@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -108,6 +112,15 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
 enum class ArrowSide { TOP, BOTTOM, LEFT, RIGHT, NONE }
 
 /**
+ * A panel shown as a sheet rising from the bottom (ProCraft Pocket): it hangs from no button, so
+ * it has no arrow, and a grabber across its top closes it ([close]) when tapped or pulled down;
+ * without [close] it keeps a grabber of its own.
+ */
+class PopoverSheet(val close: (() -> Unit)?)
+
+val LocalPopoverSheet = staticCompositionLocalOf<PopoverSheet?> { null }
+
+/**
  * A panel hanging from the top bar, with an arrow pointing up at its button: [arrowX] is the tip's
  * distance from the panel's left edge (from its top, for an arrow on the [side]). [popoverPlace]
  * finds where it goes. Without a [fill] of its own it is frosted over the canvas: translucent,
@@ -123,6 +136,9 @@ fun Popover(
     side: ArrowSide = ArrowSide.TOP,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val sheet = LocalPopoverSheet.current
+    val edge = if (sheet != null && side == ArrowSide.TOP) ArrowSide.NONE else side
+    val close = sheet?.close.takeIf { edge == ArrowSide.NONE }
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
@@ -144,12 +160,12 @@ fun Popover(
             val at = c.positionInWindow()
             val k = look.scale
             val (arrowH, radius) = with(density) { Pc.ArrowHeight.toPx() to corner.toPx() }
-            val (l, t, r) = Triple(if (side == ArrowSide.LEFT) arrowH else 0f, if (side == ArrowSide.TOP) arrowH else 0f, if (side == ArrowSide.RIGHT) arrowH else 0f)
-            val b = if (side == ArrowSide.BOTTOM) arrowH else 0f
+            val (l, t, r) = Triple(if (edge == ArrowSide.LEFT) arrowH else 0f, if (edge == ArrowSide.TOP) arrowH else 0f, if (edge == ArrowSide.RIGHT) arrowH else 0f)
+            val b = if (edge == ArrowSide.BOTTOM) arrowH else 0f
             body = floatArrayOf(at.x + l * k, at.y + t * k, at.x + (c.size.width - r) * k, at.y + (c.size.height - b) * k, radius * k)
         }
     }
-    val sideways = side == ArrowSide.LEFT || side == ArrowSide.RIGHT
+    val sideways = edge == ArrowSide.LEFT || edge == ArrowSide.RIGHT
     Box(
         modifier.width(if (sideways) width + Pc.ArrowHeight else width).then(frost).drawBehind {
             val arrowH = Pc.ArrowHeight.toPx()
@@ -158,7 +174,7 @@ fun Popover(
             val tip = 2.dp.toPx()
             val radius = CornerRadius(corner.toPx())
             val outline = Path().apply {
-                when (side) {
+                when (edge) {
                     ArrowSide.TOP -> {
                         addRoundRect(RoundRect(0f, arrowH, size.width, size.height, radius))
                         moveTo(at - half - tip, arrowH + 0.5f)
@@ -210,16 +226,47 @@ fun Popover(
             drawPath(outline, paint)
         },
     ) {
-        val inset = when (side) {
+        val inset = when (edge) {
             ArrowSide.TOP -> Modifier.padding(top = Pc.ArrowHeight)
             ArrowSide.BOTTOM -> Modifier.padding(bottom = Pc.ArrowHeight)
             ArrowSide.LEFT -> Modifier.padding(start = Pc.ArrowHeight)
             ArrowSide.RIGHT -> Modifier.padding(end = Pc.ArrowHeight)
             ArrowSide.NONE -> Modifier
         }
-        Column(inset.clip(RoundedCornerShape(corner)), content = content)
+        // what opens from inside the sheet (a menu, a popover) points at its own button again
+        Column(inset.clip(RoundedCornerShape(corner))) {
+            val scope = this
+            androidx.compose.runtime.CompositionLocalProvider(LocalPopoverSheet provides null) { scope.content() }
+        }
+        if (close != null) SheetGrabber(close, Modifier.align(androidx.compose.ui.Alignment.TopCenter))
     }
 }
+
+/** A sheet's grabber: tapped, or pulled down, it [close]s the sheet. */
+@Composable
+private fun SheetGrabber(close: () -> Unit, modifier: Modifier) {
+    val closing by androidx.compose.runtime.rememberUpdatedState(close)
+    Box(
+        modifier.size(SheetGrabberReach, SheetGrabberHeight)
+            .pointerInput(Unit) {
+                var pulled = 0f
+                detectVerticalDragGestures(onDragStart = { pulled = 0f }) { change, dy ->
+                    change.consume()
+                    pulled += dy
+                    if (pulled > SheetPull.toPx()) closing()
+                }
+            }
+            .pointerInput(Unit) { detectTapGestures { closing() } },
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        Box(Modifier.size(36.dp, 5.dp).clip(RoundedCornerShape(2.5.dp)).drawBehind { drawRect(Pc.Grabber) })
+    }
+}
+
+/** A sheet's grabber: what takes the touch (over the sheet's top middle, clear of its title and buttons), and how far it is pulled down to close. */
+private val SheetGrabberReach = 72.dp
+private val SheetGrabberHeight = 18.dp
+private val SheetPull = 40.dp
 
 /** Where a popover [width] wide goes on a screen [screenWidth] wide: its left edge and arrow tip. */
 data class PopoverPlace(val left: Dp, val arrowX: Dp)

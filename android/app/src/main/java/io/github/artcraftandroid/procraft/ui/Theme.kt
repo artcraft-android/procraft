@@ -35,7 +35,54 @@ object Pc {
     val ActionDisc: Color get() = pick(0xFF141414, 0xFFEDEDED)
     val ActionGlyph: Color get() = pick(0xFF969696, 0xFF646464)
     val ColorRing: Color get() = pick(0xFF969696, 0xFF696969)
-    val BarHeight = 44.dp
+    /** One row of the top bar. */
+    val BarRowHeight = 44.dp
+
+    /** How many rows the top bar takes: two where one is too narrow for its buttons ([barFit]). */
+    var barRows by mutableStateOf(1)
+
+    /** The screen's cutout (a camera in the display) at the top, left and right, which the bars keep clear of. */
+    var safeTop by mutableStateOf(0.dp)
+    var safeLeft by mutableStateOf(0.dp)
+    var safeRight by mutableStateOf(0.dp)
+
+    /**
+     * ProCraft Pocket, the phone's interface (a window whose shorter side is under [PocketBelow]):
+     * the bar is a card of glass in the top left, the side bar floats, the panels rise from the bottom.
+     */
+    var pocket by mutableStateOf(false)
+
+    /** ProCraft Pocket on a phone held sideways ([PocketSplitFrom] wide): the card is two pills across the top. */
+    var pocketSplit by mutableStateOf(false)
+
+    /** ProCraft Pocket's card folded away to a pill (swiped up), the canvas clear. */
+    var pocketFolded by mutableStateOf(false)
+
+    val PocketBelow = 600.dp
+    val PocketSplitFrom = 640.dp
+    val PocketInset = 8.dp
+    val PocketPadding = 6.dp
+    val PocketButton = 46.dp
+    val PocketRowHeight = 44.dp
+    val PocketRowGap = 2.dp
+    val PocketCorner = 26.dp
+    val PocketToolDisc = 38.dp
+    /** How far the panels, as sheets, keep from the screen's edges. */
+    val PocketSheetGap = 8.dp
+    /** The strip under the card's rows holding its grabber. */
+    val PocketGrabber = 14.dp
+    val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap * 2 + PocketGrabber
+    val PocketPillHeight: Dp get() = PocketPadding * 2 + PocketRowHeight
+    val PocketGlass: Color get() = pick(0xD9262626, 0xDEF2F2F2)
+    /** The disc under a round button in a panel's title row (ProCraft Pocket's ••• and +). */
+    val HeaderDisc: Color get() = pick(0xFF3A3A3A, 0xFFFFFFFF)
+
+    /** The top bar's height (ProCraft Pocket's: down to under its card, folded or not), under the cutout. */
+    val BarHeight: Dp get() = when {
+        !pocket -> safeTop + BarRowHeight * barRows
+        pocketSplit -> safeTop + PocketInset + PocketPillHeight
+        else -> safeTop + PocketInset + PocketCardHeight
+    }
     val BarMargin = 40.dp
     val BarButtonWidth = 44.dp
     val BarButtonHeight = 38.dp
@@ -117,14 +164,14 @@ object Pc {
 
     /** The centre of tool button [index] (0 is the colour button, counting leftwards), from the bar's right edge. */
     fun toolCentreFromRight(index: Int, barWidth: Dp): Dp {
-        val fit = barFit(barWidth)
-        return fit.margin + fit.button / 2 + (fit.button + fit.toolGap) * index
+        val fit = barFit(barWidth - safeLeft - safeRight)
+        return safeRight + fit.margin + fit.button / 2 + (fit.button + fit.toolGap) * index
     }
 
     /** The centre of action button [index] (0 is actions, counting rightwards), from the bar's left edge. */
     fun actionCentre(index: Int, barWidth: Dp): Dp {
-        val fit = barFit(barWidth)
-        return fit.margin + GalleryWidth + fit.actionGap + fit.button / 2 + (fit.button + fit.actionGap) * index
+        val fit = barFit(barWidth - safeLeft - safeRight)
+        return safeLeft + fit.margin + fit.gallery + fit.actionGap + fit.button / 2 + (fit.button + fit.actionGap) * index
     }
 
     // the gallery; light, near white with dark grey inks and a frosted white capsule
@@ -186,31 +233,57 @@ object Pc {
         }
     }
 
-    /** The top bar's spacing: its margins, the gaps between its tool and action buttons, and how wide those are. */
-    data class BarFit(val margin: Dp, val toolGap: Dp, val actionGap: Dp, val button: Dp) {
+    /**
+     * The top bar's spacing: its margins, the gaps between its tool and action buttons, how wide
+     * those are and how wide Gallery is, and whether the tools go on a second [rows] under the actions.
+     */
+    data class BarFit(val margin: Dp, val toolGap: Dp, val actionGap: Dp, val button: Dp, val gallery: Dp = GalleryWidth, val rows: Int = 1) {
+        /** How big the buttons' glyphs are drawn, against the measured buttons. */
+        val scale: Float get() = button / BarButtonWidth
+
         /** The width it takes for the bar's two ends not to meet: Gallery and four actions, five tools. */
-        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 4 + button * 5 + toolGap * 4
+        val needs: Dp get() {
+            val actions = margin * 2 + gallery + (button + actionGap) * 4
+            val tools = margin * 2 + button * 5 + toolGap * 4
+            return if (rows == 1) actions + tools - margin * 2 else maxOf(actions, tools)
+        }
     }
 
-    /** Tighter and tighter, for windows too narrow for the measured steps. */
+    private val CompactBarMargin = 8.dp
+
+    /** Tighter and tighter, for windows too narrow for the measured steps, the buttons as measured. */
     private val NarrowBars = listOf(
         BarFit(BarMargin, 8.dp, 14.dp, BarButtonWidth),
         BarFit(BarMargin, 2.dp, 4.dp, BarButtonWidth),
         BarFit(16.dp, 2.dp, 4.dp, BarButtonWidth),
-        BarFit(8.dp, 0.dp, 0.dp, BarButtonWidth),
-        BarFit(8.dp, 0.dp, 0.dp, 36.dp),
-        BarFit(4.dp, 0.dp, 0.dp, 32.dp),
+        BarFit(CompactBarMargin, 0.dp, 0.dp, BarButtonWidth),
     )
+
+    /** The smallest a button gets in one row: narrower than that, the tools go on a second row. */
+    private val SmallestBarButton = 32.dp
 
     /**
      * The spacing of a top bar [width] wide: the measured step for that width, or where its two
-     * ends would run into each other (a narrow window, as in split screen) the first of
-     * [NarrowBars] that keeps them apart.
+     * ends would run into each other (a narrow window, a phone) the first of [NarrowBars] that keeps
+     * them apart; narrower still, its buttons and Gallery smaller in one row, and where they would
+     * get too small to tap, the tools on a row of their own.
      */
     fun barFit(width: Dp): BarFit {
         val (tool, action) = barGaps(width)
         val measured = BarFit(BarMargin, tool, action, BarButtonWidth)
-        return if (measured.needs <= width) measured else NarrowBars.firstOrNull { it.needs <= width } ?: NarrowBars.last()
+        if (measured.needs <= width) return measured
+        NarrowBars.firstOrNull { it.needs <= width }?.let { return it }
+        val room = (width - CompactBarMargin * 2).coerceAtLeast(0.dp)
+        val one = (room / (GalleryWidth + BarButtonWidth * 9)).coerceAtMost(1f)
+        if (BarButtonWidth * one >= SmallestBarButton) {
+            return BarFit(CompactBarMargin, 0.dp, 0.dp, BarButtonWidth * one, GalleryWidth * one)
+        }
+        // two rows: Gallery and the actions over the tools, each row as wide as it can be
+        val two = (room / (GalleryWidth + BarButtonWidth * 4)).coerceAtMost(1f)
+        val (button, gallery) = BarButtonWidth * two to GalleryWidth * two
+        val actionGap = ((room - gallery - button * 4) / 4).coerceIn(0.dp, 14.dp)
+        val toolGap = ((room - button * 5) / 4).coerceIn(0.dp, 8.dp)
+        return BarFit(CompactBarMargin, toolGap, actionGap, button, gallery, rows = 2)
     }
 
     /** Where the side bar goes: its top, and how long each of its two tracks is. */
