@@ -2300,8 +2300,10 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     assert!((moved.handles[0] - 190.0).abs() < 1.0, "{:?}", moved.handles);
     s.quickshape_done();
     assert!(s.quickshape_info().is_none());
-    // the circle's edge is painted, its middle is not
-    assert_eq!(pixel(&s, 10, 100)[0], 0);
+    // the circle's edge is painted, its middle is not (the line it is drawn from is the smoothed
+    // one, so the edge can sit a pixel or two in from where the raw fit had it)
+    let edge = (0..40).find(|&x| pixel(&s, x, 100)[0] == 0);
+    assert!(edge.is_some_and(|x| (7..=15).contains(&x)), "the left edge came out at {edge:?}");
     assert_eq!(pixel(&s, 100, 100), [255, 255, 255, 255]);
     s.undo();
     assert_eq!(pixel(&s, 10, 100), [255, 255, 255, 255]);
@@ -4343,7 +4345,7 @@ fn a_p3_canvas_exports_with_its_profile() {
     s.export_jpeg(path.to_string_lossy().into_owned()).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE ").expect("an embedded profile");
+    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE\0").expect("an embedded profile");
     assert_eq!(&bytes[at + 14..at + 14 + icc.len()], &icc[..]);
     let _ = std::fs::remove_file(path);
 }
@@ -9285,7 +9287,12 @@ fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
     let dark = |x: u32, y: u32| {
         (x.saturating_sub(4)..=x + 4).any(|x| (y.saturating_sub(4)..=y + 4).any(|y| pixel(&s, x, y)[0] < 128))
     };
-    assert!(dark(160, 100) && dark(100, 160) && dark(40, 100));
+    // the line the shape is fitted to is the smoothed one, which can sit a few pixels in from
+    // where the raw points went, so painted probes reach further and the gap's stays where it was
+    let painted = |x: u32, y: u32| {
+        (x.saturating_sub(8)..=x + 8).any(|x| (y.saturating_sub(8)..=y + 8).any(|y| pixel(&s, x, y)[0] < 128))
+    };
+    assert!(painted(160, 100) && painted(100, 160) && painted(40, 100));
     let gap = (-std::f32::consts::FRAC_PI_2) - std::f32::consts::TAU / 24.0;
     let (gx, gy) = (100.0 + 60.0 * gap.cos(), 100.0 + 60.0 * gap.sin());
     assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
