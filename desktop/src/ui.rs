@@ -2200,7 +2200,6 @@ impl Interface {
                         | Act::TipAttachment
                         | Act::LightInterface
                         | Act::RightHanded
-                        | Act::StartAtTip
                         | Act::BrushCursor
                         | Act::ProjectCanvas
                         | Act::ResetInput,
