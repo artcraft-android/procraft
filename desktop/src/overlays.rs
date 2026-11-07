@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, Pick, QuickShapeInfo, QuickShapeKind};
+use procraft_core::{CanvasSession, Pick, QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -241,10 +241,70 @@ impl Overlays {
                 {
                     // the snapped shape's handles: blue dots ringed in white
                     let ppp = ctx.pixels_per_point();
-                    for &[x, y] in info.handles.as_chunks::<2>().0 {
-                        let at = pos2(x, y) / ppp;
-                        ui.painter().circle_filled(at, 6.5, Color32::WHITE);
-                        ui.painter().circle_filled(at, 5.0, argb(pc::ACCENT));
+                    let points: Vec<Pos2> =
+                        info.handles.as_chunks::<2>().0.iter().map(|&[x, y]| pos2(x, y) / ppp).collect();
+                    // a curve's controls show what they pull on: a line each back to its anchor
+                    let curve = info.kind == QuickShapeKind::Curve;
+                    let control = Color32::from_rgb(96, 224, 120);
+                    // a corner's controls are worked out from the anchors either side, so nothing is
+                    // drawn for them and nothing there can be taken hold of
+                    let folded = |i: usize| {
+                        let owner = match i % 3 {
+                            1 => i.checked_sub(1),
+                            2 => i.checked_add(1),
+                            _ => None,
+                        };
+                        curve
+                            && owner.is_some_and(|a| matches!(info.anchors.get(a / 3), Some(QuickShapeAnchor::Corner)))
+                    };
+                    if curve {
+                        for (i, &at) in points.iter().enumerate() {
+                            if folded(i) {
+                                continue;
+                            }
+                            let about = match i % 3 {
+                                1 => i.checked_sub(1),
+                                2 => i.checked_add(1),
+                                _ => None,
+                            };
+                            if let Some(anchor) = about.and_then(|a| points.get(a)) {
+                                ui.painter().line_segment([*anchor, at], egui::Stroke::new(1.5, control));
+                            }
+                        }
+                    }
+                    for (i, &at) in points.iter().enumerate() {
+                        if folded(i) {
+                            continue;
+                        }
+                        let ink = if curve && !i.is_multiple_of(3) { control } else { argb(pc::ACCENT) };
+                        // an anchor says how it sits with its shape: round, free, or a corner
+                        match if curve && i.is_multiple_of(3) { info.anchors.get(i / 3).copied() } else { None } {
+                            Some(QuickShapeAnchor::Broken) => {
+                                let r = 7.5;
+                                let corners = vec![
+                                    pos2(at.x, at.y - r),
+                                    pos2(at.x - r * 0.87, at.y + r * 0.5),
+                                    pos2(at.x + r * 0.87, at.y + r * 0.5),
+                                ];
+                                ui.painter().add(egui::Shape::convex_polygon(
+                                    corners,
+                                    ink,
+                                    egui::Stroke::new(1.5, Color32::WHITE),
+                                ));
+                            }
+                            Some(QuickShapeAnchor::Corner) => {
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_center_size(at, vec2(13.0, 13.0)),
+                                    1.0,
+                                    Color32::WHITE,
+                                );
+                                ui.painter().rect_filled(egui::Rect::from_center_size(at, vec2(10.0, 10.0)), 1.0, ink);
+                            }
+                            _ => {
+                                ui.painter().circle_filled(at, 6.5, Color32::WHITE);
+                                ui.painter().circle_filled(at, 5.0, ink);
+                            }
+                        }
                     }
                 }
             });
@@ -478,6 +538,7 @@ pub fn label(kind: QuickShapeKind) -> &'static str {
         QuickShapeKind::Line => "Line",
         QuickShapeKind::Polyline => "Polyline",
         QuickShapeKind::Arc => "Arc",
+        QuickShapeKind::Curve => "Curve",
         QuickShapeKind::Ellipse => "Ellipse",
         QuickShapeKind::Circle => "Circle",
         QuickShapeKind::Triangle => "Triangle",
@@ -494,6 +555,7 @@ pub fn snapped_to(kind: QuickShapeKind) -> String {
         QuickShapeKind::Line => "a line",
         QuickShapeKind::Polyline => "a polyline",
         QuickShapeKind::Arc => "an arc",
+        QuickShapeKind::Curve => "a curve",
         QuickShapeKind::Ellipse => "an ellipse",
         QuickShapeKind::Circle => "a circle",
         QuickShapeKind::Triangle => "a triangle",
@@ -510,6 +572,8 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
         QuickShapeKind::Line => &icons::SHAPE_LINE,
         QuickShapeKind::Polyline => &icons::SHAPE_POLYLINE,
         QuickShapeKind::Arc => &icons::SHAPE_ARC,
+        // no curve glyph drawn yet: a bend reads close enough for the pill
+        QuickShapeKind::Curve => &icons::SHAPE_ARC,
         QuickShapeKind::Ellipse => &icons::SHAPE_ELLIPSE,
         QuickShapeKind::Circle => &icons::SHAPE_CIRCLE,
         QuickShapeKind::Triangle => &icons::SHAPE_TRIANGLE,
@@ -566,6 +630,7 @@ mod tests {
                     kind: QuickShapeKind::Ellipse,
                     choices: vec![QuickShapeKind::Ellipse, QuickShapeKind::Circle],
                     handles: Vec::new(),
+                    anchors: Vec::new(),
                 }),
                 ..Overlays::default()
             };
