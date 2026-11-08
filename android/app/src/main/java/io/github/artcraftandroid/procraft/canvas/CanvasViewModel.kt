@@ -8843,10 +8843,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         session?.setPlayFrame(null)
     }
 
-    fun addFrame() {
+   fun addFrame() {
         stopPlaying()
         frameOptionsOpen = false
         layerChange { if (it.addFrame() == 0uL) message = noRoom() }
+    }
+
+    fun addPage() {
+        frameOptionsOpen = false
+        layerChange { if (it.addPage() == 0uL) message = noRoom() }
     }
 
     private fun currentFrameLayer(): LayerInfo? = currentFrame?.let { animationFrames.getOrNull(it) }?.let { id -> layers.firstOrNull { it.id == id } }
@@ -8955,6 +8960,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new layer of a plugin's [kind] above the current one. */
     fun addPluginLayer(kind: String) = layerChange { if (it.addPluginLayer(kind) == 0uL) message = noRoom() }
+
+    fun addRootLayer() = layerChange { if (it.addRootLayer() == 0uL) message = noRoom() }
 
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
@@ -9634,4 +9641,3 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 }
-
