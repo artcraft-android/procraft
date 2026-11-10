@@ -567,6 +567,10 @@ impl CanvasSession {
     /// Add Frame (New Page with Page Assist): a new empty frame above the current one, named
     /// "Frame N" ("Page N") by the frames there are with it. With a layer inside a group current,
     /// it goes above that group's frame, at the top level, not into the group.
+
+    /// Add Frame (New Page with Page Assist): a new empty root-level layer (outside any group),
+    /// placed above the active root frame/group, named "Frame N" ("Page N") by the frames there
+    /// are with it.
     pub fn add_frame(&self) -> u64 {
         self.change("new layer", |d| {
             if !d.has_room(1) {
