@@ -60,7 +60,8 @@ struct CanvasScreen: View {
                 if model.transforming {
                     TransformOverlay(model: model)
                 }
-                if model.selecting {
+                // (and the Paint or Erase tool's lasso shapes as they are drawn)
+                if model.selecting || model.lassoToolOn {
                     SelectionOverlay(model: model)
                 }
                 ColorDropBand(drop: model.drop, width: screen.size.width)
@@ -619,6 +620,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.toggleBars()
             case .fit:
                 model.settleToFit()
+            // fingers that turned the canvas a little by accident: it eases back
+            case let .unturn(x, y, turn):
+                model.settleTurn(x: x, y: y, turn: turn)
             case let .layerSelect(x, y):
                 model.layerSelect(x: x, y: y)
             case .quickShapeLast:
@@ -673,6 +677,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.selection.freehandChanged()
             case .selectionChanged:
                 model.selection.touched()
+            case .shapeFilled:
+                model.selection.shapeFilled()
             case let .fillThreshold(threshold):
                 model.drop.pourThreshold(threshold)
             case .filled:

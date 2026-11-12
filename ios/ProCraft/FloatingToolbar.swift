@@ -155,12 +155,26 @@ struct ToolbarButton: View {
     var width: CGFloat = 83
     var iconSize: CGFloat = 24
     var labelSize: CGFloat = 12.5
+    /// What holding it does instead, if anything.
+    var onHold: (() -> Void)?
     let action: () -> Void
 
     var body: some View {
+        if let onHold {
+            button.onLongPressGesture {
+                if enabled {
+                    onHold()
+                }
+            }
+        } else {
+            button
+        }
+    }
+
+    private var button: some View {
         let tint = !enabled ? ToolbarInk.buttonDimmed : active ? Pc.accent : ToolbarInk.buttonText
         // icons centred 30 below the top, labels' capitals 50 below it; a long name may run past
-        ZStack(alignment: .top) {
+        return ZStack(alignment: .top) {
             PcIconView(icon, size: iconSize, color: tint)
                 .offset(y: 30 - iconSize / 2)
             Text(verbatim: label)

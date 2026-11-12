@@ -6,6 +6,7 @@ private let buttonRoomy: CGFloat = 83
 private let buttonNarrow: CGFloat = 70
 private let featherWidth: CGFloat = 250
 private let startDot = Color(argb: 0xFFC7_C7C7)
+private let lassoErasePreview = Color(argb: 0xFF80_8080)
 private let savedThumb = Color(argb: 0xFF00_0000)
 /// A path's dashes, dark over light.
 let overlayDash = Color(argb: 0xE600_0000)
@@ -45,7 +46,7 @@ enum SelectionKind: String, CaseIterable {
 
 /// A popover over the selection toolbar.
 enum SelectionPopup {
-    case none, feather, saved
+    case none, feather, saved, colorFill
 }
 
 /// The selection tool's state: the core keeps the selection, this what the tool shows of it.
@@ -53,6 +54,8 @@ enum SelectionPopup {
 final class SelectionTool {
     private static let kindKey = "selectionKind"
     private static let thresholdKey = "selectionThreshold"
+    private static let lassoFillKey = "lassoFill"
+    private static let fillOpacityKey = "fillOpacity"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
@@ -61,6 +64,11 @@ final class SelectionTool {
     private(set) var removes = false
     /// Each new selection is filled with the paint colour.
     private(set) var colorFill = false
+    /// Color Fill's Lasso Fill (held Color Fill): each shape drawn is filled on its own, as one
+    /// undo step, nothing left selected.
+    private(set) var lassoFill: Bool
+    /// How strongly Color Fill fills (its popover's Opacity), 0..1.
+    private(set) var fillOpacity: Float
     private(set) var hasSelection = false
     private(set) var popup = SelectionPopup.none
     /// The feather popover's amount (0..1).
@@ -87,6 +95,8 @@ final class SelectionTool {
         let d = UserDefaults.standard
         kind = d.string(forKey: Self.kindKey).flatMap(SelectionKind.init(rawValue:)) ?? .freehand
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
+        lassoFill = d.bool(forKey: Self.lassoFillKey)
+        fillOpacity = min(max(d.object(forKey: Self.fillOpacityKey) as? Float ?? 1, 0), 1)
     }
 
     /// Each time the tool opens, shapes add to the selection.
@@ -118,8 +128,18 @@ final class SelectionTool {
 
     /// How the canvas's touches select while the tool is open; none otherwise.
     func touch() -> SelectTouch? {
-        guard model.selecting else { return nil }
-        return SelectTouch(kind: kind.touch, join: join, threshold: threshold)
+        guard model.selecting else {
+            // the Paint or Erase tool's own lasso: its shapes fill (or erase) at its opacity
+            guard model.lassoToolOn else { return nil }
+            return SelectTouch(
+                kind: .freehand, join: .add, threshold: threshold,
+                lassoFill: true, lassoErase: model.tool == .erase, lassoTool: true
+            )
+        }
+        return SelectTouch(
+            kind: kind.touch, join: join, threshold: threshold,
+            lassoFill: colorFill && lassoFill, lassoErase: false, lassoTool: false
+        )
     }
 
     /// The freehand path as the touches have drawn it.
@@ -140,6 +160,14 @@ final class SelectionTool {
     func touched() {
         shapeDrag = nil
         changed()
+    }
+
+    /// With Lasso Fill, a shape was filled on the layer (nothing selected). Its preview goes at
+    /// once, not at the next read of the path, so it is never shown over the fill.
+    func shapeFilled() {
+        shapeDrag = nil
+        freehand = []
+        model.refresh()
     }
 
     /// A colour selection's threshold slid from window pixels `p`: shown as it goes; `done`, kept
@@ -256,10 +284,30 @@ final class SelectionTool {
         }
     }
 
+    func toggleLassoFill() {
+        lassoFill.toggle()
+        UserDefaults.standard.set(lassoFill, forKey: Self.lassoFillKey)
+    }
+
+    /// Color Fill's Opacity slid to `opacity` (0..1), kept.
+    func fillOpacityTo(_ opacity: Float) {
+        fillOpacity = min(max(opacity, 0), 1)
+        model.session.setFillOpacity(opacity: fillOpacity)
+        UserDefaults.standard.set(fillOpacity, forKey: Self.fillOpacityKey)
+    }
+
     func clear() {
         closeFreehand()
         model.session.selectNone()
         changed(fill: false)
+    }
+
+    /// Whether anything is selected, read again (undo and redo may change it).
+    func readHas() {
+        let has = model.session.hasSelection()
+        if has != hasSelection {
+            hasSelection = has
+        }
     }
 
     private func changed(fill: Bool = true) {
@@ -321,13 +369,18 @@ struct SelectionToolbar: View {
             ToolbarButton(icon: PcIcons.saveLoad, label: "Save & Load", active: tool.popup == .saved, enabled: has || drawing, width: w, iconSize: 44, labelSize: long) {
                 tool.openPopup(.saved)
             }
-            ToolbarButton(icon: PcIcons.colorFill, label: "Color Fill", active: tool.colorFill, width: w, iconSize: 37) { tool.toggleColorFill() }
+            // held: Color Fill's settings (Lasso Fill)
+            ToolbarButton(
+                icon: PcIcons.colorFill, label: "Color Fill", active: tool.colorFill, width: w, iconSize: 37,
+                onHold: { tool.openPopup(.colorFill) }
+            ) { tool.toggleColorFill() }
             ToolbarButton(icon: PcIcons.clearSelection, label: "Clear", enabled: has || drawing, width: w, iconSize: 44) { tool.clear() }
         }
     }
 }
 
-/// A popover over the selection toolbar: feathering the selection, or the selections kept.
+/// A popover over the selection toolbar: feathering the selection, the selections kept, or Color
+/// Fill's settings.
 struct SelectionPopover: View {
     let model: CanvasModel
     let screen: CGSize
@@ -337,7 +390,8 @@ struct SelectionPopover: View {
         if tool.popup != .none {
             let width = tool.popup == .feather ? featherWidth : toolbarMenuWidth
             let layout = ToolbarLayout(screenWidth: screen.width, count: 8, roomy: buttonRoomy, narrow: buttonNarrow)
-            let centre = layout.buttonCentre(tool.popup == .feather ? 4 : 5, screenWidth: screen.width)
+            let index = tool.popup == .feather ? 4 : tool.popup == .colorFill ? 6 : 5
+            let centre = layout.buttonCentre(index, screenWidth: screen.width)
             let left = min(max(centre - width / 2, 0), screen.width - width)
             ToolbarPopover(
                 arrowX: centre - left, left: left, bottom: ToolbarLayout.buttonsTop(screenHeight: screen.height),
@@ -352,6 +406,20 @@ struct SelectionPopover: View {
                             label: "Amount", value: amount,
                             shown: amount <= 0 ? "None" : "\(wholeNumber(amount * 100))%",
                             onChange: { tool.featherTo($0) }
+                        )
+                    }
+                } else if tool.popup == .colorFill {
+                    ToolbarMenuTitle(text: "Color Fill")
+                        .padding(.bottom, 4)
+                    ToolbarMenuGroup {
+                        ToolbarSwitchRow(label: "Lasso Fill", on: tool.lassoFill) { tool.toggleLassoFill() }
+                    }
+                    .padding(.bottom, 10)
+                    ToolbarMenuGroup {
+                        let opacity = tool.fillOpacity
+                        PanelSlider(
+                            label: "Opacity", value: opacity, shown: "\(wholeNumber(opacity * 100))%",
+                            onChange: { tool.fillOpacityTo($0) }
                         )
                     }
                 } else {
@@ -411,8 +479,9 @@ private struct SavedSelections: View {
 }
 
 /// What the selection tool shows while a shape is made: the rectangle or ellipse being dragged and
-/// the freehand path (dashed, its first point a dot to close it on), and the bar and crosshair while
-/// a colour selection's threshold is dragged.
+/// the freehand path (dashed, its first point a dot to close it on; with Lasso Fill, filled with the
+/// paint colour at half Color Fill's opacity, as it will fill, with no dot), and the bar and
+/// crosshair while a colour selection's threshold is dragged.
 struct SelectionOverlay: View {
     let model: CanvasModel
 
@@ -429,22 +498,45 @@ struct SelectionOverlay: View {
         let drag = tool.shapeDrag
         let slid = tool.thresholdDrag
         let kind = tool.kind
+        // Lasso Fill: the shape shows as it will fill, at half its strength (the Paint tool's lasso at
+        // its opacity slider's; the Erase tool's grey, as what it takes away)
+        let preview: Color? = if model.lassoToolOn, model.tool == .erase {
+            lassoErasePreview.opacity(Double(0.5 * model.opacity))
+        } else if model.lassoToolOn {
+            CanvasSpace.shared.color(model.colorRgb()).opacity(Double(0.5 * model.opacity))
+        } else if tool.colorFill, tool.lassoFill {
+            CanvasSpace.shared.color(model.colorRgb()).opacity(Double(0.5 * tool.fillOpacity))
+        } else {
+            nil
+        }
         if drag != nil || !path.isEmpty || slid != nil {
             let points = path.map { model.canvasToWindow($0) }
             ZStack(alignment: .top) {
                 Canvas { context, _ in
                     if let (a, b) = drag {
                         let r = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
-                        dashed(context, kind == .ellipse ? Path(ellipseIn: r) : Path(r))
+                        let outline = kind == .ellipse ? Path(ellipseIn: r) : Path(r)
+                        if let preview {
+                            context.fill(outline, with: .color(preview))
+                        } else {
+                            dashed(context, outline)
+                        }
                     }
                     if let first = points.first {
                         var line = Path()
                         line.addLines(points)
-                        dashed(context, line)
-                        context.fill(
-                            Path(ellipseIn: CGRect(x: first.x - 5.5, y: first.y - 5.5, width: 11, height: 11)),
-                            with: .color(startDot)
-                        )
+                        if let preview {
+                            // closed back to the first point, as lifting closes it (non-zero, as the
+                            // fill); no dot to close it on, as it is drawing
+                            line.closeSubpath()
+                            context.fill(line, with: .color(preview))
+                        } else {
+                            dashed(context, line)
+                            context.fill(
+                                Path(ellipseIn: CGRect(x: first.x - 5.5, y: first.y - 5.5, width: 11, height: 11)),
+                                with: .color(startDot)
+                            )
+                        }
                     }
                     if let p = slid?.at {
                         // a thin cross where the colour is picked

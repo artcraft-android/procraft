@@ -208,6 +208,18 @@ final class CanvasModel {
     var adjusting: Bool {
         adjustment != nil
     }
+
+    /// The Paint and Erase tools' own lassos (Lasso Fill, Lasso Erase): turned on by holding the
+    /// tool's button while Lasso Fill (or the other one) is on, off by holding it again. On, the
+    /// tool's strokes are shapes that close and fill (or erase) at its opacity slider.
+    private(set) var paintLasso = false
+    private(set) var eraseLasso = false
+
+    /// The current tool draws with its lasso now (nothing else open over it).
+    var lassoToolOn: Bool {
+        !selecting && !transforming && adjustment == nil
+            && ((tool == .paint && paintLasso) || (tool == .erase && eraseLasso))
+    }
     private(set) var recoloring = false
 
     /// The Actions panel's tab, kept from one session to the next.
@@ -331,6 +343,8 @@ final class CanvasModel {
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setLightInterface(on: settings.lightInterface)
+        session.setPourAllLayers(on: drop.allLayers)
+        session.setFillOpacity(opacity: selection.fillOpacity)
         applyInput()
         session.useColourHistory(history: Self.colourHistory)
         history = Self.colourHistory.colours()
@@ -386,6 +400,20 @@ final class CanvasModel {
     /// A tool button held: that tool takes the brush the current one has (erasing with the
     /// painting brush, say), and becomes the tool.
     func toolHeld(_ target: ToolKind) {
+        if target == .paint || target == .erase {
+            let own = target == .paint ? paintLasso : eraseLasso
+            if own, tool == target, !selecting {
+                // held again while drawing with its lasso: back to plain strokes
+                setLasso(target, false)
+                showNotice(target == .paint ? "Painting" : "Erasing")
+                return
+            }
+            if (selecting && selection.colorFill && selection.lassoFill) || lassoToolOn {
+                // held while Lasso Fill (or the other tool's lasso) is on: this tool's lasso
+                startLassoTool(target)
+                return
+            }
+        }
         guard let brush = currentBrush, target != tool, switchModes(.toolHeld) else { return }
         select(target)
         if session.selectBrush(set: brush.set, index: brush.index) {
@@ -402,6 +430,26 @@ final class CanvasModel {
         case .erase: doing = "Erasing"
         }
         showNotice("\(doing) with the current brush")
+    }
+
+    private func setLasso(_ target: ToolKind, _ on: Bool) {
+        if target == .paint {
+            paintLasso = on
+        } else {
+            eraseLasso = on
+        }
+    }
+
+    /// The Paint or Erase tool takes up its lasso: the selection tool closes (what it made stays).
+    private func startLassoTool(_ target: ToolKind) {
+        _ = switchModes(.tool)
+        closeSelecting()
+        setLasso(target, true)
+        select(target)
+        if panel == .brushes {
+            panel = .none
+        }
+        showNotice(target == .paint ? "Lasso Fill" : "Lasso Erase")
     }
 
     func select(_ next: ToolKind) {
@@ -1001,8 +1049,17 @@ final class CanvasModel {
         refresh()
     }
 
-    /// The selection button: opens or closes the selection tool (a selection made stays).
+    /// The selection button: with anything selected (the button lit), the selection goes, as one
+    /// undo step, and the tool closes if open; else it opens or closes the selection tool.
     func toggleSelecting() {
+        if selection.hasSelection {
+            // the other modes end first, keeping what they made, as with any press of it
+            _ = switchModes(.selection)
+            closeSelecting()
+            selection.clear()
+            refreshFlags()
+            return
+        }
         // open, it closes; else the other modes end
         guard switchModes(.selection) else { return }
         panel = .none
@@ -1575,6 +1632,7 @@ final class CanvasModel {
         let info = session.info()
         canUndo = info.canUndo
         canRedo = info.canRedo
+        selection.readHas()
     }
 
     // MARK: the colour
@@ -1752,6 +1810,13 @@ final class CanvasModel {
     /// Fits the canvas to the window again; what is over it follows the view as it settles.
     func settleToFit() {
         session.settleToFit()
+        followView()
+    }
+
+    /// Turns the canvas back by `turn` (radians) about (`x`, `y`), easing there: two fingers'
+    /// accidental turn.
+    func settleTurn(x: Float, y: Float, turn: Float) {
+        session.settleTurn(x: x, y: y, turn: turn)
         followView()
     }
 

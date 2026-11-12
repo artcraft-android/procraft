@@ -34,7 +34,8 @@ struct TopBar: View {
                     ActionButton(icon: PcIcons.adjustments, selected: model.panel == .adjustments || model.adjusting || model.recoloring) {
                         model.toggle(.adjustments)
                     }
-                    ActionButton(icon: PcIcons.selection, selected: model.selecting, glyph: 33) {
+                    // lit while the tool is open and while anything is selected (tapped then, it deselects)
+                    ActionButton(icon: PcIcons.selection, selected: model.selecting || model.selection.hasSelection, glyph: 33) {
                         model.toggleSelecting()
                     }
                     ActionButton(icon: PcIcons.transform, selected: model.transforming, glyph: 44) {

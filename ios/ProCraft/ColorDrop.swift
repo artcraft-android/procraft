@@ -20,6 +20,7 @@ final class ColorDrop {
     }
 
     private static let thresholdKey = "dropThreshold"
+    private static let allLayersKey = "dropAllLayers"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
@@ -30,6 +31,16 @@ final class ColorDrop {
     private(set) var threshold: Float
     /// The threshold is being slid: its row shows under the band.
     private(set) var sliding = false
+    /// All Layers (the band's segmented control): a dropped colour fills up to what every visible
+    /// layer shows, not only the current layer (or the reference layer). Kept from one drop to the
+    /// next; off at first.
+    private(set) var allLayers: Bool
+
+    /// Whether, without All Layers, a colour is measured on a reference layer (another than the
+    /// current one).
+    var onReference: Bool {
+        model.layers.contains { $0.reference && !$0.current }
+    }
     /// Where a dragged colour let go fills nothing (the colour panel, while open), window points.
     @ObservationIgnored var avoid: CGRect?
 
@@ -52,6 +63,22 @@ final class ColorDrop {
     init(model: CanvasModel) {
         self.model = model
         threshold = UserDefaults.standard.object(forKey: Self.thresholdKey) as? Float ?? 0.5
+        allLayers = UserDefaults.standard.bool(forKey: Self.allLayersKey)
+    }
+
+    /// All Layers on or off, from the next fill; the band stays up a while longer to see it.
+    func chooseAllLayers(_ on: Bool) {
+        if on == allLayers { return }
+        allLayers = on
+        UserDefaults.standard.set(on, forKey: Self.allLayersKey)
+        model.session.setPourAllLayers(on: on)
+        if band == .dropped {
+            bandTimer?.invalidate()
+            bandTimer = Timer.scheduledTimer(withTimeInterval: bandShown, repeats: false) { [weak self] _ in
+                guard let self, self.band == .dropped else { return }
+                self.band = .none
+            }
+        }
     }
 
     private func keepThreshold() {
@@ -433,10 +460,18 @@ struct ColorDropBand: View {
         let opening = drop.band != .none
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 13) {
-                Text(verbatim: "ColorDrop")
-                    .font(.system(size: 16.5, weight: .bold))
-                    .foregroundStyle(ink)
-                    .lineLimit(1)
+                // on a narrow screen the control and button have the band to themselves
+                if width >= bandRoomForTitle {
+                    Text(verbatim: "ColorDrop")
+                        .font(.system(size: 16.5, weight: .bold))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                }
+                // what a colour fills up to: the current layer (or the reference layer) or All Layers
+                Segmented(
+                    first: drop.onReference ? "Reference" : "Layer", second: "All Layers",
+                    onSecond: drop.allLayers, ink: ink, blue: blue
+                ) { drop.chooseAllLayers($0) }
                 if kept == .filling {
                     // the tick ends filling
                     tick
@@ -480,5 +515,48 @@ struct ColorDropBand: View {
                 shown = band == .none ? 0 : 1
             }
         }
+    }
+}
+
+/// Each of the band's segments, room for "All Layers" and "Reference".
+private let segmentWidth: CGFloat = 68
+
+/// Under this, the band leaves its title out for the segmented control.
+private let bandRoomForTitle: CGFloat = 380
+
+/// Two choices side by side in a rounded track, the chosen one under a blue thumb that slides
+/// across to the other when it is tapped: `onSecond` whether the second is chosen.
+private struct Segmented: View {
+    let first: String
+    let second: String
+    let onSecond: Bool
+    let ink: Color
+    let blue: Color
+    let choose: (Bool) -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .circular)
+        ZStack(alignment: .leading) {
+            shape.fill(Color(argb: Look.shared.light ? 0x1F00_0000 : 0x33FF_FFFF))
+            shape.fill(blue)
+                .frame(width: segmentWidth, height: 20)
+                .offset(x: onSecond ? segmentWidth : 0)
+                .animation(.timingCurve(0.3, 0, 0.2, 1, duration: 0.33), value: onSecond)
+            HStack(spacing: 0) {
+                ForEach(0 ..< 2, id: \.self) { index in
+                    let chosen = onSecond == (index == 1)
+                    Text(verbatim: index == 1 ? second : first)
+                        .font(.system(size: 11.7))
+                        .foregroundStyle(chosen ? Color.white : ink)
+                        .lineLimit(1)
+                        .frame(width: segmentWidth, height: 20)
+                        .contentShape(Rectangle())
+                        .onTapGesture { choose(index == 1) }
+                        .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+        }
+        .frame(width: segmentWidth * 2, height: 20)
+        .clipShape(shape)
     }
 }

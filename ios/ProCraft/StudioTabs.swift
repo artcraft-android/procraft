@@ -93,6 +93,12 @@ private let strokePathTab = StudioTab(name: "Stroke path", icon: PcIcons.studioS
         slider("spacing", "Spacing"), slider("spacing_jitter", "Spacing Jitter"), slider("jitter_lateral", "Jitter Lateral"),
         slider("jitter_linear", "Jitter Linear"), slider("falloff", "Fall off"),
     ]),
+    // pixel art: stamps on whole pixels, hard-edged; pixel perfect also leaves the doubled pixels
+    // and L-corners out of a one-pixel line
+    section("Pixel art", [
+        toggle("pixelated", "Pixelated"),
+        toggle("pixel_perfect", "Pixel perfect", enabledBy: EnabledBy(key: "pixelated", choice: 1)),
+    ]),
 ])
 
 private let stabilizationTab = StudioTab(name: "Stabilization", icon: PcIcons.studioStabilize, iconSize: 45, sections: [
