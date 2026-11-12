@@ -1886,6 +1886,138 @@ fn an_adjustment_within_a_selection_keeps_only_that_to_undo() {
 }
 
 #[test]
+fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
+    use crate::TouchCommand;
+    use crate::selection::SelectionJoin;
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    let tool = |kind, join, lasso_fill| {
+        Some(SelectTouch { kind, join, threshold: 0.5, lasso_fill, lasso_erase: false, lasso_tool: false })
+    };
+    // a square dragged round with the pen, a move every 2 px, lifted short of where it began: it
+    // closes and fills
+    let lasso = |s: &CanvasSession, x0: f32, y0: f32, x1: f32, y1: f32, ms: f64| {
+        let mut out = s.touch_down(1, PointerKind::Stylus, vec![sample(x0, y0, ms)]);
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0 + 4.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                out.extend(s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]));
+            }
+        }
+        out.extend(s.touch_up(1, vec![sample(x0, y0 + 4.0, t + 4.0)]));
+        out
+    };
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_color(1.0, 0.0, 0.0);
+    let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 0.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!out.contains(&TouchCommand::SelectionChanged), "{out:?}");
+    assert!(s.freehand_path().is_empty(), "the path closed as it lifted");
+    assert!(!s.has_selection(), "nothing left selected");
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 70, 70), [255, 255, 255, 255]);
+    // another in another colour: the first keeps its own
+    s.set_color(0.0, 0.0, 1.0);
+    lasso(&s, 60.0, 60.0, 90.0, 90.0, 1000.0);
+    assert_eq!(pixel(&s, 75, 75), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    // one undo takes back one shape, and only it
+    s.undo();
+    assert_eq!(pixel(&s, 75, 75), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    s.undo();
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255]);
+    // a rectangle dragged out fills the same way
+    s.set_touch_selecting(tool(SelectKind::Rectangle, SelectionJoin::Add, true));
+    s.touch_down(1, PointerKind::Stylus, vec![sample(50.0, 10.0, 2000.0)]);
+    s.touch_move(1, vec![sample(90.0, 40.0, 2020.0)]);
+    let out = s.touch_up(1, vec![sample(90.0, 40.0, 2040.0)]);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 70, 25), [0, 0, 255, 255]);
+    assert!(!s.has_selection());
+    // a selection there before limits the fill, as it does painting, and is left as it was
+    s.select_shape(false, 0.0, 50.0, 50.0, 100.0, SelectionJoin::Add);
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_color(0.0, 1.0, 0.0);
+    lasso(&s, 30.0, 60.0, 70.0, 90.0, 3000.0);
+    assert_eq!(pixel(&s, 40, 75), [0, 255, 0, 255]);
+    assert_eq!(pixel(&s, 60, 75), [255, 255, 255, 255]);
+    assert!(s.has_selection());
+    s.undo();
+    assert_eq!(pixel(&s, 40, 75), [255, 255, 255, 255]);
+    assert!(s.has_selection(), "the fill's undo leaves the selection");
+    // taking away fills too: with Lasso Fill the tool only draws
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Remove, true));
+    let out = lasso(&s, 10.0, 60.0, 40.0, 90.0, 3500.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 25, 75), [0, 255, 0, 255]);
+    assert!(s.has_selection(), "the selection is not taken from");
+    // without Lasso Fill, a freehand path dragged stays open when it lifts, as it always has
+    s.select_none();
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, false));
+    let out = lasso(&s, 10.0, 60.0, 30.0, 90.0, 13_000.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "still open");
+    assert!(!s.has_selection());
+    s.close_freehand();
+    assert!(s.has_selection());
+    // at half opacity, half the colour over what is there; a fill of the selection too
+    s.select_none();
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_fill_opacity(0.5);
+    s.set_color(0.0, 0.0, 0.0);
+    lasso(&s, 60.0, 60.0, 90.0, 90.0, 4500.0);
+    let [r, g, b, a] = pixel(&s, 75, 75);
+    assert!(r.abs_diff(128) <= 1 && r == g && g == b && a == 255, "{:?}", [r, g, b, a]);
+    s.select_shape(false, 0.0, 0.0, 20.0, 20.0, SelectionJoin::Add);
+    s.fill_selection();
+    assert!(pixel(&s, 10, 10)[0].abs_diff(128) <= 1, "{:?}", pixel(&s, 10, 10));
+    s.set_fill_opacity(1.0);
+    s.select_none();
+    // Lasso Erase takes away what is there; the Paint or Erase tool's own lasso goes by that
+    // tool's opacity slider, not Color Fill's
+    let erasing = |tool_opacity| {
+        Some(SelectTouch {
+            kind: SelectKind::Freehand,
+            join: SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: true,
+            lasso_erase: true,
+            lasso_tool: tool_opacity,
+        })
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    lasso(&s, 60.0, 10.0, 95.0, 45.0, 10_000.0);
+    assert_eq!(pixel(&s, 77, 27), [255, 0, 0, 255]);
+    s.set_touch_selecting(erasing(false));
+    let out = lasso(&s, 65.0, 15.0, 90.0, 40.0, 11_000.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 77, 27), [255, 255, 255, 255], "erased through to the paper");
+    assert_eq!(pixel(&s, 62, 12), [255, 0, 0, 255], "only inside the shape");
+    s.undo();
+    assert_eq!(pixel(&s, 77, 27), [255, 0, 0, 255]);
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_opacity(0.5);
+    s.set_touch_selecting(erasing(true));
+    lasso(&s, 65.0, 15.0, 90.0, 40.0, 12_000.0);
+    let [r, g, b, _] = pixel(&s, 77, 27);
+    assert!(r == 255 && g.abs_diff(128) <= 1 && b.abs_diff(128) <= 1, "half erased: {:?}", [r, g, b]);
+    s.set_tool(ToolKind::Paint);
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    // nor does taking away without it
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Remove, false));
+    let out = lasso(&s, 10.0, 60.0, 30.0, 90.0, 14_000.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "still open");
+    s.set_touch_selecting(None);
+}
+
+#[test]
 fn a_selection_limits_painting_and_its_tools_work() {
     use crate::selection::SelectionJoin;
     let Some(s) = session(100, 100) else { return };
@@ -1963,10 +2095,19 @@ fn a_transform_with_a_selection_moves_only_what_it_takes() {
     assert_eq!(pixel(&s, 30, 80), [0, 0, 0, 255]);
     assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 70, 50), [0, 0, 0, 255]);
-    // and the selection went with it
-    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 20.0, 0.0)]);
+    // and the selection is cleared: painting goes anywhere again
+    assert!(!s.has_selection());
+    s.stroke_begin(PointerKind::Finger, vec![sample(70.0, 20.0, 0.0)]);
     s.stroke_end(vec![]);
-    assert_eq!(pixel(&s, 30, 20), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 70, 20), [0, 0, 0, 255]);
+    // undo brings the selection back, a second undo the transform
+    s.undo();
+    s.undo();
+    assert!(s.has_selection());
+    // a cancelled transform leaves the selection as it was
+    s.transform_begin().unwrap();
+    s.transform_end(false);
+    assert!(s.has_selection());
     let _ = TransformAction::Reset;
 }
 
@@ -5817,6 +5958,39 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     // a locked layer takes none
     assert!(s.set_layer_locked(layer, true));
     assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+}
+
+#[test]
+fn all_layers_fills_up_to_lines_on_other_layers() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle, on its own layer
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    let lines = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    let colours = s.add_layer();
+    assert!(!s.pour_all_layers());
+    // on the empty layer alone, the line isn't seen: the whole layer fills
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    s.pour_end(false, None);
+    // with All Layers it fills up to the line, on the current layer only
+    s.set_pour_all_layers(true);
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    let painted = |id: u64, x: usize, y: usize| s.copy_layer_contents(id).map(|c| c.rgba[(y * 100 + x) * 4 + 3]).unwrap();
+    assert_eq!(painted(colours, 20, 50), 255);
+    assert_eq!(painted(lines, 20, 50), 0);
+    // a hidden layer isn't seen
+    s.set_layer_visible(lines, false);
+    assert!(s.pour_begin(80.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    assert_eq!(painted(colours, 50, 50), 255);
 }
 
 #[test]
@@ -9784,6 +9958,9 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
                                 kind: kinds[next(4) as usize],
                                 join,
                                 threshold: next(80) as f32 / 100.0,
+                                lasso_fill: next(2) == 0,
+                                lasso_erase: next(3) == 0,
+                                lasso_tool: next(2) == 0,
                             }));
                             mode = 1;
                         }

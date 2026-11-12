@@ -2,6 +2,7 @@ package io.github.artcraftandroid.procraft.ui
 
 import android.os.SystemClock
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,6 +48,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -169,6 +175,8 @@ fun DropDot(vm: CanvasViewModel) {
  * ColorDrop's band under the top bar, sliding down from behind it: while a colour is dragged and
  * while filling goes on, with the threshold as a blue line across the screen under it; after a
  * drop, for a moment, offering to continue filling. Sliding the threshold adds a row reading it.
+ * Its segmented control picks what a colour fills up to: the current layer (or the reference
+ * layer) or All Layers.
  */
 @Composable
 fun DropBandUi(vm: CanvasViewModel) {
@@ -189,7 +197,15 @@ fun DropBandUi(vm: CanvasViewModel) {
         Column(Modifier.graphicsLayer { translationY = -(1f - shown.value) * size.height }) {
             Box(Modifier.fillMaxWidth().height(32.dp).background(if (Pc.light) BandLight else BandDark), contentAlignment = Alignment.Center) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("ColorDrop", color = ink, fontSize = 16.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    // on a narrow screen the control and button have the band to themselves
+                    if (width >= BandRoomForTitle) {
+                        Text("ColorDrop", color = ink, fontSize = 16.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Spacer(Modifier.width(13.dp))
+                    }
+                    Segmented(
+                        if (vm.dropOnReference) "Reference" else "Layer", "All Layers",
+                        second = vm.dropAllLayers, ink = ink, blue = blue,
+                    ) { vm.chooseDropAllLayers(it) }
                     Spacer(Modifier.width(13.dp))
                     if (what == DropBand.FILLING) {
                         // the tick ends filling
@@ -225,6 +241,44 @@ fun DropBandUi(vm: CanvasViewModel) {
         }
     }
 }
+
+/**
+ * Two choices side by side in a rounded track, the chosen one under a blue thumb that slides
+ * across to the other when it is tapped: [second] whether the second is chosen.
+ */
+@Composable
+private fun Segmented(first: String, secondLabel: String, second: Boolean, ink: Color, blue: Color, choose: (Boolean) -> Unit) {
+    val at by animateFloatAsState(if (second) 1f else 0f, Motion.switchKnob(), label = "segment")
+    Box(Modifier.size(SegmentWidth * 2, 20.dp).clip(RoundedCornerShape(10.dp)).background(if (Pc.light) TrackLight else TrackDark)) {
+        Box(Modifier.offset(x = SegmentWidth * at).size(SegmentWidth, 20.dp).clip(RoundedCornerShape(10.dp)).background(blue))
+        Row {
+            for ((index, label) in listOf(first, secondLabel).withIndex()) {
+                val chosen = second == (index == 1)
+                Box(
+                    Modifier.size(SegmentWidth, 20.dp)
+                        .semantics {
+                            role = Role.Tab
+                            selected = chosen
+                        }
+                        .press { choose(index == 1) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(label, color = if (chosen) Color.White else ink, fontSize = 11.7.sp, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+/** Each of the band's segments, room for "All Layers" and "Reference". */
+private val SegmentWidth = 68.dp
+
+/** Under this, the band leaves its title out for the segmented control. */
+private val BandRoomForTitle: Dp = 380.dp
+
+/** The segmented control's track, dark and light. */
+private val TrackDark = Color(0x33FFFFFF)
+private val TrackLight = Color(0x1F000000)
 
 /** A tap target without a ripple. */
 private fun Modifier.press(onClick: () -> Unit): Modifier = composed {

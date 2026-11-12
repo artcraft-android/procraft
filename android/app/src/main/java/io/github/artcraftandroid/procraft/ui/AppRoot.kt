@@ -107,7 +107,8 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the drawing guide is the canvas's: under every bar and panel
                 GuideOverlay(vm)
                 if (vm.transforming) TransformOverlay(vm)
-                if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
+                // (and the Paint or Erase tool's lasso shapes as they are drawn)
+                if (vm.selecting || vm.lassoToolOn) SelectionOverlay(vm, Pc.BarHeight)
                 vm.picking?.let { pick ->
                     val pickingZ = if (pick.fromReference) 1f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))

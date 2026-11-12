@@ -3752,3 +3752,64 @@ fn a_hard_round_tip_s_thinnest_line_keeps_close_to_its_size() {
     let wide = ink(4.0, 1.35);
     assert!((wide - 9.5).abs() < 0.3, "{wide}");
 }
+
+#[test]
+fn a_pixelated_stroke_covers_whole_pixels_or_none() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let mut brush = Brush { pen_taper: Taper::NONE, touch_taper: Taper::NONE, streamline: 0.0, ..Brush::round_pen() };
+    brush.set_setting("pixelated", 1.0);
+    brush.set_setting("pixel_perfect", 1.0);
+    let style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [0.0; 3], 1.0, false);
+    assert!(style.pixelated);
+    canvas.begin_stroke(doc.current(), style);
+    let mut stroke = StrokeBuilder::new(brush, 1.0, Pointer::Finger);
+    let samples: Vec<Sample> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            Sample::at(Vec2::new(4.0 + 50.0 * t, 20.0 + 17.0 * t + 0.3 * (t * 30.0).sin()), 1.0, i as f64 * 4.0)
+        })
+        .collect();
+    canvas.add_stamps(&stroke.add(&samples));
+    // the stroke as it ends, and stamps off the grid (as a mirror lays them), which the shader
+    // lays on it: 1, 3 and 5 across
+    canvas.replace_stamps(
+        &[
+            stroke.finish(),
+            vec![dot(Vec2::new(10.3, 50.7), 0.6), dot(Vec2::new(30.2, 50.9), 1.4), dot(Vec2::new(50.4, 50.6), 2.6)],
+        ]
+        .concat(),
+    );
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let alpha = |x: u32, y: u32| pixel(&px, 64, x, y)[3];
+    let mut line = 0;
+    for y in 0..64 {
+        for x in 0..64 {
+            let a = alpha(x, y);
+            assert!(a == 0 || a == 255, "({x}, {y}) partly covered: {a}");
+            if a == 255 && y < 45 {
+                line += 1;
+            }
+        }
+    }
+    assert!(line >= 50, "{line}");
+    // one pixel thick: no row of the shallow line holds two pixels side by side over a step down
+    let painted = |x: u32, y: u32| alpha(x, y) == 255;
+    for y in 1..45 {
+        for x in 1..63 {
+            let elbow = painted(x, y) && painted(x - 1, y) && painted(x, y - 1);
+            assert!(!elbow, "an L-corner at ({x}, {y})");
+        }
+    }
+    let count =
+        |x0: u32, x1: u32| (x0..x1).flat_map(|x| (45..58).map(move |y| (x, y))).filter(|&(x, y)| painted(x, y)).count();
+    assert!(painted(10, 50));
+    assert_eq!(count(5, 16), 1);
+    // three across a plus, five across a square less its corners
+    assert_eq!(count(25, 36), 5);
+    assert_eq!(count(44, 57), 21);
+}

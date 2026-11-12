@@ -8,6 +8,7 @@ use crate::brush::{
 use crate::curve::Curve;
 use crate::geom::{IRect, Vec2};
 use crate::input::{Pointer, Sample};
+use crate::pixel::{self, PixelPerfect};
 use crate::studio::{SPACING_FLOOR, SPACING_SPAN};
 use std::collections::VecDeque;
 use std::f64::consts::{PI, TAU};
@@ -418,6 +419,10 @@ struct Extras {
     /// The gap per unit of stamp size: the older spacing (version 0) puts stamps 1/√2 as far
     /// apart as the newer.
     spacing_stride: f32,
+    /// Pixelated: stamps laid on whole pixels (see [`crate::pixel`]); pixel perfect as well, the
+    /// one-pixel line's doubled pixels and corners left out, and no gap of more than a pixel.
+    pixelated: bool,
+    pixel_perfect: bool,
 }
 
 /// Each tilt switch's angle (its dial's share of a quarter turn), none where the switch is off.
@@ -527,6 +532,8 @@ impl Extras {
             motion_filtering: unit("motion_filtering"),
             motion_expression: unit("motion_expression"),
             spacing_stride: if b.setting("spacing_version") < 0.5 { std::f32::consts::FRAC_1_SQRT_2 } else { 1.0 },
+            pixelated: b.setting("pixelated") >= 0.5,
+            pixel_perfect: b.setting("pixelated") >= 0.5 && b.setting("pixel_perfect") >= 0.5,
         }
     }
 }
@@ -823,6 +830,8 @@ pub struct StrokeBuilder {
     /// How far the start taper reaches, once its time has passed: from then on it is what the
     /// stroke keeps (so what is drawn for good stays as it is when the stroke ends).
     start_settled: Option<f32>,
+    /// The pixel perfect filter the stamps drawn for good have gone through, holding the newest.
+    pixel_filter: PixelPerfect,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -999,6 +1008,7 @@ impl StrokeBuilder {
             kept: 0,
             left_out: 0,
             start_settled: None,
+            pixel_filter: PixelPerfect::default(),
         }
         .reading_extras()
     }
@@ -1064,12 +1074,24 @@ impl StrokeBuilder {
         self.length
     }
 
+    /// The stroke's stamps so far (of a pixel perfect brush, those its filter lets through for
+    /// good: see [`StrokeBuilder::pixel_all`]).
     pub fn stamp_count(&self) -> usize {
+        if self.extras.pixel_perfect {
+            return self.pixel_all(self.stamps_as_drawn(), false).len();
+        }
         self.placed.len()
     }
 
     /// Adds samples (canvas pixels) and returns the stamps they add. Non-finite samples are skipped.
     pub fn add(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        let added = self.add_unsnapped(samples);
+        self.pixel_on(added)
+    }
+
+    /// As [`StrokeBuilder::add`], the stamps as placed, before a pixelated brush lays them on
+    /// whole pixels.
+    fn add_unsnapped(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         let mut out = Vec::new();
         for s in samples.iter().filter(|s| s.is_finite()) {
             self.push(*s, &mut out);
@@ -1077,25 +1099,78 @@ impl StrokeBuilder {
         out
     }
 
+    /// A pixelated brush's stamps drawn for good from here on, laid on whole pixels, through the
+    /// stroke's pixel perfect filter if it has one (which holds the newest back: see
+    /// [`StrokeBuilder::pixel_ahead`]). Any other brush's as they are.
+    fn pixel_on(&mut self, stamps: Vec<Stamp>) -> Vec<Stamp> {
+        if !self.extras.pixelated {
+            return stamps;
+        }
+        let snapped = stamps.into_iter().map(pixel::snapped);
+        if !self.extras.pixel_perfect {
+            return snapped.collect();
+        }
+        let mut out = Vec::new();
+        for s in snapped {
+            self.pixel_filter.push(s, &mut out);
+        }
+        out
+    }
+
+    /// As [`StrokeBuilder::pixel_on`], for stamps shown ahead of those drawn for good (the tip,
+    /// predicted input), the filter left as it is: they follow the stamp it holds back, and end
+    /// with whatever it would then hold.
+    fn pixel_ahead(&self, stamps: Vec<Stamp>) -> Vec<Stamp> {
+        if !self.extras.pixelated {
+            return stamps;
+        }
+        let snapped = stamps.into_iter().map(pixel::snapped);
+        if !self.extras.pixel_perfect {
+            return snapped.collect();
+        }
+        let mut filter = self.pixel_filter.clone();
+        let mut out = Vec::new();
+        for s in snapped {
+            filter.push(s, &mut out);
+        }
+        out.extend(filter.held());
+        out
+    }
+
+    /// A whole run of the stroke's stamps from its start as a pixelated brush draws them: on
+    /// whole pixels, through a fresh pixel perfect filter, with the stamp it holds back at the
+    /// end if `with_held`. What [`StrokeBuilder::pixel_on`] lets through stamp by stamp is always
+    /// the start of this.
+    fn pixel_all(&self, stamps: Vec<Stamp>, with_held: bool) -> Vec<Stamp> {
+        if !self.extras.pixelated {
+            return stamps;
+        }
+        let snapped = stamps.into_iter().map(pixel::snapped);
+        if !self.extras.pixel_perfect {
+            return snapped.collect();
+        }
+        pixel::perfect(snapped, with_held)
+    }
+
     /// The stamps `samples` would add, without adding them (for drawing predicted input): the
     /// path walked on to the last of them.
     pub fn preview(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         // none of the stamps so far are needed
         let mut ahead = self.open_copy(self.placed.len());
-        let mut out = ahead.add(samples);
+        let mut out = ahead.add_unsnapped(samples);
         ahead.average_on(&mut out);
         ahead.stream_on(&mut out);
         ahead.flush(&mut out);
-        out
+        self.pixel_ahead(out)
     }
 
     /// As [`StrokeBuilder::preview`], and on from the path to the input itself: all the stroke
     /// shows ahead of what is drawn for good.
     pub fn preview_to_input(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         let mut ahead = self.open_copy(self.placed.len());
-        let mut out = ahead.add(samples);
+        let mut out = ahead.add_unsnapped(samples);
         ahead.reach_input(&mut out);
-        out
+        self.pixel_ahead(out)
     }
 
     /// Walks the stretch to the newest path point, as if nothing came after it.
@@ -1144,7 +1219,7 @@ impl StrokeBuilder {
     /// longer reaches, and the tip, the stamps after them as they would be drawn were the stroke
     /// to end here.
     pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
-        self.add(samples);
+        self.add_unsnapped(samples);
         let start = self.start_span();
         let reach = match self.start_settled {
             // the start's reach still moving: nothing is drawn for good yet
@@ -1157,20 +1232,23 @@ impl StrokeBuilder {
         let to = open.iter().position(|p| p.distance >= reach).map_or(self.placed.len(), |i| self.kept + i);
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
+        let kept = self.pixel_on(kept);
         self.kept = to;
         // the tip as if the stroke ended here: walked on to the input
         let mut ended = self.open_copy(to);
         ended.reach_input(&mut Vec::new());
-        (kept, ended.tip_from(0))
+        let tip = ended.tip_from(0);
+        (kept, self.pixel_ahead(tip))
     }
 
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
     /// left as it is.
     pub fn preview_tip(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         let mut ahead = self.open_copy(self.kept);
-        ahead.add(samples);
+        ahead.add_unsnapped(samples);
         ahead.reach_input(&mut Vec::new());
-        ahead.tip_from(0)
+        let tip = ahead.tip_from(0);
+        self.pixel_ahead(tip)
     }
 
     /// A copy of the stroke holding only its stamps from `from` on, to see how it would go on:
@@ -1199,6 +1277,11 @@ impl StrokeBuilder {
 
     /// Every stamp so far as currently drawn (no end taper yet).
     pub fn stamps(&self) -> Vec<Stamp> {
+        self.pixel_all(self.stamps_as_drawn(), true)
+    }
+
+    /// Every stamp so far as placed (no end taper yet), before a pixelated brush lays them out.
+    fn stamps_as_drawn(&self) -> Vec<Stamp> {
         let start = self.start_span();
         self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
@@ -1211,7 +1294,8 @@ impl StrokeBuilder {
         }
         let start = self.start_span();
         let drawn = if self.shows_tip() { self.kept } else { self.placed.len() };
-        Some(self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect())
+        let stamps = self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect();
+        Some(self.pixel_all(stamps, false))
     }
 
     /// The line a shape is fitted to, from this builder as its stroke began and the stroke's
@@ -1223,7 +1307,7 @@ impl StrokeBuilder {
         line.brush.streamline = 0.0;
         line.brush.pen_taper = Taper::NONE;
         line.brush.touch_taper = Taper::NONE;
-        line.add(samples);
+        line.add_unsnapped(samples);
         line.finish();
         line.placed.iter().map(|p| p.center - p.thrown).collect()
     }
@@ -1255,6 +1339,7 @@ impl StrokeBuilder {
         }
         let (start, end) = (self.start_span(), self.end_span(run_on));
         let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect();
+        let stamps = self.pixel_all(stamps, true);
         self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
         stamps
     }
@@ -1823,7 +1908,9 @@ impl StrokeBuilder {
             let by = self.brush.pressure_curves.at(PressureCurve::SpacingJitter, p.soft[4].clamp(0.0, 1.0));
             widen += by * x.spacing_jitter * SPACING_FILE_SCALE * self.random.next();
         }
-        ((1.0 + widen.max(0.0)) * (last + self.step(p)) * 0.5).max(0.25)
+        let gap = ((1.0 + widen.max(0.0)) * (last + self.step(p)) * 0.5).max(0.25);
+        // a pixel perfect line goes from each pixel to the next without skipping one
+        if x.pixel_perfect { gap.min(1.0) } else { gap }
     }
 
     /// Each use's pressure followed from `before` towards `now` over `frames` (of a 60 Hz display)
@@ -4387,5 +4474,111 @@ mod tests {
             assert!((went - moved).abs() < 1e-3, "{went} {moved}");
         }
         assert!(stamps[10].grain_size != stamps[40].grain_size);
+    }
+
+    fn pixel_brush(perfect: bool) -> Brush {
+        let mut b = plain();
+        b.set_setting("pixelated", 1.0);
+        b.set_setting("pixel_perfect", if perfect { 1.0 } else { 0.0 });
+        b
+    }
+
+    /// A shallow diagonal with a wobble, as a hand draws one.
+    fn wobbly(n: usize) -> Vec<Sample> {
+        (0..=n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                let at = Vec2::new(10.0 + 60.0 * t, 10.0 + 25.0 * t + 0.4 * (t * 40.0).sin());
+                Sample::at(at, 1.0, i as f64 * 4.0)
+            })
+            .collect()
+    }
+
+    fn pixels_of(stamps: &[Stamp]) -> Vec<[i32; 2]> {
+        stamps.iter().map(|s| [s.center.x.floor() as i32, s.center.y.floor() as i32]).collect()
+    }
+
+    #[test]
+    fn a_pixelated_brush_lays_whole_pixels() {
+        for diameter in [1.0, 2.4, 3.3] {
+            let mut b = StrokeBuilder::new(pixel_brush(false), diameter, Pointer::Finger);
+            let mut stamps = b.add(&wobbly(80));
+            stamps.extend(b.finish());
+            assert!(!stamps.is_empty());
+            for s in stamps {
+                let across = s.radius * 2.0;
+                assert!(across >= 1.0 && across.fract() == 0.0, "{across}");
+                // odd widths mid-pixel, even ones on a corner
+                let off = if across % 2.0 == 1.0 { 0.5 } else { 0.0 };
+                assert_eq!([s.center.x.fract(), s.center.y.fract()], [off, off], "{s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pixel_perfect_line_is_one_clean_pixel_thick() {
+        let samples = wobbly(80);
+        let mut b = StrokeBuilder::new(pixel_brush(true), 1.0, Pointer::Finger);
+        assert!(!b.shows_tip());
+        let mut drawn = Vec::new();
+        for batch in samples.chunks(7) {
+            drawn.extend(b.add(batch));
+            // the stroke so far is what is drawn and the pixel held back to see what comes next
+            let held: Vec<Stamp> = b.pixel_filter.held().into_iter().collect();
+            assert_eq!(b.stamps(), [drawn.clone(), held].concat());
+        }
+        assert_eq!(b.drawn_for_good(), Some(drawn.clone()));
+        assert_eq!(b.stamp_count(), drawn.len());
+        let all = b.finish();
+        // ending it only adds to what was drawn
+        assert!(all.starts_with(&drawn) && all.len() > drawn.len());
+        let pixels = pixels_of(&all);
+        assert!(pixels.len() > 50, "{}", pixels.len());
+        for w in pixels.windows(2) {
+            let step = [w[1][0] - w[0][0], w[1][1] - w[0][1]];
+            assert!(step != [0, 0] && step[0].abs() <= 1 && step[1].abs() <= 1, "{w:?}");
+        }
+        for w in pixels.windows(3) {
+            assert!(!crate::pixel::is_elbow(w[0], w[1], w[2]), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn a_pixel_perfect_line_keeps_whole_with_wide_spacing() {
+        let brush = Brush { spacing: 1.0, ..pixel_brush(true) };
+        let mut b = StrokeBuilder::new(brush, 1.0, Pointer::Finger);
+        b.add(&wobbly(80));
+        let pixels = pixels_of(&b.finish());
+        for w in pixels.windows(2) {
+            assert!((w[1][0] - w[0][0]).abs() <= 1 && (w[1][1] - w[0][1]).abs() <= 1, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn a_pixel_perfect_tip_follows_what_is_drawn_for_good() {
+        let brush = Brush { pen_taper: Taper { start: 0.3, end: 0.0, size: 1.0, opacity: 0.0 }, ..pixel_brush(true) };
+        let mut b = StrokeBuilder::new(brush, 1.0, Pointer::Stylus);
+        assert!(b.shows_tip());
+        let mut kept = Vec::new();
+        for batch in wobbly(80).chunks(5) {
+            let (now, tip) = b.add_tipped(batch);
+            kept.extend(now);
+            // nothing shown twice where what is kept meets the tip
+            if let (Some(last), Some(first)) = (kept.last(), tip.first()) {
+                assert_ne!(pixels_of(&[*last]), pixels_of(&[*first]));
+            }
+        }
+        assert!(!kept.is_empty());
+        assert_eq!(b.drawn_for_good(), Some(kept.clone()));
+        assert!(b.finish().starts_with(&kept));
+    }
+
+    #[test]
+    fn a_pixel_perfect_tap_lays_its_pixel() {
+        let mut b = StrokeBuilder::new(pixel_brush(true), 1.0, Pointer::Stylus);
+        assert!(b.add(&[Sample::at(Vec2::new(3.2, 4.7), 1.0, 0.0)]).is_empty());
+        let all = b.finish();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].center, all[0].radius), (Vec2::new(3.5, 4.5), 0.5));
     }
 }

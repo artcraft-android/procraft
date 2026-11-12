@@ -382,6 +382,18 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
+    /// Whether a dropped colour measures the visible layers together, as they show without the
+    /// background (All Layers), instead of the current layer (or the reference layer). Off at
+    /// first; it holds from the next pour.
+    pub fn set_pour_all_layers(&self, on: bool) {
+        self.shared.lock().pour_all_layers = on;
+    }
+
+    /// See [`CanvasSession::set_pour_all_layers`].
+    pub fn pour_all_layers(&self) -> bool {
+        self.shared.lock().pour_all_layers
+    }
+
     /// Ends the open pour: `keep` makes it one undo step, called `name` if given (else
     /// "ColorDrop"); otherwise (or with nothing poured) the layer goes back to how it was. Kept,
     /// with a plugin on the fill hook, it ends when that has had its say, on a thread of its own:
@@ -400,6 +412,18 @@ impl CanvasSession {
     /// it is. The pour's own calls wait for it.
     pub fn pour_finishing(&self) -> bool {
         self.shared.lock().pour.as_ref().is_some_and(|pour| pour.finishing.is_some())
+    }
+}
+
+impl State {
+    /// The visible layers composited together without the background, everything queued drawn
+    /// first: what a pour measures with All Layers.
+    fn layers_composite(&mut self) -> Option<Vec<u8>> {
+        self.finish_stroke();
+        self.settle();
+        self.flush();
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
+        canvas.read_layers_composite(gpu, &mut self.doc).ok()
     }
 }
 
@@ -423,9 +447,11 @@ impl CanvasSession {
         }
         let Some(before) = st.current_pixels() else { return false };
         let within = st.reach_selection();
-        // measured on every layer seen while a plugin says so, else on the reference layer when
-        // another layer is it
-        let elsewhere = if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+        // measured on every visible layer together (All Layers), on every layer seen while a
+        // plugin says so, or else on the reference layer when another layer is it
+        let elsewhere = if st.pour_all_layers {
+            st.layers_composite()
+        } else if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
             st.composite_pixels()
         } else {
             st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r))

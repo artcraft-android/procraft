@@ -379,6 +379,7 @@ impl Transform {
             Tapped::Button(4) => Asked::Action(TransformAction::FitToCanvas),
             Tapped::Button(5) => Asked::Popup(Popup::Interpolation),
             Tapped::Button(_) => Asked::Action(TransformAction::Reset),
+            Tapped::Held(_) => return None,
         })
     }
 
@@ -581,11 +582,12 @@ impl<'a> Button<'a> {
     }
 }
 
-/// What was tapped on a floating toolbar.
+/// What was tapped on a floating toolbar: a button right-clicked is `Held`, as a long press is on Android.
 pub(crate) enum Tapped {
     Background,
     Segment(usize),
     Button(usize),
+    Held(usize),
 }
 
 /// The floating toolbar at the foot of the window (transform, selection): a row of `segments`
@@ -628,8 +630,10 @@ pub(crate) fn floating_toolbar(
             let centre = button_centre(bar, button, i, buttons.len());
             let rect = Rect::from_min_size(pos2(centre - button / 2.0, pill.bottom()), vec2(button, BUTTON_HEIGHT));
             let label_size = if b.label.len() > 12 { long } else { 12.5 };
-            if toolbar_button(ui, look, rect, b, label_size) {
-                tapped = Some(Tapped::Button(i));
+            match toolbar_button(ui, look, rect, b, label_size) {
+                Some(false) => tapped = Some(Tapped::Button(i)),
+                Some(true) => tapped = Some(Tapped::Held(i)),
+                None => {}
             }
         }
     });
@@ -699,8 +703,8 @@ fn segment(ui: &Ui, look: &mut Look, rect: Rect, icon: &Icon, label: &str, on: b
 }
 
 /// A toolbar button: its icon centred 30 below its top over its name; blue while its popover is
-/// open, grey when it can't be used. True when tapped.
-fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: f32) -> bool {
+/// open, grey when it can't be used. `Some(false)` when tapped, `Some(true)` when right-clicked.
+fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: f32) -> Option<bool> {
     let tint = if !b.enabled {
         argb(BUTTON_DIMMED)
     } else if b.active {
@@ -719,7 +723,11 @@ fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: 
         Weight::Regular,
         ink,
     );
-    b.enabled && ui.interact(rect, ui.scope_id().with(("toolbar button", b.label)), Sense::click()).clicked()
+    if !b.enabled {
+        return None;
+    }
+    let r = ui.interact(rect, ui.scope_id().with(("toolbar button", b.label)), Sense::click());
+    if r.secondary_clicked() { Some(true) } else { r.clicked().then_some(false) }
 }
 
 /// A node: a coloured dot on a white disc with a faint shadow, `scale` times its size.

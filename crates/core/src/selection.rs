@@ -31,6 +31,14 @@ pub enum SelectionDisplay {
     Fill,
 }
 
+/// How Lasso Fill fills a shape: painting it, or erasing it (Lasso Erase); at Color Fill's opacity,
+/// or at the current tool's opacity slider (`tool_opacity`: the Paint or Erase tool's own lasso).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LassoFill {
+    pub erase: bool,
+    pub tool_opacity: bool,
+}
+
 /// Points around an ellipse drawn as a polygon.
 const ELLIPSE_POINTS: usize = 128;
 
@@ -111,6 +119,67 @@ impl State {
         window.iter().map(|&p| view.screen_to_canvas(p).filter(|c| c.is_finite())).collect()
     }
 
+    /// Window points `window` made a shape on the canvas (on a shown model, on its texture).
+    fn window_shape(&mut self, window: &[Vec2]) -> Option<Mask> {
+        if self.scene_shown() {
+            self.scene_mask(window)
+        } else {
+            let points = self.to_canvas_points(window)?;
+            Some(Mask::polygon(self.doc.width(), self.doc.height(), &points))
+        }
+    }
+
+    /// Fills `mask` on the current layer with the paint colour at `opacity` (or with `erase`, takes
+    /// it away from what is there), as one undo step (called `name`, if it has one); false if
+    /// nothing could be filled (no layer, a locked one, an empty mask, or erasing with the alpha
+    /// locked).
+    fn fill_mask(&mut self, mask: &Mask, name: Option<&str>, opacity: f32, erase: bool) -> bool {
+        let current = self.doc.current();
+        if self.doc.layer(current).is_none() || self.doc.is_locked(current) {
+            return false;
+        }
+        let alpha_lock = self.doc.layer(current).is_some_and(|l| l.alpha_lock);
+        if erase && alpha_lock {
+            return false;
+        }
+        // only what the mask covers changes
+        let Some(rect) = crate::layer_ops::mask_rect(mask) else { return false };
+        let Some(mut pixels) = self.layer_part(current, rect) else { return false };
+        let [r, g, b] = self.color.map(|c| c.clamp(0.0, 1.0));
+        let opacity = opacity.clamp(0.0, 1.0);
+        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(mask, rect)) {
+            if m == 0 {
+                continue;
+            }
+            if erase {
+                // what is there (premultiplied), less as much as is covered at the opacity
+                let keep = 1.0 - f32::from(m) / 255.0 * opacity;
+                for c in px.iter_mut() {
+                    *c = to_byte(f32::from(*c) / 255.0 * keep);
+                }
+                continue;
+            }
+            let [pr, pg, pb, pa] = px;
+            // the colour over what is there, as much as is covered at the fill's opacity (only
+            // where there is paint, with the alpha locked)
+            let k = f32::from(m) / 255.0 * opacity;
+            let a = f32::from(*pa) / 255.0;
+            let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
+            for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
+                *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
+            }
+            *pa = to_byte(out_a);
+        }
+        let Some(canvas) = self.canvas.as_mut() else { return false };
+        if let Some(name) = name {
+            canvas.name_next_step(name);
+        }
+        canvas.write_layer_part(current, rect, pixels);
+        self.flush();
+        self.revision += 1;
+        true
+    }
+
     /// The current layer's pixels, after any queued work.
     pub(crate) fn current_pixels(&mut self) -> Option<Vec<u8>> {
         self.finish_stroke();
@@ -127,19 +196,7 @@ impl CanvasSession {
     /// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and
     /// (`x1`, `y1`) joins the selection. Drawn on the window, so it turns with the view.
     pub fn select_shape(&self, ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32, join: SelectionJoin) {
-        let (a, b) = (Vec2::new(x0, y0), Vec2::new(x1, y1));
-        let window: Vec<Vec2> = if ellipse {
-            let (c, r) = (a.lerp(b, 0.5), (b - a) * 0.5);
-            (0..ELLIPSE_POINTS)
-                .map(|i| {
-                    let t = i as f32 / ELLIPSE_POINTS as f32 * std::f32::consts::TAU;
-                    Vec2::new(c.x + r.x * t.cos(), c.y + r.y * t.sin())
-                })
-                .collect()
-        } else {
-            vec![a, Vec2::new(b.x, a.y), b, Vec2::new(a.x, b.y)]
-        };
-        self.select_window_polygon(&window, join);
+        self.select_window_polygon(&shape_outline(ellipse, x0, y0, x1, y1), join);
     }
 
     /// The polygon through window points `points` (x, y pairs) joins the selection.
@@ -339,39 +396,19 @@ impl CanvasSession {
         u32::try_from(self.shared.lock().saved_selections.len()).unwrap_or(u32::MAX)
     }
 
-    /// Fills the selection on the current layer with the paint colour, as one undo step.
+    /// How strongly Color Fill fills, by selection or Lasso Fill (its popover's Opacity), 0..1.
+    pub fn set_fill_opacity(&self, opacity: f32) {
+        self.shared.lock().fill_opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
+    }
+
+    /// Fills the selection on the current layer with the paint colour at Color Fill's opacity
+    /// ([`CanvasSession::set_fill_opacity`]), as one undo step.
     pub fn fill_selection(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let current = st.doc.current();
-        if st.doc.layer(current).is_none() || st.doc.is_locked(current) {
-            return;
-        }
         let Some(mask) = st.selection.clone() else { return };
-        // only what is selected changes
-        let Some(rect) = crate::layer_ops::mask_rect(&mask) else { return };
-        let Some(mut pixels) = st.layer_part(current, rect) else { return };
-        let [r, g, b] = st.color.map(|c| c.clamp(0.0, 1.0));
-        let alpha_lock = st.doc.layer(current).is_some_and(|l| l.alpha_lock);
-        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(&mask, rect)) {
-            let [pr, pg, pb, pa] = px;
-            if m == 0 {
-                continue;
-            }
-            // the colour over what is there, as much as is selected (only where there is paint,
-            // with the alpha locked)
-            let k = f32::from(m) / 255.0;
-            let a = f32::from(*pa) / 255.0;
-            let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
-            for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
-                *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
-            }
-            *pa = to_byte(out_a);
-        }
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.write_layer_part(current, rect, pixels);
-            st.flush();
-            st.revision += 1;
+        let opacity = st.fill_opacity;
+        if st.fill_mask(&mask, None, opacity, false) {
             self.shared.frame(st);
         }
     }
@@ -416,15 +453,60 @@ impl CanvasSession {
     fn select_window_polygon(&self, window: &[Vec2], join: SelectionJoin) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let shape = if st.scene_shown() {
-            let Some(shape) = st.scene_mask(window) else { return };
-            shape
-        } else {
-            let Some(points) = st.to_canvas_points(window) else { return };
-            Mask::polygon(st.doc.width(), st.doc.height(), &points)
-        };
+        let Some(shape) = st.window_shape(window) else { return };
         st.join(shape, join, true);
         self.shared.frame(st);
+    }
+
+    /// Lasso Fill: the shape through window points `window` filled on the current layer with the
+    /// paint colour (or erased, as `lasso` says), as one undo step, only where the selection there
+    /// is reaches (as painting is); the selection is left as it is.
+    fn fill_window_polygon(&self, window: &[Vec2], lasso: LassoFill) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let Some(mut shape) = st.window_shape(window) else { return };
+        if let Some(selection) = &st.selection {
+            // as much of each pixel as both cover (a feathered edge stays soft)
+            for (a, &b) in shape.data.iter_mut().zip(&selection.data) {
+                *a = ((u16::from(*a) * u16::from(b) + 127) / 255) as u8;
+            }
+        }
+        let opacity = if lasso.tool_opacity { st.sliders(st.tool).opacity } else { st.fill_opacity };
+        let name = if lasso.erase { "lasso erase" } else { "lasso fill" };
+        if st.fill_mask(&shape, Some(name), opacity, lasso.erase) {
+            self.shared.frame(st);
+        }
+    }
+
+    /// Lasso Fill: the polygon through window points `points` (x, y pairs) filled.
+    pub(crate) fn fill_polygon(&self, points: Vec<f32>, lasso: LassoFill) {
+        let window: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+        self.fill_window_polygon(&window, lasso);
+    }
+
+    /// Lasso Fill: a rectangle (or with `ellipse`, the ellipse in it) between window points
+    /// (`x0`, `y0`) and (`x1`, `y1`) filled.
+    pub(crate) fn fill_shape(&self, ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32, lasso: LassoFill) {
+        self.fill_window_polygon(&shape_outline(ellipse, x0, y0, x1, y1), lasso);
+    }
+}
+
+/// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and
+/// (`x1`, `y1`), as a polygon.
+fn shape_outline(ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec2> {
+    let (a, b) = (Vec2::new(x0, y0), Vec2::new(x1, y1));
+    if ellipse {
+        let (c, r) = (a.lerp(b, 0.5), (b - a) * 0.5);
+        (0..ELLIPSE_POINTS)
+            .map(|i| {
+                let t = i as f32 / ELLIPSE_POINTS as f32 * std::f32::consts::TAU;
+                Vec2::new(c.x + r.x * t.cos(), c.y + r.y * t.sin())
+            })
+            .collect()
+    } else {
+        vec![a, Vec2::new(b.x, a.y), b, Vec2::new(a.x, b.y)]
     }
 }
 

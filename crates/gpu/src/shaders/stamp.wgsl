@@ -32,6 +32,8 @@ struct StampUniform {
     shape_lod_cap: f32,
     // pixels a side of the image a moving grain is read from
     grain_side: f32,
+    // 1: pixel art, each stamp laid on whole pixels and hard-edged
+    pixelated: u32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -90,14 +92,23 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
     // a shape's quad keeps its reach however small the stamp; the round tip thins out by its area
-    let r = max(inst.radius, select(0.25, 0.01, su.shape >= 0));
+    var r = max(inst.radius, select(0.25, 0.01, su.shape >= 0));
+    var center = inst.center;
+    if (su.pixelated == 1u) {
+        // a whole number of pixels across, centred where it covers whole pixels: an odd width
+        // mid-pixel, an even one on a corner (as the stroke already laid it, unless mirrored off
+        // the grid)
+        let across = max(round(r * 2.0), 1.0);
+        r = across * 0.5;
+        center = select(floor(center) + 0.5, round(center), across % 2.0 == 0.0);
+    }
     let half = vec2<f32>(r, max(r * inst.roundness, 1e-3));
     // one pixel to spare for anti-aliasing
     let q = corners[vi % 6u] * (half + 1.0) / half;
     let local = q * half;
     let c = cos(inst.angle);
     let s = sin(inst.angle);
-    let p = inst.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
+    let p = center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
     var o: StampOut;
     o.pos = vec4<f32>(p.x / su.canvas_size.x * 2.0 - 1.0, 1.0 - p.y / su.canvas_size.y * 2.0, 0.0, 1.0);
     o.q = q;
@@ -105,7 +116,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.alpha = inst.alpha;
     let gc = cos(inst.grain_turn);
     let gs = sin(inst.grain_turn);
-    let from_middle = p - inst.center;
+    let from_middle = p - center;
     o.grain_at = inst.grain_offset + vec2<f32>(from_middle.x * gc - from_middle.y * gs, from_middle.x * gs + from_middle.y * gc);
     o.fill = inst.flip * half / (half + QUAD_REACH);
     o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
@@ -169,10 +180,17 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     var a = 0.0;
     if (su.shape < 0) {
         let d = length(i.q) * r;
-        // a one-pixel anti-aliased rim, and the brush's own falloff from hardness·r outwards
-        let rim = clamp(r - d + 0.5, 0.0, 1.0);
-        let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
-        a = min(rim, soft);
+        if (su.pixelated == 1u) {
+            // each pixel whose middle is inside, whole; a tenth of a pixel in from the edge rounds
+            // the corners of a disc off as pixel art draws them (three across a plus, five across
+            // a square less its corners)
+            a = select(0.0, 1.0, d <= r - 0.1);
+        } else {
+            // a one-pixel anti-aliased rim, and the brush's own falloff from hardness·r outwards
+            let rim = clamp(r - d + 0.5, 0.0, 1.0);
+            let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
+            a = min(rim, soft);
+        }
     } else {
         // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across
         let uv = i.q * i.fill * 0.5 + 0.5;
@@ -184,6 +202,10 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {
             s = shape_texel(uv, su.shape);
+        }
+        if (su.pixelated == 1u) {
+            // pixel art paints a pixel or doesn't
+            s = step(0.5, s);
         }
         a = select(0.0, s, inside);
     }
@@ -223,7 +245,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     }
     // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
     // covers only its area of one (a shape's quad reaches past it, which thins it as far)
-    if (su.shape < 0) {
+    if (su.shape < 0 && su.pixelated == 0u) {
         let small = min(r * 2.0, 1.0);
         a = a * small * small;
     }

@@ -11,7 +11,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -80,7 +79,8 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             }
             ActionButton(PcIcons.Actions, "Actions", fit.button, selected = vm.panel == Panel.ACTIONS) { vm.toggle(Panel.ACTIONS) }
             ActionButton(PcIcons.Adjustments, "Adjustments", fit.button, selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
-            ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
+            // lit while the tool is open and while anything is selected (tapped then, it deselects)
+            ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting || vm.hasSelection, glyph = 33.dp) { vm.toggleSelecting() }
             ActionButton(PcIcons.Transform, "Transform", fit.button, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
         }
         // the layers and colour panels take the highlight from the current tool while open
@@ -121,13 +121,6 @@ private fun ActionButton(icon: ImageVector, label: String, width: Dp, selected: 
         // the glyphs are drawn in a 44 frame, shown [glyph] across (most 36)
         Icon(icon, contentDescription = label, tint = lerp(Pc.ActionGlyph, Color.White, lit), modifier = Modifier.requiredSize(glyph))
     }
-}
-
-/** A tap target that also does [onHold] when held instead. */
-private fun Modifier.tapOrHold(onClick: () -> Unit, onHold: () -> Unit): Modifier = composed {
-    val tap by rememberUpdatedState(onClick)
-    val hold by rememberUpdatedState(onHold)
-    pointerInput(Unit) { detectTapGestures(onLongPress = { hold() }, onTap = { tap() }) }
 }
 
 /** A tool button: tapped, the tool (or its brushes); held ([onHold]), it takes the current brush. */

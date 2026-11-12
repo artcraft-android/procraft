@@ -178,6 +178,12 @@ val STUDIO_TABS: List<StudioTab> by lazy {
                 slider("spacing", "Spacing"), slider("spacing_jitter", "Spacing Jitter"), slider("jitter_lateral", "Jitter Lateral"),
                 slider("jitter_linear", "Jitter Linear"), slider("falloff", "Fall off"),
             )),
+            // pixel art: stamps on whole pixels, hard-edged; pixel perfect also leaves the doubled
+            // pixels and L-corners out of a one-pixel line
+            StudioSection("Pixel art", listOf(
+                toggle("pixelated", "Pixelated"),
+                toggle("pixel_perfect", "Pixel perfect", enabledBy = "pixelated" to 1),
+            )),
         )),
         StudioTab("Stabilization", PcIcons.StudioStabilize, 45.dp, listOf(
             StudioSection("StreamLine", listOf(slider("streamline", "Amount"), slider("streamline_pressure", "Pressure"))),

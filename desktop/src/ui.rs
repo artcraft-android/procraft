@@ -556,7 +556,8 @@ impl Interface {
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
-            selection: self.selection.on,
+            // lit while the tool is open and while anything is selected (clicked then, it deselects)
+            selection: self.selection.on || session.has_selection(),
             adjustments: self.open == Some(Popover::Adjustments)
                 || session.adjustment_shown().adjustment.is_some()
                 || session.recolor_on()
@@ -804,8 +805,17 @@ impl Interface {
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
         self.plugin_panel(&ctx, session, &mut backdrops);
         crate::model_picture::show(&ctx, &mut self.look, session);
+        self.selection.lasso_fill = self.prefs.lasso_fill;
+        self.selection.fill_opacity = self.prefs.fill_opacity;
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
             self.prefs.selection_x_ray = on;
+            self.prefs.keep();
+        }
+        // Color Fill's Lasso Fill turned on or off, or its Opacity slid, in its popover, kept
+        if self.selection.lasso_fill != self.prefs.lasso_fill || self.selection.fill_opacity != self.prefs.fill_opacity
+        {
+            self.prefs.lasso_fill = self.selection.lasso_fill;
+            self.prefs.fill_opacity = self.selection.fill_opacity;
             self.prefs.keep();
         }
         if let Some(asked) = self.adjustments.show(
@@ -1174,6 +1184,7 @@ impl Interface {
                 TouchCommand::ClearLayer => self.clear_layer(session),
                 TouchCommand::ToggleBars => self.toggle_bars(session),
                 TouchCommand::Fit => session.settle_to_fit(),
+                TouchCommand::Unturn { x, y, turn } => session.settle_turn(x, y, turn),
                 TouchCommand::QuickShapeLast => {
                     if let Some(info) = session.quickshape_last() {
                         self.snapped(info);
@@ -1231,6 +1242,7 @@ impl Interface {
                     sliding = (!done).then_some((x, y, threshold));
                 }
                 TouchCommand::SelectionChanged => self.selection.changed(session),
+                TouchCommand::ShapeFilled => self.selection.shape_filled(),
                 // the freehand path is read as it is drawn, each frame
                 TouchCommand::FreehandChanged => {}
                 // an adjustment's amount is read as it is drawn, each frame; a touch on the canvas
@@ -1791,8 +1803,17 @@ impl Interface {
         }
     }
 
-    /// Selection on (touches select, as its toolbar says) or off (a freehand path drawn is closed).
+    /// With anything selected (the button lit), the selection goes, as one undo step, and the tool
+    /// closes if on; else Selection on (touches select, as its toolbar says) or off (a freehand
+    /// path drawn is closed).
     fn toggle_selection(&mut self, session: &CanvasSession) {
+        if session.has_selection() {
+            // the other modes end first, keeping what they made, as with any press of it
+            self.switch_modes(session, ModeButton::Selection);
+            self.selection.close(session);
+            self.selection.clear(session);
+            return;
+        }
         // on, it ends; else the other modes end
         if !self.switch_modes(session, ModeButton::Selection) {
             return;

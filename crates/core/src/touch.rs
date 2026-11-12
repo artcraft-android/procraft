@@ -66,6 +66,17 @@ const TOGETHER_MS: f64 = 100.0;
 /// over this long (milliseconds) before they part.
 const QUICK_PINCH_SPEED: f32 = -2.5;
 const QUICK_PINCH_WINDOW_MS: f64 = 40.0;
+/// Two fingers lifted from a view they turned by no more than this (radians: 10°), leaving it no
+/// further than this from upright, turn it upright, easing there, when the turn was hurried or
+/// came only with a zoom or a move: the fingers' wobble, not a turn meant. Turned slowly and on
+/// its own, however little, it stays.
+const UNTURN_MAX: f32 = 10.0 * std::f32::consts::PI / 180.0;
+/// Hurried: the turn at least this fast (radians a second: 15°) on average since the view began
+/// to follow the fingers.
+const UNTURN_SPEED: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// Only with a zoom or a move: the fingers' arc turning it less than this part of how far they
+/// spread (or closed) or moved together.
+const UNTURN_INCIDENTAL: f32 = 0.5;
 /// Three fingers turning back and forth this often clear the layer, each leg this far (points).
 const SCRUB_TURNS: i32 = 3;
 const SCRUB_STEP: f32 = 24.0;
@@ -91,6 +102,11 @@ const PUCK_SLOP: f32 = 10.0;
 /// apart (points).
 const FREEHAND_CLOSE: f32 = 22.0;
 const FREEHAND_STEP: f32 = 2.0;
+/// At the app's full Stabilization, a dragged freehand path's points are each averaged with this
+/// many either side, fewer as it is turned down (by its amount to this power): as a stroke's
+/// samples are steadied.
+const FREEHAND_MOST_AVERAGED: f32 = 120.0;
+const FREEHAND_STABILIZATION_POWER: f32 = 2.2;
 
 /// How the selection tool selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -103,11 +119,24 @@ pub enum SelectKind {
 
 /// The selection tool is open: how it selects, whether a new selection adds to the one there is
 /// or takes away from it, and where a colour selection's threshold starts (0..1).
+///
+/// `lasso_fill` (Color Fill on, with its Lasso Fill): the tool draws instead of selecting. Each
+/// freehand path, rectangle or ellipse drawn (adding or taking away alike) is filled on the
+/// current layer with the paint colour as one undo step, only where the selection there is
+/// reaches, and the selection is left as it was ([`TouchCommand::ShapeFilled`]); a freehand path
+/// dragged closes as the touch lifts. Selecting by colour is as it always is.
+///
+/// With `lasso_fill`, `lasso_erase` (Lasso Erase) makes each shape erase from the current layer
+/// instead, and `lasso_tool` (the Paint or Erase tool's own lasso, the selection tool closed)
+/// fills or erases at the current tool's opacity slider rather than at Color Fill's opacity.
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
 pub struct SelectTouch {
     pub kind: SelectKind,
     pub join: crate::SelectionJoin,
     pub threshold: f32,
+    pub lasso_fill: bool,
+    pub lasso_erase: bool,
+    pub lasso_tool: bool,
 }
 
 /// A transform is open: touches work its box (a warp's control points shown as the advanced mesh
@@ -225,6 +254,14 @@ pub enum TouchCommand {
     ToggleBars,
     /// The canvas settles to fit the window.
     Fit,
+    /// The canvas eases upright, turning by `turn` (radians) about the window point (`x`, `y`):
+    /// the fingers moving it turned it a little, by accident, near upright (see
+    /// [`CanvasSession::settle_turn`]).
+    Unturn {
+        x: f32,
+        y: f32,
+        turn: f32,
+    },
     CopyPaste,
     QuickMenu {
         x: f32,
@@ -322,6 +359,9 @@ pub enum TouchCommand {
     },
     FreehandChanged,
     SelectionChanged,
+    /// With Lasso Fill ([`SelectTouch::lasso_fill`]): a shape was filled on the current layer (or,
+    /// too small or outside the selection, left out), the selection as it was.
+    ShapeFilled,
     /// An adjustment open: its amount changed (see [`CanvasSession::adjustment_shown`]); a tap at
     /// window point (`x`, `y`) asks for its menu.
     AdjustChanged,
@@ -404,6 +444,17 @@ struct Held {
     moves: Vec<PenSample>,
 }
 
+/// What two fingers have done to the view since it began to follow them: when that was, and by
+/// how much they have turned it (radians), spread (window pixels, closing less than nothing) and
+/// moved it, all told.
+#[derive(Clone, Copy, Default)]
+struct Followed {
+    since_ms: f64,
+    turn: f32,
+    spread: f32,
+    pan: (f32, f32),
+}
+
 /// The touches' state: kept by the session, apart from the canvas's (they call into it).
 pub(crate) struct Touches {
     settings: TouchSettings,
@@ -434,6 +485,8 @@ pub(crate) struct Touches {
     /// Others of the fingers moving in this event are still to be told of.
     more_to_come: bool,
     pinch: Vec<(f64, f32)>,
+    /// What the fingers have done to the view since it began to follow them.
+    followed: Followed,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
     scrub_x: f32,
@@ -487,7 +540,10 @@ pub(crate) struct Touches {
     puck_drag: Option<PuckDrag>,
     puck_dragging: bool,
     select_threshold: f32,
+    /// The freehand path (canvas pixels), and which of its points are kept as they are (tapped,
+    /// or a QuickShape's): the rest, dragged, are smoothed by the app's Stabilization.
     freehand: Vec<(f32, f32)>,
+    freehand_fixed: Vec<bool>,
     /// A transform is open; what its touch took, and whether it has started dragging it.
     transforming: Option<TransformTouch>,
     transform_handle: crate::TransformHandle,
@@ -555,6 +611,7 @@ impl Default for Touches {
             tap_moved: 0.0,
             tap_done: false,
             gesture_scale: 1.0,
+            followed: Followed::default(),
             view_moving: false,
             more_to_come: false,
             pinch: Vec::new(),
@@ -596,6 +653,7 @@ impl Default for Touches {
             puck_dragging: false,
             select_threshold: 0.5,
             freehand: Vec::new(),
+            freehand_fixed: Vec::new(),
             transforming: None,
             transform_handle: crate::TransformHandle::Move,
             transform_grabbed: false,
@@ -631,6 +689,51 @@ impl Default for Touches {
 /// Where a pointer's samples end up, and when.
 fn last_of(samples: &[PenSample]) -> Option<&PenSample> {
     samples.last()
+}
+
+/// A freehand path smoothed by the app's Stabilization (`stabilization`, 0..1): each dragged point
+/// averaged with those either side, as far as the stretch it is in reaches each way alike, so the
+/// ends of each stretch, its points `fixed` (tapped corners, a QuickShape's) and the ends of the
+/// path stay where they are.
+fn steadied(points: &[(f32, f32)], fixed: &[bool], stabilization: f32) -> Vec<(f32, f32)> {
+    let most = (stabilization.clamp(0.0, 1.0).powf(FREEHAND_STABILIZATION_POWER) * FREEHAND_MOST_AVERAGED) as usize;
+    if most == 0 || points.len() < 3 {
+        return points.to_vec();
+    }
+    // running sums, to average any stretch at once
+    let sums: Vec<(f64, f64)> = std::iter::once((0.0, 0.0))
+        .chain(points.iter().scan((0.0f64, 0.0f64), |sum, &(x, y)| {
+            *sum = (sum.0 + f64::from(x), sum.1 + f64::from(y));
+            Some(*sum)
+        }))
+        .collect();
+    let last = points.len() - 1;
+    let kept = |i: usize| i == 0 || i == last || fixed.get(i).copied().unwrap_or(false);
+    // each point's stretch runs from the kept point before it to the next kept one
+    let mut next_kept = vec![last; points.len()];
+    let mut next = last;
+    for (i, slot) in next_kept.iter_mut().enumerate().rev() {
+        if kept(i) {
+            next = i;
+        }
+        *slot = next;
+    }
+    let mut previous = 0;
+    points
+        .iter()
+        .zip(&next_kept)
+        .enumerate()
+        .map(|(i, (&p, &end))| {
+            if kept(i) {
+                previous = i;
+                return p;
+            }
+            let reach = most.min(i - previous).min(end - i);
+            let (Some(lo), Some(hi)) = (sums.get(i - reach), sums.get(i + reach + 1)) else { return p };
+            let n = (2 * reach + 1) as f64;
+            (((hi.0 - lo.0) / n) as f32, ((hi.1 - lo.1) / n) as f32)
+        })
+        .collect()
 }
 
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -763,6 +866,7 @@ impl CanvasSession {
         t.selecting = how;
         if how.is_none() {
             t.freehand.clear();
+            t.freehand_fixed.clear();
         }
     }
 
@@ -783,10 +887,15 @@ impl CanvasSession {
         self.select_colour_at((x, y), threshold, join, true);
     }
 
-    /// The freehand selection's path drawn so far, in window pixels (x, y pairs).
+    /// The freehand selection's path drawn so far, in window pixels (x, y pairs), smoothed by the
+    /// app's Stabilization as it will select or fill.
     pub fn freehand_path(&self) -> Vec<f32> {
-        let points = self.touches().freehand.clone();
+        let points = {
+            let t = self.touches();
+            (t.freehand.clone(), t.freehand_fixed.clone())
+        };
         let st = self.shared.lock();
+        let points = steadied(&points.0, &points.1, st.input.stabilization);
         let Some(view) = st.view else { return Vec::new() };
         points
             .iter()
@@ -799,26 +908,56 @@ impl CanvasSession {
 
     /// Closes the freehand path into a selection (fewer than three points are dropped).
     pub fn close_freehand(&self) {
-        let (path, join) = {
+        let join = self.touches().selecting.map_or(crate::SelectionJoin::Add, |s| s.join);
+        if let Some(window) = self.take_freehand() {
+            self.select_polygon(window, join);
+        }
+    }
+}
+
+impl CanvasSession {
+    /// The freehand path taken (none left), smoothed by the app's Stabilization, as window points
+    /// (x, y pairs), if it has three or more.
+    fn take_freehand(&self) -> Option<Vec<f32>> {
+        let (path, fixed) = {
             let mut t = self.touches();
-            (std::mem::take(&mut t.freehand), t.selecting.map_or(crate::SelectionJoin::Add, |s| s.join))
+            (std::mem::take(&mut t.freehand), std::mem::take(&mut t.freehand_fixed))
         };
         if path.len() < 3 {
-            return;
+            return None;
         }
-        let window: Vec<f32> = {
-            let st = self.shared.lock();
-            let Some(view) = st.view else { return };
+        let st = self.shared.lock();
+        let path = steadied(&path, &fixed, st.input.stabilization);
+        let view = st.view?;
+        Some(
             path.iter()
                 .flat_map(|&(x, y)| {
                     let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
                     [p.x, p.y]
                 })
-                .collect()
-        };
-        self.select_polygon(window, join);
+                .collect(),
+        )
     }
 
+    /// The freehand path closed: filled (or erased) as Lasso Fill says (`lasso`), else made a
+    /// selection.
+    fn end_freehand(&self, lasso: Option<crate::selection::LassoFill>, out: &mut Vec<TouchCommand>) {
+        if let Some(lasso) = lasso {
+            if let Some(window) = self.take_freehand() {
+                self.fill_polygon(window, lasso);
+            }
+            out.push(TouchCommand::FreehandChanged);
+            out.push(TouchCommand::ShapeFilled);
+        } else {
+            self.close_freehand();
+            out.push(TouchCommand::FreehandChanged);
+            out.push(TouchCommand::SelectionChanged);
+        }
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
     /// A transform open (each touch works its box) or not.
     pub fn set_touch_transforming(&self, transforming: Option<TransformTouch>) {
         self.touches().transforming = transforming;
@@ -1368,6 +1507,8 @@ impl CanvasSession {
                 let flat: Vec<f32> = t.freehand.iter().flat_map(|&(x, y)| [x, y]).collect();
                 if let Some(outline) = crate::quickshape::quickshape_outline(flat).filter(|o| o.len() >= 6) {
                     t.freehand = outline.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
+                    // the shape it snapped to is kept as it is
+                    t.freehand_fixed = vec![true; t.freehand.len()];
                     t.lasso_snapped = true;
                     out.push(TouchCommand::FreehandChanged);
                 }
@@ -1823,6 +1964,7 @@ impl CanvasSession {
             t.gesture_scale = 1.0;
             t.pinch.clear();
             t.pinch.push((now, 1.0));
+            t.followed = Followed::default();
         }
         if t.mode != Mode::Gesture {
             t.view_moving = false;
@@ -1923,11 +2065,26 @@ impl CanvasSession {
                 // two fingers parting as they close fast fit a canvas pinched smaller than it
                 // fits, settling into place (a tap's fingers aren't a pinch)
                 let tap = Self::fingers_tapped(&t, now);
+                let mut fitted = false;
                 if parted && !pinched && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
                     let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
                     if flicked && self.pinched_smaller_than_fit() {
                         out.push(TouchCommand::Fit);
+                        fitted = true;
                     }
+                }
+                // the last two fingers following the view parting from a little turn, hurried
+                // or only with a zoom or a move, ease it upright if it is left near it (fitting
+                // turns it square anyway)
+                if parted && t.gesture_pair.is_none() {
+                    let unturn = !pinched && !cancelled && !tap && !fitted && t.view_moving;
+                    if unturn && Self::turned_by_accident(&t, now)
+                        && let Some(turned) = self.near_upright()
+                    {
+                        let (x, y, ..) = t.last;
+                        out.push(TouchCommand::Unturn { x, y, turn: -turned });
+                    }
+                    t.followed = Followed { since_ms: now, ..Followed::default() };
                 }
                 // the first lift decides a tap, and it does what it does there: the fingers left
                 // down, wherever they go, do nothing more
@@ -2133,12 +2290,23 @@ impl CanvasSession {
             t.select_moved = true;
         }
         let moved = t.select_moved;
+        // Lasso Fill (or Erase): shapes drawn are filled, never selected
+        let lasso = how
+            .lasso_fill
+            .then_some(crate::selection::LassoFill { erase: how.lasso_erase, tool_opacity: how.lasso_tool });
         match how.kind {
             SelectKind::Rectangle | SelectKind::Ellipse => {
                 drop(t);
                 if done {
+                    let ellipse = how.kind == SelectKind::Ellipse;
+                    if let Some(lasso) = lasso {
+                        if dist(at, start) >= 1.0 {
+                            self.fill_shape(ellipse, start.0, start.1, at.0, at.1, lasso);
+                        }
+                        out.push(TouchCommand::ShapeFilled);
+                        return;
+                    }
                     if dist(at, start) >= 1.0 {
-                        let ellipse = how.kind == SelectKind::Ellipse;
                         self.select_shape(ellipse, start.0, start.1, at.0, at.1, how.join);
                     }
                     out.push(TouchCommand::SelectionChanged);
@@ -2152,9 +2320,7 @@ impl CanvasSession {
                     if done {
                         t.lasso_snapped = false;
                         drop(t);
-                        self.close_freehand();
-                        out.push(TouchCommand::FreehandChanged);
-                        out.push(TouchCommand::SelectionChanged);
+                        self.end_freehand(lasso, out);
                     }
                     return;
                 }
@@ -2189,10 +2355,12 @@ impl CanvasSession {
                     });
                     if t.freehand.len() > 2 && near_first {
                         drop(t);
-                        self.close_freehand();
-                        out.push(TouchCommand::SelectionChanged);
+                        self.end_freehand(lasso, out);
+                        return;
                     } else if let Some(p) = to_canvas {
+                        // a tapped point is a corner, kept as it is
                         t.freehand.push(p);
+                        t.freehand_fixed.push(true);
                     }
                     out.push(TouchCommand::FreehandChanged);
                 } else if moved && to_window.is_none_or(|w| dist((w.x, w.y), at) >= FREEHAND_STEP * scale) {
@@ -2201,11 +2369,17 @@ impl CanvasSession {
                         && let Some(first) = first_canvas
                     {
                         t.freehand.push(first);
+                        t.freehand_fixed.push(false);
                     }
                     if let Some(p) = to_canvas {
                         t.freehand.push(p);
+                        t.freehand_fixed.push(false);
                     }
                     out.push(TouchCommand::FreehandChanged);
+                }
+                // Lasso Fill: a path dragged closes as the touch lifts
+                if done && moved && lasso.is_some() {
+                    self.end_freehand(lasso, out);
                 }
             }
             SelectKind::Automatic => {
@@ -2368,6 +2542,31 @@ impl CanvasSession {
         }
     }
 
+    /// The fingers parting at `now` turned the view only by accident: a little ([`UNTURN_MAX`]),
+    /// and hurried ([`UNTURN_SPEED`]) or only with a zoom or a move ([`UNTURN_INCIDENTAL`]).
+    fn turned_by_accident(t: &Touches, now: f64) -> bool {
+        let f = &t.followed;
+        let turn = f.turn.abs();
+        if !(turn > 1e-4 && turn <= UNTURN_MAX) {
+            return false;
+        }
+        let seconds = ((now - f.since_ms) / 1000.0).max(1e-3) as f32;
+        let hurried = turn / seconds >= UNTURN_SPEED;
+        // each finger's arc is the turn times half the spread: the two together, times all of it
+        let (.., spread, _) = t.last;
+        let arc = turn * spread;
+        let alongside = f.spread.abs().max(f.pan.0.hypot(f.pan.1));
+        hurried || arc < UNTURN_INCIDENTAL * alongside
+    }
+
+    /// How far the view is turned from upright (radians, the short way), if it is turned at all
+    /// and by no more than [`UNTURN_MAX`].
+    fn near_upright(&self) -> Option<f32> {
+        let turned = self.shared.lock().view?.rotation();
+        let turned = (turned + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        (turned.abs() > 1e-5 && turned.abs() <= UNTURN_MAX).then_some(turned)
+    }
+
     /// The canvas as pinched is smaller on the screen than it is fitted.
     fn pinched_smaller_than_fit(&self) -> bool {
         let st = self.shared.lock();
@@ -2404,9 +2603,16 @@ impl CanvasSession {
         t.pinch.drain(..old);
         t.last = (x, y, d, angle);
         let gone: f32 = t.down.iter().map(|d| dist(d.at, d.from)).sum();
-        t.view_moving |= gone >= VIEW_SLOP * t.scale;
+        if !t.view_moving && gone >= VIEW_SLOP * t.scale {
+            t.view_moving = true;
+            t.followed = Followed { since_ms: ms, ..Followed::default() };
+        }
         // from where they are when it starts, so it doesn't jump
         if t.view_moving {
+            let f = &mut t.followed;
+            f.turn += turn;
+            f.spread += if ld > 1.0 && d > 1.0 { d - ld } else { 0.0 };
+            f.pan = (f.pan.0 + x - lx, f.pan.1 + y - ly);
             self.view_gesture(lx, ly, x - lx, y - ly, scale, turn);
         }
         true
@@ -2654,7 +2860,14 @@ mod tests {
             out.contains(&TouchCommand::Undo)
         };
         assert!(!tap(&s, 0.0));
-        let how = SelectTouch { kind: SelectKind::Freehand, join: crate::SelectionJoin::Add, threshold: 0.5 };
+        let how = SelectTouch {
+            kind: SelectKind::Freehand,
+            join: crate::SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: false,
+            lasso_erase: false,
+            lasso_tool: false,
+        };
         s.set_touch_selecting(Some(how));
         assert!(tap(&s, 1000.0));
         s.set_touch_selecting(None);
@@ -3144,6 +3357,124 @@ mod tests {
         }
     }
 
+    /// Two fingers about (400, 300) going from `from` to `to` apart, turning `degrees` (and moving
+    /// `pan` points across) over `ms` at 200 Hz, then lifting: what the lifts gave.
+    fn twist(s: &CanvasSession, from: f32, to: f32, degrees: f32, pan: f32, ms: f64) -> Vec<TouchCommand> {
+        let place = |t: f64| {
+            let k = (t / ms) as f32;
+            let (half, a) = ((from + (to - from) * k) / 2.0, (degrees * k).to_radians());
+            let (c, d) = (400.0 + pan * k, (a.cos() * half, a.sin() * half));
+            ((c - d.0, 300.0 - d.1), (c + d.0, 300.0 + d.1))
+        };
+        let (a, b) = place(0.0);
+        s.touch_down(1, PointerKind::Finger, at(a.0, a.1, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(b.0, b.1, 0.0));
+        let mut t = 0.0;
+        while t + 5.0 <= ms {
+            t += 5.0;
+            let (a, b) = place(t);
+            s.touch_move(1, at(a.0, a.1, t));
+            s.touch_move(2, at(b.0, b.1, t));
+        }
+        let (a, b) = place(t);
+        let mut out = s.touch_up(2, at(b.0, b.1, t));
+        out.extend(s.touch_up(1, at(a.0, a.1, t + 8.0)));
+        out
+    }
+
+    fn unturn(out: &[TouchCommand]) -> Option<(f32, f32, f32)> {
+        out.iter().find_map(|c| match *c {
+            TouchCommand::Unturn { x, y, turn } => Some((x, y, turn)),
+            _ => None,
+        })
+    }
+
+    fn turned(s: &CanvasSession) -> f32 {
+        s.shared.lock().view.map_or(0.0, |v| v.rotation())
+    }
+
+    #[test]
+    fn a_little_turn_with_a_pinch_or_a_pan_eases_back() {
+        // zooming in, slowly or quickly, the fingers turning a few degrees as they go
+        for (from, to, degrees, pan, ms) in
+            [(200.0, 450.0, 5.0, 0.0, 250.0), (250.0, 500.0, -4.0, 0.0, 1200.0), (300.0, 300.0, 3.0, 220.0, 600.0)]
+        {
+            let s = shown(1.0);
+            let out = twist(&s, from, to, degrees, pan, ms);
+            let at_lift = turned(&s);
+            assert!(at_lift.abs() > 1f32.to_radians(), "{degrees}: {at_lift}");
+            let (x, y, turn) = unturn(&out).unwrap_or_else(|| panic!("{degrees}: {out:?}"));
+            assert!((turn + at_lift).abs() < 1e-4, "{turn} {at_lift}");
+            // turned back where the fingers lifted, keeping the zoom and what was under them
+            let before = s.shared.lock().view.unwrap();
+            let under = before.screen_to_canvas(Vec2::new(x, y)).unwrap();
+            s.settle_turn(x, y, turn);
+            std::thread::sleep(std::time::Duration::from_secs_f32(0.35));
+            s.shared.lock().step_view_motion();
+            let after = s.shared.lock().view.unwrap();
+            assert!(turned(&s).abs() < 1e-4, "{}", turned(&s));
+            assert!((after.zoom() - before.zoom()).abs() < 1e-4);
+            let p = after.to_screen().apply(under);
+            assert!((p.x - x).abs() < 0.05 && (p.y - y).abs() < 0.05, "{p:?} {x} {y}");
+        }
+    }
+
+    #[test]
+    fn a_little_turn_by_accident_eases_upright_not_back_to_where_it_was() {
+        // turned 4° on purpose before, then a pinch wobbling 3° more: upright, not 4°
+        let s = shown(1.0);
+        s.view_gesture(400.0, 300.0, 0.0, 0.0, 1.0, 4f32.to_radians());
+        let out = twist(&s, 200.0, 450.0, 3.0, 0.0, 250.0);
+        let (x, y, turn) = unturn(&out).unwrap_or_else(|| panic!("{out:?}"));
+        assert!((turn + turned(&s)).abs() < 1e-4, "{turn} {}", turned(&s));
+        s.settle_turn(x, y, turn);
+        std::thread::sleep(std::time::Duration::from_secs_f32(0.2));
+        s.shared.lock().step_view_motion();
+        assert!(turned(&s).abs() < 1e-4, "{}", turned(&s));
+        // turned well away on purpose, a wobble leaves it where the fingers left it
+        for degrees in [30.0f32, -90.0, 180.0] {
+            let s = shown(1.0);
+            s.view_gesture(400.0, 300.0, 0.0, 0.0, 1.0, degrees.to_radians());
+            let out = twist(&s, 200.0, 450.0, 3.0, 0.0, 250.0);
+            assert!(unturn(&out).is_none(), "{degrees}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_quick_little_twist_on_its_own_eases_back() {
+        // longer than a tap takes, quick enough to be a wobble (23° a second)
+        let s = shown(1.0);
+        let out = twist(&s, 400.0, 400.0, 8.0, 0.0, 350.0);
+        assert!(!out.contains(&TouchCommand::Undo), "{out:?}");
+        assert!(unturn(&out).is_some(), "{out:?}");
+    }
+
+    #[test]
+    fn a_slow_little_turn_meant_stays() {
+        // turned slowly on its own, however little, as it is with a pinch alongside
+        for (from, to, degrees, ms) in [(300.0, 300.0, 4.0, 700.0), (300.0, 300.0, -8.0, 900.0), (300.0, 320.0, 3.0, 800.0)] {
+            let out = twist(&shown(1.0), from, to, degrees, 0.0, ms);
+            assert!(unturn(&out).is_none(), "{degrees}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_past_the_limit_stays_however_quick() {
+        for (degrees, ms) in [(12.0, 150.0), (-25.0, 300.0), (40.0, 250.0)] {
+            let out = twist(&shown(1.0), 200.0, 450.0, degrees, 0.0, ms);
+            assert!(unturn(&out).is_none(), "{degrees}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn with_turning_off_nothing_turns_back() {
+        let s = shown(1.0);
+        s.touches().settings.rotate = false;
+        let out = twist(&s, 200.0, 450.0, 5.0, 0.0, 250.0);
+        assert!(unturn(&out).is_none(), "{out:?}");
+        assert_eq!(turned(&s), 0.0);
+    }
+
     #[test]
     fn a_flick_that_leaves_the_canvas_bigger_than_it_fits_doesn_t_fit() {
         let s = shown(3.0);
@@ -3369,9 +3700,71 @@ mod tests {
     }
 
     #[test]
+    fn a_dragged_freehand_path_is_steadied_by_the_app_s_stabilization() {
+        // a drag wobbling up and down 4 either side of a straight line, with a tapped corner
+        let mut points: Vec<(f32, f32)> =
+            (0..200).map(|i| (i as f32 * 2.0, if i % 2 == 0 { 4.0 } else { -4.0 })).collect();
+        let mut fixed = vec![false; points.len()];
+        points[100] = (200.0, 50.0);
+        fixed[100] = true;
+        // off, nothing changes
+        assert_eq!(steadied(&points, &fixed, 0.0), points);
+        let steady = steadied(&points, &fixed, 1.0);
+        // the ends and the corner stay where they are
+        assert_eq!(steady[0], points[0]);
+        assert_eq!(steady[199], points[199]);
+        assert_eq!(steady[100], points[100]);
+        // well inside a stretch the wobble is all but gone; next to its ends, less so
+        assert!(steady[150].1.abs() < 0.5, "{:?}", steady[150]);
+        assert!(steady[50].1.abs() < 26.0, "{:?}", steady[50]);
+        let half = steadied(&points, &fixed, 0.5);
+        assert!(half[150].1.abs() < 4.0 && half[150].1.abs() > steady[150].1.abs(), "{:?}", half[150]);
+
+        // the path the selection tool shows (and closes) is steadied as the app is set
+        let s = CanvasSession::new(400, 400);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (400, 400);
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        }
+        s.set_touch_selecting(Some(SelectTouch {
+            kind: SelectKind::Freehand,
+            join: crate::SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: false,
+            lasso_erase: false,
+            lasso_tool: false,
+        }));
+        s.touch_down(1, PointerKind::Stylus, at(10.0, 100.0, 0.0));
+        for i in 1..120 {
+            let y = 100.0 + if i % 2 == 0 { 4.0 } else { -4.0 };
+            s.touch_move(1, at(10.0 + i as f32 * 3.0, y, i as f64 * 4.0));
+        }
+        let wobble = |s: &CanvasSession| {
+            let path = s.freehand_path();
+            let ys: Vec<f32> = path.chunks(2).map(|p| p[1]).collect();
+            ys[40..ys.len() - 40].iter().map(|y| (y - 100.0).abs()).fold(0.0f32, f32::max)
+        };
+        let raw = wobble(&s);
+        s.set_input_settings(1.0, 0.0, 0.0, 0.0, false, Vec::new());
+        let steadied = wobble(&s);
+        assert!(raw > 3.0 && steadied < 1.0, "raw {raw}, steadied {steadied}");
+        s.set_touch_selecting(None);
+    }
+
+    #[test]
     fn the_selection_tool_drags_out_shapes_and_slides_a_colour_selections_threshold() {
         let s = session();
-        let tool = |kind| Some(SelectTouch { kind, join: crate::SelectionJoin::Add, threshold: 0.5 });
+        let tool = |kind| {
+            Some(SelectTouch {
+                kind,
+                join: crate::SelectionJoin::Add,
+                threshold: 0.5,
+                lasso_fill: false,
+                lasso_erase: false,
+                lasso_tool: false,
+            })
+        };
         s.set_touch_selecting(tool(SelectKind::Rectangle));
         s.touch_down(1, PointerKind::Stylus, at(10.0, 10.0, 0.0));
         let out = s.touch_move(1, at(120.0, 90.0, 20.0));

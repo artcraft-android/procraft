@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -265,6 +266,13 @@ internal fun Modifier.tap(onClick: () -> Unit): Modifier = composed {
     clickable(remember { MutableInteractionSource() }, indication = null, onClick = onClick)
 }
 
+/** A tap target that also does [onHold] when held instead. */
+internal fun Modifier.tapOrHold(onClick: () -> Unit, onHold: () -> Unit): Modifier = composed {
+    val tap by rememberUpdatedState(onClick)
+    val hold by rememberUpdatedState(onHold)
+    pointerInput(Unit) { detectTapGestures(onLongPress = { hold() }, onTap = { tap() }) }
+}
+
 /** The floating toolbar at the foot of the screen while transforming. */
 @Composable
 fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = Modifier) {
@@ -426,6 +434,7 @@ internal fun ToolbarButton(
     width: Dp = ButtonWidth,
     iconSize: Dp = 24.dp,
     labelSize: TextUnit = 12.5.sp,
+    onHold: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val tint = when {
@@ -435,7 +444,12 @@ internal fun ToolbarButton(
     }
     val fit = LocalToolbarFit.current
     val drawn = iconSize * fit.iconScale
-    Box(Modifier.size(width, ButtonHeight).then(if (enabled) Modifier.tap(onClick) else Modifier)) {
+    val touch = when {
+        !enabled -> Modifier
+        onHold != null -> Modifier.tapOrHold(onClick, onHold)
+        else -> Modifier.tap(onClick)
+    }
+    Box(Modifier.size(width, ButtonHeight).then(touch)) {
         // icons centred 30 below the top, labels' capitals 50 below it
         Icon(icon, contentDescription = if (fit.names) null else label, tint = tint, modifier = Modifier.align(Alignment.TopCenter).offset(y = 30.dp - drawn / 2).requiredSize(drawn))
         if (fit.names) Text(
@@ -590,7 +604,7 @@ private const val SNAP_DISTANCE_DEFAULT = 3f
 private const val SNAP_VELOCITY_MAX = 10f
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
+internal fun SwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(49.dp).tap(onToggle).padding(start = 12.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         MenuLabel(label, modifier = Modifier.weight(1f))
         Switch(checked, enabled = true)

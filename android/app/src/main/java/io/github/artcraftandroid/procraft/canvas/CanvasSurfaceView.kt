@@ -211,6 +211,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             TouchCommand.ClearLayer -> vm.clearCurrentLayer()
             TouchCommand.ToggleBars -> vm.toggleBars()
             TouchCommand.Fit -> vm.settleToFit()
+            is TouchCommand.Unturn -> vm.settleTurn(c.x, c.y, c.turn)
             TouchCommand.CopyPaste -> vm.copyPasteOpen = true
             is TouchCommand.QuickMenu -> vm.toggleQuickMenu(Offset(c.x, c.y))
             is TouchCommand.LayerSelect -> vm.layerSelectAt(Offset(c.x, c.y))
@@ -256,6 +257,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             is TouchCommand.SelectionThreshold -> vm.colourSlid(Offset(c.x, c.y), c.threshold, c.done)
             TouchCommand.FreehandChanged -> vm.freehandChanged()
             TouchCommand.SelectionChanged -> vm.selectionTouched()
+            TouchCommand.ShapeFilled -> vm.shapeFilled()
             // an adjustment's amount, liquify, the clone source and the like changed; a tap opens its menu
             TouchCommand.AdjustChanged -> vm.adjustTouched()
             is TouchCommand.AdjustMenu -> if (!closedAdjustMenu) vm.adjustMenuAt = Offset(c.x, c.y)
@@ -415,7 +417,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
-    private fun painting() = vm.adjustment == null && !vm.selecting && !vm.transforming
+    private fun painting() = vm.adjustment == null && !vm.selecting && !vm.transforming && !vm.lassoToolOn
 
     /** Input stopped coming, so the finger or pen has stopped: nothing runs ahead of it any more. */
     private val predictionOver = Runnable { session?.strokePredict(emptyList()) }

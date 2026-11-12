@@ -346,6 +346,8 @@ const VIEW_SETTLE_SECONDS: f32 = 0.5;
 const VIEW_SETTLE_DAMPING: f32 = 0.8;
 /// How long the view takes to grow back to fit, slowing to a stop.
 const VIEW_EASE_SECONDS: f32 = 0.3;
+/// How long the view takes to turn back from fingers' accidental turn, slowing to a stop.
+const VIEW_UNTURN_SECONDS: f32 = 0.15;
 
 /// The view settling from `from` to `to`, begun at `start`, along `curve`.
 #[derive(Clone, Copy)]
@@ -442,6 +444,8 @@ pub(crate) struct State {
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// A colour dropped on the canvas whose threshold can still change.
     pub(crate) pour: Option<pour::Pour>,
+    /// A dropped colour measures the visible layers together (All Layers), not the current layer.
+    pub(crate) pour_all_layers: bool,
     /// A dropped colour's fill spreading in, while it does.
     pub(crate) reveal: Option<reveal::Reveal>,
     /// The system asks for less motion: a dropped colour's fill shows at once.
@@ -472,6 +476,8 @@ pub(crate) struct State {
     /// The small canvas brush previews are drawn on.
     preview: Option<(Canvas, Document)>,
     color: [f32; 3],
+    /// How strongly Color Fill fills (its popover's Opacity), 0..1.
+    fill_opacity: f32,
     /// The secondary colour, for secondary colour dynamics.
     secondary: [f32; 3],
     /// The app's colour history, which paint strokes add to.
@@ -1316,6 +1322,7 @@ impl CanvasSession {
             text_drawn: None,
             text_steps: Vec::new(),
             pour: None,
+            pour_all_layers: false,
             reveal: None,
             reduce_motion: false,
             recolor: None,
@@ -1344,6 +1351,7 @@ impl CanvasSession {
             strokes: 0,
             preview: None,
             color: [0.0, 0.0, 0.0],
+            fill_opacity: 1.0,
             secondary: [1.0, 1.0, 1.0],
             colour_history: None,
             stroke: None,
@@ -1920,6 +1928,29 @@ impl CanvasSession {
         st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
         self.shared.frame(&mut st);
         true
+    }
+
+    /// Turns the canvas by `turn` (radians) about the window point (`x`, `y`), keeping its zoom and
+    /// what is there, easing into place over 0.15 s: two fingers' accidental turn taken back
+    /// (`TouchCommand::Unturn`). Not a model or a picture placed on one, which the fingers moved.
+    pub fn settle_turn(&self, x: f32, y: f32, turn: f32) {
+        let mut st = self.shared.lock();
+        if !(x.is_finite() && y.is_finite() && turn.is_finite()) || turn == 0.0 {
+            return;
+        }
+        if st.scene_picture_under((x, y)) == Some(true) || st.scene_shown() {
+            return;
+        }
+        let Some(from) = st.view else { return };
+        let mut to = from;
+        to.gesture(Vec2::new(x, y), Vec2::ZERO, 1.0, turn);
+        st.view_motion = Some(ViewMotion {
+            from,
+            to,
+            start: std::time::Instant::now(),
+            curve: ViewCurve::EaseOut(VIEW_UNTURN_SECONDS),
+        });
+        self.shared.frame(&mut st);
     }
 
     /// Fits the whole canvas in the window again, growing back into place over 0.3 s, slowing to

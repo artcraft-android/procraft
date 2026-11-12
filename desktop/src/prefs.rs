@@ -36,6 +36,10 @@ pub struct Prefs {
     pub light_interface: bool,
     /// A selection drawn on a model reaches every surface under it.
     pub selection_x_ray: bool,
+    /// Color Fill's Lasso Fill: each shape drawn is filled on its own, nothing left selected.
+    pub lasso_fill: bool,
+    /// Color Fill's Opacity, 0..1.
+    pub fill_opacity: f32,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
     /// Brush sizes relative to the screen (else to the canvas).
@@ -95,6 +99,8 @@ impl Default for Prefs {
         Prefs {
             light_interface: false,
             selection_x_ray: false,
+            lasso_fill: false,
+            fill_opacity: 1.0,
             right_handed: false,
             brush_on_screen: false,
             brush_cursor: true,
@@ -152,6 +158,8 @@ impl Prefs {
             match name {
                 "light_interface" => p.light_interface = on,
                 "selection_x_ray" => p.selection_x_ray = on,
+                "lasso_fill" => p.lasso_fill = on,
+                "fill_opacity" => p.fill_opacity = unit.unwrap_or(p.fill_opacity),
                 "right_handed" => p.right_handed = on,
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
@@ -209,6 +217,8 @@ impl Prefs {
         let lines = [
             format!("light_interface {}", self.light_interface),
             format!("selection_x_ray {}", self.selection_x_ray),
+            format!("lasso_fill {}", self.lasso_fill),
+            format!("fill_opacity {}", self.fill_opacity),
             format!("right_handed {}", self.right_handed),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
@@ -249,6 +259,7 @@ impl Prefs {
         crate::look::set_light(self.light_interface);
         session.set_light_interface(self.light_interface);
         session.set_selection_x_ray(self.selection_x_ray);
+        session.set_fill_opacity(self.fill_opacity);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
         session.use_plugins(Arc::clone(&self.plugins));

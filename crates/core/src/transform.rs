@@ -577,20 +577,14 @@ impl CanvasSession {
     pub fn transform_end(&self, commit: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let Some(t) = st.transform.as_ref() {
-            // a selection moves with what it took
-            let moved = match (commit, st.selection.as_ref()) {
-                (true, Some(mask)) => match t.warp() {
-                    Some(mesh) => Some(mask.warped(&warp::triangles(&mesh, t.source(), MESH_STEPS))),
-                    None => Homography::quad_to_quad(t.content(), t.source()).map(|h| mask.moved(|p| h.apply(p))),
-                },
-                _ => None,
-            };
+        if st.transform.is_some() {
             st.end_transform(commit);
             st.flush();
-            if let Some(moved) = moved {
-                let before = st.selection.replace(moved);
-                st.record_selection(before, "move");
+            // a kept transform is done with what it took: the selection goes
+            if commit && st.selection.is_some() {
+                let before = st.selection.take();
+                st.feather_base = None;
+                st.record_selection(before, "clear selection");
             }
             st.revision += 1;
             st.scene_back_from_tool();

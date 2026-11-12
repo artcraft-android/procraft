@@ -15,7 +15,7 @@ use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, text};
 use crate::transform::{
     Button, DASH, DASH_GAP, MENU_ARROW, MENU_GROUP, MENU_TEXT, MENU_WIDTH, Tapped, button_tip, floating_toolbar,
-    menu_slider, menu_title, popover_frame,
+    menu_slider, menu_title, popover_frame, switch,
 };
 
 /// The selection toolbar's buttons with room, and where the window is narrow.
@@ -33,6 +33,7 @@ enum Popup {
     None,
     Feather,
     Saved,
+    ColorFill,
 }
 
 pub struct Selection {
@@ -49,6 +50,13 @@ pub struct Selection {
     /// selections kept and their pictures.
     has: bool,
     color_fill: bool,
+    /// Color Fill's Lasso Fill (kept in the preferences): with Color Fill on, each shape drawn is
+    /// filled on its own, as one undo step, and nothing stays selected.
+    pub lasso_fill: bool,
+    /// Color Fill's Opacity (kept in the preferences), 0..1.
+    pub fill_opacity: f32,
+    /// How many buttons the toolbar has, for where a popover points.
+    buttons: usize,
     feather: f32,
     popup: Popup,
     saved: u32,
@@ -78,6 +86,9 @@ impl Default for Selection {
             drag: None,
             has: false,
             color_fill: false,
+            lasso_fill: false,
+            fill_opacity: 1.0,
+            buttons: 8,
             feather: 0.0,
             popup: Popup::None,
             saved: 0,
@@ -114,7 +125,15 @@ impl Selection {
     fn touches(&self, session: &CanvasSession) {
         let join =
             if self.removes && self.kind != SelectKind::Automatic { SelectionJoin::Remove } else { SelectionJoin::Add };
-        session.set_touch_selecting(Some(SelectTouch { kind: self.kind, join, threshold: self.threshold }));
+        let lasso_fill = self.color_fill && self.lasso_fill;
+        session.set_touch_selecting(Some(SelectTouch {
+            kind: self.kind,
+            join,
+            threshold: self.threshold,
+            lasso_fill,
+            lasso_erase: false,
+            lasso_tool: false,
+        }));
     }
 
     /// The selection shows tinted while selecting by colour, else striped.
@@ -154,6 +173,11 @@ impl Selection {
         } else {
             self.sliding = Some((at, threshold));
         }
+    }
+
+    /// With Lasso Fill, a shape was filled (nothing selected).
+    pub fn shape_filled(&mut self) {
+        self.drag = None;
     }
 
     /// A selection was made: Color Fill fills it.
@@ -211,6 +235,7 @@ impl Selection {
             buttons.push(Button::new(&icons::X_RAY, "X-Ray", 44.0).active(session.selection_x_ray()));
         }
         buttons.push(Button::new(&icons::CLEAR_SELECTION, "Clear", 44.0).enabled(has || drawing));
+        self.buttons = buttons.len();
         let tapped =
             floating_toolbar(ctx, look, "selection toolbar", (BUTTON_ROOMY, BUTTON_NARROW), &segments, &buttons, 41.0);
         match tapped {
@@ -249,7 +274,11 @@ impl Selection {
                 if self.color_fill && self.has {
                     session.fill_selection();
                 }
+                self.touches(session);
             }
+            // right-clicked: Color Fill's settings
+            Some(Tapped::Held(6)) => self.open_popup(ctx, session, Popup::ColorFill),
+            Some(Tapped::Held(_)) => {}
             Some(Tapped::Button(7)) if model => {
                 let on = !session.selection_x_ray();
                 session.set_selection_x_ray(on);
@@ -296,10 +325,18 @@ impl Selection {
         if self.popup == Popup::None {
             return;
         }
-        let index = if self.popup == Popup::Feather { 4 } else { 5 };
-        let (tip_x, tip_y) = button_tip(ctx, (BUTTON_ROOMY, BUTTON_NARROW), index, 8);
+        let index = match self.popup {
+            Popup::Feather => 4,
+            Popup::ColorFill => 6,
+            _ => 5,
+        };
+        let (tip_x, tip_y) = button_tip(ctx, (BUTTON_ROOMY, BUTTON_NARROW), index, self.buttons);
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
-        let height = if self.popup == Popup::Feather { 40.0 + 4.0 + 59.0 + 16.0 } else { 40.0 + 8.0 + 172.0 } + 20.0;
+        let height = match self.popup {
+            Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0,
+            Popup::ColorFill => 40.0 + 4.0 + 49.0 + 10.0 + 59.0 + 16.0,
+            _ => 40.0 + 8.0 + 172.0,
+        } + 20.0;
         let screen = ctx.content_rect();
         let left = (tip_x - width / 2.0).clamp(screen.left(), screen.right() - width);
         let rect = Rect::from_min_size(pos2(left, tip_y - MENU_ARROW - height), vec2(width, height));
@@ -318,6 +355,35 @@ impl Selection {
                 if let Some(v) = menu_slider(ui, row, "Amount", amount, &shown) {
                     self.feather = v;
                     session.select_feather(v);
+                }
+                return;
+            }
+            if self.popup == Popup::ColorFill {
+                menu_title(ui, inner, "Color Fill");
+                let row = Rect::from_min_size(pos2(inner.left(), inner.top() + 44.0), vec2(inner.width(), 49.0));
+                ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
+                text(
+                    ui.painter(),
+                    pos2(row.left() + 12.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    "Lasso Fill",
+                    16.0,
+                    Weight::Regular,
+                    argb(MENU_TEXT),
+                );
+                switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.lasso_fill, "Lasso Fill");
+                if ui.interact(row, ui.scope_id().with("lasso fill"), Sense::click()).clicked() {
+                    self.lasso_fill = !self.lasso_fill;
+                    self.touches(session);
+                }
+                let group =
+                    Rect::from_min_size(pos2(inner.left(), row.bottom() + 10.0), vec2(inner.width(), 59.0 + 16.0));
+                ui.painter().rect_filled(group, 13, argb(MENU_GROUP));
+                let shown = format!("{}%", (self.fill_opacity * 100.0).round() as i32);
+                let slider = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
+                if let Some(v) = menu_slider(ui, slider, "Opacity", self.fill_opacity, &shown) {
+                    self.fill_opacity = v.clamp(0.0, 1.0);
+                    session.set_fill_opacity(self.fill_opacity);
                 }
                 return;
             }
@@ -392,6 +458,13 @@ impl Selection {
     fn overlay(&self, ctx: &egui::Context, session: &CanvasSession, bar_top: f32) {
         let ppp = ctx.pixels_per_point();
         let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("selection overlay")));
+        // Lasso Fill: the shape shows as it will fill, at half its strength
+        let preview = (self.color_fill && self.lasso_fill).then(|| {
+            let c = session.color();
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let channel = |i: usize| byte(c.get(i).copied().unwrap_or(0.0));
+            Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), byte(0.5 * self.fill_opacity))
+        });
         if let Some((a, b)) = self.drag {
             let (a, b) = (a / ppp, b / ppp);
             let r = Rect::from_two_pos(a, b);
@@ -405,13 +478,22 @@ impl Selection {
             } else {
                 vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()]
             };
-            dashed(&painter, &outline);
+            match preview {
+                Some(colour) => filled(&painter, &outline, colour, ppp),
+                None => dashed(&painter, &outline),
+            }
         }
         let path: Vec<Pos2> =
             session.freehand_path().as_chunks::<2>().0.iter().map(|&[x, y]| pos2(x, y) / ppp).collect();
         if let Some(&first) = path.first() {
-            dashed(&painter, &path);
-            painter.circle_filled(first, 5.5, argb(START_DOT));
+            match preview {
+                // no dot to close it on, as it is drawing
+                Some(colour) => filled(&painter, &path, colour, ppp),
+                None => {
+                    dashed(&painter, &path);
+                    painter.circle_filled(first, 5.5, argb(START_DOT));
+                }
+            }
         }
         if let Some((at, threshold)) = self.sliding {
             // a thin cross where the colour is picked
@@ -426,6 +508,42 @@ impl Selection {
             text(&painter, band.center(), Align2::CENTER_CENTER, &reading, 14.0, Weight::Regular, argb(MESSAGE_TEXT));
         }
     }
+}
+
+/// The polygon through `points`, closed back to the first, filled with `colour` by the non-zero
+/// rule as Lasso Fill fills it: a span of each row of pixels (`ppp` points per pixel) at a time, as
+/// egui fills only convex shapes whole.
+fn filled(painter: &egui::Painter, points: &[Pos2], colour: Color32, ppp: f32) {
+    if points.len() < 3 {
+        return;
+    }
+    let (top, bottom) = points.iter().fold((f32::MAX, f32::MIN), |(t, b), p| (t.min(p.y), b.max(p.y)));
+    let row = 1.0 / ppp.max(0.1);
+    let mut crossings: Vec<(f32, i32)> = Vec::new();
+    let mut mesh = egui::Mesh::default();
+    let mut y = (top / row).floor() * row;
+    while y < bottom {
+        // the middle of the row, where its edges are crossed
+        let sy = y + row / 2.0;
+        crossings.clear();
+        for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+            if (a.y <= sy) != (b.y <= sy) {
+                let x = a.x + (sy - a.y) / (b.y - a.y) * (b.x - a.x);
+                crossings.push((x, if b.y > a.y { 1 } else { -1 }));
+            }
+        }
+        crossings.sort_by(|p, q| p.0.total_cmp(&q.0));
+        let mut winding = 0;
+        for pair in crossings.windows(2) {
+            let [(x0, d), (x1, _)] = pair else { continue };
+            winding += d;
+            if winding != 0 && x1 > x0 {
+                mesh.add_colored_rect(Rect::from_min_max(pos2(*x0, y), pos2(*x1, y + row)), colour);
+            }
+        }
+        y += row;
+    }
+    painter.add(Shape::mesh(mesh));
 }
 
 /// A path drawn as the selection's outline: thin dark dashes over light ones.

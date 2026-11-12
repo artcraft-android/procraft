@@ -186,6 +186,9 @@ pub struct StrokeStyle {
     pub full_shape: Option<u64>,
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
+    /// Pixelated (pixel art): each stamp laid on whole pixels at a whole number of pixels across
+    /// (see `procraft_engine::pixel`), every pixel it covers covered fully and none partly.
+    pub pixelated: bool,
     /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
     /// strength however small the stamp.
     pub shape_lod_cap: f32,
@@ -283,6 +286,7 @@ impl StrokeStyle {
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
             shape_sharp: false,
+            pixelated: false,
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
@@ -342,11 +346,13 @@ impl StrokeStyle {
             // the editors' turn of the image, the whole grain with it (the rotation control is
             // each stamp's own: `Stamp::grain_turn`)
             grain_rotation: brush.setting("grain_turn").clamp(-1.0, 1.0) * std::f32::consts::PI,
-            grain_sharp: brush.setting("grain_filtering") < 0.5,
+            // a pixelated brush reads its images pixel by pixel, whatever its filtering
+            grain_sharp: brush.setting("grain_filtering") < 0.5 || brush.setting("pixelated") >= 0.5,
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
-            shape_sharp: brush.setting("shape_filtering") < 0.5,
+            shape_sharp: brush.setting("shape_filtering") < 0.5 || brush.setting("pixelated") >= 0.5,
+            pixelated: brush.setting("pixelated") >= 0.5,
             shape_lod_cap: if brush.setting("shape_filtering").round() == 1.0 {
                 SHAPE_LOD_CAP_CLASSIC
             } else {
@@ -668,7 +674,8 @@ fn round_tip_reach(hardness: f32, r: f32) -> (f32, f32) {
 /// shares of their widths, so its reach goes by the stamp's size before the taper).
 fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32) -> f32 {
     let r = radius.max(0.0);
-    if style.shape.is_some() || r <= 0.0 {
+    // a pixelated stamp covers exactly the pixels it is as wide as, with no rim to reach past
+    if style.shape.is_some() || style.pixelated || r <= 0.0 {
         return r;
     }
     let taper = if taper.is_finite() { taper.clamp(0.0, 1.0) } else { 1.0 };
@@ -713,7 +720,8 @@ struct StampUniform {
     shape_lod_cap: f32,
     /// Pixels a side of the image a moving grain is read from.
     grain_side: f32,
-    _pad: u32,
+    /// 1 when stamps are laid on whole pixels, hard-edged (see `StrokeStyle::pixelated`).
+    pixelated: u32,
 }
 
 #[repr(C)]
@@ -4102,7 +4110,7 @@ impl Canvas {
                         shape_sharp: u32::from(style.shape_sharp),
                         shape_lod_cap: style.shape_lod_cap,
                         grain_side: style.grain_side,
-                        _pad: 0,
+                        pixelated: u32::from(style.pixelated),
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -7954,6 +7962,20 @@ impl Canvas {
         self.render_finished(gpu, &mut shown);
         // copied before the composite is made again below
         let read = start_reading(gpu, &self.composite, self.width, self.height);
+        self.invalidate();
+        self.render(gpu, doc, None);
+        read
+    }
+
+    /// The visible layers composited together without the background (premultiplied RGBA8, rows
+    /// top to bottom), as a fill measuring every layer sees them; the canvas's own composite is
+    /// made again after. Waits for the GPU.
+    pub fn read_layers_composite(&mut self, gpu: &Gpu, doc: &mut Document) -> Result<Vec<u8>, GpuError> {
+        let mut shown = doc.clone();
+        shown.background_visible = false;
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        let read = self.read_composite(gpu);
         self.invalidate();
         self.render(gpu, doc, None);
         read

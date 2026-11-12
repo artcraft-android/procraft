@@ -129,7 +129,7 @@ enum class TransformPopup { NONE, SNAPPING, INTERPOLATION }
 enum class SelectionKind(val label: String) { AUTOMATIC("Automatic"), FREEHAND("Freehand"), RECTANGLE("Rectangle"), ELLIPSE("Ellipse") }
 
 /** A popover over the selection toolbar. */
-enum class SelectionPopup { NONE, FEATHER, SAVED }
+enum class SelectionPopup { NONE, FEATHER, SAVED, COLOR_FILL }
 
 /**
  * A brush ([single]) or a brush set called [name] as a file it is shared in: its letters and
@@ -822,6 +822,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Each new selection is filled with the paint colour. */
     var colorFill by mutableStateOf(false)
         private set
+    /** Color Fill's Lasso Fill (held Color Fill): each shape drawn is filled on its own, as one undo step, nothing left selected. */
+    var lassoFill by mutableStateOf(transformPrefs.getBoolean(LASSO_FILL, false))
+        private set
+    /** How strongly Color Fill fills (its popover's Opacity), 0..1. */
+    var fillOpacity by mutableStateOf(transformPrefs.getFloat(FILL_OPACITY, 1f).coerceIn(0f, 1f))
+        private set
+    /**
+     * The Paint and Erase tools' own lassos (Lasso Fill, Lasso Erase): turned on by holding the
+     * tool's button while Lasso Fill (or the other one) is on, off by holding it again. On, the
+     * tool's strokes are shapes that close and fill (or erase) at its opacity slider.
+     */
+    var paintLasso by mutableStateOf(false)
+        private set
+    var eraseLasso by mutableStateOf(false)
+        private set
+    /** The current tool draws with its lasso now (nothing else open over it). */
+    val lassoToolOn: Boolean
+        get() = !selecting && !transforming && adjustment == null && !adjustPencil &&
+            ((tool == ToolKind.PAINT && paintLasso) || (tool == ToolKind.ERASE && eraseLasso))
     var hasSelection by mutableStateOf(false)
         private set
     private var selectionPopupState by mutableStateOf(SelectionPopup.NONE)
@@ -2658,6 +2677,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setInterfaceSize(interfaceShown)
         // the system's animations off: a dropped colour's fill shows at once
         s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
+        s.setPourAllLayers(dropAllLayers)
         applyPlugins(s)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
@@ -2682,6 +2702,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         submeshThumbnails.clear()
         selectionXRay = interfacePrefs.getBoolean(SELECTION_X_RAY, false)
         s.setSelectionXRay(selectionXRay)
+        s.setFillOpacity(fillOpacity)
         modelWarnings = s.takeModelWarnings().map { io.github.artcraftandroid.procraft.core.modelWarningName(it) }
         modelChannel = s.modelChannel().toInt()
         channelTileChosen = false
@@ -3547,6 +3568,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * brush, say), and becomes the tool.
      */
     fun toolHeld(target: ToolKind) {
+        if (target == ToolKind.PAINT || target == ToolKind.ERASE) {
+            val own = if (target == ToolKind.PAINT) paintLasso else eraseLasso
+            when {
+                // held again while drawing with its lasso: back to plain strokes
+                own && tool == target && !selecting -> {
+                    setLasso(target, false)
+                    showNotice(if (target == ToolKind.PAINT) "Painting" else "Erasing")
+                    return
+                }
+                // held while Lasso Fill (or the other tool's lasso) is on: this tool's lasso
+                (selecting && colorFill && lassoFill) || lassoToolOn -> {
+                    startLassoTool(target)
+                    return
+                }
+            }
+        }
         val s = session ?: return
         val brush = currentBrush ?: return
         if (target == tool || !switchModes(ModeButton.ToolHeld)) return
@@ -3566,6 +3603,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 ToolKind.ERASE -> "Erasing"
             } + " with the current brush",
         )
+    }
+
+    private fun setLasso(target: ToolKind, on: Boolean) {
+        if (target == ToolKind.PAINT) paintLasso = on else eraseLasso = on
+    }
+
+    /** The Paint or Erase tool takes up its lasso: the selection tool closes (what it made stays). */
+    private fun startLassoTool(target: ToolKind) {
+        switchModes(ModeButton.Tool)
+        closeSelecting()
+        setLasso(target, true)
+        select(target)
+        if (panel == Panel.BRUSHES) panel = Panel.NONE
+        showNotice(if (target == ToolKind.PAINT) "Lasso Fill" else "Lasso Erase")
     }
 
     fun showSet(index: Int) {
@@ -6502,8 +6553,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- selection ----
 
-    /** The selection button: opens or closes the selection tool (a selection made stays). */
+    /**
+     * The selection button: with anything selected (the button lit), the selection goes, as one
+     * undo step, and the tool closes if open; else it opens or closes the selection tool.
+     */
     fun toggleSelecting() {
+        if (hasSelection) {
+            // the other modes end first, keeping what they made, as with any press of it
+            switchModes(ModeButton.Selection)
+            closeSelecting()
+            clearSelection()
+            refreshFlags()
+            return
+        }
         // open, it closes; else the other modes end
         if (!switchModes(ModeButton.Selection)) return
         panel = Panel.NONE
@@ -6540,14 +6602,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** How the canvas's (shared) touches select while the selection tool is open; none otherwise. */
     fun selectTouch(): io.github.artcraftandroid.procraft.core.SelectTouch? {
-        if (!selecting) return null
+        if (!selecting) {
+            // the Paint or Erase tool's own lasso: its shapes fill (or erase) at its opacity
+            if (!lassoToolOn) return null
+            return io.github.artcraftandroid.procraft.core.SelectTouch(
+                io.github.artcraftandroid.procraft.core.SelectKind.FREEHAND, SelectionJoin.ADD, selectionThreshold,
+                lassoFill = true, lassoErase = tool == ToolKind.ERASE, lassoTool = true,
+            )
+        }
         val kind = when (selectionKind) {
             SelectionKind.AUTOMATIC -> io.github.artcraftandroid.procraft.core.SelectKind.AUTOMATIC
             SelectionKind.FREEHAND -> io.github.artcraftandroid.procraft.core.SelectKind.FREEHAND
             SelectionKind.RECTANGLE -> io.github.artcraftandroid.procraft.core.SelectKind.RECTANGLE
             SelectionKind.ELLIPSE -> io.github.artcraftandroid.procraft.core.SelectKind.ELLIPSE
         }
-        return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold)
+        return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold, colorFill && lassoFill, lassoErase = false, lassoTool = false)
     }
 
     /** The freehand path is read at the next frame: a pen sends many moves a frame, each a longer path. */
@@ -6567,6 +6636,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun selectionTouched() {
         shapeDrag = null
         selectionChanged()
+    }
+
+    /**
+     * With Lasso Fill, a shape was filled on the layer (nothing selected). Its preview goes at
+     * once, not at the next frame's read of the path, so it is never shown over the fill.
+     */
+    fun shapeFilled() {
+        shapeDrag = null
+        freehand = emptyList()
+        refresh()
     }
 
     /** The threshold slid last and not yet shown: shown once a frame, however many moves come in one. */
@@ -6636,6 +6715,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set
+
+    /**
+     * ColorDrop's All Layers (the band's segmented control): a dropped colour fills up to what
+     * every visible layer shows, not only the current layer (or the reference layer). Kept from
+     * one drop to the next; off at first.
+     */
+    var dropAllLayers by mutableStateOf(transformPrefs.getBoolean(DROP_ALL_LAYERS, false))
+        private set
+
+    /** Whether, without All Layers, a colour is measured on a reference layer (another than the current one). */
+    val dropOnReference: Boolean get() = layers.any { it.reference && !it.current }
+
+    /** All Layers on or off, from the next fill; the band stays up a while longer to see it. */
+    fun chooseDropAllLayers(on: Boolean) {
+        if (on == dropAllLayers) return
+        dropAllLayers = on
+        transformPrefs.edit().putBoolean(DROP_ALL_LAYERS, on).apply()
+        session?.setPourAllLayers(on)
+        if (dropBand == DropBand.DROPPED) {
+            dropBandTimer?.cancel()
+            dropBandTimer = viewModelScope.launch {
+                kotlinx.coroutines.delay(DROP_BAND_MS)
+                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
+            }
+        }
+    }
 
     /** Whether the threshold is being slid: its row shows under the band. */
     var dropSliding by mutableStateOf(false)
@@ -7007,6 +7112,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun toggleLassoFill() {
+        lassoFill = !lassoFill
+        transformPrefs.edit().putBoolean(LASSO_FILL, lassoFill).apply()
+    }
+
+    /** Color Fill's Opacity slid to [opacity] (0..1), kept. */
+    fun fillOpacityTo(opacity: Float) {
+        fillOpacity = opacity.coerceIn(0f, 1f)
+        session?.setFillOpacity(fillOpacity)
+        transformPrefs.edit().putFloat(FILL_OPACITY, fillOpacity).apply()
+    }
+
     fun clearSelection() {
         closeFreehand()
         session?.selectNone()
@@ -7151,6 +7268,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Fits the canvas to the screen, settling into place; what is drawn over it follows each frame. */
     fun settleToFit() {
         session?.settleToFit()
+        followView()
+    }
+
+    /** Turns the canvas back by [turn] (radians) about ([x], [y]), easing there: two fingers' accidental turn. */
+    fun settleTurn(x: Float, y: Float, turn: Float) {
+        session?.settleTurn(x, y, turn)
         followView()
     }
 
@@ -7925,7 +8048,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val ADVANCED_MESH = "advancedMesh"
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
+        private const val LASSO_FILL = "lassoFill"
+        private const val FILL_OPACITY = "fillOpacity"
         private const val DROP_THRESHOLD = "dropThreshold"
+        private const val DROP_ALL_LAYERS = "dropAllLayers"
 
         /** How long a widget's tap waits for the window to be measured before opening anyway. */
         private const val WINDOW_WAIT_MS = 3000L
