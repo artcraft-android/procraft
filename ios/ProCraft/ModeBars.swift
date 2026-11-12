@@ -10,6 +10,7 @@ private extension QuickShapeKind {
         case .line: "Line"
         case .polyline: "Polyline"
         case .arc: "Arc"
+        case .curve: "Curve"
         case .ellipse: "Ellipse"
         case .circle: "Circle"
         case .triangle: "Triangle"
@@ -25,6 +26,8 @@ private extension QuickShapeKind {
         case .line: PcIcons.shapeLine
         case .polyline: PcIcons.shapePolyline
         case .arc: PcIcons.shapeArc
+        // a curve shows the arc's, as on the other apps
+        case .curve: PcIcons.shapeArc
         case .ellipse: PcIcons.shapeEllipse
         case .circle: PcIcons.shapeCircle
         case .triangle: PcIcons.shapeTriangle

@@ -1840,6 +1840,10 @@ final class CanvasModel {
             switch b.why {
             case .locked:
                 toggleLocked(b.layer)
+            case .alphaLocked:
+                if b.layer.alphaLock {
+                    toggleAlphaLock(b.layer)
+                }
             case .hidden, .groupHidden:
                 // its own box ticked (what else hides it stays)
                 if let said = session.showLayer(id: b.layer.id) {
@@ -1961,6 +1965,7 @@ final class CanvasModel {
         case .line: shape = "a line"
         case .polyline: shape = "a polyline"
         case .arc: shape = "an arc"
+        case .curve: shape = "a curve"
         case .ellipse: shape = "an ellipse"
         case .circle: shape = "a circle"
         case .triangle: shape = "a triangle"

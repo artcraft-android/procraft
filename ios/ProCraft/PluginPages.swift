@@ -105,6 +105,9 @@ private struct PluginCard: View {
             RowView(row: .toggle(one.label, on: one.on, change: { PluginsModel.shared.setSwitch(one.key, $0) }))
         case let .slider(one):
             PluginSliderRow(slider: one) { PluginsModel.shared.setSlider($0, $1) }
+        // a file a plugin takes (a brush sound): no row until the iPad can pick and play one
+        case .file:
+            EmptyView()
         }
     }
 

@@ -2,6 +2,7 @@ package io.github.artcraftandroid.procraft
 
 import android.graphics.Color
 import android.hardware.display.DisplayManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -15,6 +16,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
+import io.github.artcraftandroid.procraft.canvas.PEN_DOUBLE_TAP_KEY
+import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
@@ -42,7 +45,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // text's fonts given to the core, off the main thread
         io.github.artcraftandroid.procraft.canvas.TextRenderer.prepare(assets, java.io.File(filesDir, "fonts"))
-        window.isNavigationBarContrastEnforced = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
         // wide colour, so a Display P3 canvas's colours show as they are around it too
         if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
@@ -51,7 +54,13 @@ class MainActivity : ComponentActivity() {
         io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path)
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
-        setContent { AppRoot(model) }
+        // laid out left to right in every language, as the original is: a right-to-left one
+        // (Arabic, Hebrew) would otherwise mirror the bars
+        setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr,
+            ) { AppRoot(model) }
+        }
         lifecycleScope.launch { snapshotFlow { model.projectCanvas }.collect { showProjection() } }
         importOpened(intent)
     }
@@ -93,12 +102,14 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         vm.readAppSettings()
         vm.resumeTracking()
+        vm.appInFront(true)
         displays.registerDisplayListener(displayListener, null)
         showProjection()
     }
 
     override fun onStop() {
         super.onStop()
+        vm.appInFront(false)
         vm.saveNow()
         displays.unregisterDisplayListener(displayListener)
         projection?.dismiss()
@@ -156,8 +167,15 @@ class MainActivity : ComponentActivity() {
         return super.dispatchTouchEvent(e)
     }
 
+    private val penDoubleTaps = PenDoubleTaps()
+
     /** A hardware keyboard's shortcuts on the canvas (keys no text field took). */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // a pen's double-tap that comes as a key of its own: as its first button, once for each
+        if (keyCode == PEN_DOUBLE_TAP_KEY) {
+            if (event.repeatCount == 0 && penDoubleTaps.isNew(event.eventTime)) vm.penKey(false)
+            return true
+        }
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true

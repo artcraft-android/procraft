@@ -375,6 +375,11 @@ private struct BlockedDialog: View {
                 title: "Group is empty", message: "\u{201C}\(name)\u{201D} holds no layers to change.",
                 action: "Open Layers", icon: PcIcons.folder, destructive: false
             )
+        case .alphaLocked:
+            return AlertContent(
+                title: "Alpha Lock is on", message: "\u{201C}\(name)\u{201D} can't be liquified while its alpha is locked.",
+                action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Turn Off"
+            )
         // only on a model, which this app doesn't open yet
         case .meshHidden:
             return AlertContent(
