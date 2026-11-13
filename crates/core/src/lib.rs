@@ -75,6 +75,7 @@ mod reveal;
 mod scene3d;
 mod selection;
 mod sharp;
+mod side_slider;
 mod sound_file;
 mod stroke_sound;
 mod studio;
@@ -192,6 +193,7 @@ pub use scene3d::{
     unpack_model_artwork, zip_model_name,
 };
 pub use selection::{SelectionDisplay, SelectionJoin};
+pub use side_slider::{SideSliderTap, side_slider_drag_share, side_slider_tap};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     small_source, source_from_copy, source_from_picture, source_library, source_size,
