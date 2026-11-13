@@ -200,6 +200,8 @@ pub struct Library {
     card_rects: Vec<(usize, Rect)>,
     /// The cards' brush strokes, drawn small, by library, set and place (none: it can't be).
     card_previews: HashMap<(u32, u32, u32), Option<TextureHandle>>,
+    /// Strokes forgotten in the middle of a frame that may still draw them: let go at the next.
+    card_retired: Vec<TextureHandle>,
     /// The cards' strokes still to draw, and those being drawn on a thread of their own (another
     /// library's brushes are read from its file, which can be large).
     card_wanted: Vec<(u32, u32, u32)>,
@@ -347,6 +349,8 @@ impl Library {
             pos2(left, top),
             vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
         );
+        // the cards' strokes forgotten last frame are drawn no more
+        self.card_retired.clear();
         if std::mem::take(&mut self.stale) {
             self.previews.clear();
             self.drawing = None;
