@@ -875,6 +875,8 @@ private val CardGap = 8.dp
 private val CardCorner = 16.dp
 private val CardSetRow = 19.dp
 private val CardBrushHeight = 30.dp
+/** As many brushes as a card has room for under its name, the last cut off by its bottom: only these have their strokes drawn. */
+private val CardBrushRows = ((CardHeight - 47.dp) / (CardBrushHeight + 2.dp)).toInt() + 1
 
 /**
  * The library popover showing every library's card (tapped, that library is brought into use;
@@ -1032,7 +1034,7 @@ private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraft
                 }
             }
             Column(Modifier.weight(0.55f).padding(start = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                library.sets.getOrNull(chosen)?.brushes?.forEach { b ->
+                library.sets.getOrNull(chosen)?.brushes?.take(CardBrushRows)?.forEach { b ->
                     // its name over its stroke, drawn small
                     val key = "$i-${b.set}-${b.index}"
                     val stroke = vm.cardPreviews[key]
