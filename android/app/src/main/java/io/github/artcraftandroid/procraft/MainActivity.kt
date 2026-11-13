@@ -51,8 +51,9 @@ class MainActivity : ComponentActivity() {
         if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
         // which graphics backend the app is trying, kept before the model makes the GPU device: a
-        // driver that crashes the app then sends the next start to the next backend
-        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path)
+        // driver that crashes the app then sends the next start to the next backend (one that drew
+        // is trusted until the app or the system is updated)
+        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path, installedBuild())
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
         // laid out left to right in every language, as the original is: a right-to-left one
@@ -64,6 +65,12 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch { snapshotFlow { model.projectCanvas }.collect { showProjection() } }
         importOpened(intent)
+    }
+
+    /** The app as installed and the system it runs on, as one text: it differs once either is updated. */
+    private fun installedBuild(): String {
+        val installed = runCatching { packageManager.getPackageInfo(packageName, 0).lastUpdateTime }.getOrDefault(0L)
+        return "$installed ${Build.FINGERPRINT}"
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
