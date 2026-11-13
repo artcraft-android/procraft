@@ -153,7 +153,7 @@ pub use layers::{
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_layer_budget, set_resident_budget,
 };
 pub use liquify::liquify_reach;
-pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
+pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{

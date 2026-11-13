@@ -41,6 +41,7 @@ import io.github.artcraftandroid.procraft.core.KeyShortcut
 import io.github.artcraftandroid.procraft.core.ModeButton
 import io.github.artcraftandroid.procraft.core.Modes
 import io.github.artcraftandroid.procraft.core.modeSwitch
+import io.github.artcraftandroid.procraft.core.modeSwitchDeselects
 import io.github.artcraftandroid.procraft.core.GuideType
 import io.github.artcraftandroid.procraft.core.GuideUnit
 import io.github.artcraftandroid.procraft.core.SymmetryType
@@ -6186,8 +6187,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** [button] pressed: the modes it leaves behind end first (keeping what they made), as the core says; true if it goes on to do what it does. */
     private fun switchModes(button: ModeButton): Boolean {
-        val change = modeSwitch(button, openModes())
+        val open = openModes()
+        val change = modeSwitch(button, open)
         val end = change.end
+        // the selection button closing the selection tool lets go of the selection too
+        if (modeSwitchDeselects(button, open)) clearSelection()
         if (end.quickshape) endQuickShape()
         if (end.filling) endDropBand()
         if (end.recolor) endRecolor()
@@ -6704,7 +6708,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- selection ----
 
-    /** The selection button: opens or closes the selection tool (a selection made stays). */
+    /** The selection button: opens the selection tool, or closes it letting go of the selection. */
     fun toggleSelecting() {
         // open, it closes; else the other modes end
         if (!switchModes(ModeButton.Selection)) return

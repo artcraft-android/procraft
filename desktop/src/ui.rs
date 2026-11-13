@@ -8,7 +8,7 @@ use std::time::Instant;
 use egui::{Color32, Key, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
     Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyCombo, KeyShortcut, ModeButton, ModeSwitch, Modes,
-    QuickAction, ToolKind, TouchCommand, Trigger, mode_switch,
+    QuickAction, ToolKind, TouchCommand, Trigger, mode_switch, mode_switch_deselects,
 };
 
 use crate::actions::{Act, Actions};
@@ -2218,10 +2218,15 @@ impl Interface {
         }
     }
 
-    /// `button` pressed: the modes it leaves behind end first (keeping what they made), as the
-    /// core says; true if it goes on to do what it does.
+    /// `button` pressed: the modes it leaves behind end first (keeping what they made, but for
+    /// the selection its own button lets go of), as the core says; true if it goes on to do what
+    /// it does.
     fn switch_modes(&mut self, session: &CanvasSession, button: ModeButton) -> bool {
-        let ModeSwitch { end, goes_on } = mode_switch(button, self.open_modes(session));
+        let open = self.open_modes(session);
+        let ModeSwitch { end, goes_on } = mode_switch(button, open);
+        if mode_switch_deselects(button, open) {
+            self.selection.clear(session);
+        }
         if end.quickshape {
             session.quickshape_done();
             self.overlays.shape = None;
