@@ -487,7 +487,7 @@ pub(crate) struct State {
     /// The library in use as the user has it, and as it ships; the libraries.
     library: Vec<brush_library::LibrarySet>,
     pub(crate) libraries: brush_libraries::Libraries,
-    shipped: Vec<BrushSet>,
+    shipped: Arc<Vec<BrushSet>>,
     /// When the library is empty (never, but never panic).
     fallback: Brush,
     /// The brush each tool uses: (set, brush) in the library.
@@ -1474,7 +1474,7 @@ impl CanvasSession {
             crop_redo: None,
             library: shelf,
             libraries: brush_libraries::Libraries::default(),
-            shipped,
+            shipped: Arc::new(shipped),
             fallback: Brush::round_pen(),
             paint_brush,
             erase_brush,

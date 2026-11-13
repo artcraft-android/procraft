@@ -26,6 +26,9 @@ static STAMPS: std::sync::Mutex<Option<((Option<u32>, Option<u64>, [u32; 3], usi
 static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), Vec<Vec<f32>>)>> =
     std::sync::Mutex::new(None);
 
+/// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
+static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BrushInfo {
     pub set: u32,
@@ -370,6 +373,10 @@ impl CanvasSession {
                 return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
             }
         }
+        // one at a time, on the canvas kept for them: drawn side by side, each took a canvas of its
+        // own, its shape and grain arrays made again with it (a library's card asks for a dozen
+        // strokes at once)
+        let _drawing = PREVIEWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
             let mut st = self.shared.lock();

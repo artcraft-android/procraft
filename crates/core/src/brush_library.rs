@@ -434,13 +434,15 @@ pub(crate) fn read_library(
         return None;
     }
     let pictures = folder.map(|folder| crate::brush_pictures::read(folder, json)).unwrap_or_default();
-    let st = session.shared.lock();
+    // made again without the state's lock: hundreds of brushes take a while (a second and more on
+    // a tablet), and the canvas waits on that lock to draw
+    let shipped = std::sync::Arc::clone(&session.shared.lock().shipped);
     let library = saved
         .into_iter()
         .map(|set| {
             let icon = set.icon_now();
             let origins = set.brushes.iter().map(|b| b.from).collect();
-            let brushes = set.brushes.into_iter().map(|b| st.restored_with(b, &pictures)).collect();
+            let brushes = set.brushes.into_iter().map(|b| State::restored_from(&shipped, b, &pictures)).collect();
             LibrarySet { name: set.name, brushes, origins, icon }
         })
         .collect();
@@ -461,7 +463,7 @@ fn holds(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Path) -
 }
 
 /// `file`'s size and time, if it is there.
-fn stamp(file: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+pub(crate) fn stamp(file: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
     let meta = std::fs::metadata(file).ok()?;
     Some((meta.len(), meta.modified().ok()?))
 }
@@ -521,13 +523,15 @@ pub(crate) fn is_brush_text(text: &str) -> bool {
     serde_json::from_str::<SetFile>(text).is_ok() || serde_json::from_str::<BrushFile>(text).is_ok()
 }
 
+/// What brush `origin` on the `shipped` shelf started as.
+fn origin_in(shipped: &[BrushSet], origin: Option<(usize, usize)>) -> Brush {
+    origin.and_then(|(s, i)| shipped.get(s).and_then(|set| set.brushes.get(i))).cloned().unwrap_or_else(blank_brush)
+}
+
 impl State {
     /// What brush `origin` started as.
     pub(crate) fn origin_brush(&self, origin: Option<(usize, usize)>) -> Brush {
-        origin
-            .and_then(|(s, i)| self.shipped.get(s).and_then(|set| set.brushes.get(i)))
-            .cloned()
-            .unwrap_or_else(blank_brush)
+        origin_in(&self.shipped, origin)
     }
 
     /// Brush `i` of `set` as kept: its origin and its changes from there.
@@ -566,7 +570,7 @@ impl State {
     }
 
     /// What `sets` hold, told apart from any other (see [`Self::library_told`]).
-    fn told_of(&self, sets: &[LibrarySet]) -> u64 {
+    pub(crate) fn told_of(&self, sets: &[LibrarySet]) -> u64 {
         crate::project::pixels_hash(&serde_json::to_vec(&self.sets_saved(sets, Images::Told)).unwrap_or_default())
     }
 
@@ -695,18 +699,18 @@ impl State {
 
     /// A kept brush made again.
     fn restored(&self, b: SavedBrush) -> Brush {
-        self.restored_with(b, &std::collections::HashMap::new())
+        Self::restored_from(&self.shipped, b, &std::collections::HashMap::new())
     }
 
-    /// A kept brush made again, the pictures it names in files taken from `pictures` (see
-    /// [`crate::brush_pictures::read`]).
-    fn restored_with(
-        &self,
+    /// A kept brush made again from what it started as on the `shipped` shelf, the pictures it
+    /// names in files taken from `pictures` (see [`crate::brush_pictures::read`]).
+    fn restored_from(
+        shipped: &[BrushSet],
         b: SavedBrush,
         pictures: &std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>,
     ) -> Brush {
         let picture = |text: &str| crate::brush_pictures::bytes_of(text, pictures);
-        let mut brush = self.origin_brush(b.from);
+        let mut brush = origin_in(shipped, b.from);
         // where its origin's size controls sit (a size kept there isn't written down)
         let origin_sizes = [("max_size", brush.setting("max_size")), ("min_size", brush.setting("min_size"))];
         if !b.name.trim().is_empty() {
@@ -811,8 +815,8 @@ impl State {
             picture: png(&a.picture),
             signature: png(&a.signature),
         });
-        brush.reset_point = b.reset.map(|r| ResetPoint::of(&self.restored_with(*r.brush, pictures), r.made));
-        brush.secondary = b.secondary.map(|s| Box::new(self.restored_with(*s, pictures)));
+        brush.reset_point = b.reset.map(|r| ResetPoint::of(&Self::restored_from(shipped, *r.brush, pictures), r.made));
+        brush.secondary = b.secondary.map(|s| Box::new(Self::restored_from(shipped, *s, pictures)));
         brush
     }
 

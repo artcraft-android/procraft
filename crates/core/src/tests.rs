@@ -5601,9 +5601,9 @@ fn brush_libraries_come_and_go_each_kept_in_its_own_files() {
     // the card of the one not in use shows its sets; its brushes are read from its files
     assert_eq!(s.brush_libraries()[1].sets.len(), 1);
     assert!(s.open_brush_library(1));
-    let kept = s.library_brushes("main", &dir).unwrap();
+    let (kept, _) = s.library_read("main", &dir).unwrap();
     assert_eq!(kept.len(), shipped);
-    assert!(kept.iter().all(|set| !set.is_empty()));
+    assert!(kept.iter().all(|set| !set.brushes.is_empty()));
     assert!(s.open_brush_library(0));
     // kept and opened again in a new session: the same libraries, the same one in use
     assert!(s.keep_brushes(d.clone()));
@@ -5724,6 +5724,60 @@ fn bringing_another_library_into_use_keeps_a_change_not_yet_kept() {
     assert!(t.open_brush_library(0));
     assert_eq!(t.saved_brush_library(), library);
     assert_eq!(t.saved_brush_choices(), choices);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_library_is_read_once_for_its_card_and_coming_back_to_one_reads_nothing() {
+    use std::sync::Arc;
+
+    use procraft_engine::brush::Source;
+    use procraft_engine::textures::TEXTURE_SIZE;
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-reads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let s = Arc::new(CanvasSession::new(64, 64));
+    assert!(!s.open_brushes(d.clone()));
+    // a brush of the first library with a shape of its own, kept in the pictures' folder
+    assert!(s.duplicate_brush(0, 0).is_some());
+    let shape = Source::new((0..TEXTURE_SIZE * TEXTURE_SIZE).map(|i| (i % 239) as u8).collect()).unwrap();
+    s.shared.lock().library[0].brushes[0].shape.source = Some(shape.clone());
+    assert!(s.keep_brushes(d.clone()));
+    let pictures = dir.join(crate::brush_pictures::FOLDER);
+    assert!(std::fs::read_dir(&pictures).unwrap().count() > 0);
+    // a copy of it, never in use, and an empty one brought into use
+    assert_eq!(s.duplicate_brush_library(0), Some(1));
+    assert_eq!(s.new_brush_library(), Some(2));
+    assert!(s.open_brush_library(2));
+    // the copy's card asks for its strokes from many threads at once: it is read once, all of
+    // them drawing from the one read
+    let reads: Vec<_> = (0..8)
+        .map(|_| {
+            let (s, dir) = (Arc::clone(&s), dir.clone());
+            std::thread::spawn(move || s.library_read("lib-1", &dir).unwrap().0)
+        })
+        .collect();
+    let reads: Vec<_> = reads.into_iter().map(|r| r.join().unwrap()).collect();
+    assert!(reads.iter().all(|r| Arc::ptr_eq(r, &reads[0])), "read once, not once each");
+    assert_eq!(reads[0][0].brushes[0].shape.source.as_ref().map(|s| s.id), Some(shape.id));
+    // the first library, left as it was kept, is neither read for its card nor to come back to:
+    // its pictures' files gone meanwhile, its brush still has its shape
+    for entry in std::fs::read_dir(&pictures).unwrap().flatten() {
+        std::fs::remove_file(entry.path()).unwrap();
+    }
+    assert_eq!(
+        s.library_read("main", &dir).unwrap().0[0].brushes[0].shape.source.as_ref().map(|s| s.id),
+        Some(shape.id)
+    );
+    assert!(s.open_brush_library(0));
+    assert_eq!(s.shared.lock().library[0].brushes[0].shape.source.as_ref().map(|s| s.id), Some(shape.id));
+    // one changed in its files since (by another session) is read again
+    assert!(s.open_brush_library(2));
+    let first = dir.join("library.json");
+    let text = std::fs::read_to_string(&first).unwrap();
+    std::fs::write(&first, text.replacen('[', "[ ", 1)).unwrap();
+    let again = s.library_read("main", &dir).unwrap().0;
+    assert_eq!(again[0].brushes[0].shape.source, None, "read again: its picture is gone");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
