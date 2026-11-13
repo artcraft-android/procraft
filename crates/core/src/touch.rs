@@ -917,6 +917,17 @@ impl CanvasSession {
                 }
             }
             return Vec::new();
+        } else if let Some((other, other_kind, other_samples)) = t.palm_wait.take() {
+            // the pen gone meanwhile (its time run out): a finger left waiting still makes a
+            // gesture with one landing together with it, else it was the hand's
+            let landed = last_of(&other_samples).map_or(f64::MIN, |s| s.time_ms);
+            if kind == PointerKind::Finger && first.time_ms - landed <= TOGETHER_MS {
+                drop(t);
+                let mut out = self.touch_down_now(other, other_kind, other_samples);
+                out.extend(self.touch_down_now(id, kind, samples));
+                return out;
+            }
+            t.palms.push(other);
         }
         drop(t);
         self.touch_down_now(id, kind, samples)
@@ -2805,6 +2816,31 @@ mod tests {
         s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 3000.0));
         s.touch_move(1, at(60.0, 10.0, 3020.0));
         assert!(s.touch_up(1, at(60.0, 10.0, 3040.0)).contains(&TouchCommand::StrokeEnded));
+    }
+
+    #[test]
+    fn two_fingers_tapped_as_the_pen_s_time_runs_out_still_undo() {
+        let s = session();
+        s.touch_down(5, PointerKind::Stylus, at(300.0, 100.0, 0.0));
+        s.touch_move(5, at(340.0, 120.0, 20.0));
+        s.touch_up(5, at(360.0, 130.0, 50.0));
+        // the first finger lands while the pen counts as near, the second together with it just
+        // after that has run out
+        let gone = 50.0 + f64::from(PEN_GONE_S) * 1000.0;
+        let mut out = s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, gone - 40.0));
+        out.extend(s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, gone + 40.0)));
+        out.extend(s.touch_up(2, at(200.0, 100.0, gone + 100.0)));
+        out.extend(s.touch_up(1, at(100.0, 100.0, gone + 110.0)));
+        assert!(out.contains(&TouchCommand::Undo), "{out:?}");
+        // one landing well after a finger left waiting: that one was the hand's, this one paints
+        let s = session();
+        s.touch_down(5, PointerKind::Stylus, at(300.0, 100.0, 0.0));
+        s.touch_up(5, at(360.0, 130.0, 50.0));
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, gone - 40.0)).is_empty());
+        s.touch_down(2, PointerKind::Finger, at(10.0, 10.0, gone + 200.0));
+        s.touch_move(2, at(60.0, 10.0, gone + 220.0));
+        assert!(s.touch_up(2, at(60.0, 10.0, gone + 240.0)).contains(&TouchCommand::StrokeEnded));
+        assert!(s.touch_up(1, at(100.0, 300.0, gone + 260.0)).is_empty());
     }
 
     #[test]
