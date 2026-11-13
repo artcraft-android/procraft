@@ -11257,6 +11257,29 @@ fn add_frame_names_its_layer_frame_or_page_by_the_count() {
     assert!(name(&s, layer).starts_with("Layer"));
 }
 
+#[test]
+fn add_frame_with_a_layer_inside_a_group_current_goes_above_the_group_at_the_top_level() {
+    let Some(s) = session(64, 64) else { return };
+    let first = s.layers()[0].id;
+    let second = s.add_layer();
+    assert!(s.pick_layer(first));
+    let group = s.group_picked();
+    assert!(group != 0);
+    assert!(s.select_layer(first));
+    assert!(s.set_animation_assist(true));
+    let frame = s.add_frame();
+    let layers = s.layers();
+    let info = layers.iter().find(|l| l.id == frame).unwrap();
+    assert_eq!(info.parent, None, "a frame of its own, not a layer in the group");
+    assert_eq!(info.name, "Frame 2", "the group is the first frame");
+    // right above the group (the list is top first), the group's two layers still in it
+    let at = |id: u64| layers.iter().position(|l| l.id == id).unwrap();
+    assert_eq!(at(frame) + 1, at(group));
+    assert_eq!(layers.iter().filter(|l| l.parent == Some(group)).count(), 2);
+    assert!(layers.iter().any(|l| l.id == second && l.parent == Some(group)));
+    assert!(info.current);
+}
+
 /// Six painted layers with GPU room for only two (the rest kept compressed, as on a smaller
 /// tablet), two masked and one hidden.
 fn six_layers_two_on_the_gpu() -> Option<std::sync::Arc<CanvasSession>> {

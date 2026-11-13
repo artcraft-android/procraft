@@ -435,14 +435,24 @@ impl CanvasSession {
         id
     }
 
-    /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
-    /// [`Self::add_layer`], named "Frame N" ("Page N") by the frames there are with it.
+    /// Add Frame (New Page with Page Assist): a new empty frame above the current one, named
+    /// "Frame N" ("Page N") by the frames there are with it. With a layer inside a group current,
+    /// it goes above that group's frame, at the top level, not into the group.
     pub fn add_frame(&self) -> u64 {
         self.change("new layer", |d| {
             if !d.has_room(1) {
                 return None;
             }
             let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            // the frame the current layer is drawn in: its outermost group, or itself
+            let mut frame = d.current();
+            for _ in 0..64 {
+                match d.group_of(frame) {
+                    Some(g) => frame = g,
+                    None => break,
+                }
+            }
+            d.set_current(frame);
             let id = d.add_layer();
             let n = procraft_engine::animation::frames(d).len();
             d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
