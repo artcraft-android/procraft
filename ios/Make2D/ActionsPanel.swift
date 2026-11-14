@@ -223,6 +223,8 @@ struct ActionsPanel: View {
                     .act("Animated PNG", action: { model.openAnimatedExport(.png) }),
                     .act("Animated MP4", action: { model.openAnimatedExport(.mp4) }),
                     .act("Animated HEVC", action: { model.openAnimatedExport(.hevc) }),
+                    .act("Sprite Sheet", action: { model.openSpriteSheetExport() }),
+                    .act("Harmony Scene", action: { model.shareHarmony() }),
                 ],
             ]
             share[0] += made

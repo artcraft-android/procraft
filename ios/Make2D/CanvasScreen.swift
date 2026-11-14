@@ -78,7 +78,7 @@ struct CanvasScreen: View {
                     .opacity(hidden ? 0 : 1)
                 // over the canvas, under the panels; not over a page that takes the screen
                 if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying,
-                   model.animatedExport == nil {
+                   model.animatedExport == nil, !model.spriteSheetExport {
                     Group {
                         if model.timeline.on {
                             TimelineBar(model: model, screen: screen.size)
@@ -194,6 +194,10 @@ struct CanvasScreen: View {
                 }
                 if let format = model.animatedExport {
                     AnimatedExport(model: model, format: format)
+                        .transition(.move(edge: .bottom))
+                }
+                if model.spriteSheetExport {
+                    SpriteSheetExport(model: model)
                         .transition(.move(edge: .bottom))
                 }
                 if model.timeLapse.replaying {
