@@ -1,10 +1,10 @@
-//! Artworks on disk: new, open (ProCraft packages, PSDs and PNGs), save as .procraft, export,
+//! Artworks on disk: new, open (Make2D packages, PSDs and PNGs), save as .procraft, export,
 //! and asking before unsaved changes are lost.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use procraft_core::{
+use make2d_core::{
     CanvasPreset, CanvasSession, KeptGestures, ModelFile, PagesOutcome, PsdOutcome, ThumbnailImage, export_file_name,
     import_pages, import_psd, preset_height, preset_width,
 };
@@ -46,7 +46,7 @@ pub enum Format {
 impl Format {
     pub fn name(self) -> &'static str {
         match self {
-            Format::Procraft | Format::ModelArtwork => "ProCraft",
+            Format::Procraft | Format::ModelArtwork => "Make2D",
             Format::Package => "Procreate",
             Format::Psd => "PSD",
             Format::Pdf | Format::LayersPdf => "PDF",
@@ -90,9 +90,9 @@ impl Format {
 pub fn app_dir() -> PathBuf {
     let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("ProCraft")
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("Make2D")
     } else if cfg!(target_os = "macos") {
-        home().join("Library/Application Support/ProCraft")
+        home().join("Library/Application Support/Make2D")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -103,7 +103,7 @@ pub fn app_dir() -> PathBuf {
 
 /// Shows a passing message with an OK button.
 pub fn say(text: &str) {
-    MessageDialog::new().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
+    MessageDialog::new().set_level(MessageLevel::Info).set_title("Make2D").set_description(text).show();
 }
 
 /// Whether the file at `path` holds brushes, by its name (a zip by what it holds): ours (a brush,
@@ -111,10 +111,10 @@ pub fn say(text: &str) {
 pub fn is_brush_file(path: &Path) -> bool {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     ["brush", "brushset", "brushlibrary"].contains(&extension.as_str())
-        || procraft_core::OTHER_BRUSH_EXTENSIONS.contains(&extension.as_str())
+        || make2d_core::OTHER_BRUSH_EXTENSIONS.contains(&extension.as_str())
         // a brush or a set sent on as a plain zip (told by its names, not read whole)
         || (extension == "zip"
-            && procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::Brushes)
+            && make2d_core::zip_file_kind(path.to_string_lossy().into_owned()) == make2d_core::ZipKind::Brushes)
 }
 
 /// Where brush files given while no canvas is open wait for one.
@@ -243,7 +243,7 @@ pub fn tell_later(title: &str, text: &str) {
 
 /// Keeps `session`'s brushes in their folder. One that can't (the disk full, say) is told once,
 /// from the window's thread, and not again until they are kept once more.
-pub fn keep_brushes(session: &procraft_core::CanvasSession) {
+pub fn keep_brushes(session: &make2d_core::CanvasSession) {
     static FAILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if session.keep_brushes(brushes_dir()) {
         FAILING.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -251,7 +251,7 @@ pub fn keep_brushes(session: &procraft_core::CanvasSession) {
         tell_later(
             "Can't keep the brushes",
             "The brush library couldn't be kept. The disk may be full: brushes brought in or changed \
-             since are lost when ProCraft closes, unless some room is made.",
+             since are lost when Make2D closes, unless some room is made.",
         );
     }
 }
@@ -413,7 +413,7 @@ pub fn new_from_preset(preset: &CanvasPreset) -> Arc<CanvasSession> {
 
 /// The time-lapse settings `preset` gives a new artwork, kept in its folder `dir` before it opens.
 pub fn keep_preset_time_lapse(preset: &CanvasPreset, dir: &str) {
-    procraft_core::TimeLapse::new(dir.to_owned()).set_settings(procraft_core::TimeLapseSettings {
+    make2d_core::TimeLapse::new(dir.to_owned()).set_settings(make2d_core::TimeLapseSettings {
         resolution: preset.time_lapse_resolution,
         quality: preset.time_lapse_quality,
         hevc: preset.time_lapse_hevc,
@@ -424,7 +424,7 @@ pub fn keep_preset_time_lapse(preset: &CanvasPreset, dir: &str) {
 /// none (said so) if it isn't one.
 pub fn import_profile() -> Option<String> {
     let path = FileDialog::new().set_title("Import").add_filter("Color profiles", &["icc", "icm"]).pick_file()?;
-    let name = std::fs::read(path).ok().and_then(procraft_core::import_profile);
+    let name = std::fs::read(path).ok().and_then(make2d_core::import_profile);
     if name.is_none() {
         tell("Can't import", "This file isn't a color profile.");
     }
@@ -442,7 +442,7 @@ pub fn is_plugin_file(path: &Path) -> bool {
 pub fn pick_plugin() -> Option<PathBuf> {
     FileDialog::new()
         .set_title("Import")
-        .add_filter("ProCraft plugins", &["procraft-plugin", "procraftplugin"])
+        .add_filter("Make2D plugins", &["procraft-plugin", "procraftplugin"])
         .pick_file()
 }
 
@@ -490,7 +490,7 @@ pub fn is_palette_file(path: &Path) -> bool {
 /// [`pick_artwork`] takes), palettes and brushes.
 pub fn pick_import() -> Option<Vec<PathBuf>> {
     let brushes: Vec<&str> =
-        ["brush", "brushset", "brushlibrary"].into_iter().chain(procraft_core::OTHER_BRUSH_EXTENSIONS).collect();
+        ["brush", "brushset", "brushlibrary"].into_iter().chain(make2d_core::OTHER_BRUSH_EXTENSIONS).collect();
     let more: Vec<&str> = PALETTE_EXTENSIONS.into_iter().chain(brushes).collect();
     pick_artwork_files(&more)
 }
@@ -535,7 +535,7 @@ pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Op
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     // a model's artwork opens from where it is unpacked, and is kept as any new artwork is
-    if procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::ModelArtwork {
+    if make2d_core::zip_file_kind(path.to_string_lossy().into_owned()) == make2d_core::ZipKind::ModelArtwork {
         let opened = open_model_artwork(&path).map(|s| (s, None));
         return opened.map_err(|e| tell_later("Can't open the model", &e)).ok();
     }
@@ -562,7 +562,7 @@ fn open_model_artwork(path: &Path) -> Result<Arc<CanvasSession>, String> {
     let work = std::env::temp_dir().join(format!("procraft-model-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let dir = work.to_string_lossy().into_owned();
-    if !procraft_core::unpack_model_artwork(path.to_string_lossy().into_owned(), dir.clone()) {
+    if !make2d_core::unpack_model_artwork(path.to_string_lossy().into_owned(), dir.clone()) {
         return Err("This file can't be opened.".to_owned());
     }
     let opened = CanvasSession::open(dir).map_err(|e| e.to_string());
@@ -686,7 +686,7 @@ pub fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
 pub fn about() {
     MessageDialog::new()
         .set_level(MessageLevel::Info)
-        .set_title("ProCraft")
+        .set_title("Make2D")
         .set_description(format!("Version {}", env!("PROCRAFT_VERSION")))
         .show();
 }
@@ -700,7 +700,7 @@ pub fn save(session: &Arc<CanvasSession>, ui: &mut Interface, ask: bool) {
         None => {
             let Some(p) = FileDialog::new()
                 .set_title("Save")
-                .add_filter("ProCraft artwork", &["procraft"])
+                .add_filter("Make2D artwork", &["procraft"])
                 .set_file_name(format!("{}.procraft", session.name()))
                 .save_file()
             else {
@@ -818,7 +818,7 @@ fn writing(
     session: &Arc<CanvasSession>,
     card: &mut crate::export_card::ExportCard,
     failed: &'static str,
-    write: impl FnOnce(&CanvasSession) -> Result<Vec<PathBuf>, procraft_core::MobileError> + Send + 'static,
+    write: impl FnOnce(&CanvasSession) -> Result<Vec<PathBuf>, make2d_core::MobileError> + Send + 'static,
 ) {
     session.reset_export_progress();
     let following = Arc::clone(session);
@@ -863,7 +863,7 @@ fn place_written(files: &[PathBuf], cancelled: bool) -> Result<bool, String> {
 /// on a GPU device of its own, never shown. `card` shows them made, an artwork at a time;
 /// cancelled, none is left where it was going.
 pub fn share_artworks(
-    list: &[procraft_core::GalleryArtwork],
+    list: &[make2d_core::GalleryArtwork],
     format: Format,
     pdf_quality: u8,
     card: &mut crate::export_card::ExportCard,
@@ -873,7 +873,7 @@ pub fn share_artworks(
     }
     let extension = format.extension();
     let file_name = |name: &str| export_file_name(name.to_owned(), false);
-    let targets: Vec<(procraft_core::GalleryArtwork, PathBuf)> = if let [one] = list {
+    let targets: Vec<(make2d_core::GalleryArtwork, PathBuf)> = if let [one] = list {
         let Some(path) = FileDialog::new()
             .set_title(format!("Share {}", format.name()))
             .add_filter(format.name(), &[extension])
@@ -937,7 +937,7 @@ pub fn share_artworks(
 /// The artwork `a` from the gallery written as `format` at `path` (a PDF's pictures at
 /// `pdf_quality`), opened on a GPU device of its own, never shown.
 pub fn write_artwork(
-    a: &procraft_core::GalleryArtwork,
+    a: &make2d_core::GalleryArtwork,
     format: Format,
     path: &str,
     pdf_quality: u8,
@@ -967,8 +967,8 @@ pub const DRAG_FORMATS: [Format; 5] = [Format::Procraft, Format::Psd, Format::Jp
 /// An artwork lifted out of the gallery (the folder `dir`, named `name`) written as `format` into
 /// the system's temporary folder for dragging; its path.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn drag_file(a: &procraft_core::GalleryArtwork, format: Format) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("ProCraft drags");
+pub fn drag_file(a: &make2d_core::GalleryArtwork, format: Format) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("Make2D drags");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = export_file_name(a.name.clone(), false);
     let path = dir.join(format!("{name}.{}", format.extension()));
@@ -1009,12 +1009,12 @@ mod tests {
     #[test]
     fn a_new_artwork_records_its_time_lapse_as_its_preset_says() {
         let dir = folder("preset-time-lapse");
-        let mut preset = procraft_core::standard_presets().remove(0);
+        let mut preset = make2d_core::standard_presets().remove(0);
         (preset.time_lapse_resolution, preset.time_lapse_quality, preset.time_lapse_hevc) = (2, 3, true);
         keep_preset_time_lapse(&preset, &dir.to_string_lossy());
-        let settings = procraft_core::TimeLapse::new(dir.to_string_lossy().into_owned()).settings();
+        let settings = make2d_core::TimeLapse::new(dir.to_string_lossy().into_owned()).settings();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(settings, procraft_core::TimeLapseSettings { resolution: 2, quality: 3, hevc: true });
+        assert_eq!(settings, make2d_core::TimeLapseSettings { resolution: 2, quality: 3, hevc: true });
     }
 
     #[test]

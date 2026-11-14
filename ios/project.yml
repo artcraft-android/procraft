@@ -1,14 +1,14 @@
 # The iPad app's Xcode project, made by XcodeGen (https://github.com/yonaskolb/XcodeGen):
 #
-#   ios/build-rust.sh && (cd ios && xcodegen generate) && open ios/ProCraft.xcodeproj
+#   ios/build-rust.sh && (cd ios && xcodegen generate) && open ios/Make2D.xcodeproj
 #
 # iPad only (phones get an app of their own). The core is linked as a static library and called
 # through its UniFFI Swift bindings, both made by build-rust.sh before each build into Generated/
 # (not kept in git, nor is the project). To run it on an iPad, pick a team under Signing &
 # Capabilities; build-ipa.sh makes an unsigned .ipa instead.
-name: ProCraft
+name: Make2D
 options:
-  bundleIdPrefix: io.github.artcraftandroid
+  bundleIdPrefix: com.make2d
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -18,12 +18,12 @@ settings:
     MARKETING_VERSION: "0.0.3"
     CURRENT_PROJECT_VERSION: "301"
 targets:
-  ProCraft:
+  Make2D:
     type: application
     platform: iOS
     sources:
-      - path: ProCraft
-      - path: Generated/ProCraftCore.swift
+      - path: Make2D
+      - path: Generated/Make2DCore.swift
         optional: true
       - path: Generated/Assets.xcassets
         optional: true
@@ -48,7 +48,7 @@ targets:
     info:
       path: Generated/Info.plist
       properties:
-        CFBundleDisplayName: ProCraft
+        CFBundleDisplayName: Make2D
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
@@ -68,36 +68,36 @@ targets:
         # what other apps can open here: copied in for the gallery to bring in, as Import does
         LSSupportsOpeningDocumentsInPlace: false
         CFBundleDocumentTypes:
-          - CFBundleTypeName: ProCraft artwork
+          - CFBundleTypeName: Make2D artwork
             LSHandlerRank: Owner
-            LSItemContentTypes: [io.github.artcraftandroid.procraft.artwork]
+            LSItemContentTypes: [com.make2d.app.artwork]
           - CFBundleTypeName: Artwork, brushes and palettes
             LSHandlerRank: Alternate
             LSItemContentTypes:
-              - io.github.artcraftandroid.procraft.layered
-              - io.github.artcraftandroid.procraft.brushes
-              - io.github.artcraftandroid.procraft.palette
+              - com.make2d.app.layered
+              - com.make2d.app.brushes
+              - com.make2d.app.palette
           - CFBundleTypeName: Pictures
             LSHandlerRank: Alternate
             LSItemContentTypes: [public.image, com.adobe.pdf, com.adobe.photoshop-image]
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: io.github.artcraftandroid.procraft.artwork
-            UTTypeDescription: ProCraft artwork
+          - UTTypeIdentifier: com.make2d.app.artwork
+            UTTypeDescription: Make2D artwork
             UTTypeConformsTo: [public.data, public.content]
             UTTypeTagSpecification:
               public.filename-extension: [procraft]
         UTImportedTypeDeclarations:
-          - UTTypeIdentifier: io.github.artcraftandroid.procraft.layered
+          - UTTypeIdentifier: com.make2d.app.layered
             UTTypeDescription: Layered artwork
             UTTypeConformsTo: [public.data, public.content]
             UTTypeTagSpecification:
               public.filename-extension: ["procreate"]
-          - UTTypeIdentifier: io.github.artcraftandroid.procraft.brushes
+          - UTTypeIdentifier: com.make2d.app.brushes
             UTTypeDescription: Brushes
             UTTypeConformsTo: [public.data, public.content]
             UTTypeTagSpecification:
               public.filename-extension: [brush, brushset, brushlibrary, abr, gbr, gih, vbr, kpp, sut]
-          - UTTypeIdentifier: io.github.artcraftandroid.procraft.palette
+          - UTTypeIdentifier: com.make2d.app.palette
             UTTypeDescription: Palette
             UTTypeConformsTo: [public.data, public.content]
             UTTypeTagSpecification:
@@ -109,8 +109,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: io.github.artcraftandroid.procraft
-        PRODUCT_NAME: ProCraft
+        PRODUCT_BUNDLE_IDENTIFIER: com.make2d.app
+        PRODUCT_NAME: Make2D
         TARGETED_DEVICE_FAMILY: "2"
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
@@ -126,7 +126,7 @@ targets:
         # the core, and what it links as `rustc --print native-static-libs` lists it (libSystem,
         # libobjc, libc and libm come with any app)
         OTHER_LDFLAGS:
-          - -lprocraft_core
+          - -lmake2d_core
           - -liconv
           - -framework
           - CoreFoundation

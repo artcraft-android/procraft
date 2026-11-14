@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{BlobShape, CanvasSession, ColourBlob, ColourDrag, DragStep, Fill, VectorEraser};
+use make2d_core::{BlobShape, CanvasSession, ColourBlob, ColourDrag, DragStep, Fill, VectorEraser};
 
 use crate::colours::{of_hex, srgb};
 use crate::look::{Themed, Weight, argb, pc, text};
@@ -466,7 +466,11 @@ pub fn eraser_band(ctx: &egui::Context, session: &CanvasSession, on: bool, top: 
             let blue = argb(pc::ACCENT);
             // "Eraser" (on a narrow screen the control has the band to itself), then the choices
             let titled = window.width() >= ERASER_ROOM_FOR_TITLE;
-            let name = if titled { painter.layout_no_wrap("Eraser".into(), Weight::Bold.font(16.5), ink).size().x + 13.0 } else { 0.0 };
+            let name = if titled {
+                painter.layout_no_wrap("Eraser".into(), Weight::Bold.font(16.5), ink).size().x + 13.0
+            } else {
+                0.0
+            };
             let track_width = segment * modes.len() as f32;
             let left = band.center().x - (name + track_width) / 2.0;
             if titled {
@@ -478,11 +482,12 @@ pub fn eraser_band(ctx: &egui::Context, session: &CanvasSession, on: bool, top: 
             painter.rect_filled(thumb, 10, blue);
             let mut picked = None;
             for (i, label) in labels.iter().enumerate() {
-                let cell = Rect::from_min_size(pos2(track.left() + segment * i as f32, track.top()), vec2(segment, 20.0));
+                let cell =
+                    Rect::from_min_size(pos2(track.left() + segment * i as f32, track.top()), vec2(segment, 20.0));
                 let colour = if i == chosen { Color32::WHITE } else { ink };
                 text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 11.7, Weight::Regular, colour);
                 if ui.interact(cell, ui.scope_id().with(("eraser segment", i)), Sense::click()).clicked() {
-                    picked = Some(modes[i]);
+                    picked = modes.get(i).copied();
                 }
             }
             if let Some(mode) = picked {

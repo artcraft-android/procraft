@@ -9,9 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use procraft_engine::document::LayerId;
-use procraft_engine::geom::{Affine, Vec2};
-use procraft_gpu::{Canvas, Resample};
+use make2d_engine::document::LayerId;
+use make2d_engine::geom::{Affine, Vec2};
+use make2d_gpu::{Canvas, Resample};
 
 use crate::State;
 
@@ -157,6 +157,7 @@ impl State {
     fn sharp_wanted(&self, to_screen: Affine) -> bool {
         let plain = self.doc.background_visible
             && self.doc.animation.is_none()
+            && self.doc.timeline.is_none()
             && self.stroke.is_none()
             && self.recording.is_none()
             && self.shape.is_none()
@@ -206,7 +207,7 @@ impl State {
         };
         let to_sharp = Affine { a: scale, b: 0.0, c: 0.0, d: scale, e: -origin.x * scale, f: -origin.y * scale };
         let Some(from_sharp) = to_sharp.inverse() else { return false };
-        let visible = procraft_engine::geom::IRect::new(
+        let visible = make2d_engine::geom::IRect::new(
             origin.x.floor() as i32,
             origin.y.floor() as i32,
             (origin.x + w as f32 / scale).ceil() as i32,

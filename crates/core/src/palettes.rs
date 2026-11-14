@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use procraft_engine::palette::{self, Palette};
+use make2d_engine::palette::{self, Palette};
 
 /// A palette as the panels show it: its name and its thirty swatches (empty slots none).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]

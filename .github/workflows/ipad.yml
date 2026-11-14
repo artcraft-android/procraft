@@ -86,20 +86,20 @@ jobs:
           cat metal.log >>"$GITHUB_STEP_SUMMARY"
 
       - name: Build the tests
-        run: cargo test -p procraft-gpu -p procraft-core --no-run
+        run: cargo test -p make2d-gpu -p make2d-core --no-run
 
       - name: The filter tests
         continue-on-error: true
         run: |
           set -o pipefail
-          cargo test -p procraft-gpu --test plugin_filter -- --nocapture --test-threads=1 2>&1 | tee gpu.log
-          cargo test -p procraft-core plugin_filter -- --nocapture --test-threads=1 2>&1 | tee -a gpu.log
+          cargo test -p make2d-gpu --test plugin_filter -- --nocapture --test-threads=1 2>&1 | tee gpu.log
+          cargo test -p make2d-core plugin_filter -- --nocapture --test-threads=1 2>&1 | tee -a gpu.log
 
       - name: The hostile filter tests
         continue-on-error: true
         run: |
           set -o pipefail
-          perl -e 'alarm 420; exec @ARGV' cargo test -p procraft-gpu --test plugin_filter -- --ignored --nocapture --test-threads=1 2>&1 | tee hostile.log
+          perl -e 'alarm 420; exec @ARGV' cargo test -p make2d-gpu --test plugin_filter -- --ignored --nocapture --test-threads=1 2>&1 | tee hostile.log
 
       - name: What ran
         if: always()
@@ -142,7 +142,7 @@ jobs:
           bash ios/build-rust.sh iphonesimulator
           (cd ios && xcodegen generate --spec project.yml)
           # the core is built for Apple silicon's simulator only
-          xcodebuild -project ios/ProCraft.xcodeproj -scheme ProCraft -configuration Debug -sdk iphonesimulator \
+          xcodebuild -project ios/Make2D.xcodeproj -scheme Make2D -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator build \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO >build-simulator.log 2>&1 \
             || { grep -E "error|failed" build-simulator.log | head -60; exit 1; }
@@ -159,7 +159,7 @@ jobs:
           xcrun simctl list devices available | grep iPad | head -5 >>"$GITHUB_STEP_SUMMARY"
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
-          xcrun simctl install "$device" "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
+          xcrun simctl install "$device" "$(find build/simulator -name Make2D.app -path '*iphonesimulator*' | head -1)"
           mkdir -p screens
           studio="studio studio-taper studio-grain studio-stylus studio-materials studio-preview studio-about studio-roundness studio-tilt studio-landscape"
           over="keypad keypad-pressure keypad-tilt blend-list node-menu pad-menu"
@@ -177,7 +177,7 @@ jobs:
           plugged="prefs-plugins plugin-offer adjust-plugins effect-plugin prefs-plugin-on layers-add share-plugin"
           fitted="reference reference-bars reference-image interface-large interface-small gallery-sized interface-again"
           for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $lapse $plugged $fitted; do
-            SIMCTL_CHILD_CAPTURE_PLUGINS="$PWD/packed" xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
+            SIMCTL_CHILD_CAPTURE_PLUGINS="$PWD/packed" xcrun simctl launch --terminate-running-process "$device" com.make2d.app -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"
           done

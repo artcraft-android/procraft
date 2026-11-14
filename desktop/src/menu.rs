@@ -243,7 +243,7 @@ pub enum Entry<'a> {
     /// An item that opens more (a chevron at its end).
     More(&'a icons::Icon, &'a str, Themed),
     /// An item whose glyph is a plugin's badge, drawn as on a layer's thumbnail.
-    Badge(procraft_core::PluginBadge, &'a str, Themed),
+    Badge(make2d_core::PluginBadge, &'a str, Themed),
     Rule(f32),
 }
 

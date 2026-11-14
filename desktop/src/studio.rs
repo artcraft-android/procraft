@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use egui::{
     Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, TextureId, Ui, UiBuilder, pos2, vec2,
 };
-use procraft_core::{CanvasSession, PenSample, PointerKind, SourceKind, slider_extras};
+use make2d_core::{CanvasSession, PenSample, PointerKind, SourceKind, slider_extras};
 
 use crate::icons::{self, Icon};
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -115,7 +115,7 @@ static PLUGIN_ROW: Control = Control::Choice("", &[]);
 
 /// The rows the plugins that are on add to the brush studio's Properties, kept with each brush:
 /// each one's label, key and choices.
-pub fn plugin_rows(plugins: &procraft_core::Plugins) -> Vec<(String, String, Vec<String>)> {
+pub fn plugin_rows(plugins: &make2d_core::Plugins) -> Vec<(String, String, Vec<String>)> {
     let on = plugins.plugins().into_iter().filter(|p| p.on && p.problem.is_none());
     on.flat_map(|p| p.brush_controls).map(|c| (c.label, c.key, c.choices)).collect()
 }
@@ -901,10 +901,8 @@ impl Studio {
                 }
             }
             let mode = session.studio_combine_mode();
-            let name = procraft_core::combine_blend_modes()
-                .into_iter()
-                .find(|m| m.id == mode)
-                .map_or(String::new(), |m| m.name);
+            let name =
+                make2d_core::combine_blend_modes().into_iter().find(|m| m.id == mode).map_or(String::new(), |m| m.name);
             let left = pos2(row.left() + 11.0, row.center().y);
             text(ui.painter(), left, Align2::LEFT_CENTER, "Combine Mode", 17.0, Weight::Regular, argb(DIM));
             let right = pos2(row.right() - 42.0, row.center().y);
@@ -1854,7 +1852,7 @@ impl Studio {
             Some(t) => circle_image(ui, t.id(), face, 48.0),
             None => look.icon(ui, &icons::BRUSH, face, 56.0, argb(DIM)),
         }
-        let name = format!("Made by {}", if about.author.trim().is_empty() { "ProCraft" } else { about.author.trim() });
+        let name = format!("Made by {}", if about.author.trim().is_empty() { "Make2D" } else { about.author.trim() });
         let at = pos2(card.center().x, face.y + 48.0 + 21.0 + 12.0);
         text(ui.painter(), at, Align2::CENTER_CENTER, &name, 20.0, Weight::Regular, argb(ABOUT_NAME));
         // the signature in grey, whatever its own colour
@@ -1988,12 +1986,11 @@ fn brush_preview(ctx: &egui::Context, session: &CanvasSession) -> Option<Texture
 /// A blend mode's name, as the picker shows it (a file may give the grain a layer mode its list
 /// leaves out).
 fn blend_name(key: &str, value: f32) -> String {
-    let modes =
-        if key == "grain_blend" { procraft_core::grain_blend_modes() } else { procraft_core::brush_blend_modes() };
+    let modes = if key == "grain_blend" { make2d_core::grain_blend_modes() } else { make2d_core::brush_blend_modes() };
     let n = value.round() as u32;
     modes
         .into_iter()
-        .chain(procraft_core::blend_modes())
+        .chain(make2d_core::blend_modes())
         .find(|m| m.id == n)
         .map_or_else(|| "Normal".to_owned(), |m| m.name)
 }
@@ -2591,9 +2588,9 @@ impl Studio {
         let Some((key, centre, fresh)) = self.blend_list else { return };
         let combining = key == COMBINE_MODE;
         let modes = match key {
-            "grain_blend" => procraft_core::grain_blend_modes(),
-            COMBINE_MODE => procraft_core::combine_blend_modes(),
-            _ => procraft_core::brush_blend_modes(),
+            "grain_blend" => make2d_core::grain_blend_modes(),
+            COMBINE_MODE => make2d_core::combine_blend_modes(),
+            _ => make2d_core::brush_blend_modes(),
         };
         let current = if combining { session.studio_combine_mode() } else { self.value(key).round() as u32 };
         let chosen = modes.iter().position(|m| m.id == current).unwrap_or(0);

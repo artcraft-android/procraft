@@ -10,14 +10,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use procraft_engine::brush::{Brush, Grain, Shape, Taper, Tilt};
-use procraft_engine::curve::Curve;
-use procraft_engine::document::LayerId;
-use procraft_engine::geom::{Homography, Vec2};
-use procraft_engine::guide::Guide;
-use procraft_engine::input::{Pointer, Sample};
-use procraft_engine::stroke::InputSettings;
-use procraft_engine::vector::{
+use make2d_engine::brush::{Brush, Grain, Shape, Taper, Tilt};
+use make2d_engine::curve::Curve;
+use make2d_engine::document::LayerId;
+use make2d_engine::geom::{Homography, Vec2};
+use make2d_engine::guide::Guide;
+use make2d_engine::input::{Pointer, Sample};
+use make2d_engine::stroke::InputSettings;
+use make2d_engine::vector::{
     FillMode, Ink, Object, Second, Setup, StrokeId, TracedFrom, VectorContent, VectorFill, VectorStroke,
 };
 use serde::{Deserialize, Serialize};
@@ -228,11 +228,11 @@ fn packed(samples: &[Sample]) -> String {
         }
         bytes.extend(s.time_ms.to_le_bytes());
     }
-    procraft_engine::base64::encode(&bytes)
+    make2d_engine::base64::encode(&bytes)
 }
 
 fn unpacked(text: &str) -> Option<Vec<Sample>> {
-    let bytes = procraft_engine::base64::decode(text)?;
+    let bytes = make2d_engine::base64::decode(text)?;
     let (samples, rest) = bytes.as_chunks::<32>();
     if !rest.is_empty() || samples.len() > MOST_SAMPLES {
         return None;
@@ -541,7 +541,7 @@ mod tests {
         let s = CanvasSession::new(64, 64);
         let st = s.shared.lock();
         let mut tried = 0;
-        for set in procraft_engine::library::library() {
+        for set in make2d_engine::library::library() {
             for mut brush in set.brushes {
                 // (as a stroke has it: the opacity slider in it)
                 brush.touch_opacity = 0.37;

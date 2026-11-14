@@ -13,7 +13,7 @@ use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{
+use make2d_core::{
     ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, P3, preset_label, presets_from_json, profile_chip,
 };
 
@@ -204,7 +204,7 @@ pub struct Gallery {
     new_open: bool,
     presets: Vec<CanvasPreset>,
     /// The kinds of artwork the plugins on make: the New canvas list's last rows.
-    pub kinds: Vec<procraft_core::PluginKind>,
+    pub kinds: Vec<make2d_core::PluginKind>,
     /// The screen's size, pixels: Screen Size's canvas.
     pub screen_px: (u32, u32),
     /// Select: on, the artworks picked (by folder), More's list open, the picked artworks shown
@@ -400,7 +400,7 @@ impl Gallery {
 
     fn keep_presets(&self) {
         if let Err(e) =
-            crate::files::write_whole(&presets_path(), procraft_core::presets_json(self.presets.clone()).as_bytes())
+            crate::files::write_whole(&presets_path(), make2d_core::presets_json(self.presets.clone()).as_bytes())
         {
             log::warn!("keeping the presets: {e}");
         }
@@ -639,7 +639,7 @@ impl Gallery {
     fn select_header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) {
         let painter = ui.painter();
         let top = screen.top();
-        let title = self.stack.as_ref().map_or("ProCraft", |s| s.1.as_str()).to_owned();
+        let title = self.stack.as_ref().map_or("Make2D", |s| s.1.as_str()).to_owned();
         text(
             painter,
             pos2(screen.left() + 32.0, top + 11.0),
@@ -894,7 +894,7 @@ impl Gallery {
                 ui.painter(),
                 pos2(field.center().x, field.bottom() + 12.0),
                 Align2::CENTER_TOP,
-                "ProCraft",
+                "Make2D",
                 64.0,
                 Weight::Bold,
                 Color32::WHITE,
@@ -1130,7 +1130,7 @@ impl Gallery {
                 painter,
                 pos2(screen.left() + 32.0, top + 11.0),
                 Align2::LEFT_TOP,
-                "ProCraft",
+                "Make2D",
                 36.0,
                 Weight::Bold,
                 argb(TITLE).gamma_multiply(title_in),
@@ -2040,10 +2040,10 @@ const PLAYED_MOST: f64 = 256e6;
 
 /// An artwork's frames as read for Preview, and how they play.
 struct PlayedFrames {
-    pictures: Vec<procraft_core::ThumbnailImage>,
+    pictures: Vec<make2d_core::ThumbnailImage>,
     order: Vec<u32>,
     fps: u32,
-    playback: procraft_core::AnimationPlayback,
+    playback: make2d_core::AnimationPlayback,
 }
 
 /// An animated artwork in Preview: being read, then played.
@@ -2053,7 +2053,7 @@ struct Played {
     frames: Vec<TextureHandle>,
     order: Vec<u32>,
     fps: u32,
-    playback: procraft_core::AnimationPlayback,
+    playback: make2d_core::AnimationPlayback,
     at: u32,
     step: i32,
     due: Option<Instant>,
@@ -2063,7 +2063,7 @@ impl Played {
     /// Starts reading the artwork in `dir`, if it plays, at no more than `side` pixels.
     fn start(dir: String, side: u32) -> Played {
         let (done, read) = std::sync::mpsc::channel();
-        let (from, plays) = (dir.clone(), procraft_core::artwork_plays(dir.clone()));
+        let (from, plays) = (dir.clone(), make2d_core::artwork_plays(dir.clone()));
         if plays {
             std::thread::spawn(move || _ = done.send(read_frames(from, side)));
         }
@@ -2073,7 +2073,7 @@ impl Played {
             frames: Vec::new(),
             order: Vec::new(),
             fps: 1,
-            playback: procraft_core::AnimationPlayback::Loop,
+            playback: make2d_core::AnimationPlayback::Loop,
             at: 0,
             step: 1,
             due: None,
@@ -2113,7 +2113,7 @@ impl Played {
             return;
         }
         let len = u32::try_from(self.order.len()).unwrap_or(0);
-        match procraft_core::animation_next_step(self.playback, len, self.at, self.step) {
+        match make2d_core::animation_next_step(self.playback, len, self.at, self.step) {
             Some(next) => {
                 (self.at, self.step) = (next.at, next.step);
                 self.due = Some(now + frame);
@@ -2133,7 +2133,7 @@ impl Played {
 
 /// The frames of the artwork in `dir`, at no more than `side` pixels and [`PLAYED_MOST`] together.
 fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
-    let session = procraft_core::CanvasSession::open(dir).ok()?;
+    let session = make2d_core::CanvasSession::open(dir).ok()?;
     // a model goes round
     if session.model_info().is_some() {
         if !session.draw_without_window() {
@@ -2143,7 +2143,7 @@ fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
         let fit = (PLAYED_MOST / 4.0 / f64::from(count.max(1))).sqrt() as u32;
         let pictures: Vec<_> = (0..count).filter_map(|i| session.model_preview_picture(i, side.min(fit))).collect();
         let order = (0..pictures.len() as u32).collect();
-        let (fps, playback) = (session.model_preview_fps(), procraft_core::AnimationPlayback::Loop);
+        let (fps, playback) = (session.model_preview_fps(), make2d_core::AnimationPlayback::Loop);
         return Some(PlayedFrames { pictures, order, fps, playback });
     }
     let settings = session.animation_settings().filter(|s| !s.pages)?;

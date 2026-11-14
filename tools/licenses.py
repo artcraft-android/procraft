@@ -194,14 +194,14 @@ def write(out, lines, shared):
 
 
 def main():
-    head = ['ProCraft is made with the following third-party software, under the licences given.', '',
+    head = ['Make2D is made with the following third-party software, under the licences given.', '',
             'The interface font, Inter, is under the SIL Open Font License 1.1 (its text above).', '',
             'The app keeps Lucide icons (lucide.dev), under the ISC License (its text above).', '',
             "The colour panel's OKLab model is Okhsl, worked out after Björn Ottosson's code",
             '(bottosson.github.io/posts/colorpicker), under the MIT License:', '',
             MIT.format(holders='2021 Björn Ottosson'), '']
 
-    crates, shared = linked('procraft-core', [TARGET]), {}
+    crates, shared = linked('make2d-core', [TARGET]), {}
     lines = head + ['The 3D view environments are panoramas from Poly Haven (polyhaven.com), under CC0 (public',
                     'domain); their authors are listed in assets/environments/README.md.', '']
     lines += crate_lines(crates, shared)
@@ -211,7 +211,7 @@ def main():
     write(OUT, lines, shared)
     print(f'{len(crates)} crates, {len(ANDROID)} Android groups -> {os.path.relpath(OUT, ROOT)}')
 
-    crates, shared = linked('procraft-desktop', DESKTOP_TARGETS), {}
+    crates, shared = linked('make2d-desktop', DESKTOP_TARGETS), {}
     write(DESKTOP_OUT, head + crate_lines(crates, shared), shared)
     print(f'{len(crates)} crates -> {os.path.relpath(DESKTOP_OUT, ROOT)}')
 

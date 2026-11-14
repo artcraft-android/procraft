@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use procraft_engine::document::LayerId;
+use make2d_engine::document::LayerId;
 
 use crate::{CanvasSession, PenSample, PluginCanvas, State};
 

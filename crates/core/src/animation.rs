@@ -5,9 +5,9 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::Path;
 
-use procraft_engine::animation::{self, Animation, Playback};
-use procraft_engine::document::{Document, LayerId, LayerKind};
-use procraft_engine::formats::GifWriter;
+use make2d_engine::animation::{self, Animation, Playback};
+use make2d_engine::document::{Document, LayerId, LayerKind};
+use make2d_engine::formats::GifWriter;
 
 use crate::layers::ThumbnailImage;
 use crate::project::{file_error, thumbnail, write_atomically};
@@ -24,6 +24,23 @@ fn frames(doc: &Document) -> Vec<LayerId> {
     animation::frames(doc)
 }
 
+/// One frame of an export: Animation Assist's frame (a top-level layer or group, alone), or a
+/// timeline's frame as it plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Shot {
+    Unit(LayerId),
+    At(u32),
+}
+
+/// What an export draws, in order: a timeline's every frame, or Animation Assist's frames each as
+/// often as it holds them.
+fn shots(doc: &Document) -> Vec<Shot> {
+    match &doc.timeline {
+        Some(tl) => (0..tl.duration).map(Shot::At).collect(),
+        None => sequence(doc).into_iter().map(Shot::Unit).collect(),
+    }
+}
+
 /// The frames as they play: each as often as Animation Assist holds it.
 fn sequence(doc: &Document) -> Vec<LayerId> {
     let holds = |id: LayerId| doc.animation.as_ref().map_or(0, |a| a.hold(id)) as usize;
@@ -32,9 +49,13 @@ fn sequence(doc: &Document) -> Vec<LayerId> {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// The frames in playing order (indices into the frames), each as often as it is held.
+    /// The frames in playing order (indices into the frames), each as often as it is held; on a
+    /// timeline, each of its frames in turn.
     pub fn animation_sequence(&self) -> Vec<u32> {
         let doc = &self.shared.lock().doc;
+        if let Some(tl) = &doc.timeline {
+            return (0..tl.duration).collect();
+        }
         let all = frames(doc);
         sequence(doc)
             .iter()
@@ -55,16 +76,27 @@ impl CanvasSession {
         st.canvas.is_some()
     }
 
-    /// How many frames the animation has.
+    /// How many frames the animation has (a timeline's: as many as it lasts).
     pub fn animation_frame_count(&self) -> u32 {
-        u32::try_from(frames(&self.shared.lock().doc).len()).unwrap_or(u32::MAX)
+        let doc = &self.shared.lock().doc;
+        match &doc.timeline {
+            Some(tl) => tl.duration,
+            None => u32::try_from(frames(doc).len()).unwrap_or(u32::MAX),
+        }
     }
 
-    /// Frame `index` (bottom first), straight alpha, scaled to fit `max_side` (0: full size),
-    /// over the background unless `transparent`; none if there is no such frame.
+    /// Frame `index` (bottom first; on a timeline, its frame `index` as it plays), straight
+    /// alpha, scaled to fit `max_side` (0: full size), over the background unless `transparent`;
+    /// none if there is no such frame.
     pub fn animation_frame(&self, index: u32, transparent: bool, max_side: u32) -> Option<ThumbnailImage> {
-        let unit = frames(&self.shared.lock().doc).get(usize::try_from(index).ok()?).copied()?;
-        match self.render_frame(unit, transparent, max_side) {
+        let shot = {
+            let doc = &self.shared.lock().doc;
+            match &doc.timeline {
+                Some(tl) => (index < tl.duration).then_some(Shot::At(index))?,
+                None => Shot::Unit(frames(doc).get(usize::try_from(index).ok()?).copied()?),
+            }
+        };
+        match self.render_shot(shot, transparent, max_side) {
             Ok((width, height, rgba)) => Some(ThumbnailImage { width, height, rgba }),
             Err(e) => {
                 log::warn!("animation frame: {e}");
@@ -87,7 +119,7 @@ impl CanvasSession {
         per_frame_palette: bool,
         transparent: bool,
     ) -> Result<(), MobileError> {
-        let units = sequence(&self.shared.lock().doc);
+        let units = shots(&self.shared.lock().doc);
         let delay = (100.0 / fps.clamp(0.1, 100.0)).round() as u16;
         // the frames made take it to 0.95 (sharing a palette, its look at them to 0.45 first), the
         // file written to 1
@@ -106,16 +138,16 @@ impl CanvasSession {
                 .iter()
                 .skip(next)
                 .take(few)
-                .map(|&unit| self.render_frame(unit, transparent, max_side))
+                .map(|&unit| self.render_shot(unit, transparent, max_side))
                 .collect::<Result<Vec<_>, _>>()?;
             next += frames.len();
             let Some(&(w, h, _)) = frames.first() else { break };
             let frame_bytes = (w as usize * h as usize * 4).max(1);
-            few = (GIF_BATCH_BYTES / frame_bytes).clamp(1, procraft_engine::par::cores());
+            few = (GIF_BATCH_BYTES / frame_bytes).clamp(1, make2d_engine::par::cores());
             let writer = gif.get_or_insert_with(|| GifWriter::new(w, h));
             let made = {
                 let writer = &*writer;
-                procraft_engine::par::side_by_side(&frames, |(_, _, rgba)| {
+                make2d_engine::par::side_by_side(&frames, |(_, _, rgba)| {
                     writer.encoded_frame(rgba, delay.max(1), dither)
                 })
             };
@@ -134,7 +166,7 @@ impl CanvasSession {
     /// The animation as a looping animated PNG at `path`, `fps` frames a second, scaled to fit
     /// `max_side` (0: full size), `transparent` leaving the background out.
     pub fn export_apng(&self, path: String, max_side: u32, fps: f32, transparent: bool) -> Result<(), MobileError> {
-        let units = sequence(&self.shared.lock().doc);
+        let units = shots(&self.shared.lock().doc);
         let count = u32::try_from(units.len()).unwrap_or(u32::MAX);
         let Some((&first, rest)) = units.split_first() else {
             return Err(file_error("saving", "there are no frames"));
@@ -142,7 +174,7 @@ impl CanvasSession {
         // as the GIF's: the frames to 0.95, the file to 1
         self.exported(0.0);
         let made = |k: usize| self.exported(0.95 * k as f32 / count.max(1) as f32);
-        let (w, h, rgba) = self.render_frame(first, transparent, max_side)?;
+        let (w, h, rgba) = self.render_shot(first, transparent, max_side)?;
         // a frame lasts 1/fps seconds, in thousandths
         let delay = (1000.0 / fps.clamp(0.1, 1000.0)).round().clamp(1.0, 65535.0) as u16;
         write_atomically(Path::new(&path), |f| {
@@ -157,7 +189,7 @@ impl CanvasSession {
             writer.write_image_data(&rgba).map_err(|e| file_error("saving", e))?;
             made(1);
             for (k, &unit) in rest.iter().enumerate() {
-                let (fw, fh, frame) = self.render_frame(unit, transparent, max_side)?;
+                let (fw, fh, frame) = self.render_shot(unit, transparent, max_side)?;
                 if (fw, fh) != (w, h) {
                     return Err(file_error("saving", "the frames differ in size"));
                 }
@@ -176,19 +208,19 @@ impl CanvasSession {
     /// (each drawn once for it); none when there are no frames.
     fn shared_palette_gif(
         &self,
-        units: &[LayerId],
+        units: &[Shot],
         transparent: bool,
         max_side: u32,
     ) -> Result<Option<GifWriter>, MobileError> {
         // a held frame is drawn once, however many places it holds
         let mut seen = std::collections::HashSet::new();
-        let units: Vec<LayerId> = units.iter().copied().filter(|u| seen.insert(*u)).collect();
+        let units: Vec<Shot> = units.iter().copied().filter(|u| seen.insert(*u)).collect();
         // about as many sampled pixels in all as a single frame's palette looks at
         let per_frame = (GIF_PALETTE_SAMPLES / units.len().max(1)).max(256);
         let mut samples: Vec<[u8; 4]> = Vec::new();
         let mut size = None;
         for (k, &unit) in units.iter().enumerate() {
-            let (w, h, rgba) = self.render_frame(unit, transparent, max_side)?;
+            let (w, h, rgba) = self.render_shot(unit, transparent, max_side)?;
             size.get_or_insert((w, h));
             let pixels = rgba.as_chunks::<4>().0;
             let step = (pixels.len() / per_frame).max(1);
@@ -198,11 +230,12 @@ impl CanvasSession {
         Ok(size.map(|(w, h)| GifWriter::shared(w, h, &samples)))
     }
 
-    /// `unit` alone (the background too unless `transparent`), straight alpha, scaled to fit
-    /// `max_side` (0: full size). The canvas shows the whole picture again afterwards.
-    fn render_frame(
+    /// `shot` (an Animation Assist frame alone, or a timeline's frame as it plays; the background
+    /// too unless `transparent`), straight alpha, scaled to fit `max_side` (0: full size). The
+    /// canvas shows the whole picture again afterwards.
+    pub(crate) fn render_shot(
         &self,
-        unit: LayerId,
+        shot: Shot,
         transparent: bool,
         max_side: u32,
     ) -> Result<(u32, u32, Vec<u8>), MobileError> {
@@ -212,9 +245,11 @@ impl CanvasSession {
             st.finish_stroke();
             st.settle();
             let mut doc = st.doc.clone();
-            for id in doc.members(None) {
-                if id != unit {
-                    doc.set_visible(id, false);
+            if let Shot::Unit(unit) = shot {
+                for id in doc.members(None) {
+                    if id != unit {
+                        doc.set_visible(id, false);
+                    }
                 }
             }
             if transparent {
@@ -224,9 +259,14 @@ impl CanvasSession {
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
+            let played = canvas.play_frame();
+            if let Shot::At(frame) = shot {
+                canvas.set_play_frame(usize::try_from(frame).ok());
+            }
             canvas.invalidate();
             canvas.render_finished(gpu, &mut doc);
             let rgba = canvas.read_composite(gpu);
+            canvas.set_play_frame(played);
             canvas.invalidate();
             canvas.render(gpu, &mut st.doc, None);
             self.shared.frame(st);

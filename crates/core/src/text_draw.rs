@@ -568,13 +568,13 @@ fn glyph_image(
 /// Where `info`'s letters may reach on the canvas: its laid-out box and each letter where it
 /// lands (tight kerning or tracking can take letters out of the box), with a letter's height
 /// around them (slanted and overhanging letters, the underline, an outline).
-pub(crate) fn text_reach(info: &TextInfo) -> procraft_engine::geom::IRect {
+pub(crate) fn text_reach(info: &TextInfo) -> make2d_engine::geom::IRect {
     let laid = lay_out(&mut fonts(), info);
     let (left, top) = (info.x, info.y - info.baseline * info.size);
     let margin = info.size.abs() + 4.0;
     let n = |v: f32| if v.is_finite() { v.clamp(-1e9, 1e9) as i32 } else { 0 };
     let around = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        procraft_engine::geom::IRect::new(
+        make2d_engine::geom::IRect::new(
             n((x0 - margin).floor()),
             n((y0 - margin).floor()),
             n((x1 + margin).ceil()),
@@ -595,7 +595,7 @@ pub(crate) fn text_reach(info: &TextInfo) -> procraft_engine::geom::IRect {
 
 /// The text drawn over transparency within `region` of the canvas: that region's pixels only,
 /// premultiplied RGBA8.
-pub(crate) fn draw_text_within(info: &TextInfo, region: procraft_engine::geom::IRect) -> Vec<u8> {
+pub(crate) fn draw_text_within(info: &TextInfo, region: make2d_engine::geom::IRect) -> Vec<u8> {
     let mut out = Picture::new(region.width(), region.height());
     let mut guard = fonts();
     let f = &mut *guard;

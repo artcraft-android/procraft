@@ -9,6 +9,8 @@ replay_pid*.log
 # the iPad app's generated files: the core and its bindings (ios/build-rust.sh), the Xcode project
 # (XcodeGen)
 /ios/Generated/
-/ios/ProCraft.xcodeproj/
+/ios/Make2D.xcodeproj/
+# simulator builds made by hand
+/ios/build-sim/
 # Python bytecode from the tools
 __pycache__/

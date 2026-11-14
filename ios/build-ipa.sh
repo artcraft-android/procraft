@@ -21,23 +21,23 @@ DIST="$(mkdir -p "${DIST:-$ROOT/dist}" && cd "${DIST:-$ROOT/dist}" && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 WORK="$TARGET_DIR/ios-package"
 IPA="$DIST/procraft-$VERSION-ipados-unsigned.ipa"
-echo "==> ProCraft $VERSION ($SHORT, build $BUILD) for iPadOS, unsigned"
+echo "==> Make2D $VERSION ($SHORT, build $BUILD) for iPadOS, unsigned"
 
 # the core and its bindings first: the project lists the files they make
 bash "$ROOT/ios/build-rust.sh" iphoneos
 (cd "$ROOT/ios" && xcodegen generate --spec project.yml)
 
 rm -rf "$WORK"
-xcodebuild -project "$ROOT/ios/ProCraft.xcodeproj" -scheme ProCraft -configuration Release \
-  -sdk iphoneos -destination 'generic/platform=iOS' -archivePath "$WORK/ProCraft.xcarchive" archive \
+xcodebuild -project "$ROOT/ios/Make2D.xcodeproj" -scheme Make2D -configuration Release \
+  -sdk iphoneos -destination 'generic/platform=iOS' -archivePath "$WORK/Make2D.xcarchive" archive \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
   MARKETING_VERSION="$SHORT" CURRENT_PROJECT_VERSION="$BUILD"
 
-APP="$WORK/ProCraft.xcarchive/Products/Applications/ProCraft.app"
-[ -d "$APP" ] || { echo "error: the archive has no ProCraft.app" >&2; exit 1; }
+APP="$WORK/Make2D.xcarchive/Products/Applications/Make2D.app"
+[ -d "$APP" ] || { echo "error: the archive has no Make2D.app" >&2; exit 1; }
 # an .ipa is the app in a Payload folder, zipped
 mkdir -p "$WORK/ipa/Payload"
-ditto "$APP" "$WORK/ipa/Payload/ProCraft.app"
+ditto "$APP" "$WORK/ipa/Payload/Make2D.app"
 rm -f "$IPA"
 (cd "$WORK/ipa" && zip -qry "$IPA" Payload)
 echo "wrote $IPA"

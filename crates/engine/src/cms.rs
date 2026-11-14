@@ -908,7 +908,7 @@ mod tests {
     }
 
     /// Prints how the profile in `PROCRAFT_ICC` turns a few Display P3 colours, for comparing with
-    /// other colour programs: `cargo test -p procraft-engine cms -- --ignored --nocapture`.
+    /// other colour programs: `cargo test -p make2d-engine cms -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn print_conversions() {

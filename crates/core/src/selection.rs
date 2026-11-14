@@ -1,8 +1,8 @@
 //! Selections: shapes drawn on the window become a selection on the canvas, which painting keeps
 //! inside, and which can be inverted, feathered, saved, filled or copied to a layer of its own.
 
-use procraft_engine::geom::Vec2;
-use procraft_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
+use make2d_engine::geom::Vec2;
+use make2d_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
 
 use crate::{CanvasSession, State};
 
@@ -133,7 +133,7 @@ impl State {
             self.scene_mask(window)
         } else if hard {
             // along the pixels' edges all the way round, so it takes just the pixels it goes round
-            let points = procraft_engine::pixel::stepped(&self.to_canvas_points(window)?, true);
+            let points = make2d_engine::pixel::stepped(&self.to_canvas_points(window)?, true);
             Some(Mask::polygon_hard(self.doc.width(), self.doc.height(), &points))
         } else {
             let points = self.to_canvas_points(window)?;
@@ -510,7 +510,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let (Some(canvas), Some(gpu), Some((rect, pixels))) = (st.canvas.as_mut(), st.gpu.as_ref(), part) {
-            let _ = canvas.upload_layer_part(gpu, procraft_engine::document::LayerId(id), rect, &pixels);
+            let _ = canvas.upload_layer_part(gpu, make2d_engine::document::LayerId(id), rect, &pixels);
         }
         st.revision += 1;
         self.shared.frame(st);
@@ -577,12 +577,12 @@ impl CanvasSession {
 
 /// A path drawn by hand (`points`: x, y in turn, canvas pixels) as Pixelated takes it, for showing
 /// it as it is drawn: along the pixels' edges, a pixel across or down at a time, and `closed`,
-/// back to where it began the same way (`procraft_engine::pixel::stepped`). The shape it then
+/// back to where it began the same way (`make2d_engine::pixel::stepped`). The shape it then
 /// selects or fills is just the pixels inside this.
 #[uniffi::export]
 pub fn pixel_path(points: Vec<f32>, closed: bool) -> Vec<f32> {
     let points: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-    procraft_engine::pixel::stepped(&points, closed).iter().flat_map(|p| [p.x, p.y]).collect()
+    make2d_engine::pixel::stepped(&points, closed).iter().flat_map(|p| [p.x, p.y]).collect()
 }
 
 /// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and

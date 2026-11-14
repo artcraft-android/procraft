@@ -8,10 +8,10 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use make2d_gpu::wgpu;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use procraft_gpu::wgpu;
 
 /// A `CAMetalLayer` the Swift app handed over, held (retained) until the render thread lets go.
 pub(crate) struct Layer(Retained<AnyObject>);

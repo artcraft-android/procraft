@@ -1,7 +1,7 @@
 # The .deb (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages the file tree,
 # puts its path for ${STAGE} (nfpm doesn't expand variables in `src`) and exports VERSION and
 # NFPM_ARCH.
-name: procraft
+name: make2d
 arch: ${NFPM_ARCH}
 platform: linux
 version: ${VERSION}
@@ -16,7 +16,7 @@ homepage: https://github.com/artcraft-android/procraft
 license: MIT OR Apache-2.0
 description: |-
   Paint, draw and sketch
-  ProCraft is a painting app with brushes, layers, adjustments, text and animation: the same
+  Make2D is a painting app with brushes, layers, adjustments, text and animation: the same
   engine and interface as on Android tablets.
 
 # The binary links only glibc and libgcc_s itself. The windowing (X11 or Wayland, xkbcommon) and
@@ -45,8 +45,8 @@ recommends:
   - pipewire-bin | pulseaudio-utils | alsa-utils
 
 contents:
-  - src: ${STAGE}/usr/bin/procraft
-    dst: /usr/bin/procraft
+  - src: ${STAGE}/usr/bin/make2d
+    dst: /usr/bin/make2d
     file_info: { mode: 0755 }
   - src: ${STAGE}/usr/share/
     dst: /usr/share/

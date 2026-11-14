@@ -3,8 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use procraft_engine::profile::Profile;
-use procraft_gpu::{Gpu, wgpu};
+use make2d_engine::profile::Profile;
+use make2d_gpu::{Gpu, wgpu};
 
 use crate::Shared;
 use crate::frame::{configure, screen_profile};
@@ -201,7 +201,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
 /// file).
 fn keep_pipelines(shared: &Shared) {
     let Some(gpu) = shared.lock().gpu.clone() else { return };
-    let thread = std::thread::Builder::new().name("procraft-keep-pipelines".to_owned());
+    let thread = std::thread::Builder::new().name("make2d-keep-pipelines".to_owned());
     if let Err(e) = thread.spawn(move || gpu.keep_pipelines()) {
         log::warn!("keeping the pipelines: {e}");
     }

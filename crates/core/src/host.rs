@@ -3,8 +3,8 @@
 
 use std::time::{Duration, Instant};
 
-use procraft_engine::profile::Profile;
-use procraft_gpu::{Gpu, wgpu};
+use make2d_engine::profile::Profile;
+use make2d_gpu::{Gpu, wgpu};
 
 use crate::CanvasSession;
 

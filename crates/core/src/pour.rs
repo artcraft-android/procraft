@@ -7,10 +7,10 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use procraft_engine::document::LayerId;
-use procraft_engine::fill::{self, Flood};
-use procraft_engine::geom::{IRect, Vec2};
-use procraft_engine::selection::Mask;
+use make2d_engine::document::LayerId;
+use make2d_engine::fill::{self, Flood};
+use make2d_engine::geom::{IRect, Vec2};
+use make2d_engine::selection::Mask;
 
 use crate::hooks::Hooks;
 use crate::plugin_run::MOST_FILL;
@@ -231,7 +231,7 @@ impl Pour {
 
     /// The pour as it now is, put on its layer in `canvas` where it changed (`same_flood`: only
     /// its threshold changed since it was last shown).
-    fn show(&mut self, width: u32, canvas: Option<&mut procraft_gpu::Canvas>, same_flood: bool) {
+    fn show(&mut self, width: u32, canvas: Option<&mut make2d_gpu::Canvas>, same_flood: bool) {
         let threshold = self.shown as f32 / 1000.0;
         let Some(([x, y, w, h], pixels)) = self.pour_region(width, threshold, same_flood) else { return };
         if let Some(canvas) = canvas {

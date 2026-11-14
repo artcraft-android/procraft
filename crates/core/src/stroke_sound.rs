@@ -94,7 +94,7 @@ impl CanvasSession {
     /// is told where (a spray can's ball rattles shaken back and forth).
     pub fn sound_hover(&self, x: f32, y: f32) {
         if x.is_finite() && y.is_finite() {
-            self.shared.lock().sound_hover = Some((procraft_engine::geom::Vec2::new(x, y), std::time::Instant::now()));
+            self.shared.lock().sound_hover = Some((make2d_engine::geom::Vec2::new(x, y), std::time::Instant::now()));
         }
     }
 

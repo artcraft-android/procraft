@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Make2D
+GenericName=Painting
+Comment=Paint, draw and sketch
+Exec=make2d %F
+Icon=procraft
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=paint;draw;sketch;brush;art;
+StartupWMClass=Make2D

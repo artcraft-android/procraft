@@ -9,12 +9,12 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 
-use procraft_engine::animation::{self, FrameLook};
-use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
-use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
-use procraft_engine::geom::{Affine, IRect};
-use procraft_engine::stroke::{MOST_ROUNDNESS, Stamp};
-use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
+use make2d_engine::animation::{self, FrameLook};
+use make2d_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
+use make2d_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
+use make2d_engine::geom::{Affine, IRect};
+use make2d_engine::stroke::{MOST_ROUNDNESS, Stamp};
+use make2d_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
 use wgpu::util::DeviceExt;
 
@@ -56,7 +56,7 @@ const _: () = assert!(
 /// see [`scaled_radius`]).
 fn scaled_stamp(s: &Stamp, origin: [f32; 2], k: f32) -> Stamp {
     let mut s = *s;
-    s.center = procraft_engine::geom::Vec2::new((s.center.x - origin[0]) * k, (s.center.y - origin[1]) * k);
+    s.center = make2d_engine::geom::Vec2::new((s.center.x - origin[0]) * k, (s.center.y - origin[1]) * k);
     s.grain_offset = s.grain_offset * k;
     s.grain_size *= k;
     s.distance *= k;
@@ -125,7 +125,7 @@ pub enum Resample {
     Bilinear,
     Bicubic,
     /// For pixel art turned or bent: each pixel takes the colour under its middle of the copy
-    /// enlarged by Scale2x's rule (`procraft_engine::pixel::grown_by`), which keeps a turned
+    /// enlarged by Scale2x's rule (`make2d_engine::pixel::grown_by`), which keeps a turned
     /// line's steps even where the nearest pixel alone doubles and drops them, and blends nothing.
     PixelArt,
 }
@@ -231,7 +231,7 @@ pub struct StrokeStyle {
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
     /// Pixelated (pixel art): each stamp laid on whole pixels at a whole number of pixels across
-    /// (see `procraft_engine::pixel`), every pixel it covers covered fully and none partly.
+    /// (see `make2d_engine::pixel`), every pixel it covers covered fully and none partly.
     pub pixelated: bool,
     /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
     /// strength however small the stamp.
@@ -701,7 +701,7 @@ struct StampInstance {
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
 /// painted `in_place` (see [`WORK_AT_ONCE`]).
 fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> u64 {
-    let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+    let at = make2d_engine::geom::Vec2::new(s.center[0], s.center[1]);
     let reach = IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
     let pixels = u64::from(reach.width()) * u64::from(reach.height());
     if in_place { pixels * IN_PLACE_PIXEL_WORK + IN_PLACE_STAMP_WORK } else { pixels + STAMP_WORK }
@@ -877,15 +877,20 @@ impl Default for LayerUniform {
     }
 }
 
-/// How a layer shows besides its own settings: Animation Assist's onion skins.
+/// How a layer shows besides its own settings: an onion skin's tint and fade, and on a timeline
+/// its clip's opacity, blend mode and pose.
 #[derive(Clone, Copy)]
 struct Look {
     tint: [f32; 4],
     opacity: f32,
+    /// Moved, scaled or turned: drawn alone and through this map onto the canvas.
+    pose: Option<Affine>,
+    /// Blended this way instead of by its own mode.
+    blend: Option<BlendMode>,
 }
 
 impl Look {
-    const PLAIN: Look = Look { tint: [0.0; 4], opacity: 1.0 };
+    const PLAIN: Look = Look { tint: [0.0; 4], opacity: 1.0, pose: None, blend: None };
 }
 
 impl LayerUniform {
@@ -1003,7 +1008,7 @@ struct Sharp {
 /// An encoded colour moved by a linear-light matrix (clipped), as the display shader does.
 fn convert_colour(c: [f32; 3], m: Option<[[f32; 3]; 3]>) -> [f32; 3] {
     let Some(m) = m else { return c };
-    use procraft_engine::profile::{apply, decode, encode};
+    use make2d_engine::profile::{apply, decode, encode};
     apply(m, c.map(decode)).map(|v| encode(v.clamp(0.0, 1.0)))
 }
 
@@ -1962,11 +1967,16 @@ pub struct Canvas {
     composite: wgpu::Texture,
     composite_view: wgpu::TextureView,
     composite_second: OnDemand,
+    /// A timeline drawing moved, scaled or turned by its keys, drawn there before it is laid onto
+    /// the canvas (made the first time one is).
+    posed: OnDemand,
     /// Where a group's layers are composited before the group goes onto the stack below: a pair
     /// for each depth of group (made when first needed).
     groups: Vec<([wgpu::Texture; 2], [wgpu::TextureView; 2])>,
-    /// Animation Assist playing: the frame shown (alone, no onion skins).
+    /// Playing: the frame shown (alone, no onion skins): Animation Assist's frame, or a timeline's.
     play_frame: Option<usize>,
+    /// The timeline frame drawn on (with its onion skins) while not playing.
+    timeline_frame: u32,
     /// What the open stroke is given, told again as it comes (see [`Canvas::echo_stroke`]), and
     /// whether the stroke it tells of is still open.
     echo: Option<(Vec<StrokeEcho>, bool)>,
@@ -2365,8 +2375,10 @@ impl Canvas {
             composite,
             composite_view,
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
+            posed: OnDemand::new("posed drawing", width, height, LAYER_FORMAT),
             groups: Vec::new(),
             play_frame: None,
+            timeline_frame: 0,
             echo: None,
             artwork_pixel: 1.0,
             over: false,
@@ -3891,11 +3903,32 @@ impl Canvas {
         self.play_frame
     }
 
-    /// Animation Assist playing: frame `frame` shows alone (none: back to drawing).
+    /// Playing: frame `frame` shows alone (none: back to drawing): Animation Assist's frame, or on
+    /// a timeline the frame number.
     pub fn set_play_frame(&mut self, frame: Option<usize>) {
         if self.play_frame != frame {
             self.play_frame = frame;
             self.invalidate();
+        }
+    }
+
+    /// On a timeline, the frame drawn on (its onion skins around it) while not playing.
+    pub fn timeline_frame(&self) -> u32 {
+        self.timeline_frame
+    }
+
+    pub fn set_timeline_frame(&mut self, frame: u32) {
+        if self.timeline_frame != frame {
+            self.timeline_frame = frame;
+            self.invalidate();
+        }
+    }
+
+    /// The timeline frame shown, and whether it is playing.
+    fn timeline_at(&self) -> (u32, bool) {
+        match self.play_frame {
+            Some(f) => (u32::try_from(f).unwrap_or(u32::MAX), true),
+            None => (self.timeline_frame, false),
         }
     }
 
@@ -4582,7 +4615,7 @@ impl Canvas {
                     // a dual brush's paint laid in place: put together again where the second went
                     if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
                         let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
-                            let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                            let at = make2d_engine::geom::Vec2::new(s.center[0], s.center[1]);
                             r.union(IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2))
                         });
                         self.synthesize(device, &mut encoder, &mut smudge_uniforms, rect);
@@ -5586,7 +5619,7 @@ impl Canvas {
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("smudge"), timestamp_writes: None });
         pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
         for (k, s) in instances.iter().enumerate() {
-            let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+            let center = make2d_engine::geom::Vec2::new(s.center[0], s.center[1]);
             let bbox = IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
                 .intersect(full);
             if bbox.is_empty() || s.radius <= 0.0 {
@@ -5745,7 +5778,7 @@ impl Canvas {
         if style.wet_pull.is_none() {
             // dry paint laid in place: each stamp lays the paint itself, no pass of plots
             for (s, _, _) in stamps {
-                let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                let center = make2d_engine::geom::Vec2::new(s.center[0], s.center[1]);
                 let bbox =
                     IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
                         .intersect(full);
@@ -5845,7 +5878,7 @@ impl Canvas {
             pass.dispatch_workgroups(plot.div_ceil(8), plot.div_ceil(8), 1);
             // then each stamp laid from its plot
             for (k, (s, _, _)) in group.iter().enumerate() {
-                let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                let center = make2d_engine::geom::Vec2::new(s.center[0], s.center[1]);
                 let bbox =
                     IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
                         .intersect(full);
@@ -6798,7 +6831,7 @@ impl Canvas {
     /// is below the run), with every layer in them; none while something else is under way
     /// (Animation Assist's frames, an adjustment, liquify, a transform, a stroke elsewhere).
     fn live_items(&self, doc: &Document) -> Option<(Vec<LayerId>, std::ops::Range<usize>)> {
-        if doc.animation.is_some() {
+        if doc.animation.is_some() || doc.timeline.is_some() {
             return None;
         }
         let tops = doc.members(None);
@@ -7033,15 +7066,22 @@ impl Canvas {
         self.caches = Some(caches);
     }
 
-    /// With Animation Assist on (and nothing else under way), the layers of the frames shown: the
-    /// current (or played) one, its onion skins, and a background or foreground frame.
+    /// With Animation Assist on or a timeline (and nothing else under way), the layers of the frames shown:
+    /// the current (or played) one, its onion skins, and a background or foreground frame.
     fn shown_frames(&self, doc: &Document) -> Option<HashSet<LayerId>> {
-        let a = doc.animation.as_ref()?;
+        if doc.animation.is_none() && doc.timeline.is_none() {
+            return None;
+        }
         let busy =
             self.transforming.is_some() || self.liquify.is_some() || self.pencil.is_some() || self.held.is_some();
         if busy || self.smudge.is_some() {
             return None;
         }
+        if let Some(tl) = &doc.timeline {
+            let (frame, playing) = self.timeline_at();
+            return Some(tl.showing(frame, playing).iter().flat_map(|s| item_layers(doc, s.root)).collect());
+        }
+        let a = doc.animation.as_ref()?;
         let frames = animation::frames(doc);
         let focus = self.play_frame.or_else(|| animation::current_frame(doc))?;
         let shown: HashSet<LayerId> = frames
@@ -7402,6 +7442,29 @@ impl Canvas {
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
+        // a timeline: the drawings its frame shows (with onion skins while drawing), each as one
+        if top && let Some(tl) = &doc.timeline {
+            let (frame, playing) = self.timeline_at();
+            for s in tl.showing(frame, playing) {
+                let blend = (s.blend != BlendMode::Normal).then_some(s.blend);
+                let look = match s.look {
+                    FrameLook::Shown => Look { opacity: s.opacity, pose: s.pose, blend, ..Look::PLAIN },
+                    FrameLook::Onion { color, opacity } => Look {
+                        tint: [color[0], color[1], color[2], 1.0],
+                        opacity: opacity * s.opacity,
+                        pose: s.pose,
+                        blend,
+                    },
+                    FrameLook::Hidden => continue,
+                };
+                let Some(layer) = doc.layer(s.root) else { continue };
+                if doc.soloed_out(s.root) || look.opacity <= 0.0 {
+                    continue;
+                }
+                self.composite_unit(device, doc, encoder, uniforms, rect, layer, look, stack, current);
+            }
+            return;
+        }
         // Animation Assist: the top level's frames show around the current (or played) one
         let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
@@ -7419,60 +7482,150 @@ impl Canvas {
                     match animation::look(a, i, frames.len(), c, self.play_frame.is_some()) {
                         FrameLook::Shown => Look::PLAIN,
                         FrameLook::Onion { color, opacity } => {
-                            Look { tint: [color[0], color[1], color[2], 1.0], opacity }
+                            Look { tint: [color[0], color[1], color[2], 1.0], opacity, ..Look::PLAIN }
                         }
                         FrameLook::Hidden => continue,
                     }
                 }
                 _ => Look::PLAIN,
             };
-            match layer.kind {
-                LayerKind::Mask => {}
-                LayerKind::Paint => {
-                    // with what is clipped to it, as one (frames each show as their own looks say)
-                    let clips = clipped_to(doc, id, items.get(next..).unwrap_or_default());
-                    if animation.is_none()
-                        && self.composite_clipped(device, doc, encoder, uniforms, rect, layer, clips, stack, current)
-                    {
-                        next += clips.len();
-                        continue;
-                    }
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, false, stack, current)
-                }
-                LayerKind::Group => {
-                    if !layer.visible || layer.opacity <= 0.0 {
-                        continue;
-                    }
-                    // its members straight onto what is below (an onion skin's frame on its own,
-                    // to be tinted whole)
-                    if layer.passes_through() && look.tint[3] == 0.0 {
-                        let members = doc.members(Some(id));
-                        self.composite_items(device, doc, encoder, uniforms, rect, &members, false, stack, current);
-                        continue;
-                    }
-                    let Some(view) = self.composite_group(device, doc, encoder, uniforms, rect, id) else { continue };
-                    let uniform = LayerUniform {
-                        opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
-                        blend: layer.blend.id(),
-                        tint: look.tint,
-                        ..Default::default()
-                    };
-                    self.draw_onto(
-                        device,
-                        encoder,
-                        uniforms,
-                        rect,
-                        view,
-                        None,
-                        &self.stroke_view,
-                        uniform,
-                        layer.blend,
-                        stack,
-                        current,
-                    );
+            // with what is clipped to it, as one (frames each show as their own looks say)
+            if layer.kind == LayerKind::Paint && animation.is_none() {
+                let clips = clipped_to(doc, id, items.get(next..).unwrap_or_default());
+                if self.composite_clipped(device, doc, encoder, uniforms, rect, layer, clips, stack, current) {
+                    next += clips.len();
+                    continue;
                 }
             }
+            self.composite_unit(device, doc, encoder, uniforms, rect, layer, look, stack, current);
         }
+    }
+
+    /// One item of a level, a layer or a group, onto `stack` with `look`.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_unit(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        layer: &Layer,
+        look: Look,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        // a timeline drawing moved, scaled or turned, or blended by its clip: drawn alone first
+        if look.pose.is_some() || look.blend.is_some() {
+            self.composite_posed(device, doc, encoder, uniforms, rect, layer, look, stack, current);
+            return;
+        }
+        match layer.kind {
+            LayerKind::Mask => {}
+            LayerKind::Paint => {
+                self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, false, stack, current);
+            }
+            LayerKind::Group => {
+                if !layer.visible || layer.opacity <= 0.0 {
+                    return;
+                }
+                // its members straight onto what is below (an onion skin's frame, or a drawing
+                // shown faded, on its own, to be tinted or faded whole)
+                if layer.passes_through() && look.tint[3] == 0.0 && look.opacity >= 1.0 {
+                    let members = doc.members(Some(layer.id));
+                    self.composite_items(device, doc, encoder, uniforms, rect, &members, false, stack, current);
+                    return;
+                }
+                let Some(view) = self.composite_group(device, doc, encoder, uniforms, rect, layer.id) else { return };
+                let uniform = LayerUniform {
+                    opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
+                    blend: layer.blend.id(),
+                    tint: look.tint,
+                    ..Default::default()
+                };
+                self.draw_onto(
+                    device,
+                    encoder,
+                    uniforms,
+                    rect,
+                    view,
+                    None,
+                    &self.stroke_view,
+                    uniform,
+                    layer.blend,
+                    stack,
+                    current,
+                );
+            }
+        }
+    }
+
+    /// A timeline drawing (`layer`, a top-level layer or group) moved, scaled or turned by its
+    /// keys, or blended by its clip: the whole of it drawn alone, redrawn through its pose onto
+    /// the posed texture, and that laid onto `stack` at its opacity and mode.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_posed(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        layer: &Layer,
+        look: Look,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        if !layer.visible || layer.opacity <= 0.0 {
+            return;
+        }
+        // all of it, wherever it is: a pose brings in pixels from outside what is redrawn
+        let source = match layer.kind {
+            LayerKind::Mask => return,
+            LayerKind::Paint => match self.layers.get(&layer.id) {
+                Some(l) => &l.view,
+                None => return,
+            },
+            LayerKind::Group => match self.composite_group(device, doc, encoder, uniforms, self.full(), layer.id) {
+                Some(v) => v,
+                None => return,
+            },
+        };
+        let pose = look.pose.unwrap_or(Affine::IDENTITY);
+        let Some(back) = pose.inverse() else { return };
+        let (_, posed) = self.posed.get(device);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("posed"),
+            layout: &self.pipelines.transform_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.everything) },
+            ],
+        });
+        // each canvas pixel from where the pose brought it, bilinear
+        let offset = uniforms.push(&TransformUniform {
+            r0: [back.a, back.c, back.e, 0.0],
+            r1: [back.b, back.d, back.f, 0.0],
+            r2: [0.0, 0.0, 1.0, 0.0],
+            p: [1.0, self.width as f32, self.height as f32, 0.0],
+        });
+        {
+            let mut pass = render_pass(encoder, "posed", posed, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+            scissor(&mut pass, rect);
+            pass.set_pipeline(&self.pipelines.transform);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.draw(0..3, 0..1);
+        }
+        let blend = look.blend.unwrap_or(layer.blend);
+        let uniform = LayerUniform {
+            opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
+            blend: blend.id(),
+            tint: look.tint,
+            ..Default::default()
+        };
+        self.draw_onto(device, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
     }
 
     /// Group `id`'s members composited over transparency on the textures for its depth; returns
@@ -8596,7 +8749,7 @@ impl Canvas {
     }
 
     /// A colour table for [`Target::lut`] from `lut` (its first three outputs, 0..1 encoded).
-    pub fn display_lut(&self, gpu: &Gpu, lut: &procraft_engine::cms::Lut) -> DisplayLut {
+    pub fn display_lut(&self, gpu: &Gpu, lut: &make2d_engine::cms::Lut) -> DisplayLut {
         let rgba: Vec<u8> = lut
             .values
             .chunks(lut.outputs.max(1))
@@ -8873,6 +9026,7 @@ impl Canvas {
         all.extend(self.layers.values().map(|l| &l.texture));
         all.extend(self.tip_backup.as_ref());
         all.extend(self.composite_second.made());
+        all.extend(self.posed.made());
         all.extend(self.scratch.made());
         all.extend(self.second_stroke.made());
         all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
@@ -9843,13 +9997,13 @@ impl Parked {
                 rows.extend_from_slice(rgba.get(start..start + row).unwrap_or_default());
             }
         }
-        Parked { rect, lz4: procraft_engine::applz4::encode(&rows) }
+        Parked { rect, lz4: make2d_engine::applz4::encode(&rows) }
     }
 
     /// The painted rectangle's rows, one after another; none if damaged.
     fn rows(&self) -> Option<Vec<u8>> {
         let size = self.rect.map_or(0, |r| r.width() as usize * r.height() as usize * 4);
-        procraft_engine::applz4::decode(&self.lz4, size).filter(|p| p.len() == size)
+        make2d_engine::applz4::decode(&self.lz4, size).filter(|p| p.len() == size)
     }
 
     /// The whole layer (`width` x `height`, clear outside the rectangle); none if damaged.
@@ -10172,7 +10326,7 @@ struct Remake {
 /// How many levels of group textures compositing `doc` takes: down to the deepest group
 /// composited on its own (with Animation Assist any group, its frame's onion skin tinted whole).
 fn group_levels(doc: &Document) -> usize {
-    if doc.animation.is_some() {
+    if doc.animation.is_some() || doc.timeline.is_some() {
         return doc.max_depth().max(clip_levels(doc));
     }
     let alone = doc.layers().iter().filter(|l| l.kind == LayerKind::Group && !l.passes_through());
@@ -10843,7 +10997,7 @@ mod tests {
 
     #[test]
     fn a_canvas_made_for_filling_holds_no_layer_textures_until_they_come() {
-        use procraft_engine::document::Document;
+        use make2d_engine::document::Document;
         let Ok(gpu) = Gpu::headless() else { return };
         let mut doc = Document::new(512, 512);
         for _ in 0..7 {
@@ -10864,8 +11018,8 @@ mod tests {
 
     #[test]
     fn the_history_takes_from_the_room_for_layers() {
-        use procraft_engine::document::Document;
-        use procraft_engine::stroke::Stamp;
+        use make2d_engine::document::Document;
+        use make2d_engine::stroke::Stamp;
         let Ok(gpu) = Gpu::headless() else { return };
         let mut doc = Document::new(64, 64);
         let per = 64 * 64 * 4;
@@ -10876,7 +11030,7 @@ mod tests {
         // each stroke over the whole layer keeps a layer's worth to undo
         for _ in 0..2 {
             canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
-            canvas.add_stamps(&[Stamp::round(procraft_engine::geom::Vec2::new(32.0, 32.0), 64.0, 1.0)]);
+            canvas.add_stamps(&[Stamp::round(make2d_engine::geom::Vec2::new(32.0, 32.0), 64.0, 1.0)]);
             canvas.end_stroke();
             canvas.render(&gpu, &mut doc, None);
         }
@@ -10909,10 +11063,10 @@ mod tests {
 
     #[test]
     fn a_smudge_the_gpu_has_no_memory_for_draws_on_and_makes_no_step() {
-        use procraft_engine::document::Document;
-        use procraft_engine::stroke::Stamp;
+        use make2d_engine::document::Document;
+        use make2d_engine::stroke::Stamp;
         let Ok(gpu) = Gpu::headless() else { return };
-        let dot = |x: f32, radius: f32| Stamp::round(procraft_engine::geom::Vec2::new(x, 32.0), radius, 1.0);
+        let dot = |x: f32, radius: f32| Stamp::round(make2d_engine::geom::Vec2::new(x, 32.0), radius, 1.0);
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let id = doc.current();

@@ -1,4 +1,4 @@
-//! Vector layers: layers whose strokes are kept as strokes (`procraft_engine::vector`).
+//! Vector layers: layers whose strokes are kept as strokes (`make2d_engine::vector`).
 //!
 //! A stroke on a vector layer is drawn as on any other, by the same builder onto the same pixels;
 //! as it ends, what it was drawn from (its input, its brush and how it was set up) is kept on the
@@ -11,18 +11,18 @@
 
 use std::sync::Arc;
 
-use procraft_engine::brush::Brush;
-use procraft_engine::document::{Document, LayerId};
-use procraft_engine::geom::Vec2;
-use procraft_engine::geom::{Homography, IRect};
-use procraft_engine::input::Sample;
-use procraft_engine::selection::Mask;
-use procraft_engine::stroke::{PathSpot, Stamp};
-use procraft_engine::vector::{
+use make2d_engine::brush::Brush;
+use make2d_engine::document::{Document, LayerId};
+use make2d_engine::geom::Vec2;
+use make2d_engine::geom::{Homography, IRect};
+use make2d_engine::input::Sample;
+use make2d_engine::selection::Mask;
+use make2d_engine::stroke::{PathSpot, Stamp};
+use make2d_engine::vector::{
     FillMode, Ink, Object, Second, Setup, StrokeId, TracedFrom, VectorContent, VectorFill, VectorStroke,
 };
-use procraft_engine::vector_fill::Wall;
-use procraft_gpu::{Canvas, SecondStroke, StrokeStyle, StrokeTool};
+use make2d_engine::vector_fill::Wall;
+use make2d_gpu::{Canvas, SecondStroke, StrokeStyle, StrokeTool};
 
 use crate::selection::LassoFill;
 use crate::{CanvasSession, State};
@@ -76,7 +76,7 @@ pub(crate) enum Carried {
     By(Homography),
     /// Warped: the mesh, and the rectangle of the canvas (its corners, top left first, clockwise)
     /// it was laid over.
-    Warped { mesh: procraft_engine::warp::Mesh, source: [Vec2; 4] },
+    Warped { mesh: make2d_engine::warp::Mesh, source: [Vec2; 4] },
 }
 
 impl Carried {
@@ -91,7 +91,7 @@ impl Carried {
                     return false;
                 }
                 content
-                    .bend(ids, &|p| procraft_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h))
+                    .bend(ids, &|p| make2d_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h))
             }
         }
     }
@@ -421,7 +421,7 @@ impl State {
                             None => stamps,
                         };
                         let all = match shown_by {
-                            Some(by) => procraft_engine::vector::placed(all, by),
+                            Some(by) => make2d_engine::vector::placed(all, by),
                             None => all,
                         };
                         match within {
@@ -515,7 +515,7 @@ impl State {
                     None => stamps,
                 };
                 match shown_by {
-                    Some(by) => procraft_engine::vector::placed(all, by),
+                    Some(by) => make2d_engine::vector::placed(all, by),
                     None => all,
                 }
             };
@@ -740,10 +740,10 @@ impl State {
         colour: [f32; 3],
         factor: f32,
     ) -> Option<VectorContent> {
-        let traced = procraft_engine::vector_fill::trace(walls, self.doc.width(), self.doc.height(), seed, factor)?;
+        let traced = make2d_engine::vector_fill::trace(walls, self.doc.width(), self.doc.height(), seed, factor)?;
         let replaced: Vec<_> = was
             .fills()
-            .filter(|f| f.traced.is_some() && procraft_engine::vector_fill::inside(&f.loops, seed))
+            .filter(|f| f.traced.is_some() && make2d_engine::vector_fill::inside(&f.loops, seed))
             .map(|f| f.id)
             .collect();
         let fill = VectorFill {
@@ -756,7 +756,7 @@ impl State {
             traced: Some(TracedFrom {
                 seed,
                 factor,
-                sources: traced.sources.into_iter().map(procraft_engine::vector::StrokeId).collect(),
+                sources: traced.sources.into_iter().map(make2d_engine::vector::StrokeId).collect(),
             }),
             takes_from: None,
         };
@@ -1064,7 +1064,7 @@ impl State {
                         x0 + (x1 - x0) * ((i % 24) as f32 + 0.5) / 24.0,
                         y0 + (y1 - y0) * ((i / 24) as f32 + 0.5) / 24.0,
                     );
-                    procraft_engine::vector_fill::inside(&fill.loops, p).then_some(p)
+                    make2d_engine::vector_fill::inside(&fill.loops, p).then_some(p)
                 });
                 fill.mode != FillMode::Erase && mostly(&mut inside)
             }
@@ -1606,7 +1606,7 @@ impl CanvasSession {
         st.let_go_of_selection();
         let hard = st.lasso_pixelated(lasso);
         let Some(points) = st.to_canvas_points(window) else { return true };
-        let points = if hard { procraft_engine::pixel::stepped(&points, true) } else { points };
+        let points = if hard { make2d_engine::pixel::stepped(&points, true) } else { points };
         let opacity = if lasso.tool_opacity { st.sliders(st.tool).opacity } else { st.fill_opacity };
         if st.vector_lasso(current, points, hard, lasso.erase, opacity) {
             self.shared.frame(st);
@@ -1753,10 +1753,10 @@ impl CanvasSession {
 mod tests {
     use std::sync::Arc;
 
-    use procraft_engine::document::LayerId;
-    use procraft_engine::geom::Vec2;
-    use procraft_engine::view::View;
-    use procraft_gpu::{Gpu, wgpu};
+    use make2d_engine::document::LayerId;
+    use make2d_engine::geom::Vec2;
+    use make2d_engine::view::View;
+    use make2d_gpu::{Gpu, wgpu};
 
     use super::{LIFTED_NAME, VectorApply, VectorEraser};
     use crate::selection::LassoFill;
@@ -1806,10 +1806,9 @@ mod tests {
         s.stroke_end(vec![at(60)]);
     }
 
-
     #[test]
     fn a_canvas_in_display_p3_shares_its_shapes_in_srgb_and_takes_svg_colours_into_p3() {
-        use procraft_engine::profile::Profile;
+        use make2d_engine::profile::Profile;
         let Some(s) = session() else { return };
         let layer = s.add_vector_layer();
         let colour = [0.2, 0.5, 0.8];
@@ -3188,7 +3187,7 @@ mod tests {
         st.draw_frame(&view, format, (300, 300), Default::default(), std::time::Instant::now());
         let gpu = st.gpu.as_ref().unwrap();
         assert_eq!(gpu.errors(), 0, "GPU validation errors");
-        procraft_gpu::read_texture(gpu, &target, 300, 300).unwrap()
+        make2d_gpu::read_texture(gpu, &target, 300, 300).unwrap()
     }
 
     #[test]

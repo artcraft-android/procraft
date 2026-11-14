@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use egui::{Align2, Color32, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{BrushLibraryInfo, CanvasSession};
+use make2d_core::{BrushLibraryInfo, CanvasSession};
 
 use super::{Deleting, Library, SET_CELL, one_line};
 use crate::icons;

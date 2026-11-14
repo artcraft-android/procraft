@@ -1,12 +1,12 @@
 //! The brush library: its sets and brushes, choosing the brush for the current tool, and preview
 //! strokes for the library panel.
 
-use procraft_engine::document::Document;
-use procraft_engine::geom::Vec2;
-use procraft_engine::input::Pointer;
-use procraft_engine::preview;
-use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
-use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+use make2d_engine::document::Document;
+use make2d_engine::geom::Vec2;
+use make2d_engine::input::Pointer;
+use make2d_engine::preview;
+use make2d_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
+use make2d_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::CanvasSession;
 use crate::layers::ThumbnailImage;
@@ -106,12 +106,12 @@ impl CanvasSession {
         {
             return loops.clone();
         }
-        let side = procraft_engine::textures::TEXTURE_SIZE;
+        let side = make2d_engine::textures::TEXTURE_SIZE;
         let traced = match (pixels, image) {
-            (Some(own), _) => procraft_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
-            (None, Some(i)) => procraft_engine::textures::shapes()
+            (Some(own), _) => make2d_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
+            (None, Some(i)) => make2d_engine::textures::shapes()
                 .get(i as usize)
-                .map(|shape| procraft_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
+                .map(|shape| make2d_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
                 .unwrap_or_default(),
             (None, None) => Vec::new(),
         };
@@ -162,12 +162,12 @@ impl CanvasSession {
         let (hardness, roundness, turn) = (f32::from_bits(hardness), f32::from_bits(roundness), f32::from_bits(turn));
         let pixels = match (source, image) {
             (Some(own), _) => Some(own.to_vec()),
-            (None, Some(i)) => procraft_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
+            (None, Some(i)) => make2d_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
             (None, None) => None,
         };
         let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
         let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
-        let size = procraft_engine::textures::TEXTURE_SIZE;
+        let size = make2d_engine::textures::TEXTURE_SIZE;
         // averaged down to about the picture's size first, so a small picture keeps fine detail's
         // weight rather than catching a few of its pixels
         let (picture, n) = match &pixels {
@@ -296,7 +296,7 @@ impl CanvasSession {
 
 /// Where a tool's notches are kept on a brush.
 pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
-    procraft_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
+    make2d_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
 }
 
 /// A square grey picture `n` pixels a side averaged down to half that.
@@ -335,10 +335,10 @@ impl CanvasSession {
     /// stroke does (they are read out first: nothing is drawn under the lock).
     fn use_full_sources(
         &self,
-        gpu: &procraft_gpu::Gpu,
+        gpu: &make2d_gpu::Gpu,
         canvas: &mut Canvas,
         style: &mut StrokeStyle,
-        brush: &procraft_engine::brush::Brush,
+        brush: &make2d_engine::brush::Brush,
     ) {
         if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref()) {
             let pixels = self.shared.lock().grain_store.pixels(full);
@@ -356,7 +356,7 @@ impl CanvasSession {
 
     pub(crate) fn drawn_preview(
         &self,
-        brush: procraft_engine::brush::Brush,
+        brush: make2d_engine::brush::Brush,
         width: u32,
         height: u32,
     ) -> Option<ThumbnailImage> {
@@ -407,7 +407,7 @@ impl CanvasSession {
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             (!second_style.in_place()).then(|| {
                 let dual =
-                    procraft_gpu::SecondStroke { style: second_style, mode, threshold: second_style.alpha_threshold };
+                    make2d_gpu::SecondStroke { style: second_style, mode, threshold: second_style.alpha_threshold };
                 (second, dual, preview::diameter(&brush) * ratio)
             })
         });
@@ -445,7 +445,7 @@ impl CanvasSession {
 mod tests {
     use std::sync::Arc;
 
-    use procraft_engine::brush::Brush;
+    use make2d_engine::brush::Brush;
 
     use crate::CanvasSession;
 

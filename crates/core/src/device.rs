@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use procraft_gpu::Gpu;
+use make2d_gpu::Gpu;
 
 static DEVICE: Mutex<Option<Gpu>> = Mutex::new(None);
 
@@ -104,7 +104,7 @@ pub fn warm_gpu() {
             *kept = Some(gpu);
         }
         Ok(Err(e)) => log::error!("making the GPU device: {e}"),
-        Err(panic) => log::error!("making the GPU device panicked: {}", procraft_gpu::panic_message(panic.as_ref())),
+        Err(panic) => log::error!("making the GPU device panicked: {}", make2d_gpu::panic_message(panic.as_ref())),
     }
 }
 
@@ -115,7 +115,7 @@ pub fn warm_gpu() {
 pub fn set_gpu_record_folder(dir: String) {
     start_log();
     // the canvases' pipelines kept there between runs as well, where the GPU can
-    procraft_gpu::keep_pipelines_in(PathBuf::from(&dir));
+    make2d_gpu::keep_pipelines_in(PathBuf::from(&dir));
     *RECORD_FOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(PathBuf::from(dir));
 }
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn the_record_follows_the_tries_and_keeps_a_backend_that_drew() {
-        let dir = std::env::temp_dir().join(format!("procraft-gpu-record-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("make2d-gpu-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let _ = std::fs::remove_file(dir.join(RECORD));
         assert_eq!(start_in(&dir, 2), 0);

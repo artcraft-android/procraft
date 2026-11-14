@@ -1,4 +1,4 @@
-//! The session both ProCraft apps drive: a [`CanvasSession`] takes input from the interface, builds
+//! The session both Make2D apps drive: a [`CanvasSession`] takes input from the interface, builds
 //! strokes with the engine and draws them with the GPU renderer. The Android app reaches it through
 //! UniFFI's Kotlin bindings, and it draws on its own render thread straight into the app's
 //! `SurfaceView`; the desktop app calls it directly and draws each frame into its window
@@ -26,8 +26,8 @@ mod clipboard;
 mod colour;
 mod colour_blob;
 mod colour_drag;
-mod crisp;
 mod colour_models;
+mod crisp;
 mod crop;
 mod crop_edit;
 mod device;
@@ -84,6 +84,7 @@ mod tests;
 mod text;
 mod text_draw;
 mod timelapse;
+mod timeline;
 mod touch;
 mod transform;
 mod turn;
@@ -101,14 +102,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use procraft_engine::brush::Brush;
-use procraft_engine::document::Document;
-use procraft_engine::geom::Vec2;
-use procraft_engine::input::{Pointer, Sample};
-use procraft_engine::library::{BrushSet, library};
-use procraft_engine::stroke::StrokeBuilder;
-use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
+use make2d_engine::brush::Brush;
+use make2d_engine::document::Document;
+use make2d_engine::geom::Vec2;
+use make2d_engine::input::{Pointer, Sample};
+use make2d_engine::library::{BrushSet, library};
+use make2d_engine::stroke::StrokeBuilder;
+use make2d_engine::view::View;
+use make2d_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
 pub use adjust::{
     ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
@@ -397,10 +398,10 @@ impl ViewCurve {
     fn at(self, t: f32) -> (f32, f32) {
         match self {
             ViewCurve::Settle => {
-                let spring = procraft_engine::motion::Spring::new(VIEW_SETTLE_SECONDS, VIEW_SETTLE_DAMPING);
+                let spring = make2d_engine::motion::Spring::new(VIEW_SETTLE_SECONDS, VIEW_SETTLE_DAMPING);
                 (spring.at(t), spring.seconds())
             }
-            ViewCurve::EaseOut(seconds) => (procraft_engine::motion::Bezier::ease_out(seconds).at(t), seconds),
+            ViewCurve::EaseOut(seconds) => (make2d_engine::motion::Bezier::ease_out(seconds).at(t), seconds),
         }
     }
 }
@@ -436,7 +437,7 @@ pub(crate) struct State {
     /// The tool chosen before this one (not one a stroke only borrowed).
     previous_tool: Option<ToolKind>,
     /// The app's own smoothing and pressure, on top of every brush's.
-    pub(crate) input: procraft_engine::stroke::InputSettings,
+    pub(crate) input: make2d_engine::stroke::InputSettings,
     /// Selection mask visibility, 0..1: how strongly what is not selected is banded.
     pub(crate) selection_visibility: f32,
     /// Brush scaling relative to the screen: the brush keeps its size on the screen as the canvas
@@ -466,13 +467,13 @@ pub(crate) struct State {
     /// How long things rest before the sharp picture is made (again).
     pub(crate) crisp_rest: std::time::Duration,
     /// The layer a stroke being drawn is on, while it is drawn on the sharp picture too.
-    pub(crate) crisp_stroke: Option<procraft_engine::document::LayerId>,
+    pub(crate) crisp_stroke: Option<make2d_engine::document::LayerId>,
     /// Where what is drawn of a vector layer is carried as it is drawn (the artwork's pixels to
     /// those drawn on), while it is drawn for the screen; none when drawn on the artwork itself.
-    pub(crate) vector_shown_by: Option<procraft_engine::geom::Homography>,
+    pub(crate) vector_shown_by: Option<make2d_engine::geom::Homography>,
     /// Each vector layer's file as last made, with what told its content apart then (see
     /// `State::vector_file_kept`).
-    pub(crate) vector_files: HashMap<procraft_engine::document::LayerId, vector_file::KeptFile>,
+    pub(crate) vector_files: HashMap<make2d_engine::document::LayerId, vector_file::KeptFile>,
     /// The canvas an object's own erasers are drawn on, while a vector layer is drawn again.
     pub(crate) vector_scratch: Option<vector_layer::Scratch>,
     /// The selected strokes and fills of that layer, picked up onto a layer of their own to be
@@ -480,16 +481,16 @@ pub(crate) struct State {
     pub(crate) vector_lifted: Option<vector_layer::VectorLifted>,
     /// The vector layer the open transform is of, if it is of one: kept, it carries the layer's
     /// strokes and fills, not its pixels.
-    pub(crate) vector_transform: Option<procraft_engine::document::LayerId>,
+    pub(crate) vector_transform: Option<make2d_engine::document::LayerId>,
     /// Opened from a folder holding a plugin's artwork: its kind and its data, until the app opens
     /// it with its plugin.
     pub(crate) plugin_opened: Option<plugin_artwork::PluginOpened>,
     /// The picker plugin's picture, compiled for this session's GPU: whose it is, and its code.
-    pub(crate) picker_program: Option<(String, Arc<str>, Arc<procraft_gpu::PictureProgram>)>,
+    pub(crate) picker_program: Option<(String, Arc<str>, Arc<make2d_gpu::PictureProgram>)>,
     /// When the stroke's input was last heard, for a sound plugin.
     pub(crate) sound_heard: Option<std::time::Instant>,
     /// Where the pen last hovered (window pixels) and when, for the spray can's rattle.
-    pub(crate) sound_hover: Option<(procraft_engine::geom::Vec2, std::time::Instant)>,
+    pub(crate) sound_hover: Option<(make2d_engine::geom::Vec2, std::time::Instant)>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -499,26 +500,26 @@ pub(crate) struct State {
     text_edit: Option<text::TextEdit>,
     /// Where the edit last drew its text into the layer (none: not yet, on a layer already there,
     /// so the next draw takes the whole layer).
-    text_drawn: Option<procraft_engine::geom::IRect>,
+    text_drawn: Option<make2d_engine::geom::IRect>,
     /// The steps finished text edits made (by [`Canvas::undo_step`]'s numbering) and their layers:
     /// undo and redo of one go back to editing that text.
-    pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
+    pub(crate) text_steps: Vec<(u64, make2d_engine::document::LayerId)>,
     /// The stroke being drawn on a plugin's layer, recorded as it goes.
     pub(crate) recording: Option<plugin_layers::Recording>,
     /// The changes strokes made to plugins' layers' data, by the step each made, for undo and redo.
     pub(crate) layer_steps: Vec<plugin_layers::LayerStep>,
     /// Plugins' layers as their items were last laid: where each item reached, so an edit lays
     /// again only what it changes.
-    pub(crate) laid: std::collections::HashMap<procraft_engine::document::LayerId, plugin_layers::Laid>,
+    pub(crate) laid: std::collections::HashMap<make2d_engine::document::LayerId, plugin_layers::Laid>,
     /// How many times plugins' layers were laid again whole, and how many times only in part.
     pub(crate) lays: [u64; 2],
     /// Plugins' layers drawn sharp over the canvas when zoomed in.
     pub(crate) sharp: sharp::Sharp,
     /// While items are laid on the sharp picture's canvas: canvas pixels to its pixels.
-    pub(crate) lay_to: Option<procraft_engine::geom::Affine>,
+    pub(crate) lay_to: Option<make2d_engine::geom::Affine>,
     /// Plugins' layers whose data couldn't be read (or their plugin couldn't take it): they take no
     /// strokes, and their data files are left as they are.
-    pub(crate) layer_data_unread: std::collections::HashSet<procraft_engine::document::LayerId>,
+    pub(crate) layer_data_unread: std::collections::HashSet<make2d_engine::document::LayerId>,
     /// A colour dropped on the canvas whose threshold can still change.
     pub(crate) pour: Option<pour::Pour>,
     /// Continue filling's Continuous drag under way: what it has filled so far.
@@ -605,6 +606,8 @@ pub(crate) struct State {
     pub(crate) interface_size: f32,
     /// The canvas shown in perceptual greys (the window's view only).
     pub(crate) grey_view: bool,
+    /// On a timeline, the track drawn on (and that new drawings go on).
+    pub(crate) timeline_track: Option<make2d_engine::timeline::TrackId>,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
@@ -623,14 +626,14 @@ pub(crate) struct State {
     /// not yet in `info`.
     pub(crate) tracking_since: Option<std::time::Instant>,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
-    pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
+    pub(crate) pending_pixels: Vec<(make2d_engine::document::LayerId, project::Opened)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
     /// Layers whose saved files couldn't be read (shown empty): a save leaves each file as it is
     /// until the layer is painted on, and then keeps the file aside before writing the new one.
-    pub(crate) unreadable: std::collections::HashSet<procraft_engine::document::LayerId>,
+    pub(crate) unreadable: std::collections::HashSet<make2d_engine::document::LayerId>,
     /// Those of them not told of yet (see [`CanvasSession::take_failure`]).
-    pub(crate) unreadable_untold: Vec<procraft_engine::document::LayerId>,
+    pub(crate) unreadable_untold: Vec<make2d_engine::document::LayerId>,
     /// Let go of (see [`CanvasSession::release_canvas`]): no canvas is made again.
     pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
@@ -650,16 +653,16 @@ pub(crate) struct State {
     pub(crate) saved_view: Option<project::SavedView>,
     /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
     /// apart from the document, so that undoing never moves it.
-    pub(crate) reference_window: procraft_engine::reference_window::ReferenceWindow,
+    pub(crate) reference_window: make2d_engine::reference_window::ReferenceWindow,
     pub(crate) reference_picture: Option<Arc<Vec<u8>>>,
     pub(crate) revision: u64,
     /// The open transform, how its handles act and how it resamples.
-    transform: Option<procraft_engine::transform::Transform>,
+    transform: Option<make2d_engine::transform::Transform>,
     /// A plugin's layer being transformed: the layer and the ids of the items moving, which are
     /// moved as items as it ends; and whether its pixels were as its items were last laid as it
     /// began (the transform puts them back so before they move).
-    transform_items: Option<(procraft_engine::document::LayerId, Vec<u32>, bool)>,
-    transform_mode: procraft_engine::transform::TransformMode,
+    transform_items: Option<(make2d_engine::document::LayerId, Vec<u32>, bool)>,
+    transform_mode: make2d_engine::transform::TransformMode,
     interpolation: transform::Interpolation,
     /// Transform's Pixelated: the content keeps to whole pixels and nothing is blended.
     transform_pixelated: bool,
@@ -668,16 +671,16 @@ pub(crate) struct State {
     transform_guides: transform::GuideSettings,
     /// An open transform's layers, while what its box snaps onto (the other layers' bounds) isn't
     /// found yet: snapping was off as it began; found when snapping comes on.
-    snap_pending: Option<Vec<procraft_engine::document::LayerId>>,
+    snap_pending: Option<Vec<make2d_engine::document::LayerId>>,
     /// What is selected, if anything, and selections kept to load again.
-    selection: Option<procraft_engine::selection::Mask>,
-    saved_selections: Vec<procraft_engine::selection::Mask>,
+    selection: Option<make2d_engine::selection::Mask>,
+    saved_selections: Vec<make2d_engine::selection::Mask>,
     pub(crate) selection_display: selection::SelectionDisplay,
     /// The table showing a canvas with a profile of its own on the screen, and what it was made for.
-    pub(crate) display_lut: Option<((usize, procraft_engine::profile::Profile), procraft_gpu::DisplayLut)>,
+    pub(crate) display_lut: Option<((usize, make2d_engine::profile::Profile), make2d_gpu::DisplayLut)>,
     /// While a colour selection's threshold is dragged: the selection before it, and the layer read once.
-    selection_before: Option<Option<procraft_engine::selection::Mask>>,
-    colour_source: Option<(Vec<u8>, procraft_engine::selection::ColourFlood)>,
+    selection_before: Option<Option<make2d_engine::selection::Mask>>,
+    colour_source: Option<(Vec<u8>, make2d_engine::selection::ColourFlood)>,
     /// An adjustment is open on the current layer, and what it last drew.
     adjusting: bool,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
@@ -685,7 +688,7 @@ pub(crate) struct State {
     filters: plugin_filter::Filters,
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
-    last_filter: Option<procraft_gpu::Filter>,
+    last_filter: Option<make2d_gpu::Filter>,
     /// The liquify brush as it goes.
     liquify: liquify::LiquifyRun,
     /// The brush studio is open on this (set, brush), and the brush as it opened.
@@ -703,7 +706,7 @@ pub(crate) struct State {
     clone_offset: Option<Vec2>,
     /// The selection before the feather popover softened it, and the room its feathering works
     /// in (kept while the popover is open, so each step doesn't ask the system for it again).
-    feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
+    feather_base: Option<(make2d_engine::selection::Mask, Vec<f32>)>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
     /// The stroke being drawn as input (canvas points), for QuickShape,
@@ -730,7 +733,7 @@ pub(crate) struct State {
     /// The direction (radians) an assisted stroke is kept to, once it has gone far enough to
     /// tell: chosen then and kept to its end, so a wavering hand doesn't switch it.
     assist_angle: Option<f32>,
-    pub(crate) guide_before: Option<(procraft_engine::guide::Guide, Option<View>)>,
+    pub(crate) guide_before: Option<(make2d_engine::guide::Guide, Option<View>)>,
 }
 
 impl State {
@@ -742,10 +745,10 @@ impl State {
     /// The surround's grid in window pixels, shifted by `by` (where the window's corner lands on
     /// the target).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    pub(crate) fn surround_grid(&self, by: Vec2) -> procraft_gpu::SurroundGrid {
+    pub(crate) fn surround_grid(&self, by: Vec2) -> make2d_gpu::SurroundGrid {
         let s = self.display_scale;
         let [x, y] = self.grid_origin.unwrap_or([0.5 * s, 0.5 * s]);
-        procraft_gpu::SurroundGrid {
+        make2d_gpu::SurroundGrid {
             spacing: GRID_SPACING_PT * s,
             origin: [x + by.x, y + by.y],
             top: GRID_TOP_PT * self.interface_scale() + by.y,
@@ -865,7 +868,7 @@ impl State {
     pub(crate) fn stroke_brush(
         &mut self,
         tool: ToolKind,
-        layer: procraft_engine::document::LayerId,
+        layer: make2d_engine::document::LayerId,
     ) -> (Brush, StrokeStyle, f32) {
         let paint = StrokePaint {
             colour: self.color,
@@ -891,7 +894,7 @@ impl State {
         // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
         // build up to full; a glaze's caps the stroke
         let opacity = if brush.blends() && matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
-            brush.flow *= sliders.opacity.clamp(0.0, 1.0).powf(procraft_engine::brush::FLOW_POWER);
+            brush.flow *= sliders.opacity.clamp(0.0, 1.0).powf(make2d_engine::brush::FLOW_POWER);
             1.0
         } else {
             brush.opacity(sliders.opacity)
@@ -922,7 +925,7 @@ impl State {
     pub(crate) fn second_brush(
         &mut self,
         tool: ToolKind,
-        layer: procraft_engine::document::LayerId,
+        layer: make2d_engine::document::LayerId,
         first: &Brush,
         first_style: &StrokeStyle,
     ) -> Option<(Brush, SecondStroke, f32)> {
@@ -948,7 +951,7 @@ impl State {
             return None;
         }
         let opacity = if second.blends() {
-            second.flow *= sliders.opacity.clamp(0.0, 1.0).powf(procraft_engine::brush::FLOW_POWER);
+            second.flow *= sliders.opacity.clamp(0.0, 1.0).powf(make2d_engine::brush::FLOW_POWER);
             1.0
         } else {
             second.opacity(sliders.opacity)
@@ -994,7 +997,7 @@ impl State {
         if let Some(&Some([size, opacity])) = brush.sliders.get(brushes::notch_tool(tool)) {
             return Sliders { size, opacity };
         }
-        let curve = procraft_engine::brush::SIZE_CURVE;
+        let curve = make2d_engine::brush::SIZE_CURVE;
         let size = brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve);
         Sliders { size, ..DEFAULT_SLIDERS }
     }
@@ -1035,7 +1038,7 @@ impl State {
 
     /// Layers `ids`' files couldn't be read: they show empty, saves leave their files, and the
     /// app is told.
-    pub(crate) fn layers_unread(&mut self, ids: Vec<procraft_engine::document::LayerId>) {
+    pub(crate) fn layers_unread(&mut self, ids: Vec<make2d_engine::document::LayerId>) {
         for id in ids {
             if self.unreadable.insert(id) {
                 self.unreadable_untold.push(id);
@@ -1062,7 +1065,7 @@ impl State {
         let doc = &self.doc;
         // every layer up as it was read, or no canvas: one the GPU had no memory for would show
         // empty, and be saved so once painted on
-        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
+        let made = gpu.checked(|| -> Result<Canvas, make2d_gpu::GpuError> {
             let mut c = Canvas::unfilled(gpu, doc)?;
             c.set_resident_budget(crate::layers::resident_budget());
             for (id, pixels) in &pixels {
@@ -1113,7 +1116,7 @@ fn draw_samples(
     builder: &mut StrokeBuilder,
     second: Option<&mut StrokeBuilder>,
     samples: &[Sample],
-    guide: &procraft_engine::guide::Guide,
+    guide: &make2d_engine::guide::Guide,
 ) -> bool {
     // a dual brush's second, as its stamps come (no tip of its own)
     if let Some(second) = second {
@@ -1140,7 +1143,7 @@ fn lift_samples(
     builder: &mut StrokeBuilder,
     second: Option<&mut StrokeBuilder>,
     samples: &[Sample],
-    guide: &procraft_engine::guide::Guide,
+    guide: &make2d_engine::guide::Guide,
 ) {
     let stamps = builder.add(samples);
     if !(canvas.shows_tip() && builder.shows_tip()) {
@@ -1159,7 +1162,7 @@ fn show_ahead(
     canvas: &mut Canvas,
     builder: &mut StrokeBuilder,
     samples: &[Sample],
-    guide: &procraft_engine::guide::Guide,
+    guide: &make2d_engine::guide::Guide,
 ) {
     if canvas.shows_tip() {
         canvas.set_tip(&guide::mirrored(guide, &builder.preview_to_input(samples)));
@@ -1175,7 +1178,7 @@ fn close_stroke(
     canvas: &mut Canvas,
     builder: StrokeBuilder,
     second: Option<StrokeBuilder>,
-    guide: &procraft_engine::guide::Guide,
+    guide: &make2d_engine::guide::Guide,
 ) {
     // what undo calls it
     canvas.name_next_step(match canvas.stroke_tool() {
@@ -1192,7 +1195,7 @@ fn lay_stroke(
     canvas: &mut Canvas,
     mut builder: StrokeBuilder,
     second: Option<StrokeBuilder>,
-    guide: &procraft_engine::guide::Guide,
+    guide: &make2d_engine::guide::Guide,
 ) {
     if let Some(mut second) = second {
         canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish()));
@@ -1301,18 +1304,18 @@ impl Shared {
         enum Read {
             /// Where it is painted (only that is sent), with its compressed copy when layers may
             /// soon be paged.
-            Upload(Vec<u8>, Option<procraft_engine::geom::IRect>, Option<procraft_gpu::ReadyToPark>),
-            Park(procraft_gpu::ReadyToPark),
+            Upload(Vec<u8>, Option<make2d_engine::geom::IRect>, Option<make2d_gpu::ReadyToPark>),
+            Park(make2d_gpu::ReadyToPark),
         }
         // every layer up as it was read, or no canvas (what was opened kept): one the GPU had no
         // memory for would show empty, and be saved so once painted on
-        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
+        let made = gpu.checked(|| -> Result<Canvas, make2d_gpu::GpuError> {
             let budget = crate::layers::resident_budget();
             let (w, h) = (doc.width(), doc.height());
             // read on a few threads (each file decoded and its compressed copy made: those below
             // the top layers that fit are parked, those that fit keep it, so letting them go
             // later needs no reading back), put on the canvas here in order
-            let first_resident = ids.len().saturating_sub(procraft_gpu::most_resident(budget, w, h));
+            let first_resident = ids.len().saturating_sub(make2d_gpu::most_resident(budget, w, h));
             // the copies of layers that go up take an eighth of the textures' budget at most, and
             // only those that pack to a quarter or less are kept
             let copy_room = budget / 8;
@@ -1338,11 +1341,11 @@ impl Shared {
                                 l.pixels(w, h).map(|px| {
                                     let hash = project::pixels_hash(&px);
                                     if i >= first_resident {
-                                        let copy = copying.then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
+                                        let copy = copying.then(|| make2d_gpu::ReadyToPark::of(&px, w, h));
                                         let painted = crate::layer_ops::painted_rect(&px, w);
                                         (Read::Upload(px, painted, copy), hash)
                                     } else {
-                                        (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
+                                        (Read::Park(make2d_gpu::ReadyToPark::of(&px, w, h)), hash)
                                     }
                                 })
                             });
@@ -1460,7 +1463,7 @@ impl CanvasSession {
     /// A new artwork of `width` × `height` pixels.
     #[uniffi::constructor]
     pub fn new(width: u32, height: u32) -> Arc<CanvasSession> {
-        let most = procraft_engine::document::canvas_edge_most();
+        let most = make2d_engine::document::canvas_edge_most();
         CanvasSession::with_document(
             Document::new(width.min(most), height.min(most)),
             DEFAULT_NAME.to_owned(),
@@ -1477,7 +1480,7 @@ impl CanvasSession {
     pub(crate) fn with_document(
         doc: Document,
         name: String,
-        pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
+        pixels: Vec<(make2d_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
         device::start_log();
         let shipped = library();
@@ -1536,7 +1539,7 @@ impl CanvasSession {
             plugin_opened: None,
             sound_heard: None,
             sound_hover: None,
-            input: procraft_engine::stroke::InputSettings::default(),
+            input: make2d_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,
             libraries: brush_libraries::Libraries::default(),
@@ -1581,6 +1584,7 @@ impl CanvasSession {
             display_scale: 2.0,
             interface_size: 1.0,
             grey_view: false,
+            timeline_track: None,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1595,7 +1599,7 @@ impl CanvasSession {
             revision: 0,
             transform: None,
             transform_items: None,
-            transform_mode: procraft_engine::transform::TransformMode::Freeform,
+            transform_mode: make2d_engine::transform::TransformMode::Freeform,
             interpolation: transform::Interpolation::Bilinear,
             transform_pixelated: false,
             selection_pixelated: false,
@@ -1688,7 +1692,7 @@ impl CanvasSession {
             }
             let shared = Arc::clone(&self.shared);
             let handle = std::thread::Builder::new()
-                .name("procraft-render".to_owned())
+                .name("make2d-render".to_owned())
                 .spawn(move || {
                     // a panic (in a driver's wrapper, say) leaves the canvas saying it can't draw
                     // rather than waiting on a thread that is gone
@@ -1696,7 +1700,7 @@ impl CanvasSession {
                     if let Err(panic) =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || render::run(run, native)))
                     {
-                        let reason = format!("the renderer stopped: {}", procraft_gpu::panic_message(panic.as_ref()));
+                        let reason = format!("the renderer stopped: {}", make2d_gpu::panic_message(panic.as_ref()));
                         log::error!("render thread: {reason}");
                         shared.lock().error = Some(reason);
                     }
@@ -1739,6 +1743,8 @@ impl CanvasSession {
 
     /// A stroke starts: `samples` are its first input.
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
+        // on a timeline, painting where the track has no drawing makes one
+        self.drawing_for_stroke();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         // a plugin's own artwork takes its strokes itself
@@ -1789,7 +1795,7 @@ impl CanvasSession {
             || st
                 .doc
                 .layer(current)
-                .is_none_or(|l| l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| l.kind == make2d_engine::document::LayerKind::Group || l.text.is_some())
         {
             return;
         }
@@ -1825,7 +1831,7 @@ impl CanvasSession {
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
         // how each builder is set up: all a stroke kept as a stroke is drawn again from, but its
         // input
-        let set_up = |st: &State, brush: Brush, diameter: f32, seed: u32| procraft_engine::vector::Setup {
+        let set_up = |st: &State, brush: Brush, diameter: f32, seed: u32| make2d_engine::vector::Setup {
             brush: Arc::new(brush),
             diameter,
             pointer: pointer.into(),
@@ -1835,7 +1841,7 @@ impl CanvasSession {
             view_turn: st.view.map_or(0.0, |v| v.rotation()),
             points_per_pixel: st.view.map_or(1.0, |v| v.zoom()) / st.display_scale,
         };
-        let make = |st: &State, setup: &procraft_engine::vector::Setup| {
+        let make = |st: &State, setup: &make2d_engine::vector::Setup| {
             let preview_tilt = setup.brush.setting("preview_tilt") >= 0.5;
             let mut builder = setup.builder();
             if st.pad_strokes.is_some() {

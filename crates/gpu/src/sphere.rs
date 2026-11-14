@@ -4,8 +4,8 @@
 
 use std::f32::consts::PI;
 
-use procraft_engine::environment::Equirect;
-use procraft_engine::textures::TEXTURE_SIZE;
+use make2d_engine::environment::Equirect;
+use make2d_engine::textures::TEXTURE_SIZE;
 
 use crate::lighting::{CUBE_LEVELS, Lighting};
 use crate::{Canvas, Gpu};

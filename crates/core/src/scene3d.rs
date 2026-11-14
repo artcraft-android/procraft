@@ -12,16 +12,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use procraft_engine::document::{Document, LayerId, LayerKind};
-use procraft_engine::geom::{IRect, Vec2};
-use procraft_engine::input::Sample;
-use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, SurfaceHit, read_obj};
-use procraft_engine::stroke::StrokeBuilder;
-use procraft_engine::studio::MAX_GRAIN_SCALE;
-use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
-use procraft_engine::view::View;
-use procraft_gpu::wgpu::util::DeviceExt as _;
-use procraft_gpu::{
+use make2d_engine::document::{Document, LayerId, LayerKind};
+use make2d_engine::geom::{IRect, Vec2};
+use make2d_engine::input::Sample;
+use make2d_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, SurfaceHit, read_obj};
+use make2d_engine::stroke::StrokeBuilder;
+use make2d_engine::studio::MAX_GRAIN_SCALE;
+use make2d_engine::usd::{read_usd, read_usdc, read_usdz};
+use make2d_engine::view::View;
+use make2d_gpu::wgpu::util::DeviceExt as _;
+use make2d_gpu::{
     Canvas, Gpu, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, SharedStroke, ShownSelection, StrokeStyle, StrokeTool,
     wgpu,
 };
@@ -309,7 +309,7 @@ fn is_model_name(name: &str) -> bool {
 /// The model in zip `bytes` (the first of those nearest its top), if it holds one and isn't a
 /// package of another kind (an artwork or brushes). Folders, and the hidden files another system
 /// adds when it zips (`__MACOSX/`, `._` files), are passed over.
-fn zipped_model_name(zip: &procraft_engine::zip::ZipReader<'_>) -> Option<String> {
+fn zipped_model_name(zip: &make2d_engine::zip::ZipReader<'_>) -> Option<String> {
     model_name_among(zip.names())
 }
 
@@ -336,7 +336,7 @@ pub(crate) fn model_name_among<'n>(names: impl Iterator<Item = &'n str>) -> Opti
 
 /// The model in a zip and the other files beside it (see [`zipped_model_name`]).
 fn unzip_model(bytes: &[u8]) -> Option<Zipped> {
-    let zip = procraft_engine::zip::ZipReader::new(bytes)?;
+    let zip = make2d_engine::zip::ZipReader::new(bytes)?;
     let name = zipped_model_name(&zip)?;
     let model = zip.read(&name)?;
     let folder = name.rsplit_once('/').map_or("", |(f, _)| f);
@@ -366,7 +366,7 @@ pub(crate) fn is_model_artwork<'n>(mut names: impl Iterator<Item = &'n str>) -> 
 }
 
 /// Every file under `dir` into `zip`, named by its path from `root`.
-fn zip_folder(zip: &mut procraft_engine::zip::ZipWriter, root: &Path, dir: &Path) -> std::io::Result<()> {
+fn zip_folder(zip: &mut make2d_engine::zip::ZipWriter, root: &Path, dir: &Path) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
@@ -384,7 +384,7 @@ fn zip_folder(zip: &mut procraft_engine::zip::ZipWriter, root: &Path, dir: &Path
 #[uniffi::export]
 pub fn unpack_model_artwork(path: String, dir: String) -> bool {
     let Ok(bytes) = fs::read(&path) else { return false };
-    let Some(zip) = procraft_engine::zip::ZipReader::new(&bytes) else { return false };
+    let Some(zip) = make2d_engine::zip::ZipReader::new(&bytes) else { return false };
     if !is_model_artwork(zip.names()) {
         return false;
     }
@@ -409,7 +409,7 @@ pub fn unpack_model_artwork(path: String, dir: String) -> bool {
 /// it holds none or is an artwork, a layered package or brushes.
 #[uniffi::export]
 pub fn zip_model_name(bytes: Vec<u8>) -> Option<String> {
-    zipped_model_name(&procraft_engine::zip::ZipReader::new(&bytes)?)
+    zipped_model_name(&make2d_engine::zip::ZipReader::new(&bytes)?)
 }
 
 /// Sets flag `index` of `flags`, `count` of them.
@@ -463,7 +463,7 @@ pub(crate) struct Scene {
     /// The current texture set is shown flat, as a canvas, in place of the model.
     flat: bool,
     /// An environment to light the model by, waiting for the next frame to be set up.
-    environment: Option<procraft_engine::environment::Equirect>,
+    environment: Option<make2d_engine::environment::Equirect>,
     /// The environment's name, kept with the model (none: the app's default).
     environment_name: Option<String>,
     /// How bright the light is taken (1 as it is; 0 to 5).
@@ -485,9 +485,9 @@ pub(crate) struct Scene {
     warnings: Vec<ModelWarning>,
     /// What fills and adjustments reach while meshes are picked: the meshes it was made for, and
     /// where they lie in the texture.
-    reach: Option<(Vec<usize>, procraft_engine::selection::Mask)>,
+    reach: Option<(Vec<usize>, make2d_engine::selection::Mask)>,
     /// The selection as it was before an adjustment was kept to the meshes picked.
-    held_selection: Option<Option<procraft_engine::selection::Mask>>,
+    held_selection: Option<Option<make2d_engine::selection::Mask>>,
     /// How the Reference window sees the model, from when it first has.
     reference_orbit: Option<Orbit>,
     /// The window as the eyedropper last saw it.
@@ -948,7 +948,7 @@ impl Scene {
 
     /// Where fills and adjustments stay on the current texture set while some of its meshes are
     /// picked, or locked or hidden; none while they reach all of it.
-    fn reach(&mut self) -> Option<procraft_engine::selection::Mask> {
+    fn reach(&mut self) -> Option<make2d_engine::selection::Mask> {
         let all: Vec<usize> =
             (0..self.mesh.submeshes.len()).filter(|&i| self.set_of(i) == Some(self.current)).collect();
         let mut picked: Vec<usize> = all.iter().copied().filter(|&i| self.mesh_painted(i)).collect();
@@ -959,7 +959,7 @@ impl Scene {
         if self.reach.as_ref().is_none_or(|(made, _)| *made != picked) {
             let side = self.texture_size;
             let data = self.mesh.submesh_coverage(&picked, side as usize, REACH_GROWN);
-            self.reach = Some((picked, procraft_engine::selection::Mask { width: side, height: side, data }));
+            self.reach = Some((picked, make2d_engine::selection::Mask { width: side, height: side, data }));
         }
         self.reach.as_ref().map(|(_, m)| m.clone())
     }
@@ -1266,7 +1266,7 @@ impl CanvasSession {
     /// Lights the model by the environment `name` whose panorama is `hdr` (a Radiance `.hdr`)
     /// and shows it behind the model; false if it can't be read.
     pub fn set_model_environment(&self, name: String, hdr: Vec<u8>) -> bool {
-        let Some(panorama) = procraft_engine::environment::read_hdr(&hdr) else { return false };
+        let Some(panorama) = make2d_engine::environment::read_hdr(&hdr) else { return false };
         let mut st = self.shared.lock();
         let Some(scene) = st.scene.as_mut() else { return false };
         scene.environment = Some(panorama);
@@ -1421,7 +1421,7 @@ impl CanvasSession {
         let Some(scene) = st.scene.as_mut() else { return Vec::new() };
         let picked = std::mem::take(&mut scene.picked);
         let zip = (scene.source.extension == "usdz")
-            .then(|| procraft_engine::zip::ZipReader::new(&scene.source.bytes))
+            .then(|| make2d_engine::zip::ZipReader::new(&scene.source.bytes))
             .flatten();
         let found = |path: &str| match &zip {
             Some(zip) => packed_file(zip, path),
@@ -1854,12 +1854,12 @@ impl CanvasSession {
         let files = self.model_files()?;
         let base = &files.base;
         let materials: Vec<(&str, &PartImages)> = files.names.iter().map(String::as_str).zip(&files.images).collect();
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         zip.add(
             &format!("{base}.obj"),
-            procraft_engine::mesh::write_obj(&files.mesh, &format!("{base}.mtl"), &files.names).as_bytes(),
+            make2d_engine::mesh::write_obj(&files.mesh, &format!("{base}.mtl"), &files.names).as_bytes(),
         );
-        zip.add(&format!("{base}.mtl"), procraft_engine::mesh::write_mtl(&materials).as_bytes());
+        zip.add(&format!("{base}.mtl"), make2d_engine::mesh::write_mtl(&materials).as_bytes());
         for (file, png) in files.images.iter().flat_map(PartImages::files) {
             zip.add(file, png);
         }
@@ -1873,7 +1873,7 @@ impl CanvasSession {
     pub fn export_model_artwork(&self, dir: String, path: String) -> Result<(), MobileError> {
         self.save(dir.clone())?;
         let root = Path::new(&dir);
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         zip_folder(&mut zip, root, root).map_err(|e| file_error("saving", e))?;
         let bytes = zip.finish();
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))
@@ -1898,10 +1898,10 @@ impl CanvasSession {
                 [png(colour), png(&both), map(normal), map(occlusion)]
             })
             .collect();
-        let parts: Vec<procraft_engine::gltf::GlbPart<'_>> = names
+        let parts: Vec<make2d_engine::gltf::GlbPart<'_>> = names
             .iter()
             .zip(&encoded)
-            .map(|(name, [colour, both, normal, occlusion])| procraft_engine::gltf::GlbPart {
+            .map(|(name, [colour, both, normal, occlusion])| make2d_engine::gltf::GlbPart {
                 name,
                 color: colour,
                 metallic_roughness: both,
@@ -1909,7 +1909,7 @@ impl CanvasSession {
                 occlusion: (!occlusion.is_empty()).then_some(occlusion.as_slice()),
             })
             .collect();
-        let bytes = procraft_engine::gltf::write_glb(&mesh, &parts);
+        let bytes = make2d_engine::gltf::write_glb(&mesh, &parts);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
 
@@ -1917,7 +1917,7 @@ impl CanvasSession {
     /// for each texture set, reading its images (as for [`CanvasSession::export_model_obj`]).
     pub fn export_model_usdz(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
-        let bytes = procraft_engine::usd::write_usdz(&files.mesh, &files.images);
+        let bytes = make2d_engine::usd::write_usdz(&files.mesh, &files.images);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
 }
@@ -1959,14 +1959,14 @@ impl CanvasSession {
     pub fn export_model_jpeg(&self, path: String) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(false)?;
         let rgb = crate::project::onto_white(&crate::project::straight_alpha(&rgba));
-        let bytes = procraft_engine::jpeg::encode(&rgb, w, h, crate::project::JPEG_QUALITY);
+        let bytes = make2d_engine::jpeg::encode(&rgb, w, h, crate::project::JPEG_QUALITY);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
     }
 
     /// The model as the window shows it, on the canvas's surround, as a TIFF at `path`.
     pub fn export_model_tiff(&self, path: String) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(false)?;
-        let bytes = procraft_engine::formats::tiff(w, h, 72.0, &[], &rgba);
+        let bytes = make2d_engine::formats::tiff(w, h, 72.0, &[], &rgba);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
     }
 }
@@ -2077,14 +2077,14 @@ impl CanvasSession {
     ) -> Result<(), MobileError> {
         let count = turntable_frames(turntable, fps);
         let delay = (100.0 / fps.clamp(1.0, 100.0)).round() as u16;
-        let mut gif: Option<procraft_engine::formats::GifWriter> = None;
+        let mut gif: Option<make2d_engine::formats::GifWriter> = None;
         // the frames made take it to 0.95, the file written to 1
         self.exported(0.0);
         for i in 0..count {
             let t = self
                 .model_turntable_picture(i, count, turntable, width, height, false)
                 .ok_or_else(|| file_error("saving", "the model is not shown yet"))?;
-            gif.get_or_insert_with(|| procraft_engine::formats::GifWriter::new(t.width, t.height)).frame(
+            gif.get_or_insert_with(|| make2d_engine::formats::GifWriter::new(t.width, t.height)).frame(
                 &t.rgba,
                 delay.max(1),
                 true,
@@ -2249,12 +2249,12 @@ fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -
 
 /// A file packed in a USDZ by the path its layer gives (relative to the package; `./` and folders
 /// allowed for), else by its name alone.
-fn packed_file(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<Vec<u8>> {
+fn packed_file(zip: &make2d_engine::zip::ZipReader<'_>, path: &str) -> Option<Vec<u8>> {
     zip.read(&packed_name(zip, path)?)
 }
 
 /// The entry [`packed_file`] reads for `path`, if there is one.
-fn packed_name(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<String> {
+fn packed_name(zip: &make2d_engine::zip::ZipReader<'_>, path: &str) -> Option<String> {
     let path = path.trim_start_matches("./");
     if zip.names().any(|n| n == path) {
         return Some(path.to_owned());
@@ -2431,7 +2431,7 @@ pub(crate) struct ModelSnapshot {
 pub(crate) type SavedSets = HashMap<(usize, usize, LayerId), u64>;
 
 /// A waiting texture set's layers' pixels: read from its canvas, or as opened if not drawn yet.
-fn set_pixels(set: &mut TextureSet, gpu: Option<&procraft_gpu::Gpu>) -> Result<Pixels, MobileError> {
+fn set_pixels(set: &mut TextureSet, gpu: Option<&make2d_gpu::Gpu>) -> Result<Pixels, MobileError> {
     match (set.canvas.as_mut(), gpu) {
         (Some(canvas), Some(gpu)) => {
             canvas.render(gpu, &mut set.doc, None);
@@ -2697,14 +2697,13 @@ impl Scene {
     /// Whether the model brings an image for each part's colour: a USDZ's packed one, or one
     /// picked or zipped with it, that its material maps.
     fn brings_colour(&self) -> Vec<bool> {
-        let zip = (self.source.extension == "usdz")
-            .then(|| procraft_engine::zip::ZipReader::new(&self.source.bytes))
-            .flatten();
+        let zip =
+            (self.source.extension == "usdz").then(|| make2d_engine::zip::ZipReader::new(&self.source.bytes)).flatten();
         let found = |path: &str| match &zip {
             Some(zip) => packed_name(zip, path).is_some(),
             None => companion(&self.picked, path).is_some(),
         };
-        let material = |p: &procraft_engine::mesh::Part| self.mesh.materials.iter().find(|m| m.name == p.material);
+        let material = |p: &make2d_engine::mesh::Part| self.mesh.materials.iter().find(|m| m.name == p.material);
         self.mesh.parts.iter().map(|p| material(p).and_then(|m| m.color_map.as_deref()).is_some_and(found)).collect()
     }
 
@@ -3008,7 +3007,7 @@ impl State {
     }
 
     /// The selection as fills take it: on a model, kept to the meshes picked.
-    pub(crate) fn reach_selection(&mut self) -> Option<procraft_engine::selection::Mask> {
+    pub(crate) fn reach_selection(&mut self) -> Option<make2d_engine::selection::Mask> {
         let selection = self.selection.clone();
         let Some(reach) = self.scene.as_mut().and_then(Scene::reach) else { return selection };
         let Some(mut within) = selection else { return Some(reach) };
@@ -3045,7 +3044,7 @@ impl State {
     }
 
     /// How the selection shows on the model from now on, if there is one.
-    pub(crate) fn scene_selection_look(&mut self, look: Option<procraft_gpu::SelectionLook>) {
+    pub(crate) fn scene_selection_look(&mut self, look: Option<make2d_gpu::SelectionLook>) {
         let mask = self.canvas.as_ref().and_then(Canvas::selection_view).cloned();
         let Some(scene) = self.scene.as_mut() else { return };
         let part = scene.current;
@@ -3055,9 +3054,9 @@ impl State {
 
     /// The window polygon `window` carried onto the texture set painted on, as a selection: its
     /// surfaces under it nearest the camera, or with X-Ray all of them.
-    pub(crate) fn scene_mask(&mut self, window: &[Vec2]) -> Option<procraft_engine::selection::Mask> {
+    pub(crate) fn scene_mask(&mut self, window: &[Vec2]) -> Option<make2d_engine::selection::Mask> {
         let size = self.window_size;
-        let shape = procraft_engine::selection::Mask::polygon(size.0, size.1, window);
+        let shape = make2d_engine::selection::Mask::polygon(size.0, size.1, window);
         let x_ray = self.x_ray;
         let gpu = self.gpu.as_ref()?;
         let scene = self.scene.as_mut()?;
@@ -3068,7 +3067,7 @@ impl State {
         let data = view.project_coverage(gpu, part, &shape.data, size.0, size.1);
         view.paint_through = through;
         match data {
-            Ok(data) => Some(procraft_engine::selection::Mask { width: side, height: side, data }),
+            Ok(data) => Some(make2d_engine::selection::Mask { width: side, height: side, data }),
             Err(e) => {
                 log::error!("a selection on the model: {e}");
                 None
@@ -3185,8 +3184,8 @@ impl State {
         let mut canvas_style = style;
         if grain.is_some() {
             canvas_style.grain = Some(0);
-            canvas_style.grain_mode = procraft_engine::brush::GrainMode::Texturized;
-        } else if canvas_style.grain_mode == procraft_engine::brush::GrainMode::Texturized {
+            canvas_style.grain_mode = make2d_engine::brush::GrainMode::Texturized;
+        } else if canvas_style.grain_mode == make2d_engine::brush::GrainMode::Texturized {
             canvas_style.grain = None;
         }
         // a stroke changing what's under it works on the layer as the camera sees it, there
@@ -3223,7 +3222,7 @@ impl State {
     /// A stroke on a part's colour paints its roughness and metalness too, on the same layer and
     /// with the same coverage: the brush's amount of each through its source (an eraser takes
     /// all three away). A stroke on one of those channels paints only it.
-    fn begin_material_strokes(&mut self, brush: &procraft_engine::brush::Brush, style: StrokeStyle, layer: LayerId) {
+    fn begin_material_strokes(&mut self, brush: &make2d_engine::brush::Brush, style: StrokeStyle, layer: LayerId) {
         let structure = self.doc.clone();
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
         scene.material_paint = None;
@@ -3266,7 +3265,7 @@ impl State {
             let cached = scene.material_sources.get(k).and_then(|c| c.as_ref()).map(|(key, _)| *key);
             if key.is_some() && cached != key {
                 let made = crate::brush_files::material_pixels(source).and_then(|pixels| {
-                    procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels)
+                    make2d_gpu::material_source(gpu, make2d_engine::textures::TEXTURE_SIZE as u32, &pixels)
                 });
                 if let Some(slot) = scene.material_sources.get_mut(k) {
                     *slot = key.zip(made);
@@ -3428,7 +3427,7 @@ impl State {
                     .and_then(Option::as_ref)
                     .filter(|(key, _)| Some(*key) == look.source)
                     .map(|(_, view)| view);
-                let look = procraft_gpu::MaterialLook {
+                let look = make2d_gpu::MaterialLook {
                     amount: look.amount,
                     source,
                     tile: look.tile,
@@ -3612,8 +3611,7 @@ impl State {
         if !scene.surface_shown {
             let side = scene.texture_size;
             for (part, maps) in scene.surface_maps.iter().enumerate() {
-                for (map, kind) in
-                    maps.iter().zip([procraft_gpu::SurfaceMap::Normal, procraft_gpu::SurfaceMap::Occlusion])
+                for (map, kind) in maps.iter().zip([make2d_gpu::SurfaceMap::Normal, make2d_gpu::SurfaceMap::Occlusion])
                 {
                     view.set_surface_map(gpu, part, kind, map.as_deref().map(|m| (side, m.as_slice())));
                 }
@@ -3636,7 +3634,7 @@ impl State {
         // frosted panels over the model: it drawn again, small, and blurred under each
         let glass = !self.backdrops.is_empty() || !self.backdrop_windows.is_empty();
         if let Some(canvas) = self.canvas.as_mut().filter(|_| glass) {
-            let backdrop = procraft_gpu::Backdrop {
+            let backdrop = make2d_gpu::Backdrop {
                 regions: &self.backdrops,
                 windows: &self.backdrop_windows,
                 sigma: crate::BACKDROP_SIGMA_PT * self.display_scale,
@@ -3655,21 +3653,21 @@ impl State {
 fn stroke_grain(
     gpu: &Gpu,
     scene: &mut Scene,
-    brush: &procraft_engine::brush::Brush,
+    brush: &make2d_engine::brush::Brush,
     tile: f32,
 ) -> Option<wgpu::TextureView> {
     let g = &brush.grain;
-    if g.mode != procraft_engine::brush::GrainMode::Texturized || g.depth <= 0.0 {
+    if g.mode != make2d_engine::brush::GrainMode::Texturized || g.depth <= 0.0 {
         return None;
     }
     let key = g.source.as_ref().map(|s| s.id).or_else(|| g.image.map(|i| (1 << 63) | u64::from(i)))?;
     if scene.grain_source.as_ref().map(|(k, _)| *k) != Some(key) {
         let pixels = crate::brush_files::grain_pixels(brush)?;
-        let made = procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels);
+        let made = make2d_gpu::material_source(gpu, make2d_engine::textures::TEXTURE_SIZE as u32, &pixels);
         scene.grain_source = made.map(|v| (key, v));
     }
     let source = scene.grain_source.as_ref().map(|(_, v)| v)?;
-    let look = procraft_gpu::GrainLook {
+    let look = make2d_gpu::GrainLook {
         source,
         tile: tile.max(1.0),
         follows_camera: brush.setting("grain_follows_camera") >= 0.5,
@@ -3697,7 +3695,7 @@ fn window_samples(samples: &[PenSample]) -> Vec<Sample> {
 }
 
 /// The pixels stamps can touch.
-fn bounds_of(stamps: &[procraft_engine::stroke::Stamp]) -> IRect {
+fn bounds_of(stamps: &[make2d_engine::stroke::Stamp]) -> IRect {
     stamps.iter().fold(IRect::EMPTY, |r, s| r.union(IRect::around(s.center, s.radius * std::f32::consts::SQRT_2)))
 }
 
@@ -3861,7 +3859,7 @@ pub fn model_warning_name(warning: ModelWarning) -> String {
 
 #[cfg(test)]
 mod tests {
-    use procraft_gpu::{Gpu, wgpu};
+    use make2d_gpu::{Gpu, wgpu};
 
     use super::ModelFile;
     use crate::{CanvasSession, PenSample, PointerKind};
@@ -3915,7 +3913,7 @@ mod tests {
         st.render_scene(&view, format, (side, side), None);
         let gpu = st.gpu.as_ref().unwrap();
         assert_eq!(gpu.errors(), 0, "GPU validation errors");
-        procraft_gpu::read_texture(gpu, &target, side, side).unwrap()
+        make2d_gpu::read_texture(gpu, &target, side, side).unwrap()
     }
 
     #[test]
@@ -3976,8 +3974,8 @@ mod tests {
             st.ensure_canvas();
         }
         // lit by an environment, shown behind it (set up on the next frame)
-        let sky = procraft_engine::environment::Equirect::uniform([0.8, 0.9, 1.0]);
-        assert!(s.set_model_environment("sky".into(), procraft_engine::environment::write_hdr(&sky)));
+        let sky = make2d_engine::environment::Equirect::uniform([0.8, 0.9, 1.0]);
+        assert!(s.set_model_environment("sky".into(), make2d_engine::environment::write_hdr(&sky)));
         assert!(!s.set_model_environment("bad".into(), b"not a picture".to_vec()));
         assert_eq!(s.model_environment().as_deref(), Some("sky"));
         frame(&s, 200);
@@ -4391,7 +4389,7 @@ mod tests {
         assert_eq!(opened.submeshes_locked(), [false, true]);
         assert_eq!(painted_halves(&opened), painted);
         // a file that isn't one is left alone, and nothing leaves the folder given
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         zip.add("artwork.json", b"{}");
         zip.add("model.obj", b"");
         zip.add("../outside.txt", b"x");
@@ -4597,7 +4595,7 @@ mod tests {
         let plain = frame_pixels(&s, 200);
         {
             let mut guard = s.shared.lock();
-            guard.scene_selection_look(Some(procraft_gpu::SelectionLook::Fill([1.0, 0.0, 0.0])));
+            guard.scene_selection_look(Some(make2d_gpu::SelectionLook::Fill([1.0, 0.0, 0.0])));
         }
         let covered = frame_pixels(&s, 200);
         let at = |p: &[u8], x: usize, y: usize| p[(y * 200 + x) * 4..][..3].to_vec();
@@ -5019,7 +5017,7 @@ mod tests {
 
     /// A zip of `files` (name, contents), in order.
     fn zipped(files: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         for (name, bytes) in files {
             zip.add(name, bytes);
         }
@@ -5241,7 +5239,7 @@ f 1/1 2/2",
         let path = std::env::temp_dir().join(format!("procraft-obj-{}.zip", std::process::id()));
         s.export_model_obj(path.to_string_lossy().into_owned()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
+        let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
         let mut names: Vec<&str> = zip.names().collect();
         names.sort_unstable();
         assert_eq!(
@@ -5259,7 +5257,7 @@ f 1/1 2/2",
         );
         let obj = String::from_utf8(zip.read("Two_cubes.obj").unwrap()).unwrap();
         let mtl = String::from_utf8(zip.read("Two_cubes.mtl").unwrap()).unwrap();
-        let mesh = procraft_engine::mesh::read_obj(&obj, Some(&mtl)).unwrap();
+        let mesh = make2d_engine::mesh::read_obj(&obj, Some(&mtl)).unwrap();
         assert_eq!(mesh.triangles.len(), 12);
         assert_eq!(mesh.materials[1].color_map.as_deref(), Some("side_wall-color.png"));
         assert_eq!(mesh.materials[1].roughness_map.as_deref(), Some("side_wall-roughness.png"));
@@ -5308,7 +5306,7 @@ f 1/1 2/2",
         // as a USDZ: the layer and both sets' images
         s.export_model_usdz(path.to_string_lossy().into_owned()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
+        let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
         assert_eq!(
             zip.names().collect::<Vec<_>>(),
             [
@@ -5357,7 +5355,7 @@ f 1/1 2/2",
                 }
             }
         }
-        (procraft_gpu::textures_bytes(&all) - history, history, [pair[0].is_some(), pair[1].is_some()])
+        (make2d_gpu::textures_bytes(&all) - history, history, [pair[0].is_some(), pair[1].is_some()])
     }
 
     #[test]
@@ -5485,7 +5483,7 @@ f 1/1 2/2",
         let obj = dir.join("cube.zip");
         s.export_model_obj(obj.to_string_lossy().into_owned()).unwrap();
         let bytes = std::fs::read(&obj).unwrap();
-        let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
+        let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
         assert!(zip.read(&format!("{set}-normal.png")).is_some());
         assert!(zip.read(&format!("{set}-ambient_occlusion.png")).is_some());
         let mtl = String::from_utf8(zip.read("Cube.mtl").unwrap()).unwrap();
@@ -5589,7 +5587,7 @@ f 1/1 2/2",
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!s.paint_through());
         s.set_paint_through(true);
-        let sky = procraft_engine::environment::write_hdr(&procraft_engine::environment::Equirect::uniform([0.5; 3]));
+        let sky = make2d_engine::environment::write_hdr(&make2d_engine::environment::Equirect::uniform([0.5; 3]));
         assert!(s.set_model_environment("coast".into(), sky));
         assert_eq!(s.model_exposure(), 1.0);
         s.set_model_exposure(9.0);

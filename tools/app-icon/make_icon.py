@@ -1,4 +1,4 @@
-"""Draws ProCraft's app icon, a paintbrush in a warm-to-cool blend on black, and writes every size
+"""Draws Make2D's app icon, a paintbrush in a warm-to-cool blend on black, and writes every size
 the app and the repository use. Needs Pillow. Run from anywhere:
 
     python tools/app-icon/make_icon.py

@@ -1,14 +1,14 @@
 //! Vector layers shared with other programs: sent out as an SVG picture or a PDF page of shapes
-//! (`procraft_engine::vector_export`), and an SVG picture taken in as a vector layer of strokes
+//! (`make2d_engine::vector_export`), and an SVG picture taken in as a vector layer of strokes
 //! and fills.
 
 use std::sync::Arc;
 
-use procraft_engine::brush::{Brush, Taper};
-use procraft_engine::geom::Vec2;
-use procraft_engine::input::{Pointer, Sample};
-use procraft_engine::vector::{FillMode, Ink, Setup, VectorContent, VectorFill, VectorStroke};
-use procraft_engine::vector_export::{self, Picture};
+use make2d_engine::brush::{Brush, Taper};
+use make2d_engine::geom::Vec2;
+use make2d_engine::input::{Pointer, Sample};
+use make2d_engine::vector::{FillMode, Ink, Setup, VectorContent, VectorFill, VectorStroke};
+use make2d_engine::vector_export::{self, Picture};
 
 use crate::{CanvasSession, MobileError, State};
 
@@ -204,15 +204,19 @@ impl Reading {
 
 /// Colours moved from one profile to another.
 struct ColourWay {
-    from: Arc<procraft_engine::cms::IccProfile>,
-    to: Arc<procraft_engine::cms::IccProfile>,
+    from: Arc<make2d_engine::cms::IccProfile>,
+    to: Arc<make2d_engine::cms::IccProfile>,
 }
 
 impl ColourWay {
     fn convert(&self, colour: [f32; 3]) -> [f32; 3] {
         let device = colour.map(|c| f64::from(c.clamp(0.0, 1.0)));
         let out = self.from.convert(&device, &self.to);
-        std::array::from_fn(|i| out.get(i).map_or(colour[i], |&c| (c as f32).clamp(0.0, 1.0)))
+        let mut converted = colour;
+        for (c, o) in converted.iter_mut().zip(&out) {
+            *c = (*o as f32).clamp(0.0, 1.0);
+        }
+        converted
     }
 }
 
@@ -261,11 +265,11 @@ impl State {
     /// How colours go between the canvas's profile and sRGB: into the canvas's (`into`) or out
     /// of it. None if the canvas is in sRGB itself, so they stay as they are.
     fn colour_way(&self, into: bool) -> Option<ColourWay> {
-        use procraft_engine::profile::Profile;
+        use make2d_engine::profile::Profile;
         if self.doc.icc.is_none() && self.doc.profile == Profile::Srgb {
             return None;
         }
-        let (canvas, srgb) = (self.doc.rgb_profile(), procraft_engine::cms::builtin(Profile::Srgb));
+        let (canvas, srgb) = (self.doc.rgb_profile(), make2d_engine::cms::builtin(Profile::Srgb));
         Some(if into { ColourWay { from: srgb, to: canvas } } else { ColourWay { from: canvas, to: srgb } })
     }
 
@@ -332,7 +336,7 @@ impl CanvasSession {
     }
 
     /// The artwork's vector layers written to `path` as a one-page PDF of shapes (see
-    /// `procraft_engine::vector_export`): the page the canvas's size, each stroke and fill a shape
+    /// `make2d_engine::vector_export`): the page the canvas's size, each stroke and fill a shape
     /// a program that edits such things can take hold of. Layers of pixels are not in it.
     pub fn export_vector_pdf(&self, path: String) -> Result<(), MobileError> {
         let picture = {

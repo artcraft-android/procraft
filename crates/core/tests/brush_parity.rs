@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, PenSample, PointerKind};
+use make2d_core::{CanvasSession, PenSample, PointerKind};
 
 fn session() -> Option<Arc<CanvasSession>> {
     let s = CanvasSession::new(256, 256);

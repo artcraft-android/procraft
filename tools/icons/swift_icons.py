@@ -1,4 +1,4 @@
-"""Writes the iPad app's icon table (ios/ProCraft/Icons.swift) from the desktop app's
+"""Writes the iPad app's icon table (ios/Make2D/Icons.swift) from the desktop app's
 (desktop/src/icons.rs, itself written from the Android app's ui/Icons.kt), so all three show the
 same icons.
 
@@ -10,7 +10,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUST = os.path.join(ROOT, "desktop/src/icons.rs")
-SWIFT = os.path.join(ROOT, "ios/ProCraft/Icons.swift")
+SWIFT = os.path.join(ROOT, "ios/Make2D/Icons.swift")
 
 ICON = re.compile(r'Icon \{ name: "([^"]+)", width: ([0-9.]+), height: ([0-9.]+), parts: &\[(.*?)\] \}', re.S)
 PART = re.compile(r'Part \{ d: "([^"]*)", stroke: ([0-9.]+), fill: (true|false), even_odd: (true|false) \}')

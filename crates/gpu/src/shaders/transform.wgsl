@@ -69,7 +69,7 @@ fn same(a: vec4<f32>, b: vec4<f32>) -> bool {
     return all(abs(a - b) < vec4<f32>(0.002));
 }
 
-// Scale2x's rule (procraft_engine::pixel::grown): the quarter q (0 or 1 across and down) of pixel
+// Scale2x's rule (make2d_engine::pixel::grown): the quarter q (0 or 1 across and down) of pixel
 // p between a above it, b to its right, c to its left and d below. A corner takes a neighbour's
 // colour where the two neighbours beside it are alike and unlike those across from them.
 fn quarter(p: vec4<f32>, a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32>, q: vec2<i32>) -> vec4<f32> {

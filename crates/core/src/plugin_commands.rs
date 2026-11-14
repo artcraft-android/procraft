@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use procraft_engine::document::{LayerId, LayerKind};
-use procraft_engine::geom::IRect;
+use make2d_engine::document::{LayerId, LayerKind};
+use make2d_engine::geom::IRect;
 use wasmi::{Caller, Extern, Linker, Memory, Module, StoreLimits, ValType};
 
 use crate::CanvasSession;

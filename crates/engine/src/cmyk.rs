@@ -1,4 +1,4 @@
-//! ProCraft's own CMYK profile, made here: a press printing on coated paper, modelled from the
+//! Make2D's own CMYK profile, made here: a press printing on coated paper, modelled from the
 //! colours of its inks and their overprints, written as an ICC version 2 output profile with
 //! 16-bit tables (the same tables for every rendering intent).
 //!
@@ -402,7 +402,7 @@ mod tests {
     use crate::profile::Profile;
 
     /// Writes the profile to the file in `PROCRAFT_CMYK`, for trying in other colour programs:
-    /// `cargo test -p procraft-engine write_cmyk -- --ignored`.
+    /// `cargo test -p make2d-engine write_cmyk -- --ignored`.
     #[test]
     #[ignore]
     fn write_cmyk() {

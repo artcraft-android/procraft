@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use procraft_engine::brush::Brush;
+use make2d_engine::brush::Brush;
 
 use crate::brush_library::{LibrarySet, library_writes};
 use crate::layers::ThumbnailImage;

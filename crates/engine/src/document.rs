@@ -464,6 +464,10 @@ pub struct Document {
     /// Animation Assist's settings while it is on.
     #[serde(default, deserialize_with = "or_default")]
     pub animation: Option<crate::animation::Animation>,
+    /// Its timeline, if it is animated on one (which takes over from Animation Assist): tracks of
+    /// clips, each drawing one of the top-level layers or groups. None: a still canvas.
+    #[serde(default, deserialize_with = "or_default", skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<crate::timeline::Timeline>,
     /// The colour profile its pixels and colours are in.
     #[serde(default, deserialize_with = "or_default")]
     pub profile: crate::profile::Profile,
@@ -557,6 +561,7 @@ impl Document {
             guide: crate::guide::Guide::new(width.clamp(1, MAX_CANVAS_EDGE), height.clamp(1, MAX_CANVAS_EDGE)),
             dpi: default_dpi(),
             animation: None,
+            timeline: None,
             profile: crate::profile::Profile::Srgb,
             icc: None,
             solo: None,
@@ -1763,6 +1768,8 @@ impl Document {
         }
         let (current, ids): (LayerId, Vec<LayerId>) = (self.current, self.layers.iter().map(|l| l.id).collect());
         self.picked.retain(|p| *p != current && ids.contains(p));
+        let top = self.members(None);
+        self.timeline = self.timeline.take().map(|t| t.repaired(&top));
         self
     }
 

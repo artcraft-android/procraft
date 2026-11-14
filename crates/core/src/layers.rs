@@ -1,7 +1,7 @@
 //! Layers: the list the layers panel shows and every change to it, each one undoable. A slider
 //! drag (opacity, background colour) is one undo step from where it began to `done`.
 
-use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
+use make2d_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
 
 use crate::CanvasSession;
 
@@ -129,7 +129,7 @@ pub struct LayerOptionRow {
 
 /// What locking (`on`) or unlocking layer `id` is called (see [`CanvasSession::lock_said`]).
 fn lock_name(d: &Document, id: LayerId, on: bool) -> &'static str {
-    let by_group = |l: &procraft_engine::document::Layer| !on && !l.locked && !d.locked_groups(id).is_empty();
+    let by_group = |l: &make2d_engine::document::Layer| !on && !l.locked && !d.locked_groups(id).is_empty();
     let group = d.layer(id).is_some_and(|l| l.kind == LayerKind::Group || by_group(l));
     match (on, group) {
         (true, false) => "Lock layer",
@@ -239,14 +239,14 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
 /// The memory layers may take on this device, bytes: it sets how many layers a canvas holds.
 #[uniffi::export]
 pub fn set_layer_budget(bytes: u64) {
-    procraft_engine::document::set_layer_budget(bytes);
+    make2d_engine::document::set_layer_budget(bytes);
 }
 
 /// How many layers a canvas `width` × `height` holds on this device (Custom Canvas's Maximum
 /// Layers).
 #[uniffi::export]
 pub fn layers_for(width: u32, height: u32) -> u32 {
-    u32::try_from(procraft_engine::document::layer_cap_for(width, height)).unwrap_or(u32::MAX)
+    u32::try_from(make2d_engine::document::layer_cap_for(width, height)).unwrap_or(u32::MAX)
 }
 
 /// What the layers' textures may take on this device, bytes: past it, layers not worked on are
@@ -281,7 +281,7 @@ pub struct LayerStats {
 /// The sRGB colour profile (ICC), as palette files carry it with their colours.
 #[uniffi::export]
 pub fn srgb_profile() -> Vec<u8> {
-    procraft_engine::icc::icc(procraft_engine::profile::Profile::Srgb)
+    make2d_engine::icc::icc(make2d_engine::profile::Profile::Srgb)
 }
 
 /// The layer blend modes in the order the panel lists them.
@@ -293,7 +293,7 @@ pub fn blend_modes() -> Vec<BlendModeInfo> {
 /// The modes a brush and its burnt edges blend by, in the order the studio lists them.
 #[uniffi::export]
 pub fn brush_blend_modes() -> Vec<BlendModeInfo> {
-    procraft_engine::brush::brush_blends()
+    make2d_engine::brush::brush_blends()
         .into_iter()
         .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
         .collect()
@@ -302,7 +302,7 @@ pub fn brush_blend_modes() -> Vec<BlendModeInfo> {
 /// The modes a dual brush's two strokes combine by, in the order the studio lists them.
 #[uniffi::export]
 pub fn combine_blend_modes() -> Vec<BlendModeInfo> {
-    procraft_engine::brush::combine_modes()
+    make2d_engine::brush::combine_modes()
         .into_iter()
         .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
         .collect()
@@ -311,7 +311,7 @@ pub fn combine_blend_modes() -> Vec<BlendModeInfo> {
 /// The modes a brush's grain blends by, in the order the studio lists them.
 #[uniffi::export]
 pub fn grain_blend_modes() -> Vec<BlendModeInfo> {
-    procraft_engine::brush::grain_blends()
+    make2d_engine::brush::grain_blends()
         .into_iter()
         .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
         .collect()
@@ -454,7 +454,7 @@ impl CanvasSession {
             }
             let pages = d.animation.as_ref().is_some_and(|a| a.pages);
             let id = d.add_layer();
-            let n = procraft_engine::animation::frames(d).len();
+            let n = make2d_engine::animation::frames(d).len();
             d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
             Some(id.0)
         })
@@ -477,6 +477,10 @@ impl CanvasSession {
                 d.set_current(id).then_some(())
             })
             .is_some();
+        // on a timeline, the playhead follows the layer to its drawing
+        if ok {
+            self.follow_layer();
+        }
         // the onion skins follow the current frame
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -762,7 +766,7 @@ impl CanvasSession {
         let before = st.doc.clone();
         // a layer changes the one below only where it is painted: only that much is kept for undo
         // (none at all for an empty one), not a copy of the whole of it
-        let within = st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0));
+        let within = st.painted_box(upper).unwrap_or(make2d_engine::geom::IRect::new(0, 0, 0, 0));
         if let Some(canvas) = st.canvas.as_mut() {
             // each mask applied to its layer first, as one step; a hidden layer below gives up
             // what it holds (the merge keeps what showed)
@@ -965,8 +969,8 @@ impl CanvasSession {
         // each read started under the lock and waited for once it is let go, so touches and
         // frames go on meanwhile (thumbnails are read after every change while Layers is open)
         let id = LayerId(id);
-        let no_canvas = || procraft_gpu::GpuError::Readback("no canvas".into());
-        let read = || -> Result<procraft_gpu::Thumbnail, procraft_gpu::GpuError> {
+        let no_canvas = || make2d_gpu::GpuError::Readback("no canvas".into());
+        let read = || -> Result<make2d_gpu::Thumbnail, make2d_gpu::GpuError> {
             let first = {
                 let mut guard = self.shared.lock();
                 let st = &mut *guard;
@@ -974,8 +978,8 @@ impl CanvasSession {
                 canvas.start_layer_thumbnail(gpu, &mut st.doc, id, max_side)?
             };
             let (coarse, mask) = match first {
-                procraft_gpu::LayerThumbnailStep::Ready(t) => return Ok(t),
-                procraft_gpu::LayerThumbnailStep::Coarse { pending, mask } => (pending.pixels()?, mask),
+                make2d_gpu::LayerThumbnailStep::Ready(t) => return Ok(t),
+                make2d_gpu::LayerThumbnailStep::Coarse { pending, mask } => (pending.pixels()?, mask),
             };
             let fine = {
                 let mut guard = self.shared.lock();
@@ -996,7 +1000,7 @@ impl CanvasSession {
 }
 
 /// Whether layer `id` exists and `differs` holds for it.
-fn changed(d: &Document, id: u64, differs: impl FnOnce(&procraft_engine::document::Layer) -> bool) -> bool {
+fn changed(d: &Document, id: u64, differs: impl FnOnce(&make2d_engine::document::Layer) -> bool) -> bool {
     d.layer(LayerId(id)).is_some_and(differs)
 }
 
@@ -1085,7 +1089,7 @@ impl CanvasSession {
             (Some(canvas), Some(gpu)) => canvas
                 .painted_boxes_or_why(gpu, &painted)
                 .into_iter()
-                .try_fold(procraft_engine::geom::IRect::new(0, 0, 0, 0), |all, b| {
+                .try_fold(make2d_engine::geom::IRect::new(0, 0, 0, 0), |all, b| {
                     b.ok().map(|b| b.map_or(all, |b| if all.is_empty() { b } else { all.union(b) }))
                 }),
             _ => None,

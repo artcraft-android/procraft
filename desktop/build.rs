@@ -1,4 +1,4 @@
-//! The desktop app's version is the Android app's (procraft.version in android/gradle.properties,
+//! The desktop app's version is the Android app's (make2d.version in android/gradle.properties,
 //! the one number a release is tagged with), given to the code as PROCRAFT_VERSION. The Windows
 //! .exe carries it with the app's icon (assets/app-icon/procraft.ico, made by
 //! tools/app-icon/make_icon.py) and its name, for Explorer, the task bar and shortcuts.
@@ -10,7 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../assets/app-icon/procraft.ico");
     let version = std::fs::read_to_string(PROPERTIES)
         .ok()
-        .and_then(|text| text.lines().find_map(|l| l.trim().strip_prefix("procraft.version=").map(str::to_owned)))
+        .and_then(|text| text.lines().find_map(|l| l.trim().strip_prefix("make2d.version=").map(str::to_owned)))
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
@@ -27,8 +27,8 @@ fn main() {
         let mut resource = winresource::WindowsResource::new();
         resource
             .set_icon("../assets/app-icon/procraft.ico")
-            .set("ProductName", "ProCraft")
-            .set("FileDescription", "ProCraft")
+            .set("ProductName", "Make2D")
+            .set("FileDescription", "Make2D")
             .set("ProductVersion", &version)
             .set("FileVersion", &version)
             .set_version_info(winresource::VersionInfo::PRODUCTVERSION, packed)

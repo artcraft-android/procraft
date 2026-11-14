@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use procraft_core::CanvasSession;
+use make2d_core::CanvasSession;
 
 /// The sound's rate, how much each buffer holds (10 ms) and how many are queued (30 ms ahead).
 const RATE: u32 = 48_000;

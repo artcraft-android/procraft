@@ -4,7 +4,7 @@
 //! any filter. Nothing of it goes in the artwork: what it did is pixels, and an artwork never
 //! depends on a plugin.
 //!
-//! What keeps a filter from running away is in procraft-gpu (`plugin_filter.rs`). This is what is
+//! What keeps a filter from running away is in make2d-gpu (`plugin_filter.rs`). This is what is
 //! done about one that gets past that, or that a driver falls over on: the artwork is saved before
 //! the first filter of a session, a filter on trial is written down until it has drawn, and one
 //! that stops is switched off with its reason on its card, for someone to turn on again. It is
@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use procraft_gpu::{Canvas, FilterProgram, FilterRun};
+use make2d_gpu::{Canvas, FilterProgram, FilterRun};
 
 use crate::plugins::{PluginControl, PluginSlider, Plugins, STOPPED_DRIVER};
 use crate::{CanvasSession, State};
@@ -236,8 +236,8 @@ impl CanvasSession {
 
 #[cfg(test)]
 mod tests {
-    use procraft_engine::view::View;
-    use procraft_gpu::Gpu;
+    use make2d_engine::view::View;
+    use make2d_gpu::Gpu;
     use serde_json::{Value, json};
 
     use super::*;
@@ -512,7 +512,7 @@ mod tests {
             "@group(0) @binding(0) var t: texture_2d<f32>;\nfn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }",
             "@fragment fn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }",
         ] {
-            assert_eq!(refused(code).as_deref(), Some("This filter's code can't run in ProCraft."), "{code}");
+            assert_eq!(refused(code).as_deref(), Some("This filter's code can't run in Make2D."), "{code}");
         }
         // the text is held to its size at the door too
         let huge = format!(

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{
+use make2d_core::{
     PanelRow, PluginControl, PluginInfo, PluginPanel, PluginSource, Plugins, plugin_slider_along, plugin_slider_at,
     plugin_slider_shown,
 };
@@ -196,7 +196,7 @@ fn model_groups(tab: usize, showing: &Showing) -> Vec<Vec<Row>> {
                 Heading("Share Model"),
                 // ours comes back whole in another copy of the app; the other package holds no
                 // model yet
-                Button("ProCraft", None, Some(Act::Share(Format::ModelArtwork))),
+                Button("Make2D", None, Some(Act::Share(Format::ModelArtwork))),
                 Button("Procreate", None, None),
                 Button("USDZ", None, Some(Act::Share(Format::ModelUsdz))),
                 Button("OBJ", None, Some(Act::Share(Format::ModelObj))),
@@ -339,7 +339,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         2 => vec![
             vec![
                 Heading("Share Image"),
-                Button("ProCraft", None, Some(Act::Share(Format::Procraft))),
+                Button("Make2D", None, Some(Act::Share(Format::Procraft))),
                 Button("Procreate", None, Some(Act::Share(Format::Package))),
                 Button("PSD", None, Some(Act::Share(Format::Psd))),
                 Button("PDF", None, Some(Act::Share(Format::Pdf))),
@@ -419,7 +419,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
         }
         _ => vec![
-            vec![Button("About ProCraft", None, Some(Act::About)), Button("Licences", None, Some(Act::Licences))],
+            vec![Button("About Make2D", None, Some(Act::About)), Button("Licences", None, Some(Act::Licences))],
             vec![
                 Button("Keyboard shortcuts", None, Some(Act::Shortcuts)),
                 Button("Advanced settings", None, Some(Act::AdvancedSettings)),
@@ -1665,7 +1665,7 @@ fn slide_row(ui: &Ui, cell: Rect, label: &str, value: &str, fraction: f32, id: (
 #[cfg(test)]
 mod tests {
     use egui::{Event, Modifiers, PointerButton, RawInput};
-    use procraft_core::{PluginSlider, PluginSwitch};
+    use make2d_core::{PluginSlider, PluginSwitch};
 
     use super::*;
 
@@ -1750,7 +1750,7 @@ mod tests {
             "controls":[{{"key":"cut","type":"slider","label":"Cut","least":0,"most":32,"step":1,"starts":0}}]}}"#,
             module.len()
         );
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         zip.add("craft-extension.json", manifest.as_bytes());
         zip.add("plugin.wasm", &module);
         zip.finish()
@@ -1764,7 +1764,7 @@ mod tests {
             "files":[{{"path":"filter.wgsl","sha256":"{SHADER_SHA}","size":{}}}],"permissions":[],"controls":[]}}"#,
             SHADER.len()
         );
-        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let mut zip = make2d_engine::zip::ZipWriter::new();
         zip.add("craft-extension.json", manifest.as_bytes());
         zip.add("filter.wgsl", SHADER.as_bytes());
         zip.finish()
@@ -2020,7 +2020,7 @@ mod tests {
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
             source: PluginSource::File,
-            holds: vec![procraft_core::PluginPart::Hooks],
+            holds: vec![make2d_core::PluginPart::Hooks],
             version: "1.0.0".to_owned(),
             publisher: "Someone".to_owned(),
             experimental: false,

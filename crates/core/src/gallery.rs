@@ -494,11 +494,11 @@ pub enum ZipKind {
 
 #[uniffi::export]
 pub fn zip_file_kind(path: String) -> ZipKind {
-    let Some(names) = procraft_engine::zip::names_in_file(Path::new(&path)) else { return ZipKind::NotZip };
+    let Some(names) = make2d_engine::zip::names_in_file(Path::new(&path)) else { return ZipKind::NotZip };
     let names = || names.iter().map(String::as_str);
     if crate::brush_files::brush_names(names()) {
         ZipKind::Brushes
-    } else if names().any(|n| n.rsplit('/').next() == Some(procraft_engine::palette::SWATCHES_ENTRY)) {
+    } else if names().any(|n| n.rsplit('/').next() == Some(make2d_engine::palette::SWATCHES_ENTRY)) {
         ZipKind::Swatches
     } else if crate::scene3d::is_model_artwork(names()) {
         ZipKind::ModelArtwork
@@ -518,7 +518,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-zip-kind-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let zip = |file: &str, entries: &[&str]| {
-            let mut w = procraft_engine::zip::ZipWriter::new();
+            let mut w = make2d_engine::zip::ZipWriter::new();
             for e in entries {
                 w.add(e, b"x");
             }

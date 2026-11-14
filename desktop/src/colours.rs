@@ -7,7 +7,7 @@
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use std::sync::Arc;
 
-use procraft_core::{
+use make2d_core::{
     CanvasSession, ColourHistory, ColourModel, ColourPlace, HueControl, Palettes, Plugins, SLIDER_HUES, colours_in_p3,
     harmony_wheel, hue_at, hue_position, oklab_of, oklab_slid, oklab_to_rgb, oklab_tracks, p3_hsv_of, p3_hsv_to_rgb,
 };
@@ -1093,7 +1093,7 @@ impl Pickers {
         let picker = self.picker.clone();
         let pick = |x: f32, y: f32| match &picker {
             Some((plugins, _)) => plugins.picker_pick(x, y),
-            None => Some(procraft_core::triangle_sv(x, y)),
+            None => Some(make2d_core::triangle_sv(x, y)),
         };
         let response = ui.interact(rect, ui.scope_id().with("classic triangle"), Sense::click_and_drag());
         if let Some(p) = response.interact_pointer_pos()
@@ -1109,7 +1109,7 @@ impl Pickers {
         if self.triangle_picture.as_ref().is_none_or(stale) {
             let rgba = match &picker {
                 Some((_, session)) => session.picker_picture(hsv[0], px as u32),
-                None => Some(procraft_core::triangle_picture(hsv[0], px as u32)),
+                None => Some(make2d_core::triangle_picture(hsv[0], px as u32)),
             };
             // (a picture that couldn't be drawn shows none; its plugin goes off)
             self.triangle_picture = rgba.filter(|rgba| rgba.len() == px * px * 4).map(|rgba| {
@@ -1122,7 +1122,7 @@ impl Pickers {
         }
         let at = match &picker {
             Some((plugins, _)) => plugins.picker_point(hsv[1], hsv[2]),
-            None => Some(procraft_core::triangle_point(hsv[1], hsv[2])),
+            None => Some(make2d_core::triangle_point(hsv[1], hsv[2])),
         };
         if let Some([x, y]) = at.as_deref() {
             knob(ui, pos2(rect.left() + x * side, rect.top() + y * side), 10.75, srgb(ColourModel::Hsb.to_rgb(*hsv)));
@@ -1581,7 +1581,7 @@ impl Colours {
         look: &mut Look,
         session: &CanvasSession,
         i: u32,
-        p: &procraft_core::PaletteInfo,
+        p: &make2d_core::PaletteInfo,
         filled: &[(usize, u32)],
         card: Rect,
         default: bool,
@@ -1653,7 +1653,7 @@ impl Colours {
                 let lettering = if bright { Color32::BLACK } else { Color32::WHITE };
                 let mut job = egui::text::LayoutJob::default();
                 job.append(
-                    &procraft_core::colour_name(rgb),
+                    &make2d_core::colour_name(rgb),
                     0.0,
                     egui::TextFormat {
                         font_id: Weight::Regular.font(15.0),
@@ -2157,7 +2157,7 @@ mod tests {
             assert_eq!(at(15, 15), Some(Color32::BLACK), "{model:?}");
         }
         // its picture stays small however big the square is drawn
-        let most = procraft_core::MODEL_SQUARE as usize;
+        let most = make2d_core::MODEL_SQUARE as usize;
         assert_eq!(model_square_image(ColourModel::Oklab, 0.2, 4000).size, [most, most]);
         // HLS's middle row is the pure hue at the right, where HSB's top row has it
         let hls = image(ColourModel::Hls);

@@ -1,11 +1,11 @@
 //! Transform: the current layer's content moved, scaled, rotated or distorted as a whole through
 //! the box around it, shown live and kept as one undo step.
 
-use procraft_engine::document::{Document, Layer, LayerId, LayerKind};
-use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
-use procraft_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
-use procraft_engine::warp;
-use procraft_gpu::Resample;
+use make2d_engine::document::{Document, Layer, LayerId, LayerKind};
+use make2d_engine::geom::{Affine, Homography, IRect, Vec2};
+use make2d_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
+use make2d_engine::warp;
+use make2d_gpu::Resample;
 
 use crate::vector_layer::Carried;
 use crate::{CanvasSession, State};
@@ -176,8 +176,8 @@ const MAX_SNAP_LAYERS: usize = 16;
 /// first, for a moved box to snap onto: found on the GPU, every one of them read.
 fn snap_bounds(
     doc: &Document,
-    canvas: &procraft_gpu::Canvas,
-    gpu: &procraft_gpu::Gpu,
+    canvas: &make2d_gpu::Canvas,
+    gpu: &make2d_gpu::Gpu,
     targets: &[LayerId],
 ) -> Vec<[f32; 4]> {
     let others: Vec<_> = doc
@@ -232,10 +232,10 @@ impl State {
                 None => Homography::quad_to_quad(t.source(), t.content()).map(Carried::By),
             });
             let name = match self.transform_mode {
-                procraft_engine::transform::TransformMode::Uniform => "uniform transform",
-                procraft_engine::transform::TransformMode::Distort => "distort transform",
-                procraft_engine::transform::TransformMode::Warp => "warp transform",
-                procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
+                make2d_engine::transform::TransformMode::Uniform => "uniform transform",
+                make2d_engine::transform::TransformMode::Distort => "distort transform",
+                make2d_engine::transform::TransformMode::Warp => "warp transform",
+                make2d_engine::transform::TransformMode::Freeform => "non-uniform transform",
             };
             if self.transform.take().is_some()
                 && let Some(canvas) = self.canvas.as_mut()
@@ -268,7 +268,7 @@ impl State {
             }
             if let Some(moved) = moved {
                 let name = match self.transform_mode {
-                    procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                    make2d_engine::transform::TransformMode::Uniform => "uniform transform",
                     _ => "non-uniform transform",
                 };
                 self.move_taken_items(layer, Some(&ids), moved, name);
@@ -281,10 +281,10 @@ impl State {
         {
             if commit {
                 canvas.name_next_step(match self.transform_mode {
-                    procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
-                    procraft_engine::transform::TransformMode::Uniform => "uniform transform",
-                    procraft_engine::transform::TransformMode::Distort => "distort transform",
-                    procraft_engine::transform::TransformMode::Warp => "warp transform",
+                    make2d_engine::transform::TransformMode::Freeform => "non-uniform transform",
+                    make2d_engine::transform::TransformMode::Uniform => "uniform transform",
+                    make2d_engine::transform::TransformMode::Distort => "distort transform",
+                    make2d_engine::transform::TransformMode::Warp => "warp transform",
                 });
             }
             match within {
@@ -758,7 +758,7 @@ impl CanvasSession {
         let window = (width.max(1), height.max(1));
         let view = st.view.unwrap_or_else(|| {
             st.saved_view.and_then(|v| v.view(window)).unwrap_or_else(|| {
-                procraft_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
+                make2d_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
             })
         });
         let m = view.to_screen();

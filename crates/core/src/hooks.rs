@@ -666,7 +666,7 @@ impl CanvasSession {
         let program = match cached.filter(|(was, code, _)| *was == id && *code == text) {
             Some((_, _, program)) => program,
             None => {
-                let code = procraft_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
+                let code = make2d_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
                 let made = code.ok().and_then(|code| gpu.make_picture(code).ok());
                 let Some(program) = made else {
                     hooks.stopped(&id, Stop::Damaged);
@@ -679,8 +679,8 @@ impl CanvasSession {
         match gpu.draw_picture(&program, hue, side) {
             Ok(rgba) => Some(rgba),
             // asked bigger than it can be drawn, or the device gone: not the plugin's doing
-            Err(procraft_gpu::PictureStop::TooBig | procraft_gpu::PictureStop::Lost) => None,
-            Err(procraft_gpu::PictureStop::Spent | procraft_gpu::PictureStop::Cut) => {
+            Err(make2d_gpu::PictureStop::TooBig | make2d_gpu::PictureStop::Lost) => None,
+            Err(make2d_gpu::PictureStop::Spent | make2d_gpu::PictureStop::Cut) => {
                 hooks.stopped(&id, Stop::TooSlow);
                 None
             }
@@ -703,8 +703,8 @@ impl CanvasSession {
 pub(crate) mod tests {
     use std::time::Instant;
 
-    use procraft_engine::view::View;
-    use procraft_gpu::Gpu;
+    use make2d_engine::view::View;
+    use make2d_gpu::Gpu;
     use serde_json::{Value, json};
 
     use super::*;
@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
         s.stroke_end(vec![sample(160.0, 100.0, 248.0)]);
         let alpha_on = |s: &CanvasSession, layer: u64| {
             let mut st = s.shared.lock();
-            st.layer_pixels(procraft_engine::document::LayerId(layer)).unwrap()[(100 * 200 + 100) * 4 + 3]
+            st.layer_pixels(make2d_engine::document::LayerId(layer)).unwrap()[(100 * 200 + 100) * 4 + 3]
         };
         assert_eq!(alpha_on(&s, art_layer), 255, "drawn on the plugin's layer");
         assert_eq!(alpha_on(&s, added), 0, "not on the layer added");
@@ -1699,7 +1699,7 @@ pub(crate) mod tests {
             (rows[0].key.as_str(), rows[0].choices.len()),
             ("plugin:io.github.artcraftandroid.brush-sounds:sound", 8)
         );
-        let mut brush = procraft_engine::brush::Brush::round_pen();
+        let mut brush = make2d_engine::brush::Brush::round_pen();
         brush.set_setting(&rows[0].key, 5.0);
         assert_eq!(brush.setting(&rows[0].key), 5.0);
         brush.set_setting(&rows[0].key, 300.0);
@@ -2208,7 +2208,7 @@ pub(crate) mod tests {
         for y in 60..120 {
             mask[y * 200..(y + 1) * 200].fill(255);
         }
-        s.shared.lock().selection = Some(procraft_engine::selection::Mask { width: 200, height: 200, data: mask });
+        s.shared.lock().selection = Some(make2d_engine::selection::Mask { width: 200, height: 200, data: mask });
         pour_at(&s, 30.0, 80.0);
         assert!(red_at(&s, 30, 80), "in the selection, this side of the cut");
         assert!(!red_at(&s, 30, 30), "out of the selection");
@@ -2353,7 +2353,7 @@ pub(crate) mod tests {
                 data[y * side + side / 2..y * side + side / 2 + 6].fill(0);
             }
             let filled = data.iter().filter(|&&v| v > 0).count();
-            let mask = procraft_engine::selection::Mask { width: side as u32, height: side as u32, data };
+            let mask = make2d_engine::selection::Mask { width: side as u32, height: side as u32, data };
             let start = Instant::now();
             let closed = crate::pour::closed_by(&hooks, mask, (side as u32 / 4, side as u32 / 4));
             let took = start.elapsed().as_secs_f64() * 1e3;
@@ -2542,7 +2542,7 @@ pub(crate) mod tests {
                 .view
                 .and_then(|v| v.to_screen().inverse())
                 .unwrap()
-                .apply(procraft_engine::geom::Vec2::new(10.0, 20.0));
+                .apply(make2d_engine::geom::Vec2::new(10.0, 20.0));
             assert_eq!(at[0].pos, plain, "the sample goes through unchanged");
         }
         assert_eq!(s.take_failure().as_deref(), Some("A plugin stopped. Switched off: it crashed."));

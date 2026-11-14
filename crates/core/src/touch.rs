@@ -933,7 +933,7 @@ impl CanvasSession {
         points
             .iter()
             .flat_map(|&(x, y)| {
-                let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                let p = view.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
                 [p.x, p.y]
             })
             .collect()
@@ -965,7 +965,7 @@ impl CanvasSession {
         Some(
             path.iter()
                 .flat_map(|&(x, y)| {
-                    let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                    let p = view.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
                     [p.x, p.y]
                 })
                 .collect(),
@@ -2511,9 +2511,7 @@ impl CanvasSession {
                     let view = st.view;
                     (
                         st.window_to_canvas(at.0, at.1).map(|p| (p.x, p.y)),
-                        last.and_then(|(x, y)| {
-                            view.map(|v| v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y)))
-                        }),
+                        last.and_then(|(x, y)| view.map(|v| v.to_screen().apply(make2d_engine::geom::Vec2::new(x, y)))),
                     )
                 };
                 let first_canvas = self.shared.lock().window_to_canvas(start.0, start.1).map(|p| (p.x, p.y));
@@ -2522,7 +2520,7 @@ impl CanvasSession {
                     let mut t = self.touches();
                     let first = t.freehand.first().copied();
                     let near_first = first.zip(self.shared.lock().view).is_some_and(|((x, y), v)| {
-                        let p = v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                        let p = v.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
                         dist((p.x, p.y), at) <= FREEHAND_CLOSE * scale
                     });
                     if t.freehand.len() > 2 && near_first {
@@ -2588,7 +2586,7 @@ impl CanvasSession {
     fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
         let (shown, view, density, warping) = {
             let st = self.shared.lock();
-            let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
+            let warping = st.transform_mode == make2d_engine::transform::TransformMode::Warp;
             (st.transform_box(), st.view.map(|v| v.to_screen()), st.interface_scale(), warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
@@ -2877,7 +2875,7 @@ pub(crate) type TouchState = Mutex<Touches>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use procraft_engine::geom::Vec2;
+    use make2d_engine::geom::Vec2;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
         vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }]
@@ -3873,7 +3871,7 @@ mod tests {
         let s = CanvasSession::new(1000, 800);
         {
             let mut st = s.shared.lock();
-            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
             st.adjust = crate::adjusting::Adjusting::opened(Adjustment::PerspectiveBlur);
         }
         s.adjustment_perspective_kind(kind);
@@ -3971,7 +3969,7 @@ mod tests {
         {
             let mut st = s.shared.lock();
             st.window_size = (400, 400);
-            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
         }
         s.set_touch_selecting(Some(SelectTouch {
             kind: SelectKind::Freehand,
@@ -4049,11 +4047,11 @@ mod tests {
 
     #[test]
     fn after_a_warp_the_other_kinds_drag_the_box_s_nodes() {
-        use procraft_engine::transform::{Transform, TransformMode};
+        use make2d_engine::transform::{Transform, TransformMode};
         let s = session();
         {
             let mut st = s.shared.lock();
-            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
             let mut t = Transform::new(100.0, 100.0, 200.0, 100.0, Vec::new());
             t.start_warp();
             st.transform = Some(t);
@@ -4139,7 +4137,7 @@ mod tests {
     #[test]
     fn recolor_s_touch_drags_its_reticle_or_taps_it_elsewhere_and_paints_nothing() {
         let s = session();
-        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
         s.recolor_start(32.0, 32.0, 0.0, 0.0, 1.0, 0.0);
         // the app moves the reticle where the touches say
         let obey = |out: Vec<TouchCommand>| {
@@ -4170,7 +4168,7 @@ mod tests {
     #[test]
     fn the_companion_s_move_takes_a_lone_press_and_moves_the_view_without_painting() {
         let s = session();
-        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
         s.set_touch_companion(Some(CompanionMode::Move));
         s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
         let out = s.touch_move(1, at(130.0, 120.0, 16.0));
@@ -4193,7 +4191,7 @@ mod tests {
     #[test]
     fn one_finger_set_to_move_the_canvas_moves_it_and_the_pen_still_paints() {
         let s = session();
-        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
         let g = crate::gestures::GestureSettings::new(crate::gestures::KeptGestures::default());
         let changed = g.set(crate::gestures::GesturePurpose::General, "ONE_FINGER_PAN".into(), true);
         // painting with a finger goes off with it, and back on turns it off again

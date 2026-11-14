@@ -1,4 +1,4 @@
-//! Brush shape and grain images, generated here (ProCraft's own, made procedurally at start-up):
+//! Brush shape and grain images, generated here (Make2D's own, made procedurally at start-up):
 //! 8-bit greyscale, white = paint. Grains tile seamlessly.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -2871,7 +2871,7 @@ mod tests {
     }
 
     /// Writes every shape and grain as a PGM into the directory in `PROCRAFT_DUMP`, for looking at
-    /// them: `cargo test -p procraft-engine dump_textures -- --ignored`.
+    /// them: `cargo test -p make2d-engine dump_textures -- --ignored`.
     #[test]
     #[ignore]
     fn dump_textures() {
