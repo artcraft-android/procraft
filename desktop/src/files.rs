@@ -114,6 +114,55 @@ pub fn is_brush_file(path: &Path) -> bool {
             && procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::Brushes)
 }
 
+/// Whether the file at `path` holds assets, by its name (a zip by what it holds): an asset, a set
+/// or a library.
+pub fn is_asset_file(path: &Path) -> bool {
+    let extension = extension_of(path);
+    ["asset", "assetset", "assetlibrary"].contains(&extension.as_str())
+        || (extension == "zip"
+            && procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::Assets)
+}
+
+/// Where asset files given while no canvas is open wait for one.
+pub fn pending_assets_dir() -> PathBuf {
+    app_dir().join("pending-assets")
+}
+
+/// Asset files given while no canvas is open, kept (under their own names, after a number that
+/// keeps their order) until one opens; says so. False if none could be kept.
+pub fn keep_pending_assets(paths: &[PathBuf]) -> bool {
+    let dir = pending_assets_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut kept = false;
+    for (i, path) in paths.iter().enumerate() {
+        let Some(name) = path.file_name() else { continue };
+        let to = dir.join(format!("{stamp}-{i}-{}", name.to_string_lossy()));
+        kept |= std::fs::copy(path, to).is_ok();
+    }
+    if kept {
+        say("Assets will be added to the library when a canvas opens.");
+    }
+    kept
+}
+
+/// The asset files kept while no canvas was open, oldest first, taken out of the folder.
+pub fn take_pending_assets() -> Vec<Vec<u8>> {
+    let Ok(read) = std::fs::read_dir(pending_assets_dir()) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_file(&path);
+            bytes
+        })
+        .collect()
+}
+
 /// Where brush files given while no canvas is open wait for one.
 pub fn pending_brushes_dir() -> PathBuf {
     app_dir().join("pending-brushes")
@@ -341,6 +390,11 @@ pub fn brushes_dir() -> String {
     app_dir().join("brushes").to_string_lossy().into_owned()
 }
 
+/// Where the asset library is kept, shared by every artwork.
+pub fn assets_dir() -> String {
+    app_dir().join("assets").to_string_lossy().into_owned()
+}
+
 /// The gesture settings kept: a line for each switch (`EYEDROPPER.HOLD true`) and each page's
 /// delay (`EYEDROPPER.delay 0.4`).
 pub fn kept_gestures() -> KeptGestures {
@@ -505,11 +559,12 @@ pub fn is_palette_file(path: &Path) -> bool {
 }
 
 /// The files the gallery's Import brings in, as the user picks them: an artwork or a model (as
-/// [`pick_artwork`] takes), palettes and brushes.
+/// [`pick_artwork`] takes), palettes, brushes and assets.
 pub fn pick_import() -> Option<Vec<PathBuf>> {
     let brushes: Vec<&str> =
         ["brush", "brushset", "brushlibrary"].into_iter().chain(procraft_core::OTHER_BRUSH_EXTENSIONS).collect();
-    let more: Vec<&str> = PALETTE_EXTENSIONS.into_iter().chain(brushes).collect();
+    let more: Vec<&str> =
+        PALETTE_EXTENSIONS.into_iter().chain(brushes).chain(["asset", "assetset", "assetlibrary"]).collect();
     pick_artwork_files(&more)
 }
 

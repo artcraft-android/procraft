@@ -2286,6 +2286,56 @@ pub fn import_psd(path: String, dir: String, name: String) -> PsdOutcome {
     PsdOutcome::Imported
 }
 
+/// Reads an artwork folder's document and its layers' pixels, without making a session (an asset
+/// being placed). None if it can't be read.
+pub(crate) fn read_artwork(dir: &Path) -> Option<crate::assets::Content> {
+    let text = fs::read_to_string(dir.join("artwork.json")).ok()?;
+    let file: ArtworkFile = serde_json::from_str(&text).ok()?;
+    let doc = file.document.repaired();
+    let (w, h) = (doc.width(), doc.height());
+    let mut pixels = Vec::new();
+    for l in doc.layers() {
+        if l.kind == LayerKind::Group {
+            continue;
+        }
+        let rgba = read_layer_picture(dir, l.id, w, h)?;
+        pixels.push((l.id, rgba));
+    }
+    Some((doc, pixels))
+}
+
+/// A layer's kept picture: the lossless PNG, or a JPEG for photographic layers that keep one.
+fn read_layer_picture(dir: &Path, id: LayerId, w: u32, h: u32) -> Option<Vec<u8>> {
+    let png = layer_path(dir, id);
+    if png.exists() {
+        return read_png(&png, w, h).ok();
+    }
+    let img = image::open(dir.join("layers").join(format!("{}.jpg", id.0))).ok()?.to_rgba8();
+    let (iw, ih) = img.dimensions();
+    Some(if (iw, ih) == (w, h) {
+        img.into_raw()
+    } else {
+        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
+    })
+}
+
+/// Keeps a photographic (opaque) layer as a JPEG instead of its PNG, so shared libraries stay
+/// small. The PNG is removed; readers fall back to the JPEG.
+pub(crate) fn store_layer_jpeg(dir: &Path, id: LayerId, w: u32, h: u32, rgba: &[u8]) -> bool {
+    let Some(img) = image::RgbaImage::from_raw(w, h, rgba.to_vec()) else { return false };
+    let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+    let mut bytes = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90);
+    if enc.encode_image(&rgb).is_err() {
+        return false;
+    }
+    if fs::write(dir.join("layers").join(format!("{}.jpg", id.0)), bytes).is_err() {
+        return false;
+    }
+    let _ = fs::remove_file(layer_path(dir, id));
+    true
+}
+
 /// The picture scaled down (box filter) to fit `side`, straight alpha, for viewing elsewhere.
 /// A picture (`width` x `height`, RGBA) turned `turns` quarter turns clockwise.
 fn turned(width: u32, height: u32, rgba: Vec<u8>, turns: u8) -> (u32, u32, Vec<u8>) {

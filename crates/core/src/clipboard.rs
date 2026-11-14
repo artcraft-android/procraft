@@ -20,7 +20,7 @@ const MOST_FRAMES: usize = 999;
 impl State {
     /// The current layer's pixels within the selection (all of it without one), the canvas's
     /// size.
-    fn selected_pixels(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn selected_pixels(&mut self) -> Option<Vec<u8>> {
         self.canvas.as_ref().zip(self.gpu.as_ref())?;
         let current = self.doc.current();
         // a group has no pixels of its own to copy
@@ -123,7 +123,7 @@ pub fn write_copy_png(image: ThumbnailImage, icc: Vec<u8>, path: String) -> bool
 
 /// `image` placed on a `width` × `height` canvas: centred, and scaled down to fit when `fit` and
 /// it is larger (premultiplied RGBA8; anything outside is cut off).
-fn placed(image: ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
+pub(crate) fn placed(image: ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
     let (iw, ih) = (image.width as usize, image.height as usize);
     if iw == 0 || ih == 0 || image.rgba.len() != iw * ih * 4 {
         return None;

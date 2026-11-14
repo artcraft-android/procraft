@@ -10,6 +10,7 @@ mod adjustments;
 mod alert;
 mod animated_export;
 mod animation;
+mod assets;
 mod canvas_info;
 mod chrome;
 mod colour_drop;
@@ -700,6 +701,7 @@ impl App {
             files::keep_brushes(last);
         }
         session.open_brushes(files::brushes_dir());
+        session.open_assets(files::assets_dir());
         self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
@@ -1143,8 +1145,8 @@ impl App {
     }
 
     /// Files brought into the gallery (picked with Import, or dropped on it) into `folder`:
-    /// palettes join the colour panel's, brushes wait for a canvas to open, and the rest come in as
-    /// an artwork (a package, a PSD, a PDF, a picture, or a model with its files).
+    /// palettes join the colour panel's, brushes and assets wait for a canvas to open, and the rest
+    /// come in as an artwork (a package, a PSD, a PDF, a picture, or a model with its files).
     fn import(&mut self, paths: Vec<std::path::PathBuf>, folder: Option<String>) {
         let (palettes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_palette_file(p));
         if !palettes.is_empty() {
@@ -1158,6 +1160,10 @@ impl App {
         let (brushes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_brush_file(p));
         if !brushes.is_empty() {
             files::keep_pending_brushes(&brushes);
+        }
+        let (assets, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_asset_file(p));
+        if !assets.is_empty() {
+            files::keep_pending_assets(&assets);
         }
         // a model takes the files picked with it; else each is an artwork of its own, the one
         // before kept (closed) as the next comes in

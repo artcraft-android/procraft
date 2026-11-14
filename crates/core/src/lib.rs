@@ -17,6 +17,7 @@ mod adjust_menu;
 mod adjusting;
 mod animation;
 mod app_log;
+mod assets;
 mod brush_files;
 mod brush_libraries;
 mod brush_library;
@@ -131,6 +132,7 @@ pub use animation::{
     AnimationPlayback, AnimationSettings, FrameRate, PlayStep, animation_next_step, export_fps_at, export_fps_fraction,
     export_fps_label, frame_rate,
 };
+pub use assets::{AssetFolderInfo, AssetInfo, AssetLibraryInfo, AssetScope, PsdImportMode};
 pub use brush_files::BrushEngines;
 pub use brush_files::{
     BrushFileReading, BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes,
@@ -565,6 +567,10 @@ pub(crate) struct State {
     /// The library in use as the user has it, and as it ships; the libraries.
     library: Vec<brush_library::LibrarySet>,
     pub(crate) libraries: brush_libraries::Libraries,
+    /// The asset library, shared by every artwork.
+    pub(crate) assets: assets::Assets,
+    /// After placing an asset: the layer to return to, and the placed top, once its transform ends.
+    pub(crate) place_return: Option<(procraft_engine::document::LayerId, procraft_engine::document::LayerId)>,
     shipped: Arc<Vec<BrushSet>>,
     /// When the library is empty (never, but never panic).
     fallback: Brush,
@@ -1778,6 +1784,8 @@ impl CanvasSession {
             crop_redo: None,
             library: shelf,
             libraries: brush_libraries::Libraries::default(),
+            assets: assets::Assets::default(),
+            place_return: None,
             shipped,
             fallback: Brush::round_pen(),
             paint_brush,

@@ -25,6 +25,9 @@ import io.github.artcraftandroid.procraft.core.BlendModeInfo
 import io.github.artcraftandroid.procraft.ui.GradientPreset
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
+import io.github.artcraftandroid.procraft.core.AssetLibraryInfo
+import io.github.artcraftandroid.procraft.core.AssetScope
+import io.github.artcraftandroid.procraft.core.PsdImportMode
 import io.github.artcraftandroid.procraft.core.RecentBrush
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.ColourModel
@@ -111,7 +114,7 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
     else -> set
 }
 
-enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
+enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS, ASSETS }
 
 /**
  * The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick, and
@@ -940,6 +943,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private val brushLibraryFile = File(brushesDir, "library.json")
     /** Writes of the library, one at a time. */
     private val brushLibraryWrites = Mutex()
+    /** The asset library, shared by every artwork. */
+    private val assetsDir = File(app.filesDir, "assets")
+    /** Writes of the asset library, one at a time. */
+    private val assetWrites = Mutex()
     var transformKind by mutableStateOf(enumPref(TRANSFORM_KIND, TransformKind.FREEFORM))
         private set
     var interpolation by mutableStateOf(enumPref(INTERPOLATION, Interpolation.BILINEAR))
@@ -3085,6 +3092,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the library as kept, with what shipped since joining it, and the brushes in use as left;
         // else edits kept by versions before the library was
         if (!s.openBrushes(brushesDir.path)) brushPrefs.getString(BRUSH_CHANGES, null)?.let { s.applyBrushChanges(it) }
+        // the assets every artwork shares
+        s.openAssets(assetsDir.path)
     }
 
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
@@ -3159,6 +3168,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
         brushSets = s.brushLibrary()
         readLibraries()
+        readAssets()
         readSetChoices()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
@@ -5236,6 +5246,385 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The library as it ships, back beside the others. */
     fun restoreLibraries() = libraryWork(false, "The library couldn't be put back.") { it.restoreStockBrushLibrary() != null }
+
+    // ---- assets ----
+
+    /** Every asset library, the one in use among them: for the libraries' cards and the title. */
+    var assetLibraries by mutableStateOf<List<AssetLibraryInfo>>(emptyList())
+        private set
+
+    /** The asset popover shows every library's card rather than the one in use. */
+    var showingAssetLibraries by mutableStateOf(false)
+
+    /** The folder shown on the right, in the library in use. */
+    var shownAssetFolder by mutableStateOf(0)
+
+    /** The library whose name is being edited (its place), if one is. */
+    var renamingAssetLibrary by mutableStateOf<Int?>(null)
+
+    /** The folder whose name is being edited (its place in the library in use), if one is. */
+    var renamingAssetFolder by mutableStateOf<Int?>(null)
+
+    /** The asset whose name is being edited (its id), if one is. */
+    var renamingAsset by mutableStateOf<String?>(null)
+
+    /** The library to delete (its place), once that is confirmed. */
+    var deletingAssetLibrary by mutableStateOf<Int?>(null)
+
+    /** The folder to delete (its place in the library in use), once that is confirmed. */
+    var deletingAssetFolder by mutableStateOf<Int?>(null)
+
+    /** The asset to delete (its id), once that is confirmed. */
+    var deletingAsset by mutableStateOf<String?>(null)
+
+    /** A PSD picked, waiting to be asked how its layers come in: its bytes and its name. */
+    var psdPending by mutableStateOf<Pair<ByteArray, String>?>(null)
+
+    /** The artworks an asset can be made from, for the project picker. */
+    var projectChoices by mutableStateOf<List<Artwork>>(emptyList())
+        private set
+
+    /** The library in use's name, and its place. */
+    val assetLibraryName: String get() = assetLibraries.firstOrNull { it.current }?.name ?: "Assets"
+    val assetLibraryPlace: Int get() = assetLibraries.indexOfFirst { it.current }.coerceAtLeast(0)
+
+    private fun readAssets() {
+        val libraries = session?.assetLibraries().orEmpty()
+        assetLibraries = libraries
+        // thumbnails of assets that are gone are let go of
+        val ids = libraries.flatMap { it.folders }.flatMap { it.assets }.map { it.id }.toHashSet()
+        assetPreviews.keys.toList().forEach { if (it !in ids) assetPreviews.remove(it) }
+        assetPreviewsLoading.retainAll(ids)
+    }
+
+    /** The assets' thumbnails, drawn small, by id. */
+    val assetPreviews = mutableStateMapOf<String, ImageBitmap>()
+    private val assetPreviewsLoading = HashSet<String>()
+
+    /** Renders asset [id] small for its cell, once, off the main thread. */
+    fun loadAssetPreview(id: String) {
+        if (assetPreviews.containsKey(id) || !assetPreviewsLoading.add(id)) return
+        val s = session ?: return
+        viewModelScope.launch {
+            val image = withContext(Dispatchers.Default) {
+                val t = s.assetPreview(id, 256u) ?: return@withContext null
+                val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                bitmap.asImageBitmap()
+            }
+            if (image != null && assetPreviewsLoading.contains(id)) assetPreviews[id] = image
+        }
+    }
+
+    /**
+     * Runs [work] on the assets off the main thread (it reads and writes their files), then reads
+     * them again; [done] hears what it came to (none: it failed, and [failure] is told).
+     */
+    private fun <T> assetWork(failure: String, work: (CanvasSession) -> T?, done: (T) -> Unit = {}) {
+        val s = session ?: return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { assetWrites.withLock { runCatching { work(s) }.getOrNull() } }
+            if (result == null) message = failure
+            readAssets()
+            if (result != null) done(result)
+        }
+    }
+
+    /** Brings library [i] into use and shows its folders. */
+    fun openAssetLibrary(i: Int) {
+        showingAssetLibraries = false
+        if (assetLibraries.getOrNull(i)?.current == true) return
+        assetWork("This library can't be opened.", { if (it.openAssetLibrary(i.toUInt())) true else null }) { shownAssetFolder = 0 }
+    }
+
+    fun renameAssetLibrary(i: Int, name: String) {
+        renamingAssetLibrary = null
+        if (name.isBlank() || assetLibraries.getOrNull(i)?.name == name.trim()) return
+        assetWork("The library couldn't be renamed.") { if (it.renameAssetLibrary(i.toUInt(), name)) true else null }
+    }
+
+    /** A new, empty library after the others, its name ready to edit among the cards. */
+    fun newAssetLibrary() {
+        assetWork("A new library couldn't be made.", { it.newAssetLibrary() }) { renamingAssetLibrary = it.toInt() }
+    }
+
+    /** A new library brought into use at once, its name ready to edit in the title. */
+    fun newAssetLibraryAndOpen() {
+        assetWork("A new library couldn't be made.", { s ->
+            val i = s.newAssetLibrary()
+            if (i != null && s.openAssetLibrary(i)) i else null
+        }) {
+            shownAssetFolder = 0
+            renamingAssetLibrary = it.toInt()
+        }
+    }
+
+    fun deleteAssetLibrary(i: Int) {
+        deletingAssetLibrary = null
+        assetWork("The library couldn't be deleted.") { if (it.deleteAssetLibrary(i.toUInt())) true else null }
+    }
+
+    /** A new folder at the end of the library in use, shown, with its name ready to edit. */
+    fun newAssetFolder() {
+        val lib = assetLibraryPlace
+        assetWork("A new folder couldn't be made.", { it.newAssetFolder(lib.toUInt()) }) {
+            shownAssetFolder = it.toInt()
+            renamingAssetFolder = it.toInt()
+        }
+    }
+
+    fun renameAssetFolder(folder: Int, name: String) {
+        renamingAssetFolder = null
+        if (name.isBlank()) return
+        val lib = assetLibraryPlace
+        assetWork("The folder couldn't be renamed.") { if (it.renameAssetFolder(lib.toUInt(), folder.toUInt(), name)) true else null }
+    }
+
+    fun deleteAssetFolder(folder: Int) {
+        deletingAssetFolder = null
+        val lib = assetLibraryPlace
+        assetWork("The folder couldn't be deleted.") { if (it.deleteAssetFolder(lib.toUInt(), folder.toUInt())) true else null }
+    }
+
+    /** Takes [scope] of the open artwork into the shown folder, its new asset named right away. */
+    fun captureAsset(scope: AssetScope) {
+        val lib = assetLibraryPlace
+        val folder = shownAssetFolder
+        assetWork("Nothing to capture.", { it.captureAsset("", scope, lib.toUInt(), folder.toUInt()) }) { nameNewAsset(it) }
+    }
+
+    /** Puts asset [id] on the canvas above the current layer, ready to transform. */
+    fun placeAsset(id: String) {
+        val s = session ?: return
+        viewModelScope.launch {
+            val placed = withContext(Dispatchers.IO) { assetWrites.withLock { runCatching { s.placeAsset(id) }.getOrNull() } }
+            if (placed == null) {
+                message = "This asset can't be placed."
+                return@launch
+            }
+            refresh()
+            toggleTransform()
+        }
+    }
+
+    fun renameAsset(id: String, name: String) {
+        renamingAsset = null
+        if (name.isBlank()) return
+        assetWork("The asset couldn't be renamed.") { if (it.renameAsset(id, name)) true else null }
+    }
+
+    fun deleteAsset(id: String) {
+        deletingAsset = null
+        assetWork("The asset couldn't be deleted.") { if (it.deleteAsset(id)) true else null }
+    }
+
+    fun duplicateAsset(id: String) {
+        assetWork("The asset couldn't be copied.") { it.duplicateAsset(id) }
+    }
+
+    fun moveAsset(id: String, library: Int, folder: Int) {
+        assetWork("The asset couldn't be moved.") { if (it.moveAsset(id, library.toUInt(), folder.toUInt())) true else null }
+    }
+
+    /** A picture picked to be asset [id]'s thumbnail, in place of the one made from what was added. */
+    fun setAssetThumbnail(id: String, uri: android.net.Uri) {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            if (bytes == null) {
+                message = "This file could not be read."
+                return@launch
+            }
+            assetWork("The thumbnail couldn't be set.", { if (it.setAssetThumbnail(id, bytes)) true else null }) { reloadAssetPreview(id) }
+        }
+    }
+
+    /** The open canvas as asset [id]'s thumbnail. */
+    fun setAssetThumbnailFromCanvas(id: String) {
+        assetWork("The thumbnail couldn't be set.", { if (it.setAssetThumbnailFromCanvas(id)) true else null }) { reloadAssetPreview(id) }
+    }
+
+    /** The current layer as asset [id]'s thumbnail. */
+    fun setAssetThumbnailFromLayer(id: String) {
+        assetWork("The thumbnail couldn't be set.", { if (it.setAssetThumbnailFromLayer(id)) true else null }) { reloadAssetPreview(id) }
+    }
+
+    /** The picture on the clipboard as asset [id]'s thumbnail, if there is one. */
+    fun setAssetThumbnailFromClipboard(id: String) {
+        val uri = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+        if (uri == null) {
+            message = "There's no picture on the clipboard."
+            return
+        }
+        setAssetThumbnail(id, uri)
+    }
+
+    private fun reloadAssetPreview(id: String) {
+        // a drawn thumbnail keeps its loading mark: clear it too, or the new one never draws
+        assetPreviews.remove(id)
+        assetPreviewsLoading.remove(id)
+        loadAssetPreview(id)
+    }
+
+    /** Whatever the one import entry picked, sent to the importer its name says. */
+    fun importPickedFile(uri: android.net.Uri) {
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { fileName(uri) }.orEmpty()
+            when {
+                listOf("asset", "assetset", "assetlibrary", "zip").any { name.endsWith(".$it", ignoreCase = true) } -> importAssetFile(uri)
+                listOf("psd", "psb").any { name.endsWith(".$it", ignoreCase = true) } -> pickPsd(uri)
+                else -> importAssetImage(uri)
+            }
+        }
+    }
+
+    /** A picture picked (or taken with the camera) brought in as a single-image asset. */
+    fun importAssetImage(uri: android.net.Uri) {
+        val lib = assetLibraryPlace
+        val folder = shownAssetFolder
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { fileName(uri)?.substringBeforeLast('.') }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            if (bytes == null) {
+                message = "This file could not be read."
+                return@launch
+            }
+            assetWork("The file could not be brought in.", { it.importAssetImage(bytes, name ?: "Untitled asset", lib.toUInt(), folder.toUInt()) }) { nameNewAsset(it) }
+        }
+    }
+
+    /** A shared asset file picked, brought in: a library of its own, a new folder, or assets added. */
+    fun importAssetFile(uri: android.net.Uri) {
+        val lib = assetLibraryPlace
+        val folder = shownAssetFolder
+        val librariesBefore = assetLibraries.size
+        val foldersBefore = assetLibraries.getOrNull(lib)?.folders?.size ?: 0
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            if (bytes == null) {
+                message = "This file could not be read."
+                return@launch
+            }
+            assetWork("The file could not be brought in.", { it.importAssetFile(bytes, lib.toUInt(), folder.toUInt()) }) {
+                // a library file made its own; a set a new folder; else the assets joined the shown one
+                if (assetLibraries.size > librariesBefore) {
+                    openAssetLibrary(assetLibraries.size - 1)
+                } else {
+                    val folders = assetLibraries.getOrNull(lib)?.folders.orEmpty()
+                    shownAssetFolder = if (folders.size > foldersBefore) folders.size - 1 else folder
+                }
+            }
+        }
+    }
+
+    /** A PSD picked, read and waiting to be asked how its layers come in. */
+    fun pickPsd(uri: android.net.Uri) {
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { fileName(uri)?.substringBeforeLast('.') }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            if (bytes == null) {
+                message = "This file could not be read."
+                return@launch
+            }
+            psdPending = bytes to (name ?: "Untitled asset")
+        }
+    }
+
+    /** The picked PSD brought in as one grouped asset, or each paint layer its own; the first named. */
+    fun importPsd(mode: PsdImportMode) {
+        val (bytes, name) = psdPending ?: return
+        psdPending = null
+        val lib = assetLibraryPlace
+        val folder = shownAssetFolder
+        val before = assetLibraries.getOrNull(lib)?.folders?.getOrNull(folder)?.assets?.map { it.id }.orEmpty()
+        assetWork("The file could not be brought in.", { it.importAssetPsd(bytes, name, mode, lib.toUInt(), folder.toUInt()) }) {
+            // the first asset the folder didn't have before is the new one (an exploded PSD's first)
+            val new = assetLibraries.getOrNull(lib)?.folders?.getOrNull(folder)?.assets?.firstOrNull { a -> a.id !in before }
+            if (new != null) nameNewAsset(new.id)
+        }
+    }
+
+    /** The artworks an asset can be made from, read for the project picker. */
+    fun readProjects() {
+        viewModelScope.launch {
+            projectChoices = withContext(Dispatchers.IO) { runCatching { allArtworks(store.root) }.getOrDefault(emptyList()) }
+        }
+    }
+
+    private fun allArtworks(at: File): List<Artwork> = store.list(at).flatMap {
+        when (it) {
+            is Artwork -> listOf(it)
+            is io.github.artcraftandroid.procraft.gallery.Stack -> allArtworks(it.dir)
+        }
+    }
+
+    /** Another artwork's layers brought in as one asset, named right away. */
+    fun importAssetProject(a: Artwork) {
+        val lib = assetLibraryPlace
+        val folder = shownAssetFolder
+        assetWork("The file could not be brought in.", { it.importAssetFromProject(a.dir.path, a.name, lib.toUInt(), folder.toUInt()) }) { nameNewAsset(it) }
+    }
+
+    /** Asset [id] written to a .asset file in the share cache, to hand to another app. */
+    suspend fun shareAsset(id: String): File? {
+        val s = session ?: return null
+        val name = assetLibraries.flatMap { it.folders }.flatMap { it.assets }.firstOrNull { it.id == id }?.name ?: "Asset"
+        val file = withContext(Dispatchers.IO) {
+            assetWrites.withLock {
+                runCatching {
+                    // in a folder of its own, so another of the same name can't write over it while
+                    // it is being shared
+                    val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                    val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Asset" }
+                    val out = File(dir, "$safe.asset")
+                    if (s.exportAsset(id, out.path)) out else null
+                }.getOrNull()
+            }
+        }
+        if (file == null) message = "This asset couldn't be shared."
+        return file
+    }
+
+    /** The folder at [library]/[folder] written to a .assetset file in the share cache. */
+    suspend fun shareAssetFolder(library: Int, folder: Int): File? {
+        val s = session ?: return null
+        val name = assetLibraries.getOrNull(library)?.folders?.getOrNull(folder)?.name ?: "Folder"
+        val file = withContext(Dispatchers.IO) {
+            assetWrites.withLock {
+                runCatching {
+                    val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                    val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Folder" }
+                    val out = File(dir, "$safe.assetset")
+                    if (s.exportAssetFolder(library.toUInt(), folder.toUInt(), out.path)) out else null
+                }.getOrNull()
+            }
+        }
+        if (file == null) message = "This folder couldn't be shared."
+        return file
+    }
+
+    /** The library at [library] written to a .assetlibrary file in the share cache. */
+    suspend fun shareAssetLibrary(library: Int): File? {
+        val s = session ?: return null
+        val name = assetLibraries.getOrNull(library)?.name ?: "Assets"
+        val file = withContext(Dispatchers.IO) {
+            assetWrites.withLock {
+                runCatching {
+                    val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                    val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Assets" }
+                    val out = File(dir, "$safe.assetlibrary")
+                    if (s.exportAssetLibrary(library.toUInt(), out.path)) out else null
+                }.getOrNull()
+            }
+        }
+        if (file == null) message = "This library couldn't be shared."
+        return file
+    }
+
+    /** A new asset named right away: its folder shown, its whole name chosen to type over. */
+    private fun nameNewAsset(id: String) {
+        showingAssetLibraries = false
+        renamingAsset = id
+    }
 
     /** A new set at the top of the library, shown, with its name ready to edit. */
     fun newBrushSet() {

@@ -516,6 +516,8 @@ pub enum ZipKind {
     },
     /// An artwork file of ours, a layered package, or anything else.
     Other,
+    /// A shared asset file: one asset, a folder or a library of them.
+    Assets,
 }
 
 #[uniffi::export]
@@ -530,6 +532,8 @@ pub fn zip_file_kind(path: String) -> ZipKind {
         ZipKind::ModelArtwork
     } else if let Some(name) = crate::scene3d::model_name_among(names()) {
         ZipKind::Model { name }
+    } else if names().any(|n| n == crate::assets::SHARE_MANIFEST) {
+        ZipKind::Assets
     } else {
         ZipKind::Other
     }
@@ -558,6 +562,7 @@ mod tests {
             zip("colours.zip", &["Swatches.json"]),
             zip("model.zip", &["__MACOSX/._chair.obj", "chair/chair.obj", "chair/chair.mtl"]),
             zip("art.zip", &["Document.archive", "chair.obj", "QuickLook/Thumbnail.png"]),
+            zip("paper.assetlibrary", &["assets.json", "items/abc/artwork.json", "items/abc/layers/1.png"]),
             zip("other.zip", &["notes.txt"]),
         ];
         fs::write(dir.join("plain.zip"), b"PK not really").unwrap();
@@ -571,6 +576,7 @@ mod tests {
                 ZipKind::Swatches,
                 ZipKind::Model { name: "chair/chair.obj".to_owned() },
                 ZipKind::Other,
+                ZipKind::Assets,
                 ZipKind::Other,
             ]
         );
