@@ -1142,8 +1142,12 @@ struct Paced {
     distance: f32,
 }
 
-/// The display frame wet paint input at `time_ms` is laid in.
-fn wet_frame(time_ms: f64) -> i64 {
+/// The pass wet paint input at `time_ms` is laid in: a display frame's input a pass, or (a brush's
+/// preview, its stroke drawn all at once) each input sample's stamps a pass of their own.
+fn wet_pass(time_ms: f64, preview: bool) -> i64 {
+    if preview {
+        return (time_ms * 1024.0).round() as i64;
+    }
     (time_ms / WET_FRAME_MS).floor() as i64
 }
 
@@ -5350,8 +5354,8 @@ impl Canvas {
 
     /// Smudges `instances` into the stroke's layer: per stamp, the brush picks up colour and lays
     /// down what it carries; then the changed pixels go back into the layer texture. Wet paint is
-    /// laid a display frame at a time (see [`Canvas::lay_wet`]), the newest frame's stamps held
-    /// back until the rest of it comes.
+    /// laid a pass at a time (a display frame's input, see [`Canvas::lay_wet`]), the newest pass's
+    /// stamps held back until the rest of it comes.
     fn smudge_stamps(
         &mut self,
         device: &wgpu::Device,
@@ -5526,8 +5530,9 @@ impl Canvas {
         if style.paints_in_place() {
             let Some(smudge) = self.smudge.as_mut() else { return };
             smudge.pending.extend(instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)));
-            let newest = smudge.pending.last().map(|s| wet_frame(s.2.time_ms));
-            let ready = smudge.pending.iter().take_while(|s| Some(wet_frame(s.2.time_ms)) != newest).count();
+            let key = |s: &(StampInstance, [f32; 8], Paced)| wet_pass(s.2.time_ms, style.preview);
+            let newest = smudge.pending.last().map(key);
+            let ready = smudge.pending.iter().take_while(|s| Some(key(s)) != newest).count();
             let ready: Vec<_> = smudge.pending.drain(..ready).collect();
             self.lay_wet(device, encoder, (params, passes), &ready, style);
             return;
@@ -5668,10 +5673,10 @@ impl Canvas {
         self.smudged(encoder, rect);
     }
 
-    /// Lays wet paint, a pass a display frame (at most [`WET_PASS_MOST`] stamps): `stamps` in
-    /// order, with their wet-mix scaling and places in the stroke. Each pass works out what each of its
-    /// stamps lays down from the layer as the pass finds it (see the shader's `cs_wet_plots`), then
-    /// lays the stamps, each through its shape and grain.
+    /// Lays wet paint, a pass a display frame (see [`wet_pass`]; at most [`WET_PASS_MOST`] stamps):
+    /// `stamps` in order, with their wet-mix scaling and places in the stroke. Each pass works out
+    /// what each of its stamps lays down from the layer as the pass finds it (see the shader's
+    /// `cs_wet_plots`), then lays the stamps, each through its shape and grain.
     fn lay_wet(
         &mut self,
         device: &wgpu::Device,
@@ -5739,9 +5744,13 @@ impl Canvas {
         }
         let mut from = 0;
         while let Some(head) = stamps.get(from) {
-            let frame = wet_frame(head.2.time_ms);
-            let count =
-                stamps.iter().skip(from).take(WET_PASS_MOST).take_while(|s| wet_frame(s.2.time_ms) == frame).count();
+            let key = wet_pass(head.2.time_ms, style.preview);
+            let count = stamps
+                .iter()
+                .skip(from)
+                .take(WET_PASS_MOST)
+                .take_while(|s| wet_pass(s.2.time_ms, style.preview) == key)
+                .count();
             let group = stamps.get(from..from + count.max(1)).unwrap_or_default();
             from += group.len().max(1);
             let n = group.len();
@@ -10937,5 +10946,17 @@ mod tests {
         assert_eq!(final_mixture(0.4, 0.9, 1.0, (0, 4), false), 0.4);
         // neither picking up nor mixing: what it carries, whole
         assert_eq!(final_mixture(0.0, 0.9, 0.0, (1, 4), false), 1.0);
+    }
+
+    #[test]
+    fn wet_paint_is_laid_a_frame_at_a_time_and_a_preview_a_sample_at_a_time() {
+        // a pen's samples (240 a second) within one display frame share a pass on the canvas, and
+        // each take their own in a preview
+        let times = [1.0, 1.0 + 1000.0 / 240.0, 1.0 + 2000.0 / 240.0, 1.0 + 3000.0 / 240.0];
+        assert!(times.iter().all(|&t| wet_pass(t, false) == wet_pass(times[0], false)));
+        let preview: Vec<i64> = times.iter().map(|&t| wet_pass(t, true)).collect();
+        assert!(preview.windows(2).all(|w| w[0] != w[1]));
+        // the next frame's input, the next pass
+        assert_ne!(wet_pass(15.0, false), wet_pass(18.0, false));
     }
 }
