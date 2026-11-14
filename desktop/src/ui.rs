@@ -251,6 +251,13 @@ pub struct Interface {
 
 impl Default for Interface {
     fn default() -> Interface {
+        Interface::with_prefs(crate::prefs::Prefs::kept())
+    }
+}
+
+impl Interface {
+    /// The interface as it starts, with `prefs` (the ones kept, as the app runs).
+    fn with_prefs(prefs: crate::prefs::Prefs) -> Interface {
         Interface {
             actions: Vec::new(),
             canvas_rect: Rect::EVERYTHING,
@@ -307,7 +314,7 @@ impl Default for Interface {
             keep_brushes: false,
             tool_hold_acted: false,
             brushes_were_open: false,
-            prefs: crate::prefs::Prefs::kept(),
+            prefs,
             side_bar_shown: true,
             licences: false,
             shortcut_list: Default::default(),
@@ -2967,7 +2974,231 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
 
 #[cfg(test)]
 mod tests {
+    use egui::{Event, Pos2, RawInput};
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{DeviceId, ElementState, Force, MouseButton, Touch, TouchPhase, WindowEvent};
+
     use super::*;
+
+    /// The interface over a canvas in a window (a pixel a point), its input handed on as the app's
+    /// window hands it on: a touch to egui (the first one down its pointer as well, as egui-winit
+    /// makes it) and to the canvas, which takes it only off the interface; the mouse to both; keys
+    /// to egui, each with the modifiers held as it came.
+    struct Window {
+        ctx: egui::Context,
+        ui: Interface,
+        input: Input,
+        session: Arc<CanvasSession>,
+        touches: crate::input::InterfaceTouches,
+        size: egui::Vec2,
+        time: f64,
+        events: Vec<Event>,
+        pointer_touch: Option<u64>,
+    }
+
+    impl Window {
+        /// A canvas opened on a headless GPU in a window `size` points across, the side bar on the
+        /// right with `right`; none without a GPU.
+        fn open(size: egui::Vec2, right: bool) -> Option<Window> {
+            let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
+            let session = CanvasSession::new(400, 300);
+            session.set_display_scale(1.0);
+            session.use_gpu(gpu);
+            session.show_in(size.x as u32, size.y as u32);
+            let ctx = egui::Context::default();
+            crate::look::install_fonts(&ctx);
+            let mut ui = Interface::with_prefs(crate::prefs::Prefs { right_handed: right, ..Default::default() });
+            ui.opened(&session, 1.0);
+            let (input, touches) = (Input::default(), Default::default());
+            let mut window =
+                Window { ctx, ui, input, session, touches, size, time: 0.0, events: Vec::new(), pointer_touch: None };
+            for _ in 0..3 {
+                window.frame();
+            }
+            Some(window)
+        }
+
+        fn frame(&mut self) {
+            self.time += 1.0 / 60.0;
+            self.input.tick(&self.session);
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
+                time: Some(self.time),
+                events: std::mem::take(&mut self.events),
+                ..RawInput::default()
+            };
+            let Window { ctx, ui, input, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |egui_ui| ui.show(egui_ui, session, input));
+            output.textures_delta.clear();
+        }
+
+        /// A window event to the canvas, which leaves what lands on the interface to it.
+        fn canvas_hears(&mut self, event: &WindowEvent) {
+            let canvas = self.ui.canvas_rect;
+            let blocked = self.ui.popover_open && !self.ui.panel_lets_through;
+            let ctx = &self.ctx;
+            self.input
+                .on_event(&self.session, event, false, |p| blocked || crate::screen::on_interface(ctx, p, canvas));
+        }
+
+        /// The pen touching at `at`, as the system's pointer messages bring it.
+        fn pen(&mut self, phase: TouchPhase, at: Pos2) {
+            const PEN: u64 = 77;
+            crate::pen::pointer_kind(PEN, true);
+            let location = PhysicalPosition::new(f64::from(at.x), f64::from(at.y));
+            let touch =
+                Touch { device_id: DeviceId::dummy(), phase, location, force: Some(Force::Normalized(0.5)), id: PEN };
+            let canvas = self.ui.canvas_rect;
+            let ctx = &self.ctx;
+            for heard in self.touches.route(WindowEvent::Touch(touch), |p| crate::screen::on_interface(ctx, p, canvas))
+            {
+                if let WindowEvent::Touch(t) = heard {
+                    self.egui_touch(&t);
+                }
+            }
+            self.canvas_hears(&WindowEvent::Touch(touch));
+        }
+
+        /// A touch as egui-winit gives it to egui: as itself, and as the pointer while it is the
+        /// first one down.
+        fn egui_touch(&mut self, t: &Touch) {
+            let at = Pos2::new(t.location.x as f32, t.location.y as f32);
+            let phase = match t.phase {
+                TouchPhase::Started => egui::TouchPhase::Start,
+                TouchPhase::Moved => egui::TouchPhase::Move,
+                TouchPhase::Ended => egui::TouchPhase::End,
+                TouchPhase::Cancelled => egui::TouchPhase::Cancel,
+            };
+            let id = egui::TouchId::from(t.id);
+            self.events.push(Event::Touch { device_id: egui::TouchDeviceId(0), id, phase, pos: at, force: Some(0.5) });
+            if self.pointer_touch.is_some_and(|id| id != t.id) {
+                return;
+            }
+            let button = |pressed| Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            match t.phase {
+                TouchPhase::Started => {
+                    self.pointer_touch = Some(t.id);
+                    self.events.extend([Event::PointerMoved(at), button(true)]);
+                }
+                TouchPhase::Moved => self.events.push(Event::PointerMoved(at)),
+                TouchPhase::Ended => {
+                    self.pointer_touch = None;
+                    self.events.extend([button(false), Event::PointerGone]);
+                }
+                TouchPhase::Cancelled => {
+                    self.pointer_touch = None;
+                    self.events.push(Event::PointerGone);
+                }
+            }
+        }
+
+        /// The mouse pointer moving to `at` (a pen hovering moves it too).
+        fn hover(&mut self, at: Pos2) {
+            self.events.push(Event::PointerMoved(at));
+            let position = PhysicalPosition::new(f64::from(at.x), f64::from(at.y));
+            self.canvas_hears(&WindowEvent::CursorMoved { device_id: DeviceId::dummy(), position });
+            self.frame();
+        }
+
+        /// A pen stroke across the middle of the window, on the canvas.
+        fn stroke(&mut self) {
+            let from = Pos2::new(self.size.x / 2.0 - 60.0, self.size.y / 2.0);
+            self.pen(TouchPhase::Started, from);
+            self.frame();
+            for i in 1..=20 {
+                self.pen(TouchPhase::Moved, from + vec2(i as f32 * 6.0, 0.0));
+                self.frame();
+            }
+            self.pen(TouchPhase::Ended, from + vec2(120.0, 0.0));
+            self.frame();
+        }
+
+        /// The pen hovering to `at` and tapping there, sliding a little as it lands.
+        fn pen_tap(&mut self, at: Pos2) {
+            self.hover(at);
+            self.pen(TouchPhase::Started, at);
+            self.frame();
+            self.pen(TouchPhase::Moved, at + vec2(2.0, 2.0));
+            self.pen(TouchPhase::Ended, at + vec2(2.0, 2.0));
+            self.frame();
+            self.frame();
+        }
+
+        /// The mouse clicking at `at`.
+        fn click(&mut self, at: Pos2) {
+            self.hover(at);
+            for (pressed, state) in [(true, ElementState::Pressed), (false, ElementState::Released)] {
+                let button = egui::PointerButton::Primary;
+                self.events.push(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
+                self.canvas_hears(&WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(),
+                    state,
+                    button: MouseButton::Left,
+                });
+                self.frame();
+            }
+            self.frame();
+        }
+
+        /// `key` pressed and let go with Ctrl (and Shift) held, as a keyboard sends it or a tablet's
+        /// driver for one of its buttons.
+        fn ctrl_key(&mut self, key: Key, shift: bool) {
+            let modifiers = Modifiers { ctrl: true, command: true, shift, ..Modifiers::NONE };
+            for pressed in [true, false] {
+                self.events.push(Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers });
+            }
+            self.frame();
+            self.frame();
+        }
+
+        /// Whether there is a step to undo, and one to redo.
+        fn steps(&self) -> (bool, bool) {
+            let info = self.session.info();
+            (info.can_undo, info.can_redo)
+        }
+
+        /// The middle of the side bar's undo button, and of its redo button.
+        fn undo_redo(&self) -> (Pos2, Pos2) {
+            let bar =
+                crate::chrome::side_bar_rect(Rect::from_min_size(Pos2::ZERO, self.size), self.ui.prefs.right_handed);
+            let shorter = pc::SLIDER_HEIGHT - pc::side_bar_fit(self.size.y).1;
+            let at = |y: f32| Pos2::new(bar.center().x, bar.top() + y - shorter * 2.0);
+            (at(451.0), at(493.0))
+        }
+    }
+
+    #[test]
+    fn the_side_bar_s_redo_takes_a_pen_s_tap_and_a_click_after_its_undo_as_ctrl_shift_z_does() {
+        // as measured, and with its tracks shortened to fit a short window on the right
+        for (size, right) in [(vec2(1200.0, 800.0), false), (vec2(1000.0, 420.0), true)] {
+            let Some(mut w) = Window::open(size, right) else { return };
+            w.stroke();
+            assert_eq!(w.steps(), (true, false), "{size:?}");
+            let (undo, redo) = w.undo_redo();
+            // a tablet's pen through the system's pointer messages (Windows Ink)
+            w.pen_tap(undo);
+            assert_eq!(w.steps(), (false, true), "{size:?}");
+            w.pen_tap(redo);
+            assert_eq!(w.steps(), (true, false), "{size:?}");
+            // the mouse (a tablet's pen moves it with Windows Ink off)
+            w.click(undo);
+            assert_eq!(w.steps(), (false, true), "{size:?}");
+            w.click(redo);
+            assert_eq!(w.steps(), (true, false), "{size:?}");
+            // the keys, from a keyboard or a pen's button; Ctrl+Y isn't one of them
+            w.ctrl_key(Key::Z, false);
+            assert_eq!(w.steps(), (false, true), "{size:?}");
+            w.ctrl_key(Key::Y, false);
+            assert_eq!(w.steps(), (false, true), "{size:?}");
+            w.ctrl_key(Key::Z, true);
+            assert_eq!(w.steps(), (true, false), "{size:?}");
+        }
+    }
 
     #[test]
     fn keys_go_by_the_names_the_core_knows_and_go_as_they_are_with_no_plugin() {

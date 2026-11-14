@@ -274,9 +274,7 @@ impl Screen {
     /// Whether `p` (window pixels) is on the interface rather than the canvas, which shows in
     /// `canvas` (points).
     pub fn over_interface(&self, p: (f32, f32), canvas: egui::Rect) -> bool {
-        let ctx = self.egui.egui_ctx();
-        let at = egui::pos2(p.0, p.1) / ctx.pixels_per_point();
-        !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
+        on_interface(self.egui.egui_ctx(), p, canvas)
     }
 
     /// Draws `pad` (the brush studio's drawing pad) into its own picture, `size` pixels (made again
@@ -431,6 +429,13 @@ impl Screen {
             (canvas, interface) => canvas.or(interface),
         }
     }
+}
+
+/// Whether `p` (window pixels) is on `ctx`'s interface rather than the canvas, which shows in
+/// `canvas` (points): off the canvas, or on anything shown over it.
+pub fn on_interface(ctx: &egui::Context, p: (f32, f32), canvas: egui::Rect) -> bool {
+    let at = egui::pos2(p.0, p.1) / ctx.pixels_per_point();
+    !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
 }
 
 #[cfg(test)]
