@@ -333,7 +333,14 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             val lifted = e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL
             vm.showLiquifyRing(if (lifted || e.pointerCount > 1) null else Offset(e.x, e.y))
         }
-        route(e, s)
+        // a fault in the core as it takes a touch costs that touch, not the app: it goes in the log
+        // and the touches start afresh
+        try {
+            route(e, s)
+        } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+            io.github.artcraftandroid.procraft.AppLog.e("touch", "a touch failed in the core; its touches let go", fault)
+            runCatching { s.touchCancel() }
+        }
         // Layer opacity: the shared touches drag it; the band shows it as they go
         if (vm.opacityLayer != null) vm.layerOpacityTouched(e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL)
         return true
@@ -421,7 +428,15 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     override fun onGenericMotionEvent(e: MotionEvent): Boolean = penButton(e) || super.onGenericMotionEvent(e)
 
     /** The pen hovering over the canvas shows the brush cursor where it would paint. */
-    override fun onHoverEvent(e: MotionEvent): Boolean {
+    override fun onHoverEvent(e: MotionEvent): Boolean = try {
+        hoverEvent(e)
+    } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+        // as for a touch: the hover is let go, the app keeps going, the log says why
+        io.github.artcraftandroid.procraft.AppLog.e("touch", "a pen's hover failed in the core", fault)
+        true
+    }
+
+    private fun hoverEvent(e: MotionEvent): Boolean {
         if (penButton(e)) return true
         if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return super.onHoverEvent(e)
         when (e.actionMasked) {
