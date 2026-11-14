@@ -326,6 +326,31 @@ pub fn plugin_slider_along(slider: PluginSlider, value: f32) -> f32 {
     if range > 0.0 { ((value - slider.least) / range).clamp(0.0, 1.0) } else { 0.0 }
 }
 
+/// `slider`'s steps as choices, when every step has a name: shown as a menu of them, not as a
+/// slider, since nothing lies between them. Otherwise none.
+#[uniffi::export]
+pub fn plugin_slider_choices(slider: PluginSlider) -> Vec<String> {
+    let steps = if slider.step > 0.0 { ((slider.most - slider.least) / slider.step).round() } else { -1.0 };
+    let wanted = steps + 1.0;
+    if steps >= 1.0 && wanted <= slider.names.len() as f32 {
+        slider.names.iter().take(wanted as usize).cloned().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Which of `slider`'s choices `value` is.
+#[uniffi::export]
+pub fn plugin_slider_chosen(slider: PluginSlider, value: f32) -> u32 {
+    if slider.step > 0.0 { ((slider.stepped(value) - slider.least) / slider.step).round().max(0.0) as u32 } else { 0 }
+}
+
+/// The value of `slider`'s choice `index`.
+#[uniffi::export]
+pub fn plugin_slider_choice(slider: PluginSlider, index: u32) -> f32 {
+    slider.stepped(slider.least + index as f32 * slider.step)
+}
+
 /// `value` on `slider` as it reads, to as many places as its step needs.
 #[uniffi::export]
 pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
@@ -1561,6 +1586,26 @@ mod tests {
         assert_eq!(plugin_slider_shown(sound.clone(), 0.0), "By brush");
         assert_eq!(plugin_slider_shown(sound.clone(), 1.2), "Eraser");
         assert_eq!(plugin_slider_shown(sound, 2.0), "Pencil");
+    }
+
+    #[test]
+    fn a_slider_named_at_every_step_is_a_choice() {
+        let names = ["Eraser", "Pencil", "Pen"].map(str::to_owned).to_vec();
+        let sound = PluginSlider { least: 1.0, most: 3.0, step: 1.0, at_least: None, names, ..gap_slider() };
+        assert_eq!(plugin_slider_choices(sound.clone()), ["Eraser", "Pencil", "Pen"]);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 1.0), 0);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 3.0), 2);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 9.0), 2);
+        assert_eq!(plugin_slider_choice(sound.clone(), 1), 2.0);
+        assert_eq!(plugin_slider_choice(sound.clone(), 7), 3.0);
+        // a step left unnamed, numbers, or a range of one: a slider still
+        let short = PluginSlider { most: 4.0, ..sound.clone() };
+        assert!(plugin_slider_choices(short).is_empty());
+        assert!(plugin_slider_choices(gap_slider()).is_empty());
+        let one = PluginSlider { most: 1.0, ..sound.clone() };
+        assert!(plugin_slider_choices(one).is_empty());
+        let flat = PluginSlider { step: 0.0, ..sound };
+        assert!(plugin_slider_choices(flat).is_empty());
     }
 
     #[test]
