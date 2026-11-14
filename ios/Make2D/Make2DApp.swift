@@ -101,7 +101,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -113,6 +113,9 @@ enum ScreenCapture {
     static var compactMode: ColorMode?
     /// What opens over the QuickMenu.
     static var quickShows: String?
+    /// The Adjustments menu opens with Adjustment Layer on; a layer's styles open on this one.
+    static var adjustAsLayer = false
+    static var styleOpens: Int?
 
     /// The studio's pages, by capture.
     private static let pages: [String: Int] = [
@@ -312,6 +315,63 @@ enum ScreenCapture {
     private static func libraries(_ model: CanvasModel, shows: String) {
         model.showingLibraries = true
         library(model, shows: shows)
+    }
+
+    /// Colourful strokes across the canvas (window points), for the effects to change.
+    private static func paintStrokes(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.5)
+        for (k, hue) in [Float(0.0), 0.58, 0.14].enumerated() {
+            model.setColor(hue: hue, saturation: 0.8, brightness: 0.9)
+            let y = 420 + Float(k) * 260
+            let at = { (i: Int) in
+                PenSample(x: 500 + Float(i) * 40, y: y + 80 * sin(Float(i) / 3), pressure: 0.8, tilt: 0, orientation: 0, timeMs: Double(i) * 8, roll: 0)
+            }
+            s.strokeBegin(pointer: .stylus, samples: [at(0)])
+            s.strokeAdd(samples: (1 ... 40).map(at))
+            s.strokeEnd(samples: [])
+        }
+        model.refresh()
+    }
+
+    /// The effects' screens: an adjustment open on the strokes (or as an adjustment layer), or the
+    /// layers panel over an adjustment layer, or a layer's styles.
+    private static func effects(_ name: String, _ model: CanvasModel) {
+        paintStrokes(model)
+        switch name {
+        case "effect-pixelate", "effect-dither", "effect-vignette":
+            let a: Adjustment = name == "effect-pixelate" ? .pixelate : name == "effect-dither" ? .dither : .vignette
+            model.startAdjustment(a)
+            model.adjust { $0.adjustmentAmountBy(step: name == "effect-pixelate" ? 0.25 : 0.8) }
+        case "effect-layer":
+            model.addAdjustmentLayer(.hsb)
+            model.adjust { $0.adjustmentHsb(hue: 0.75, saturation: 0.5, brightness: 0.5) }
+        case "effect-layer-dither":
+            model.addAdjustmentLayer(.dither)
+            model.adjust { $0.adjustmentAmountBy(step: 1) }
+        case "layers-adjustment":
+            model.addAdjustmentLayer(.gradientMap)
+            model.endAdjustment(commit: true)
+            model.toggle(.layers)
+        case "layers-style":
+            if let l = model.layers.first(where: { $0.current }) {
+                var effects = model.layerEffects(l)
+                if effects.count == 4 {
+                    effects[0].on = true
+                    effects[0].size = 6
+                    effects[1].on = true
+                    effects[2].on = true
+                    for i in 0 ..< 3 {
+                        model.setLayerEffect(l, i, effects[i], done: true)
+                    }
+                }
+            }
+            layersShows = "style"
+            styleOpens = 1
+            model.toggle(.layers)
+        default:
+            break
+        }
     }
 
     /// The vector layers plugin on, and a layer of its kind over the current one.
@@ -587,6 +647,12 @@ enum ScreenCapture {
             model.startAdjustment(.chromaticAberration)
         case "effect-perspective":
             model.startAdjustment(.perspectiveBlur)
+        case "effect-pixelate", "effect-dither", "effect-vignette", "effect-layer", "effect-layer-dither",
+             "layers-adjustment", "layers-style":
+            effects(name, model)
+        case "adjustments-layer":
+            adjustAsLayer = true
+            model.toggle(.adjustments)
         case "transform":
             transform(model)
         case "transform-snapping":
