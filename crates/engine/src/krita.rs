@@ -623,16 +623,30 @@ fn tip(
         name: brush.attribute("name").unwrap_or_default(),
         md5: brush.attribute("md5sum").unwrap_or_default(),
     };
-    let tip = find(&wanted).and_then(|bytes| picture_tip(bytes, file, brush.attribute("name")));
+    let masked = alpha_mask(brush);
+    let tip = find(&wanted).and_then(|bytes| picture_tip(bytes, file, brush.attribute("name"), masked));
     if tip.is_none() {
         missing.push(file.to_owned());
     }
     tip.map(|t| (t, false))
 }
 
+/// Whether a picture tip in colour is laid as a mask (Krita's alpha mask: its dark and opaque
+/// parts paint), not by its alpha as the picture is (its colours, which we can't lay): as its
+/// application says, else as the older keys say (colour as a mask, unless it keeps its
+/// lightness). Neither said, a colour picture keeps its colours.
+fn alpha_mask(brush: &Element) -> bool {
+    let said = |key: &str| brush.attribute(key).map(str::trim);
+    match said("brushApplication") {
+        Some(application) => application == "0",
+        None => said("preserveLightness") != Some("1") && matches!(said("ColorAsMask"), Some("1" | "true")),
+    }
+}
+
 /// A tip from its picture's file (named `file`): a PNG, an ABR file's tip called `name` (else its
-/// first), a GIMP brush or a pipe's first.
-fn picture_tip(bytes: Vec<u8>, file: &str, name: Option<&str>) -> Option<KritaTip> {
+/// first), a GIMP brush or a pipe's first; a GIMP brush in colour laid as a mask if `masked` (see
+/// [`alpha_mask`]).
+fn picture_tip(bytes: Vec<u8>, file: &str, name: Option<&str>, masked: bool) -> Option<KritaTip> {
     if bytes.starts_with(&PNG) {
         return Some(KritaTip::Png(bytes));
     }
@@ -641,8 +655,11 @@ fn picture_tip(bytes: Vec<u8>, file: &str, name: Option<&str>) -> Option<KritaTi
         let at = tips.iter().position(|t| Some(t.name.as_str()) == name).unwrap_or(0);
         tips.into_iter().nth(at)
     };
-    let tip =
-        if file.to_ascii_lowercase().ends_with(".abr") { abr() } else { crate::gbr::read_first(&bytes).or_else(abr) };
+    let tip = if file.to_ascii_lowercase().ends_with(".abr") {
+        abr()
+    } else {
+        crate::gbr::read_first(&bytes, masked).or_else(abr)
+    };
     tip.map(KritaTip::Image)
 }
 
@@ -1294,6 +1311,33 @@ mod tests {
         crate::damaged::survives("Krita bundle", &bundle, |b| {
             let _ = read_bundle(b);
         });
+    }
+
+    #[test]
+    fn a_colour_tip_laid_as_an_alpha_mask_paints_where_it_is_dark() {
+        // a GIMP brush in colour, 2 x 1: white and black, both opaque
+        let mut tip = Vec::new();
+        for v in [28u32 + 1, 2, 2, 1, 4] {
+            tip.extend_from_slice(&v.to_be_bytes());
+        }
+        tip.extend_from_slice(b"GIMP");
+        tip.extend_from_slice(&10u32.to_be_bytes());
+        tip.push(0);
+        tip.extend_from_slice(&[255, 255, 255, 255, 0, 0, 0, 255]);
+        let pixels = |attributes: &str| {
+            let brush = format!(r#"<Brush type="gbr_brush" filename="colour.gbr" spacing="0.1" {attributes}/>"#);
+            let b = read_preset(&kpp(&preset("Colour", &brush, true)), &|_| Some(tip.clone())).unwrap();
+            let KritaTip::Image(t) = b.tip else { panic!("{:?}", b.tip) };
+            t.pixels
+        };
+        // as a mask (its application, or the older key): the dark part paints
+        assert_eq!(pixels(r#"brushApplication="0" ColorAsMask="1""#), [0, 255]);
+        assert_eq!(pixels(r#"ColorAsMask="1""#), [0, 255]);
+        // its colours as they are (which we can't lay), or its lightness kept: by its alpha
+        assert_eq!(pixels(r#"brushApplication="1" ColorAsMask="0""#), [255, 255]);
+        assert_eq!(pixels(r#"brushApplication="2""#), [255, 255]);
+        assert_eq!(pixels(r#"ColorAsMask="1" preserveLightness="1""#), [255, 255]);
+        assert_eq!(pixels(""), [255, 255]);
     }
 
     #[test]
