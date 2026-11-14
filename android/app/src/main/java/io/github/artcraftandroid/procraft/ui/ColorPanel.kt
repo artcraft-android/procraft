@@ -374,8 +374,11 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
     val m = remember(c, vm.colourModel) { ModelColor(c, vm.colourModel, vm.colourPlace) }
     val density = LocalDensity.current
     val height = if (vm.colorMode == ColorMode.DISC) 351.dp else 390.dp
-    // kept on the screen
-    val x = with(density) { at.x.toDp() }.coerceIn(0.dp, (maxWidth - FloatingWidth).coerceAtLeast(0.dp))
+    // kept on the screen, and clear of the side bar as the panels are
+    val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else 0.dp
+    val least = if (vm.rightHanded) 0.dp else clear
+    val most = (maxWidth - FloatingWidth - if (vm.rightHanded) clear else 0.dp).coerceAtLeast(least)
+    val x = with(density) { at.x.toDp() }.coerceIn(least, most)
     val y = with(density) { at.y.toDp() }.coerceIn(0.dp, (maxHeight - height).coerceAtLeast(0.dp))
     Popover(
         FloatingWidth,
