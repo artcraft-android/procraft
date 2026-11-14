@@ -25,6 +25,10 @@ func shownValue(_ v: Float, _ shown: Shown, most: Float = 16) -> String {
     case .double:
         // the control's middle reads as 100%
         return "\(wholeNumber(v * 200))%"
+    case .stretch:
+        // how long a ribbon's tile is against its own proportions: a quarter to four times, as
+        // the engine's `Brush::ribbon_tile` takes the control
+        return "\(wholeNumber(ribbonStretch(v) * 100))%"
     case .twice:
         // as a percent, with the control's middle at 100%
         if v <= 0 {
@@ -75,6 +79,11 @@ func typedNumber(_ shown: Shown, most: Float) -> TypedNumber {
         return TypedNumber(most: 100, signed: false) { Float($0) / 100 }
     case .double, .twice:
         return TypedNumber(most: 200, signed: false) { Float($0) / 200 }
+    case .stretch:
+        return TypedNumber(most: 400, signed: false) { n in
+            let times = Double(min(max(n, 25), 400)) / 100
+            return Float((log(times) / log(4) + 1) / 2)
+        }
     case .both, .follow, .grade:
         return TypedNumber(most: 100, signed: true) { Float($0) / 100 }
     case .count:
@@ -85,4 +94,10 @@ func typedNumber(_ shown: Shown, most: Float) -> TypedNumber {
             return Float(pow(Double(min(max(part, 0), 1)), 1 / 2.2))
         }
     }
+}
+
+/// A ribbon's tile against its own proportions for the ribbon scale control at `v` (0..1): four to
+/// the power 2v - 1, 1 at the middle.
+func ribbonStretch(_ v: Float) -> Float {
+    Float(pow(4, Double(2 * min(max(v, 0), 1) - 1)))
 }

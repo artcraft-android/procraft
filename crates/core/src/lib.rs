@@ -305,6 +305,9 @@ pub enum ToolKind {
     Paint,
     Erase,
     Smudge,
+    /// Brightens, dims or tames the paint under the brush (see [`LightSettings`]), with the
+    /// paint tool's brush.
+    Light,
 }
 
 impl ToolKind {
@@ -313,7 +316,45 @@ impl ToolKind {
             ToolKind::Paint => StrokeTool::Paint,
             ToolKind::Erase => StrokeTool::Erase,
             ToolKind::Smudge => StrokeTool::Smudge,
+            ToolKind::Light => StrokeTool::Light,
         }
+    }
+}
+
+/// What the light tool does to the paint under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum LightKind {
+    #[default]
+    Brighten,
+    Dim,
+    /// Only light above white, drawn back towards white: nothing on an ordinary canvas.
+    Tame,
+}
+
+/// The light tool's settings: what it does, and how strongly (0..1: a stroke covering fully at 1
+/// moves the light two stops, doubling it twice or halving it twice).
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct LightSettings {
+    pub kind: LightKind,
+    pub strength: f32,
+}
+
+impl Default for LightSettings {
+    fn default() -> LightSettings {
+        LightSettings { kind: LightKind::Brighten, strength: 0.5 }
+    }
+}
+
+impl LightSettings {
+    /// As a stroke takes it, brightening no further than white (an ordinary canvas keeps nothing
+    /// past it).
+    fn tool(self) -> make2d_gpu::LightTool {
+        let mode = match self.kind {
+            LightKind::Brighten => make2d_gpu::LightMode::Brighten,
+            LightKind::Dim => make2d_gpu::LightMode::Dim,
+            LightKind::Tame => make2d_gpu::LightMode::Tame,
+        };
+        make2d_gpu::LightTool::new(mode, self.strength)
     }
 }
 
@@ -436,6 +477,8 @@ pub(crate) struct State {
     tool: ToolKind,
     /// The tool chosen before this one (not one a stroke only borrowed).
     previous_tool: Option<ToolKind>,
+    /// What the light tool does, and how strongly.
+    light_tool: LightSettings,
     /// The app's own smoothing and pressure, on top of every brush's.
     pub(crate) input: make2d_engine::stroke::InputSettings,
     /// Selection mask visibility, 0..1: how strongly what is not selected is banded.
@@ -841,7 +884,8 @@ impl State {
     /// The (set, brush) `tool` uses.
     fn brush_ref(&self, tool: ToolKind) -> (usize, usize) {
         match tool {
-            ToolKind::Paint => self.paint_brush,
+            // the light tool lights with the paint tool's brush
+            ToolKind::Paint | ToolKind::Light => self.paint_brush,
             ToolKind::Erase => self.erase_brush,
             ToolKind::Smudge => self.smudge_brush,
         }
@@ -889,7 +933,8 @@ impl State {
         paint: StrokePaint,
         preview: bool,
     ) -> (Brush, StrokeStyle, f32) {
-        let mut brush = brush;
+        // a smudge drags the layer along stamp by stamp: a ribbon brush smudges as stamps
+        let mut brush = if tool == ToolKind::Smudge { brush.without_ribbon() } else { brush };
         brush.touch_opacity = sliders.opacity.clamp(0.0, 1.0);
         // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
         // build up to full; a glaze's caps the stroke
@@ -903,6 +948,7 @@ impl State {
         let mut style = StrokeStyle::for_brush(&brush, tool.stroke_tool(), paint.colour, opacity, paint.alpha_lock);
         style.secondary = paint.secondary;
         style.preview = preview;
+        style.light = self.light_tool.tool();
         style.wetness = StrokeStyle::wetness_at(sliders.opacity);
         self.use_brush_images(&mut style, &brush);
         (brush, style, diameter)
@@ -1184,6 +1230,7 @@ fn close_stroke(
     canvas.name_next_step(match canvas.stroke_tool() {
         Some(StrokeTool::Erase) => "Erase stroke",
         Some(StrokeTool::Smudge) => "Smudge stroke",
+        Some(StrokeTool::Light) => "Light stroke",
         _ if canvas.is_pencil() => "Filter stroke",
         _ => "Paint stroke",
     });
@@ -1497,6 +1544,7 @@ impl CanvasSession {
             reconfigure: false,
             tool: ToolKind::Paint,
             previous_tool: None,
+            light_tool: LightSettings::default(),
             text_edit: None,
             text_drawn: None,
             text_steps: Vec::new(),
@@ -2348,6 +2396,16 @@ impl CanvasSession {
             st.previous_tool = Some(st.tool);
         }
         st.tool = tool;
+    }
+
+    /// What the light tool does, and how strongly (strength kept to 0..1).
+    pub fn set_light(&self, light: LightSettings) {
+        let strength = if light.strength.is_finite() { light.strength.clamp(0.0, 1.0) } else { 0.5 };
+        self.shared.lock().light_tool = LightSettings { strength, ..light };
+    }
+
+    pub fn light(&self) -> LightSettings {
+        self.shared.lock().light_tool
     }
 
     /// The paint colour, sRGB 0..1 (red, green, blue).

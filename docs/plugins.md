@@ -767,7 +767,7 @@ procraft_canvas_load() -> i32                                  // 0 if it took t
 procraft_canvas_tool(tool: i32, colour: i32, size: f32, opacity: f32)   // if it exports it
 ```
 
-`procraft_canvas_tool` is told what each stroke starts with: the tool (0 paint, 1 erase, 2 smudge),
+`procraft_canvas_tool` is told what each stroke starts with: the tool (0 paint, 1 erase, 2 smudge, 3 light),
 the colour (`0xRRGGBBAA`), the brush's width in canvas pixels, and its opacity (0 to 1).
 
 - A touch's `phase` is 0 down, 1 moved, 2 up, or 3 called off (a second finger made it a gesture).
@@ -939,7 +939,7 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 
 | Id | Field |
 |---|---|
-| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge |
+| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge, 3 light |
 | 2 | The samples, 32 bytes each: x, y (canvas pixels), pressure, tilt, azimuth and roll as 32-bit floats, then the milliseconds since the first sample as a 64-bit float |
 | 3, 4 | The colour and the secondary colour, three 32-bit floats each, sRGB 0 to 1 |
 | 5, 6 | The size and opacity sliders, 32-bit floats, 0 to 1 |

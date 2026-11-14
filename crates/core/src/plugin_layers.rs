@@ -429,6 +429,7 @@ fn tool_number(tool: ToolKind) -> u8 {
         ToolKind::Paint => 0,
         ToolKind::Erase => 1,
         ToolKind::Smudge => 2,
+        ToolKind::Light => 3,
     }
 }
 
@@ -552,6 +553,7 @@ impl Item {
                     item.tool = match bytes.first() {
                         Some(1) => ToolKind::Erase,
                         Some(2) => ToolKind::Smudge,
+                        Some(3) => ToolKind::Light,
                         _ => ToolKind::Paint,
                     }
                 }
@@ -638,6 +640,7 @@ impl Item {
             ToolKind::Erase => "Erase stroke",
             ToolKind::Smudge => "Smudge stroke",
             ToolKind::Paint => "Paint stroke",
+            ToolKind::Light => "Light stroke",
         }
     }
 }

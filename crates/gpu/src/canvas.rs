@@ -13,6 +13,7 @@ use make2d_engine::animation::{self, FrameLook};
 use make2d_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
 use make2d_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use make2d_engine::geom::{Affine, IRect};
+use make2d_engine::ribbon::{Piece, Ribbon};
 use make2d_engine::stroke::{MOST_ROUNDNESS, Stamp};
 use make2d_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
@@ -43,7 +44,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 144;
+const UNIFORM_SIZE: u64 = 160;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -84,6 +85,43 @@ const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
     8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
 ];
+
+/// The vertex layout of a ribbon's piece, beside the stamp instance it is laid for.
+const RIBBON_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![12 => Float32x4, 13 => Float32x4, 14 => Float32x4];
+
+/// A ribbon's piece as the GPU takes it (see `make2d_engine::ribbon::Piece`): each rung's middle
+/// and the way to its left edge, then their alphas and their places along the image.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct RibbonEnds {
+    from: [f32; 4],
+    to: [f32; 4],
+    ends: [f32; 4],
+}
+
+impl RibbonEnds {
+    /// `piece`, its alphas taken as the stamp `s` it is laid for has its own (see
+    /// [`capped_alpha`]).
+    fn of(piece: &Piece, style: &StrokeStyle, capped: bool, s: &Stamp) -> RibbonEnds {
+        let alpha = |a: f32| capped_alpha(style, capped, &Stamp { alpha: a, ..*s }).0;
+        let rung = |r: &make2d_engine::ribbon::Rung| [r.center.x, r.center.y, r.across.x, r.across.y];
+        RibbonEnds {
+            from: rung(&piece.from),
+            to: rung(&piece.to),
+            ends: [alpha(piece.from.alpha), alpha(piece.to.alpha), piece.from.along, piece.to.along],
+        }
+    }
+
+    /// Where the piece can reach: both its rungs' squares.
+    fn reach(&self) -> IRect {
+        let rung = |r: [f32; 4]| {
+            let [x, y, ax, ay] = r;
+            IRect::around(make2d_engine::geom::Vec2::new(x, y), ax.hypot(ay) + 2.0)
+        };
+        rung(self.from).union(rung(self.to))
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -151,6 +189,64 @@ pub enum StrokeTool {
     /// The stroke's pixels take the layer's place where they reach (their alpha marked by 1): what
     /// a change made elsewhere brings back to the layer. Drawn in, never stamped.
     Laid,
+    /// Brightens, dims or tames the paint the stroke covers, as far as it covers it, without
+    /// changing its hue (see [`LightTool`]): built up in the stroke texture as an erase is.
+    Light,
+}
+
+/// What the light tool does to the paint under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightMode {
+    /// Lighter, up to the light's ceiling.
+    #[default]
+    Brighten,
+    /// Darker.
+    Dim,
+    /// Only what is brighter than white, drawn back towards white (nothing on a canvas that
+    /// keeps nothing past white).
+    Tame,
+}
+
+/// How a light stroke changes the paint it covers: each colour's channels scaled alike in linear
+/// light, so its hue and saturation stay as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightTool {
+    pub mode: LightMode,
+    /// How many stops (doublings or halvings of the light) a stroke covering fully moves it.
+    pub stops: f32,
+    /// The brightest a brightened colour's strongest channel goes, in linear light: 1 (white) on
+    /// a canvas that keeps nothing past it; more where the canvas keeps light above white.
+    pub ceiling: f32,
+}
+
+impl LightTool {
+    /// The most stops a stroke at full strength moves the light.
+    pub const MOST_STOPS: f32 = 2.0;
+
+    /// The light at `strength` (0..1 of [`LightTool::MOST_STOPS`]) in `mode`, brightening no
+    /// further than white.
+    pub fn new(mode: LightMode, strength: f32) -> LightTool {
+        let strength = if strength.is_finite() { strength.clamp(0.0, 1.0) } else { 0.0 };
+        LightTool { mode, stops: strength * LightTool::MOST_STOPS, ceiling: 1.0 }
+    }
+
+    /// As the composite takes it: the mode's number, the stops and the ceiling.
+    fn uniform(self) -> [f32; 4] {
+        let mode = match self.mode {
+            LightMode::Brighten => 0.0,
+            LightMode::Dim => 1.0,
+            LightMode::Tame => 2.0,
+        };
+        let stops = if self.stops.is_finite() { self.stops.clamp(0.0, 16.0) } else { 0.0 };
+        let ceiling = if self.ceiling.is_finite() { self.ceiling.max(0.0) } else { 1.0 };
+        [mode, stops, ceiling, 0.0]
+    }
+}
+
+impl Default for LightTool {
+    fn default() -> LightTool {
+        LightTool::new(LightMode::Brighten, 0.5)
+    }
 }
 
 /// How a stroke is drawn.
@@ -247,6 +343,12 @@ pub struct StrokeStyle {
     /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
     /// `Brush::laid_in_place`).
     pub laid_in_place: bool,
+    /// A ribbon: the shape image stretched along the stroke as one strip (see
+    /// `make2d_engine::ribbon`), its stamps the strip's rungs, a tile of the image this many of
+    /// the strip's widths long. None: stamped.
+    pub ribbon: Option<f32>,
+    /// What a light stroke does (the light tool's; other tools leave it be).
+    pub light: LightTool,
 }
 
 impl StrokeStyle {
@@ -265,7 +367,7 @@ impl StrokeStyle {
     /// The style as a dual brush's second: only coverage, drawn apart into its own texture, so
     /// never laid in place or mixed wet, whatever its own settings say.
     pub fn as_second(self) -> StrokeStyle {
-        StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
+        StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ribbon: None, ..self }
     }
 
     /// The style without its wet mix: dry, as the brush would be with none set (a preview that
@@ -336,6 +438,8 @@ impl StrokeStyle {
             preview: false,
             luminance: false,
             laid_in_place: false,
+            ribbon: None,
+            light: LightTool::default(),
         }
     }
 
@@ -347,7 +451,10 @@ impl StrokeStyle {
         opacity: f32,
         preserve_alpha: bool,
     ) -> StrokeStyle {
-        let wet = brush.mixes_wet();
+        // a ribbon is one strip, laid apart and put into the layer as the stroke ends: never wet
+        // or laid in place, nor a smudge's (which drags the layer along stamp by stamp)
+        let ribbon = (brush.is_ribbon() && tool != StrokeTool::Smudge).then(|| brush.ribbon_tile());
+        let wet = brush.mixes_wet() && ribbon.is_none();
         StrokeStyle {
             tool,
             color,
@@ -398,7 +505,7 @@ impl StrokeStyle {
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
             shape_sharp: brush.setting("shape_filtering") < 0.5 || brush.setting("pixelated") >= 0.5,
-            pixelated: brush.setting("pixelated") >= 0.5,
+            pixelated: brush.setting("pixelated") >= 0.5 && ribbon.is_none(),
             shape_lod_cap: if brush.setting("shape_filtering").round() == 1.0 {
                 SHAPE_LOD_CAP_CLASSIC
             } else {
@@ -407,7 +514,9 @@ impl StrokeStyle {
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
-            laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
+            laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place() && ribbon.is_none(),
+            ribbon,
+            light: LightTool::default(),
         }
     }
 
@@ -796,6 +905,9 @@ struct StampUniform {
     grain_side: f32,
     /// 1 when stamps are laid on whole pixels, hard-edged (see `StrokeStyle::pixelated`).
     pixelated: u32,
+    /// 1 for a ribbon's pieces (see `StrokeStyle::ribbon`).
+    ribbon: u32,
+    _pad: [u32; 3],
 }
 
 #[repr(C)]
@@ -841,6 +953,8 @@ struct LayerUniform {
     /// where its top left is in those (see [`Canvas::draw_scaled`]): what grain fixed to the
     /// canvas is read by.
     scaled: [f32; 4],
+    /// A light stroke's mode, stops and ceiling (see [`LightTool::uniform`]).
+    light: [f32; 4],
 }
 
 impl Default for LayerUniform {
@@ -873,6 +987,7 @@ impl Default for LayerUniform {
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
             scaled: [1.0, 0.0, 0.0, 0.0],
+            light: LightTool::default().uniform(),
         }
     }
 }
@@ -917,6 +1032,7 @@ impl LayerUniform {
             burnt_blend: s.burnt_blend,
             grain_sharp: if s.grain_sharp { 1.0 } else { 0.0 },
             grain_side: s.grain_side,
+            light: s.light.uniform(),
             ..self
         };
         match s.canvas_grain() {
@@ -1048,6 +1164,7 @@ const STROKE_PAINT: u32 = 1;
 const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
 const STROKE_LAID: u32 = 4;
+const STROKE_LIGHT: u32 = 5;
 
 /// How much of what it carries a smudge brush keeps at each stamp.
 const DEFAULT_PULL: f32 = 0.93;
@@ -1467,6 +1584,8 @@ enum Op {
         /// the wet paint drawn in place.
         wet: Vec<[f32; 8]>,
         times: Vec<Paced>,
+        /// A ribbon's pieces, one for each instance (the stamp it is laid for); empty for stamps.
+        ribbon: Vec<RibbonEnds>,
         style: StrokeStyle,
         clear: bool,
         layer: LayerId,
@@ -1870,6 +1989,10 @@ pub(crate) struct Pipelines {
     stamp_max: wgpu::RenderPipeline,
     /// Stamps adding towards their transfer (dual-source blending), where the GPU has it.
     stamp_capped: Option<wgpu::RenderPipeline>,
+    /// A ribbon's pieces, drawn as stamps are by each rendering.
+    ribbon: wgpu::RenderPipeline,
+    ribbon_max: wgpu::RenderPipeline,
+    ribbon_capped: Option<wgpu::RenderPipeline>,
     layer: wgpu::RenderPipeline,
     /// A normal layer clipped to what it is drawn onto.
     layer_atop: wgpu::RenderPipeline,
@@ -2051,6 +2174,10 @@ pub struct Canvas {
     uniform_slots: u64,
     stamp_buffer: wgpu::Buffer,
     stamp_capacity: u64,
+    /// Ribbons' pieces as the last render uploaded them, and how many the buffer holds.
+    ribbon_buffer: Option<(wgpu::Buffer, u64)>,
+    /// The open stroke's ribbon as far as it is laid, if it is one (see [`StrokeStyle::ribbon`]).
+    ribbon: Option<Ribbon>,
     /// The most stamps' work sent to the GPU as one piece (see [`WORK_AT_ONCE`]).
     work_at_once: u64,
     /// The most stamps one render uploads (see [`STAMPS_AT_ONCE`]).
@@ -2411,6 +2538,8 @@ impl Canvas {
             uniform_slots,
             stamp_buffer,
             stamp_capacity,
+            ribbon_buffer: None,
+            ribbon: None,
             work_at_once: WORK_AT_ONCE,
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
@@ -2782,6 +2911,7 @@ impl Canvas {
         self.end_stroke();
         self.prediction.clear();
         let within = self.lay_within;
+        self.ribbon = style.ribbon.map(Ribbon::new);
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
     }
 
@@ -2923,8 +3053,11 @@ impl Canvas {
             return;
         }
         let at = self.ops.len();
+        // a ribbon's strip goes on through the tip, and from where it was again after it
+        let ribbon = self.ribbon;
         // (measured, it counts where the stroke reaches, as drawn)
         let bounds = self.push_stamps(stamps, false);
+        self.ribbon = ribbon;
         if bounds.is_empty() || self.measuring {
             return;
         }
@@ -2975,14 +3108,12 @@ impl Canvas {
             let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
             IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2)
         };
-        let drawn: Vec<&Stamp> =
+        let finite: Vec<&Stamp> =
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
         // where all of them reach, though only those reaching where the stroke is laid are drawn
         // (each pixel built up from its own stamps alone: never a stroke laid in place)
-        let bounds = drawn.iter().fold(IRect::EMPTY, |b, s| b.union(reach(s))).intersect(full);
+        let bounds = finite.iter().fold(IRect::EMPTY, |b, s| b.union(reach(s))).intersect(full);
         let within = active.within.filter(|_| !style.in_place());
-        let drawn: Vec<&Stamp> =
-            drawn.into_iter().filter(|s| within.is_none_or(|w| !reach(s).intersect(w).is_empty())).collect();
         if clear && !second {
             if !self.measuring {
                 self.dirty = self.dirty.union(active.bounds);
@@ -2994,6 +3125,32 @@ impl Canvas {
         if self.measuring {
             return bounds;
         }
+        // a ribbon's pieces, each drawn with the stamp that ends it (the strip goes on from where
+        // it reached, or from its start when drawn again from scratch)
+        let ribbon = match (second, style.ribbon, self.ribbon.as_mut()) {
+            (false, Some(tile), Some(ribbon)) => {
+                if clear {
+                    *ribbon = Ribbon::new(tile);
+                }
+                let rungs: Vec<Stamp> = finite.iter().map(|s| Stamp { radius: drawn_at(s), ..**s }).collect();
+                Some(ribbon.extend(&rungs))
+            }
+            _ => None,
+        };
+        let (drawn, ends): (Vec<&Stamp>, Vec<RibbonEnds>) = match ribbon {
+            Some(pieces) => pieces
+                .iter()
+                .filter_map(|p| {
+                    let s = *finite.get(p.stamp)?;
+                    let ends = RibbonEnds::of(p, &style, capped, s);
+                    within.is_none_or(|w| !ends.reach().intersect(w).is_empty()).then_some((s, ends))
+                })
+                .unzip(),
+            None => (
+                finite.into_iter().filter(|s| within.is_none_or(|w| !reach(s).intersect(w).is_empty())).collect(),
+                Vec::new(),
+            ),
+        };
         let wet: Vec<[f32; 8]> =
             drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
         let times: Vec<Paced> = drawn
@@ -3039,6 +3196,7 @@ impl Canvas {
                 instances,
                 wet,
                 times,
+                ribbon: ends,
                 style,
                 clear: clear && !pencil,
                 layer: active.layer,
@@ -3057,12 +3215,12 @@ impl Canvas {
         self.prediction.clear();
         // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second; nor paint
         // laid in place: drawn over every layer, its stamps show none of what it is laid on, a
-        // block of colour that the stroke then isn't)
+        // block of colour that the stroke then isn't; nor a ribbon's, whose rungs aren't stamps)
         let Some(style) = self
             .active
             .filter(|a| a.second.is_none())
             .map(|a| a.style)
-            .filter(|s| s.tool == StrokeTool::Paint && !s.paints_in_place())
+            .filter(|s| s.tool == StrokeTool::Paint && !s.paints_in_place() && s.ribbon.is_none())
         else {
             return;
         };
@@ -4125,6 +4283,7 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
+        self.ribbon = style.ribbon.map(Ribbon::new);
         self.active =
             Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, within: None });
     }
@@ -4452,6 +4611,33 @@ impl Canvas {
         if !instances.is_empty() {
             gpu.queue.write_buffer(&self.stamp_buffer, 0, bytemuck::cast_slice(&instances));
         }
+        // and the ribbons' pieces, in the same order
+        let ribbon_ends: Vec<RibbonEnds> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Stamps { ribbon, .. } => Some(ribbon.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        if !ribbon_ends.is_empty() {
+            let needed = ribbon_ends.len() as u64;
+            if self.ribbon_buffer.as_ref().is_none_or(|(_, capacity)| *capacity < needed) {
+                let capacity = needed.next_power_of_two();
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ribbons"),
+                    size: capacity * size_of::<RibbonEnds>() as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.ribbon_buffer = Some((buffer, capacity));
+            }
+            if let Some((buffer, _)) = &self.ribbon_buffer {
+                gpu.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&ribbon_ends));
+            }
+        }
+        let mut next_ribbon = 0u32;
 
         // the display takes four slots, and frosted panels three and one for each
         let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + b.windows.len() + 3);
@@ -4565,10 +4751,17 @@ impl Canvas {
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
                 }
-                Op::Stamps { instances, style, clear, pencil, second, .. } => {
+                Op::Stamps { instances, ribbon, style, clear, pencil, second, .. } => {
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
                     let first = next_instance;
                     next_instance = next_instance.saturating_add(count);
+                    // a ribbon's pieces, one for each of its instances
+                    let ribbon_first = next_ribbon;
+                    let ribbons = (!ribbon.is_empty() && ribbon.len() == instances.len())
+                        .then_some(())
+                        .and(self.ribbon_buffer.as_ref())
+                        .map(|(buffer, _)| buffer);
+                    next_ribbon = next_ribbon.saturating_add(u32::try_from(ribbon.len()).unwrap_or(u32::MAX));
                     let (grain, grain_scale, grain_depth) =
                         style.moving_grain().map_or((-1, 1.0, 0.0), |(g, s, d)| (g as i32, s, d));
                     let own_grain = self.full_grain_bind(device, &style);
@@ -4590,6 +4783,8 @@ impl Canvas {
                         grain_side: style.grain_side,
                         pixelated: u32::from(style.pixelated),
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
+                        ribbon: u32::from(ribbons.is_some()),
+                        _pad: [0; 3],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
                     let target = match (&self.pencil, pencil) {
@@ -4599,11 +4794,20 @@ impl Canvas {
                     };
                     let mut pass = render_pass(&mut encoder, "stamps", target, load);
                     if count > 0 {
-                        pass.set_pipeline(match style.rendering {
-                            Rendering::BuildUp | Rendering::Gradual => &self.pipelines.stamp,
-                            Rendering::Strongest => &self.pipelines.stamp_max,
-                            Rendering::Capped => self.pipelines.stamp_capped.as_ref().unwrap_or(&self.pipelines.stamp),
+                        let p = &self.pipelines;
+                        pass.set_pipeline(match (style.rendering, ribbons.is_some()) {
+                            (Rendering::BuildUp | Rendering::Gradual, false) => &p.stamp,
+                            (Rendering::Strongest, false) => &p.stamp_max,
+                            (Rendering::Capped, false) => p.stamp_capped.as_ref().unwrap_or(&p.stamp),
+                            (Rendering::BuildUp | Rendering::Gradual, true) => &p.ribbon,
+                            (Rendering::Strongest, true) => &p.ribbon_max,
+                            (Rendering::Capped, true) => p.ribbon_capped.as_ref().unwrap_or(&p.ribbon),
                         });
+                        if let Some(buffer) = ribbons {
+                            let size = size_of::<RibbonEnds>() as u64;
+                            let end = u64::from(ribbon_first) + u64::from(count);
+                            pass.set_vertex_buffer(1, buffer.slice(u64::from(ribbon_first) * size..end * size));
+                        }
                         pass.set_bind_group(0, &self.uniform_bind, &[offset]);
                         pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
                         let start = u64::from(first) * size_of::<StampInstance>() as u64;
@@ -5983,16 +6187,21 @@ impl Canvas {
                 quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
-            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
-                (StrokeTool::Paint | StrokeTool::Laid, true) => {
+            let light = stroke.style.tool == StrokeTool::Light;
+            match (
+                stroke.style.tool,
+                laid || light || locked || stroke.style.blend != 0 || burns || stroke.style.luminance,
+            ) {
+                (StrokeTool::Paint | StrokeTool::Laid | StrokeTool::Light, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
                     let offset = uniforms.push(
                         &LayerUniform {
                             opacity: 1.0,
-                            stroke_mode: match (laid, locked) {
-                                (true, _) => STROKE_LAID,
-                                (_, true) => STROKE_PAINT_LOCKED,
+                            stroke_mode: match (laid, light, locked) {
+                                (true, ..) => STROKE_LAID,
+                                (_, true, _) => STROKE_LIGHT,
+                                (.., true) => STROKE_PAINT_LOCKED,
                                 _ => STROKE_PAINT,
                             },
                             stroke_opacity: opacity,
@@ -6030,7 +6239,9 @@ impl Canvas {
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
-                            StrokeTool::Paint | StrokeTool::Smudge | StrokeTool::Laid => &self.pipelines.commit_paint,
+                            StrokeTool::Paint | StrokeTool::Smudge | StrokeTool::Laid | StrokeTool::Light => {
+                                &self.pipelines.commit_paint
+                            }
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
@@ -7751,6 +7962,7 @@ impl Canvas {
                 Some(StrokeTool::Paint) => STROKE_PAINT,
                 Some(StrokeTool::Erase) => STROKE_ERASE,
                 Some(StrokeTool::Laid) => STROKE_LAID,
+                Some(StrokeTool::Light) => STROKE_LIGHT,
                 // the smudge changes the layer itself
                 Some(StrokeTool::Smudge) => STROKE_NONE,
             },
@@ -9435,26 +9647,35 @@ impl Pipelines {
         let smudge_wet_plots = compute("smudge wet plots", "cs_wet_plots");
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
-        let stamp_pipeline = |label, blend| {
+        // stamps, or a ribbon's pieces beside the stamps they are laid for
+        let stamp_like = |label, module: &wgpu::ShaderModule, fragment, blend, ribbon: bool| {
+            let stamps = wgpu::VertexBufferLayout {
+                array_stride: size_of::<StampInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &STAMP_ATTRIBUTES,
+            };
+            let pieces = wgpu::VertexBufferLayout {
+                array_stride: size_of::<RibbonEnds>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &RIBBON_ATTRIBUTES,
+            };
+            let with_pieces = [Some(stamps.clone()), Some(pieces)];
+            let alone = [Some(stamps)];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&stamp_layout),
                 vertex: wgpu::VertexState {
-                    module: &stamp_module,
-                    entry_point: Some("vs_stamp"),
+                    module,
+                    entry_point: Some(if ribbon { "vs_ribbon" } else { "vs_stamp" }),
                     compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<StampInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &STAMP_ATTRIBUTES,
-                    })],
+                    buffers: if ribbon { &with_pieces } else { &alone },
                 },
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
-                    module: &stamp_module,
-                    entry_point: Some("fs_stamp"),
+                    module,
+                    entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: STROKE_FORMAT,
@@ -9466,12 +9687,14 @@ impl Pipelines {
                 cache: kept,
             })
         };
-        let stamp = stamp_pipeline("stamp", PREMULTIPLIED_OVER);
-        let stamp_max = stamp_pipeline("stamp max", MAXIMUM);
+        let stamp = stamp_like("stamp", &stamp_module, "fs_stamp", PREMULTIPLIED_OVER, false);
+        let stamp_max = stamp_like("stamp max", &stamp_module, "fs_stamp", MAXIMUM, false);
+        let ribbon = stamp_like("ribbon", &stamp_module, "fs_stamp", PREMULTIPLIED_OVER, true);
+        let ribbon_max = stamp_like("ribbon max", &stamp_module, "fs_stamp", MAXIMUM, true);
         // stamps adding towards their transfer: the paint (scaled by it) over what is there, kept
         // by what the stamp covers (a second colour out of the shader)
-        let stamp_capped = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
-            let capped_module = module(
+        let capped_module = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
+            module(
                 "stamp capped",
                 concat!(
                     "enable dual_source_blending;\n",
@@ -9479,37 +9702,12 @@ impl Pipelines {
                     include_str!("shaders/stamp.wgsl"),
                     include_str!("shaders/stamp_capped.wgsl")
                 ),
-            );
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("stamp capped"),
-                layout: Some(&stamp_layout),
-                vertex: wgpu::VertexState {
-                    module: &capped_module,
-                    entry_point: Some("vs_stamp"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<StampInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &STAMP_ATTRIBUTES,
-                    })],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &capped_module,
-                    entry_point: Some("fs_stamp_capped"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: STROKE_FORMAT,
-                        blend: Some(TOWARDS_TRANSFER),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: kept,
-            })
+            )
         });
+        let stamp_capped =
+            capped_module.as_ref().map(|m| stamp_like("stamp capped", m, "fs_stamp_capped", TOWARDS_TRANSFER, false));
+        let ribbon_capped =
+            capped_module.as_ref().map(|m| stamp_like("ribbon capped", m, "fs_stamp_capped", TOWARDS_TRANSFER, true));
         let full = |label, entry, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -9626,6 +9824,9 @@ impl Pipelines {
             stamp,
             stamp_max,
             stamp_capped,
+            ribbon,
+            ribbon_max,
+            ribbon_capped,
             smudge_layout,
             smudge_carry,
             smudge_blur_down,
@@ -9826,7 +10027,7 @@ fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
 fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> {
     let mut pieces = Vec::with_capacity(ops.len());
     for op in ops {
-        let Op::Stamps { second, instances, wet, times, style, clear, layer, pencil } = op else {
+        let Op::Stamps { second, instances, wet, times, ribbon, style, clear, layer, pencil } = op else {
             pieces.push(op);
             continue;
         };
@@ -9844,17 +10045,20 @@ fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> 
             work = work.saturating_add(more);
         }
         if counts.is_empty() {
-            pieces.push(Op::Stamps { second, instances, wet, times, style, clear, layer, pencil });
+            pieces.push(Op::Stamps { second, instances, wet, times, ribbon, style, clear, layer, pencil });
             continue;
         }
         counts.push(count);
         let (mut instances, mut wet, mut times) = (instances.into_iter(), wet.into_iter(), times.into_iter());
+        // a ribbon's pieces go with their stamps
+        let mut ribbon = ribbon.into_iter();
         for (i, count) in counts.into_iter().enumerate() {
             pieces.push(Op::Stamps {
                 second,
                 instances: instances.by_ref().take(count).collect(),
                 wet: wet.by_ref().take(count).collect(),
                 times: times.by_ref().take(count).collect(),
+                ribbon: ribbon.by_ref().take(count).collect(),
                 style,
                 // from scratch the first time only
                 clear: clear && i == 0,

@@ -101,7 +101,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -322,6 +322,102 @@ enum ScreenCapture {
         }
     }
 
+    /// `steps` run one after another a fifth of a second apart: strokes given all at once, with no
+    /// frame between them, aren't all taken.
+    private static func paced(_ steps: [() -> Void]) {
+        for (i, step) in steps.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2 * Double(i), execute: step)
+        }
+    }
+
+    /// A stroke through `points` (window pixels) at `pressure` for each.
+    private static func stroke(_ s: CanvasSession, _ points: [(Float, Float, Float)]) {
+        let samples = points.enumerated().map { k, p in
+            PenSample(x: p.0, y: p.1, pressure: p.2, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0)
+        }
+        guard let first = samples.first, let last = samples.last else { return }
+        s.strokeBegin(pointer: .stylus, samples: [first])
+        s.strokeAdd(samples: Array(samples.dropFirst().dropLast()))
+        s.strokeEnd(samples: [last])
+    }
+
+    /// A wave across the canvas at `y`, the pressure swelling from light to full and back.
+    private static func wave(_ s: CanvasSession, y: Float) {
+        stroke(s, (0 ... 60).map { k in
+            let t = Float(k) / 60
+            return (300 + Float(k) * 28, y + 70 * sin(t * 2 * .pi), 0.25 + 0.75 * sin(t * .pi))
+        })
+    }
+
+    /// A straight line from `from` to `to` at full pressure.
+    private static func line(_ s: CanvasSession, _ from: (Float, Float), _ to: (Float, Float)) {
+        stroke(s, (0 ... 40).map { k in
+            let t = Float(k) / 40
+            return (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, 1)
+        })
+    }
+
+    /// Ribbon brushes drawn on the canvas: a heart stamped, then as a ribbon, a star stretched
+    /// along and a leaf, each with the brush the paint tool has, changed only while drawn (the
+    /// studio's edit put back after).
+    private static func ribbons(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.7)
+        s.setBrushOpacity(slider: 1)
+        // (shape, ribbon, its scale, colour)
+        let rows: [(UInt32, Float, Float, [Float])] = [
+            (37, 0, 0.5, [0.8, 0.2, 0.3]), (37, 1, 0.5, [0.8, 0.2, 0.3]),
+            (18, 1, 0.75, [0.95, 0.65, 0.1]), (8, 1, 0.5, [0.2, 0.6, 0.3]),
+        ]
+        paced(rows.enumerated().map { i, row in
+            {
+                _ = s.studioBegin()
+                _ = s.setStudioShippedSource(kind: .shape, index: row.0)
+                s.setStudioSetting(key: "ribbon", value: row.1)
+                s.setStudioSetting(key: "ribbon_scale", value: row.2)
+                s.setColor(r: row.3[0], g: row.3[1], b: row.3[2])
+                wave(s, y: 760 + Float(i) * 330)
+                s.studioEnd(keep: false)
+                model.refresh()
+            }
+        })
+    }
+
+    /// The light tool over bands of colour: brightened down one stripe, dimmed down another, its
+    /// panel open.
+    private static func lit(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.9)
+        s.setBrushOpacity(slider: 1)
+        let bands: [[Float]] = [[0.8, 0.3, 0.2], [0.2, 0.45, 0.8], [0.3, 0.65, 0.3], [0.85, 0.7, 0.2]]
+        var steps: [() -> Void] = []
+        for (i, c) in bands.enumerated() {
+            for k in 0 ..< 3 {
+                let y = 720 + Float(i) * 340 + Float(k) * 80
+                steps.append {
+                    s.setColor(r: c[0], g: c[1], b: c[2])
+                    line(s, (250, y), (2100, y))
+                }
+            }
+        }
+        steps.append {
+            model.select(.light)
+            s.setBrushSize(slider: 0.9)
+            s.setBrushOpacity(slider: 1)
+            model.setLight(LightSettings(kind: .brighten, strength: 0.6))
+            line(s, (800, 640), (800, 2080))
+        }
+        steps.append {
+            model.setLight(LightSettings(kind: .dim, strength: 0.6))
+            line(s, (1500, 640), (1500, 2080))
+        }
+        steps.append {
+            model.refresh()
+            model.toggle(.light)
+        }
+        paced(steps)
+    }
+
     /// Opens what capture `name` shows, if it is one of these.
     private static func open(_ name: String, in model: CanvasModel) {
         if let page = pages[name] {
@@ -414,6 +510,18 @@ enum ScreenCapture {
             if name == "animation-colors" {
                 animationColors = true
             }
+        case "studio-ribbon":
+            // the Shape page at its Ribbon section, the ribbon on (its preview drawn as one)
+            studioRow = "ribbon"
+            studio(model, page: 3) { studio, _ in
+                // a heart's shape to stretch: the round tip has none
+                studio.keepSource(.shape, pixels: Data(), shipped: 37)
+                studio.set("ribbon", 1)
+            }
+        case "ribbon":
+            ribbons(model)
+        case "light":
+            lit(model)
         case "timeline-keys":
             // a line keyed to fall and turn a quarter over eight frames, seen half way
             model.timeline.setOn(true)

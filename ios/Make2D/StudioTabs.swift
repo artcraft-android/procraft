@@ -2,10 +2,10 @@ import SwiftUI
 
 /// How a slider reads. `size` reads the size the control sets as a percent (Max at its end), `both`
 /// goes both ways from 0% in its middle, -100% to Max (and `follow` and `grade` to a name of their
-/// own), `double` reads 100% at its middle; `metal` and `gloss` name their ends as a material's
-/// metalness and roughness.
+/// own), `double` reads 100% at its middle, `stretch` 100% there and 25% to 400% from end to end;
+/// `metal` and `gloss` name their ends as a material's metalness and roughness.
 enum Shown {
-    case percent, both, count, tip, movement, zoom, charge, size, follow, grade, double, twice, metal, gloss
+    case percent, both, count, tip, movement, zoom, charge, size, follow, grade, double, twice, stretch, metal, gloss
 }
 
 /// What a control waits on: another control's key and the choice it must be on; greyed out
@@ -134,6 +134,12 @@ private let shapeTab = StudioTab(name: "Shape", icon: PcIcons.studioShape, iconS
         .roundness, slider("pressure_roundness", "Pressure Roundness", .both),
         slider("tilt_roundness", "Tilt roundness", .both), slider("roundness_jitter_y", "Roundness Vertical Jitter"),
         slider("roundness_jitter_x", "Roundness Horizontal Jitter"),
+    ]),
+    // the shape stretched along the stroke as one strip (a shape image's; the round tip stamps),
+    // its tiles as long as the strip is wide at the scale's middle
+    section("Ribbon", [
+        toggle("ribbon", "Ribbon"),
+        slider("ribbon_scale", "Ribbon scale", .stretch, enabledBy: EnabledBy(key: "ribbon", choice: 1)),
     ]),
     section("Shape filtering", [.choice(key: "shape_filtering", options: filtering)]),
 ])

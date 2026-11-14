@@ -461,6 +461,8 @@ private struct StudioSettings: View {
             switch (ScreenCapture.studioRow, control) {
             case ("roundness", .roundness), ("tilt", .tiltAngle):
                 return true
+            case let ("ribbon", .toggle(key, _, _)):
+                return key == "ribbon"
             default:
                 return false
             }
