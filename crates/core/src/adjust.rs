@@ -371,10 +371,11 @@ impl State {
             None => {}
         }
         adjustment.settings = self.adjust.layer_settings();
+        // (it is the current layer, composited live: the caches stay)
         if self.doc.set_adjustment(id, adjustment)
             && let Some(canvas) = self.canvas.as_mut()
         {
-            canvas.invalidate();
+            canvas.recomposite();
         }
     }
 
@@ -861,7 +862,7 @@ impl CanvasSession {
                 edit.preview = original;
             }
             if let Some(canvas) = st.canvas.as_mut() {
-                canvas.invalidate();
+                canvas.recomposite();
             }
             self.shared.frame(st);
             return;

@@ -13991,3 +13991,30 @@ fn picked_layers_with_an_adjustment_layer_among_them_stay_apart() {
     assert_eq!(s.layers().len(), count);
     assert_eq!(pixel(&s, 32, 32), grey);
 }
+
+#[test]
+fn changing_an_open_adjustment_layer_keeps_the_composite_caches() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    red_bar(&s);
+    let red = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    // a layer above it, kept in a cache while the adjustment layer is worked on
+    let adjust = s.layers().iter().find(|l| l.current).unwrap().id;
+    s.add_layer();
+    assert!(s.select_layer(adjust));
+    let _ = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_edit(adjust).is_some());
+    let _ = pixel(&s, 32, 32);
+    let cached = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().composites_cached();
+    assert!(cached(&s));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    let grey = pixel(&s, 32, 32);
+    assert!(grey[0].abs_diff(grey[1]) <= 2 && grey != red, "{grey:?}");
+    assert!(cached(&s), "a change to it shows at once, the caches kept");
+    s.adjustment_hsb(0.5, 1.0, 0.5);
+    assert_ne!(pixel(&s, 32, 32), grey);
+    assert!(cached(&s));
+    assert!(s.adjustment_end(false));
+}

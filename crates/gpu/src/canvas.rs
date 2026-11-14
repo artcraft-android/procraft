@@ -3875,6 +3875,14 @@ impl Canvas {
         self.dirty = self.full();
     }
 
+    /// Composites the whole picture again next render, keeping the caches: for a change to an
+    /// item that composites live (an adjustment layer's values while it is the current layer).
+    /// Caches made from what changed are made again as they would be anyway, their items' keys
+    /// telling.
+    pub fn recomposite(&mut self) {
+        self.dirty = self.full();
+    }
+
     /// The frame showing alone, if one is (see [`Canvas::set_play_frame`]).
     pub fn play_frame(&self) -> Option<usize> {
         self.play_frame
