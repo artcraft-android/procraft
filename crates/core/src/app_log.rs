@@ -3,8 +3,9 @@
 //! It is `procraft.log` in the app's own folder, with the run before's kept beside it as
 //! `procraft-previous.log`, as the desktop app keeps its own.
 //!
-//! The interface begins it with a header (the app, the device) and adds its own warnings and
-//! errors; the core's log goes in from `info` up. Each line goes into the file as it comes, with no
+//! The interface begins it with a header (the app, the device, how the last runs ended, with the
+//! system's trace of a crash: see [`trace_text`]) and adds its own warnings and errors; the core's
+//! log goes in from `info` up. Each line goes into the file as it comes, with no
 //! buffer in between, so a crash in native code leaves every line before it. A log that reaches
 //! [`MOST`] keeps its start and its latest lines (see [`cut`]), and what could name the person or
 //! their files is left out of every line (see [`redact`]).
@@ -28,6 +29,9 @@ const TAIL: usize = 512 << 10;
 
 /// The most one write puts in, bytes.
 const WRITE_MOST: usize = 64 << 10;
+
+/// The most of a trace of how a run ended that goes in, bytes.
+const TRACE_MOST: usize = 48 << 10;
 
 /// What stands where a log was cut.
 const LEFT_OUT: &str = "[... lines left out here, to keep the log under 1 MB ...]\n";
@@ -86,6 +90,21 @@ pub fn start_log_file(dir: String, header: String) {
 #[uniffi::export]
 pub fn log_line(level: LogLevel, tag: String, message: String) {
     write(&line(level.level(), &tag, &message));
+}
+
+/// A trace the system kept of how one of the app's last runs ended, as text for the log: a frozen
+/// app's (already text) as it is; a crash in native code's (the system's record of it, in its
+/// binary form) told as its signal, its cause, the threads' places in the code and the process's
+/// last lines in the system's log. At most [`TRACE_MOST`] either way.
+#[uniffi::export]
+pub fn trace_text(trace: Vec<u8>) -> String {
+    let text = match std::str::from_utf8(&trace) {
+        Ok(text) if text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')) => text.to_owned(),
+        _ => {
+            tombstone::read(&trace).unwrap_or_else(|| format!("(a trace of {} bytes the app can't read)", trace.len()))
+        }
+    };
+    trimmed(&text, TRACE_MOST)
 }
 
 /// The core's log to Android's (through `android`) and into the file, from `info` up.
@@ -345,6 +364,276 @@ fn starts_with_any_case(text: &str, prefix: &str) -> bool {
     text.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
+/// The system's record of a crash in native code (its "tombstone", in protocol buffers' binary
+/// form), read as far as the log needs it.
+mod tombstone {
+    use std::fmt::Write as _;
+
+    /// How many frames of a thread that didn't crash are told.
+    const OTHER_FRAMES: usize = 4;
+
+    /// How many of the process's last lines in the system's log are told.
+    const LOG_LINES: usize = 30;
+
+    /// A field's value: a number, or bytes (a string, or a message of its own).
+    enum Value<'a> {
+        Number(u64),
+        Bytes(&'a [u8]),
+    }
+
+    /// A message's fields in turn (number and value), up to one that can't be read: a trace cut
+    /// short still gives what came before.
+    struct Fields<'a>(&'a [u8]);
+
+    impl<'a> Iterator for Fields<'a> {
+        type Item = (u64, Value<'a>);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let field = self.field();
+            if field.is_none() {
+                self.0 = &[];
+            }
+            field
+        }
+    }
+
+    impl<'a> Fields<'a> {
+        fn field(&mut self) -> Option<(u64, Value<'a>)> {
+            let key = self.varint()?;
+            let value = match key & 7 {
+                0 => Value::Number(self.varint()?),
+                1 => Value::Number(u64::from_le_bytes(self.take(8)?.try_into().ok()?)),
+                2 => {
+                    let length = usize::try_from(self.varint()?).ok()?;
+                    Value::Bytes(self.take(length)?)
+                }
+                5 => Value::Number(u64::from(u32::from_le_bytes(self.take(4)?.try_into().ok()?))),
+                _ => return None,
+            };
+            Some((key >> 3, value))
+        }
+
+        fn varint(&mut self) -> Option<u64> {
+            let mut value = 0;
+            for shift in (0..64).step_by(7) {
+                let (&byte, rest) = self.0.split_first()?;
+                self.0 = rest;
+                value |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return Some(value);
+                }
+            }
+            None
+        }
+
+        fn take(&mut self, length: usize) -> Option<&'a [u8]> {
+            let (taken, rest) = self.0.split_at_checked(length)?;
+            self.0 = rest;
+            Some(taken)
+        }
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// A signed field's number (sent as 64 bits, two's complement).
+    fn signed(n: u64) -> i64 {
+        i64::from_ne_bytes(n.to_ne_bytes())
+    }
+
+    #[derive(Default)]
+    struct Signal {
+        number: i64,
+        name: String,
+        code: i64,
+        code_name: String,
+        fault: Option<u64>,
+    }
+
+    #[derive(Default)]
+    struct Frame {
+        rel_pc: u64,
+        function: String,
+        offset: u64,
+        file: String,
+        build_id: String,
+    }
+
+    #[derive(Default)]
+    struct Thread {
+        id: u64,
+        name: String,
+        registers: Vec<(String, u64)>,
+        frames: Vec<Frame>,
+    }
+
+    fn signal(bytes: &[u8]) -> Signal {
+        let mut signal = Signal::default();
+        let (mut has_fault, mut fault) = (false, 0);
+        for (n, value) in Fields(bytes) {
+            match (n, value) {
+                (1, Value::Number(v)) => signal.number = signed(v),
+                (2, Value::Bytes(b)) => signal.name = text(b),
+                (3, Value::Number(v)) => signal.code = signed(v),
+                (4, Value::Bytes(b)) => signal.code_name = text(b),
+                (8, Value::Number(v)) => has_fault = v != 0,
+                (9, Value::Number(v)) => fault = v,
+                _ => {}
+            }
+        }
+        signal.fault = has_fault.then_some(fault);
+        signal
+    }
+
+    fn frame(bytes: &[u8]) -> Frame {
+        let mut frame = Frame::default();
+        for (n, value) in Fields(bytes) {
+            match (n, value) {
+                (1, Value::Number(v)) => frame.rel_pc = v,
+                (4, Value::Bytes(b)) => frame.function = text(b),
+                (5, Value::Number(v)) => frame.offset = v,
+                (6, Value::Bytes(b)) => frame.file = text(b),
+                (8, Value::Bytes(b)) => frame.build_id = text(b),
+                _ => {}
+            }
+        }
+        frame
+    }
+
+    fn thread(bytes: &[u8]) -> Thread {
+        let mut thread = Thread::default();
+        for (n, value) in Fields(bytes) {
+            match (n, value) {
+                (1, Value::Number(v)) => thread.id = v,
+                (2, Value::Bytes(b)) => thread.name = text(b),
+                (3, Value::Bytes(b)) => {
+                    let (mut name, mut at) = (String::new(), 0);
+                    for (n, value) in Fields(b) {
+                        match (n, value) {
+                            (1, Value::Bytes(b)) => name = text(b),
+                            (2, Value::Number(v)) => at = v,
+                            _ => {}
+                        }
+                    }
+                    thread.registers.push((name, at));
+                }
+                (4, Value::Bytes(b)) => thread.frames.push(frame(b)),
+                _ => {}
+            }
+        }
+        thread
+    }
+
+    /// A buffer of the system's log: its lines, each as "time level tag: message".
+    fn log_lines(bytes: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (n, value) in Fields(bytes) {
+            let (2, Value::Bytes(b)) = (n, value) else { continue };
+            let (mut time, mut level, mut tag, mut message) = (String::new(), 0, String::new(), String::new());
+            for (n, value) in Fields(b) {
+                match (n, value) {
+                    (1, Value::Bytes(b)) => time = text(b),
+                    (4, Value::Number(v)) => level = v,
+                    (5, Value::Bytes(b)) => tag = text(b),
+                    (6, Value::Bytes(b)) => message = text(b),
+                    _ => {}
+                }
+            }
+            let level = match level {
+                2 => 'V',
+                3 => 'D',
+                4 => 'I',
+                5 => 'W',
+                6 => 'E',
+                7 => 'F',
+                _ => '?',
+            };
+            lines.push(format!("{time} {level} {tag}: {}", message.trim_end()));
+        }
+        lines
+    }
+
+    /// The record `bytes` as text: none if it isn't one (no signal and no threads in it).
+    pub(super) fn read(bytes: &[u8]) -> Option<String> {
+        let (mut crashed, mut uptime, mut said) = (None, None, None);
+        let (mut causes, mut threads, mut logs) = (Vec::new(), Vec::new(), Vec::new());
+        let mut abort = String::new();
+        for (n, value) in Fields(bytes) {
+            match (n, value) {
+                (6, Value::Number(v)) => crashed = Some(v),
+                (10, Value::Bytes(b)) => said = Some(signal(b)),
+                (14, Value::Bytes(b)) => abort = text(b),
+                (15, Value::Bytes(b)) => causes.extend(Fields(b).find_map(|(n, v)| match (n, v) {
+                    (1, Value::Bytes(b)) => Some(text(b)),
+                    _ => None,
+                })),
+                // each thread under its number, as a pair of fields
+                (16, Value::Bytes(b)) => threads.extend(Fields(b).find_map(|(n, v)| match (n, v) {
+                    (2, Value::Bytes(b)) => Some(thread(b)),
+                    _ => None,
+                })),
+                (18, Value::Bytes(b)) => logs.extend(log_lines(b)),
+                (20, Value::Number(v)) => uptime = Some(v),
+                _ => {}
+            }
+        }
+        if said.is_none() && threads.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        if let Some(s) = said {
+            let _ = write!(out, "signal {} ({}), code {} ({})", s.number, s.name, s.code, s.code_name);
+            if let Some(fault) = s.fault {
+                let _ = write!(out, ", fault address {fault:#x}");
+            }
+            out.push('\n');
+        }
+        if let Some(seconds) = uptime {
+            let _ = writeln!(out, "the process had run {seconds} s");
+        }
+        if !abort.is_empty() {
+            let _ = writeln!(out, "abort message: {abort}");
+        }
+        for cause in causes {
+            let _ = writeln!(out, "cause: {cause}");
+        }
+        // the thread that crashed first and whole, the others after it with their first frames
+        threads.sort_by_key(|t| (Some(t.id) != crashed, t.id));
+        for t in &threads {
+            let it = Some(t.id) == crashed;
+            let _ = writeln!(out, "thread {} \"{}\"{}:", t.id, t.name, if it { ", which crashed" } else { "" });
+            if it {
+                for four in t.registers.chunks(4) {
+                    let line: Vec<String> = four.iter().map(|(name, at)| format!("{name:<4}{at:016x}")).collect();
+                    let _ = writeln!(out, "    {}", line.join("  "));
+                }
+            }
+            let shown = if it { t.frames.len() } else { t.frames.len().min(OTHER_FRAMES) };
+            for (i, f) in t.frames.iter().take(shown).enumerate() {
+                let _ = write!(out, "    #{i:02} pc {:016x}  {}", f.rel_pc, f.file);
+                if !f.function.is_empty() {
+                    let _ = write!(out, " ({}+{})", f.function, f.offset);
+                }
+                if !f.build_id.is_empty() {
+                    let _ = write!(out, " (BuildId: {})", f.build_id);
+                }
+                out.push('\n');
+            }
+            if shown < t.frames.len() {
+                let _ = writeln!(out, "    ... {} more", t.frames.len() - shown);
+            }
+        }
+        if !logs.is_empty() {
+            let _ = writeln!(out, "the process's last lines in the system's log:");
+            for line in logs.iter().skip(logs.len().saturating_sub(LOG_LINES)) {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +777,138 @@ mod tests {
         let l = line(log::Level::Warn, "ProCraft", "importing a PSD");
         assert!(l.starts_with('['), "{l}");
         assert!(l.ends_with(" ms WARN  ProCraft] importing a PSD\n"), "{l}");
+    }
+
+    /// A field of a record in protocol buffers' binary form: its number, then a number or bytes.
+    fn varint(mut n: u64, out: &mut Vec<u8>) {
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+    }
+
+    fn number(field: u64, n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        varint(field << 3, &mut out);
+        varint(n, &mut out);
+        out
+    }
+
+    fn bytes(field: u64, b: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        varint((field << 3) | 2, &mut out);
+        varint(b.len() as u64, &mut out);
+        out.extend_from_slice(b);
+        out
+    }
+
+    fn frame(pc: u64, function: &str) -> Vec<u8> {
+        let mut f = number(1, pc);
+        f.extend(number(2, pc + 0x7000_0000));
+        if !function.is_empty() {
+            f.extend(bytes(4, function.as_bytes()));
+            f.extend(number(5, 40));
+        }
+        f.extend(bytes(6, b"/data/app/~~a==/io.github.artcraftandroid.procraft-b==/lib/arm64/libprocraft_core.so"));
+        f.extend(bytes(8, b"0123abcd"));
+        f
+    }
+
+    fn thread(id: u64, name: &str, frames: usize) -> Vec<u8> {
+        let mut t = number(1, id);
+        t.extend(bytes(2, name.as_bytes()));
+        for (register, at) in
+            [("x0", 0u64), ("x1", 0x10), ("pc", 0x7000_1234), ("sp", 0x7fff_0000), ("lr", 0x7000_1000)]
+        {
+            let mut r = bytes(1, register.as_bytes());
+            r.extend(number(2, at));
+            t.extend(bytes(3, &r));
+        }
+        for i in 0..frames {
+            t.extend(bytes(
+                4,
+                &frame(0x1234 + i as u64 * 0x10, if i == 0 { "wgpu_hal::vulkan::Queue::submit" } else { "" }),
+            ));
+        }
+        // under its number
+        let mut entry = number(1, id);
+        entry.extend(bytes(2, &t));
+        bytes(16, &entry)
+    }
+
+    /// A record of a crash in native code, as the system keeps it.
+    fn tombstone() -> Vec<u8> {
+        let mut signal = number(1, 11);
+        signal.extend(bytes(2, b"SIGSEGV"));
+        signal.extend(number(3, 1));
+        signal.extend(bytes(4, b"SEGV_MAPERR"));
+        signal.extend(number(8, 1));
+        signal.extend(number(9, 0x10));
+        let mut log = bytes(1, b"main");
+        for (level, tag, message) in [(4, "procraft", "GPU: Mali-G715"), (5, "vulkan", "the device was lost\n")] {
+            let mut line = bytes(1, b"11-13 14:02:11.123");
+            line.extend(number(4, level));
+            line.extend(bytes(5, tag.as_bytes()));
+            line.extend(bytes(6, message.as_bytes()));
+            log.extend(bytes(2, &line));
+        }
+        let mut t = number(1, 1);
+        t.extend(bytes(2, b"samsung/gts9/gts9:14/UP1A/X:user/release-keys"));
+        t.extend(number(5, 4000));
+        t.extend(number(6, 4321));
+        t.extend(bytes(10, &signal));
+        t.extend(bytes(15, &bytes(1, b"null pointer dereference")));
+        t.extend(thread(4000, "main", 6));
+        t.extend(thread(4321, "procraft render", 3));
+        t.extend(bytes(17, &bytes(1, b"a memory map, not told")));
+        t.extend(bytes(18, &log));
+        t.extend(number(20, 95));
+        t
+    }
+
+    #[test]
+    fn a_native_crash_is_told_as_its_signal_cause_threads_and_last_log_lines() {
+        let text = trace_text(tombstone());
+        let crashed = text.find("thread 4321 \"procraft render\", which crashed:\n").expect(&text);
+        let other = text.find("thread 4000 \"main\":\n").expect(&text);
+        assert!(crashed < other, "{text}");
+        for said in [
+            "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault address 0x10\n",
+            "the process had run 95 s\n",
+            "cause: null pointer dereference\n",
+            "    x0  0000000000000000  x1  0000000000000010  pc  0000000070001234  sp  000000007fff0000\n    lr  0000000070001000\n",
+            "    #00 pc 0000000000001234  /data/app/~~a==/io.github.artcraftandroid.procraft-b==/lib/arm64/libprocraft_core.so \
+             (wgpu_hal::vulkan::Queue::submit+40) (BuildId: 0123abcd)\n",
+            "    #02 pc 0000000000001254  /data/app/",
+            // the others' first frames only
+            "    #03 pc 0000000000001264",
+            "    ... 2 more\n",
+            "    11-13 14:02:11.123 W vulkan: the device was lost\n",
+        ] {
+            assert!(text.contains(said), "{said:?} not in\n{text}");
+        }
+        assert!(!text.contains("memory map"), "{text}");
+        assert!(!text.contains("#04"), "{text}");
+    }
+
+    #[test]
+    fn a_trace_cut_short_still_tells_what_came_before() {
+        let whole = tombstone();
+        let text = trace_text(whole[..whole.len() - 20].to_vec());
+        assert!(text.starts_with("signal 11 (SIGSEGV)"), "{text}");
+        assert!(text.contains("which crashed"), "{text}");
+    }
+
+    #[test]
+    fn a_trace_in_text_stays_as_it_is_up_to_its_most() {
+        let anr = "----- pid 4000 at 2026-11-13 14:02:11 -----\n\"main\" prio=5 tid=1 Native\n  at a.b(c.kt:1)\n";
+        assert_eq!(trace_text(anr.as_bytes().to_vec()), anr);
+        let long: String = (0..10_000).map(|i| format!("  at frame{i}(f.kt:{i})\n")).collect();
+        let text = trace_text(long.into_bytes());
+        assert!(text.len() <= TRACE_MOST + 100, "{}", text.len());
+        assert!(text.starts_with("  at frame0(f.kt:0)\n") && text.ends_with(" KB more left out ...]\n"));
+        // neither text nor a record
+        assert_eq!(trace_text(vec![8, 1, 0xff]), "(a trace of 3 bytes the app can't read)");
     }
 }
