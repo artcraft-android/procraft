@@ -845,7 +845,7 @@ fn easing_of(s: &EasingSpec) -> Easing {
         EasingKind::Hold => Easing::Hold,
         EasingKind::Smooth => Easing::Smooth,
         EasingKind::CubicBezier => Easing::CubicBezier([p(0, 0.42), p(1, 0.0)], [p(2, 0.58), p(3, 1.0)]),
-        EasingKind::Curve => Easing::Curve(s.params.chunks_exact(2).map(|c| [c[0], c[1]]).collect()),
+        EasingKind::Curve => Easing::Curve(s.params.as_chunks::<2>().0.to_vec()),
         EasingKind::Bounce => Easing::Bounce { first_step: p(0, 0.3), bounciness: p(1, 0.8) },
         EasingKind::Elastic => {
             Easing::Elastic { step: p(0, 0.25), attack: p(1, 1.0), decay: p(2, 0.5), magnitude: p(3, 1.0) }

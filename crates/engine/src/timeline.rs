@@ -1575,10 +1575,10 @@ fn along_bezier(p: [[f32; 2]; 4], eased: f32) -> [f32; 2] {
     let point = |u: f32| {
         let v = 1.0 - u;
         let w = [v * v * v, 3.0 * v * v * u, 3.0 * v * u * u, u * u * u];
-        [0, 1].map(|axis| w.iter().zip(&p).map(|(w, q)| w * q[axis]).sum::<f32>())
+        [w.iter().zip(&p).map(|(w, q)| w * q[0]).sum::<f32>(), w.iter().zip(&p).map(|(w, q)| w * q[1]).sum::<f32>()]
     };
     let samples: Vec<[f32; 2]> = (0..=PIECES).map(|i| point(i as f32 / PIECES as f32)).collect();
-    let mut lengths = vec![0.0_f32; PIECES + 1];
+    let mut lengths = [0.0_f32; PIECES + 1];
     for i in 1..=PIECES {
         let (a, b) = (samples.get(i - 1).copied().unwrap_or_default(), samples.get(i).copied().unwrap_or_default());
         let before = lengths.get(i - 1).copied().unwrap_or(0.0);
