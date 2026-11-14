@@ -92,7 +92,7 @@ PlanItem {
   matte_only: bool,                consumed by the clip above as a matte
 }
 Added in 1d: pose: Option<Affine> (None with no pose keys, the fast path), keyed opacity.
-Added in 1f: the camera. Phase 4: resolved effect parameters.
+Phase 4: resolved effect parameters.
 ```
 
 Groups stay nested in the plan, so the renderer can composite a group as one unit before blending it, with cycles already applied to their frame. Hidden tracks, disabled clips, adjustment clips (until phase 4) and audio draw nothing. This mirrors Koi's `TimelineSampler`, and the plan is what tests assert on: "at frame N, this is what's on screen".
@@ -107,6 +107,10 @@ The plan is pure engine code with no GPU, so the easing maths, groups, cycles an
 2. Draw that with its pose, opacity and blend into the frame. Posed drawing reuses the affine sampling from `transform.wgsl`.
 3. Mattes: render the source into a matte texture instead of the frame, then multiply the clip above by its alpha or luminance.
 4. Apply the camera when exporting or when the camera view is on.
+
+As built (1f): `Canvas::composite_timeline` walks the plan itself rather than a flattened list. Each depth of group clip has a *reel* of scratch textures (made only when first wanted): a pair a group's own tracks composite onto before the group is laid down as one (posed, faded and blended by its clip), a texture a masked clip is drawn alone on, and two matte textures (a masked clip can be the matte of the one above too). A matte source is drawn alone, at its opacity and pose, onto a matte texture; the clip above is drawn alone and then through it (the layer shader's clip alpha for clipping and alpha mattes, its mask lightness for luma mattes). With the camera on, the whole frame composites onto the top reel's pair first, then goes through the camera's affine onto the canvas, the background staying put under it.
+
+The camera's frame is the canvas's size. `CameraPose::to_frame` maps the canvas into it (the center to the frame's middle, zoomed and turned about it); `Timeline::camera_at` eases its keys with the rotation unwound key to key, so it always turns the short way. A clip inside a group keeps its frames on the group's level: the core API reports and takes timeline frames (adding the groups' starts, `Timeline::origin`), and drawing at the playhead goes through each group's start and cycle (`Timeline::track_frame`, `local_frame`). Ungrouping lets go of the group's own keys and cycle.
 
 Onion skins become "the drawings before and after on the selected track", reusing today's `FrameLook::Onion` tinting.
 
@@ -152,8 +156,8 @@ When a document is read, `Timeline::repaired` makes the timeline consistent with
 | 1b ✓ | Plan-driven compositing, onion skins, playback | gpu, core | A migrated canvas plays the same as before (done Nov 14, 2026: GPU tests compare every played and drawn-on frame pixel for pixel; exports now render each timeline frame as it plays, background and foreground included) |
 | 1c ✓ | iPad timeline panel, Make2D-native look: tracks, clips, playhead, drag/trim/split; simple mode as today's frame strip (done Nov 14, 2026: Actions → Canvas → Timeline; the layers panel still lists every drawing's layers) | core API, `ios/Make2D` | Can block out an animation on iPad |
 | 1d ✓ | Keys and poses: channels, Linear/Hold/Smooth/Bézier, posed compositing, pivot | engine, gpu | A clip can move, turn and fade (done Nov 14, 2026: keyed opacity and clip blend modes too; iPad Keys panel on the picked clip, keyed at the playhead) |
-| 1e | Full easing library, a small easing editor window, motion paths | engine, iPad | Matches Koi's easing curves |
-| 1f | Groups and cycles, mattes, keyed camera | engine, gpu, iPad | Koi's group, matte and camera features work |
+| 1e ✓ | Full easing library, a small easing editor window, motion paths | engine, iPad | Matches Koi's easing curves (done Nov 14, 2026: every Koi easing, checked against Koi's own numbers; Bézier motion paths timed by distance along them; on iPad the picked clip's path shows over the canvas while its keys are open, a key's dot tapped to go to it or dragged to move it, a handle dragged to bend the path, the other mirroring it) |
+| 1f ✓ | Groups and cycles, mattes, keyed camera | engine, gpu, iPad | Koi's group, matte and camera features work (done Nov 14, 2026: clipping masks and alpha and luma mattes drawn on the GPU; group clips made from clips picked on one level, opened to edit their tracks, cycling with their keys repeating or running on, and composited as one; the camera keyed by dragging its frame over the canvas, exports and "Play Through Camera" seen through it) |
 | 1g | Track clipboard, retime, sync markers (tap to drop one at the playhead while playing; new UI) | engine, iPad | |
 
 Steps 1a and 1b change nothing anyone can see, which makes them safe to land first: the timeline drives everything, but a migrated canvas looks and plays exactly as it did.
