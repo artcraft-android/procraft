@@ -1722,6 +1722,39 @@ fn a_capped_stroke_builds_up_to_its_transfer() {
 }
 
 #[test]
+fn a_gradual_stroke_builds_up_each_pixel_by_its_own_cover() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let lay = |stamps: &[Stamp], rendering: Rendering| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle { rendering, hardness: 0.0, ..style(StrokeTool::Paint, 1.0) });
+        canvas.add_stamps(stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let at = Vec2::new(32.0, 32.0);
+    // how much a soft dot covers each pixel out from its middle
+    let once = lay(&[dot(at, 24.0)], Rendering::BuildUp);
+    // forty stamps of 0.3 over it, building up gradually
+    let n = 40;
+    let stamps: Vec<Stamp> = (0..n).map(|_| Stamp { overlap: n as f32, ..Stamp::round(at, 24.0, 0.3) }).collect();
+    let built = lay(&stamps, Rendering::Gradual);
+    for x in [32, 40, 46, 50, 53] {
+        let cover = f32::from(pixel(&once, 64, x, 32)[3]) / 255.0;
+        // the rule pixel by pixel: each stamp adds its share of what is left, squared, its share
+        // as far as it covers the pixel (a faint edge builds up nearly as far as the middle)
+        let mut rule = 0.0f32;
+        for _ in 0..n {
+            rule += 0.3 * cover * (1.0 - rule) * (1.0 - rule);
+        }
+        let got = f32::from(pixel(&built, 64, x, 32)[3]) / 255.0;
+        assert!((got - rule).abs() < 0.02, "{x}: {got} for {rule} (cover {cover})");
+    }
+}
+
+#[test]
 fn burnt_edges_burn_only_the_paint_under_a_thin_stroke() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

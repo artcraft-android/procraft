@@ -71,6 +71,10 @@ pub struct Stamp {
     /// How far along the path it is (canvas pixels), whatever jitter threw it from there: wet
     /// paint runs out with this.
     pub distance: f32,
+    /// For a stroke that builds up gradually (each stamp adding its alpha of what is left,
+    /// squared), how many stamps go over a point of its path in one pass; 0 for any other. Each
+    /// pixel builds up by how much of it the stamp covers (see [`Stamp::over_alpha`]).
+    pub overlap: f32,
 }
 
 impl Stamp {
@@ -98,7 +102,24 @@ impl Stamp {
             wet: [1.0; 8],
             time_ms: 0.0,
             distance: 0.0,
+            overlap: 0.0,
         }
+    }
+
+    /// The opacity the stamp needs drawn "over" so that, in a stroke that builds up gradually, a
+    /// point it covers fully reaches after its [`overlap`](Stamp::overlap) of stamps what the rule
+    /// gives (its alpha in any other stroke).
+    pub fn over_alpha(&self) -> f32 {
+        let alpha = self.alpha.clamp(0.0, 1.0);
+        if self.overlap <= 1.0 || !self.overlap.is_finite() {
+            return alpha;
+        }
+        let n = self.overlap.min(512.0).ceil();
+        let mut built = 0.0f32;
+        for _ in 0..n as u32 {
+            built += alpha * (1.0 - built) * (1.0 - built);
+        }
+        1.0 - (1.0 - built.min(1.0)).powf(1.0 / n)
     }
 
     /// Pixels the stamp can touch: its square shape at any rotation.
@@ -190,6 +211,8 @@ struct Placed {
     drawn_share: f32,
     /// What the input's speed left of the size (see [`StrokeBuilder::sized`]).
     speed_size: f32,
+    /// See [`Stamp::overlap`].
+    overlap: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1851,18 +1874,6 @@ impl StrokeBuilder {
         self.diameter_at(p) / if self.brush.round_tip() { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
     }
 
-    /// The opacity a stamp drawn "over" needs so that a brush that builds up gradually reaches,
-    /// after one pass, what it would have with `alpha` (each stamp adding `alpha` of what is left,
-    /// squared). `overlap` is how many stamps cover a point in one pass.
-    fn gradual(alpha: f32, overlap: f32) -> f32 {
-        let n = overlap.clamp(1.0, 512.0);
-        let mut built = 0.0f32;
-        for _ in 0..n.ceil() as u32 {
-            built += alpha * (1.0 - built) * (1.0 - built);
-        }
-        1.0 - (1.0 - built.min(1.0)).powf(1.0 / n.ceil())
-    }
-
     /// How much of the stamp at a point is its drawn shape, not what leaning grows it by.
     fn drawn_share(&self, p: PathPoint) -> f32 {
         let grown = self.tilt_growth(p);
@@ -1948,12 +1959,13 @@ impl StrokeBuilder {
         // a capped stroke builds up towards what the pressure lets through rather than taking it
         let transfer = pressure_flow;
         let through = if self.brush.rendering == Rendering::Capped { 1.0 } else { pressure_flow };
-        let mut alpha = ranged.powf(FLOW_POWER) * through * falloff;
-        // (wet paint is laid stamp by stamp as it is mixed, and a stroke laid in place takes the
-        // rule pixel by pixel, not built up gradually)
-        if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place() {
-            alpha = StrokeBuilder::gradual(alpha, diameter / self.step(p));
-        }
+        let alpha = ranged.powf(FLOW_POWER) * through * falloff;
+        // a gradual stroke's pixels each build up by their own share of the stamp (wet paint is
+        // laid stamp by stamp as it is mixed, and a stroke laid in place takes the rule pixel by
+        // pixel itself)
+        let gradual =
+            self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place();
+        let overlap = if gradual { diameter / self.step(p) } else { 0.0 };
         let shape = self.brush.shape.clone();
         let [count_by, count_jitter_by, lateral_by, linear_by, size_jitter_by, opacity_jitter_by, scatter_by] = [
             PC::Count,
@@ -2172,6 +2184,7 @@ impl StrokeBuilder {
                 pressed: p.soft,
                 drawn_share,
                 speed_size,
+                overlap,
             };
             self.placed.push(placed);
             let stamp = self.finish_stamp(&placed, start_span, None);
@@ -2283,6 +2296,7 @@ impl StrokeBuilder {
             wet: p.wet,
             time_ms: p.time_ms,
             distance: p.distance,
+            overlap: p.overlap,
         }
     }
 }
@@ -2395,11 +2409,37 @@ mod tests {
         for _ in 0..10 {
             built += 0.168 * (1.0 - built) * (1.0 - built);
         }
-        let alpha = StrokeBuilder::gradual(0.168, 10.0);
+        let stamp = |alpha: f32| Stamp { overlap: 10.0, ..Stamp::round(Vec2::ZERO, 5.0, alpha) };
+        let alpha = stamp(0.168).over_alpha();
         assert!(alpha < 0.168);
         assert!((1.0 - (1.0 - alpha).powi(10) - built).abs() < 1e-4);
         // one stamp at full opacity covers fully either way
-        assert!((StrokeBuilder::gradual(1.0, 10.0) - 1.0).abs() < 1e-6);
+        assert!((stamp(1.0).over_alpha() - 1.0).abs() < 1e-6);
+        // and a stroke that doesn't build up gradually takes its alpha as it is
+        assert_eq!(Stamp::round(Vec2::ZERO, 5.0, 0.168).over_alpha(), 0.168);
+    }
+
+    #[test]
+    fn a_gradual_brushs_stamps_keep_their_own_alpha_and_say_how_many_go_over_a_point() {
+        let stamps = |rendering: Rendering| {
+            let b = Brush { rendering, max_opacity: 0.8, ..plain() };
+            let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
+            s.add(&line(50, 200.0));
+            s.finish()
+        };
+        let (gradual, build_up) = (stamps(Rendering::Gradual), stamps(Rendering::BuildUp));
+        assert_eq!(gradual.len(), build_up.len());
+        for (g, b) in gradual.iter().zip(&build_up) {
+            // the same alpha as any other stroke's: the renderer builds it up pixel by pixel
+            assert!((g.alpha - b.alpha).abs() < 1e-6, "{} {}", g.alpha, b.alpha);
+            assert_eq!(b.overlap, 0.0);
+        }
+        // as many as fit across a stamp at the gap between them
+        for pair in gradual.windows(2).skip(5).take(20) {
+            let [g, next] = pair else { continue };
+            let across = 2.0 * g.radius / (next.center - g.center).length();
+            assert!(g.overlap > 1.0 && (g.overlap / across - 1.0).abs() < 0.1, "{} {across}", g.overlap);
+        }
     }
 
     #[test]

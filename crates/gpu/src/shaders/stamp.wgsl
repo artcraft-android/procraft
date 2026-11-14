@@ -60,6 +60,8 @@ struct StampIn {
     @location(10) brightness_add: f32,
     // how far the grain's patch under the stamp turns, where it is read from staying put
     @location(11) grain_turn: f32,
+    // a gradual stroke's stamps over a point (0: another stroke)
+    @location(12) overlap: f32,
 }
 
 struct StampOut {
@@ -81,6 +83,8 @@ struct StampOut {
     @location(6) look: vec4<f32>,
     // what light pressure lets through: the most a capped stroke builds up to
     @location(7) transfer: f32,
+    // a gradual stroke's stamps over a point (0: another stroke)
+    @location(9) overlap: f32,
 }
 
 @vertex
@@ -113,7 +117,41 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
     o.transfer = inst.more.z;
+    o.overlap = inst.overlap;
     return o;
+}
+
+// What a stamp covering a pixel by `c` lays "over" in a stroke that builds up gradually, `n`
+// stamps going over each point: each adds its cover of what is left, squared, so what it adds
+// hangs on what those before it laid. Taken at each place in a pixel's run of stamps covering it
+// `mu` on average (what is left before the k-th about 1 / (1 + k mu)), and drawn over each other,
+// the stamps build each pixel up about as the rule does by its own cover: a faint part of a shape
+// as far as the rule takes it, a lone strong one filling what it covers.
+fn gradual_over(c: f32, n: f32, mu: f32) -> f32 {
+    if (n <= 1.0 || c <= 0.0) {
+        return c;
+    }
+    let k = min(c, 0.9999);
+    let span = n * max(mu, 0.0);
+    if (span < 1e-3) {
+        return k;
+    }
+    // the mean over the run of the log of what each place keeps, (1 / n) of the integral of
+    // log(1 - k / (1 + mu x)) over 0..n
+    let y = 1.0 + span;
+    let kept = ((y - k) * log(1.0 - k / y) - k * log(y) - (1.0 - k) * log(1.0 - k)) / span;
+    return 1.0 - exp(kept);
+}
+
+// how much the stamp covers on average, its shape `shaped` at a point taken to `here` by its
+// grain and the rest: its shape image's coarsest level taken as far, or (the round tip, as
+// smooth as it is) as much as it covers there
+fn stamp_mean(shaped: f32, here: f32) -> f32 {
+    if (su.shape < 0 || shaped <= 0.0) {
+        return here;
+    }
+    let top = f32(textureNumLevels(shapes) - 1u);
+    return textureSampleLevel(shapes, shape_smp, vec2<f32>(0.5), su.shape, top).r * here / shaped;
 }
 
 // hue (0..1), saturation and brightness of a colour, and back
@@ -187,6 +225,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         }
         a = select(0.0, s, inside);
     }
+    let shaped = a;
     if (su.grain >= 0) {
         let scale = su.grain_scale * i.look.y;
         let gc = cos(su.grain_rotation);
@@ -229,6 +268,6 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     }
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
-    a = a * i.alpha * inside_selection;
+    a = gradual_over(a * i.alpha, i.overlap, stamp_mean(shaped, a) * i.alpha) * inside_selection;
     return vec4<f32>(i.color * a, a);
 }

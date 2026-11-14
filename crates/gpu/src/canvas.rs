@@ -80,9 +80,9 @@ fn scaled_radius(style: &StrokeStyle, radius: f32, k: f32) -> f32 {
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32
 ];
 
 #[repr(C)]
@@ -656,6 +656,9 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
+    /// How many stamps of a gradual stroke go over a point, each pixel building up by its own
+    /// share of the stamp (see `Stamp::overlap`); 0 for any other stroke.
+    overlap: f32,
 }
 
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
@@ -668,15 +671,23 @@ fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> u64 {
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
-/// apart for the capped pipeline, or (without one) takes it into the alpha.
-fn capped_alpha(style: &StrokeStyle, capped: bool, s: &Stamp) -> (f32, f32) {
-    let alpha = s.alpha.clamp(0.0, 1.0);
+/// apart for the capped pipeline, or (without one) takes it into the alpha. A gradual stroke's
+/// stamp keeps its own alpha where the stamp shader builds the stroke up `per_pixel`, and stands
+/// in for that rule at full cover anywhere else (laid in place, or over the canvas).
+fn capped_alpha(style: &StrokeStyle, capped: bool, s: &Stamp, per_pixel: bool) -> (f32, f32) {
+    let alpha = if per_pixel { s.alpha } else { s.over_alpha() }.clamp(0.0, 1.0);
     let transfer = if s.transfer.is_finite() { s.transfer.clamp(0.0, 1.0) } else { 1.0 };
     match (style.rendering, capped) {
         (Rendering::Capped, true) => (alpha, transfer),
         (Rendering::Capped, false) => (alpha * transfer, 1.0),
         _ => (alpha, 1.0),
     }
+}
+
+/// How many stamps of a gradual stroke go over a point, as the stamp shader takes it (0: the
+/// stamp laid as it is), where it builds the stroke up `per_pixel`.
+fn stamp_overlap(s: &Stamp, per_pixel: bool) -> f32 {
+    if per_pixel && s.overlap.is_finite() { s.overlap.clamp(0.0, 512.0) } else { 0.0 }
 }
 
 /// How far past its size a round tip of radius `r` reaches, by its hardness: (scale, growth) for
@@ -2860,12 +2871,14 @@ impl Canvas {
                 distance: if s.distance.is_finite() { s.distance } else { 0.0 },
             })
             .collect();
+        // drawn by the stamp shader, a gradual stroke builds up pixel by pixel
+        let per_pixel = !style.in_place();
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
                 let radius = drawn_at(s);
                 // without the capped pipeline, the transfer goes into the stamp
-                let (alpha, transfer) = capped_alpha(&style, capped, s);
+                let (alpha, transfer) = capped_alpha(&style, capped, s, per_pixel);
                 StampInstance {
                     center: [s.center.x, s.center.y],
                     radius,
@@ -2886,6 +2899,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    overlap: stamp_overlap(s, per_pixel),
                 }
             })
             .collect();
@@ -2925,7 +2939,8 @@ impl Canvas {
         let capped = self.pipelines.stamp_capped.is_some();
         self.prediction.extend(
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).map(|s| {
-                let (alpha, transfer) = capped_alpha(&style, capped, s);
+                // (drawn over the canvas a stamp at a time, by the overlay)
+                let (alpha, transfer) = capped_alpha(&style, capped, s, false);
                 StampInstance {
                     center: [s.center.x, s.center.y],
                     radius: drawn_radius(&style, s.radius, s.taper),
@@ -2942,6 +2957,7 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    overlap: 0.0,
                 }
             }),
         );
