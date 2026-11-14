@@ -54,6 +54,8 @@ private enum Imported {
     case picture(CanvasSession)
     /// Something that isn't an artwork, or the reason it can't be read.
     case said(String)
+    /// Something that asks about itself (a plugin): nothing more to say here.
+    case offered
 }
 
 /// The gallery: what it shows, and what its buttons do with the store. An artwork's work goes on a
@@ -232,6 +234,21 @@ final class GalleryModel {
     func newCanvas(width: UInt32, height: UInt32) {
         let session = CanvasSession(width: max(width, 1), height: max(height, 1))
         _ = session.setNewProfile(name: p3Name)
+        onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
+    }
+
+    /// A new artwork of a plugin's kind (`<id>.<key>`), `width` x `height` pixels (the screen's
+    /// size), in Display P3, its plugin keeping it.
+    func newCanvas(kind: String, width: UInt32, height: UInt32) {
+        let (w, h) = (max(width, 1), max(height, 1))
+        let session = CanvasSession(width: w, height: h)
+        _ = session.setNewProfile(name: p3Name)
+        guard let canvas = PluginsModel.shared.store.openCanvas(kind: kind, width: w, height: h, data: nil),
+              session.attachPluginCanvas(kind: kind, canvas: canvas)
+        else {
+            message = "The plugin couldn't make this artwork."
+            return
+        }
         onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
     }
 
@@ -437,9 +454,12 @@ final class GalleryModel {
     private func finishImport(_ outcome: Imported, name: String, folder: String?, open: Bool) {
         var toOpen: OpenArtwork?
         var said: String?
+        var quiet = false
         switch outcome {
         case let .said(text):
             said = text
+        case .offered:
+            quiet = true
         case let .made(dir):
             if cancelled {
                 Gallery.store.delete(dir: dir)
@@ -464,11 +484,13 @@ final class GalleryModel {
             if let said {
                 self.message = said
                 self.importShown = nil
+            } else if quiet {
+                self.importShown = nil
             } else if !wasCancelled {
                 self.importShown = ProgressShown(progress: 1, done: true, detail: name)
             }
         }
-        if said == nil, !wasCancelled {
+        if said == nil, !quiet, !wasCancelled {
             Thread.sleep(forTimeInterval: doneShown)
         }
         DispatchQueue.main.async { [weak self] in
@@ -490,6 +512,27 @@ final class GalleryModel {
         let title = (name as NSString).deletingPathExtension.trimmingCharacters(in: .whitespaces)
         let lower = name.lowercased()
         let tag = String(decoding: head, as: UTF8.self)
+        // what isn't an artwork's, a brush's or a palette's, by its name: a plugin (offered, as its
+        // own page's Import offers it), a font, a colour profile
+        if lower.hasSuffix(".procraft-plugin") || lower.hasSuffix(".procraftplugin") {
+            // read a moment later: a copy this one's going doesn't take with it
+            let kept = FileManager.default.temporaryDirectory.appendingPathComponent("plugin-\(UUID().uuidString)-\(name)")
+            guard (try? FileManager.default.copyItem(at: copy, to: kept)) != nil else {
+                return .said("This file can't be opened.")
+            }
+            DispatchQueue.main.async { [weak self] in
+                PluginsModel.shared.offer(kept) { self?.message = $0 }
+            }
+            return .offered
+        }
+        if [".ttf", ".otf", ".ttc"].contains(where: { lower.hasSuffix($0) }) {
+            let added = (try? Data(contentsOf: copy)).flatMap { importTextFont(bytes: $0, fileName: name) }
+            return .said(added != nil ? "Font added." : "This font can't be read.")
+        }
+        if lower.hasSuffix(".icc") || lower.hasSuffix(".icm") {
+            let added = (try? Data(contentsOf: copy)).flatMap { importProfile(bytes: $0) }
+            return .said(added.map { "\($0) added to the color profiles." } ?? "This color profile can't be read.")
+        }
         // another program's palette
         let foreign = tag == "ASEF" || lower.hasSuffix(".aco")
         let zip = head.starts(with: [0x50, 0x4B])

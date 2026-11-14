@@ -174,6 +174,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         )
                     }
                 }
+                EraserBandUi(vm)
                 NoticeBand(vm)
                 DropBandUi(vm)
                 // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
@@ -303,6 +304,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
+                VectorNodes(vm)
                 CopyPastePanel(vm)
                 QuickMenu(vm)
                 LayerChoice(vm)

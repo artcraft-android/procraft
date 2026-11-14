@@ -15,6 +15,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
     BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, ThumbnailImage,
+    VectorApply,
 };
 use resvg::tiny_skia;
 
@@ -391,9 +392,17 @@ impl Layers {
                 }
                 let plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
                 look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked()
-                    && session.add_layer() == 0
-                {
+                // (held, or with the other button: a vector layer, which keeps what is drawn on it as
+                // strokes and fills)
+                let plus = ui.interact(plus, ui.scope_id().with("new layer"), Sense::click());
+                let added = if plus.long_touched() || plus.secondary_clicked() {
+                    Some(session.add_vector_layer())
+                } else if plus.clicked() {
+                    Some(session.add_layer())
+                } else {
+                    None
+                };
+                if added == Some(0) {
                     crate::files::no_room(session);
                 }
                 let list = Rect::from_min_max(
@@ -1278,9 +1287,21 @@ impl Layers {
         backdrops: &mut Vec<f32>,
     ) {
         let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
+        // a vector layer's own rows: whether it is drawn again as fine as the screen when zoomed
+        // in, and (with strokes or fills picked on it) what the brush as it is set can give them;
+        // how the eraser works on it is chosen in the Eraser band
+        let mut own: Vec<(String, bool, VectorRow)> = Vec::new();
+        if l.vector && !l.locked {
+            own.push(("Crisp Zoom".to_owned(), session.vector_crisp(), VectorRow::Crisp));
+            if l.current && session.vector_picked_count() > 0 {
+                own.push(("Apply Color".to_owned(), false, VectorRow::Apply(VectorApply::Colour)));
+                own.push(("Apply Brush".to_owned(), false, VectorRow::Apply(VectorApply::Brush)));
+                own.push(("Apply Size".to_owned(), false, VectorRow::Apply(VectorApply::Size)));
+            }
+        }
         // a plugin's actions for the layer, after the app's own
         let actions = std::mem::take(&mut self.plugin_actions);
-        let count = rows.len() + actions.len();
+        let count = rows.len() + own.len() + actions.len();
         // as measured, an empty one (a locked group's or mask's) is a pill 64 tall
         let height = (7.0 * 2.0 + menu::OPTION_HEIGHT * count as f32).max(64.0);
         let screen = ctx.content_rect();
@@ -1289,6 +1310,7 @@ impl Layers {
         let rect = Rect::from_min_size(pos2(panel.left() + OPTIONS_LEFT, top), vec2(OPTIONS_WIDTH, height));
         let mut chosen = None;
         let mut action = None;
+        let mut vector = None;
         self.options_menu.show(
             ctx,
             "layer options",
@@ -1308,13 +1330,26 @@ impl Layers {
                         chosen = Some(r.option);
                     }
                 }
-                for (&row, a) in places.iter().skip(rows.len()).zip(&actions) {
+                for (&row, (label, ticked, does)) in places.iter().skip(rows.len()).zip(&own) {
+                    if menu::option(ui, look, row, label, *ticked, true, false) {
+                        vector = Some(*does);
+                    }
+                }
+                for (&row, a) in places.iter().skip(rows.len() + own.len()).zip(&actions) {
                     if menu::option(ui, look, row, &a.label, false, true, false) {
                         action = Some(a.key.clone());
                     }
                 }
             },
         );
+        if let Some(does) = vector {
+            self.options_menu.close();
+            match does {
+                VectorRow::Crisp => session.set_vector_crisp(!session.vector_crisp()),
+                VectorRow::Apply(what) => _ = session.vector_apply(what),
+            }
+            return;
+        }
         if let Some(key) = action {
             self.options_menu.close();
             self.run_action = Some(key);
@@ -1685,7 +1720,20 @@ impl Layers {
             let shown = Rect::from_center_size(rect.center(), size * fit);
             painter.image(t.id(), shown, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        // a vector layer is marked in its corner
+        if l.vector {
+            let mark = Rect::from_min_size(pos2(rect.left() + 3.0, rect.bottom() - 18.0), vec2(15.0, 15.0));
+            painter.rect_filled(mark, 3, Color32::from_black_alpha(115));
+            text(&painter, mark.center(), Align2::CENTER_CENTER, "V", 10.0, Weight::SemiBold, Color32::WHITE);
+        }
     }
+}
+
+/// What a vector layer's own row in its options does.
+#[derive(Clone, Copy)]
+enum VectorRow {
+    Crisp,
+    Apply(VectorApply),
 }
 
 /// A model's texture set's name, heading its meshes: 41 tall, 16 under the set before it.

@@ -188,6 +188,47 @@ impl Homography {
         Some(a.then(Homography::square_to_quad(to)?))
     }
 
+    /// `a` as a projective map (one that keeps parallel lines parallel).
+    pub fn from_affine(a: Affine) -> Homography {
+        let [x0, y0, x1, y1, x2, y2] = [a.a, a.b, a.c, a.d, a.e, a.f].map(f64::from);
+        Homography { m: [x0, x1, x2, y0, y1, y2, 0.0, 0.0, 1.0] }
+    }
+
+    /// The map's nine numbers, row by row, to keep; and a map from nine kept.
+    pub fn rows(self) -> [f64; 9] {
+        self.m
+    }
+
+    pub fn from_rows(m: [f64; 9]) -> Homography {
+        Homography { m }
+    }
+
+    /// Whether it leaves every point where it is.
+    pub fn is_identity(self) -> bool {
+        self == Homography::IDENTITY
+    }
+
+    /// What the map does about `p`: where `p` goes, how much bigger things there become, how far
+    /// they turn (radians), and whether they are mirrored. None where the map sends `p` to
+    /// infinity or flattens what is about it.
+    pub fn about(self, p: Vec2) -> Option<(Vec2, f32, f32, bool)> {
+        let [a, b, c, d, e, f, g, h, i] = self.m;
+        let (x, y) = (f64::from(p.x), f64::from(p.y));
+        let w = g * x + h * y + i;
+        if w.abs() < 1e-12 {
+            return None;
+        }
+        let (to_x, to_y) = ((a * x + b * y + c) / w, (d * x + e * y + f) / w);
+        // how the place it goes to moves as it moves along and down
+        let (along_x, along_y) = ((a - g * to_x) / w, (d - g * to_y) / w);
+        let (down_x, down_y) = ((b - h * to_x) / w, (e - h * to_y) / w);
+        let area = along_x * down_y - down_x * along_y;
+        if !area.is_finite() || area.abs() < 1e-12 {
+            return None;
+        }
+        Some((Vec2::new(to_x as f32, to_y as f32), area.abs().sqrt() as f32, along_y.atan2(along_x) as f32, area < 0.0))
+    }
+
     /// `self`, then `next`.
     pub fn then(self, next: Homography) -> Homography {
         let [a0, a1, a2, a3, a4, a5, a6, a7, a8] = self.m;

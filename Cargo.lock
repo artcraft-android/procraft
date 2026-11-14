@@ -3050,6 +3050,7 @@ dependencies = [
  "tiny-skia 0.12.0",
  "unicode-segmentation",
  "uniffi",
+ "usvg",
  "wasmi",
  "wat",
 ]

@@ -75,6 +75,8 @@ struct PanelHeader<Action: View>: View {
 @Observable
 private final class LibraryUi {
     var adding = false
+    /// The title's menu: Restore default brushes.
+    var titleMenu = false
     var setMenu: Int?
     var recentMenu = false
     var iconPicker = false
@@ -161,7 +163,10 @@ struct BrushLibrary: View {
         case .paint: "Brush library"
         }
         Popover(width: libraryWidth, arrowX: arrowX) {
-            PanelHeader(title: title, start: 20, end: 12, height: 52) {
+            PanelHeader(
+                title: title, start: 20, end: 12, height: 52, chevronOn: ui.titleMenu,
+                onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } }
+            ) {
                 PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
                     .frame(width: 41, height: 40)
                     .contentShape(Rectangle())
@@ -948,6 +953,20 @@ private struct LibraryMenus: View {
                 MenuDismissal { closeAll() }
                 addMenu
             }
+            if ui.titleMenu {
+                MenuDismissal { closeAll() }
+                // under the title
+                let at = kept(CGPoint(x: 12, y: Pc.arrowHeight + 46), CGSize(width: glassMenuWidth, height: 51))
+                GlassMenu(overPanel: true) {
+                    MenuRow(icon: PcIcons.menuRestore, label: "Restore default brushes") {
+                        closeAll()
+                        model.restoreShippedBrushes()
+                    }
+                    .padding(.vertical, 5.5)
+                }
+                .offset(x: at.x, y: at.y)
+                .menuTransition(.top)
+            }
             if ui.recentMenu, let frame = ui.setFrames[CanvasModel.recentSet] {
                 MenuDismissal { closeAll() }
                 let at = beside(frame, height: 65)
@@ -971,6 +990,7 @@ private struct LibraryMenus: View {
     private func closeAll() {
         withAnimation(Motion.menuClose) {
             ui.adding = false
+            ui.titleMenu = false
             ui.recentMenu = false
             ui.setMenu = nil
             ui.iconPicker = false

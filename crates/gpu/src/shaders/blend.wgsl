@@ -235,3 +235,11 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
     return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
 }
+
+// source `s` laid into backdrop `b` (both premultiplied) with blend function `mode`, only where
+// the backdrop is: the backdrop's colour changes as far as the source covers it and its alpha
+// stays, so where it is thin the source is as thin and none of what it covers shows through
+fn blend_atop(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
+    let mixed = clamp(blend_rgb(unpremultiply(b), unpremultiply(s), mode), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>((1.0 - s.a) * b.rgb + s.a * b.a * mixed, b.a);
+}

@@ -49,7 +49,7 @@ enum StudioInk {
     static var padBehind: Color { back }
     static let switchFixed = Color(argb: 0xFF51_5153)
     static let switchFixedKnob = Color(argb: 0xFF9B_9B9B)
-    static let done = Color(argb: 0xFF01_90FF)
+    static var done: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 }
 
 /// What the studio's rows ask to show over everything, where a scrolling column can't cut it.
@@ -245,6 +245,19 @@ private struct StudioPad: View {
             }
             .offset(x: 21, y: 21)
             HStack(spacing: 13) {
+                // a plugin's: the brush set at random
+                if PluginsModel.shared.randomisesBrushes {
+                    Text(verbatim: "Randomise")
+                        .font(.system(size: 17))
+                        .foregroundStyle(StudioInk.buttonInk)
+                        .lineLimit(1)
+                        .padding(.horizontal, 16)
+                        .frame(height: 43)
+                        .background(Capsule().fill(StudioInk.button))
+                        .overlay(Capsule().strokeBorder(StudioInk.buttonEdge, lineWidth: 1))
+                        .contentShape(Capsule())
+                        .onTapGesture { studio.randomise() }
+                }
                 Text(verbatim: "Cancel")
                     .font(.system(size: 17))
                     .foregroundStyle(StudioInk.buttonInk)
@@ -375,7 +388,23 @@ private func studioRows(_ tab: StudioTab, name: String) -> [StudioRow] {
             above = .control(control)
         }
     }
+    // the rows plugins that are on add to Properties, each under its own label
+    if tab.name == "Properties" {
+        for row in pluginBrushControls() {
+            let control = StudioControl.choice(key: row.key, options: row.choices)
+            rows.append(.space(studioGap(above, .title)))
+            rows.append(.title(row.label))
+            rows.append(.space(studioGap(.title, .control(control))))
+            rows.append(.control(control))
+            above = .control(control)
+        }
+    }
     return rows
+}
+
+/// The rows the plugins that are on add to the brush studio, kept with each brush.
+func pluginBrushControls() -> [PluginBrushControl] {
+    PluginsModel.shared.plugins.filter { $0.on && $0.problem == nil }.flatMap(\.brushControls)
 }
 
 /// The open page's settings, in sections, spaced as measured; each page opens at its top.

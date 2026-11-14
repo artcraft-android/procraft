@@ -115,7 +115,7 @@ struct SavedGrainFile {
 /// A brush as kept: where it came from, its name, the controls that differ from there and, if it
 /// differs, its pressure curve.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct SavedBrush {
+pub(crate) struct SavedBrush {
     #[serde(default)]
     from: Option<(usize, usize)>,
     name: String,
@@ -600,6 +600,17 @@ impl State {
             roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
             secondary: brush.secondary.as_ref().map(|s| Box::new(self.saved_brush(s, None, images))),
         }
+    }
+
+    /// `brush` as kept whole, its images with it: all of it, as changed from a blank brush (what a
+    /// stroke kept as a stroke keeps of the brush that drew it).
+    pub(crate) fn brush_kept(&self, brush: &Brush) -> SavedBrush {
+        self.saved_brush(brush, None, Images::Whole)
+    }
+
+    /// A brush kept by [`State::brush_kept`] made again.
+    pub(crate) fn brush_made(&self, kept: SavedBrush) -> Brush {
+        self.restored(kept)
     }
 
     /// A kept brush made again.

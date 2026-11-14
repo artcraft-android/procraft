@@ -21,6 +21,7 @@ final class ColorDrop {
 
     private static let thresholdKey = "dropThreshold"
     private static let allLayersKey = "dropAllLayers"
+    private static let continuousKey = "dropContinuous"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
@@ -35,6 +36,10 @@ final class ColorDrop {
     /// layer shows, not only the current layer (or the reference layer). Kept from one drop to the
     /// next; off at first.
     private(set) var allLayers: Bool
+    /// Continuous (the band's toggle): while Continue filling, a touch dragged across the canvas
+    /// fills each area it crosses where nothing is filled yet, instead of sliding the threshold;
+    /// the drag is one undo step. Kept from one drop to the next; off at first.
+    private(set) var continuous: Bool
 
     /// Whether, without All Layers, a colour is measured on a reference layer (another than the
     /// current one).
@@ -64,6 +69,7 @@ final class ColorDrop {
         self.model = model
         threshold = UserDefaults.standard.object(forKey: Self.thresholdKey) as? Float ?? 0.5
         allLayers = UserDefaults.standard.bool(forKey: Self.allLayersKey)
+        continuous = UserDefaults.standard.bool(forKey: Self.continuousKey)
     }
 
     /// All Layers on or off, from the next fill; the band stays up a while longer to see it.
@@ -72,6 +78,19 @@ final class ColorDrop {
         allLayers = on
         UserDefaults.standard.set(on, forKey: Self.allLayersKey)
         model.session.setPourAllLayers(on: on)
+        keepBandUp()
+    }
+
+    /// Continuous on or off, from the next touch; the band stays up a while longer to see it.
+    func chooseContinuous(_ on: Bool) {
+        if on == continuous { return }
+        continuous = on
+        UserDefaults.standard.set(on, forKey: Self.continuousKey)
+        keepBandUp()
+    }
+
+    /// After a drop, the band offering Continue filling stays up for another while.
+    private func keepBandUp() {
         if band == .dropped {
             bandTimer?.invalidate()
             bandTimer = Timer.scheduledTimer(withTimeInterval: bandShown, repeats: false) { [weak self] _ in
@@ -226,7 +245,7 @@ final class ColorDrop {
     func touchFill() -> Fill? {
         guard band == .filling else { return nil }
         let c = Self.channels(swatch ?? model.colorRgb())
-        return Fill(r: c.r, g: c.g, b: c.b, threshold: threshold)
+        return Fill(r: c.r, g: c.g, b: c.b, threshold: threshold, continuous: continuous)
     }
 
     /// The touches' fill was let go of (kept, or taken back by a second finger).
@@ -418,7 +437,7 @@ struct ColorDropBand: View {
     }
 
     private var blue: Color {
-        Color(argb: light ? 0xFF0A_8CFD : 0xFF00_76FD)
+        Pc.tinted(Color(argb: light ? 0xFF0A_8CFD : 0xFF00_76FD))
     }
 
     private var ink: Color {
@@ -441,6 +460,22 @@ struct ColorDropBand: View {
         .background(Circle().fill(blue))
         .contentShape(Circle())
         .onTapGesture { drop.endFilling() }
+    }
+
+    /// Continuous: a pill that is blue while on.
+    private var continuousToggle: some View {
+        let on = drop.continuous
+        let shape = RoundedRectangle(cornerRadius: 10, style: .circular)
+        return Text(verbatim: "Continuous")
+            .font(.system(size: 11.7))
+            .foregroundStyle(on ? Color.white : ink)
+            .lineLimit(1)
+            .frame(width: continuousWidth, height: 20)
+            .background(shape.fill(on ? blue : Color(argb: light ? 0x1F00_0000 : 0x33FF_FFFF)))
+            .animation(.timingCurve(0.3, 0, 0.2, 1, duration: 0.2), value: on)
+            .contentShape(shape)
+            .onTapGesture { drop.chooseContinuous(!on) }
+            .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
     }
 
     private var continueButton: some View {
@@ -468,10 +503,14 @@ struct ColorDropBand: View {
                         .lineLimit(1)
                 }
                 // what a colour fills up to: the current layer (or the reference layer) or All Layers
-                Segmented(
-                    first: drop.onReference ? "Reference" : "Layer", second: "All Layers",
-                    onSecond: drop.allLayers, ink: ink, blue: blue
-                ) { drop.chooseAllLayers($0) }
+                BandSegments(
+                    labels: [drop.onReference ? "Reference" : "Layer", "All Layers"],
+                    chosen: drop.allLayers ? 1 : 0, ink: ink, blue: blue
+                ) { drop.chooseAllLayers($0 == 1) }
+                // what a drag does while filling: fill every unfilled area it crosses
+                if width >= bandRoomForContinuous {
+                    continuousToggle
+                }
                 if kept == .filling {
                     // the tick ends filling
                     tick
@@ -518,45 +557,49 @@ struct ColorDropBand: View {
     }
 }
 
-/// Each of the band's segments, room for "All Layers" and "Reference".
-private let segmentWidth: CGFloat = 68
+/// Each of ColorDrop's segments, room for "All Layers" and "Reference".
+let bandSegmentWidth: CGFloat = 68
 
-/// Under this, the band leaves its title out for the segmented control.
-private let bandRoomForTitle: CGFloat = 380
+/// Under this, the band leaves its title out for its controls.
+private let bandRoomForTitle: CGFloat = 470
 
-/// Two choices side by side in a rounded track, the chosen one under a blue thumb that slides
-/// across to the other when it is tapped: `onSecond` whether the second is chosen.
-private struct Segmented: View {
-    let first: String
-    let second: String
-    let onSecond: Bool
+/// Continuous's pill across, and the band's width under which it is left out.
+private let continuousWidth: CGFloat = 76
+private let bandRoomForContinuous: CGFloat = 360
+
+/// A band's choices side by side in a rounded track (ColorDrop's, the Eraser band's), the chosen
+/// one under a blue thumb that slides across to another when it is tapped.
+struct BandSegments: View {
+    let labels: [String]
+    let chosen: Int
+    var width: CGFloat = bandSegmentWidth
     let ink: Color
     let blue: Color
-    let choose: (Bool) -> Void
+    let choose: (Int) -> Void
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .circular)
         ZStack(alignment: .leading) {
             shape.fill(Color(argb: Look.shared.light ? 0x1F00_0000 : 0x33FF_FFFF))
             shape.fill(blue)
-                .frame(width: segmentWidth, height: 20)
-                .offset(x: onSecond ? segmentWidth : 0)
-                .animation(.timingCurve(0.3, 0, 0.2, 1, duration: 0.33), value: onSecond)
+                .frame(width: width, height: 20)
+                .offset(x: CGFloat(chosen) * width)
+                .animation(.timingCurve(0.3, 0, 0.2, 1, duration: 0.33), value: chosen)
             HStack(spacing: 0) {
-                ForEach(0 ..< 2, id: \.self) { index in
-                    let chosen = onSecond == (index == 1)
-                    Text(verbatim: index == 1 ? second : first)
+                ForEach(labels.indices, id: \.self) { index in
+                    let on = index == chosen
+                    Text(verbatim: labels[index])
                         .font(.system(size: 11.7))
-                        .foregroundStyle(chosen ? Color.white : ink)
+                        .foregroundStyle(on ? Color.white : ink)
                         .lineLimit(1)
-                        .frame(width: segmentWidth, height: 20)
+                        .frame(width: width, height: 20)
                         .contentShape(Rectangle())
-                        .onTapGesture { choose(index == 1) }
-                        .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+                        .onTapGesture { choose(index) }
+                        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
                 }
             }
         }
-        .frame(width: segmentWidth * 2, height: 20)
+        .frame(width: width * CGFloat(labels.count), height: 20)
         .clipShape(shape)
     }
 }

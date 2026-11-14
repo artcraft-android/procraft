@@ -5,6 +5,10 @@ import UIKit
 /// What the Share tab makes.
 enum ShareKind {
     case psd, pdf, tiff, jpeg, png, layersPdf, layerPngs
+    /// A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes.
+    case svg
+    /// The artwork's vector layers as a page of shapes.
+    case vectorPdf
 }
 
 /// How a picture comes in from the Add tab.
@@ -104,6 +108,12 @@ extension CanvasModel {
                 case .png:
                     try session.exportPng(path: file(".png").path)
                     return [file(".png")]
+                case .svg:
+                    try session.exportSvg(path: file(".svg").path)
+                    return [file(".svg")]
+                case .vectorPdf:
+                    try session.exportVectorPdf(path: file(".pdf").path)
+                    return [file(".pdf")]
                 case .pdf:
                     try session.exportPdf(path: file(".pdf").path, layers: false, quality: quality)
                     return [file(".pdf")]
@@ -159,6 +169,18 @@ extension CanvasModel {
 
     /// A file from the picker, read with the access it gave.
     func insertFile(_ url: URL, isPrivate: Bool) {
+        // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+        if url.pathExtension.lowercased() == "svg" {
+            closePanels()
+            let name = url.deletingPathExtension().lastPathComponent
+            if let data = url.readPicked(), session.insertSvg(bytes: data, name: name) != 0 {
+                refresh()
+                showNotice("Vector Layer")
+            } else {
+                showNotice("This picture can't be opened.", warning: true)
+            }
+            return
+        }
         insertPicture(url.readPicked(), name: url.lastPathComponent, isPrivate: isPrivate)
     }
 

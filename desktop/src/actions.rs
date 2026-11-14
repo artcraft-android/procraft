@@ -118,6 +118,7 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    VectorCrisp,
     ResetInput,
 }
 
@@ -264,8 +265,10 @@ pub struct Showing {
     pub model: bool,
     pub model_flat: bool,
     pub paint_through: bool,
-    /// The artwork is a plugin's: Share Image offers SVG too.
+    /// The artwork is a plugin's, or has vector layers: Share Image offers SVG too.
     pub svg: bool,
+    /// The artwork has vector layers: Share Image offers them as a PDF of shapes.
+    pub vectors: bool,
 }
 
 /// The groups of rows of tab `tab`.
@@ -330,6 +333,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
             .into_iter()
             .chain(showing.svg.then_some(Button("SVG", None, Some(Act::Share(Format::Svg)))))
+            .chain(showing.vectors.then_some(Button("Vector PDF", None, Some(Act::Share(Format::VectorPdf)))))
             .collect(),
             vec![
                 Heading("Share Layers"),
@@ -361,6 +365,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         Some(Act::ScalingMenu),
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
+                    Switch("Crisp zoom", prefs.vector_crisp, Some(Act::VectorCrisp)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
@@ -640,6 +645,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::BrushCursor)) => {
                 prefs.brush_cursor = !prefs.brush_cursor;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::VectorCrisp)) => {
+                prefs.vector_crisp = !prefs.vector_crisp;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {

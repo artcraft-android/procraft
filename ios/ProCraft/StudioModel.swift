@@ -100,7 +100,8 @@ final class StudioModel {
     }
 
     private func read() {
-        let keys = studioKeys
+        // and the rows the plugins that are on add (a brush's own sound), kept with each brush
+        let keys = studioKeys + pluginBrushControls().map(\.key)
         for (key, value) in zip(keys, session.studioSettings(keys: keys)) {
             values[key] = value
         }
@@ -175,6 +176,31 @@ final class StudioModel {
         read()
         syncPad()
         padMenuOpen = false
+    }
+
+    /// The brush set at random, as a plugin says.
+    func randomise() {
+        guard session.studioRandomise() else { return }
+        read()
+        syncPad()
+    }
+
+    /// Asks first, then resets: it can't be undone.
+    func askReset() {
+        model.question = Question(
+            title: "Reset this brush?",
+            message: "It goes back to its last reset point, or to how it came. It can't be undone.",
+            action: "Reset", icon: nil
+        ) { [weak self] in self?.reset() }
+    }
+
+    /// Asks first, then makes a new reset point: it can't be undone.
+    func askNewResetPoint() {
+        model.question = Question(
+            title: "New reset point?",
+            message: "Resetting the brush will bring it back to how it is now. It can't be undone.",
+            action: "Make", icon: nil, destructive: false
+        ) { [weak self] in self?.newResetPoint() }
     }
 
     /// Sets the brush aside as it is now, for resetting it to go back to.
@@ -267,6 +293,10 @@ final class StudioModel {
 
     /// A picture on the clipboard as a source image; none if there isn't one.
     func pastedSource() -> Data? {
+        // what was cut or copied here first, cut to its drawing
+        if let own = model.copySource() {
+            return own
+        }
         guard let picture = UIPasteboard.general.image else {
             model.showNotice("There's no picture to paste.", warning: true)
             return nil

@@ -223,6 +223,8 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
     Ok(Imported {
         document,
         pixels,
+        // (a PSD's layers are pixels)
+        vectors: Vec::new(),
         name: "Untitled Artwork".to_owned(),
         author: String::new(),
         strokes: 0,
@@ -714,6 +716,7 @@ fn paint_layer(id: LayerId, name: String, parent: Option<LayerId>) -> Layer {
         text: None,
         private: false,
         assisted: false,
+        vector: None,
     }
 }
 

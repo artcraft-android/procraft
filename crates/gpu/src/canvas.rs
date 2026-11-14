@@ -96,6 +96,22 @@ pub enum Resample {
     Nearest,
     Bilinear,
     Bicubic,
+    /// For pixel art turned or bent: each pixel takes the colour under its middle of the copy
+    /// enlarged by Scale2x's rule (`procraft_engine::pixel::grown_by`), which keeps a turned
+    /// line's steps even where the nearest pixel alone doubles and drops them, and blends nothing.
+    PixelArt,
+}
+
+impl Resample {
+    /// As the transform shader takes it.
+    fn filter(self) -> f32 {
+        match self {
+            Resample::Nearest => 0.0,
+            Resample::Bilinear => 1.0,
+            Resample::Bicubic => 2.0,
+            Resample::PixelArt => 3.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,6 +395,24 @@ impl StrokeStyle {
     fn canvas_grain(&self) -> Option<(u32, f32, f32)> {
         self.grain.filter(|_| self.grain_mode == GrainMode::Texturized).map(|g| (g, self.grain_scale, self.grain_depth))
     }
+}
+
+/// What an open stroke was given, in the order it came (see [`Canvas::echo_stroke`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum StrokeEcho {
+    /// More of it ([`Canvas::add_stamps`]), or all of it again ([`Canvas::replace_stamps`]).
+    Stamps(Vec<Stamp>),
+    Replace(Vec<Stamp>),
+    /// Likewise of a dual brush's second.
+    Second(Vec<Stamp>),
+    ReplaceSecond(Vec<Stamp>),
+    /// Its tip, and what runs ahead of it ([`Canvas::set_tip`], [`Canvas::set_prediction`]).
+    Tip(Vec<Stamp>),
+    Prediction(Vec<Stamp>),
+    DropSecond,
+    /// It ended, kept or called off: nothing more is told of.
+    End,
+    Cancel,
 }
 
 /// Where [`Canvas::render`] draws the canvas.
@@ -672,15 +706,25 @@ fn round_tip_reach(hardness: f32, r: f32) -> (f32, f32) {
 /// The radius a stamp of `radius` is drawn at in `style`, thinned `taper` of the way by a taper
 /// (the round tip's rim with it: measured, a taper narrows a thin brush and a wide one to the same
 /// shares of their widths, so its reach goes by the stamp's size before the taper).
-fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32) -> f32 {
+///
+/// `px` is how many of the canvas's pixels make one of the artwork's: 1, but more on a canvas
+/// that draws the artwork finer (vector layers drawn again as fine as the screen, zoomed in). The
+/// rim's reach and the anti-aliased edge a stroke's stamps build up beyond it are the artwork's
+/// pixels: there they are as many of this canvas's, so a line is as wide as on the artwork, only
+/// its edge sharper.
+fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32, px: f32) -> f32 {
     let r = radius.max(0.0);
     // a pixelated stamp covers exactly the pixels it is as wide as, with no rim to reach past
     if style.shape.is_some() || style.pixelated || r <= 0.0 {
         return r;
     }
+    let px = if px.is_finite() { px.max(1.0) } else { 1.0 };
     let taper = if taper.is_finite() { taper.clamp(0.0, 1.0) } else { 1.0 };
-    let (scale, growth) = round_tip_reach(style.hardness, if taper > 0.0 { r / taper } else { r });
-    r * scale + growth * taper
+    let artwork = r / px;
+    let (scale, growth) = round_tip_reach(style.hardness, if taper > 0.0 { artwork / taper } else { artwork });
+    // (the edge built up is about half a pixel past the stamps, of the artwork's against this
+    // canvas's own half pixel: nothing more at 1)
+    r * scale + growth * taper * px + 0.5 * (px - 1.0)
 }
 
 /// A stamp's mirroring and colour shift for the GPU, kept finite.
@@ -925,6 +969,12 @@ struct SurroundUniform {
     v1: [f32; 4],
     v2: [f32; 4],
 }
+
+/// How a layer is clipped as it is drawn: not at all, multiplied by its base's alpha, or laid
+/// into what is below only where that is (onto its base's picture, which keeps its alpha).
+const CLIP_NONE: u32 = 0;
+const CLIP_ALPHA: u32 = 1;
+const CLIP_ATOP: u32 = 2;
 
 const STROKE_NONE: u32 = 0;
 const STROKE_PAINT: u32 = 1;
@@ -1729,6 +1779,8 @@ pub(crate) struct Pipelines {
     /// Stamps adding towards their transfer (dual-source blending), where the GPU has it.
     stamp_capped: Option<wgpu::RenderPipeline>,
     layer: wgpu::RenderPipeline,
+    /// A normal layer clipped to what it is drawn onto.
+    layer_atop: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
     commit_paint: wgpu::RenderPipeline,
@@ -1823,6 +1875,13 @@ pub struct Canvas {
     groups: Vec<([wgpu::Texture; 2], [wgpu::TextureView; 2])>,
     /// Animation Assist playing: the frame shown (alone, no onion skins).
     play_frame: Option<usize>,
+    /// What the open stroke is given, told again as it comes (see [`Canvas::echo_stroke`]), and
+    /// whether the stroke it tells of is still open.
+    echo: Option<(Vec<StrokeEcho>, bool)>,
+    /// How many of its pixels make one of the artwork's (see [`Canvas::set_artwork_pixel`]).
+    artwork_pixel: f32,
+    /// Drawn over what the target already shows (see [`Canvas::set_over`]).
+    over: bool,
     /// Where a stroke of a blend mode, or one on a locked layer, and a merge are drawn before
     /// they go back into the layer; made the first time one is.
     scratch: OnDemand,
@@ -1977,6 +2036,21 @@ const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
     },
     alpha: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// What is drawn laid into the target only where the target is, which keeps its alpha: a clipped
+/// layer onto its base's picture.
+const SOURCE_ATOP: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::DstAlpha,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::DstAlpha,
         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
         operation: wgpu::BlendOperation::Add,
     },
@@ -2186,6 +2260,9 @@ impl Canvas {
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
             groups: Vec::new(),
             play_frame: None,
+            echo: None,
+            artwork_pixel: 1.0,
+            over: false,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
             queued_second: None,
@@ -2586,18 +2663,53 @@ impl Canvas {
         self.ops.push(Op::ClearSecond(second));
     }
 
+    /// From now until the open stroke ends, all it is given is told again, in order, to whoever
+    /// asks ([`Canvas::take_echo`]): for the same stroke to be drawn somewhere else as it is made.
+    pub fn echo_stroke(&mut self) {
+        self.echo = Some((Vec::new(), true));
+    }
+
+    /// What the stroke told of was given since this was last asked; with [`StrokeEcho::End`] or
+    /// [`StrokeEcho::Cancel`] in it, nothing more comes until [`Canvas::echo_stroke`] again.
+    pub fn take_echo(&mut self) -> Vec<StrokeEcho> {
+        self.echo.as_mut().map(|(told, _)| std::mem::take(told)).unwrap_or_default()
+    }
+
+    /// Nothing more is told of the open stroke.
+    pub fn stop_echo(&mut self) {
+        self.echo = None;
+    }
+
+    fn tell(&mut self, what: impl FnOnce() -> StrokeEcho) {
+        if let Some((told, open)) = self.echo.as_mut().filter(|(_, open)| *open) {
+            let what = what();
+            *open = !matches!(what, StrokeEcho::End | StrokeEcho::Cancel);
+            told.push(what);
+        }
+    }
+
+    /// Whether [`Canvas::render`] draws the canvas over what its target already shows (nothing
+    /// around it, the target not cleared first) instead of on the surround: for a second canvas
+    /// laid over the first's picture.
+    pub fn set_over(&mut self, over: bool) {
+        self.over = over;
+    }
+
     /// Draws more of the open stroke's second.
     pub fn add_second_stamps(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::Second(stamps.to_vec()));
         self.push_stamps_to(stamps, false, true);
     }
 
     /// Redraws the open stroke's second from scratch with `stamps` (its final form).
     pub fn replace_second_stamps(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::ReplaceSecond(stamps.to_vec()));
         self.push_stamps_to(stamps, true, true);
     }
 
     /// The open stroke goes on without its second (it was made into a shape).
     pub fn drop_second(&mut self) {
+        self.tell(|| StrokeEcho::DropSecond);
         if let Some(active) = self.active.as_mut()
             && active.second.take().is_some()
         {
@@ -2642,14 +2754,23 @@ impl Canvas {
 
     /// Draws more of the open stroke.
     pub fn add_stamps(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::Stamps(stamps.to_vec()));
         self.untip();
         self.push_stamps(stamps, false);
     }
 
     /// Redraws the open stroke from scratch with `stamps` (its final form, e.g. with the end taper).
     pub fn replace_stamps(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::Replace(stamps.to_vec()));
         self.tip = None;
         self.push_stamps(stamps, true);
+    }
+
+    /// How many of its pixels make one of the artwork's: more than 1 on a canvas that draws the
+    /// artwork finer than it is (vector layers drawn again as fine as the screen). Round stamps
+    /// reach as far past their size as on the artwork, counted in the artwork's pixels.
+    pub fn set_artwork_pixel(&mut self, px: f32) {
+        self.artwork_pixel = if px.is_finite() { px.max(1.0) } else { 1.0 };
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
@@ -2662,6 +2783,7 @@ impl Canvas {
     /// The open stroke's tip, drawn over it until the next stamps or tip: its last stamps as
     /// they'd be drawn were it to end now.
     pub fn set_tip(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::Tip(stamps.to_vec()));
         self.untip();
         if !self.shows_tip() || stamps.is_empty() {
             return;
@@ -2713,7 +2835,7 @@ impl Canvas {
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
-                let radius = drawn_radius(&style, s.radius, s.taper);
+                let radius = drawn_radius(&style, s.radius, s.taper, self.artwork_pixel);
                 let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
                 bounds = bounds.union(IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2));
                 // without the capped pipeline, the transfer goes into the stamp
@@ -2769,6 +2891,7 @@ impl Canvas {
     /// Stamps for where the input is predicted to go next: drawn over the canvas until replaced,
     /// never into the layer. Only painting strokes show them.
     pub fn set_prediction(&mut self, stamps: &[Stamp]) {
+        self.tell(|| StrokeEcho::Prediction(stamps.to_vec()));
         self.prediction.clear();
         // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second; nor paint
         // laid in place: drawn over every layer, its stamps show none of what it is laid on, a
@@ -2782,12 +2905,13 @@ impl Canvas {
             return;
         };
         let capped = self.pipelines.stamp_capped.is_some();
+        let artwork_pixel = self.artwork_pixel;
         self.prediction.extend(
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).map(|s| {
                 let (alpha, transfer) = capped_alpha(&style, capped, s);
                 StampInstance {
                     center: [s.center.x, s.center.y],
-                    radius: drawn_radius(&style, s.radius, s.taper),
+                    radius: drawn_radius(&style, s.radius, s.taper, artwork_pixel),
                     alpha,
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
                     roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
@@ -2810,6 +2934,7 @@ impl Canvas {
         self.prediction.clear();
         self.untip();
         if let Some(active) = self.active.take() {
+            self.tell(|| StrokeEcho::End);
             self.ops.push(Op::Commit(active));
         }
     }
@@ -2821,6 +2946,7 @@ impl Canvas {
         self.prediction.clear();
         self.untip();
         if let Some(active) = self.active.take() {
+            self.tell(|| StrokeEcho::End);
             self.ops.push(Op::Within(rects));
             self.ops.push(Op::Commit(active));
         }
@@ -2860,6 +2986,7 @@ impl Canvas {
         self.prediction.clear();
         self.tip = None;
         if let Some(active) = self.active.take() {
+            self.tell(|| StrokeEcho::Cancel);
             self.dirty = self.dirty.union(active.bounds);
             self.ops.push(Op::Cancel);
         }
@@ -3466,6 +3593,11 @@ impl Canvas {
         self.dirty = self.full();
     }
 
+    /// The frame showing alone, if one is (see [`Canvas::set_play_frame`]).
+    pub fn play_frame(&self) -> Option<usize> {
+        self.play_frame
+    }
+
     /// Animation Assist playing: frame `frame` shows alone (none: back to drawing).
     pub fn set_play_frame(&mut self, frame: Option<usize>) {
         if self.play_frame != frame {
@@ -3789,6 +3921,17 @@ impl Canvas {
         self.ops.push(Op::TransformEnd { commit, within: Some(within) });
     }
 
+    /// How many times over [`Resample::PixelArt`] enlarges the copy (each doubling it): three, as
+    /// RotSprite does, on a canvas the size pixel art is made at; fewer on a larger one, where
+    /// every pixel of the layer would read too many of the copy's.
+    pub fn pixel_art_levels(&self) -> f32 {
+        match u64::from(self.width) * u64::from(self.height) {
+            n if n <= 1 << 21 => 3.0,
+            n if n <= 1 << 25 => 2.0,
+            _ => 1.0,
+        }
+    }
+
     /// Whether a transform is open, counting queued work.
     pub fn is_transforming(&self) -> bool {
         let mut open = self.transforming.is_some();
@@ -3924,7 +4067,9 @@ impl Canvas {
         let device = &gpu.device;
         // groups flattened or merged are composited on their own, whatever they are
         let flattening = self.ops.iter().filter_map(|op| match op {
-            Op::Flatten { before, .. } | Op::MergeMany { before, .. } => Some(before.max_depth()),
+            Op::Flatten { before, .. } | Op::MergeMany { before, .. } => {
+                Some(before.max_depth().max(clip_levels(before)))
+            }
             _ => None,
         });
         let depth = flattening.max().unwrap_or(0);
@@ -4398,16 +4543,13 @@ impl Canvas {
                 }
                 Op::TransformSet { to_source: m, resample } => {
                     let mut drew = false;
+                    let levels = self.pixel_art_levels();
                     for t in self.transforming.iter().chain(&self.transform_more) {
                         let Some(layer) = self.layers.get(&t.layer) else { continue };
-                        let filter = match resample {
-                            Resample::Nearest => 0.0,
-                            Resample::Bilinear => 1.0,
-                            Resample::Bicubic => 2.0,
-                        };
+                        let filter = resample.filter();
                         let [a, b, c, d, e, f, g, h, i] = m;
                         let offset = uniforms.push(&TransformUniform {
-                            r0: [a, b, c, 0.0],
+                            r0: [a, b, c, levels],
                             r1: [d, e, f, 0.0],
                             r2: [g, h, i, 0.0],
                             p: [filter, self.width as f32, self.height as f32, if t.masked { 1.0 } else { 0.0 }],
@@ -4436,11 +4578,8 @@ impl Canvas {
                     }
                 }
                 Op::TransformMesh { vertices, resample } => {
-                    let filter = match resample {
-                        Resample::Nearest => 0.0,
-                        Resample::Bilinear => 1.0,
-                        Resample::Bicubic => 2.0,
-                    };
+                    let filter = resample.filter();
+                    let levels = self.pixel_art_levels();
                     let bytes: &[u8] = bytemuck::cast_slice(&vertices);
                     let count = u32::try_from(vertices.len()).unwrap_or(0);
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -4455,7 +4594,7 @@ impl Canvas {
                     for t in self.transforming.iter().chain(&self.transform_more) {
                         let Some(layer) = self.layers.get(&t.layer) else { continue };
                         let offset = uniforms.push(&TransformUniform {
-                            r0: [0.0; 4],
+                            r0: [0.0, 0.0, 0.0, levels],
                             r1: [0.0; 4],
                             r2: [0.0; 4],
                             p: [filter, self.width as f32, self.height as f32, if t.masked { 1.0 } else { 0.0 }],
@@ -5499,12 +5638,21 @@ impl Canvas {
         lower: LayerId,
     ) -> Option<()> {
         let settings = doc.layer(upper)?;
-        let clip = doc.clip_base(upper).and_then(|id| self.layers.get(&id));
+        let base = doc.clip_base(upper);
+        let clipped = match base {
+            None => CLIP_NONE,
+            // into its base: where the base is, which keeps its alpha (as the two composite)
+            Some(b) if b == lower => CLIP_ATOP,
+            // into another layer clipped to the same base, which goes on clipping the two
+            Some(b) if doc.clip_base(lower) == Some(b) => CLIP_NONE,
+            Some(_) => CLIP_ALPHA,
+        };
+        let clip = base.filter(|_| clipped == CLIP_ALPHA).and_then(|id| self.layers.get(&id));
         let up = self.layers.get(&upper)?;
         let uniform = LayerUniform {
             opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
             blend: settings.blend.id(),
-            clipped: u32::from(clip.is_some()),
+            clipped,
             ..Default::default()
         };
         self.blend_down(device, encoder, uniforms, &up.view, clip.map(|c| &c.view), uniform, lower)
@@ -6229,7 +6377,11 @@ impl Canvas {
                 None => break,
             }
         }
-        let start = tops.iter().position(|t| *t == top)?;
+        let mut start = tops.iter().position(|t| *t == top)?;
+        // a clipped layer composites with its base (and what else is clipped to it) as one
+        if let Some(base) = doc.clip_base(top) {
+            start = tops.iter().position(|t| *t == base)?;
+        }
         let layer = |i: usize| tops.get(i).and_then(|t| doc.layer(*t));
         let mut end = tops.len();
         while end > start + 1 && tops.get(end - 1).is_some_and(|t| plain(doc, *t)) {
@@ -6568,7 +6720,10 @@ impl Canvas {
             let mut layers = Vec::new();
             let mut staged = 0;
             while let Some(&item) = items.get(at) {
-                let mut more = item_layers(doc, item);
+                // an item with what is clipped to it, which composites with it as one
+                let run = at..at + 1 + clipped_to(doc, item, items.get(at + 1..).unwrap_or_default()).len();
+                let unit = items.get(run.clone()).unwrap_or_default();
+                let mut more: Vec<LayerId> = unit.iter().flat_map(|i| item_layers(doc, *i)).collect();
                 more.extend(clip_base_and_mask(doc, item));
                 // the time counts bringing layers back, not the compositing after: the count
                 // keeps a part whose layers come back quickly from compositing too long
@@ -6577,7 +6732,7 @@ impl Canvas {
                 if !part.is_empty() && (late || full_part) {
                     break;
                 }
-                at += 1;
+                at = run.end;
                 let painted = self.painted(&more).intersect(full);
                 if painted.is_empty() {
                     continue;
@@ -6598,20 +6753,20 @@ impl Canvas {
                     staged = 0;
                 }
                 layers.extend(more);
-                part.push((item, rect));
+                part.push((run, rect));
             }
             largest = largest.max(part.len());
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
             let mut uniforms = UniformData::default();
-            for (item, rect) in &part {
+            for (run, rect) in &part {
                 self.composite_items(
                     device,
                     doc,
                     &mut encoder,
                     &mut uniforms,
                     *rect,
-                    &[*item],
+                    items.get(run.clone()).unwrap_or_default(),
                     true,
                     &stack,
                     &mut current,
@@ -6816,7 +6971,9 @@ impl Canvas {
         let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
         let focus = animation.and_then(|_| self.play_frame.or_else(|| animation::current_frame(doc)));
-        for &id in items {
+        let mut next = 0;
+        while let Some(&id) = items.get(next) {
+            next += 1;
             let Some(layer) = doc.layer(id) else { continue };
             // another layer shown alone
             if doc.soloed_out(id) {
@@ -6837,7 +6994,15 @@ impl Canvas {
             match layer.kind {
                 LayerKind::Mask => {}
                 LayerKind::Paint => {
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current)
+                    // with what is clipped to it, as one (frames each show as their own looks say)
+                    let clips = clipped_to(doc, id, items.get(next..).unwrap_or_default());
+                    if animation.is_none()
+                        && self.composite_clipped(device, doc, encoder, uniforms, rect, layer, clips, stack, current)
+                    {
+                        next += clips.len();
+                        continue;
+                    }
+                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, false, stack, current)
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
@@ -6894,8 +7059,68 @@ impl Canvas {
         Some(&views[0])
     }
 
+    /// A paint layer and `clips`, the layers clipped to it (bottom up), composited as one: the
+    /// layer alone on its depth's group textures, each clipped layer laid into that where it is
+    /// (it keeps its alpha, so along a soft edge the clipped paint shows as thin as the layer is,
+    /// with none of the layer's own under it), and the whole onto `stack` at the layer's opacity
+    /// and mode. False, with nothing drawn, when nothing clipped to it shows or the textures
+    /// aren't there: its layers then composite one by one.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_clipped(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        base: &Layer,
+        clips: &[LayerId],
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) -> bool {
+        let shows =
+            |id: &&LayerId| doc.layer(**id).is_some_and(|l| l.visible && l.opacity > 0.0) && !doc.soloed_out(**id);
+        if !base.visible || base.opacity <= 0.0 || !clips.iter().any(|c| shows(&c)) {
+            return false;
+        }
+        let Some((textures, views)) = self.groups.get(doc.depth(base.id)) else { return false };
+        let [first, second] = views;
+        let inner = Stack::pair(textures, views);
+        drop(render_pass(encoder, "clipped clear", first, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        let mut at = 0;
+        // the layer as it is: its opacity and mode are the whole's
+        let alone = Layer { opacity: 1.0, blend: BlendMode::Normal, ..base.clone() };
+        self.composite_layer(device, doc, encoder, uniforms, rect, &alone, Look::PLAIN, false, &inner, &mut at);
+        for layer in clips.iter().filter(shows).filter_map(|c| doc.layer(*c)) {
+            self.composite_layer(device, doc, encoder, uniforms, rect, layer, Look::PLAIN, true, &inner, &mut at);
+        }
+        let uniform = LayerUniform {
+            opacity: base.opacity.clamp(0.0, 1.0),
+            blend: base.blend.id(),
+            tint: Look::PLAIN.tint,
+            ..Default::default()
+        };
+        let view = if at == 0 { first } else { second };
+        self.draw_onto(
+            device,
+            encoder,
+            uniforms,
+            rect,
+            view,
+            None,
+            &self.stroke_view,
+            uniform,
+            base.blend,
+            stack,
+            current,
+        );
+        true
+    }
+
     /// One paint layer (through its mask, with the stroke being drawn on it or its mask) onto a
-    /// stack whose result is in its first texture (`current` 0) or its second (1).
+    /// stack whose result is in its first texture (`current` 0) or its second (1). With `atop`
+    /// the stack holds the picture of the layer it is clipped to, which it is laid into; else a
+    /// clipped layer shows as far as its base's alpha goes.
     #[allow(clippy::too_many_arguments)]
     fn composite_layer(
         &self,
@@ -6906,10 +7131,11 @@ impl Canvas {
         rect: IRect,
         layer: &Layer,
         look: Look,
+        atop: bool,
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
-        let clip = doc.clip_base(layer.id);
+        let clip = doc.clip_base(layer.id).filter(|_| !atop);
         let clip_visible = clip.is_none_or(|id| doc.layer(id).is_some_and(|l| l.visible));
         if !layer.visible || !clip_visible || layer.opacity <= 0.0 {
             return;
@@ -6942,7 +7168,11 @@ impl Canvas {
             },
             stroke_opacity: stroke.map_or(0.0, |s| s.style.opacity.clamp(0.0, 1.0)),
             blend: layer.blend.id(),
-            clipped: u32::from(clip.is_some()),
+            clipped: match clip {
+                _ if atop => CLIP_ATOP,
+                Some(_) => CLIP_ALPHA,
+                None => CLIP_NONE,
+            },
             clip_masked: if clip_mask_view.is_some() { 1.0 } else { 0.0 },
             masked: if mask_view.is_some() { 1.0 } else { 0.0 },
             stroke_on_mask: if stroke.is_some_and(|s| Some(s.layer) == mask) { 1.0 } else { 0.0 },
@@ -6992,7 +7222,8 @@ impl Canvas {
             let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
-            pass.set_pipeline(&self.pipelines.layer);
+            let atop = uniform.clipped == CLIP_ATOP;
+            pass.set_pipeline(if atop { &self.pipelines.layer_atop } else { &self.pipelines.layer });
             pass.set_bind_group(0, &bind, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
@@ -7088,8 +7319,10 @@ impl Canvas {
             });
             (&*pipeline, offset)
         });
-        let mut pass = render_pass(encoder, "display", target.view, wgpu::LoadOp::Clear(clear));
-        if let Some((grid_pipeline, offset)) = grid {
+        // (laid over another canvas's picture, what is there stays around this one)
+        let load = if self.over { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(clear) };
+        let mut pass = render_pass(encoder, "display", target.view, load);
+        if let Some((grid_pipeline, offset)) = grid.filter(|_| !self.over) {
             pass.set_pipeline(grid_pipeline);
             pass.set_bind_group(0, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
@@ -7730,6 +7963,20 @@ impl Canvas {
     /// CPU. Drawn on the GPU; false (nothing done) if `from` has no texture for it (a parked
     /// layer). Not an undo step.
     pub fn resample_layer_from(&mut self, gpu: &Gpu, from: &Canvas, id: LayerId, to_old: [f32; 6]) -> bool {
+        self.magnify_layer_from(gpu, from, id, to_old, false)
+    }
+
+    /// As [`Canvas::resample_layer_from`]; with `squares`, each pixel is the one pixel of `from`
+    /// its middle falls in instead of a blend of the four around it: a layer magnified as the
+    /// squares its pixels show as.
+    pub fn magnify_layer_from(
+        &mut self,
+        gpu: &Gpu,
+        from: &Canvas,
+        id: LayerId,
+        to_old: [f32; 6],
+        squares: bool,
+    ) -> bool {
         let Some(source) = from.layers.get(&id) else { return false };
         if !self.layers.contains_key(&id) {
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
@@ -7744,7 +7991,7 @@ impl Canvas {
         let [a, b, c, d, e, f] = to_old;
         let map = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("crop"),
-            contents: bytemuck::cast_slice(&[a, b, c, d, e, f, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&[a, b, c, d, e, f, if squares { 1.0 } else { 0.0 }, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -8665,6 +8912,7 @@ impl Pipelines {
         };
         Pipelines {
             layer: full("layer", "fs_layer", Some(PREMULTIPLIED_OVER)),
+            layer_atop: full("layer atop", "fs_layer", Some(SOURCE_ATOP)),
             blend: full("blend", "fs_blend", None),
             solid: full("solid", "fs_solid", None),
             commit_paint: full("commit paint", "fs_commit", Some(PREMULTIPLIED_OVER)),
@@ -9446,10 +9694,24 @@ struct Remake {
 /// composited on its own (with Animation Assist any group, its frame's onion skin tinted whole).
 fn group_levels(doc: &Document) -> usize {
     if doc.animation.is_some() {
-        return doc.max_depth();
+        return doc.max_depth().max(clip_levels(doc));
     }
     let alone = doc.layers().iter().filter(|l| l.kind == LayerKind::Group && !l.passes_through());
-    alone.map(|l| doc.depth(l.id) + 1).max().unwrap_or(0)
+    alone.map(|l| doc.depth(l.id) + 1).max().unwrap_or(0).max(clip_levels(doc))
+}
+
+/// How many levels of group textures `doc`'s clipped layers take: a layer with others clipped
+/// to it composites with them on the textures of its own depth.
+fn clip_levels(doc: &Document) -> usize {
+    let bases = doc.layers().iter().filter(|l| l.clipped).filter_map(|l| doc.clip_base(l.id));
+    bases.map(|b| doc.depth(b) + 1).max().unwrap_or(0)
+}
+
+/// The start of `above` (a level's items just above item `base`, bottom up) that is clipped to
+/// `base`.
+fn clipped_to<'a>(doc: &Document, base: LayerId, above: &'a [LayerId]) -> &'a [LayerId] {
+    let run = above.iter().take_while(|c| doc.clip_base(**c) == Some(base)).count();
+    above.get(..run).unwrap_or_default()
 }
 
 /// Whether item `id` composited over transparency, then over what is below, shows as it does

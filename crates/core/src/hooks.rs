@@ -1931,6 +1931,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_continuous_drag_goes_on_past_where_the_plugin_cut_a_fill() {
+        use crate::PointerKind;
+        use crate::touch::Fill;
+        let Some(s) = session() else { return };
+        let dir = store("fill-trail");
+        filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
+        let sample = |x: f32, time_ms: f64| crate::PenSample {
+            x,
+            y: 30.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms,
+            roll: 0.0,
+        };
+        s.set_touch_filling(Some(Fill { r: 1.0, g: 0.0, b: 0.0, threshold: 0.3, continuous: true }));
+        // the first fill stops where the plugin cuts it; dragged on past there, the rest fills too
+        s.touch_down(1, PointerKind::Finger, vec![sample(30.0, 1000.0)]);
+        assert!(red_at(&s, 30, 30) && !red_at(&s, 190, 30));
+        for (i, x) in [60.0, 100.0, 140.0, 190.0].into_iter().enumerate() {
+            s.touch_move(1, vec![sample(x, 1000.0 + 20.0 * (i as f64 + 1.0))]);
+        }
+        s.touch_up(1, vec![sample(190.0, 1100.0)]);
+        assert!(red_at(&s, 30, 30) && red_at(&s, 190, 30) && red_at(&s, 199, 199));
+        assert!(!s.pour_finishing());
+        // the drag is one undo step
+        s.undo();
+        assert!(!red_at(&s, 30, 30) && !red_at(&s, 190, 30));
+        s.set_touch_filling(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_fill_keeps_to_a_selection_with_a_plugin_as_it_does_without() {
         let Some(s) = session() else { return };
         let dir = store("fill-selection");

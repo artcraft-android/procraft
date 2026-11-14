@@ -29,7 +29,7 @@ const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
 /// A tool button held this long (seconds), as a long press, takes the current brush.
 const TOOL_HOLD_S: f64 = 0.4;
 /// The pictures and the videos Insert a file and Insert a photo take (and a drop on the canvas).
-const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+const PICTURES: [&str; 9] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg"];
 const VIDEOS: [&str; 6] = ["mp4", "m4v", "mov", "wmv", "avi", "mkv"];
 
 /// Whether `path` is named as a picture is.
@@ -751,6 +751,13 @@ impl Interface {
         }
         self.hover_cursor(&ctx, session, &info, input);
         self.selection_pointer(&ctx, input);
+        // (Crisp Zoom switched from a vector layer's menu is kept as the switch in Prefs is)
+        if session.vector_crisp() != self.prefs.vector_crisp {
+            self.prefs.vector_crisp = session.vector_crisp();
+            self.prefs.keep();
+        }
+        // one stroke picked on a vector layer, with a selection tool up, shows its nodes
+        self.overlays.vector_nodes = if self.selection.on { session.vector_nodes() } else { Vec::new() };
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
             self.overlays.shape = session.quickshape_choose(kind).or(self.overlays.shape.take());
         }
@@ -858,6 +865,19 @@ impl Interface {
         } else {
             self.animation.reset(session);
         }
+        // the Eraser band: how the eraser works, while erasing on a vector layer with nothing else
+        // in its place under the top bar
+        let erasing_vector = info.tool == ToolKind::Erase
+            && !self.transform.on
+            && !self.selection.on
+            && !self.text.editing()
+            && session.adjustment_shown().adjustment.is_none()
+            && !session.recolor_on()
+            && session.touch_layer_opacity().is_none()
+            && self.overlays.shape.is_none()
+            && !self.drop.banded()
+            && session.layers().iter().any(|l| l.current && l.vector);
+        crate::colour_drop::eraser_band(&ctx, session, erasing_vector, pc::BAR_HEIGHT);
         self.drop.show(&ctx, session, to_hex(self.colours.rgb()), pc::BAR_HEIGHT);
         self.copy_paste_panel(&ctx, session);
         self.layer_choice(&ctx, session);
@@ -1678,6 +1698,7 @@ impl Interface {
                     }
                 }
                 Inserted::Picture(false) => crate::files::no_room(session),
+                Inserted::Vectors => self.overlays.notice("Vector Layer", false),
                 Inserted::Frames { added, full, assist } => {
                     if assist {
                         self.animation.reset(session);
@@ -2405,6 +2426,7 @@ impl Interface {
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
                     svg: session.exports_svg(),
+                    vectors: session.exports_vectors(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -2523,6 +2545,7 @@ impl Interface {
                         | Act::LightInterface
                         | Act::RightHanded
                         | Act::BrushCursor
+                        | Act::VectorCrisp
                         | Act::ProjectCanvas
                         | Act::ResetInput,
                     )
@@ -2762,7 +2785,7 @@ fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     }
     let ppp = painter.ctx().pixels_per_point();
     let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
-    let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.line_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
@@ -2825,6 +2848,8 @@ enum Inserted {
     /// Frames each on a layer of its own (a moving picture's or a video's): how many, whether the
     /// canvas ran out of room, and whether Animation Assist comes on with them.
     Frames { added: u32, full: bool, assist: bool },
+    /// An SVG picture, on a vector layer of its own.
+    Vectors,
     /// It couldn't be read.
     Failed(&'static str),
 }
@@ -2861,6 +2886,15 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
         };
     }
     let Ok(bytes) = std::fs::read(path) else { return Inserted::Failed("This picture can't be opened.") };
+    // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+    if extension == "svg" {
+        let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return if session.insert_svg(bytes, name) != 0 {
+            Inserted::Vectors
+        } else {
+            Inserted::Failed("This picture can't be opened.")
+        };
+    }
     if let Some(done) = session.insert_gif_frames(bytes.clone(), private) {
         if done.added == 0 && !done.full {
             return Inserted::Failed("This picture can't be opened.");

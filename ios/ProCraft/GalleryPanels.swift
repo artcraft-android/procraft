@@ -27,7 +27,7 @@ private let renameFieldFill = Color(argb: 0x14FF_FFFF)
 
 /// The new-canvas list hanging from the + button, 2 from the screen's edge: the screen's size
 /// first, then the presets, each with its colour profile and size; a preset row swiped left shows
-/// Edit and Delete.
+/// Edit and Delete. Under them, a row for each kind of artwork a plugin on makes, the screen's size.
 struct NewCanvasPanel: View {
     let model: GalleryModel
     let screen: CGSize
@@ -64,6 +64,13 @@ struct NewCanvasPanel: View {
             .padding(.top, 18)
             .padding(.trailing, 13)
         }
+    }
+
+    /// The kinds of artwork the plugins on make: the list's last rows.
+    private var kinds: [PluginKind] {
+        // read again as plugins go on or off
+        _ = PluginsModel.shared.changes
+        return PluginsModel.shared.store.kinds()
     }
 
     var body: some View {
@@ -121,7 +128,20 @@ struct NewCanvasPanel: View {
                 .clipShape(RoundedRectangle(cornerRadius: 24, style: .circular))
                 .padding(.horizontal, 9)
                 .padding(.top, 9.5)
-                .padding(.bottom, 30)
+                .padding(.bottom, kinds.isEmpty ? 30 : 0)
+                // the plugins' kinds of artwork under the presets, each the screen's size
+                ForEach(kinds.indices, id: \.self) { k in
+                    let kind = kinds[k]
+                    PresetRow(name: kind.label, label: "\(width) × \(height)px", profile: "Display P3") {
+                        onDone()
+                        model.newCanvas(kind: kind.key, width: width, height: height)
+                    }
+                    .frame(height: 38)
+                    .background(Capsule().fill(Pc.lightRowStrong))
+                    .padding(.horizontal, 9)
+                    .padding(.top, 9.5)
+                    .padding(.bottom, k == kinds.count - 1 ? 30 : 0)
+                }
             }
         }
         .contentShape(Rectangle())

@@ -191,7 +191,11 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 }, onDelete = { deletingChosen = true })
             },
         ) {
-            Box(Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { vm.addLayer() }, contentAlignment = Alignment.Center) {
+            // (held: a vector layer, which keeps what is drawn on it as strokes and fills)
+            Box(
+                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).combinedClickable(onLongClick = { vm.addVectorLayer() }) { vm.addLayer() },
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
             }
         }
@@ -855,6 +859,15 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
                 Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
             }
         }
+        // a vector layer is marked in its corner
+        if (l.vector) {
+            Box(
+                Modifier.align(Alignment.BottomStart).padding(3.dp).size(15.dp).background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(3.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("V", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            }
+        }
     }
 }
 
@@ -1030,6 +1043,17 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
                     }
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
+                }
+                // a vector layer's own rows: whether it is drawn again as fine as the screen when
+                // zoomed in, and (with strokes or fills picked on it) what the brush as it is set
+                // can give them; how the eraser works on it is chosen in the Eraser band
+                if (l.vector && !l.locked) {
+                    Option("Crisp Zoom", checked = vm.vectorCrisp(), onClick = { vm.toggleVectorCrisp(); onDone() })
+                    if (vm.vectorPicked(l)) {
+                        Option("Apply Color", onClick = { vm.vectorApply(io.github.artcraftandroid.procraft.core.VectorApply.COLOUR); onDone() })
+                        Option("Apply Brush", onClick = { vm.vectorApply(io.github.artcraftandroid.procraft.core.VectorApply.BRUSH); onDone() })
+                        Option("Apply Size", onClick = { vm.vectorApply(io.github.artcraftandroid.procraft.core.VectorApply.SIZE); onDone() })
+                    }
                 }
                 for (action in actions) {
                     Option(action.label, onClick = { onDone(); vm.runPluginAction(action.key) })

@@ -206,7 +206,10 @@ struct ActionsPanel: View {
                     .act("JPEG", action: { model.share(.jpeg) }),
                     .act("PNG", action: { model.share(.png) }),
                     .act("TIFF", action: { model.share(.tiff) }),
-                ],
+                ]
+                // a plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes
+                + (model.session.exportsSvg() ? [.act("SVG", action: { model.share(.svg) })] : [])
+                + (model.session.exportsVectors() ? [.act("Vector PDF", action: { model.share(.vectorPdf) })] : []),
                 [
                     .heading("Share Layers"),
                     .act("PDF", action: { model.pdfAsking = .layersPdf }),
@@ -240,6 +243,7 @@ struct ActionsPanel: View {
                     }),
                     .act("Brush scaling", value: AppSettings.shared.brushOnScreen ? "Screen" : "Canvas", action: { scalingMenu = true }),
                     .toggle("Project canvas", on: AppSettings.shared.projectCanvas, change: { model.changeProjectCanvas($0) }),
+                    .toggle("Crisp zoom", on: AppSettings.shared.vectorCrisp, change: { model.changeVectorCrisp($0) }),
                     .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
                     .act("Advanced cursor settings", action: { page = .cursor }),
                 ],

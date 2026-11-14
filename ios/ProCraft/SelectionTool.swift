@@ -56,6 +56,7 @@ final class SelectionTool {
     private static let thresholdKey = "selectionThreshold"
     private static let lassoFillKey = "lassoFill"
     private static let fillOpacityKey = "fillOpacity"
+    private static let pixelatedKey = "selectionPixelated"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
@@ -69,6 +70,10 @@ final class SelectionTool {
     private(set) var lassoFill: Bool
     /// How strongly Color Fill fills (its popover's Opacity), 0..1.
     private(set) var fillOpacity: Float
+    /// Pixelated, for pixel art (in Feather's popover, the selection's edge being what it sets):
+    /// the shapes drawn to select with, and those Lasso Fill fills, land on whole pixels and take
+    /// whole pixels only. (A tool's own lasso goes by its brush's Pixelated.)
+    private(set) var pixelated: Bool
     private(set) var hasSelection = false
     private(set) var popup = SelectionPopup.none
     /// The feather popover's amount (0..1).
@@ -76,8 +81,12 @@ final class SelectionTool {
     /// How many selections are kept, and their pictures.
     private(set) var saved = 0
     private(set) var savedThumbnails: [Int: UIImage] = [:]
-    /// The freehand path as drawn (canvas pixels).
+    /// The freehand path as drawn (canvas pixels): with Pixelated, as it is taken, along the
+    /// pixels' edges a pixel across or down at a time.
     private(set) var freehand: [CGPoint] = []
+    /// With Pixelated, the way back from the path's end to where it began, along the pixels' edges
+    /// too: how it closes when it is let go.
+    private(set) var freehandClosing: [CGPoint] = []
     /// A rectangle or ellipse being dragged out, between two window points.
     private(set) var shapeDrag: (CGPoint, CGPoint)?
     /// A colour selection's threshold being slid: from where (window points), and how far.
@@ -97,6 +106,7 @@ final class SelectionTool {
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
         lassoFill = d.bool(forKey: Self.lassoFillKey)
         fillOpacity = min(max(d.object(forKey: Self.fillOpacityKey) as? Float ?? 1, 0), 1)
+        pixelated = d.bool(forKey: Self.pixelatedKey)
     }
 
     /// Each time the tool opens, shapes add to the selection.
@@ -145,14 +155,27 @@ final class SelectionTool {
     /// The freehand path as the touches have drawn it.
     func freehandChanged() {
         let flat = model.session.freehandPath()
-        freehand = stride(from: 0, to: flat.count - 1, by: 2).compactMap {
+        let drawn = stride(from: 0, to: flat.count - 1, by: 2).compactMap {
             model.windowToCanvas(CGPoint(x: CGFloat(flat[$0]), y: CGFloat(flat[$0 + 1])))
         }
+        guard hard, let first = drawn.first, let last = drawn.last else {
+            freehand = drawn
+            freehandClosing = []
+            return
+        }
+        // however far apart its points came, it shows as it is taken: no slant across a pixel
+        freehand = Self.stepped(drawn)
+        freehandClosing = Array(Self.stepped([last, first]).dropFirst())
     }
 
     /// The touches' rectangle or ellipse, dragged out between two points (window pixels).
     func dragged(_ a: CGPoint, _ b: CGPoint) {
         let pixels = model.pixels
+        // with Pixelated its corners show where they will land, on whole pixels
+        if pixelated, !model.lassoToolOn, let a = model.windowToCanvas(a), let b = model.windowToCanvas(b) {
+            shapeDrag = (model.canvasToWindow(shown(a)), model.canvasToWindow(shown(b)))
+            return
+        }
         shapeDrag = (CGPoint(x: a.x / pixels, y: a.y / pixels), CGPoint(x: b.x / pixels, y: b.y / pixels))
     }
 
@@ -167,6 +190,7 @@ final class SelectionTool {
     func shapeFilled() {
         shapeDrag = nil
         freehand = []
+        freehandClosing = []
         model.refresh()
     }
 
@@ -191,6 +215,7 @@ final class SelectionTool {
     func closeFreehand() {
         let drawn = !freehand.isEmpty
         freehand = []
+        freehandClosing = []
         model.session.closeFreehand()
         if drawn {
             changed()
@@ -289,6 +314,30 @@ final class SelectionTool {
         UserDefaults.standard.set(lassoFill, forKey: Self.lassoFillKey)
     }
 
+    func togglePixelated() {
+        pixelated.toggle()
+        model.session.setSelectionPixelated(on: pixelated)
+        UserDefaults.standard.set(pixelated, forKey: Self.pixelatedKey)
+    }
+
+    /// Whether the shape being drawn is pixel art's: with Pixelated (a tool's own lasso, with its
+    /// brush's).
+    private var hard: Bool {
+        model.lassoToolOn ? model.session.currentBrushSetting(key: "pixelated") >= 0.5 : pixelated
+    }
+
+    /// A canvas point as a shape being drawn shows it: on a whole pixel, when it is pixel art's.
+    private func shown(_ canvas: CGPoint) -> CGPoint {
+        hard ? CGPoint(x: canvas.x.rounded(), y: canvas.y.rounded()) : canvas
+    }
+
+    /// A path through `points` as pixel art takes it (the core's `pixelPath`): along the pixels'
+    /// edges from each to the next.
+    private static func stepped(_ points: [CGPoint]) -> [CGPoint] {
+        let flat = pixelPath(points: points.flatMap { [Float($0.x), Float($0.y)] }, closed: false)
+        return stride(from: 0, to: flat.count - 1, by: 2).map { CGPoint(x: CGFloat(flat[$0]), y: CGFloat(flat[$0 + 1])) }
+    }
+
     /// Color Fill's Opacity slid to `opacity` (0..1), kept.
     func fillOpacityTo(_ opacity: Float) {
         fillOpacity = min(max(opacity, 0), 1)
@@ -318,6 +367,8 @@ final class SelectionTool {
             model.refresh()
         }
         showLook()
+        // one stroke picked on a vector layer shows its nodes
+        model.readVectorNodes()
     }
 
     /// Bands over what is not selected, except while selecting by colour, which tints what is.
@@ -363,7 +414,8 @@ struct SelectionToolbar: View {
             ToolbarButton(icon: PcIcons.selectCopyPaste, label: "Copy & Paste", enabled: has || drawing, width: w, iconSize: 44, labelSize: long) {
                 tool.copyToLayer()
             }
-            ToolbarButton(icon: PcIcons.feather, label: "Feather", active: tool.popup == .feather, enabled: has || drawing, width: w, iconSize: 44) {
+            // always there to tap: its Pixelated is for the shapes yet to be drawn
+            ToolbarButton(icon: PcIcons.feather, label: "Feather", active: tool.popup == .feather, width: w, iconSize: 44) {
                 tool.openPopup(.feather)
             }
             ToolbarButton(icon: PcIcons.saveLoad, label: "Save & Load", active: tool.popup == .saved, enabled: has || drawing, width: w, iconSize: 44, labelSize: long) {
@@ -400,6 +452,8 @@ struct SelectionPopover: View {
                 if tool.popup == .feather {
                     ToolbarMenuTitle(text: "Feather")
                         .padding(.bottom, 4)
+                    // the amount softens what is selected: nothing to soften, it waits
+                    let softens = tool.hasSelection || !tool.freehand.isEmpty
                     ToolbarMenuGroup {
                         let amount = tool.featherAmount
                         PanelSlider(
@@ -407,6 +461,14 @@ struct SelectionPopover: View {
                             shown: amount <= 0 ? "None" : "\(wholeNumber(amount * 100))%",
                             onChange: { tool.featherTo($0) }
                         )
+                    }
+                    .opacity(softens ? 1 : 0.4)
+                    .allowsHitTesting(softens)
+                    .padding(.bottom, 10)
+                    // the other end of the same thing: no soft edge at all, for pixel art (shapes on
+                    // whole pixels, taking whole pixels only)
+                    ToolbarMenuGroup {
+                        ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
                     }
                 } else if tool.popup == .colorFill {
                     ToolbarMenuTitle(text: "Color Fill")
@@ -524,13 +586,15 @@ struct SelectionOverlay: View {
                     }
                     if let first = points.first {
                         var line = Path()
-                        line.addLines(points)
                         if let preview {
                             // closed back to the first point, as lifting closes it (non-zero, as the
-                            // fill); no dot to close it on, as it is drawing
+                            // fill; pixel art's along the pixels' edges); no dot to close it on, as it
+                            // is drawing
+                            line.addLines(points + tool.freehandClosing.map { model.canvasToWindow($0) })
                             line.closeSubpath()
                             context.fill(line, with: .color(preview))
                         } else {
+                            line.addLines(points)
                             dashed(context, line)
                             context.fill(
                                 Path(ellipseIn: CGRect(x: first.x - 5.5, y: first.y - 5.5, width: 11, height: 11)),

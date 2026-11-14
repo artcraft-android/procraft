@@ -1,6 +1,14 @@
 import QuartzCore
 import UIKit
 
+/// What a lone finger on the canvas did after it landed: slid to a point (the view's, in points),
+/// lifted, or was taken back by the system.
+enum FingerStep: Equatable {
+    case slid(CGPoint)
+    case lifted
+    case takenBack
+}
+
 /// The canvas: a Metal layer the core's render thread draws into, and every touch on it handed to
 /// the core's touches (`crates/core/src/touch.rs`, the same as the Android app's), which paint,
 /// move the canvas and say what the app should do. A touch carries each sample the system
@@ -19,6 +27,11 @@ final class CanvasView: UIView {
     var beforeTouches: () -> Void = {}
     /// The touches moved, or the last of them went.
     var afterTouches: (_ ended: Bool) -> Void = { _ in }
+    /// A finger alone on the canvas slid, lifted or was taken back (the QuickMenu follows the
+    /// finger that opened it).
+    var onLoneFinger: (FingerStep) -> Void = { _ in }
+    /// A touch is down on the canvas.
+    var touching: Bool { !ids.isEmpty }
 
     private var attached = false
     /// The window as last given to the session, and the way up it was at.
@@ -34,6 +47,18 @@ final class CanvasView: UIView {
     private var pencilAt: CGPoint?
     /// The touches' next wait (a hold, a repeat) running out.
     private var tick: Timer?
+    /// Asks the display for its fastest refresh (120 Hz on a ProMotion iPad) while the canvas is
+    /// touched or still moving. Without one asking, the display runs at 60 Hz and hands touches
+    /// over as often, so a canvas moved by the fingers would follow them at 60 frames a second.
+    private var fastRefresh: CADisplayLink?
+    /// The fast refresh is kept until then at least (the display's clock).
+    private var fastUntil: CFTimeInterval = 0
+    /// How long the fast refresh outlasts the last touch (a move let go of eases to rest after it).
+    private static let fastTail: CFTimeInterval = 0.5
+    #if DEBUG
+    /// What has been counted since the rates were last said (see `sayRates`).
+    private var rates = (since: CFTimeInterval(0), refreshes: 0, moves: 0, frames: UInt64(0))
+    #endif
     /// The brush's outline where the Pencil or the pointer hovers (shown while hovering only, as
     /// Brush cursor starts).
     private let cursor = BrushCursorView()
@@ -56,8 +81,31 @@ final class CanvasView: UIView {
             guard let self, let id = self.penId else { return }
             self.penId = nil
             self.obey(self.session.touchUp(id: id, samples: samples))
+        },
+        together: { [weak self] send in
+            guard let self else { return send() }
+            self.inputTogether(send)
         }
     )
+    /// How deep `inputTogether` is: frames are held while it is above 0.
+    private var togetherDepth = 0
+
+    /// Runs `send` (input for the core in several calls: a move's points, then where it is
+    /// predicted to go) with no frame drawn until all of it has come: drawn halfway, the stroke's
+    /// tip would stop short of the pen for that frame, and flicker as the pen moves.
+    private func inputTogether(_ send: () -> Void) {
+        togetherDepth += 1
+        if togetherDepth == 1 {
+            session.holdFrames(hold: true)
+        }
+        defer {
+            togetherDepth -= 1
+            if togetherDepth == 0 {
+                session.holdFrames(hold: false)
+            }
+        }
+        send()
+    }
     /// What Apple Pencil Pro feels.
     private lazy var feedback = PencilFeedback(view: self)
 
@@ -173,6 +221,8 @@ final class CanvasView: UIView {
     func detach() {
         tick?.invalidate()
         tick = nil
+        fastRefresh?.invalidate()
+        fastRefresh = nil
         _ = pencil.cancel()
         penId = nil
         guard attached else { return }
@@ -180,9 +230,61 @@ final class CanvasView: UIView {
         attached = false
     }
 
+    // MARK: the display's refresh
+
+    /// The canvas is touched (or the Pencil is over it): the display is asked for its fastest
+    /// refresh from now until a little after the touches have gone and the canvas has come to rest.
+    private func keepFastRefresh() {
+        fastUntil = CACurrentMediaTime() + Self.fastTail
+        guard fastRefresh == nil, window != nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(fastRefreshStep))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        fastRefresh = link
+    }
+
+    /// Each refresh while the display is kept fast: nothing is drawn here (the core's render thread
+    /// draws), it only goes on asking, and stops once nothing needs it.
+    @objc private func fastRefreshStep(_ link: CADisplayLink) {
+        #if DEBUG
+        sayRates(link)
+        #endif
+        if !ids.isEmpty {
+            fastUntil = link.timestamp + Self.fastTail
+            return
+        }
+        if link.timestamp < fastUntil || session.viewMoving() {
+            return
+        }
+        link.invalidate()
+        fastRefresh = nil
+    }
+
+    #if DEBUG
+    /// Once a second while the canvas is touched, in Xcode's console: how often the display
+    /// refreshed, how often the touches' moves came, and how many frames the canvas drew. Which of
+    /// them falls short of the screen's most says what holds the canvas back.
+    private func sayRates(_ link: CADisplayLink) {
+        rates.refreshes += 1
+        let passed = link.timestamp - rates.since
+        guard passed >= 1 else { return }
+        let info = session.info()
+        if rates.since > 0, passed < 1.5 {
+            NSLog(
+                "ProCraft rates: display %.0f Hz, touch moves %.0f/s, canvas %.0f fps (last frame %.1f ms), screen's most %d, low power %@",
+                Double(rates.refreshes) / passed, Double(rates.moves) / passed, Double(info.frames &- rates.frames) / passed,
+                info.frameIntervalMs, window?.screen.maximumFramesPerSecond ?? 0,
+                ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off"
+            )
+        }
+        rates = (link.timestamp, 0, 0, info.frames)
+    }
+    #endif
+
     // MARK: touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        keepFastRefresh()
         // painting, the hovering outline goes (Brush cursor may show one as it paints)
         cursor.hide()
         if ids.isEmpty {
@@ -207,28 +309,46 @@ final class CanvasView: UIView {
                 out += session.touchDown(id: id, kind: kind(of: touch), samples: samples(of: touch, in: event))
             }
         }
+        // no finger is alone any more
+        if ids.count > 1 {
+            onLoneFinger(.takenBack)
+        }
         obey(out)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        #if DEBUG
+        rates.moves += 1
+        #endif
         var out: [TouchCommand] = []
-        for touch in touches {
-            guard let id = ids[ObjectIdentifier(touch)] else { continue }
-            if pencil.holds(touch) {
-                pencil.add(coalesced(touch, in: event), sample: sample)
-                pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
-            } else {
-                out += session.touchMove(id: id, samples: samples(of: touch, in: event))
+        var lone: CGPoint?
+        inputTogether {
+            for touch in touches {
+                guard let id = ids[ObjectIdentifier(touch)] else { continue }
+                if pencil.holds(touch) {
+                    pencil.add(coalesced(touch, in: event), sample: sample)
+                    pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
+                } else {
+                    out += session.touchMove(id: id, samples: samples(of: touch, in: event))
+                    if ids.count == 1 {
+                        lone = touch.location(in: self)
+                    }
+                }
+            }
+            // the stroke drawn ahead to where it is predicted to go, until the next move
+            if let key = strokeTouch,
+               let touch = touches.first(where: { ObjectIdentifier($0) == key }), !pencil.holds(touch),
+               let predicted = event?.predictedTouches(for: touch), !predicted.isEmpty
+            {
+                session.strokePredict(samples: predicted.map(sample))
             }
         }
-        // the stroke drawn ahead to where it is predicted to go, until the next move
-        if let key = strokeTouch,
-           let touch = touches.first(where: { ObjectIdentifier($0) == key }), !pencil.holds(touch),
-           let predicted = event?.predictedTouches(for: touch), !predicted.isEmpty
-        {
-            session.strokePredict(samples: predicted.map(sample))
-        }
         obey(out)
+        // (after what the move asked for: sliding off, the finger may just have opened the
+        // QuickMenu, which follows it from here)
+        if let lone {
+            onLoneFinger(.slid(lone))
+        }
         afterTouches(false)
     }
 
@@ -245,6 +365,8 @@ final class CanvasView: UIView {
         }
         if ids.isEmpty {
             strokeTouch = nil
+            // (before what the lift asked for: a menu a tap opens is not this finger's to follow)
+            onLoneFinger(.lifted)
         }
         obey(out)
         afterTouches(ids.isEmpty)
@@ -266,6 +388,7 @@ final class CanvasView: UIView {
         }
         if ids.isEmpty {
             strokeTouch = nil
+            onLoneFinger(.takenBack)
         }
         obey(out)
         afterTouches(ids.isEmpty)
@@ -284,8 +407,12 @@ final class CanvasView: UIView {
     @objc private func pencilHovered(_ hover: UIHoverGestureRecognizer) {
         switch hover.state {
         case .began, .changed:
+            // the Pencil about to come down: its first samples come as often as the rest
+            keepFastRefresh()
             let at = hover.location(in: self)
             pencilAt = at
+            // a sound plugin hears where (a spray can's ball rattles shaken back and forth)
+            session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
             obey(session.touchPenHover(hover: penHover(at, height: hover.zOffset, seconds: CACurrentMediaTime())))
             showHoverCursor()
         default:
@@ -301,7 +428,9 @@ final class CanvasView: UIView {
         case .began, .changed:
             // a pointer has no height over the glass: one that has is the Pencil, followed above
             guard hover.zOffset == 0 else { return }
-            showCursor(at: hover.location(in: self), hovering: true)
+            let at = hover.location(in: self)
+            session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
+            showCursor(at: at, hovering: true)
         default:
             cursor.hide()
         }

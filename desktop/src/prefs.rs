@@ -44,6 +44,8 @@ pub struct Prefs {
     pub right_handed: bool,
     /// Brush sizes relative to the screen (else to the canvas).
     pub brush_on_screen: bool,
+    /// Vector layers are drawn as fine as the screen when zoomed in.
+    pub vector_crisp: bool,
     pub brush_cursor: bool,
     pub cursor_shows: CursorShows,
     pub cursor_style: CursorStyle,
@@ -103,6 +105,7 @@ impl Default for Prefs {
             fill_opacity: 1.0,
             right_handed: false,
             brush_on_screen: false,
+            vector_crisp: true,
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
             cursor_style: CursorStyle::Brush,
@@ -162,6 +165,7 @@ impl Prefs {
                 "fill_opacity" => p.fill_opacity = unit.unwrap_or(p.fill_opacity),
                 "right_handed" => p.right_handed = on,
                 "brush_on_screen" => p.brush_on_screen = on,
+                "vector_crisp" => p.vector_crisp = on,
                 "brush_cursor" => p.brush_cursor = on,
                 "cursor_shows" => p.cursor_shows = pick(&SHOWS, value).unwrap_or(p.cursor_shows),
                 "cursor_style" => p.cursor_style = pick(&STYLES, value).unwrap_or(p.cursor_style),
@@ -221,6 +225,7 @@ impl Prefs {
             format!("fill_opacity {}", self.fill_opacity),
             format!("right_handed {}", self.right_handed),
             format!("brush_on_screen {}", self.brush_on_screen),
+            format!("vector_crisp {}", self.vector_crisp),
             format!("brush_cursor {}", self.brush_cursor),
             format!("cursor_shows {}", place(&SHOWS, self.cursor_shows)),
             format!("cursor_style {}", place(&STYLES, self.cursor_style)),
@@ -261,6 +266,7 @@ impl Prefs {
         session.set_selection_x_ray(self.selection_x_ray);
         session.set_fill_opacity(self.fill_opacity);
         session.set_brush_scaling(self.brush_on_screen);
+        session.set_vector_crisp(self.vector_crisp);
         session.set_selection_visibility(self.selection_visibility);
         session.use_plugins(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);

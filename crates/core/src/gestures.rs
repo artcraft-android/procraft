@@ -185,7 +185,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
         ],
         GesturePurpose::Quickmenu => vec![
             opt(T::TapModify, "Opens or closes the quick menu", false),
-            opt(T::Touch, "A finger touch opens the quick menu", false),
+            opt(T::Touch, "A finger tapped or slid on the canvas opens the quick menu", false),
             opt(T::ModifyTouch, "A finger opens the quick menu while □ is held down", false),
             opt(T::ModifyPen, "The pen opens the quick menu while □ is held down", false),
             opt(T::ThreeSwipe, "Three fingers swiped down open the quick menu", false),

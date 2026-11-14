@@ -75,12 +75,37 @@ final class QuickMenus {
 }
 
 extension CanvasModel {
-    /// The QuickMenu opened around window point `at` (in points), or closed if it is open.
-    func toggleQuickMenu(at: CGPoint) {
+    /// The QuickMenu opened around window point `at` (in points), or closed if it is open; `held`
+    /// when the finger that opens it is still down on the canvas.
+    func toggleQuickMenu(at: CGPoint, held: Bool = false) {
         if quickMenuAt == nil {
             QuickMenus.shared.shown = QuickMenus.shared.active
         }
+        quickMenuFinger = nil
+        quickMenuHeld = held && quickMenuAt == nil
         quickMenuAt = quickMenuAt == nil ? at : nil
+    }
+
+    /// A lone finger on the canvas slid or lifted, or is alone no more. While it is the finger
+    /// that opened the QuickMenu (sliding off where it landed, or held still), the menu follows
+    /// it: slid towards a button and let go, the button runs. Another finger landing with it, they
+    /// meant the canvas, and the menu goes.
+    func loneFinger(_ step: FingerStep) {
+        guard quickMenuAt != nil, quickMenuHeld else { return }
+        switch step {
+        case .slid:
+            quickMenuFinger = step
+        case .lifted:
+            quickMenuHeld = false
+            // only a finger the menu has followed
+            if case .slid = quickMenuFinger {
+                quickMenuFinger = step
+            }
+        case .takenBack:
+            quickMenuHeld = false
+            quickMenuFinger = nil
+            quickMenuAt = nil
+        }
     }
 
     /// The brush button `i` of the ring gives the current tool, if it is set to one still in the

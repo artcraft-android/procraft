@@ -12,7 +12,7 @@ private var capsuleFill: Color { Look.shared.light ? Color(argb: 0xFFFB_FBFB) : 
 private var capsuleEdge: Color { Look.shared.light ? Color(argb: 0xFFE0_E0E0) : Color(argb: 0xFF37_3737) }
 private var sizeInk: Color { Look.shared.light ? Color(argb: 0xFF3F_3F3F) : Color(argb: 0xFF8E_8E8E) }
 private var fpsTrack: Color { Look.shared.light ? Color(argb: 0xFFDD_DDDD) : Color(argb: 0xFF33_3333) }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 private let panelWidth: CGFloat = 400
 /// Web Ready fits this, else the canvas's size (a video as large as it can be, up to the most).
 private let webReadySide = 480

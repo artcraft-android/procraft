@@ -30,6 +30,9 @@ serde_json = { workspace = true }
 png = { workspace = true }
 # the time-lapse's frames, kept as JPEG; a model's textures, PNG or JPEG
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# an SVG picture read to be inserted as a vector layer: its shapes and lines, whatever way its file
+# writes them (no text, which would bring fonts)
+usvg = { version = "0.49", default-features = false }
 # text laid out and drawn alike in both apps: shaping, wrapping and glyphs, and the outline's stroke
 cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 swash = "0.2"

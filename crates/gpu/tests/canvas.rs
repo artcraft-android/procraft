@@ -3813,3 +3813,69 @@ fn a_pixelated_stroke_covers_whole_pixels_or_none() {
     assert_eq!(count(25, 36), 5);
     assert_eq!(count(44, 57), 21);
 }
+
+#[test]
+fn pixel_art_turned_reads_the_enlarged_copy_and_blends_nothing() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let side = 32usize;
+    let mut doc = Document::new(side as u32, side as u32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    // a sprite: a diagonal line, a block and a few lone pixels, in three colours
+    let (red, green, blue) = ([255u8, 0, 0, 255], [0u8, 255, 0, 255], [0u8, 0, 255, 255]);
+    let mut sprite = vec![[0u8; 4]; side * side];
+    for i in 6..26 {
+        sprite[i * side + i] = red;
+        sprite[i * side + i + 1] = red;
+    }
+    for y in 8..14 {
+        for x in 18..25 {
+            sprite[y * side + x] = green;
+        }
+    }
+    for (x, y) in [(9, 20), (11, 22), (10, 24), (12, 20)] {
+        sprite[y * side + x] = blue;
+    }
+    canvas.upload_layer(&gpu, layer, &sprite.concat()).unwrap();
+    canvas.render(&gpu, &mut doc, None);
+
+    // turned 30 degrees about the middle: each layer pixel looks up where it came from
+    let (sin, cos) = 30f32.to_radians().sin_cos();
+    let c = side as f32 / 2.0 + 0.123;
+    let m = [cos, sin, c - c * cos - c * sin, -sin, cos, c + c * sin - c * cos, 0.0, 0.0, 1.0];
+    canvas.begin_transform(layer);
+    canvas.set_transform(m, Resample::PixelArt);
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_layer(&gpu, layer).unwrap();
+
+    // the same by hand: the copy enlarged three times over (a canvas this small), the pixel of it
+    // under each layer pixel's middle
+    assert_eq!(canvas.pixel_art_levels(), 3.0);
+    let big = procraft_engine::pixel::grown_by(&sprite, side, side, 3);
+    let wide = (side * 8) as i32;
+    let (mut differ, mut drawn) = (0, 0);
+    for y in 0..side {
+        for x in 0..side {
+            let (hx, hy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (sx, sy) = (m[0] * hx + m[1] * hy + m[2], m[3] * hx + m[4] * hy + m[5]);
+            let (ux, uy) = ((sx * 8.0).floor() as i32, (sy * 8.0).floor() as i32);
+            let inside = ux >= 0 && uy >= 0 && ux < wide && uy < wide;
+            let want = if inside { big[(uy * wide + ux) as usize] } else { [0; 4] };
+            let got = pixel(&px, side as u32, x as u32, y as u32);
+            // nothing blended: one of the sprite's colours, or clear
+            assert!([red, green, blue, [0; 4]].contains(&got), "{x} {y}: {got:?}");
+            differ += usize::from(got != want);
+            drawn += usize::from(got != [0; 4]);
+        }
+    }
+    // (a middle that falls on the very edge of an enlarged pixel may round the other way)
+    assert!(differ <= 3, "{differ} pixels differ");
+    assert!(drawn > 80, "{drawn}");
+    // and it isn't just the nearest pixel: the enlarging changed some
+    canvas.set_transform(m, Resample::Nearest);
+    canvas.render(&gpu, &mut doc, None);
+    let nearest = canvas.read_layer(&gpu, layer).unwrap();
+    assert_ne!(px, nearest);
+    canvas.end_transform(false);
+}

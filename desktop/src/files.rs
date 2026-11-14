@@ -37,8 +37,10 @@ pub enum Format {
     ModelTiff,
     ModelTextures,
     ModelArtwork,
-    /// A plugin's artwork, its shapes kept.
+    /// A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes.
     Svg,
+    /// The artwork's vector layers as a page of shapes.
+    VectorPdf,
 }
 
 impl Format {
@@ -56,6 +58,7 @@ impl Format {
             Format::ModelObj => "OBJ",
             Format::ModelUsdz => "USDZ",
             Format::Svg => "SVG",
+            Format::VectorPdf => "PDF",
         }
     }
 
@@ -69,7 +72,7 @@ impl Format {
             Format::Procraft | Format::ModelArtwork => "procraft",
             Format::Package => "procreate",
             Format::Psd => "psd",
-            Format::Pdf | Format::LayersPdf => "pdf",
+            Format::Pdf | Format::LayersPdf | Format::VectorPdf => "pdf",
             Format::Png | Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelRender | Format::ModelTextures => {
                 "png"
             }
@@ -773,6 +776,7 @@ pub fn export(
             Format::ModelRender => session.export_model_render(at, false),
             Format::ModelTiff => session.export_model_tiff(at),
             Format::Svg => session.export_svg(at),
+            Format::VectorPdf => session.export_vector_pdf(at),
             Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
         }?;
         Ok(vec![part])

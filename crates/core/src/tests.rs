@@ -5961,6 +5961,64 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
 }
 
 #[test]
+fn a_continuous_drag_fills_each_unfilled_area_it_crosses_as_one_step() {
+    use crate::TouchCommand;
+    use crate::touch::Fill;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle splits the canvas in two
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    let fill = |r: f32, b: f32| Fill { r, g: 0.0, b, threshold: 0.5, continuous: true };
+    s.set_touch_filling(Some(fill(1.0, 0.0)));
+    // dragged from the left half over the line to the right: both halves red, the line kept
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 1000.0)]);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    s.touch_move(1, vec![sample(50.0, 52.0, 1020.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 1040.0)]);
+    assert!(s.touch_up(1, vec![sample(80.0, 50.0, 1060.0)]).contains(&TouchCommand::Filled));
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    assert!(!s.pour_trailing());
+    // one undo takes the whole drag back, and the line stays
+    assert_eq!(s.undo().as_deref(), Some("ColorDrop"));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    s.redo();
+    // dragged again in blue over what is filled, nothing changes
+    s.set_touch_filling(Some(fill(0.0, 1.0)));
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 2000.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 2040.0)]);
+    s.touch_up(1, vec![sample(80.0, 50.0, 2060.0)]);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    // but a tap there fills there, as Continue filling always does
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 3000.0)]);
+    s.touch_up(1, vec![sample(20.0, 50.0, 3040.0)]);
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    // a second finger takes back what the drag filled, and nothing before it
+    s.undo();
+    s.undo();
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 4000.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 4040.0)]);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    s.touch_down(2, PointerKind::Finger, vec![sample(60.0, 20.0, 4060.0)]);
+    assert!(!s.pour_trailing());
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    s.touch_up(2, vec![sample(60.0, 20.0, 4080.0)]);
+    s.touch_up(1, vec![sample(80.0, 50.0, 4080.0)]);
+    s.set_touch_filling(None);
+}
+
+#[test]
 fn all_layers_fills_up_to_lines_on_other_layers() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
@@ -5982,7 +6040,8 @@ fn all_layers_fills_up_to_lines_on_other_layers() {
     assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
     assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
-    let painted = |id: u64, x: usize, y: usize| s.copy_layer_contents(id).map(|c| c.rgba[(y * 100 + x) * 4 + 3]).unwrap();
+    let painted =
+        |id: u64, x: usize, y: usize| s.copy_layer_contents(id).map(|c| c.rgba[(y * 100 + x) * 4 + 3]).unwrap();
     assert_eq!(painted(colours, 20, 50), 255);
     assert_eq!(painted(lines, 20, 50), 0);
     // a hidden layer isn't seen
@@ -9976,6 +10035,7 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
                                 g: 0.4,
                                 b: next(255) as f32 / 255.0,
                                 threshold: next(60) as f32 / 100.0,
+                                continuous: next(2) == 0,
                             };
                             s.set_touch_filling(Some(fill));
                             mode = 3;
@@ -11564,4 +11624,186 @@ fn brushes_brought_in_keep_their_size_range_through_a_restart() {
         eprintln!("  {line}");
     }
     assert!(shifted.is_empty());
+}
+
+#[test]
+fn pixelated_selection_takes_whole_pixels_on_the_grid() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let mask = |s: &CanvasSession| s.shared.lock().selection.clone().unwrap();
+    // as it is at first: a rectangle between pixels has partly selected edges
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    assert!(mask(&s).data.iter().any(|&v| v != 0 && v != 255));
+    s.select_none();
+    // pixelated: its corners go onto whole pixels, and it is just the pixels between them
+    s.set_selection_pixelated(true);
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    let m = mask(&s);
+    for y in 0..100usize {
+        for x in 0..100usize {
+            let inside = (10..41).contains(&x) && (10..31).contains(&y);
+            assert_eq!(m.data[y * 100 + x], if inside { 255 } else { 0 }, "{x} {y}");
+        }
+    }
+    s.select_none();
+    // an ellipse and a path drawn by hand take whole pixels only
+    s.select_shape(true, 20.3, 20.7, 61.2, 50.1, SelectionJoin::Add);
+    let m = mask(&s);
+    assert!(m.data.iter().all(|&v| v == 0 || v == 255));
+    // the ellipse between the corners as they went onto the grid: as wide and as tall as that
+    let across = (0..100).filter(|&x| (0..100).any(|y| m.data[y * 100 + x] == 255)).count();
+    let down = (0..100).filter(|&y| (0..100).any(|x| m.data[y * 100 + x] == 255)).count();
+    assert_eq!((across, down), (41, 29));
+    s.select_none();
+    s.select_polygon(vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9], SelectionJoin::Add);
+    assert!(mask(&s).data.iter().all(|&v| v == 0 || v == 255));
+    assert!(mask(&s).data.contains(&255));
+    // points far apart (a fast stroke): the path shown between them keeps to the pixels' edges,
+    // and what is selected is just the pixels it goes round
+    let shown = crate::selection::pixel_path(vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9], true);
+    use procraft_engine::geom::Vec2;
+    let corners: Vec<Vec2> = shown.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+    assert!(corners.windows(2).all(|w| w[0].x == w[1].x || w[0].y == w[1].y), "a slant in it");
+    assert_eq!(mask(&s), procraft_engine::selection::Mask::polygon_hard(100, 100, &corners));
+    // every edge of what is selected lies on that path: a pixel in beside one out has the path
+    // between them
+    let m = mask(&s);
+    let on_path = |x: f32, y0: f32, y1: f32| {
+        corners.windows(2).any(|w| w[0].x == x && w[1].x == x && w[0].y.min(w[1].y) <= y0 && w[0].y.max(w[1].y) >= y1)
+    };
+    for y in 0..100usize {
+        for x in 1..100usize {
+            if m.data[y * 100 + x] != m.data[y * 100 + x - 1] {
+                assert!(on_path(x as f32, y as f32, y as f32 + 1.0), "{x} {y}");
+            }
+        }
+    }
+    s.select_none();
+    // Lasso Fill fills the same way: every pixel the paint colour or as it was
+    s.set_color(1.0, 0.0, 0.0);
+    s.fill_polygon(
+        vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9],
+        crate::selection::LassoFill { erase: false, tool_opacity: false },
+    );
+    let (mut red, mut white) = (0, 0);
+    for y in 0..100 {
+        for x in 0..100 {
+            match pixel(&s, x, y) {
+                [255, 0, 0, 255] => red += 1,
+                [255, 255, 255, 255] => white += 1,
+                other => panic!("{x} {y}: {other:?}"),
+            }
+        }
+    }
+    assert!(red > 500 && white > 500, "{red} {white}");
+    // off again, shapes are soft-edged as before
+    s.set_selection_pixelated(false);
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    assert!(mask(&s).data.iter().any(|&v| v != 0 && v != 255));
+    s.select_none();
+    // a tool's own lasso goes by its brush, not by this: soft with a brush that isn't pixelated,
+    // even with Selection's Pixelated on, and whole pixels with one that is, even with it off
+    let tool_lasso = crate::selection::LassoFill { erase: false, tool_opacity: true };
+    let soft_pixels = |s: &CanvasSession| {
+        (0..100)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = pixel(s, x, y);
+                p != [0, 0, 255, 255] && p != [255, 0, 0, 255] && p != [255, 255, 255, 255]
+            })
+            .count()
+    };
+    s.set_color(0.0, 0.0, 1.0);
+    s.set_brush_opacity(1.0);
+    s.set_selection_pixelated(true);
+    s.fill_polygon(vec![70.3, 60.2, 95.7, 64.4, 80.3, 95.9], tool_lasso);
+    assert!(soft_pixels(&s) > 0, "a soft brush's lasso has a soft edge");
+    s.undo();
+    s.set_selection_pixelated(false);
+    s.studio_begin();
+    s.set_studio_setting("pixelated".to_owned(), 1.0);
+    s.studio_end(true);
+    s.fill_polygon(vec![70.3, 60.2, 95.7, 64.4, 80.3, 95.9], tool_lasso);
+    assert_eq!(soft_pixels(&s), 0, "a pixelated brush's lasso takes whole pixels");
+    assert_eq!(pixel(&s, 82, 75), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_pixelated_transform_moves_by_whole_pixels_and_blends_nothing() {
+    let Some(s) = session(100, 100) else { return };
+    // a red block with a blue one beside it on a clear layer
+    let layer = s.add_layer();
+    s.select_layer(layer);
+    s.set_selection_pixelated(true);
+    s.set_color(1.0, 0.0, 0.0);
+    s.fill_shape(false, 30.0, 30.0, 50.0, 46.0, crate::selection::LassoFill { erase: false, tool_opacity: false });
+    s.set_color(0.0, 0.0, 1.0);
+    s.fill_shape(false, 50.0, 30.0, 60.0, 46.0, crate::selection::LassoFill { erase: false, tool_opacity: false });
+    // (read without settling, which would end the transform)
+    let layer_pixels = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        st.flush();
+        let current = st.doc.current();
+        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { panic!("no canvas") };
+        canvas.read_layer(gpu, current).unwrap()
+    };
+    let (red, blue) = ([255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+    let clean = |px: &[u8]| px.as_chunks::<4>().0.iter().all(|p| *p == red || *p == blue || *p == [0; 4]);
+    s.transform_set_interpolation(crate::transform::Interpolation::Bicubic);
+    s.transform_set_pixelated(true);
+    let b = s.transform_begin().unwrap();
+    assert_eq!(&b.corners[..2], &[30.0, 30.0]);
+    // dragged a little under three and a half pixels: it lands three over, whole
+    s.transform_grab(crate::transform::TransformHandle::Move, 40.0, 40.0);
+    let b = s.transform_drag(43.4, 40.0).unwrap();
+    s.transform_release();
+    assert_eq!(&b.corners[..2], &[33.0, 30.0], "{:?}", b.corners);
+    let px = layer_pixels(&s);
+    assert!(clean(&px), "blended, upright");
+    assert_eq!(&px[(30 * 100 + 33) * 4..][..4], &red);
+    assert_eq!(&px[(30 * 100 + 32) * 4..][..4], &[0; 4]);
+    // turned by an odd angle: still nothing but its own colours, though Bicubic is chosen
+    let b = s.transform_set_angle(27.0).unwrap();
+    assert!((b.angle - 27.0).abs() < 0.01, "{}", b.angle);
+    let px = layer_pixels(&s);
+    assert!(clean(&px), "blended, turned");
+    let count = |px: &[u8], c: [u8; 4]| px.as_chunks::<4>().0.iter().filter(|p| **p == c).count();
+    // about as much of each colour as there was (20 x 16 and 10 x 16)
+    assert!((count(&px, red) as i32 - 320).abs() < 40, "{}", count(&px, red));
+    assert!((count(&px, blue) as i32 - 160).abs() < 30, "{}", count(&px, blue));
+    s.transform_end(true);
+    assert!(clean(&layer_pixels(&s)));
+    // without it, Bicubic blends a turned edge
+    s.undo();
+    s.transform_set_pixelated(false);
+    s.transform_begin().unwrap();
+    s.transform_set_angle(27.0).unwrap();
+    assert!(!clean(&layer_pixels(&s)));
+    s.transform_end(false);
+}
+
+#[test]
+fn a_move_and_its_prediction_held_together_ask_for_one_frame_after_both() {
+    let Some(s) = session(200, 200) else { return };
+    s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 100.0, 0.0)]);
+    s.shared.lock().needs_frame = false;
+    // held: the move's points and where it is predicted to go ask for no frame between them
+    s.hold_frames(true);
+    s.stroke_add(vec![sample(60.0, 100.0, 8.0), sample(90.0, 100.0, 16.0)]);
+    assert!(!s.shared.lock().needs_frame, "a frame was asked for before the prediction came");
+    s.stroke_predict(vec![sample(110.0, 100.0, 24.0)]);
+    assert!(!s.shared.lock().needs_frame);
+    // let go: one frame, of both
+    s.hold_frames(false);
+    {
+        let st = s.shared.lock();
+        assert!(st.needs_frame && !st.holding_frames && !st.frame_held);
+    }
+    // let go with nothing changed meanwhile: no frame asked for
+    s.shared.lock().needs_frame = false;
+    s.hold_frames(true);
+    s.hold_frames(false);
+    assert!(!s.shared.lock().needs_frame);
+    s.stroke_end(vec![sample(110.0, 100.0, 24.0)]);
 }

@@ -141,7 +141,7 @@ extension CanvasModel {
     func rasterize(_ l: LayerInfo) {
         _ = session.rasterizeLayer(id: l.id)
         refresh()
-        showNotice("Text rasterized", warning: true)
+        showNotice(l.vector ? "Layer rasterized" : "Text rasterized", warning: true)
     }
 
     // MARK: the picked layers

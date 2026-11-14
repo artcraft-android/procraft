@@ -79,9 +79,15 @@ enum Motion {
     static let stackPopScale: CGFloat = 0.8
     /// Rows moving to make room.
     static let rowMove = settle(0.35)
-    /// The QuickMenu's buttons spreading from its middle, and drawing back in.
-    static let quickMenuOpen = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.15)
-    static let quickMenuClose = easeIn(0.12)
+    /// The QuickMenu growing out of its middle from two fifths its size as it fades in, and
+    /// shrinking back into it.
+    static let quickMenuOpen = easeInOut(0.18)
+    static let quickMenuClose = easeInOut(0.14)
+    static let quickMenuStartScale: CGFloat = 0.4
+    /// The QuickMenu's button the finger is at: its size, and how it comes to and goes after the
+    /// finger.
+    static let quickMenuLitScale: CGFloat = 1.2
+    static let quickMenuFollow = Animation.spring(response: 0.2, dampingFraction: 0.8)
     /// A swatch pressed and let go.
     static let swatchPressed: CGFloat = 0.78
     /// A tab's icon held shrinks this much, quickly, and lights as it is let go.

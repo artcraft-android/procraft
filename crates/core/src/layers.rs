@@ -32,6 +32,8 @@ pub struct LayerInfo {
     pub collapsed: bool,
     /// A text layer, its text still editable.
     pub text: bool,
+    /// A vector layer: what is drawn on it is kept as strokes and fills.
+    pub vector: bool,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -159,7 +161,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             row(O::Copy, "Copy", None);
             // a text layer's pixels come from its text: nothing to fill, clear, lock or invert
             if !l.text && unlocked {
-                row(O::Fill, "Fill Layer", None);
+                // (a vector layer holds strokes and fills, not a colour all over)
+                if !l.vector {
+                    row(O::Fill, "Fill Layer", None);
+                }
                 row(O::Clear, "Clear", None);
                 row(O::AlphaLock, "Alpha Lock", Some(l.alpha_lock));
             }
@@ -181,8 +186,12 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 if guided || l.assisted {
                     row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
                 }
-                if unlocked {
+                // (a vector layer's colours are its strokes'; rasterized, it is pixels like any)
+                if unlocked && !l.vector {
                     row(O::Invert, "Invert", None);
+                }
+                if unlocked && l.vector {
+                    row(O::Rasterize, "Rasterize", None);
                 }
             }
             row(O::Reference, "Reference", Some(l.reference));
@@ -376,6 +385,7 @@ impl CanvasSession {
                 },
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
+                vector: l.vector.is_some(),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then

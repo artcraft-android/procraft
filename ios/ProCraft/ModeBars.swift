@@ -120,6 +120,29 @@ struct QuickShapeHandles: View {
     }
 }
 
+/// The nodes of the one stroke picked on a vector layer, while a selection tool is up: white dots
+/// ringed in blue, each dragged to pull the stroke into another shape (the canvas's touches take
+/// the drag).
+struct VectorNodes: View {
+    let model: CanvasModel
+
+    var body: some View {
+        let nodes = model.vectorNodes
+        if model.selecting, nodes.count >= 2 {
+            let pixels = model.pixels
+            Canvas { context, _ in
+                for i in 0 ..< nodes.count / 2 {
+                    let x = CGFloat(nodes[i * 2]) / pixels
+                    let y = CGFloat(nodes[i * 2 + 1]) / pixels
+                    context.fill(Path(ellipseIn: CGRect(x: x - 6.5, y: y - 6.5, width: 13, height: 13)), with: .color(Pc.accent))
+                    context.fill(Path(ellipseIn: CGRect(x: x - 4.5, y: y - 4.5, width: 9, height: 9)), with: .color(.white))
+                }
+            }
+            .allowsHitTesting(false)
+        }
+    }
+}
+
 /// With the interface hidden, the button in the top left that brings it back.
 struct ShowInterfaceButton: View {
     let model: CanvasModel

@@ -23,7 +23,7 @@ private var pageInk: Color { themed(0xFF79_7979, 0xFF3E_3E3E) }
 // "Sign here" and its clear button: the photo's glyph in dark, darker greys on light
 private var signInk: Color { Look.shared.light ? Color(argb: 0xFF66_6666) : photoGlyph }
 private var signClear: Color { Look.shared.light ? Color(argb: 0xFF39_3939) : photoGlyph }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 private let cardCorner: CGFloat = 25
 /// Where a wide screen's page starts and ends, beside the pages' card.
 private let wideStart: CGFloat = 358

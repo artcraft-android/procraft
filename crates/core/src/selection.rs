@@ -44,7 +44,7 @@ const ELLIPSE_POINTS: usize = 128;
 
 impl State {
     /// Shows the selection on the canvas (or none when nothing is selected).
-    fn show_selection(&mut self) {
+    pub(crate) fn show_selection(&mut self) {
         let mask = self.selection.as_ref().filter(|m| !m.is_empty());
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.set_selection(gpu, mask.map(|m| m.data.as_slice()));
@@ -114,19 +114,50 @@ impl State {
     }
 
     /// Window points to canvas points.
-    fn to_canvas_points(&self, window: &[Vec2]) -> Option<Vec<Vec2>> {
+    pub(crate) fn to_canvas_points(&self, window: &[Vec2]) -> Option<Vec<Vec2>> {
         let view = self.view?;
         window.iter().map(|&p| view.screen_to_canvas(p).filter(|c| c.is_finite())).collect()
     }
 
-    /// Window points `window` made a shape on the canvas (on a shown model, on its texture).
-    fn window_shape(&mut self, window: &[Vec2]) -> Option<Mask> {
+    /// Whether a shape Lasso Fill draws is pixel art's (`hard`): as Selection's Pixelated says, or
+    /// for a tool's own lasso, which fills as its brush paints, as that brush's Pixelated does.
+    pub(crate) fn lasso_pixelated(&self, lasso: LassoFill) -> bool {
+        if lasso.tool_opacity { self.brush(self.tool).setting("pixelated") >= 0.5 } else { self.selection_pixelated }
+    }
+
+    /// Window points `window` made a shape on the canvas (on a shown model, on its texture). For
+    /// pixel art (`hard`: [`CanvasSession::set_selection_pixelated`]) its points go onto whole
+    /// pixels and it takes whole pixels only, none partly.
+    fn window_shape(&mut self, window: &[Vec2], hard: bool) -> Option<Mask> {
         if self.scene_shown() {
             self.scene_mask(window)
+        } else if hard {
+            // along the pixels' edges all the way round, so it takes just the pixels it goes round
+            let points = procraft_engine::pixel::stepped(&self.to_canvas_points(window)?, true);
+            Some(Mask::polygon_hard(self.doc.width(), self.doc.height(), &points))
         } else {
             let points = self.to_canvas_points(window)?;
             Some(Mask::polygon(self.doc.width(), self.doc.height(), &points))
         }
+    }
+
+    /// The rectangle (or with `ellipse`, the ellipse in it) between window points `a` and `b` as a
+    /// shape on the canvas. For pixel art (`hard`) the two corners go onto whole pixels first, the
+    /// shape then drawn between them, and it takes whole pixels only: a rectangle is the pixels
+    /// between its corners, and an ellipse fits a whole number of pixels across and down.
+    fn window_box(&mut self, ellipse: bool, a: Vec2, b: Vec2, hard: bool) -> Option<Mask> {
+        if !hard || self.scene_shown() {
+            return self.window_shape(&shape_outline(ellipse, a.x, a.y, b.x, b.y), false);
+        }
+        let view = self.view?;
+        let to_screen = view.to_screen();
+        let snap = |p: Vec2| {
+            let on = view.screen_to_canvas(p).filter(|c| c.is_finite())?;
+            Some(to_screen.apply(Vec2::new(on.x.round(), on.y.round())))
+        };
+        let (a, b) = (snap(a)?, snap(b)?);
+        let points = self.to_canvas_points(&shape_outline(ellipse, a.x, a.y, b.x, b.y))?;
+        Some(Mask::polygon_hard(self.doc.width(), self.doc.height(), &points))
     }
 
     /// Fills `mask` on the current layer with the paint colour at `opacity` (or with `erase`, takes
@@ -196,13 +227,25 @@ impl CanvasSession {
     /// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and
     /// (`x1`, `y1`) joins the selection. Drawn on the window, so it turns with the view.
     pub fn select_shape(&self, ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32, join: SelectionJoin) {
-        self.select_window_polygon(&shape_outline(ellipse, x0, y0, x1, y1), join);
+        self.select_window(
+            |st| st.window_box(ellipse, Vec2::new(x0, y0), Vec2::new(x1, y1), st.selection_pixelated),
+            join,
+        );
+    }
+
+    /// Selection's Pixelated, for pixel art, from now on: the shapes drawn to select with, and
+    /// those Color Fill's Lasso Fill fills, have their points on whole pixels and take whole
+    /// pixels only, with no partly covered edge. (Selecting by colour always does; a tool's own
+    /// lasso goes by its brush's Pixelated instead.) What is selected already stays as it is, and
+    /// feathering still softens it.
+    pub fn set_selection_pixelated(&self, on: bool) {
+        self.shared.lock().selection_pixelated = on;
     }
 
     /// The polygon through window points `points` (x, y pairs) joins the selection.
     pub fn select_polygon(&self, points: Vec<f32>, join: SelectionJoin) {
         let window: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-        self.select_window_polygon(&window, join);
+        self.select_window(|st| st.window_shape(&window, st.selection_pixelated), join);
     }
 
     /// Selects by colour: the pixels of the current layer joined to window point (`x`, `y`) whose
@@ -213,6 +256,25 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(seed) = st.window_texel(x, y) else { return };
         let (w, h) = (st.doc.width(), st.doc.height());
+        // on a vector layer the tap takes the stroke or fill under it, whole (there is no colour
+        // to measure a threshold from)
+        if st.doc.is_vector(st.doc.current()) && !st.scene_shown() {
+            if st.selection_before.is_none() {
+                st.selection_before = Some(st.selection.clone());
+            }
+            let before = st.selection_before.clone().flatten();
+            st.selection = before.clone();
+            match st.window_to_canvas(x, y).and_then(|at| st.footprint_at(at)) {
+                Some(shape) => st.join(shape, join, false),
+                None => st.show_selection(),
+            }
+            if !live {
+                st.selection_before = None;
+                st.record_selection(before, "Automatic Selection");
+            }
+            self.shared.frame(st);
+            return;
+        }
         // the layer is read and measured from the seed once for the whole drag
         let (pixels, flood) = match st.colour_source.take() {
             Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
@@ -450,23 +512,26 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    fn select_window_polygon(&self, window: &[Vec2], join: SelectionJoin) {
+    /// The shape `drawn` on the window joins the selection.
+    fn select_window(&self, drawn: impl FnOnce(&mut State) -> Option<Mask>, join: SelectionJoin) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(shape) = st.window_shape(window) else { return };
+        let Some(shape) = drawn(st) else { return };
+        // (on a vector layer a shape takes the strokes and fills it touches, whole)
+        let Some(shape) = st.snapped_to_objects(shape) else { return };
         st.join(shape, join, true);
         self.shared.frame(st);
     }
 
-    /// Lasso Fill: the shape through window points `window` filled on the current layer with the
-    /// paint colour (or erased, as `lasso` says), as one undo step, only where the selection there
-    /// is reaches (as painting is); the selection is left as it is.
-    fn fill_window_polygon(&self, window: &[Vec2], lasso: LassoFill) {
+    /// Lasso Fill: the shape `drawn` on the window filled on the current layer with the paint
+    /// colour (or erased, as `lasso` says), as one undo step, only where the selection there is
+    /// reaches (as painting is); the selection is left as it is.
+    fn fill_window(&self, drawn: impl FnOnce(&mut State) -> Option<Mask>, lasso: LassoFill) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
-        let Some(mut shape) = st.window_shape(window) else { return };
+        let Some(mut shape) = drawn(st) else { return };
         if let Some(selection) = &st.selection {
             // as much of each pixel as both cover (a feathered edge stays soft)
             for (a, &b) in shape.data.iter_mut().zip(&selection.data) {
@@ -483,14 +548,34 @@ impl CanvasSession {
     /// Lasso Fill: the polygon through window points `points` (x, y pairs) filled.
     pub(crate) fn fill_polygon(&self, points: Vec<f32>, lasso: LassoFill) {
         let window: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-        self.fill_window_polygon(&window, lasso);
+        // (a vector layer keeps the shape as a shape)
+        if self.lasso_on_vector(&window, lasso) {
+            return;
+        }
+        self.fill_window(|st| st.window_shape(&window, st.lasso_pixelated(lasso)), lasso);
     }
 
     /// Lasso Fill: a rectangle (or with `ellipse`, the ellipse in it) between window points
     /// (`x0`, `y0`) and (`x1`, `y1`) filled.
     pub(crate) fn fill_shape(&self, ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32, lasso: LassoFill) {
-        self.fill_window_polygon(&shape_outline(ellipse, x0, y0, x1, y1), lasso);
+        if self.lasso_on_vector(&shape_outline(ellipse, x0, y0, x1, y1), lasso) {
+            return;
+        }
+        self.fill_window(
+            |st| st.window_box(ellipse, Vec2::new(x0, y0), Vec2::new(x1, y1), st.lasso_pixelated(lasso)),
+            lasso,
+        );
     }
+}
+
+/// A path drawn by hand (`points`: x, y in turn, canvas pixels) as Pixelated takes it, for showing
+/// it as it is drawn: along the pixels' edges, a pixel across or down at a time, and `closed`,
+/// back to where it began the same way (`procraft_engine::pixel::stepped`). The shape it then
+/// selects or fills is just the pixels inside this.
+#[uniffi::export]
+pub fn pixel_path(points: Vec<f32>, closed: bool) -> Vec<f32> {
+    let points: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+    procraft_engine::pixel::stepped(&points, closed).iter().flat_map(|p| [p.x, p.y]).collect()
 }
 
 /// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and

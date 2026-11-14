@@ -256,8 +256,9 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("JPEG") { share(jpeg = true) },
                 Act("PNG") { share(jpeg = false) },
                 Act("TIFF") { share(CanvasViewModel.Export.TIFF) },
-                // a plugin's artwork, its shapes kept
+                // a plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes
                 Act("SVG") { share(CanvasViewModel.Export.SVG) }.takeIf { vm.session?.exportsSvg() == true },
+                Act("Vector PDF") { share(CanvasViewModel.Export.VECTOR_PDF) }.takeIf { vm.session?.exportsVectors() == true },
             ),
             listOf(
                 Heading("Share Layers"),
@@ -290,6 +291,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Toggle("Right-hand interface", vm.rightHanded) { vm.changeRightHanded(it) },
                 Act("Brush scaling", value = if (vm.brushOnScreen) "Screen" else "Canvas") { scalingMenu = true },
                 Toggle("Project canvas", vm.projectCanvas) { vm.changeProjectCanvas(it) },
+                Toggle("Crisp zoom", vm.vectorCrispOn) { vm.changeVectorCrisp(it) },
                 Toggle("Brush cursor", vm.brushCursorOn) { vm.changeBrushCursor(it) },
                 Act("Advanced cursor settings") { page = ActionsPage.CURSOR },
             ),

@@ -392,6 +392,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putBoolean(BRUSH_ON_SCREEN, onScreen).apply()
     }
 
+    /** Vector layers are drawn as fine as the screen when zoomed in (else as their pixels magnified). */
+    var vectorCrispOn by mutableStateOf(interfacePrefs.getBoolean(VECTOR_CRISP, true))
+        private set
+
+    fun changeVectorCrisp(on: Boolean) {
+        vectorCrispOn = on
+        session?.setVectorCrisp(on)
+        interfacePrefs.edit().putBoolean(VECTOR_CRISP, on).apply()
+    }
+
     /**
      * Shows the brush cursor at window point [p] (or hides it), sized for the current brush and
      * zoom, as long as it shows when [hovering] (or painting).
@@ -2673,6 +2683,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshCanvasSpace(s)
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
+        s.setVectorCrisp(vectorCrispOn)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
         // the system's animations off: a dropped colour's fill shows at once
@@ -3317,6 +3328,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return false
         val resolver = getApplication<Application>().contentResolver
         val type = withContext(Dispatchers.IO) { runCatching { resolver.getType(uri) }.getOrNull() }
+        // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+        val named = withContext(Dispatchers.IO) { fileName(uri) }
+        if (type == "image/svg+xml" || named?.endsWith(".svg", ignoreCase = true) == true) {
+            val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+            val name = named?.substringBeforeLast('.') ?: ""
+            val layer = bytes?.let { withContext(Dispatchers.Default) { runCatching { s.insertSvg(it, name) }.getOrNull() } }
+            if (layer == null || layer == 0uL) {
+                message = "This picture can't be opened."
+                return false
+            }
+            refresh()
+            showNotice("Vector Layer")
+            return true
+        }
         // a moving GIF: its frames, as a video's (a still one is a picture)
         if (type == "image/gif" || withContext(Dispatchers.IO) { fileName(uri) }?.endsWith(".gif", ignoreCase = true) == true) {
             val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
@@ -5572,8 +5597,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         MODEL_RENDER("png", "image/png"),
         MODEL_JPEG("jpg", "image/jpeg"),
         MODEL_TIFF("tif", "image/tiff"),
-        /** A plugin's artwork, its shapes kept. */
+        /** A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes. */
         SVG("svg", "image/svg+xml"),
+        /** The artwork's vector layers as a page of shapes. */
+        VECTOR_PDF("pdf", "application/pdf"),
     }
 
     /**
@@ -5641,6 +5668,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.MODEL_JPEG -> s.exportModelJpeg(file.path)
                     Export.MODEL_TIFF -> s.exportModelTiff(file.path)
                     Export.SVG -> s.exportSvg(file.path)
+                    Export.VECTOR_PDF -> s.exportVectorPdf(file.path)
                     Export.MODEL_TEXTURES -> {
                         val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
                         return@withContext s.exportModelTextures(folder.path).map { File(it) }
@@ -6583,6 +6611,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         selecting = false
         selectionPopup = SelectionPopup.NONE
         showSelectionLook()
+        readVectorNodes()
     }
 
     fun chooseSelectionKind(kind: SelectionKind) {
@@ -6636,6 +6665,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun selectionTouched() {
         shapeDrag = null
         selectionChanged()
+        // one stroke picked on a vector layer shows its nodes
+        readVectorNodes()
     }
 
     /**
@@ -6903,7 +6934,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun touchFill(): io.github.artcraftandroid.procraft.core.Fill? {
         if (dropBand != DropBand.FILLING) return null
         val c = dropSwatch ?: colorRgb()
-        return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold)
+        return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold, false)
     }
 
     /** The touches' fill was let go of (kept, or taken back by a second finger): a slid threshold is kept for the next. */
@@ -7294,6 +7325,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private var settling: kotlinx.coroutines.Job? = null
 
     fun refreshView() {
+        // a picked stroke's nodes follow the canvas
+        readVectorNodes()
         session?.let {
             viewMatrix = it.viewMatrix()
             // the guide's lines follow the canvas
@@ -7314,6 +7347,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun strokeEnded() {
         // a snapped shape the pen moved: its handles where it now is
         if (quickShape != null) quickShape = session?.quickshapeInfo() ?: quickShape
+        readVectorNodes()
         // a stroke on a locked or hidden layer, or a group, drew nothing: say why (text layers ask to rasterize instead)
         if (adjustment == null && !currentIsText()) currentTakesChanges(paint = true)
         refreshFlags()
@@ -7569,6 +7603,60 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
 
+    /** The Layers panel's + held: a new vector layer, which keeps what is drawn on it as strokes and fills. */
+    fun addVectorLayer() = layerChange { if (it.addVectorLayer() == 0uL) message = noRoom() else showNotice("Vector Layer") }
+
+    /**
+     * How the eraser works on vector layers: taking what its brush covers, whole strokes, or a
+     * stroke up to where it crosses others. Chosen in the Eraser band.
+     */
+    var vectorEraser by mutableStateOf(io.github.artcraftandroid.procraft.core.VectorEraser.SUBTRACT)
+        private set
+
+    fun chooseVectorEraser(mode: io.github.artcraftandroid.procraft.core.VectorEraser) {
+        val s = session ?: return
+        if (mode == vectorEraser) return
+        s.setVectorEraser(mode)
+        vectorEraser = mode
+    }
+
+    /**
+     * The Eraser band shows under the top bar: the Erase tool is up on a vector layer, drawing
+     * strokes (its lasso only subtracts), with no mode or other band in its place.
+     */
+    val eraserBandShown: Boolean
+        get() = tool == ToolKind.ERASE && !eraseLasso && !barsHidden && !selecting && !transforming && adjustment == null &&
+            !recoloring && quickShape == null && opacityLayer == null && dropBand == DropBand.NONE &&
+            layers.firstOrNull { it.current }?.vector == true
+
+    /** Whether vector layers are drawn as fine as the screen when zoomed in. */
+    fun vectorCrisp(): Boolean = vectorCrispOn
+
+    fun toggleVectorCrisp() {
+        changeVectorCrisp(!vectorCrispOn)
+        showNotice(if (vectorCrispOn) "Crisp Zoom On" else "Crisp Zoom Off")
+    }
+
+    /** Whether strokes or fills are picked on vector layer [l], to be given the brush's colour, brush or size. */
+    fun vectorPicked(l: LayerInfo): Boolean = l.current && l.vector && (session?.vectorPickedCount() ?: 0u) > 0u
+
+    /** Gives what is picked on the vector layer the paint brush's colour, brush or size as they are set now. */
+    fun vectorApply(what: io.github.artcraftandroid.procraft.core.VectorApply) {
+        if (session?.vectorApply(what) == true) refresh()
+    }
+
+    /**
+     * The nodes of the one stroke picked on a vector layer (window pixels, x and y in turn), shown
+     * while a selection tool is up: a drag of one pulls the stroke into another shape.
+     */
+    var vectorNodes by mutableStateOf<List<Float>>(emptyList())
+
+    /** Reads those nodes again: the selection, the view or the stroke changed. */
+    fun readVectorNodes() {
+        val nodes = if (selecting) session?.vectorNodes() ?: emptyList() else emptyList()
+        if (nodes != vectorNodes) vectorNodes = nodes
+    }
+
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
@@ -7772,6 +7860,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Re-reads the layers and undo state from the session. */
     fun refresh() {
         val s = session ?: return
+        readVectorNodes()
         watchFill(s)
         refreshReference()
         recordFrame()
@@ -7781,6 +7870,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             quickShapeEditing = false
         }
         layers = s.layers()
+        s.vectorEraser().let { if (it != vectorEraser) vectorEraser = it }
         followMaskColour()
         // drawing assist is the current layer's
         if (guide != null) guide = s.guide()
@@ -7924,6 +8014,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val CURSOR_SHOWS = "cursor_shows"
         const val CURSOR_STYLE = "cursor_style"
         const val BRUSH_ON_SCREEN = "brush_on_screen"
+        const val VECTOR_CRISP = "vector_crisp"
         const val PROJECT_CANVAS = "project_canvas"
         const val PALETTE_CARDS = "palette_cards"
         const val COLOR_HISTORY_SHOWN = "color_history_shown"

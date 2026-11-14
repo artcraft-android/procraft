@@ -3148,7 +3148,7 @@ impl State {
             || self
                 .doc
                 .layer(current)
-                .is_none_or(|l| self.doc.is_locked(l.id) || l.kind == LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| self.doc.is_locked(l.id) || l.kind == LayerKind::Group || l.is_made())
         {
             return;
         }

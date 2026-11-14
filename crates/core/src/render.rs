@@ -142,6 +142,10 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         {
             let mut guard = shared.lock();
+            // input coming in pieces is drawn once all of it has come (see `hold_frames`)
+            while guard.holding_frames && !guard.stop {
+                shared.wake.wait(&mut guard);
+            }
             let st = &mut *guard;
             let held = Instant::now();
             // the window changed size while the image was awaited (the device turned): the view is

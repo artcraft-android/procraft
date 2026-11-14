@@ -7,6 +7,7 @@ use procraft_engine::transform::{Guides, Handle, Transform, TransformMode, conve
 use procraft_engine::warp;
 use procraft_gpu::Resample;
 
+use crate::vector_layer::Carried;
 use crate::{CanvasSession, State};
 
 /// How transformed pixels are resampled.
@@ -199,6 +200,38 @@ impl State {
     /// Ends an open transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     pub(crate) fn end_transform(&mut self, commit: bool) {
         self.snap_pending = None;
+        // a vector layer's transform is of its strokes and fills: what was shown moving was only
+        // their picture, which is put back, and they are carried to where it was moved and drawn
+        // again there
+        if let Some(layer) = self.vector_transform.take() {
+            // (warped, they are bent through the mesh as the picture of them was)
+            let map = self.transform.as_ref().and_then(|t| match t.warp() {
+                Some(mesh) => Some(Carried::Warped { mesh, source: t.source() }),
+                None => Homography::quad_to_quad(t.source(), t.content()).map(Carried::By),
+            });
+            let name = match self.transform_mode {
+                procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                procraft_engine::transform::TransformMode::Distort => "distort transform",
+                procraft_engine::transform::TransformMode::Warp => "warp transform",
+                procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
+            };
+            if self.transform.take().is_some()
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.end_transform(false);
+            }
+            match self.vector_lifted.take() {
+                // (those picked up onto a layer of their own are set down where it was moved to,
+                // or put back)
+                Some(lifted) => self.vector_set_down(layer, lifted, map.filter(|_| commit), name),
+                None => {
+                    if commit && let Some(map) = map {
+                        self.vector_place(layer, map, name);
+                    }
+                }
+            }
+            return;
+        }
         let within = if commit && self.transform.is_some() { self.changed_since_begin() } else { None };
         if self.transform.take().is_some()
             && let Some(canvas) = self.canvas.as_mut()
@@ -230,11 +263,19 @@ impl State {
     /// Redraws the layer with the content where the transform has it now.
     fn show_transform(&mut self) {
         let (Some(t), Some(canvas)) = (self.transform.as_ref(), self.canvas.as_mut()) else { return };
+        // pixel art blends nothing, whatever Interpolation says: along the canvas's own axes (and
+        // in a warp) each pixel is the copy's nearest; turned or pulled out of square, the nearest
+        // of the copy enlarged, which keeps its lines clean
+        let resample = match self.transform_pixelated {
+            false => self.interpolation.into(),
+            true if t.is_upright() || t.warp().is_some() => Resample::Nearest,
+            true => Resample::PixelArt,
+        };
         if let Some(mesh) = t.warp() {
-            canvas.set_transform_mesh(&warp::triangles(&mesh, t.source(), MESH_STEPS), self.interpolation.into());
+            canvas.set_transform_mesh(&warp::triangles(&mesh, t.source(), MESH_STEPS), resample);
         } else if let Some(to_source) = Homography::quad_to_quad(t.content(), t.source()) {
             // each layer pixel looks up where it came from
-            canvas.set_transform(to_source.to_f32(), self.interpolation.into());
+            canvas.set_transform(to_source.to_f32(), resample);
         }
     }
 
@@ -342,7 +383,31 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        // a vector layer's selected strokes and fills are picked up onto a layer of their own, which
+        // is what is then transformed (and shown moving, the rest of their layer whole under them)
+        let vector = st.doc.current();
+        let lifted = st.vector_lift(vector);
+        let began = self.begin_transform_of_current(st);
+        match (lifted, began.is_some()) {
+            // (nothing to move after all: they are put back)
+            (true, false) => {
+                if let Some(lifted) = st.vector_lifted.take() {
+                    st.vector_set_down(vector, lifted, None, "");
+                }
+            }
+            (true, true) => st.vector_transform = Some(vector),
+            _ => {}
+        }
+        began
+    }
+}
+
+impl CanvasSession {
+    /// [`CanvasSession::transform_begin`], once what is open is kept: the current layer (or the
+    /// layers chosen) taken up to be transformed.
+    fn begin_transform_of_current(&self, st: &mut State) -> Option<TransformBox> {
         let current = st.doc.current();
+        // (a vector layer is transformed on its own, as its strokes and fills: see `end_transform`)
         let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none();
         // with layers picked, every paint layer chosen (those in a chosen group too) moves
         let chosen = st.doc.chosen();
@@ -350,7 +415,7 @@ impl CanvasSession {
             st.doc
                 .layers()
                 .iter()
-                .filter(|l| l.kind == LayerKind::Paint && movable(l))
+                .filter(|l| l.kind == LayerKind::Paint && movable(l) && l.vector.is_none())
                 .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
                 .map(|l| l.id)
                 .collect()
@@ -411,20 +476,28 @@ impl CanvasSession {
         let moved: Vec<LayerId> = targets.iter().flat_map(|&t| std::iter::once(t).chain(st.doc.mask_of(t))).collect();
         canvas.begin_transform_layers(&moved);
         let mut t = Transform::new(x, y, w, h, hull);
+        t.set_pixelated(st.transform_pixelated);
         t.set_snap_targets(&bounds);
         st.transform = Some(t);
+        st.vector_transform = match targets.as_slice() {
+            [only] if st.doc.is_vector(*only) => Some(*only),
+            _ => None,
+        };
         st.scene_flat_for_tool();
         self.shared.frame(st);
         st.transform_box()
     }
+}
 
+#[uniffi::export]
+impl CanvasSession {
     /// Why a transform didn't begin ([`CanvasSession::transform_begin`] gave none), as the message
     /// says it: a text layer must be rasterized first, a selection holds nothing of the layer, or
     /// the layer is empty.
     pub fn transform_refusal(&self) -> String {
         let st = self.shared.lock();
-        let text = st.doc.layer(st.doc.current()).is_some_and(|l| l.text.is_some());
-        if text {
+        let current = st.doc.layer(st.doc.current());
+        if current.is_some_and(|l| l.text.is_some()) {
             "Rasterize the text to transform it"
         } else if st.selection.is_some() {
             "Nothing is selected on this layer"
@@ -571,6 +644,21 @@ impl CanvasSession {
             st.show_transform();
             self.shared.frame(st);
         }
+    }
+
+    /// Transform's Pixelated, for pixel art, from now on (an open transform's content goes onto
+    /// whole pixels at once): the content moves by whole pixels and is sized onto them, nothing is
+    /// blended whatever [`CanvasSession::transform_set_interpolation`] says, and content turned or
+    /// pulled out of square keeps its lines clean ([`Resample::PixelArt`]). Returns the box as it
+    /// now is, if a transform is open.
+    pub fn transform_set_pixelated(&self, on: bool) -> Option<TransformBox> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.transform_pixelated = on;
+        st.transform.as_mut()?.set_pixelated(on);
+        st.show_transform();
+        self.shared.frame(st);
+        st.transform_box()
     }
 
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.

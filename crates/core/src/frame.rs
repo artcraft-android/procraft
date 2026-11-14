@@ -96,6 +96,12 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
+        // vector layers drawn again as fine as the screen, once the view has rested zoomed in
+        let crisp = if self.scene_shown() || self.sphere.is_some() {
+            crate::crisp::CrispShown::No
+        } else {
+            self.crisp_frame(size, screen)
+        };
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
@@ -145,9 +151,22 @@ impl State {
                 }
                 None => {}
             }
+            // (that picture's canvas in place of the artwork's, its pixels the window's; or, the
+            // view having moved since it was made, over the artwork's, where that part of it now is)
+            use crate::crisp::CrispShown;
+            let over = match crisp {
+                CrispShown::Over(map) => Some(map),
+                _ => None,
+            };
+            let whole = crisp == CrispShown::Whole;
+            let (canvas, doc, to_screen) = match self.crisp.as_mut().filter(|_| whole) {
+                Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
+                None => (canvas, &mut self.doc, to_screen),
+            };
+            let look = canvas.has_selection().then_some(shown);
             canvas.render(
                 gpu,
-                &mut self.doc,
+                doc,
                 Some(Target {
                     view,
                     format,
@@ -174,6 +193,34 @@ impl State {
             if !busy {
                 self.frames += 1;
             }
+            if let (Some(to_screen), Some(sharp)) = (over, self.crisp.as_mut()) {
+                let (sharp, doc) = (&mut sharp.canvas, &mut sharp.doc);
+                sharp.set_over(true);
+                sharp.render(
+                    gpu,
+                    doc,
+                    Some(Target {
+                        view,
+                        format,
+                        size,
+                        to_screen,
+                        surround,
+                        grid: None,
+                        selection: None,
+                        backdrop: None,
+                        convert,
+                        lut: None,
+                        // (it is no longer a pixel to a pixel: smoothed, never squares)
+                        crisp_from: f32::INFINITY,
+                        grey: self.grey_view,
+                    }),
+                );
+                sharp.set_over(false);
+            }
+        }
+        // the view resting: a frame when the sharp picture is to be made
+        if let Some(due) = self.crisp_due {
+            self.frame_due = Some(self.frame_due.map_or(due, |at| at.min(due)));
         }
         self.heed_filter_run();
     }
@@ -222,7 +269,11 @@ pub fn configure(
     if p3 {
         config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
     }
-    config.desired_maximum_frame_latency = 1;
+    // the iPad's images are shown in turn, one a refresh (there is no Mailbox there): with two, a
+    // frame can only be begun once the one before shows, and one that then takes longer than what
+    // is left of that refresh waits a whole refresh more, so a 120 Hz screen shows 60 frames a
+    // second. A third lets the next be drawn meanwhile.
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { 1 };
     // a configure the GPU refuses (it couldn't come idle in time, as while an artwork opens) leaves
     // the surface unconfigured: none, so the next frame tries again (else it stayed blank)
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);

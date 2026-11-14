@@ -1236,6 +1236,13 @@ impl Plugins {
         self.hooks().colour_triangle()
     }
 
+    /// Whether a plugin pins panels open: a touch on the canvas with a panel open paints at once
+    /// and leaves the panel up (for an app that keeps the canvas's touches from it while a panel
+    /// is open; one that tells [`crate::CanvasSession::set_touch_panel_open`] needn't ask).
+    pub fn pins_panels(&self) -> bool {
+        self.hooks().pin_panels()
+    }
+
     /// Whether a plugin sets brushes' settings at random: the brush studio shows Randomise.
     pub fn randomises_brushes(&self) -> bool {
         self.hooks().randomises_brushes()

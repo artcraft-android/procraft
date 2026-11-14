@@ -109,7 +109,7 @@ fun GuideOverlay(vm: CanvasViewModel) {
     val g = vm.guide ?: return
     if (!g.on && !vm.guideEditing) return
     val density = androidx.compose.ui.platform.LocalDensity.current.density
-    val color = Color(g.color.getOrElse(0) { 0f }, g.color.getOrElse(1) { 0f }, g.color.getOrElse(2) { 0f }, g.opacity)
+    val color = Color(g.color.getOrElse(0) { 0f }, g.color.getOrElse(1) { 0f }, g.color.getOrElse(2) { 0f }, g.lineOpacity)
     Canvas(Modifier.fillMaxSize()) {
         val width = (0.25f + 1.5f * g.thickness) * density
         val l = g.lines

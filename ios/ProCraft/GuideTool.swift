@@ -12,8 +12,8 @@ private var guideNote: Color { themed(0xFF4A_4A4A, 0xFFB5_B5B5) }
 /// The toolbar's words: light, or dark grey with the light interface.
 private var guideLabel: Color { themed(0xFFD0_D0D0, 0xFF41_4141) }
 private var panelFill: Color { themed(0xF71E_1E1E, 0xF7F1_F1F1) }
-private let guideDone = Color(argb: 0xFF01_90FF)
-private let nodeCentre = Color(argb: 0xFF0A_84FF)
+private var guideDone: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
+private var nodeCentre: Color { Pc.tinted(Color(argb: 0xFF0A_84FF)) }
 private let nodeTurn = Color(argb: 0xFF30_D158)
 private let optionsFill = Color(argb: 0xFF30_3030)
 
@@ -49,13 +49,41 @@ private let units: [(unit: GuideUnit, label: String)] = [
     (.millimeters, "Millimeters"), (.centimeters, "Centimeters"), (.inches, "Inches"), (.pixels, "Pixels"),
 ]
 
-/// A grid size slider's position for a size, and back (canvas pixels, 10 to 500).
+/// The zooms Zoom Fade's slider stops at, evenly along it: Auto (none), then 25% to 3200%.
+private let fadeStops: [Float?] = [nil, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32]
+
+/// Zoom Fade's slider's position for a zoom (or Auto), at its nearest stop, and back.
+private func fadeAtToSlider(_ at: Float?) -> Float {
+    let i = at.map { z in
+        fadeStops.indices.dropFirst().min { abs(fadeStops[$0]! - z) < abs(fadeStops[$1]! - z) } ?? 0
+    } ?? 0
+    return Float(i) / Float(fadeStops.count - 1)
+}
+
+private func sliderToFadeAt(_ v: Float) -> Float? {
+    let i = Int((min(max(v, 0), 1) * Float(fadeStops.count - 1)).rounded())
+    return fadeStops[min(max(i, 0), fadeStops.count - 1)]
+}
+
+/// A zoom as a percentage: whole, or to a tenth under 10%.
+private func zoomPercent(_ zoom: Float) -> String {
+    let percent = zoom * 100
+    return percent >= 10 ? "\(wholeNumber(percent))%" : String(format: "%.1f%%", percent)
+}
+
+/// The guide toolbar's sliders on a wide screen: a grid's narrow where Zoom Fade wouldn't fit
+/// beside them.
+private func wideSliderWidth(_ screen: CGSize, grid: Bool) -> CGFloat {
+    grid ? min(257, ((screen.width - 499) / 3).rounded(.down)) : 257
+}
+
+/// A grid size slider's position for a size, and back (canvas pixels, 1 to 500).
 private func sizeToSlider(_ px: Float) -> Float {
-    (min(max((px - 10) / 490, 0), 1)).squareRoot()
+    (min(max((px - 1) / 499, 0), 1)).squareRoot()
 }
 
 private func sliderToSize(_ v: Float) -> Float {
-    10 + v * v * 490
+    1 + v * v * 499
 }
 
 /// The drawing guide as the core has it, and its editor.
@@ -66,6 +94,8 @@ final class GuideTool {
     private(set) var info: GuideInfo
     private(set) var editing = false
     var symmetryOptionsOpen = false
+    /// Zoom Fade's popover (held open from its switch).
+    var zoomFadeOpen = false
 
     init(model: CanvasModel) {
         self.model = model
@@ -108,12 +138,14 @@ final class GuideTool {
         info = model.session.guideEditEnd(keep: keep)
         editing = false
         symmetryOptionsOpen = false
+        zoomFadeOpen = false
         model.refreshView()
     }
 
     func choose(_ kind: GuideType) {
         info = model.session.setGuideKind(kind: kind)
         symmetryOptionsOpen = false
+        zoomFadeOpen = false
     }
 
     /// The shown kind's look, each left as it is when not given.
@@ -122,6 +154,17 @@ final class GuideTool {
             opacity: opacity ?? info.opacity, thickness: thickness ?? info.thickness,
             size: size ?? info.size, hue: hue ?? info.hue
         )
+    }
+
+    /// The shown grid fades out as the canvas is zoomed out and in as it is zoomed in, or doesn't.
+    func setFade(_ on: Bool) {
+        info = model.session.setGuideFade(fade: on, at: info.fadeAt)
+    }
+
+    /// The zoom the shown grid starts to fade in at, or none for Auto.
+    func setFadeAt(_ at: Float?) {
+        guard at != info.fadeAt else { return }
+        info = model.session.setGuideFade(fade: info.fade, at: at)
     }
 
     /// The shown grid's size typed on its keypad: `typed` so far, in `unit`. It changes at once.
@@ -140,6 +183,7 @@ final class GuideTool {
         let x = p.x * pixels
         let y = p.y * pixels
         symmetryOptionsOpen = false
+        zoomFadeOpen = false
         if info.kind == .perspective {
             let index = model.session.touchVanishingPoint(x: Float(x), y: Float(y)).map { Int($0) }
             read()
@@ -177,7 +221,7 @@ struct GuideOverlay: View {
         if g.on || tool.editing {
             let pixels = model.pixels
             let rgb = g.color + [0, 0, 0]
-            let colour = Color(red: Double(rgb[0]), green: Double(rgb[1]), blue: Double(rgb[2]), opacity: Double(g.opacity))
+            let colour = Color(red: Double(rgb[0]), green: Double(rgb[1]), blue: Double(rgb[2]), opacity: Double(g.lineOpacity))
             let editing = tool.editing
             Canvas { context, _ in
                 func point(_ v: [Float], _ i: Int) -> CGPoint {
@@ -318,6 +362,9 @@ struct GuideEditor: View {
             if tool.symmetryOptionsOpen, g.kind == .symmetry {
                 SymmetryOptions(tool: tool, screen: screen)
             }
+            if tool.zoomFadeOpen, hasGrid {
+                ZoomFadeOptions(tool: tool, screen: screen)
+            }
             if let k = keypad, hasGrid {
                 GridSizeKeypad(
                     typed: k.typed, unit: k.unit, screenWidth: screen.width,
@@ -406,16 +453,35 @@ private struct GuideToolbar: View {
             .onTapGesture { tool.symmetryOptionsOpen.toggle() }
     }
 
-    private var assisted: some View {
+    private func switchRow(
+        _ label: String, on: Bool, hold: (() -> Void)? = nil, change: @escaping () -> Void
+    ) -> some View {
         HStack(spacing: 0) {
-            Text(verbatim: "Assisted Drawing")
+            Text(verbatim: label)
                 .font(.system(size: 15))
                 .foregroundStyle(guideLabel)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            PcSwitch(on: tool.info.assisted)
+            let toggle = PcSwitch(on: on)
                 .contentShape(Rectangle())
-                .onTapGesture { tool.setAssisted(!tool.info.assisted) }
+                .onTapGesture(perform: change)
+            if let hold {
+                toggle.onLongPressGesture(perform: hold)
+            } else {
+                toggle
+            }
+        }
+    }
+
+    private var assisted: some View {
+        switchRow("Assisted Drawing", on: tool.info.assisted) { tool.setAssisted(!tool.info.assisted) }
+    }
+
+    /// A grid's lines fade out as the canvas is zoomed out and in as it is zoomed in; held, where
+    /// they start to.
+    private var zoomFade: some View {
+        switchRow("Zoom Fade", on: tool.info.fade, hold: { tool.zoomFadeOpen.toggle() }) {
+            tool.setFade(!tool.info.fade)
         }
     }
 
@@ -427,10 +493,14 @@ private struct GuideToolbar: View {
             if wide {
                 VStack(spacing: 16) {
                     kindsSwitch
+                    let slider = wideSliderWidth(screen, grid: kind == .grid || kind == .isometric)
                     HStack(spacing: 19) {
-                        look(257)
+                        look(slider)
                         switch kind {
-                        case .grid, .isometric: gridSize(257)
+                        case .grid, .isometric:
+                            gridSize(slider)
+                            zoomFade
+                                .frame(width: 140)
                         case .symmetry: optionsButton(257)
                         case .perspective: EmptyView()
                         }
@@ -454,10 +524,11 @@ private struct GuideToolbar: View {
                     HStack(spacing: 20) {
                         switch kind {
                         case .grid, .isometric:
-                            gridSize(300)
+                            gridSize(240)
+                            zoomFade
+                                .frame(width: 140)
                             assisted
-                                .padding(.leading, 8)
-                                .frame(width: 300)
+                                .frame(width: 200)
                         case .perspective:
                             assisted
                                 .padding(.leading, 8)
@@ -616,6 +687,40 @@ private struct SymmetryOptions: View {
             .padding(.bottom, 14)
             switchRow("Rotational Symmetry", on: g.rotational) { tool.setSymmetry(g.symmetry, rotational: !g.rotational) }
             switchRow("Assisted Drawing", on: g.assisted) { tool.setAssisted(!g.assisted) }
+        }
+    }
+}
+
+/// Zoom Fade's options, over its switch: on or off, and the zoom its grid starts to fade in at
+/// (whole at four times that): Auto (as its lines come a few pixels apart, the zoom that is for
+/// its size shown), or one of the slider's stops.
+private struct ZoomFadeOptions: View {
+    let tool: GuideTool
+    let screen: CGSize
+
+    var body: some View {
+        let g = tool.info
+        // over the switch, its arrow at the switch's column's middle
+        let wide = screen.width > screen.height
+        let slider = wideSliderWidth(screen, grid: true)
+        let middle = wide ? 8 + 16 + (slider + 19) * 3 + 70 : (screen.width - 620) / 2 + 240 + 20 + 70
+        let width = toolbarMenuWidth
+        let left = min(max(middle - width / 2, 0), screen.width - width)
+        ToolbarPopover(
+            arrowX: middle - left, left: left, bottom: wide ? screen.height - 89 : screen.height - 98,
+            width: width, screenWidth: screen.width
+        ) {
+            ToolbarMenuTitle(text: "Zoom Fade")
+                .padding(.bottom, 4)
+            ToolbarMenuGroup {
+                ToolbarSwitchRow(label: "Zoom Fade", on: g.fade) { tool.setFade(!g.fade) }
+                ToolbarMenuLine()
+                PanelSlider(
+                    label: "Fade In At", value: fadeAtToSlider(g.fadeAt),
+                    shown: g.fadeAt.map(zoomPercent) ?? "Auto (\(zoomPercent(g.fadeAutoAt)))",
+                    onChange: { tool.setFadeAt(sliderToFadeAt($0)) }
+                )
+            }
         }
     }
 }

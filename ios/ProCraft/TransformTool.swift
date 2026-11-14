@@ -87,6 +87,7 @@ struct TransformNumericAsk: Equatable {
 final class TransformTool {
     private static let kindKey = "transformKind"
     private static let interpolationKey = "interpolation"
+    private static let pixelatedKey = "transformPixelated"
     private static let meshKey = "advancedMesh"
     private static let magneticsKey = "magnetics"
     private static let snappingKey = "snapping"
@@ -98,6 +99,10 @@ final class TransformTool {
     private(set) var box: TransformBox?
     private(set) var kind: TransformKind
     private(set) var interpolation: Interpolation
+    /// Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
+    /// and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
+    /// clean.
+    private(set) var pixelated: Bool
     var popup = TransformPopup.none
     /// Magnetics, snapping, and snapping's distance (1..50 points) and velocity (0..10).
     private(set) var guides: GuideSettings
@@ -114,6 +119,7 @@ final class TransformTool {
         let d = UserDefaults.standard
         kind = Self.kinds[d.string(forKey: Self.kindKey) ?? ""] ?? .freeform
         interpolation = Self.interpolations[d.string(forKey: Self.interpolationKey) ?? ""] ?? .bilinear
+        pixelated = d.bool(forKey: Self.pixelatedKey)
         advancedMesh = d.bool(forKey: Self.meshKey)
         guides = GuideSettings(
             magnetics: d.bool(forKey: Self.magneticsKey),
@@ -134,6 +140,7 @@ final class TransformTool {
     func begin() -> Bool {
         let s = model.session
         s.transformSetInterpolation(interpolation: interpolation)
+        _ = s.transformSetPixelated(on: pixelated)
         s.transformSetGuides(guides: guides)
         guard let first = s.transformBegin() else {
             model.showNotice(s.transformRefusal())
@@ -163,6 +170,13 @@ final class TransformTool {
         interpolation = next
         model.session.transformSetInterpolation(interpolation: next)
         UserDefaults.standard.set(Self.interpolations.first { $0.value == next }?.key, forKey: Self.interpolationKey)
+    }
+
+    /// Pixelated on or off: the content goes onto whole pixels at once.
+    func togglePixelated() {
+        pixelated.toggle()
+        box = model.session.transformSetPixelated(on: pixelated) ?? box
+        UserDefaults.standard.set(pixelated, forKey: Self.pixelatedKey)
     }
 
     func toggleAdvancedMesh() {
@@ -482,7 +496,10 @@ struct TransformToolbar: View {
             ToolbarButton(icon: PcIcons.flipVertical, label: "Flip Vertical", width: w, iconSize: 50, labelSize: long) { tool.apply(.flipVertical) }
             ToolbarButton(icon: PcIcons.rotate45, label: "Rotate 45°", width: w, iconSize: 44) { tool.apply(.rotate45) }
             ToolbarButton(icon: PcIcons.fitToCanvas, label: "Fit to Canvas", width: w, iconSize: 35, labelSize: long) { tool.apply(.fitToCanvas) }
-            ToolbarButton(icon: PcIcons.interpolation, label: interpolationName(tool.interpolation, short: true), active: popup == .interpolation, width: w, iconSize: 44) {
+            ToolbarButton(
+                icon: PcIcons.interpolation, label: tool.pixelated ? "Pixelated" : interpolationName(tool.interpolation, short: true),
+                active: popup == .interpolation, width: w, iconSize: 44
+            ) {
                 tool.popup = popup == .interpolation ? .none : .interpolation
             }
             ToolbarButton(icon: PcIcons.transformReset, label: "Reset", width: w, iconSize: 44) { tool.apply(.reset) }
@@ -545,7 +562,14 @@ private struct InterpolationMenu: View {
                     tool.choose(kind)
                     tool.popup = .none
                 }
+                // Pixelated blends nothing, whichever is chosen
+                .opacity(tool.pixelated ? 0.45 : 1)
             }
+        }
+        .padding(.bottom, 10)
+        // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+        ToolbarMenuGroup {
+            ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
         }
     }
 }

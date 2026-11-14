@@ -18,6 +18,8 @@ struct ProCraftApp: App {
         TextFonts.prepare()
         // the GPU device and the canvases' pipelines made ahead of the first artwork
         DispatchQueue.global(qos: .userInitiated).async { warmGpu() }
+        // and the brushes read (with many imported, reading them took seconds at each open)
+        DispatchQueue.global(qos: .utility).async { prepareBrushes(dir: CanvasModel.brushesDir) }
     }
 
     var body: some Scene {

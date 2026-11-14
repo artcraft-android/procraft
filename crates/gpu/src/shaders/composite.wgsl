@@ -10,7 +10,8 @@ struct LayerUniform {
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
-    // 1: multiply by the clip base's alpha
+    // 1: multiply by the clip base's alpha; 2: laid into what is below only where that is, which
+    // keeps its alpha (a clipped layer onto its base's picture)
     clipped: u32,
     // the stroke's texturized grain: -1 for none, else a layer of `grains`
     grain: i32,
@@ -217,7 +218,7 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
         // the mask shows the layer as much as it is light (and opaque)
         c = c * clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
     }
-    if (lu.clipped != 0u) {
+    if (lu.clipped == 1u) {
         var base = textureLoad(clip_tex, p, 0).a;
         if (lu.clip_masked > 0.5) {
             // the base as its mask shows it
@@ -242,6 +243,9 @@ fn fs_layer(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
+    if (lu.clipped == 2u) {
+        return blend_atop(textureLoad(backdrop_tex, p, 0), layer_color(p), lu.blend);
+    }
     return blend(textureLoad(backdrop_tex, p, 0), layer_color(p), lu.blend);
 }
 

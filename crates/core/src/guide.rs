@@ -2,7 +2,9 @@
 //! strokes with assisted drawing on (kept to the guide's directions, or mirrored by symmetry).
 
 use procraft_engine::geom::{Affine, Vec2};
-use procraft_engine::guide::{Guide, GuideKind, LengthUnit, SymmetryKind, bar_color};
+use procraft_engine::guide::{
+    FADE_AT_MAX, FADE_AT_MIN, FADE_FROM, Guide, GuideKind, LengthUnit, SymmetryKind, bar_color, zoom_fade,
+};
 use procraft_engine::input::Sample;
 use procraft_engine::stroke::Stamp;
 use procraft_engine::view::View;
@@ -35,7 +37,7 @@ pub enum GuideUnit {
 }
 
 /// The sizes a grid can have, canvas pixels.
-const SIZE_MIN: f32 = 4.0;
+const SIZE_MIN: f32 = procraft_engine::guide::SIZE_MIN;
 const SIZE_MAX: f32 = 1000.0;
 
 /// The guide as the editor and the overlay show it. Points are window pixels, x and y in turn;
@@ -46,6 +48,13 @@ pub struct GuideInfo {
     pub kind: GuideType,
     pub opacity: f32,
     pub thickness: f32,
+    /// The grid fades with the zoom (Zoom Fade); the zoom (canvas pixel to window pixels) set for
+    /// it to start to show at, if one is; the zoom it starts to show at where none is (Auto); and
+    /// the opacity its lines are drawn with as faded (`opacity` where it doesn't fade).
+    pub fade: bool,
+    pub fade_at: Option<f32>,
+    pub fade_auto_at: f32,
+    pub line_opacity: f32,
     /// The grid's size, canvas pixels; the unit it is shown in; and the size in that unit as its
     /// keypad starts with it ("71", "8", "0.5") and as its pill shows it ("71px", "8mm", "1″").
     pub size: f32,
@@ -198,6 +207,25 @@ impl State {
             [w.x, w.y]
         };
         let c = Vec2::new(g.centre[0], g.centre[1]);
+        // a grid's lines `spacing` window pixels apart: faded with the zoom, if it fades; not
+        // drawn closer than the window's pixels (they would fill it); and only where seen
+        let grid = matches!(g.kind, GuideKind::Grid | GuideKind::Isometric);
+        let spacing = look.size * self.view.map_or(1.0, |v| v.zoom());
+        let faded = if grid && look.fade { zoom_fade(spacing, look.fade_spacing()) } else { 1.0 };
+        let drawn = !grid || (faded > 0.0 && spacing >= 1.0);
+        let seen = self.view.filter(|_| grid).and_then(|v| {
+            let (w, h) = (self.window_size.0 as f32, self.window_size.1 as f32);
+            let corners = [Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)];
+            let corners: Option<Vec<Vec2>> = corners.iter().map(|&p| v.screen_to_canvas(p)).collect();
+            let corners = corners?;
+            let lo = corners
+                .iter()
+                .fold(Vec2::new(f32::INFINITY, f32::INFINITY), |a, p| Vec2::new(a.x.min(p.x), a.y.min(p.y)));
+            let hi = corners
+                .iter()
+                .fold(Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY), |a, p| Vec2::new(a.x.max(p.x), a.y.max(p.y)));
+            (lo.x.is_finite() && lo.y.is_finite() && hi.x.is_finite() && hi.y.is_finite()).then_some([lo, hi])
+        });
         // the turn handle sits up from the centre, at the canvas's top edge when level
         let up = Vec2::new(g.angle.sin(), -g.angle.cos()) * c.y.max(1.0);
         GuideInfo {
@@ -205,6 +233,10 @@ impl State {
             kind: type_of(g.kind),
             opacity: look.opacity,
             thickness: look.thickness,
+            fade: look.fade,
+            fade_at: look.fade_at,
+            fade_auto_at: FADE_FROM / look.size.max(procraft_engine::guide::SIZE_MIN),
+            line_opacity: look.opacity * faded,
             size: look.size,
             unit: guide_unit(look.unit),
             size_text: length_text(look.size, look.unit, dpi),
@@ -222,11 +254,14 @@ impl State {
             centre: point(c).to_vec(),
             handle: point(c + up).to_vec(),
             vanishing: g.vanishing.iter().flat_map(|v| point(Vec2::new(v[0], v[1]))).collect(),
-            lines: g
-                .lines(self.doc.width(), self.doc.height())
-                .into_iter()
-                .flat_map(|(a, b)| point(a).into_iter().chain(point(b)))
-                .collect(),
+            lines: if drawn {
+                g.lines_seen(self.doc.width(), self.doc.height(), seen)
+                    .into_iter()
+                    .flat_map(|(a, b)| point(a).into_iter().chain(point(b)))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -261,6 +296,23 @@ impl CanvasSession {
                 look.color = unit(hue, look.color);
                 if size.is_finite() {
                     look.size = size.clamp(SIZE_MIN, SIZE_MAX);
+                }
+            }
+        })
+    }
+
+    /// The shown kind's grid fades out as the canvas is zoomed out and in as it is zoomed in
+    /// (Zoom Fade), or doesn't; and the zoom (canvas pixel to window pixels) it starts to show at,
+    /// kept to what can be set, or none for Auto (from its lines being a few pixels apart).
+    pub fn set_guide_fade(&self, fade: bool, at: Option<f32>) -> GuideInfo {
+        self.change_guide(|g| {
+            let k = g.kind as usize;
+            if let Some(look) = g.looks.get_mut(k) {
+                look.fade = fade;
+                match at {
+                    None => look.fade_at = None,
+                    Some(z) if z.is_finite() => look.fade_at = Some(z.clamp(FADE_AT_MIN, FADE_AT_MAX)),
+                    Some(_) => {}
                 }
             }
         })
@@ -488,8 +540,8 @@ mod tests {
         // kept to the sizes a grid can have, shown as kept
         let g = s.set_guide_length("100".into(), GuideUnit::Centimeters);
         assert_eq!((g.size, g.size_label.as_str()), (SIZE_MAX, "19.24cm"));
-        let g = s.set_guide_length("1".into(), GuideUnit::Pixels);
-        assert_eq!((g.size, g.size_label.as_str()), (SIZE_MIN, "4px"));
+        let g = s.set_guide_length("0.4".into(), GuideUnit::Pixels);
+        assert_eq!((g.size, g.size_label.as_str()), (SIZE_MIN, "1px"));
         // the slider keeps the unit
         assert_eq!(s.set_guide_look(g.opacity, g.thickness, 264.0, g.hue).size_label, "264px");
         s.set_guide_length("2".into(), GuideUnit::Inches);
@@ -504,5 +556,50 @@ mod tests {
         s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
         s.set_guide_length("3".into(), GuideUnit::Centimeters);
         assert_eq!(s.guide_edit_end(true).size_label, "3cm");
+    }
+
+    #[test]
+    fn zoom_fade_fades_a_grid_by_how_far_apart_its_lines_show() {
+        let s = CanvasSession::new(400, 300);
+        s.set_guide_on(true);
+        s.set_guide_kind(GuideType::Grid);
+        // the canvas whole in a window its size: a canvas pixel to a window pixel
+        s.shared.lock().window_size = (400, 300);
+        let g = s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
+        assert!(!g.fade && g.line_opacity == g.opacity);
+        let look = |size: f32| s.set_guide_look(g.opacity, g.thickness, size, g.hue);
+        // off: a pixel grid's lines drawn whole, a pixel apart
+        let pixel = look(1.0);
+        assert_eq!((pixel.size, pixel.line_opacity), (1.0, g.opacity));
+        assert!(pixel.lines.len() / 4 >= 400 + 300);
+        // on: gone a pixel apart, partly shown 10 apart, whole far apart
+        assert!(s.set_guide_fade(true, None).fade);
+        let gone = look(1.0);
+        assert!(gone.lines.is_empty() && gone.line_opacity == 0.0);
+        let part = look(10.0);
+        assert!(part.line_opacity > 0.0 && part.line_opacity < g.opacity && !part.lines.is_empty());
+        assert_eq!(look(71.0).line_opacity, g.opacity);
+        // Auto starts as a pixel grid's lines are 4 apart: 400%; a 10 one's, 40%
+        assert_eq!(look(1.0).fade_auto_at, 4.0);
+        assert_eq!(look(10.0).fade_auto_at, 0.4);
+        // set to start at 200%: a 10 grid gone at 100%, whole at 800%, whatever its size
+        assert_eq!(s.set_guide_fade(true, Some(2.0)).fade_at, Some(2.0));
+        assert!(look(10.0).lines.is_empty());
+        let at = |zoom: f32| {
+            let mut st = s.shared.lock();
+            st.view = Some(View::fit_inside((400, 300), (400, 300), [0.0; 4]));
+            st.view.as_mut().map(|v| v.gesture(Vec2::ZERO, Vec2::ZERO, zoom, 0.0));
+        };
+        at(8.0);
+        assert_eq!(look(10.0).line_opacity, g.opacity);
+        assert_eq!(look(71.0).line_opacity, g.opacity);
+        // kept to what can be set; what isn't a zoom leaves it; none is Auto again
+        assert_eq!(s.set_guide_fade(true, Some(500.0)).fade_at, Some(FADE_AT_MAX));
+        assert_eq!(s.set_guide_fade(true, Some(f32::NAN)).fade_at, Some(FADE_AT_MAX));
+        assert_eq!(s.set_guide_fade(true, Some(0.0)).fade_at, Some(FADE_AT_MIN));
+        assert_eq!(s.set_guide_fade(true, None).fade_at, None);
+        // each kind its own: isometric doesn't fade
+        assert!(!s.set_guide_kind(GuideType::Isometric).fade);
+        assert!(s.set_guide_kind(GuideType::Grid).fade);
     }
 }

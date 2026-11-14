@@ -23,8 +23,8 @@ private var keyboardDisc: Color { themed(0xFF39_3939, 0xFFFB_FBFB) }
 private var designTrack: Color { themed(0xFF5A_5A5A, 0xFFE3_E3E3) }
 private var designTick: Color { themed(0xFF8A_8A8A, 0xFFC8_C8C8) }
 private var sheetInk: Color { Look.shared.light ? .black : .white }
-private let doneBlue = Color(argb: 0xFF01_90FF)
-private let boxLine = Color(argb: 0xFF00_76FD)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
+private var boxLine: Color { Pc.tinted(Color(argb: 0xFF00_76FD)) }
 private let boxLineArgb: UInt32 = 0xFF00_76FD
 /// The box's outline and the dots on its sides (as measured, a lighter blue than the caret's).
 private let boxOutline = Color(argb: 0xFF01_84FF)
@@ -310,7 +310,9 @@ final class TextTool {
             info = text
         }
         render()
-        model.showNotice((undo ? "Undo " : "Redo ") + name)
+        if let notice = session.stepNotice(undo: undo, name: name) {
+            model.showNotice(notice)
+        }
         model.refresh()
         return true
     }

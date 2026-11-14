@@ -732,6 +732,16 @@ impl Random {
     }
 }
 
+/// A place the path a stroke's stamps follow went through: where, how far along the path it is
+/// (canvas pixels, as [`Stamp::distance`]) and half the stamp's width there, before jitter and
+/// taper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathSpot {
+    pub pos: Vec2,
+    pub distance: f32,
+    pub radius: f32,
+}
+
 /// Builds one stroke. Feed it samples in canvas pixels as they arrive ([`StrokeBuilder::add`]
 /// returns the stamps to draw now), then [`StrokeBuilder::finish`] for the final stamps, which
 /// include the end taper and the catch-up to where the pen lifted.
@@ -832,6 +842,8 @@ pub struct StrokeBuilder {
     start_settled: Option<f32>,
     /// The pixel perfect filter the stamps drawn for good have gone through, holding the newest.
     pixel_filter: PixelPerfect,
+    /// The path as it is walked, kept only for a stroke that asked (see [`StrokeBuilder::traced`]).
+    trace: Option<Vec<PathSpot>>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -946,6 +958,30 @@ impl StrokeBuilder {
         self
     }
 
+    /// The stroke keeps the path its stamps follow as it walks it (see [`StrokeBuilder::trace`]):
+    /// a stroke kept as a stroke is found, cut and filled against by its path, not its stamps.
+    pub fn traced(mut self) -> StrokeBuilder {
+        self.trace = Some(Vec::new());
+        self
+    }
+
+    /// The path walked so far, in order, of a stroke that keeps it ([`StrokeBuilder::traced`]);
+    /// empty for any other. After [`StrokeBuilder::finish`] it is the whole stroke's, with what it
+    /// ran on past the lift.
+    pub fn trace(&self) -> &[PathSpot] {
+        self.trace.as_deref().unwrap_or_default()
+    }
+
+    /// Notes the path at `p`, its head now, for a stroke that keeps it.
+    fn note_path(&mut self, p: PathPoint) {
+        if self.trace.is_some() {
+            let spot = PathSpot { pos: p.pos, distance: self.length, radius: self.diameter_at(p) / 2.0 };
+            if let Some(trace) = self.trace.as_mut() {
+                trace.push(spot);
+            }
+        }
+    }
+
     /// A stroke with `brush` at `diameter` canvas pixels (the size slider's value).
     pub fn new(brush: Brush, diameter: f32, pointer: Pointer) -> StrokeBuilder {
         StrokeBuilder::with_seed(brush, diameter, pointer, 0x9e37_79b9)
@@ -1009,6 +1045,7 @@ impl StrokeBuilder {
             left_out: 0,
             start_settled: None,
             pixel_filter: PixelPerfect::default(),
+            trace: None,
         }
         .reading_extras()
     }
@@ -1785,6 +1822,7 @@ impl StrokeBuilder {
         let Some(from) = self.head else {
             // the first point always gets a stamp, so a tap leaves a dot
             self.head = Some(to);
+            self.note_path(to);
             self.place(to, 0.0, out);
             return;
         };
@@ -1826,6 +1864,7 @@ impl StrokeBuilder {
         }
         self.length += seg;
         self.head = Some(to);
+        self.note_path(to);
     }
 
     /// The (size, opacity) multipliers the pressure gives a point: none for a finger, which has

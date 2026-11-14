@@ -154,6 +154,8 @@ struct LayersPanel: View {
                     .frame(width: 40, height: 41)
                     .contentShape(Rectangle())
                     .onTapGesture { model.addLayer() }
+                    // held: a vector layer
+                    .onLongPressGesture { model.addVectorLayer() }
                     .padding(.top, 12)
             }
             ScrollViewReader { reader in
@@ -698,8 +700,16 @@ private struct LayerOptionsMenu: View {
 
     var body: some View {
         let rows = model.layerOptions(layer)
+        // a plugin's actions for the layer, after the app's own
+        let actions = PluginsModel.shared.store.actionsIn(place: .layer)
         let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
-        let tall = max(CGFloat(rows.count) * 38 + 14, 64)
+        // a vector layer's own row: whether it is drawn as fine as the screen when zoomed in (how
+        // the eraser works on it is chosen in the Eraser band, while erasing)
+        let vector = layer.vector && !layer.locked
+        // and, with strokes or fills picked on it, what the brush as it is set can give them
+        let applying = vector && model.vectorPicked(layer)
+        let own = (vector ? 1 : 0) + (applying ? 3 : 0)
+        let tall = max(CGFloat(rows.count + actions.count + own) * 38 + 14, 64)
         // the panel hangs from the bar: its own top is the bar's height down the screen
         let top = optionsTop - Pc.barHeight
         let y = min(max(rowY - Pc.barHeight - tall / 2, top), max(maxHeight - tall, top))
@@ -726,6 +736,57 @@ private struct LayerOptionsMenu: View {
                         onDone()
                     }
                 }
+            }
+            if vector {
+                HStack(spacing: 0) {
+                    Text(verbatim: "Crisp Zoom")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if model.vectorCrisp {
+                        PcIconView(PcIcons.tick, size: 18, color: Pc.menuInk)
+                    }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 16)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    model.toggleVectorCrisp()
+                    onDone()
+                }
+            }
+            if applying {
+                let gives: [(String, VectorApply)] = [("Apply Color", .colour), ("Apply Brush", .brush), ("Apply Size", .size)]
+                ForEach(gives, id: \.0) { row in
+                    Text(verbatim: row.0)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                        .padding(.leading, 19)
+                        .padding(.trailing, 16)
+                        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            model.vectorApply(row.1)
+                            onDone()
+                        }
+                }
+            }
+            ForEach(actions, id: \.key) { action in
+                Text(verbatim: action.label)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.menuInk)
+                    .lineLimit(1)
+                    .padding(.leading, 19)
+                    .padding(.trailing, 16)
+                    .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onDone()
+                        model.runPluginAction(action.key)
+                    }
             }
         }
         .padding(.vertical, 7)
@@ -1064,6 +1125,17 @@ private struct Thumb: View {
             }
         }
         .frame(width: 93, height: 61)
+        // a vector layer is marked in its corner
+        .overlay(alignment: .bottomLeading) {
+            if layer.vector {
+                Text(verbatim: "V")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 15, height: 15)
+                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .padding(3)
+            }
+        }
         .clipShape(shape)
     }
 }

@@ -529,7 +529,7 @@ struct TimeLapseReplay: View {
                     withAnimation(Motion.replayFade) { model.timeLapse.replaying = false }
                 }
                 // how far it has played
-                Color(argb: 0xFF00_76FD)
+                Pc.tinted(Color(argb: 0xFF00_76FD))
                     .frame(width: place.size.width * min(max(share, 0), 1), height: 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 85)

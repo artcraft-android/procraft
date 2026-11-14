@@ -29,7 +29,8 @@ struct CanvasScreen: View {
             let hidden = model.barsHidden
             ZStack(alignment: .topLeading) {
                 CanvasHost(model: model)
-                if model.panel != .none {
+                // (a plugin pinning panels open lets the canvas take it, the panel staying up)
+                if model.panel != .none, !PluginsModel.shared.pinsPanels {
                     // a touch on the canvas while a panel is open closes it and goes no further
                     Color.clear
                         .contentShape(Rectangle())
@@ -65,6 +66,7 @@ struct CanvasScreen: View {
                     SelectionOverlay(model: model)
                 }
                 ColorDropBand(drop: model.drop, width: screen.size.width)
+                EraserBand(model: model, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade
                 TopBar(model: model)
                     .offset(y: hidden ? -Pc.barHeight : 0)
@@ -89,7 +91,14 @@ struct CanvasScreen: View {
                 if !hidden {
                     FloatingColors(model: model, screen: screen.size)
                 }
+                // a plugin's own panel, while its action keeps it open
+                if let panel = model.pluginPanel {
+                    PluginPanelView(model: model, panel: panel)
+                        .frame(width: screen.size.width - 12, alignment: .trailing)
+                        .offset(y: Pc.barHeight + 12)
+                }
                 QuickShapeHandles(model: model)
+                VectorNodes(model: model)
                 if !hidden {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barHeight)
@@ -269,7 +278,7 @@ struct CanvasScreen: View {
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {
-                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: $0.icon)
+                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: $0.icon, destructive: $0.destructive)
                     },
                     onCancel: { model.question = nil },
                     onAction: {
@@ -482,6 +491,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     private let model: CanvasModel
     private let canvas: CanvasView
     private lazy var dropper = CanvasDropper(model: model)
+    /// Files dragged in from another app, taken anywhere on the window (over a panel or a bar as
+    /// over the canvas): on the window itself once the screen is on it.
+    private lazy var drops = UIDropInteraction(delegate: dropper)
     private var observers: [NSObjectProtocol] = []
     /// Back to the gallery, once the artwork is kept.
     private let leave: () -> Void
@@ -513,7 +525,6 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             DispatchQueue.global(qos: .utility).async { try? session.save(dir: dir) }
             model.startedNew()
         }
-        canvas.addInteraction(UIDropInteraction(delegate: dropper))
         // on a second display too, with Project canvas on
         Projection.shared.artwork(session)
         // kept saved by the core a few seconds after it changes; a failure told
@@ -527,19 +538,26 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             }
         }
         canvas.afterTouches = { [weak self] ended in self?.model.layerOpacityTouched(ended: ended) }
+        canvas.onLoneFinger = { [weak self] in self?.model.loneFinger($0) }
         let pencil = UIPencilInteraction()
         pencil.delegate = self
         canvas.addInteraction(pencil)
         // the app may be ended without a word once in the background: saved as it goes there
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.saveInBackground() })
+        ) { [weak self] _ in
+            self?.model.hearsStrokes = false
+            self?.saveInBackground()
+        })
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.model.resumeTracking()
             self?.model.readAppSettings()
+            self?.model.hearsStrokes = true
         })
+        // the strokes heard while the canvas shows (a plugin's sound)
+        model.hearsStrokes = true
     }
 
     override var canBecomeFirstResponder: Bool { true }
@@ -551,6 +569,15 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         becomeFirstResponder()
+        if let window = view.window, drops.view !== window {
+            drops.view?.removeInteraction(drops)
+            window.addInteraction(drops)
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        drops.view?.removeInteraction(drops)
     }
 
     private static func isAlt(_ key: UIKey) -> Bool {
@@ -684,7 +711,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             case .filled:
                 model.drop.filled()
             case let .quickMenu(x, y):
-                model.toggleQuickMenu(at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
+                model.toggleQuickMenu(
+                    at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels), held: canvas.touching
+                )
             case .adjustChanged:
                 model.adjustModesOpen = false
                 model.readAdjust()
@@ -710,8 +739,10 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         let dir = model.dir
         let lapse = model.timeLapse.lapse
         model.noteTime()
+        model.hearsStrokes = false
         model.stopWatching()
         model.keepChoicesNow()
+        drops.view?.removeInteraction(drops)
         canvas.detach()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()

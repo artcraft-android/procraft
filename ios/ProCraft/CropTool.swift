@@ -11,7 +11,7 @@ private var capsuleChosen: Color { themed(0xFF46_4646, 0xFFA5_A5A5) }
 private var headerBand: Color { themed(0xFF1D_1D1D, 0xFFDF_E2E3) }
 private var headerCapsule: Color { themed(0xFF1A_1A1A, 0xFFF5_F8F9) }
 private var headerEdge: Color { themed(0xFF37_3737, 0xFFDC_DEDF) }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 
 // light over the dark surround; dark with the light interface
 private var frameLine: Color { themed(0xCCFF_FFFF, 0xCC30_3030) }

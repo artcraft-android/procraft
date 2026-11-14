@@ -1584,6 +1584,24 @@ fun QuickShapeBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * The nodes of the one stroke picked on a vector layer, while a selection tool is up: white dots
+ * ringed in blue, each dragged to pull the stroke into another shape (the canvas's touches take
+ * the drag).
+ */
+@Composable
+fun VectorNodes(vm: CanvasViewModel) {
+    val nodes = vm.vectorNodes
+    if (!vm.selecting || nodes.size < 2) return
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        for (i in 0 until nodes.size / 2) {
+            val at = Offset(nodes[i * 2], nodes[i * 2 + 1])
+            drawCircle(Pc.Accent, 6.5.dp.toPx(), at)
+            drawCircle(Color.White, 4.5.dp.toPx(), at)
+        }
+    }
+}
+
 /** The snapped shape's handles, while they show: blue dots ringed in white. */
 @Composable
 fun QuickShapeHandles(vm: CanvasViewModel) {

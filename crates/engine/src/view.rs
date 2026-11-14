@@ -4,7 +4,7 @@ use crate::geom::{Affine, Vec2};
 
 /// Zoom limits (screen pixels per canvas pixel).
 pub const MIN_ZOOM: f32 = 0.02;
-pub const MAX_ZOOM: f32 = 64.0;
+pub const MAX_ZOOM: f32 = 128.0;
 
 /// The canvas-to-screen map: a move, a uniform zoom and a rotation.
 #[derive(Clone, Copy, Debug, PartialEq)]

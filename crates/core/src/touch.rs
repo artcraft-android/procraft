@@ -23,6 +23,7 @@ pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
 use crate::adjust::PerspectiveKind;
 use crate::adjust_menu::Adjustment;
 use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP, DIRECTIONAL_INNER, DIRECTIONAL_REACH, POSITIONAL_GRAB};
+use crate::pour::TrailStep;
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
@@ -93,6 +94,8 @@ const NODE_SLOP: f32 = 10.0;
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
 pub(crate) const POUR_SLIDE_GENTLER: f32 = 2.7;
+/// Continuous filling looks for somewhere unfilled this often along a touch's way (points).
+const TRAIL_STEP: f32 = 3.0;
 
 /// A transform's touch moved this far (points) drags what it took (a selection's too).
 const TRANSFORM_SLOP: f32 = 15.0;
@@ -147,12 +150,15 @@ pub struct TransformTouch {
 }
 
 /// What Continue filling fills with: a colour (sRGB, 0..1) and the threshold it starts at.
+/// `continuous` (the band's Continuous): a touch dragged fills each area it crosses where nothing
+/// is filled yet, at that threshold, instead of sliding it; the drag is one undo step.
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
 pub struct Fill {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub threshold: f32,
+    pub continuous: bool,
 }
 
 /// What a way of touching is set to do (Gesture controls).
@@ -389,12 +395,19 @@ enum Mode {
     Finger,
     /// Down, doing nothing (a touch that only waits for a hold, or did its thing).
     Idle,
+    /// A finger set to open something (the QuickMenu): it does where it landed, when it lifts as
+    /// a tap or once it slides past a tap's slop (on its way to one of the menu's buttons).
+    /// Joined by another finger or held still first, it opens nothing.
+    Tap(GestureAction),
     Gesture,
     Pick,
     /// An edited shape's handle dragged; its outline dragged (turning and resizing it); itself moved.
     Shape(u32),
     ShapePin,
     ShapeMove,
+    /// The selection tool, one stroke picked on a vector layer: one of its nodes dragged, pulling
+    /// the stroke into another shape.
+    Node(u32),
     /// Continue filling: the touch filled where it landed, and slides the threshold.
     Pour,
     /// A transform's touch: it took a node (or the content), and drags it once past the slop.
@@ -553,6 +566,9 @@ pub(crate) struct Touches {
     box_pinch: Option<Option<[(f32, f32); 2]>>,
     pour_moved: bool,
     pour_last: (f32, f64),
+    /// A Continuous drag: where it has looked along the touch's way to, and whether it filled.
+    pour_trail: (f32, f32),
+    pour_filled: bool,
     /// Layer Opacity is on: the layer a drag changes and its opacity as dragged; whether the
     /// touch has changed it yet.
     layer_opacity: Option<(u64, f32)>,
@@ -660,6 +676,8 @@ impl Default for Touches {
             box_pinch: None,
             pour_moved: false,
             pour_last: (0.0, 0.0),
+            pour_trail: (0.0, 0.0),
+            pour_filled: false,
             layer_opacity: None,
             opacity_moved: false,
             recolor_dragged: false,
@@ -991,7 +1009,7 @@ impl CanvasSession {
         } else if t.pen_hovering.take().is_some() {
             t.pen_left = Some(now);
         }
-        let lone = matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pick | Mode::Held);
+        let lone = matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Tap(_) | Mode::Pick | Mode::Held);
         if hovering && !was_near && Self::pen_near(&t, None) && !t.down.is_empty() && t.modify_pointer.is_none() && lone
         {
             drop(self.hand_aside(t, None, &mut out));
@@ -1123,7 +1141,7 @@ impl CanvasSession {
         if is_pen(kind)
             && t.down.len() > 1
             && t.modify_pointer.is_none()
-            && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Gesture | Mode::Pick | Mode::Held)
+            && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Tap(_) | Mode::Gesture | Mode::Pick | Mode::Held)
         {
             t = self.hand_aside(t, Some(id), &mut out);
         }
@@ -1367,8 +1385,23 @@ impl CanvasSession {
                 }
             }
             Mode::Pour if id == t.stroke_pointer => {
-                if let Some(threshold) = Self::pour_slide(&mut t, at, last.time_ms) {
+                if let Some(fill) = t.filling.filter(|f| f.continuous) {
+                    if dist(at, t.down_at) > POUR_SLOP * t.scale {
+                        t.pour_moved = true;
+                    }
+                    self.pour_along(&mut t, at, fill, false);
+                } else if let Some(threshold) = Self::pour_slide(&mut t, at, last.time_ms) {
                     out.push(TouchCommand::FillThreshold { threshold });
+                }
+            }
+            // slid past a tap's slop, it opens the menu where it landed: slid on to one of the
+            // menu's buttons and let go, the button runs (the app follows the finger)
+            Mode::Tap(a) => {
+                if dist(at, t.down_at) > slop {
+                    t.hold_due = None;
+                    t.mode = Mode::Idle;
+                    let landed = t.down_at;
+                    Self::act(a, landed, &mut out);
                 }
             }
             Mode::Idle => {
@@ -1412,6 +1445,25 @@ impl CanvasSession {
                     }
                     self.quickshape_move_handle(i, at.0 + grip.0, at.1 + grip.1);
                     out.push(TouchCommand::ShapeChanged);
+                }
+            }
+            Mode::Node(i) if id == t.stroke_pointer => {
+                let began = !t.shape_dragged && dist(at, t.down_at) > NODE_SLOP * t.scale;
+                if began {
+                    // from here on, the node's way from the finger
+                    t.shape_dragged = true;
+                    t.shape_last = (t.shape_last.0 - at.0, t.shape_last.1 - at.1);
+                }
+                if t.shape_dragged {
+                    let grip = t.shape_last;
+                    drop(t);
+                    if began {
+                        self.vector_node_grab(i);
+                    }
+                    // (told as the view moving is: what is drawn over the canvas follows)
+                    if self.vector_node_drag(at.0 + grip.0, at.1 + grip.1) {
+                        out.push(TouchCommand::ViewMoved);
+                    }
                 }
             }
             Mode::ShapePin | Mode::ShapeMove if id == t.stroke_pointer => {
@@ -1527,12 +1579,15 @@ impl CanvasSession {
         }
         if t.hold_due.is_some_and(|due| due <= now_ms) {
             t.hold_due = None;
-            if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Turn)
+            if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Tap(_) | Mode::Turn)
                 && let Some(purpose) = t.settings.hold
             {
                 let painting = t.mode == Mode::Finger;
                 let at = t.down_at;
                 t.mode = if purpose == GestureAction::Eyedropper { Mode::Pick } else { Mode::Idle };
+                // having done its thing, the finger moves the canvas no more (slid on, it is on
+                // what it opened)
+                t.pan_last = None;
                 let tool = t.tool_before.take();
                 drop(t);
                 if painting {
@@ -1769,6 +1824,26 @@ impl CanvasSession {
             t.mode = Mode::Picture;
             return;
         }
+        // the selection tool with one stroke picked on a vector layer: a touch on one of its nodes
+        // drags it, pulling the stroke into another shape
+        if t.selecting.is_some() {
+            let node = self
+                .vector_nodes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .enumerate()
+                .map(|(i, &[x, y])| (i, (x, y), dist((x, y), at)))
+                .filter(|(.., d)| *d <= grab)
+                .min_by(|a, b| a.2.total_cmp(&b.2));
+            if let Some((i, node, _)) = node {
+                t.stroke_pointer = id;
+                t.mode = Mode::Node(i as u32);
+                t.shape_dragged = false;
+                t.shape_last = node;
+                return;
+            }
+        }
         // on a shown model a finger still turns it while a selection is drawn with the pen
         if t.selecting.is_some() && !self.finger_turns_model(kind, t) {
             t.stroke_pointer = id;
@@ -1797,6 +1872,13 @@ impl CanvasSession {
             if self.current_is_text() {
                 out.push(TouchCommand::TextLayer);
                 t.mode = Mode::Idle;
+            } else if fill.continuous {
+                // Continuous: it fills here if nothing is filled here yet, and wherever it goes
+                self.pour_trail_begin();
+                t.pour_trail = at;
+                let step = self.pour_trail_at(at.0, at.1, [fill.r, fill.g, fill.b], fill.threshold);
+                t.pour_filled = step == TrailStep::Filled;
+                t.mode = Mode::Pour;
             } else {
                 let poured = self.pour_begin(at.0, at.1, fill.r, fill.g, fill.b, fill.threshold);
                 t.mode = if poured { Mode::Pour } else { Mode::Idle };
@@ -1825,9 +1907,19 @@ impl CanvasSession {
                     out.push(TouchCommand::Pick { x: at.0, y: at.1 });
                     return;
                 }
+                // the quick menu opens as the finger lifts from a tap or slides off, not as it
+                // lands: fingers landing to move the canvas or undo, or a hand resting, open
+                // nothing
+                Some(a @ GestureAction::QuickMenu) => {
+                    t.stroke_pointer = id;
+                    t.mode = Mode::Tap(a);
+                    if t.settings.hold.is_some() {
+                        t.hold_due = Some(now + t.settings.hold_ms);
+                    }
+                    return;
+                }
                 Some(
-                    a @ (GestureAction::QuickMenu
-                    | GestureAction::CopyPaste
+                    a @ (GestureAction::CopyPaste
                     | GestureAction::FullScreen
                     | GestureAction::LayerSelect
                     | GestureAction::QuickShape),
@@ -1922,10 +2014,18 @@ impl CanvasSession {
         // of what the box holds is kept when the fingers go on to take it); it keeps the opacity
         // dragged so far
         if t.mode == Mode::Pour {
-            self.pour_end(false, None);
+            if self.pour_trailing() {
+                self.pour_trail_end(false);
+            } else {
+                self.pour_end(false, None);
+            }
         }
         if t.mode == Mode::Opacity {
             self.opacity_lifted(t);
+        }
+        // a stroke's node being dragged goes back to where it was
+        if matches!(t.mode, Mode::Node(_)) && self.vector_node_release(false) {
+            out.push(TouchCommand::ViewMoved);
         }
         // a colour selection under way is kept as it was slid; a shape being dragged out goes
         if t.mode == Mode::Select {
@@ -1953,9 +2053,11 @@ impl CanvasSession {
             t.mode,
             Mode::Finger
                 | Mode::Idle
+                | Mode::Tap(_)
                 | Mode::Pour
                 | Mode::Transform
                 | Mode::Select
+                | Mode::Node(_)
                 | Mode::Recolor
                 | Mode::Turn
                 | Mode::Picture
@@ -2078,7 +2180,8 @@ impl CanvasSession {
                 // turns it square anyway)
                 if parted && t.gesture_pair.is_none() {
                     let unturn = !pinched && !cancelled && !tap && !fitted && t.view_moving;
-                    if unturn && Self::turned_by_accident(&t, now)
+                    if unturn
+                        && Self::turned_by_accident(&t, now)
                         && let Some(turned) = self.near_upright()
                     {
                         let (x, y, ..) = t.last;
@@ -2173,6 +2276,12 @@ impl CanvasSession {
                 }
             }
             Mode::Opacity => self.opacity_lifted(&mut t),
+            // a tap where it landed does what Touch is set to
+            Mode::Tap(a) => {
+                if !cancelled && now - t.tap_start <= TAP_MS {
+                    Self::act(a, t.down_at, &mut out);
+                }
+            }
             Mode::Held => {
                 t.held = None;
                 if !cancelled {
@@ -2184,6 +2293,22 @@ impl CanvasSession {
                 let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
                 out.push(TouchCommand::RecolorTapped { x: at.0, y: at.1 });
             }
+            Mode::Pour if self.pour_trailing() => {
+                if let (Some(fill), Some(s)) = (t.filling.filter(|f| f.continuous && !cancelled), last_of(&samples)) {
+                    self.pour_along(&mut t, (s.x, s.y), fill, true);
+                }
+                let tap = !cancelled && !t.pour_moved && !t.pour_filled;
+                let (down, fill) = (t.down_at, t.filling);
+                drop(t);
+                // a tap where something is filled already fills there, as without Continuous
+                if let Some(fill) = fill.filter(|_| tap)
+                    && self.pour_begin(down.0, down.1, fill.r, fill.g, fill.b, fill.threshold)
+                {
+                    self.pour_end(true, None);
+                }
+                self.pour_trail_end(!cancelled);
+                out.push(TouchCommand::Filled);
+            }
             Mode::Pour => {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
                 drop(t);
@@ -2193,6 +2318,15 @@ impl CanvasSession {
                 }
                 self.pour_end(!cancelled, None);
                 out.push(TouchCommand::Filled);
+            }
+            // a stroke's node let go: it stays where it was dragged to
+            Mode::Node(_) => {
+                drop(t);
+                // (told as a stroke ending is: the layer and what can be undone changed)
+                if self.vector_node_release(!cancelled) {
+                    out.push(TouchCommand::ViewMoved);
+                    out.push(TouchCommand::StrokeEnded);
+                }
             }
             // a tap on a handle rather than a drag of it: a curve's anchor steps to its next state
             Mode::Shape(i) => {
@@ -2649,6 +2783,31 @@ impl CanvasSession {
         if t.scrub_turns >= SCRUB_TURNS {
             t.scrub_turns = -1;
             out.push(TouchCommand::ClearLayer);
+        }
+    }
+
+    /// Continuous filling's touch gone on to `to`: every few points of the way from where it had
+    /// looked to, it fills if nothing is filled there yet. A fill still being finished by a
+    /// plugin is waited for with `wait`; otherwise the rest of the way is left for the next move.
+    fn pour_along(&self, t: &mut Touches, to: (f32, f32), fill: Fill, wait: bool) {
+        let from = t.pour_trail;
+        let apart = TRAIL_STEP * t.scale.max(f32::EPSILON);
+        let steps = (dist(from, to) / apart).ceil().clamp(1.0, 10_000.0) as u32;
+        let colour = [fill.r, fill.g, fill.b];
+        for i in 1..=steps {
+            let k = i as f32 / steps as f32;
+            let at = (from.0 + (to.0 - from.0) * k, from.1 + (to.1 - from.1) * k);
+            let mut step = self.pour_trail_at(at.0, at.1, colour, fill.threshold);
+            if step == TrailStep::Busy && wait {
+                self.await_pour();
+                step = self.pour_trail_at(at.0, at.1, colour, fill.threshold);
+            }
+            match step {
+                TrailStep::Busy => return,
+                TrailStep::Filled => t.pour_filled = true,
+                TrailStep::Passed => {}
+            }
+            t.pour_trail = at;
         }
     }
 
@@ -3216,6 +3375,49 @@ mod tests {
     }
 
     #[test]
+    fn a_finger_set_to_open_the_quick_menu_opens_it_as_it_lifts_from_a_tap() {
+        let s = session();
+        let menu = |x: f32, y: f32| TouchCommand::QuickMenu { x, y };
+        let opened = |out: &[TouchCommand]| out.iter().any(|c| matches!(c, TouchCommand::QuickMenu { .. }));
+        s.set_touch_settings(TouchSettings {
+            touch: Some(GestureAction::QuickMenu),
+            hold: None,
+            ..TouchSettings::default()
+        });
+        // nothing as it lands; lifted, the menu where it landed
+        assert!(s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0)).is_empty());
+        assert!(!painting(&s));
+        assert!(s.touch_move(1, at(104.0, 100.0, 40.0)).is_empty());
+        let out = s.touch_up(1, at(104.0, 100.0, 120.0));
+        assert!(out.contains(&menu(100.0, 100.0)), "{out:?}");
+        // slid off, the menu where it landed, once: it is the app's from there, and lifting
+        // (even back where it landed) opens nothing more
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 1000.0));
+        assert!(s.touch_move(1, at(120.0, 100.0, 1020.0)).is_empty());
+        assert_eq!(s.touch_move(1, at(160.0, 100.0, 1040.0)), vec![menu(100.0, 100.0)]);
+        assert!(!opened(&s.touch_move(1, at(100.0, 100.0, 1080.0))));
+        assert!(!opened(&s.touch_up(1, at(100.0, 100.0, 1120.0))));
+        // rested on the screen, neither
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 2000.0));
+        assert!(!opened(&s.touch_up(1, at(100.0, 100.0, 2000.0 + TAP_MS + 1.0))));
+        // the platform taking it back, neither
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 3000.0));
+        assert!(!opened(&s.touch_cancel()));
+        // two fingers move the canvas or undo: the first of them opens nothing, landing or lifting
+        let mut out = s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 4000.0));
+        out.extend(s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 4030.0)));
+        out.extend(s.touch_up(2, at(200.0, 100.0, 4080.0)));
+        out.extend(s.touch_up(1, at(100.0, 100.0, 4090.0)));
+        assert!(!opened(&out), "{out:?}");
+        assert!(out.contains(&TouchCommand::Undo), "{out:?}");
+        // held still with a hold set, it does what the hold does and no more
+        s.set_touch_settings(TouchSettings { touch: Some(GestureAction::QuickMenu), ..TouchSettings::default() });
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 5000.0));
+        assert!(s.touch_tick(5400.0).contains(&TouchCommand::Pick { x: 100.0, y: 100.0 }));
+        assert!(!opened(&s.touch_up(1, at(100.0, 100.0, 5450.0))));
+    }
+
+    #[test]
     fn the_pen_button_switches_to_the_eraser_and_back_unless_set_otherwise() {
         let s = session();
         s.set_tool(ToolKind::Smudge);
@@ -3452,7 +3654,9 @@ mod tests {
     #[test]
     fn a_slow_little_turn_meant_stays() {
         // turned slowly on its own, however little, as it is with a pinch alongside
-        for (from, to, degrees, ms) in [(300.0, 300.0, 4.0, 700.0), (300.0, 300.0, -8.0, 900.0), (300.0, 320.0, 3.0, 800.0)] {
+        for (from, to, degrees, ms) in
+            [(300.0, 300.0, 4.0, 700.0), (300.0, 300.0, -8.0, 900.0), (300.0, 320.0, 3.0, 800.0)]
+        {
             let out = twist(&shown(1.0), from, to, degrees, 0.0, ms);
             assert!(unturn(&out).is_none(), "{degrees}: {out:?}");
         }
@@ -3996,7 +4200,7 @@ mod tests {
     #[test]
     fn continue_filling_fills_each_touch_and_a_slide_moves_its_threshold() {
         let s = session();
-        s.set_touch_filling(Some(Fill { r: 1.0, g: 0.0, b: 0.0, threshold: 0.5 }));
+        s.set_touch_filling(Some(Fill { r: 1.0, g: 0.0, b: 0.0, threshold: 0.5, continuous: false }));
         // off the canvas (no view yet) nothing fills, and the touch does nothing else
         let out = s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 0.0));
         assert!(!out.iter().any(|c| matches!(c, TouchCommand::Pick { .. })), "{out:?}");

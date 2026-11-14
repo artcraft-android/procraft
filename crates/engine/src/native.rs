@@ -82,6 +82,10 @@ pub struct Imported {
     /// Its imported picture (a PNG, as stored), and the turn it is shown at (one of the system's
     /// eight image orientations; 0 is upright).
     pub reference_picture: Option<(Vec<u8>, i64)>,
+    /// The strokes and fills of its vector layers, as the app that made the package keeps them
+    /// (see [`write_with_vectors`]), by layer. None for a canvas stored turned or flipped: they
+    /// are kept as the canvas lies.
+    pub vectors: Vec<(LayerId, Vec<u8>)>,
 }
 
 /// Where a package keeps the Reference window's picture (some writers put it at the top).
@@ -182,9 +186,17 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         .read(REFERENCE_PICTURE)
         .or_else(|| zip.read("ReferenceImage.png"))
         .map(|png| (png, root.int("referenceOrientation").unwrap_or(0)));
+    // (kept only for layers the document still has, as it was repaired)
+    let upright = canvas.turns == 0 && !canvas.flip_x && !canvas.flip_y;
+    let vectors = uuids
+        .iter()
+        .filter(|(uuid, id)| upright && !uuid.is_empty() && document.layer(*id).is_some())
+        .filter_map(|(uuid, id)| Some((*id, zip.read(&vector_entry(uuid))?)))
+        .collect();
     Ok(Imported {
         document,
         pixels,
+        vectors,
         reference: read_reference(&root),
         reference_picture,
         name: root.string("name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Untitled Artwork".to_owned()),
@@ -636,6 +648,7 @@ fn add_item(
                 text: None,
                 private: false,
                 assisted: false,
+                vector: None,
             });
         }
         _ => {
@@ -667,6 +680,7 @@ fn add_item(
                 text,
                 private: item.bool("private").unwrap_or(false),
                 assisted: item.bool("perspectiveAssisted").unwrap_or(false),
+                vector: None,
             });
             if !uuid.is_empty() {
                 pixels.push((lid, canvas.pixels(&uuid, 4, 0)?));
@@ -690,6 +704,7 @@ fn add_item(
                     text: None,
                     private: false,
                     assisted: false,
+                    vector: None,
                 });
                 if let Some(m) = mask.string("UUID") {
                     // a mask stores only the tiles painted on: the rest shows the layer
@@ -811,13 +826,28 @@ fn reference_fields(b: &mut Builder, w: &ReferenceWindow) -> Vec<(&'static str, 
     fields
 }
 
+/// Where a package keeps a vector layer's strokes and fills, beside its tiles: a file named by
+/// the layer's UUID, as the app that made it keeps them (see [`write_with_vectors`]). Nothing
+/// else that reads the package knows of them: to it the layer is its pixels.
+const VECTORS: &str = "ProCraft/Vectors/";
+
+fn vector_entry(uuid: &str) -> String {
+    format!("{VECTORS}{uuid}.json")
+}
+
 /// Writes a package.
 pub fn write(e: &Export<'_>) -> Vec<u8> {
+    write_with_vectors(e, &std::collections::HashMap::new())
+}
+
+/// Writes a package as [`write`] does, with the strokes and fills of its vector layers too:
+/// `vectors` holds each one's as the app keeps them (bytes this crate only carries), by layer.
+pub fn write_with_vectors(e: &Export<'_>, vectors: &std::collections::HashMap<LayerId, Vec<u8>>) -> Vec<u8> {
     let doc = e.document;
     let (w, h) = (doc.width(), doc.height());
     let mut zip = ZipWriter::new();
     let mut b = Builder::new();
-    let mut uuids = Uuids(e.seed ^ 0x9E37_79B9_7F4A_7C15);
+    let mut uuids = Uuids(e.seed ^ 0x9E37_79B9_7F4A_7C15, Vec::new());
     let doc_ref = b.reserve();
 
     // layers and groups, top first, as nested lists
@@ -924,6 +954,11 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     zip.add("QuickLook/Thumbnail.png", e.thumbnail_png);
     if let Some(png) = e.reference_picture {
         zip.add(REFERENCE_PICTURE, png);
+    }
+    for (id, uuid) in &uuids.1 {
+        if let Some(bytes) = vectors.get(id) {
+            zip.add(&vector_entry(uuid), bytes);
+        }
     }
     zip.finish()
 }
@@ -1087,6 +1122,7 @@ fn write_item(
         );
     }
     let uuid = uuids.next();
+    uuids.1.push((id, uuid.clone()));
     let px = e.pixels.get(&id);
     if let Some(px) = px {
         write_tiles(zip, &uuid, px, w, h, 4, 0);
@@ -1380,8 +1416,8 @@ fn write_tiles(zip: &mut ZipWriter, uuid: &str, px: &[u8], w: u32, h: u32, bpp: 
     }
 }
 
-/// UUIDs from a seed (random enough to tell layers apart).
-struct Uuids(u64);
+/// UUIDs from a seed (random enough to tell layers apart), and which each paint layer was given.
+struct Uuids(u64, Vec<(LayerId, String)>);
 
 impl Uuids {
     fn next(&mut self) -> String {

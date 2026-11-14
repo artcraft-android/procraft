@@ -20,7 +20,7 @@ private var switchIdle: Color { themed(0xFFC1_C1C1, 0xFF3B_3B3B) }
 private var capsuleFill: Color { themed(0xFF1A_1A1A, 0xFFFB_FBFB) }
 private var capsuleEdge: Color { themed(0xFF37_3737, 0xFFE0_E0E0) }
 private let capsuleInk = Color(argb: 0xFFA5_A5A5)
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 /// Where the last row the keypad types into (DPI) ends, down from the top: the page's 120, two rows
 /// and their line, 24 between the groups, one row.
 private let typedBottom: CGFloat = 286

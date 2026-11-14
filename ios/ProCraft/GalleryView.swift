@@ -15,7 +15,7 @@ private var swipePillInk: Color { Look.shared.light ? Color(argb: 0xFF57_5757) :
 private let swipeDeleteFill = Color(argb: 0xFFFE_604D)
 /// How far a swiped artwork fades back under its actions.
 private let swipedFade = 0.64
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 private let renameBlur: CGFloat = 20
 /// How long Gallery Recovery's pie takes to come most of the way, the card shown long enough to be
 /// read however quick the search; and how long it stays once done.
@@ -23,16 +23,44 @@ private let recoverySearchSteps = 44
 private let recoveryStep = Duration.milliseconds(16)
 private let recoveryDone = Duration.milliseconds(900)
 
-/// A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
-/// and four on its side), the content's width (40 less) and the thumbnail box's height (82 less).
+/// The gallery's grid on a screen: how many artworks across, and how much narrower than its cell
+/// an artwork's thumbnail box is. Three across upright and four on its side, the box 40 narrower,
+/// as measured at an iPad's own sizes. On a screen wider than any of those (a 13-inch set to More
+/// Space is 1600 across) that would show the cells bigger than any iPad does, so there it is as
+/// many as fit at `densePitch` or wider and the box 84 narrower: six across 1600, as measured.
+struct GalleryGrid {
+    /// The widest a cell is at an iPad's own size: a 13-inch's 1376 over four.
+    private static let widestPitch: CGFloat = 344
+    private static let densePitch: CGFloat = 245
+
+    let columns: Int
+    let inset: CGFloat
+
+    init(_ screen: CGSize) {
+        let usual = screen.width > screen.height ? 4 : 3
+        if screen.width / CGFloat(usual) > Self.widestPitch {
+            columns = max(usual, Int(screen.width / Self.densePitch))
+            inset = 84
+        } else {
+            columns = usual
+            inset = 40
+        }
+    }
+}
+
+/// A gallery cell's sizes: its pitch both ways (the screen's width over the grid's columns), the
+/// content's width (the grid's inset less) and the thumbnail box's height (82 less).
 private struct CellSize {
+    let columns: Int
     let pitch: CGFloat
     let width: CGFloat
     let thumb: CGFloat
 
-    init(screenWidth: CGFloat, columns: Int) {
-        pitch = screenWidth / CGFloat(columns)
-        width = pitch - 40
+    init(_ screen: CGSize) {
+        let grid = GalleryGrid(screen)
+        columns = grid.columns
+        pitch = screen.width / CGFloat(columns)
+        width = pitch - grid.inset
         thumb = pitch - 82
     }
 
@@ -113,8 +141,7 @@ struct GalleryView: View {
     /// A stack's artworks flying back into its cell, over the gallery growing back.
     @ViewBuilder private func flyingBack(_ screen: CGSize) -> some View {
         if let back = model.flyingBack {
-            let columns = screen.width > screen.height ? 4 : 3
-            let cell = CellSize(screenWidth: screen.width, columns: columns)
+            let cell = CellSize(screen)
             GeometryReader { place in
                 let origin = Interface.shared.rect(place.frame(in: .global)).origin
                 ZStack(alignment: .topLeading) {
@@ -241,8 +268,8 @@ struct GalleryView: View {
     }
 
     private func grid(_ screen: CGSize) -> some View {
-        let columns = screen.width > screen.height ? 4 : 3
-        let cell = CellSize(screenWidth: screen.width, columns: columns)
+        let cell = CellSize(screen)
+        let columns = cell.columns
         return ScrollView {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(cell.pitch), spacing: 0), count: columns), spacing: 0) {
                 ForEach(model.entries, id: \.dir) { entry in
@@ -887,7 +914,8 @@ private struct CellPlace: ViewModifier {
     }
 }
 
-/// An artwork's picture in its thumbnail box, as large as fits, with a soft shadow under it.
+/// An artwork's picture in its thumbnail box, as large as fits (its cell sets it in the box's
+/// middle), with a soft shadow under it.
 private struct Thumbnail: View {
     let artwork: GalleryArtwork
     let cell: CellSize
@@ -967,7 +995,7 @@ private struct ArtworkCell: View {
                             .onDisappear { model.thumbAt[artwork.dir] = nil }
                     }
                 }
-                .frame(width: cell.width, height: cell.thumb, alignment: .bottom)
+                .frame(width: cell.width, height: cell.thumb)
                 .scaleEffect(lift)
                 .padding(.top, 39)
             Text(verbatim: artwork.name)
@@ -1006,7 +1034,7 @@ private struct StackCell: View {
                     }
                     Thumbnail(artwork: top, cell: cell, version: version, wash: wash)
                 }
-                .frame(width: cell.width, height: cell.thumb, alignment: .bottom)
+                .frame(width: cell.width, height: cell.thumb)
                 .padding(.top, 39)
             }
             Text(verbatim: name)

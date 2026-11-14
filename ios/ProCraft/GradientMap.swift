@@ -13,7 +13,7 @@ private var editorCard: Color { themed(0xFF38_3838, 0xFFEE_EEEE) }
 private var editorName: Color { themed(0xFFC5_C5C5, 0xFF3A_3A3A) }
 private var card: Color { themed(0xFF28_2828, 0xFFEE_EEEE) }
 private var cardName: Color { themed(0xFFC1_C1C1, 0xFF5D_5D5D) }
-private let doneFill = Color(argb: 0xFF01_90FF)
+private var doneFill: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 private let stopSize: CGFloat = 42
 private let gradientSpace = "gradientPanel"
 /// How long a stop or card stays pressed to be held, seconds.

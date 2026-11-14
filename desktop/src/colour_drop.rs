@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{BlobShape, CanvasSession, ColourBlob, ColourDrag, DragStep, Fill};
+use procraft_core::{BlobShape, CanvasSession, ColourBlob, ColourDrag, DragStep, Fill, VectorEraser};
 
 use crate::colours::{of_hex, srgb};
 use crate::look::{Themed, Weight, argb, pc, text};
@@ -299,6 +299,11 @@ impl ColourDrop {
         self.sliding = false;
     }
 
+    /// The band is down (a colour dragged, filling, or offering to continue).
+    pub fn banded(&self) -> bool {
+        self.band != Band::None
+    }
+
     /// Filling ends (the artwork closed, another mode chosen).
     /// Continue filling is on: the touches fill.
     pub fn filling(&self) -> bool {
@@ -418,6 +423,74 @@ impl ColourDrop {
         if out < 1.0 {
             ctx.request_repaint();
         }
+    }
+}
+
+/// The Eraser band's segments, each with room for "Whole Stroke" and "To Crossing".
+const ERASER_SEGMENT: f32 = 84.0;
+/// Under this, the Eraser band leaves its title out for the segmented control.
+const ERASER_ROOM_FOR_TITLE: f32 = 352.0;
+/// Under this, the Eraser band's segments take shorter names.
+const ERASER_ROOM_FOR_NAMES: f32 = 268.0;
+const SEGMENT_TRACK: Themed = Themed(0x33FFFFFF, 0x1F000000);
+
+/// The Eraser band hanging from `top`, sliding down from behind the top bar as ColorDrop's does:
+/// while the Erase tool is up on a vector layer (`on`), how the eraser works there — taking what
+/// its brush covers (Subtract), whole strokes, or a stroke up to where it crosses others. It stays
+/// while erasing.
+pub fn eraser_band(ctx: &egui::Context, session: &CanvasSession, on: bool, top: f32) {
+    let out = ease(ctx.animate_bool_with_time(Id::unique("eraser band"), on, SLIDE));
+    if out <= 0.0 {
+        return;
+    }
+    let modes = [VectorEraser::Subtract, VectorEraser::WholeStroke, VectorEraser::ToCrossing];
+    let chosen = modes.iter().position(|&m| m == session.vector_eraser()).unwrap_or(0);
+    let window = ctx.content_rect();
+    let named = window.width() >= ERASER_ROOM_FOR_NAMES;
+    let labels = if named { ["Subtract", "Whole Stroke", "To Crossing"] } else { ["Subtract", "Stroke", "Crossing"] };
+    let segment = if named { ERASER_SEGMENT } else { 68.0 };
+    // the thumb slides from one segment to the next
+    let at = ctx.animate_value_with_time(Id::unique("eraser band thumb"), chosen as f32, 0.33);
+    let y = top - (1.0 - out) * BAND_HEIGHT;
+    egui::Area::new(Id::unique("eraser band"))
+        .fixed_pos(pos2(window.left(), y))
+        .order(egui::Order::Middle)
+        .interactable(on)
+        .show(ctx, |ui| {
+            ui.set_clip_rect(Rect::from_min_max(pos2(window.left(), top), window.max));
+            let band = Rect::from_min_size(pos2(window.left(), y), vec2(window.width(), BAND_HEIGHT));
+            ui.allocate_rect(band, Sense::click());
+            let painter = ui.painter();
+            painter.rect_filled(band, 0, argb(BAND_FILL));
+            let ink = argb(INK);
+            let blue = argb(pc::ACCENT);
+            // "Eraser" (on a narrow screen the control has the band to itself), then the choices
+            let titled = window.width() >= ERASER_ROOM_FOR_TITLE;
+            let name = if titled { painter.layout_no_wrap("Eraser".into(), Weight::Bold.font(16.5), ink).size().x + 13.0 } else { 0.0 };
+            let track_width = segment * modes.len() as f32;
+            let left = band.center().x - (name + track_width) / 2.0;
+            if titled {
+                text(painter, pos2(left, band.center().y), Align2::LEFT_CENTER, "Eraser", 16.5, Weight::Bold, ink);
+            }
+            let track = Rect::from_min_size(pos2(left + name, band.center().y - 10.0), vec2(track_width, 20.0));
+            painter.rect_filled(track, 10, argb(SEGMENT_TRACK));
+            let thumb = Rect::from_min_size(pos2(track.left() + segment * at, track.top()), vec2(segment, 20.0));
+            painter.rect_filled(thumb, 10, blue);
+            let mut picked = None;
+            for (i, label) in labels.iter().enumerate() {
+                let cell = Rect::from_min_size(pos2(track.left() + segment * i as f32, track.top()), vec2(segment, 20.0));
+                let colour = if i == chosen { Color32::WHITE } else { ink };
+                text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 11.7, Weight::Regular, colour);
+                if ui.interact(cell, ui.scope_id().with(("eraser segment", i)), Sense::click()).clicked() {
+                    picked = Some(modes[i]);
+                }
+            }
+            if let Some(mode) = picked {
+                session.set_vector_eraser(mode);
+            }
+        });
+    if out < 1.0 || (at - chosen as f32).abs() > 1e-3 {
+        ctx.request_repaint();
     }
 }
 

@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Which panel hangs from the top bar.
 enum Panel {
@@ -37,6 +38,8 @@ struct Question {
     var message = "It can't be brought back."
     var action = "Delete"
     var icon: PcIcon? = PcIcons.trash
+    /// Its action in red: it takes something away.
+    var destructive = true
     let perform: () -> Void
 }
 
@@ -174,6 +177,8 @@ final class CanvasModel {
     var insertPrivate = false
     var pdfAsking: ShareKind?
     var saying: (title: String, message: String)?
+    /// The panel a plugin's action showed, while it is open.
+    var pluginPanel: PluginPanel?
     /// The size and opacity side bar shows.
     var showSideBar = true {
         didSet { applyFitInsets() }
@@ -187,11 +192,19 @@ final class CanvasModel {
     var companionMode: CompanionMode?
     @ObservationIgnored var colorNames = false
     @ObservationIgnored var feedbackSounds = false
+    /// The canvas is on screen and the app in front: its strokes are heard (a plugin's sound).
+    @ObservationIgnored var hearsStrokes = false {
+        didSet { followStrokeSound() }
+    }
     @ObservationIgnored var naming: Task<Void, Never>?
     @ObservationIgnored var namedAt = Date.distantPast
 
     /// The QuickMenu, open around this window point (in points); the Copy & Paste panel.
     var quickMenuAt: CGPoint?
+    /// The finger that opened the QuickMenu (sliding off, or held still) is still down on the
+    /// canvas, and what it last did under the menu.
+    @ObservationIgnored var quickMenuHeld = false
+    var quickMenuFinger: FingerStep?
     var copyPasteOpen = false
 
     /// The adjustment open, its values as the core has them, the menu a tap on the canvas opened
@@ -229,7 +242,16 @@ final class CanvasModel {
     }
     /// What was last cut or copied, for pasting.
     @ObservationIgnored private var clipboard: ThumbnailImage?
-    private(set) var canPaste = false
+    /// The system clipboard's change count once that was put on it, none while it's on its way:
+    /// anything on it since was copied in another app, and is what Paste takes.
+    @ObservationIgnored private var clipboardMark: Int?
+    /// How many cuts and copies there have been, so only the last goes on the system clipboard.
+    @ObservationIgnored private var copiesMade = 0
+    private(set) var hasCopy = false
+    /// Something was cut or copied here, or another app put a picture on the system clipboard.
+    var canPaste: Bool {
+        hasCopy || UIPasteboard.general.hasImages
+    }
     /// The drawing guide is on.
     var guideOn: Bool {
         guide.info.on
@@ -328,6 +350,10 @@ final class CanvasModel {
     init(session: CanvasSession, dir: String) {
         self.session = session
         self.dir = dir
+        // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+        if session.pluginKind() != nil {
+            _ = session.openPluginArtwork(plugins: PluginsModel.shared.store)
+        }
         _ = session.openBrushes(dir: Self.brushesDir)
         addPendingBrushes()
         brushSets = session.brushLibrary()
@@ -342,9 +368,13 @@ final class CanvasModel {
         }
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
+        session.setVectorCrisp(on: settings.vectorCrisp)
         session.setLightInterface(on: settings.lightInterface)
         session.setPourAllLayers(on: drop.allLayers)
+        // the system's Reduce Motion: a dropped colour's fill shows at once
+        session.setReduceMotion(reduce: UIAccessibility.isReduceMotionEnabled)
         session.setFillOpacity(opacity: selection.fillOpacity)
+        session.setSelectionPixelated(on: selection.pixelated)
         applyInput()
         session.useColourHistory(history: Self.colourHistory)
         history = Self.colourHistory.colours()
@@ -571,6 +601,20 @@ final class CanvasModel {
         libraryChanged()
     }
 
+    /// The brushes the app comes with that were deleted, back where they ship; said how many.
+    func restoreShippedBrushes() {
+        let back = session.restoreShippedBrushes()
+        if back > 0 {
+            libraryChanged()
+        }
+        let said: String = switch back {
+        case 0: "Every brush ProCraft comes with is in the library."
+        case 1: "1 brush is back."
+        default: "\(back) brushes are back."
+        }
+        showNotice(said)
+    }
+
     func deleteBrush(_ b: BrushInfo) {
         if session.deleteBrush(set: b.set, index: b.index) {
             libraryChanged()
@@ -709,6 +753,56 @@ final class CanvasModel {
                     Sharing.share([made])
                 } else {
                     self?.showNotice("The brush couldn't be exported.", warning: true)
+                }
+            }
+        }
+    }
+
+    /// Brush and set files from elsewhere (several brushes dragged in at once), read one after
+    /// another off the main thread under one card: together they join the library. `then` once
+    /// they are read (or at once, with none, or with another card up).
+    func importBrushes(from urls: [URL], then: (() -> Void)? = nil) {
+        guard let first = urls.first, importShown == nil, exportShown == nil else {
+            then?()
+            return
+        }
+        guard urls.count > 1 else {
+            importBrushes(from: first, then: then)
+            return
+        }
+        importCancelled = false
+        importShown = ProgressShown(progress: 0, detail: first.lastPathComponent)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var reads: [BrushesRead] = []
+            var last = first.lastPathComponent
+            for (i, url) in urls.enumerated() {
+                guard let self, !self.importCancelled else { break }
+                let name = url.lastPathComponent
+                DispatchQueue.main.async {
+                    guard !self.importCancelled else { return }
+                    self.importShown = ProgressShown(progress: Float(i) / Float(urls.count), detail: name)
+                }
+                if let read = url.readPicked().flatMap({ readBrushes(bytes: $0, fileName: name) }) {
+                    reads.append(read)
+                    last = name
+                }
+            }
+            then?()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard !self.importCancelled, !reads.isEmpty else {
+                    self.importShown = nil
+                    if !self.importCancelled {
+                        self.showNotice("These files have no brushes in them.", warning: true)
+                    }
+                    return
+                }
+                self.importShown = ProgressShown(progress: 1, done: true, detail: last)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { self.importShown = nil }
+                self.brushesRead += reads
+                self.addBrushesRead()
+                if reads.count < urls.count {
+                    self.showNotice("\(urls.count - reads.count) of the files had no brushes in them.", warning: true)
                 }
             }
         }
@@ -1075,6 +1169,7 @@ final class CanvasModel {
         selection.closed()
         selecting = false
         selection.showLook()
+        readVectorNodes()
     }
 
     /// Window pixels to canvas pixels through the view, or none when it cannot be inverted.
@@ -1109,7 +1204,7 @@ final class CanvasModel {
 
     /// Opens adjustment `a` on the current layer (keeping one already open).
     func startAdjustment(_ a: Adjustment) {
-        guard currentTakesChanges() else { return }
+        guard currentTakesChanges(adjustment: a) else { return }
         _ = switchModes(.adjustment)
         closeForAdjustment()
         // Gradient Map maps by the library
@@ -1355,8 +1450,9 @@ final class CanvasModel {
         if recoloring {
             recolor.readPoint()
         }
-        if could || name != nil {
-            showNotice("Undo" + (name.map { " \($0)" } ?? ""))
+        // (none while a plugin hides undo's notices)
+        if could || name != nil, let notice = session.stepNotice(undo: true, name: name) {
+            showNotice(notice)
         }
         // cloning, the core put the source back where it was before the stroke
         if adjustment != nil {
@@ -1386,8 +1482,8 @@ final class CanvasModel {
         let could = canRedo
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         let name = recoloring ? recolor.afterFills { session.redo() } : session.redo()
-        if could {
-            showNotice("Redo" + (name.map { " \($0)" } ?? ""))
+        if could, let notice = session.stepNotice(undo: false, name: name) {
+            showNotice(notice)
         }
         if adjustment != nil {
             readAdjust()
@@ -1409,7 +1505,12 @@ final class CanvasModel {
                 quickShapeEditing = false
             }
         }
+        readVectorNodes()
         layers = session.layers()
+        let eraser = session.vectorEraser()
+        if eraser != vectorEraser {
+            vectorEraser = eraser
+        }
         followMaskColour()
         background = session.background()
         // undoing may put the canvas back in another profile
@@ -1422,14 +1523,18 @@ final class CanvasModel {
     // MARK: Actions
 
     func cutLayer() {
+        cut(share: true)
+    }
+
+    /// Cut, put on the system clipboard too if `share`.
+    private func cut(share: Bool) {
         guard currentTakesChanges() else {
             closePanels()
             return
         }
         let cut = session.cutLayer()
         if let cut {
-            clipboard = cut
-            canPaste = true
+            copied(cut, share: share)
         }
         closePanels()
         refresh()
@@ -1439,10 +1544,14 @@ final class CanvasModel {
     }
 
     func copyLayer() {
+        copy(share: true)
+    }
+
+    /// Copy, put on the system clipboard too if `share`.
+    private func copy(share: Bool) {
         let copied = session.copyLayer()
         if let copied {
-            clipboard = copied
-            canPaste = true
+            self.copied(copied, share: share)
         }
         closePanels()
         if copied != nil {
@@ -1452,8 +1561,7 @@ final class CanvasModel {
 
     func copyLayerContents(_ l: LayerInfo) {
         if let copied = session.copyLayerContents(id: l.id) {
-            clipboard = copied
-            canPaste = true
+            self.copied(copied, share: true)
         }
     }
 
@@ -1465,15 +1573,103 @@ final class CanvasModel {
             let copied = session.copyCanvas()
             DispatchQueue.main.async {
                 guard let self, let copied else { return }
-                self.clipboard = copied
-                self.canPaste = true
+                self.copied(copied, share: true, whole: true)
                 self.showNotice("Canvas copied")
             }
         }
     }
 
+    /// `image` (premultiplied, the canvas's size) kept for Paste and, if `share`, put on the system
+    /// clipboard for other apps: what is painted of it, or all of it if `whole`.
+    private func copied(_ image: ThumbnailImage, share: Bool, whole: Bool = false) {
+        clipboard = image
+        hasCopy = true
+        copiesMade += 1
+        guard share else {
+            // what the system clipboard holds is older than this
+            clipboardMark = UIPasteboard.general.changeCount
+            return
+        }
+        clipboardMark = nil
+        let made = copiesMade
+        let p3 = CanvasSpace.shared.p3
+        // a big canvas takes a moment to make into a PNG: Paste here doesn't wait for it
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let png = Self.png(image, p3: p3, cropped: !whole)
+            DispatchQueue.main.async {
+                guard let self, self.copiesMade == made else { return }
+                if let png {
+                    UIPasteboard.general.setData(png, forPasteboardType: UTType.png.identifier)
+                }
+                self.clipboardMark = UIPasteboard.general.changeCount
+            }
+        }
+    }
+
+    /// A picture the core made (premultiplied RGBA rows) as a PNG, cut down to what is painted of
+    /// it if `cropped`; none if nothing is.
+    static func png(_ t: ThumbnailImage, p3: Bool, cropped: Bool) -> Data? {
+        let width = Int(t.width)
+        let height = Int(t.height)
+        guard width > 0, height > 0, t.rgba.count >= width * height * 4 else { return nil }
+        var box = (x0: 0, y0: 0, x1: width, y1: height)
+        if cropped {
+            box = (width, height, 0, 0)
+            t.rgba.withUnsafeBytes { bytes in
+                for y in 0 ..< height {
+                    let row = y * width * 4
+                    for x in 0 ..< width where bytes[row + x * 4 + 3] != 0 {
+                        box.x0 = min(box.x0, x)
+                        box.x1 = max(box.x1, x + 1)
+                        box.y0 = min(box.y0, y)
+                        box.y1 = y + 1
+                    }
+                }
+            }
+            guard box.x1 > box.x0, box.y1 > box.y0 else { return nil }
+        }
+        let (w, h) = (box.x1 - box.x0, box.y1 - box.y0)
+        var pixels = Data(count: w * h * 4)
+        pixels.withUnsafeMutableBytes { to in
+            t.rgba.withUnsafeBytes { from in
+                for y in 0 ..< h {
+                    let at = ((box.y0 + y) * width + box.x0) * 4
+                    to.baseAddress!.advanced(by: y * w * 4).copyMemory(from: from.baseAddress!.advanced(by: at), byteCount: w * 4)
+                }
+            }
+        }
+        guard let space = CGColorSpace(name: p3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: pixels as CFData),
+              let image = CGImage(
+                  width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: space,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              ) else { return nil }
+        let out = NSMutableData()
+        guard let file = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(file, image, nil)
+        return CGImageDestinationFinalize(file) ? out as Data : nil
+    }
+
+    /// What was cut or copied here as a source image (the shape and grain editors' Paste), unless
+    /// another app put a picture on the system clipboard since; none if nothing of it is painted.
+    func copySource() -> Data? {
+        guard let image = clipboard, clipboardMark == nil || clipboardMark == UIPasteboard.general.changeCount else {
+            return nil
+        }
+        let source = sourceFromCopy(image: image)
+        return source.isEmpty ? nil : source
+    }
+
     /// What was cut or copied, on a new layer; a private one is left out of the gallery's thumbnail.
+    /// A picture another app put on the system clipboard since then comes in instead.
     func paste(isPrivate: Bool = false) {
+        let board = UIPasteboard.general
+        let ours = clipboard != nil && (clipboardMark == nil || clipboardMark == board.changeCount)
+        if !ours, board.hasImages {
+            pasteFromOtherApp(isPrivate: isPrivate)
+            return
+        }
         guard let image = clipboard else { return }
         // through a plugin it takes a moment on a big canvas: the screen doesn't wait for it
         if !isPrivate, session.pastesIntoMask() {
@@ -1497,20 +1693,49 @@ final class CanvasModel {
         refresh()
     }
 
+    /// The picture on the system clipboard as an inserted one comes in, ready to transform (into
+    /// the current mask instead, if a plugin says to); a moving GIF's frames on the timeline.
+    private func pasteFromOtherApp(isPrivate: Bool) {
+        let board = UIPasteboard.general
+        let type = board.types.first { UTType($0)?.conforms(to: .image) == true }
+        let data = type.flatMap { board.data(forPasteboardType: $0) } ?? board.image?.pngData()
+        if type.flatMap({ UTType($0)?.conforms(to: .gif) }) == true {
+            insertPicture(data, name: "Pasted.gif", isPrivate: isPrivate)
+            return
+        }
+        closePanels()
+        guard let data, let image = GalleryModel.decode(data, p3: CanvasSpace.shared.p3)?.image else {
+            showNotice("This picture can't be opened.", warning: true)
+            return
+        }
+        // (a mask that takes what is pasted has no use for a copy of the picture)
+        if !isPrivate, session.pastePictureIntoMask(image: image) {
+            refresh()
+            return
+        }
+        guard session.insertImage(image: image, private: isPrivate) != nil else {
+            noRoomForLayers()
+            return
+        }
+        refresh()
+        toggleTransform()
+    }
+
     /// Cut & Paste: what is selected (or the layer) cut out and put back as a new layer.
     func cutAndPaste() {
         guard currentTakesChanges() else {
             closePanels()
             return
         }
-        cutLayer()
+        // kept here: the system clipboard is left as it was
+        cut(share: false)
         paste()
     }
 
     /// Duplicate: the selection copied to a new layer, or without one the current layer.
     func duplicateCurrent() {
         if session.hasSelection() {
-            copyLayer()
+            copy(share: false)
             paste()
         } else if let l = layers.first(where: { $0.current }) {
             duplicate(l)
@@ -1547,6 +1772,78 @@ final class CanvasModel {
             noRoomForLayers()
         }
         refresh()
+    }
+
+    /// The Layers panel's + held: a new vector layer, which keeps what is drawn on it as strokes
+    /// and fills.
+    func addVectorLayer() {
+        feedback()
+        if session.addVectorLayer() == 0 {
+            noRoomForLayers()
+        } else {
+            showNotice("Vector Layer")
+        }
+        refresh()
+    }
+
+    /// How the eraser works on vector layers: taking what its brush covers, whole strokes, or a
+    /// stroke up to where it crosses others. Chosen in the Eraser band.
+    private(set) var vectorEraser: VectorEraser = .subtract
+
+    func chooseVectorEraser(_ mode: VectorEraser) {
+        guard mode != vectorEraser else { return }
+        feedback()
+        session.setVectorEraser(mode: mode)
+        vectorEraser = mode
+    }
+
+    /// The Eraser band shows under the top bar: the Erase tool is up on a vector layer, drawing
+    /// strokes (its lasso only subtracts), with no mode or other band in its place.
+    var eraserBandShown: Bool {
+        tool == .erase && !eraseLasso && !barsHidden && !selecting && !transforming && !adjusting
+            && !recoloring && quickShape == nil && opacityLayer == nil && drop.band == .none
+            && layers.first(where: { $0.current })?.vector == true
+    }
+
+    /// The nodes of the one stroke picked on a vector layer (window pixels, x and y in turn), shown
+    /// while a selection tool is up: a drag of one pulls the stroke into another shape.
+    private(set) var vectorNodes: [Float] = []
+
+    /// Reads those nodes again: the selection, the view or the stroke changed.
+    func readVectorNodes() {
+        let nodes = selecting ? session.vectorNodes() : []
+        if nodes != vectorNodes {
+            vectorNodes = nodes
+        }
+    }
+
+    /// Whether strokes or fills are picked on vector layer `l`, to be given the brush's colour,
+    /// brush or size.
+    func vectorPicked(_ l: LayerInfo) -> Bool {
+        l.current && l.vector && session.vectorPickedCount() > 0
+    }
+
+    /// Gives what is picked on the vector layer the paint brush's colour, brush or size as they
+    /// are set now.
+    func vectorApply(_ what: VectorApply) {
+        feedback()
+        if session.vectorApply(what: what) {
+            refresh()
+        }
+    }
+
+    /// Whether vector layers are drawn as fine as the screen when zoomed in.
+    var vectorCrisp: Bool { AppSettings.shared.vectorCrisp }
+
+    /// Crisp zoom on or off, kept for every artwork from now on.
+    func changeVectorCrisp(_ on: Bool) {
+        AppSettings.shared.vectorCrisp = on
+        session.setVectorCrisp(on: on)
+    }
+
+    func toggleVectorCrisp() {
+        changeVectorCrisp(!vectorCrisp)
+        showNotice(vectorCrisp ? "Crisp Zoom On" : "Crisp Zoom Off")
     }
 
     /// Says how many layers this canvas holds, there being no room for another.
@@ -1792,6 +2089,7 @@ final class CanvasModel {
         if quickShape != nil {
             quickShape = session.quickshapeInfo() ?? quickShape
         }
+        readVectorNodes()
         // a stroke on a locked or hidden layer, or a group, drew nothing: say why (text layers ask
         // to rasterize)
         if !adjusting, layers.first(where: { $0.current })?.text != true {
@@ -1854,6 +2152,8 @@ final class CanvasModel {
         if quickShape != nil {
             quickShape = session.quickshapeInfo()
         }
+        // so do a picked stroke's nodes
+        readVectorNodes()
     }
 
     /// The interface hidden or shown again (not while transforming).
@@ -1890,9 +2190,17 @@ final class CanvasModel {
     /// Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
     /// cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
     /// not done afterwards. With `paint` (a stroke or a fill) a group current says so too.
-    func currentTakesChanges(paint: Bool = false) -> Bool {
-        guard let l = layers.first(where: { $0.current }),
-              let why = paint ? session.whyUnpainted() : session.whyBlocked() else { return true }
+    func currentTakesChanges(paint: Bool = false, adjustment: Adjustment? = nil) -> Bool {
+        guard let l = layers.first(where: { $0.current }) else { return true }
+        // the shared core decides
+        let asked: Blocked? = if paint {
+            session.whyUnpainted()
+        } else if let adjustment {
+            session.whyNotAdjusted(adjustment: adjustment)
+        } else {
+            session.whyBlocked()
+        }
+        guard let why = asked else { return true }
         blocked = BlockedLayer(why: why, layer: l, by: session.hiddenBy())
         return false
     }

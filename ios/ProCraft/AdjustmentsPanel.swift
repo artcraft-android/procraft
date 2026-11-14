@@ -11,6 +11,8 @@ struct AdjustmentsPanel: View {
     private let groups = adjustmentGroups()
     /// The filters imported: the menu's last group is one row to them, there only with some.
     private let filters = PluginsModel.shared.store.filters()
+    /// The plugins' actions listed here, after the filters.
+    private let actions = PluginsModel.shared.store.actionsIn(place: .adjustments)
     /// The menu has turned to them.
     @State private var showFilters = false
 
@@ -40,6 +42,10 @@ struct AdjustmentsPanel: View {
             ForEach(filters, id: \.id) { filter in
                 Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
                 row(filter.name) { model.startPluginFilter(filter) }
+            }
+            ForEach(actions, id: \.key) { action in
+                Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                row(action.label) { model.runPluginAction(action.key) }
             }
         }
     }
@@ -82,7 +88,7 @@ struct AdjustmentsPanel: View {
                             .background(RoundedRectangle(cornerRadius: 13, style: .circular).fill(Pc.actionsGroup))
                             .clipShape(RoundedRectangle(cornerRadius: 13, style: .circular))
                         }
-                        if !filters.isEmpty {
+                        if !filters.isEmpty || !actions.isEmpty {
                             group { row("Plugins") { showFilters = true } }
                         }
                         }

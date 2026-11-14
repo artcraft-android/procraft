@@ -203,9 +203,9 @@ fun DropBandUi(vm: CanvasViewModel) {
                         Spacer(Modifier.width(13.dp))
                     }
                     Segmented(
-                        if (vm.dropOnReference) "Reference" else "Layer", "All Layers",
-                        second = vm.dropAllLayers, ink = ink, blue = blue,
-                    ) { vm.chooseDropAllLayers(it) }
+                        listOf(if (vm.dropOnReference) "Reference" else "Layer", "All Layers"),
+                        chosen = if (vm.dropAllLayers) 1 else 0, ink = ink, blue = blue,
+                    ) { vm.chooseDropAllLayers(it == 1) }
                     Spacer(Modifier.width(13.dp))
                     if (what == DropBand.FILLING) {
                         // the tick ends filling
@@ -243,32 +243,90 @@ fun DropBandUi(vm: CanvasViewModel) {
 }
 
 /**
- * Two choices side by side in a rounded track, the chosen one under a blue thumb that slides
- * across to the other when it is tapped: [second] whether the second is chosen.
+ * The Eraser band under the top bar, sliding down from behind it as ColorDrop's does: while the
+ * Erase tool is up on a vector layer, how the eraser works there — taking what its brush covers
+ * (Subtract), whole strokes, or a stroke up to where it crosses others. It stays while erasing.
  */
 @Composable
-private fun Segmented(first: String, secondLabel: String, second: Boolean, ink: Color, blue: Color, choose: (Boolean) -> Unit) {
-    val at by animateFloatAsState(if (second) 1f else 0f, Motion.switchKnob(), label = "segment")
-    Box(Modifier.size(SegmentWidth * 2, 20.dp).clip(RoundedCornerShape(10.dp)).background(if (Pc.light) TrackLight else TrackDark)) {
-        Box(Modifier.offset(x = SegmentWidth * at).size(SegmentWidth, 20.dp).clip(RoundedCornerShape(10.dp)).background(blue))
+fun EraserBandUi(vm: CanvasViewModel) {
+    val on = vm.eraserBandShown
+    val shown = remember { Animatable(0f) }
+    LaunchedEffect(on) {
+        if (on) shown.animateTo(1f, Motion.noticeIn()) else shown.animateTo(0f, Motion.noticeOut())
+    }
+    if (!on && shown.value <= 0f) return
+    val ink = if (Pc.light) Color(0xFF222222) else Color(0xFFC5C5C5)
+    val blue = Pc.tinted(if (Pc.light) Color(0xFF0A8CFD) else Color(0xFF0076FD))
+    val modes = io.github.artcraftandroid.procraft.core.VectorEraser.entries
+    BoxWithConstraints(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().clipToBounds()) {
+        val width = maxWidth
+        val named = width >= EraserRoomForNames
+        Box(
+            Modifier.graphicsLayer { translationY = -(1f - shown.value) * size.height }
+                .fillMaxWidth().height(32.dp).background(if (Pc.light) BandLight else BandDark),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // on a narrow screen the control has the band to itself
+                if (width >= EraserRoomForTitle) {
+                    Text("Eraser", color = ink, fontSize = 16.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Spacer(Modifier.width(13.dp))
+                }
+                Segmented(
+                    if (named) listOf("Subtract", "Whole Stroke", "To Crossing") else listOf("Subtract", "Stroke", "Crossing"),
+                    chosen = modes.indexOf(vm.vectorEraser).coerceAtLeast(0),
+                    segment = if (named) EraserSegmentWidth else SegmentWidth, ink = ink, blue = blue,
+                    enabled = on,
+                ) { vm.chooseVectorEraser(modes[it]) }
+            }
+        }
+    }
+}
+
+/**
+ * A band's choices side by side in a rounded track, the chosen one under a blue thumb that slides
+ * across to another when it is tapped.
+ */
+@Composable
+private fun Segmented(
+    labels: List<String>,
+    chosen: Int,
+    segment: Dp = SegmentWidth,
+    ink: Color,
+    blue: Color,
+    enabled: Boolean = true,
+    choose: (Int) -> Unit,
+) {
+    val at by animateFloatAsState(chosen.toFloat(), Motion.switchKnob(), label = "segment")
+    Box(Modifier.size(segment * labels.size, 20.dp).clip(RoundedCornerShape(10.dp)).background(if (Pc.light) TrackLight else TrackDark)) {
+        Box(Modifier.offset(x = segment * at).size(segment, 20.dp).clip(RoundedCornerShape(10.dp)).background(blue))
         Row {
-            for ((index, label) in listOf(first, secondLabel).withIndex()) {
-                val chosen = second == (index == 1)
+            for ((index, label) in labels.withIndex()) {
+                val on = index == chosen
                 Box(
-                    Modifier.size(SegmentWidth, 20.dp)
+                    Modifier.size(segment, 20.dp)
                         .semantics {
                             role = Role.Tab
-                            selected = chosen
+                            selected = on
                         }
-                        .press { choose(index == 1) },
+                        .press { if (enabled) choose(index) },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(label, color = if (chosen) Color.White else ink, fontSize = 11.7.sp, maxLines = 1)
+                    Text(label, color = if (on) Color.White else ink, fontSize = 11.7.sp, maxLines = 1)
                 }
             }
         }
     }
 }
+
+/** Each of the Eraser band's segments: room for "Whole Stroke" and "To Crossing". */
+private val EraserSegmentWidth = 84.dp
+
+/** Under this, the Eraser band leaves its title out for the segmented control. */
+private val EraserRoomForTitle: Dp = 352.dp
+
+/** Under this, the Eraser band's segments take shorter names. */
+private val EraserRoomForNames: Dp = 268.dp
 
 /** Each of the band's segments, room for "All Layers" and "Reference". */
 private val SegmentWidth = 68.dp

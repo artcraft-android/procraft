@@ -302,6 +302,11 @@ pub struct Layer {
     /// Strokes on it follow the drawing guide (drawing assist).
     #[serde(default)]
     pub assisted: bool,
+    /// A vector layer's strokes, kept as strokes (see [`crate::vector`]): its pixels are what
+    /// they draw, until they are changed some other way. Not in the document's own file: an
+    /// artwork's file keeps them apart.
+    #[serde(skip)]
+    pub vector: Option<std::sync::Arc<crate::vector::VectorContent>>,
 }
 
 impl Layer {
@@ -323,7 +328,14 @@ impl Layer {
             text: None,
             private: false,
             assisted: false,
+            vector: None,
         }
+    }
+
+    /// Whether the layer is made of more than its pixels (a text layer's text, a vector layer's
+    /// strokes): what changes pixels alone leaves it be, until it is rasterized.
+    pub fn is_made(&self) -> bool {
+        self.text.is_some() || self.vector.is_some()
     }
 
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
@@ -1060,7 +1072,63 @@ impl Document {
 
     /// Makes a text layer an ordinary one, its pixels kept; false if it wasn't one.
     pub fn rasterize(&mut self, id: LayerId) -> bool {
-        self.layer_mut(id).and_then(|l| l.text.take()).is_some()
+        let Some(l) = self.layer_mut(id) else { return false };
+        // (both taken, whichever it has)
+        let (text, vector) = (l.text.take(), l.vector.take());
+        text.is_some() || vector.is_some()
+    }
+
+    /// Adds a vector layer above the current one (in its group) and makes it current: an empty
+    /// layer whose strokes are kept as strokes.
+    pub fn add_vector_layer(&mut self) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.vector = Some(std::sync::Arc::default());
+        }
+        id
+    }
+
+    /// Layer `id` made a vector layer holding `content` (as read back from where it was kept);
+    /// false if there is no such layer, or it is a group, a mask or text.
+    pub fn set_vector(&mut self, id: LayerId, content: crate::vector::VectorContent) -> bool {
+        let Some(l) = self.layer_mut(id).filter(|l| l.kind == LayerKind::Paint && l.text.is_none()) else {
+            return false;
+        };
+        l.vector = Some(std::sync::Arc::new(content));
+        true
+    }
+
+    /// Whether layer `id` keeps its strokes as strokes.
+    pub fn is_vector(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|l| l.vector.is_some())
+    }
+
+    /// Vector layer `id`'s strokes all gone: whether it had any, none if it isn't one.
+    pub fn clear_strokes(&mut self, id: LayerId) -> Option<bool> {
+        let content = self.layer_mut(id)?.vector.as_mut()?;
+        let had = !content.is_empty();
+        if had {
+            *content = std::sync::Arc::default();
+        }
+        Some(had)
+    }
+
+    /// Vector layer `id`'s content changed by `change`, which says whether it changed anything
+    /// (and leaves it alone otherwise); none if it isn't a vector layer.
+    pub fn change_vector<T>(
+        &mut self,
+        id: LayerId,
+        change: impl FnOnce(&mut crate::vector::VectorContent) -> T,
+    ) -> Option<T> {
+        let content = self.layer_mut(id)?.vector.as_mut()?;
+        Some(change(std::sync::Arc::make_mut(content)))
+    }
+
+    /// `stroke` kept on top of vector layer `id`'s strokes; false if it isn't one.
+    pub fn keep_stroke(&mut self, id: LayerId, stroke: crate::vector::VectorStroke) -> bool {
+        let Some(content) = self.layer_mut(id).and_then(|l| l.vector.as_mut()) else { return false };
+        std::sync::Arc::make_mut(content).push(stroke);
+        true
     }
 
     /// Adds an empty layer above the current one (in its group) and makes it current. It is named

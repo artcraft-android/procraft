@@ -439,6 +439,12 @@ private struct ClassicPicker: View {
         let across: CGFloat = compact ? 248 : 344
         let down: CGFloat = compact ? 248 : square
         VStack(spacing: 0) {
+            // a plugin's: its picker, or a triangle, in the square's place
+            if PluginsModel.shared.colourTriangle || PluginsModel.shared.pickerOn {
+                PluginPicker(c: c, side: compact ? 248 : min(344, square))
+                    .frame(width: across, height: down)
+                    .padding(.horizontal, compact ? 6 : 16)
+            } else {
             ZStack(alignment: .topLeading) {
                 ZStack {
                     LinearGradient(colors: [.white, canvasColor(pure)], startPoint: .leading, endPoint: .trailing)
@@ -459,6 +465,7 @@ private struct ClassicPicker: View {
             }
             .frame(width: across, height: down, alignment: .topLeading)
             .padding(.horizontal, compact ? 6 : 16)
+            }
             if compact {
                 // the hue only, 240 wide under the 248 square
                 SliderRow(value: huePosition(control: .slider, hue: hue), colours: sliderHues) {
@@ -477,6 +484,76 @@ private struct ClassicPicker: View {
                 .padding(.horizontal, 20)
             }
         }
+    }
+}
+
+/// A plugin's picker in Classic's square, `side` square: a picker plugin's picture, touches and
+/// knob, or else a triangle (saturation and brightness between the pure hue at the right, white at
+/// the top left and black at the bottom left) drawn by the core.
+private struct PluginPicker: View {
+    let c: any ColorPick
+    let side: CGFloat
+    @Environment(\.displayScale) private var scale
+
+    var body: some View {
+        let plugins = PluginsModel.shared
+        let picker = plugins.pickerOn
+        let hue = c.hue
+        let n = UInt32(max((side * scale).rounded(), 1))
+        let at = (picker ? plugins.store.pickerPoint(s: c.saturation, v: c.brightness) : nil)
+            ?? trianglePoint(s: c.saturation, v: c.brightness)
+        ZStack(alignment: .topLeading) {
+            if let image = PickerPicture.shared.image(hue: hue, side: n, picker: picker) {
+                Image(decorative: image, scale: scale)
+                    .resizable()
+                    .frame(width: side, height: side)
+            }
+            Knob(radius: 10.75, fill: canvasColor(c.rgb()))
+                .offset(x: CGFloat(at.first ?? 0) * side - 10.75, y: CGFloat(at.dropFirst().first ?? 0) * side - 10.75)
+                .allowsHitTesting(false)
+        }
+        .frame(width: side, height: side, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+            let x = Float(min(max(drag.location.x / side, 0), 1))
+            let y = Float(min(max(drag.location.y / side, 0), 1))
+            let sv = (picker ? plugins.store.pickerPick(x: x, y: y) : nil) ?? triangleSv(x: x, y: y)
+            if sv.count >= 2 {
+                c.setHsv(hue, sv[0], sv[1])
+            }
+        })
+    }
+}
+
+/// The plugin picker's picture for the last hue and size asked, kept until another is asked.
+private final class PickerPicture {
+    static let shared = PickerPicture()
+    private var key: (hue: Float, side: UInt32, picker: Bool, changes: Int)?
+    private var kept: CGImage?
+
+    func image(hue: Float, side: UInt32, picker: Bool) -> CGImage? {
+        // (a plugin's settings changed draw it again)
+        let changes = PluginsModel.shared.changes
+        if let key, key.hue == hue, key.side == side, key.picker == picker, key.changes == changes {
+            return kept
+        }
+        let count = Int(side) * Int(side) * 4
+        // a picker plugin's, blank if it couldn't draw; else the core's triangle
+        let rgba = picker
+            ? (PluginsModel.shared.pickerSession?.pickerPicture(hue: hue, side: side) ?? Data(count: count))
+            : trianglePicture(hue: hue, side: side)
+        key = (hue, side, picker, changes)
+        guard rgba.count >= count, let provider = CGDataProvider(data: rgba as CFData) else {
+            kept = nil
+            return nil
+        }
+        kept = CGImage(
+            width: Int(side), height: Int(side), bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(side) * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+        )
+        return kept
     }
 }
 

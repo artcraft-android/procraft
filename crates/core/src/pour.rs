@@ -20,6 +20,60 @@ use crate::{CanvasSession, Shared, State};
 /// What is said of a fill with more in it than can go through a plugin.
 const TOO_BIG: &str = "This fill is too big for a plugin: it stays as it is.";
 
+/// Continuous filling: a pixel no more opaque than this (of 255) is unfilled.
+const UNFILLED: u8 = 8;
+/// Continuous filling: a place this near (canvas pixels) where a fill last came to nothing isn't
+/// tried again.
+const TRAIL_MISS: f32 = 12.0;
+
+/// Continue filling's Continuous drag: each area the touch crosses where nothing is filled yet is
+/// filled (kept at once, so a plugin on the fill hook closes it before the next is measured), and
+/// the whole drag is one undo step.
+#[derive(Default)]
+pub(crate) struct Trail {
+    /// The current layer's pixels as the drag's last fill left them, and what fills are measured
+    /// on (none inside: the layer itself), so neither is read back for each fill.
+    layer: Option<(LayerId, Vec<u8>)>,
+    measured: Option<Option<Vec<u8>>>,
+    /// Where the drag's fills reached, a byte a canvas pixel: none of it is filled again.
+    covered: Vec<u8>,
+    /// How many fills it kept (on a vector layer its one drop holds them all, and isn't counted).
+    kept: u32,
+    /// Where a fill last came to nothing (canvas pixels).
+    missed: Option<Vec2>,
+}
+
+impl Trail {
+    fn cover(&mut self, mask: &Mask) {
+        if self.covered.len() != mask.data.len() {
+            self.covered = vec![0; mask.data.len()];
+        }
+        for (c, &m) in self.covered.iter_mut().zip(&mask.data) {
+            *c |= u8::from(m > 0);
+        }
+    }
+
+    fn cover_pixel(&mut self, i: usize, pixels: usize) {
+        if self.covered.len() != pixels {
+            self.covered = vec![0; pixels];
+        }
+        if let Some(c) = self.covered.get_mut(i) {
+            *c = 1;
+        }
+    }
+}
+
+/// What a place on a Continuous drag did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrailStep {
+    /// It was filled.
+    Filled,
+    /// Something is filled there already (or it is off the canvas): nothing to do.
+    Passed,
+    /// The last fill is still being finished by a plugin: it is to be tried again.
+    Busy,
+}
+
 /// A pour a plugin is finishing: when it has, and whoever is waiting for that.
 #[derive(Default)]
 pub(crate) struct Finishing {
@@ -127,6 +181,28 @@ impl Pour {
         Some((region, pixels))
     }
 
+    /// The layer's pixels with the pour as it now is put in, what it was measured on, and what of
+    /// the canvas it reached (before the selection): it ends.
+    fn settled(mut self, width: u32) -> (Vec<u8>, Option<Vec<u8>>, Option<Mask>) {
+        let threshold = self.shown as f32 / 1000.0;
+        let reached = self.flood.as_ref().map(|flood| self.closed.clone().unwrap_or_else(|| flood.mask(threshold)));
+        // (nothing shown yet: the whole of it comes back)
+        self.shown_region = None;
+        self.shown_mask = None;
+        let region = self.pour_region(width, threshold, false);
+        let mut pixels = std::mem::take(&mut self.before);
+        if let Some(([x, y, w, _], part)) = region {
+            let (stride, row) = (width as usize * 4, w as usize * 4);
+            for (r, from) in part.chunks_exact(row.max(1)).enumerate() {
+                let at = (y as usize + r) * stride + x as usize * 4;
+                if let Some(to) = pixels.get_mut(at..at + row) {
+                    to.copy_from_slice(from);
+                }
+            }
+        }
+        (pixels, self.elsewhere.take(), reached)
+    }
+
     /// The area measured again from canvas point `seed`, on the reference layer or the layer as
     /// it was.
     fn measure(&mut self, width: u32, height: u32, seed: (u32, u32)) {
@@ -205,6 +281,21 @@ pub(crate) fn closed_by(hooks: &Hooks, mut mask: Mask, seed: (u32, u32)) -> Opti
 fn end_pour(shared: &Shared, st: &mut State, keep: bool, name: Option<&str>) {
     let Some(pour) = st.pour.take() else { return };
     let keep = keep && pour.flood.is_some();
+    // a Continuous drag goes on from the layer as this leaves it
+    if st.pour_trail.is_some() {
+        let (width, layer) = (st.doc.width(), pour.layer);
+        let (pixels, measured, reached) = if keep { pour.settled(width) } else { (pour.before, pour.elsewhere, None) };
+        if let Some(trail) = st.pour_trail.as_mut() {
+            trail.layer = Some((layer, pixels));
+            if trail.measured.is_none() {
+                trail.measured = Some(measured);
+            }
+            if let Some(reached) = &reached {
+                trail.cover(reached);
+            }
+            trail.kept += u32::from(keep);
+        }
+    }
     if let Some(canvas) = st.canvas.as_mut() {
         if keep {
             canvas.name_next_step(name.unwrap_or("ColorDrop"));
@@ -335,6 +426,10 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let seed = seed_at(st, x, y);
+        if st.vector_pour_move(seed.and_then(|_| st.window_to_canvas(x, y))) {
+            self.shared.frame(st);
+            return true;
+        }
         let (w, h) = (st.doc.width(), st.doc.height());
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return false };
         let same = match seed {
@@ -356,6 +451,10 @@ impl CanvasSession {
     pub fn pour_colour(&self, r: f32, g: f32, b: f32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.vector_pour_colour([r, g, b].map(unit)) {
+            self.shared.frame(st);
+            return;
+        }
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
         let colour = [r, g, b].map(unit);
         if colour == pour.colour {
@@ -371,6 +470,10 @@ impl CanvasSession {
     pub fn pour_threshold(&self, threshold: f32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.vector_pour_threshold(threshold) {
+            self.shared.frame(st);
+            return;
+        }
         let Some(pour) = st.pour.as_mut().filter(|p| p.finishing.is_none()) else { return };
         let t = thousandths(threshold);
         if t == pour.shown {
@@ -402,6 +505,10 @@ impl CanvasSession {
         self.await_pour();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.vector_pour_end(keep, name.as_deref()) {
+            self.shared.frame(st);
+            return;
+        }
         if keep && self.finish_pour(st, &name) {
             return;
         }
@@ -416,6 +523,53 @@ impl CanvasSession {
 }
 
 impl State {
+    /// Whether a pour measures what every visible layer shows (All Layers, or a plugin saying
+    /// so), which changes as the current layer is filled.
+    fn pour_measures_all(&self) -> bool {
+        self.pour_all_layers || self.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers())
+    }
+
+    /// What a pour on layer `current` is measured on, when not the layer itself: every visible
+    /// layer together (All Layers), every layer seen while a plugin says so, or else the
+    /// reference layer when another layer is it.
+    fn pour_measured_on(&mut self, current: LayerId) -> Option<Vec<u8>> {
+        if self.pour_all_layers {
+            self.layers_composite()
+        } else if self.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+            self.composite_pixels()
+        } else {
+            self.doc.reference().filter(|&r| r != current).and_then(|r| self.layer_pixels(r))
+        }
+    }
+
+    /// Whether canvas pixel `seed` of layer `current` is somewhere a Continuous drag fills: not
+    /// reached by it yet, and nothing there, on the layer or on what it is measured on.
+    fn trail_unfilled(&mut self, current: LayerId, seed: (u32, u32)) -> bool {
+        let i = seed.1 as usize * self.doc.width() as usize + seed.0 as usize;
+        let Some(trail) = self.pour_trail.as_ref() else { return false };
+        if trail.covered.get(i).is_some_and(|&c| c > 0) {
+            return false;
+        }
+        let (read_layer, read_measured) =
+            (trail.layer.as_ref().is_none_or(|(l, _)| *l != current), trail.measured.is_none());
+        if read_layer {
+            let pixels = self.current_pixels();
+            if let Some(trail) = self.pour_trail.as_mut() {
+                trail.layer = pixels.map(|p| (current, p));
+            }
+        }
+        if read_measured {
+            let measured = self.pour_measured_on(current);
+            if let Some(trail) = self.pour_trail.as_mut() {
+                trail.measured = Some(measured);
+            }
+        }
+        let Some(trail) = self.pour_trail.as_ref() else { return false };
+        let clear = |p: &[u8]| p.get(i * 4 + 3).is_some_and(|&a| a <= UNFILLED);
+        trail.layer.as_ref().is_some_and(|(_, p)| clear(p))
+            && trail.measured.as_ref().is_none_or(|m| m.as_deref().is_none_or(clear))
+    }
+
     /// The visible layers composited together without the background, everything queued drawn
     /// first: what a pour measures with All Layers.
     fn layers_composite(&mut self) -> Option<Vec<u8>> {
@@ -442,19 +596,42 @@ impl CanvasSession {
         let (w, h) = (st.doc.width(), st.doc.height());
         let current = st.doc.current();
         let Some(layer) = st.doc.layer(current).cloned() else { return false };
-        if st.doc.is_locked(current) || layer.text.is_some() {
+        // on a vector layer the fill is traced from the strokes' lines and kept as a shape; its
+        // threshold is how wide an opening between them it gets out through
+        if layer.vector.is_some() {
+            if st.doc.is_locked(current) {
+                return false;
+            }
+            let Some(at) = st.window_to_canvas(x, y) else { return false };
+            // dropped on what is picked, or on a stroke's ink, the colour is theirs
+            st.finish_stroke();
+            st.settle();
+            if st.vector_recolour_at(current, at, [r, g, b].map(unit)) {
+                self.shared.frame(st);
+                return true;
+            }
+            // (the fill is kept whole: what was selected is let go of first)
+            st.let_go_of_selection();
+            let poured = st.vector_pour_begin(current, at, [r, g, b].map(unit), threshold);
+            if poured {
+                self.shared.frame(st);
+            }
+            return poured;
+        }
+        if st.doc.is_locked(current) || layer.is_made() {
             return false;
         }
-        let Some(before) = st.current_pixels() else { return false };
+        // (a Continuous drag knows the layer as its last fill left it, and what that was measured
+        // on unless every layer is, which that fill changed)
+        let trail = st.pour_trail.as_mut();
+        let known = trail.and_then(|t| t.layer.take()).filter(|(l, _)| *l == current).map(|(_, p)| p);
+        let Some(before) = known.or_else(|| st.current_pixels()) else { return false };
         let within = st.reach_selection();
-        // measured on every visible layer together (All Layers), on every layer seen while a
-        // plugin says so, or else on the reference layer when another layer is it
-        let elsewhere = if st.pour_all_layers {
-            st.layers_composite()
-        } else if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
-            st.composite_pixels()
-        } else {
-            st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r))
+        let all = st.pour_measures_all();
+        let measured = st.pour_trail.as_ref().filter(|t| !all || t.kept == 0).and_then(|t| t.measured.clone());
+        let elsewhere = match measured {
+            Some(measured) => measured,
+            None => st.pour_measured_on(current),
         };
         let mut pour = Pour {
             layer: current,
@@ -485,6 +662,102 @@ impl CanvasSession {
         }
         self.shared.frame(st);
         true
+    }
+
+    /// Continue filling's Continuous drag begins: what [`CanvasSession::pour_trail_at`] fills
+    /// from here is one undo step, made by [`CanvasSession::pour_trail_end`].
+    pub(crate) fn pour_trail_begin(&self) {
+        self.pour_trail_end(true);
+        self.pour_end(true, None);
+        self.await_pour();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        st.pour_trail = Some(Trail::default());
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.mark_steps();
+        }
+    }
+
+    /// Whether a Continuous drag is under way.
+    pub(crate) fn pour_trailing(&self) -> bool {
+        self.shared.lock().pour_trail.is_some()
+    }
+
+    /// The Continuous drag at window point (`x`, `y`): where nothing is filled yet, on the canvas
+    /// and not reached by the drag already, `colour` (0..1) is poured with `threshold` and kept.
+    pub(crate) fn pour_trail_at(&self, x: f32, y: f32, colour: [f32; 3], threshold: f32) -> TrailStep {
+        if self.pour_finishing() {
+            return TrailStep::Busy;
+        }
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let (Some(seed), Some(at)) = (seed_at(st, x, y), st.window_to_canvas(x, y)) else { return TrailStep::Passed };
+        let Some(trail) = st.pour_trail.as_ref() else { return TrailStep::Passed };
+        if trail.missed.is_some_and(|m| (m.x - at.x).hypot(m.y - at.y) < TRAIL_MISS) {
+            return TrailStep::Passed;
+        }
+        let current = st.doc.current();
+        let Some(layer) = st.doc.layer(current) else { return TrailStep::Passed };
+        // (text takes no colour until it is rasterized)
+        let (vector, text) = (layer.vector.is_some(), layer.text.is_some());
+        if st.doc.is_locked(current) || text {
+            return TrailStep::Passed;
+        }
+        // on a vector layer one drop holds every fill the drag makes
+        let filled = if vector {
+            if !st.vector_unfilled(current, at) {
+                return TrailStep::Passed;
+            }
+            let filled = st.vector_pour_more(current, at, colour.map(unit), threshold);
+            self.shared.frame(st);
+            filled
+        } else {
+            if !st.trail_unfilled(current, seed) {
+                return TrailStep::Passed;
+            }
+            drop(guard);
+            let filled = self.begin_pour(x, y, colour, threshold, false);
+            if filled {
+                self.pour_end(true, None);
+            }
+            guard = self.shared.lock();
+            let st = &mut *guard;
+            let (w, h) = (st.doc.width() as usize, st.doc.height() as usize);
+            if let Some(trail) = st.pour_trail.as_mut() {
+                trail.cover_pixel(seed.1 as usize * w + seed.0 as usize, w * h);
+            }
+            filled
+        };
+        if !filled && let Some(trail) = guard.pour_trail.as_mut() {
+            trail.missed = Some(at);
+        }
+        if filled { TrailStep::Filled } else { TrailStep::Passed }
+    }
+
+    /// The Continuous drag ends: `keep` makes all it filled one undo step; otherwise it is all
+    /// taken back, with no step left of it.
+    pub(crate) fn pour_trail_end(&self, keep: bool) {
+        if !self.pour_trailing() {
+            return;
+        }
+        self.pour_end(keep, None);
+        self.await_pour();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(trail) = st.pour_trail.take() else { return };
+        let Some(canvas) = st.canvas.as_mut() else { return };
+        canvas.collapse_steps();
+        if !keep && trail.kept > 0 {
+            canvas.undo();
+            st.flush();
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.forget_redo();
+            }
+        }
+        st.revision += 1;
+        self.shared.frame(st);
     }
 
     /// Waits for a fill a plugin is finishing, if there is one.

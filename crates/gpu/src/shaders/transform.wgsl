@@ -1,15 +1,18 @@
 // A layer redrawn from its copy: through a projective map (each layer pixel looks up where it
 // came from in the copy), or as a mesh of triangles each carrying where its corners came from
-// (a warp). Either way the copy is filtered there (nearest, bilinear or bicubic). With a
+// (a warp). Either way the copy is filtered there (nearest, bilinear or bicubic, or for pixel art
+// the nearest pixel of the copy enlarged by Scale2x's rule). With a
 // selection only what it selects moves, over what it leaves where it was. Premultiplied
 // throughout.
 
 struct TransformUniform {
-    // the map from layer pixel coordinates to copy pixel coordinates, row by row (3 × 3)
+    // the map from layer pixel coordinates to copy pixel coordinates, row by row (3 × 3); r0.w is
+    // how many times over the pixel art filter enlarges the copy (1 to 3)
     r0: vec4<f32>,
     r1: vec4<f32>,
     r2: vec4<f32>,
-    // (filter: 0 nearest, 1 bilinear, 2 bicubic, the copy's width, height, 1 with a selection)
+    // (filter: 0 nearest, 1 bilinear, 2 bicubic, 3 pixel art, the copy's width, height, 1 with a
+    // selection)
     p: vec4<f32>,
 }
 
@@ -61,11 +64,71 @@ fn cubic(t: f32) -> vec4<f32> {
     );
 }
 
+// whether two of the copy's colours are one colour
+fn same(a: vec4<f32>, b: vec4<f32>) -> bool {
+    return all(abs(a - b) < vec4<f32>(0.002));
+}
+
+// Scale2x's rule (procraft_engine::pixel::grown): the quarter q (0 or 1 across and down) of pixel
+// p between a above it, b to its right, c to its left and d below. A corner takes a neighbour's
+// colour where the two neighbours beside it are alike and unlike those across from them.
+fn quarter(p: vec4<f32>, a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32>, q: vec2<i32>) -> vec4<f32> {
+    if (q.x == 0 && q.y == 0 && same(c, a) && !same(c, d) && !same(a, b)) {
+        return a;
+    }
+    if (q.x == 1 && q.y == 0 && same(a, b) && !same(a, c) && !same(b, d)) {
+        return b;
+    }
+    if (q.x == 0 && q.y == 1 && same(d, c) && !same(d, b) && !same(c, a)) {
+        return c;
+    }
+    if (q.x == 1 && q.y == 1 && same(b, d) && !same(b, a) && !same(d, c)) {
+        return d;
+    }
+    return p;
+}
+
+// the copy enlarged once, twice and three times over, a pixel of each (u in its own pixels)
+fn grown1(u: vec2<i32>) -> vec4<f32> {
+    let v = u >> vec2<u32>(1u);
+    return quarter(
+        texel(v), texel(v + vec2<i32>(0, -1)), texel(v + vec2<i32>(1, 0)), texel(v + vec2<i32>(-1, 0)),
+        texel(v + vec2<i32>(0, 1)), u & vec2<i32>(1),
+    );
+}
+
+fn grown2(u: vec2<i32>) -> vec4<f32> {
+    let v = u >> vec2<u32>(1u);
+    return quarter(
+        grown1(v), grown1(v + vec2<i32>(0, -1)), grown1(v + vec2<i32>(1, 0)), grown1(v + vec2<i32>(-1, 0)),
+        grown1(v + vec2<i32>(0, 1)), u & vec2<i32>(1),
+    );
+}
+
+fn grown3(u: vec2<i32>) -> vec4<f32> {
+    let v = u >> vec2<u32>(1u);
+    return quarter(
+        grown2(v), grown2(v + vec2<i32>(0, -1)), grown2(v + vec2<i32>(1, 0)), grown2(v + vec2<i32>(-1, 0)),
+        grown2(v + vec2<i32>(0, 1)), u & vec2<i32>(1),
+    );
+}
+
 // the copy filtered at copy coordinate s (pixel centres at +0.5)
 fn filtered(s: vec2<f32>) -> vec4<f32> {
     let kind = i32(tu.p.x);
     if (kind == 0) {
         return texel(vec2<i32>(floor(s)));
+    }
+    if (kind == 3) {
+        // pixel art: the pixel under s of the copy enlarged (2, 4 or 8 times as large each way)
+        let levels = i32(tu.r0.w);
+        if (levels >= 3) {
+            return grown3(vec2<i32>(floor(s * 8.0)));
+        }
+        if (levels == 2) {
+            return grown2(vec2<i32>(floor(s * 4.0)));
+        }
+        return grown1(vec2<i32>(floor(s * 2.0)));
     }
     let c = s - 0.5;
     let base = vec2<i32>(floor(c));

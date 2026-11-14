@@ -87,6 +87,18 @@ final class PluginsModel {
     private(set) var plugins: [PluginInfo] = []
     /// Goes up with any change that may move what a plugin answers, for what asks it again.
     private(set) var changes = 0
+    /// Whether a plugin draws in-betweens (the frame options then offer In-between).
+    private(set) var tweens = false
+    /// Whether a plugin has the colour panel's Classic show a triangle in place of its square.
+    private(set) var colourTriangle = false
+    /// Whether a picker plugin draws Classic's square (and says where touches land on it).
+    private(set) var pickerOn = false
+    /// Whether a plugin sets brushes' settings at random (the brush studio shows Randomise).
+    private(set) var randomisesBrushes = false
+    /// Whether a plugin pins panels open: a touch on the canvas paints and leaves the panel up.
+    private(set) var pinsPanels = false
+    /// The artwork open, whose GPU draws a picker plugin's picture.
+    @ObservationIgnored weak var pickerSession: CanvasSession?
     /// Words for someone who changed a setting that now comes as a plugin, said once.
     private(set) var movedNotice: String?
     /// A plugin file waiting on the one screen that asks about it, and what it holds.
@@ -117,6 +129,16 @@ final class PluginsModel {
     /// The list as it stands: a plugin may have stopped on a stroke since it was read.
     func read() {
         plugins = store.plugins()
+        // what the plugins change in how the interface looks, and what it offers
+        let accent = store.accentColour()
+        if Look.shared.accent != accent {
+            Look.shared.accent = accent
+        }
+        tweens = store.tweens()
+        colourTriangle = store.colourTriangle()
+        pickerOn = store.pickerOn()
+        randomisesBrushes = store.randomisesBrushes()
+        pinsPanels = store.pinsPanels()
     }
 
     private func changed() {
@@ -148,6 +170,30 @@ final class PluginsModel {
     func setSlider(_ slider: PluginSlider, _ value: Float) {
         guard let landed = store.setSlider(key: slider.key, value: value) else { return }
         keep(slider.key, "\(landed)")
+        changed()
+    }
+
+    /// A sound picked at `url` for the file control `key`: read off the main thread (any sound the
+    /// system plays, a minute of it at most), then kept with its plugin, which keeps it itself.
+    /// `done` says whether it could be used.
+    func pickSound(_ key: String, _ url: URL, done: @escaping (Bool) -> Void) {
+        let name = url.deletingPathExtension().lastPathComponent
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let wav = decodedSound(url)
+            DispatchQueue.main.async {
+                guard let self, let wav, self.store.setSoundFile(key: key, name: name, wav: wav) else {
+                    done(false)
+                    return
+                }
+                self.changed()
+                done(true)
+            }
+        }
+    }
+
+    /// The file control `key` lets its sound go.
+    func clearFile(_ key: String) {
+        guard store.clearFile(key: key) else { return }
         changed()
     }
 

@@ -214,17 +214,23 @@ impl CanvasSession {
         self.shared.lock().plugin_artwork.as_ref().map(|a| a.kept.clone())
     }
 
-    /// Whether the session shows a plugin's artwork, which shares as SVG too.
+    /// Whether the session shares as SVG too: it shows a plugin's artwork, or the artwork has
+    /// vector layers with something on them.
     pub fn exports_svg(&self) -> bool {
-        self.shared.lock().plugin_artwork.is_some()
+        let st = self.shared.lock();
+        st.plugin_artwork.is_some() || st.vector_picture().is_some()
     }
 
-    /// The plugin's artwork written to `path` as an SVG picture, its shapes kept as they are.
+    /// Written to `path` as an SVG picture: a plugin's artwork with its shapes kept as they are;
+    /// any other, its vector layers, each stroke and fill a shape (layers of pixels are not in
+    /// it).
     pub fn export_svg(&self, path: String) -> Result<(), crate::MobileError> {
         let canvas = self.shared.lock().plugin_artwork.as_ref().map(|a| Arc::clone(&a.canvas));
         let reason = |why: &str| crate::MobileError::File { reason: why.to_owned() };
-        let text = canvas.ok_or_else(|| reason("not an artwork a plugin draws"))?.svg();
-        let text = text.ok_or_else(|| reason("the plugin couldn't draw it"))?;
+        let text = match canvas {
+            Some(canvas) => canvas.svg().ok_or_else(|| reason("the plugin couldn't draw it"))?,
+            None => self.vector_svg().ok_or_else(|| reason("no vector layer with anything on it"))?,
+        };
         crate::project::write_atomically(std::path::Path::new(&path), |p| {
             std::fs::write(p, text.as_bytes()).map_err(|e| reason(&format!("writing the picture: {e}")))
         })

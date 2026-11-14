@@ -67,6 +67,8 @@ pub struct Transform {
     snap_lines: (Vec<f32>, Vec<f32>),
     /// The lines (an x and a y, canvas pixels) the box held in a move has snapped onto now.
     snapped: [Option<f32>; 2],
+    /// Pixel art: the content keeps to whole pixels however it is moved or sized ([`on_pixels`]).
+    pixelated: bool,
 }
 
 /// What a drag is pulled towards.
@@ -104,7 +106,29 @@ impl Transform {
             drag: None,
             snap_lines: (Vec::new(), Vec::new()),
             snapped: [None; 2],
+            pixelated: false,
         }
+    }
+
+    /// Pixel art on or off: on, the content keeps to whole pixels from now on (and goes onto them
+    /// now, which is no step of its own): moved by whole pixels, its edges on whole pixels when it
+    /// is sized.
+    pub fn set_pixelated(&mut self, on: bool) {
+        self.pixelated = on;
+        if on && self.drag.is_none() {
+            self.now = on_pixels(&self.now);
+        }
+    }
+
+    /// Whether the content lies along the canvas's own axes (unturned, or turned by quarter
+    /// turns) with no warp: then its pixels stay whole pixels wherever it goes.
+    pub fn is_upright(&self) -> bool {
+        self.now.warp.is_none() && upright(self.now.content)
+    }
+
+    /// The placement as it is kept: on whole pixels, for pixel art.
+    fn kept(&self, p: Placement) -> Placement {
+        if self.pixelated { on_pixels(&p) } else { p }
     }
 
     /// Other things a moved box snaps onto: their bounds (`x`, `y`, `width`, `height`, canvas
@@ -162,7 +186,7 @@ impl Transform {
         if !to.is_finite() {
             return false;
         }
-        let next = self.dragged(handle, mode, from, to, start, guides).unwrap_or(start);
+        let next = self.kept(self.dragged(handle, mode, from, to, start, guides).unwrap_or(start));
         let moved = next != self.now;
         self.now = next;
         // a moved box sitting on a line it snaps to shows that line while held
@@ -188,7 +212,7 @@ impl Transform {
             .then(Affine::scale((now.length() / was.length()).max(MIN_SCALE)))
             .then(Affine::rotate(angle(now) - angle(was)))
             .then(Affine::translate(middle));
-        let next = map_placement(&start, m);
+        let next = self.kept(map_placement(&start, m));
         let moved = next != self.now;
         self.now = next;
         moved
@@ -342,7 +366,7 @@ impl Transform {
         self.drag = None;
         let finite =
             |n: &Placement| n.content.iter().chain(&n.frame).chain(n.warp.iter().flatten()).all(|v| v.is_finite());
-        if let Some(next) = f(&self.now).filter(finite)
+        if let Some(next) = f(&self.now).filter(finite).map(|next| self.kept(next))
             && next != self.now
         {
             self.history.push(self.now);
@@ -589,6 +613,51 @@ fn axes_scale_about(f: Quad, anchor: Vec2, sx: f32, sy: f32) -> Option<Affine> {
     let b = basis(f)?;
     let s = Affine { a: sx, d: sy, ..Affine::IDENTITY };
     Some(Affine::translate(Vec2::ZERO - anchor).then(b.inverse()?).then(s).then(b).then(Affine::translate(anchor)))
+}
+
+/// Whether a quad lies along the canvas's own axes: a rectangle unturned, or turned by quarter turns.
+fn upright(q: Quad) -> bool {
+    let [a, b, c, d] = q;
+    let near = |x: f32, y: f32| (x - y).abs() <= 1e-3;
+    (near(a.y, b.y) && near(b.x, c.x) && near(c.y, d.y) && near(d.x, a.x))
+        || (near(a.x, b.x) && near(b.y, c.y) && near(c.x, d.x) && near(d.y, a.y))
+}
+
+/// A stretch from `lo` to `hi` on whole pixels: a whole number of them long (one at least), the
+/// end nearer a whole pixel staying where it is, so a stretch already on them moves as a whole
+/// and one being sized keeps its other end.
+fn whole_span(lo: f32, hi: f32) -> (f32, f32) {
+    let size = (hi - lo).round().max(1.0);
+    let off = |v: f32| (v - v.round()).abs();
+    if off(hi) < off(lo) { (hi.round() - size, hi.round()) } else { (lo.round(), lo.round() + size) }
+}
+
+/// A placement kept to whole pixels, for pixel art. Content lying along the canvas's own axes has
+/// its edges brought onto whole pixels, so it moves and is sized by whole pixels and each of its
+/// pixels lands on whole ones; content turned any other way has its middle brought onto a pixel's
+/// corner or middle, so it moves by half pixels at most. A warp is left as it is.
+fn on_pixels(p: &Placement) -> Placement {
+    if p.warp.is_some() {
+        return *p;
+    }
+    if !upright(p.content) {
+        let c = centre(p.content);
+        let to = Vec2::new((c.x * 2.0).round() / 2.0, (c.y * 2.0).round() / 2.0);
+        return map_placement(p, Affine::translate(to - c));
+    }
+    let (lo, hi) =
+        p.content.iter().fold((Vec2::new(f32::MAX, f32::MAX), Vec2::new(f32::MIN, f32::MIN)), |(lo, hi), v| {
+            (Vec2::new(lo.x.min(v.x), lo.y.min(v.y)), Vec2::new(hi.x.max(v.x), hi.y.max(v.y)))
+        });
+    let (w, h) = (hi.x - lo.x, hi.y - lo.y);
+    if !(w > 1e-6 && h > 1e-6) {
+        return *p;
+    }
+    let ((x0, x1), (y0, y1)) = (whole_span(lo.x, hi.x), whole_span(lo.y, hi.y));
+    let m = Affine::translate(Vec2::ZERO - lo)
+        .then(Affine { a: (x1 - x0) / w, d: (y1 - y0) / h, ..Affine::IDENTITY })
+        .then(Affine::translate(Vec2::new(x0, y0)));
+    map_placement(p, m)
 }
 
 fn map_placement(p: &Placement, m: Affine) -> Placement {
@@ -969,5 +1038,48 @@ mod tests {
         t.set_size(f32::NAN, 10.0);
         assert!((t.size().0 - 100.0).abs() < 1e-2);
         assert!(t.undo() && t.undo() && t.undo() && !t.undo());
+    }
+
+    #[test]
+    fn pixel_art_keeps_the_content_on_whole_pixels() {
+        let mut t = Transform::new(10.0, 20.0, 100.0, 200.0, Vec::new());
+        t.set_pixelated(true);
+        // moved: by whole pixels, the size it was
+        t.grab(Handle::Move, Vec2::new(50.0, 50.0));
+        t.drag(TransformMode::Freeform, Vec2::new(53.4, 48.7), &NONE);
+        t.release();
+        assert!(quad_close(t.content(), rect(13.0, 19.0, 100.0, 200.0)), "{:?}", t.content());
+        // sized by its right edge: that edge onto a whole pixel, the left one staying
+        t.grab(Handle::Edge(1), Vec2::new(113.0, 119.0));
+        t.drag(TransformMode::Freeform, Vec2::new(120.6, 119.0), &NONE);
+        t.release();
+        assert!(quad_close(t.content(), rect(13.0, 19.0, 108.0, 200.0)), "{:?}", t.content());
+        // and by its left edge: the right one staying
+        t.grab(Handle::Edge(3), Vec2::new(13.0, 119.0));
+        t.drag(TransformMode::Freeform, Vec2::new(20.3, 119.0), &NONE);
+        t.release();
+        assert!(quad_close(t.content(), rect(20.0, 19.0, 101.0, 200.0)), "{:?}", t.content());
+        // never thinner than a pixel
+        t.grab(Handle::Edge(1), Vec2::new(121.0, 119.0));
+        t.drag(TransformMode::Freeform, Vec2::new(20.2, 119.0), &NONE);
+        t.release();
+        assert!(quad_close(t.content(), rect(20.0, 19.0, 1.0, 200.0)), "{:?}", t.content());
+        assert!(t.undo());
+        // a quarter turn is still along the canvas's axes, on whole pixels
+        assert!(t.is_upright());
+        t.rotate(std::f32::consts::FRAC_PI_2);
+        assert!(t.is_upright());
+        assert!(t.content().iter().all(|p| (p.x - p.x.round()).abs() < 1e-3 && (p.y - p.y.round()).abs() < 1e-3));
+        // any other turn isn't: its middle goes onto a half pixel at most
+        t.rotate(0.5);
+        assert!(!t.is_upright());
+        let c = centre(t.content());
+        assert!(((c.x * 2.0).round() - c.x * 2.0).abs() < 1e-3 && ((c.y * 2.0).round() - c.y * 2.0).abs() < 1e-3);
+        // off, it moves freely again
+        t.set_pixelated(false);
+        t.reset();
+        t.grab(Handle::Move, Vec2::new(50.0, 50.0));
+        t.drag(TransformMode::Freeform, Vec2::new(50.4, 50.0), &NONE);
+        assert!(quad_close(t.content(), rect(10.4, 20.0, 100.0, 200.0)));
     }
 }

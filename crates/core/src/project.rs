@@ -80,6 +80,15 @@ struct ArtworkFile {
 /// A plugin's artwork's data in its folder.
 pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
 
+/// The folder of an artwork's folder that keeps its vector layers' strokes and fills, a file each
+/// (see `vector_file.rs`).
+pub(crate) const VECTORS: &str = "vectors";
+
+/// Where vector layer `id`'s strokes and fills are kept in artwork folder `dir`.
+pub(crate) fn vector_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join(VECTORS).join(format!("{}.json", id.0))
+}
+
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
 /// rotation (radians).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -180,6 +189,8 @@ pub(crate) struct SaveSnapshot {
     reference_picture: Option<Arc<Vec<u8>>>,
     /// A plugin's artwork's data, if it is one.
     plugin_data: Option<Vec<u8>>,
+    /// Each vector layer's strokes and fills, as its file keeps them.
+    vectors: Vec<(LayerId, Arc<Vec<u8>>)>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -198,6 +209,8 @@ pub(crate) struct Saved {
     autosave: u64,
     /// A hash of the Reference window's picture as the folder has it, if it has one.
     reference_picture: Option<u64>,
+    /// A hash of each vector layer's file as the folder has it.
+    vectors: std::collections::HashMap<LayerId, u64>,
 }
 
 impl Saved {
@@ -211,6 +224,7 @@ impl Saved {
     pub(crate) fn opened(&mut self, dir: &Path) {
         self.dir = dir.to_path_buf();
         self.layers.clear();
+        self.vectors.clear();
         self.reference_picture = None;
     }
 
@@ -264,6 +278,8 @@ impl crate::State {
             && self.selection_before.is_none()
             // a ColorDrop's fill still open
             && self.pour.is_none()
+            && self.vector_pour.is_none()
+            && self.vector_reshape.is_none()
             && self.scene.as_ref().is_none_or(|s| !s.stroking)
     }
 
@@ -384,6 +400,9 @@ impl crate::State {
             .as_ref()
             .map(|a| a.kept.clone())
             .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.data.clone()));
+        let vector_layers: Vec<LayerId> =
+            self.doc.layers().iter().filter(|l| l.vector.is_some()).map(|l| l.id).collect();
+        let vectors = vector_layers.into_iter().filter_map(|id| Some((id, self.vector_file_kept(id)?))).collect();
         Ok(SaveSnapshot {
             changed: changed_ids,
             file,
@@ -396,6 +415,7 @@ impl crate::State {
             gpu,
             reference_picture,
             plugin_data,
+            vectors,
         })
     }
 }
@@ -508,6 +528,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         gpu,
         reference_picture,
         plugin_data,
+        vectors,
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
@@ -528,6 +549,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
+        saved.vectors.clear();
         saved.sets.clear();
         saved.reference_picture = None;
     }
@@ -595,6 +617,21 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, picture_path, &mut staged)?;
         }
+        // each vector layer's strokes and fills, where they changed since the folder's were
+        // written (the layers' pixels above are what they draw)
+        if !vectors.is_empty() {
+            fs::create_dir_all(dir.join(VECTORS)).map_err(|e| file_error("making the folder", e))?;
+        }
+        for (id, bytes) in &vectors {
+            let path = vector_path(dir, *id);
+            if saved.vectors.get(id) == Some(&pixels_hash(bytes)) && path.exists() {
+                continue;
+            }
+            let written = write_beside(&path, |p| {
+                fs::write(p, bytes.as_slice()).map_err(|e| file_error("writing a vector layer", e))
+            });
+            stage(written, path, &mut staged)?;
+        }
         // a plugin's artwork's own data, whole, before the document that names its kind
         if let Some(data) = plugin_data.as_deref() {
             let path = dir.join(PLUGIN_DATA);
@@ -622,6 +659,18 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     }
     for (id, hash, _) in &layers {
         saved.layers.insert(*id, *hash);
+    }
+    // vector layers' files as they are now; those of layers that are vector layers no longer go,
+    // now that the document is in place (a layer with no file there opens as its pixels)
+    saved.vectors = vectors.iter().map(|(id, bytes)| (*id, pixels_hash(bytes))).collect();
+    if let Ok(entries) = fs::read_dir(dir.join(VECTORS)) {
+        let keep: Vec<PathBuf> = vectors.iter().map(|(id, _)| vector_path(dir, *id)).collect();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !keep.contains(&path) {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
     // a picture taken away goes once the document without it is in place
     saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
@@ -743,6 +792,9 @@ impl CanvasSession {
                 Err(e) => log::error!("layer {:?}: {e}", layer.id),
             }
         }
+        // each vector layer's strokes and fills, for the layers that have a file of them
+        let vectors: Vec<(LayerId, Vec<u8>)> =
+            doc.layer_ids().filter_map(|id| Some((id, fs::read(vector_path(&dir, id)).ok()?))).collect();
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
         let session = CanvasSession::with_document(doc, file.name, Vec::new());
         // its files are as the last save left them: one unchanged since isn't written again
@@ -755,6 +807,12 @@ impl CanvasSession {
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
+            // (a file that can't be read leaves its layer as the pixels it has)
+            for (id, bytes) in &vectors {
+                if !st.vector_opened(*id, bytes) {
+                    log::error!("layer {id:?}: its strokes could not be read");
+                }
+            }
             st.info = file.info;
             st.saved_view = file.view;
             st.scene = scene;
@@ -892,6 +950,13 @@ impl CanvasSession {
         let session = CanvasSession::with_document(imported.document, imported.name, imported.pixels);
         {
             let mut st = session.shared.lock();
+            // its vector layers are vector layers still (one whose strokes can't be read is the
+            // pixels it came with)
+            for (id, bytes) in &imported.vectors {
+                if !st.vector_opened(*id, bytes) {
+                    log::error!("layer {id:?}: its strokes could not be read");
+                }
+            }
             st.info.strokes = imported.strokes;
             st.info.tracked_ms = (imported.tracked_seconds * 1000.0) as u64;
             st.info.author = imported.author;
@@ -929,6 +994,7 @@ impl CanvasSession {
             None => None,
         };
         self.exported(0.0);
+        let vectors: std::collections::HashMap<LayerId, Vec<u8>>;
         let (doc, pixels, composite, name, info, reference, reference_picture) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
@@ -952,6 +1018,9 @@ impl CanvasSession {
             }
             let reference = (st.reference_window.clone(), st.reference_picture.clone());
             st.count_tracked_time();
+            // each vector layer's strokes and fills go with it
+            let ids: Vec<LayerId> = st.doc.layers().iter().filter(|l| l.vector.is_some()).map(|l| l.id).collect();
+            vectors = ids.into_iter().filter_map(|id| Some((id, st.vector_file(id)?))).collect();
             (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1)
         };
         let (w, h) = (doc.width(), doc.height());
@@ -960,7 +1029,7 @@ impl CanvasSession {
             table.apply_rgba(&mut thumb, false);
         }
         let preview = png_bytes(tw, th, &thumb, &doc.picture_icc())?;
-        let bytes = procraft_engine::native::write(&procraft_engine::native::Export {
+        let export = procraft_engine::native::Export {
             document: &doc,
             pixels: &pixels,
             composite: &composite,
@@ -973,7 +1042,8 @@ impl CanvasSession {
             time_lapse: time_lapse.as_ref(),
             reference: Some(&reference),
             reference_picture: reference_picture.as_deref().map(Vec::as_slice),
-        });
+        };
+        let bytes = procraft_engine::native::write_with_vectors(&export, &vectors);
         self.exported(0.95);
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
         self.exported(1.0);
@@ -1599,6 +1669,7 @@ pub fn import_pages(
             text: None,
             private: false,
             assisted: false,
+            vector: None,
         });
     }
     let mut doc = Document::from_layers(w, h, layers, LayerId(1));

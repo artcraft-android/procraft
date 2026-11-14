@@ -628,7 +628,8 @@ impl CanvasSession {
     pub fn quickshape_hold(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.stroke.is_none() || st.shape.is_some() {
+        // (a stroke kept as a stroke stays as it was drawn)
+        if st.stroke.is_none() || st.shape.is_some() || st.vector_open.is_some() {
             return None;
         }
         // fitted to the stroke's line as stabilisation and motion filtering smoothed it

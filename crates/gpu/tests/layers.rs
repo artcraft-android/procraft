@@ -366,6 +366,104 @@ fn a_clipped_layer_follows_its_base_s_mask() {
     assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, 1, 8), left);
 }
 
+/// Covers the whole canvas at `opacity`.
+fn wash(canvas: &mut Canvas, layer: LayerId, rgb: [u8; 3], opacity: f32) {
+    let color = rgb.map(|c| f32::from(c) / 255.0);
+    canvas.begin_stroke(layer, StrokeStyle::new(StrokeTool::Paint, color, opacity));
+    canvas.add_stamps(&[Stamp::round(Vec2::new(8.0, 8.0), 100.0, 1.0)]);
+    canvas.end_stroke();
+}
+
+fn assert_near(got: [u8; 4], want: [u8; 3], what: &str) {
+    let worst = got.iter().zip(&want).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 2, "{what}: {got:?}, not about {want:?}");
+}
+
+#[test]
+fn clipped_paint_covers_a_thin_base_wholly() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // black, half there (as along a soft edge); red all over, clipped to it
+    let base = doc.current();
+    wash(&mut canvas, base, [0, 0, 0], 0.5);
+    let red = doc.add_layer();
+    fill(&mut canvas, &doc, red, [255, 0, 0]);
+    assert!(doc.set_clipped(red, true));
+    canvas.invalidate();
+    // half red over the white background, none of the black under it
+    assert_near(composite_at(&gpu, &mut doc, &mut canvas, 8, 8), [255, 128, 128], "red on a thin base");
+    // a second clipped layer covers the first as wholly
+    let top = doc.add_layer();
+    fill(&mut canvas, &doc, top, [128, 128, 255]);
+    assert!(doc.set_clipped(top, true));
+    canvas.invalidate();
+    assert_near(composite_at(&gpu, &mut doc, &mut canvas, 8, 8), [192, 192, 255], "two clipped layers");
+    // its blend mode is with what it is clipped to: red × (½, ½, 1), half there
+    doc.set_blend(top, BlendMode::Multiply);
+    canvas.invalidate();
+    assert_near(composite_at(&gpu, &mut doc, &mut canvas, 8, 8), [192, 128, 128], "multiplied into the base");
+    // the base's opacity is the whole's
+    assert!(doc.set_visible(top, false));
+    doc.set_opacity(base, 0.5);
+    canvas.invalidate();
+    assert_near(composite_at(&gpu, &mut doc, &mut canvas, 8, 8), [255, 191, 191], "a faded base");
+}
+
+#[test]
+fn a_clipped_layer_merges_into_a_thin_base_as_it_shows() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    wash(&mut canvas, base, [0, 0, 0], 0.5);
+    let red = doc.add_layer();
+    fill(&mut canvas, &doc, red, [255, 0, 0]);
+    assert!(doc.set_clipped(red, true));
+    canvas.invalidate();
+    let shown = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+    let before = doc.clone();
+    canvas.merge_down(red, base, before, None);
+    assert!(doc.finish_merge_down(red));
+    // the base recoloured, as thin as it was
+    assert_near(layer_at(&gpu, &mut doc, &mut canvas, base, 8, 8), [128, 0, 0], "merged");
+    let merged = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+    assert_near(merged, [shown[0], shown[1], shown[2]], "the picture after merging");
+}
+
+#[test]
+fn a_clipped_layer_worked_on_caches_around_its_base() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_cache_composites(true);
+    // bottom up: blue; black, half there; red and a multiplied layer clipped to it; a plain layer
+    let bottom = t.docs[0].current();
+    t.each(|doc, canvas| {
+        fill(canvas, doc, bottom, [40, 40, 200]);
+        let base = doc.add_layer();
+        wash(canvas, base, [0, 0, 0], 0.5);
+        let red = doc.add_layer();
+        doc.set_clipped(red, true);
+        fill(canvas, doc, red, [255, 0, 0]);
+        let shade = doc.add_layer();
+        doc.set_clipped(shade, true);
+        doc.set_blend(shade, BlendMode::Multiply);
+        paint(canvas, doc, shade, [128, 128, 128], Vec2::new(4.0, 4.0), 3.0, StrokeTool::Paint);
+        let plain = doc.add_layer();
+        paint(canvas, doc, plain, [20, 200, 20], Vec2::new(13.0, 13.0), 2.0, StrokeTool::Paint);
+        doc.set_current(red);
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "as made");
+    assert!(t.canvases[0].composites_cached(), "made around caches");
+    // half red over the blue, none of the black: the base composites with what is clipped to it
+    let px = t.canvases[1].read_composite(&gpu).unwrap();
+    let i = ((8 * W + 8) * 4) as usize;
+    assert_near([px[i], px[i + 1], px[i + 2], px[i + 3]], [148, 20, 100], "red on a thin base over blue");
+    let red = t.docs[0].current();
+    t.each(|doc, canvas| paint(canvas, doc, red, [255, 255, 0], Vec2::new(10.0, 6.0), 3.0, StrokeTool::Paint));
+    t.same(&gpu, 2, "painted");
+    assert!(t.canvases[0].composites_cached(), "kept");
+}
+
 #[test]
 fn duplicate_delete_and_undo_keep_pixels() {
     let Some((gpu, mut doc, mut canvas)) = setup() else { return };
