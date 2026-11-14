@@ -385,6 +385,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // the file dialogs open over it
+        files::dialogs_over(&window);
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
         // the brushes read while the gallery shows, so the first artwork opens without reading them

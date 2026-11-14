@@ -841,7 +841,7 @@ impl Layers {
 
     /// Layer `id`'s content in `channel` replaced by a picture chosen now.
     fn replace_map(&mut self, session: &CanvasSession, colours: &mut Colours, id: u64, channel: u32) {
-        let Some(path) = rfd::FileDialog::new().set_title("Replace Material Map Content").pick_file() else { return };
+        let Some(path) = crate::files::dialog().set_title("Replace Material Map Content").pick_file() else { return };
         let Ok(picture) = image::open(&path) else {
             self.notice = Some(("This picture can't be opened.".to_owned(), true));
             return;

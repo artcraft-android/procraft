@@ -1614,7 +1614,7 @@ impl Interface {
     /// do.
     fn insert_picture(&mut self, session: &Arc<CanvasSession>, photo: bool, private: bool) {
         let title = if photo { "Insert a photo" } else { "Insert a file" };
-        let Some(path) = rfd::FileDialog::new()
+        let Some(path) = crate::files::dialog()
             .set_title(title)
             .add_filter("Pictures and videos", &[&PICTURES[..], &VIDEOS[..]].concat())
             .pick_file()

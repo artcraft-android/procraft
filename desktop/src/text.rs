@@ -1150,7 +1150,7 @@ impl TextEditor {
     /// Copies the font files the user picks into the app and offers them; the text takes the first.
     fn import_font(&mut self, session: &CanvasSession) -> Option<Said> {
         let endings = ["ttf", "otf", "ttc", "otc", "TTF", "OTF", "TTC", "OTC"];
-        let picked = rfd::FileDialog::new().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
+        let picked = crate::files::dialog().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
         fonts_ready();
         // kept in the fonts folder by the core (a file that isn't a font is dropped)
         let mut kept = picked.iter().filter_map(|from| {
