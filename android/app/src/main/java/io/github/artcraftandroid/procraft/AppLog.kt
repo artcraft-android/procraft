@@ -10,7 +10,8 @@ import java.io.File
 /**
  * The app's log, kept in a file as well so that it can be shared (the core keeps it:
  * procraft.log in the app's folder, the run before's beside it): a header about the app and the
- * device, the core's log, and the interface's warnings and errors, which go through [w] and [e].
+ * device, the core's log, the interface's warnings and errors, which go through [w] and [e], and
+ * the stack of an exception nothing caught.
  */
 object AppLog {
     private const val TAG = "ProCraft"
@@ -31,6 +32,16 @@ object AppLog {
         runCatching { io.github.artcraftandroid.procraft.core.startLogFile(app.filesDir.path, header(app)) }
             .onSuccess { kept = true }
             .onFailure { Log.e(TAG, "the log's file", it) }
+        if (kept) catchCrashes()
+    }
+
+    /** An exception nothing caught: its stack into the file, before the system's handler ends the app. */
+    private fun catchCrashes() {
+        val before = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching { toFile(LogLevel.ERROR, "crash", "uncaught on thread \"${thread.name}\"", error) }
+            before?.uncaughtException(thread, error)
+        }
     }
 
     /** A warning, to the system's log and the file. */
