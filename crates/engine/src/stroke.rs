@@ -231,6 +231,12 @@ const SLOW: f32 = 25.0;
 const SPAN: f32 = 100.0;
 /// How many frames the speed is smoothed over.
 const SPEED_FRAMES: f32 = 3.0;
+/// The rows the Speed dynamics plugin adds to the brush studio's Properties (`plugins/speed-dynamics`):
+/// a brush keeps each row's choice, counted from 0, under `plugin:<id>:<key>`.
+const SPEED_PLUGIN: &str = "plugin:user.speed-dynamics:";
+/// How many times more sensitive each choice of its `sensibilidad` row makes the speed dynamics:
+/// input counts as fast after that many times less movement.
+const SPEED_TIMES: [f32; 6] = [1.0, 2.0, 4.0, 6.0, 10.0, 20.0];
 /// The frames between two samples with the same time: those of a pen sampled 240 times a second.
 const SAMPLE_FRAMES: f32 = 0.25;
 /// The input rates stabilisation, motion filtering and pressure smoothing are tuned for, samples a
@@ -359,6 +365,8 @@ struct Extras {
     speed_size: f32,
     speed_opacity: f32,
     speed_spacing: f32,
+    /// How many times more than usual the speed counts input as fast, less one (0: as usual).
+    speed_more: f32,
     stabilization: f32,
     flip_x: bool,
     flip_y: bool,
@@ -452,6 +460,11 @@ impl Extras {
     fn of(b: &Brush) -> Extras {
         let unit = |k: &str| b.setting(k).clamp(0.0, 1.0);
         let both = |k: &str| b.setting(k).clamp(-1.0, 1.0);
+        // the Speed dynamics plugin's rows: a choice of 0 (off) to 10 tenths, or of a few steps
+        let row = |k: &str| b.setting(&format!("{}{}", SPEED_PLUGIN, k)).round().max(0.0);
+        let tenths = |k: &str| (row(k) / 10.0).min(1.0);
+        let plugin_size = tenths("grosor");
+        let plugin_opacity = tenths("opacidad");
         let switch = |k: &str| (b.setting(k) >= 0.5).then(|| unit(&format!("{k}_angle")));
         Extras {
             spacing_jitter: unit("spacing_jitter"),
@@ -462,9 +475,11 @@ impl Extras {
             pressure_roundness: both("pressure_roundness"),
             tilt_roundness: both("tilt_roundness"),
             roundness_jitter: [unit("roundness_jitter_y"), unit("roundness_jitter_x")],
-            speed_size: both("speed_size"),
-            speed_opacity: both("speed_opacity"),
+            // a row of the plugin, if it is set, in place of the brush's own speed control
+            speed_size: if plugin_size > 0.0 { plugin_size } else { both("speed_size") },
+            speed_opacity: if plugin_opacity > 0.0 { plugin_opacity } else { both("speed_opacity") },
             speed_spacing: unit("speed_spacing"),
+            speed_more: SPEED_TIMES.get(row("sensibilidad") as usize).map_or(0.0, |times| times - 1.0),
             stabilization: unit("stabilization"),
             flip_x: unit("flip_x") >= 0.5,
             flip_y: unit("flip_y") >= 0.5,
@@ -1298,7 +1313,7 @@ impl StrokeBuilder {
         self.segments = self.segments.saturating_add(1);
         if let Some(last) = self.last_sample {
             let moved = s.pos.distance(last.pos) * self.points_per_pixel / frames;
-            let scale = self.input.speed_distance.clamp(0.25, 1.0);
+            let scale = (self.input.speed_distance.clamp(0.25, 1.0) / (1.0 + self.extras.speed_more)).clamp(0.05, 1.0);
             let over = (moved - SLOW * scale) / (SPAN * scale);
             let now = if over > 0.0 && !self.steady { over.sqrt().min(1.0) } else { 0.0 };
             // the first move as it is; later ones smoothed over a few frames
