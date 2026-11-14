@@ -10056,6 +10056,58 @@ fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
 }
 
 #[test]
+fn a_dual_brush_takes_its_first_brushs_opacity_after_its_two_strokes_combine() {
+    use procraft_engine::brush::Brush;
+    let Some(s) = session(120, 120) else { return };
+    s.set_brush_size(0.5);
+    s.set_color(0.0, 0.0, 0.0);
+    // the ink one straight stroke lays with the current brush at the opacity slider's `opacity`
+    let ink = |s: &CanvasSession, opacity: f32| {
+        s.set_brush_opacity(opacity);
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+        s.stroke_add((1..30).map(|k| sample(10.0 + k as f32 * 3.4, 60.0, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        let sum: u64 = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let id = st.doc.current();
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            canvas.read_layer(gpu, id).unwrap().chunks(4).map(|p| u64::from(p[3])).sum()
+        };
+        s.undo();
+        sum as f64
+    };
+    // a glaze (the round pen) with a second of wide dabs far apart, cut by Linear Height: where
+    // the second is thin, faint paint of the first rises to full, so an opacity taken into the
+    // first's paint before the cut would come out stronger than it is
+    let mut second = Brush { name: "Dabs".to_owned(), ..Brush::round_pen() };
+    second.set_setting("spacing", 1.0);
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let tool = st.tool;
+        let brush = st.brush_mut(tool).unwrap();
+        brush.secondary = Some(Box::new(second));
+        brush.set_setting("dual_blend", 28.0);
+    }
+    let (full, half) = (ink(&s, 1.0), ink(&s, 0.5));
+    // the first's opacity at the slider, half, over the two strokes as they combined
+    assert!(full > 0.0 && (half / full - 0.5).abs() < 0.03, "{half} of {full}");
+    // and the second's own opacity range has no say over the whole (its stamps lighter, which
+    // this cut doesn't show)
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let tool = st.tool;
+        let brush = st.brush_mut(tool).unwrap();
+        brush.secondary.as_mut().unwrap().max_opacity = 0.5;
+    }
+    let still = ink(&s, 0.5);
+    assert!((still / full - 0.5).abs() < 0.03, "{still} of {full}");
+}
+
+#[test]
 fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
     use crate::TouchCommand;
     for seed in [12u32, 90] {
