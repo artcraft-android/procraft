@@ -1,10 +1,10 @@
 package io.github.artcraftandroid.procraft.canvas
 
+import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.ui.CanvasSpace
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -1841,7 +1841,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 CanvasSession.openModel(file, name, files, artwork, 0u)
                     .also(::loadModelTextures).also(::loadBrushes)
             }.onFailure {
-                android.util.Log.e("ProCraft", "opening a model", it)
+                AppLog.e("ProCraft", "opening a model", it)
                 why = (it as? io.github.artcraftandroid.procraft.core.MobileException.File)?.reason?.substringAfter(": ", "")
             }.getOrNull()
         }
@@ -2108,7 +2108,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 } ?: io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable
             } catch (e: Exception) {
-                android.util.Log.e("ProCraft", "importing a PDF", e)
+                AppLog.e("ProCraft", "importing a PDF", e)
                 io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable
             } finally {
                 pages.deleteRecursively()
@@ -2132,7 +2132,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 app.contentResolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } }
                 io.github.artcraftandroid.procraft.core.importPsd(temp.path, dir.path, name?.substringBeforeLast('.')?.trim().orEmpty())
             } catch (e: Exception) {
-                android.util.Log.e("ProCraft", "importing a PSD", e)
+                AppLog.e("ProCraft", "importing a PSD", e)
                 io.github.artcraftandroid.procraft.core.PsdOutcome.Unreadable
             } finally {
                 temp.delete()
@@ -2172,7 +2172,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             } ?: error("nothing to read")
             temp
         }.getOrElse {
-            if (!importCancelled) android.util.Log.e("ProCraft", "copying a file in", it)
+            if (!importCancelled) AppLog.e("ProCraft", "copying a file in", it)
             temp.delete()
             null
         }
@@ -2201,7 +2201,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             true
         } catch (e: Exception) {
-            android.util.Log.e("ProCraft", "importing a package", e)
+            AppLog.e("ProCraft", "importing a package", e)
             false
         }
     }
@@ -2214,7 +2214,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$extension")
                 s.exportPackage(out.path, System.nanoTime().toULong(), timeLapse?.forPackage())
                 out
-            }.onFailure { android.util.Log.e("ProCraft", "exporting a package", it) }.getOrNull()
+            }.onFailure { AppLog.e("ProCraft", "exporting a package", it) }.getOrNull()
         }
     }
 
@@ -3459,7 +3459,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     added++
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ProCraft", "a video's frames", e)
+                AppLog.e("ProCraft", "a video's frames", e)
             } finally {
                 retriever.release()
             }
@@ -3754,7 +3754,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         !exportCancelled
                     }
-                }.onFailure { Log.e(TAG, "exporting the time-lapse", it) }.getOrDefault(false)
+                }.onFailure { AppLog.e(TAG, "exporting the time-lapse", it) }.getOrDefault(false)
                 out.takeIf { ok }
             }
             if (exportCancelled) return null
@@ -5285,7 +5285,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (e: Throwable) {
-        Log.e(TAG, doing, e)
+        AppLog.e(TAG, doing, e)
         message = "This picture couldn't be used."
         null
     }
@@ -5730,7 +5730,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     s.exportPlugin(e.key, file.path)
                     file
                 } catch (x: MobileException) {
-                    Log.e(TAG, "exporting", x)
+                    AppLog.e(TAG, "exporting", x)
                     null
                 }
             }
@@ -5805,7 +5805,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 listOf(file)
             } catch (e: MobileException) {
-                Log.e(TAG, "exporting", e)
+                AppLog.e(TAG, "exporting", e)
                 emptyList()
             }
         }
@@ -5876,7 +5876,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 file
             } catch (e: MobileException) {
-                Log.e(TAG, "exporting the turntable", e)
+                AppLog.e(TAG, "exporting the turntable", e)
                 null
             }
         }
@@ -5980,7 +5980,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 file
             } catch (e: MobileException) {
-                Log.e(TAG, "exporting an animation", e)
+                AppLog.e(TAG, "exporting an animation", e)
                 null
             }
         } }
@@ -6005,7 +6005,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (jpeg) s.exportJpeg(file.path) else s.exportPng(file.path)
             } catch (e: MobileException) {
-                Log.e(TAG, "exporting", e)
+                AppLog.e(TAG, "exporting", e)
                 return@withContext null
             }
             file
@@ -6090,7 +6090,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val bytes = paletteStore.swatchesFile(i.toUInt()) ?: return@runCatching null
                 val base = p.name.filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Palette" }
                 File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.swatches").also { it.writeBytes(bytes) }
-            }.onFailure { Log.e(TAG, "sharing a palette", it) }.getOrNull()
+            }.onFailure { AppLog.e(TAG, "sharing a palette", it) }.getOrNull()
         }
     }
 
@@ -7804,7 +7804,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     mkdirs()
                 }
                 s.exportChosenPngs(folder.path).map { File(it) }
-            }.onFailure { Log.e(TAG, "exporting layers", it) }.getOrDefault(emptyList())
+            }.onFailure { AppLog.e(TAG, "exporting layers", it) }.getOrDefault(emptyList())
         }
     }
 

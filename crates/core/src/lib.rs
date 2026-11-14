@@ -16,6 +16,7 @@ mod adjust;
 mod adjust_menu;
 mod adjusting;
 mod animation;
+mod app_log;
 mod brush_files;
 mod brush_libraries;
 mod brush_library;

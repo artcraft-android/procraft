@@ -2,13 +2,13 @@ package io.github.artcraftandroid.procraft.canvas
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.util.Log
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.ui.geometry.Offset
 import androidx.input.motionprediction.MotionEventPredictor
+import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.PenPreferred
@@ -72,7 +72,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         }
         val id = NativeWindows.acquire(holder.surface)
         if (id == 0L) {
-            Log.e(TAG, "no native window for the surface")
+            AppLog.e(TAG, "no native window for the surface")
             return
         }
         try {
@@ -87,7 +87,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             remember(width, height, rotation)
         } catch (e: MobileException) {
             NativeWindows.release(id)
-            Log.e(TAG, "attaching the window", e)
+            AppLog.e(TAG, "attaching the window", e)
         }
     }
 
