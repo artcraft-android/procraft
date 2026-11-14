@@ -1098,6 +1098,31 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_that_doesnt_say_which_taper_it_has_is_written_with_the_newer_one() {
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+            secondary: None,
+        };
+        let classic_of = |brush: &Brush| {
+            let back = read(&write(brush, "", &pictures)).unwrap();
+            back.settings.iter().rev().find(|(k, _)| k == "classic_taper").map(|(_, v)| *v)
+        };
+        // as it draws and as the studio shows it
+        let mut brush = Brush::round_pen();
+        assert!(!brush.extra.contains_key("classic_taper"));
+        assert_eq!(brush.setting("classic_taper"), 0.0);
+        assert_eq!(classic_of(&brush), Some(0.0));
+        brush.set_setting("classic_taper", 1.0);
+        assert_eq!(classic_of(&brush), Some(1.0));
+    }
+
+    #[test]
     fn behind_survives_a_round_trip() {
         // the brush's and its burnt edges' blend modes, as brush files number them
         let mut brush = Brush::round_pen();

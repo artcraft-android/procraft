@@ -33,7 +33,6 @@ const STARTS: &[(&str, f32)] = &[
     ("pressure_roundness_max", 1.0),
     // the newer spacing (see [`Brush::spacing`])
     ("spacing_version", 1.0),
-    ("classic_taper", 1.0),
     ("shape_filtering", 2.0),
     ("grain_movement", 1.0),
     ("grain_zoom", 1.0),

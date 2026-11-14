@@ -418,6 +418,8 @@ struct Extras {
     taper_pressure: f32,
     /// A pen's stroke shows its end tapered as it is drawn.
     tip_animation: bool,
+    /// The tapers are the classic kind, as the studio's switch shows (off unless the brush says).
+    classic_taper: bool,
     /// The secondary colour mixed in per stamp and per stroke (jitter, 0..1), and by light
     /// pressure and by leaning (−1..1).
     stamp_secondary: f32,
@@ -519,6 +521,7 @@ impl Extras {
             touch_taper_tip: unit("touch_taper_tip"),
             taper_pressure: unit("pen_taper_pressure"),
             tip_animation: b.setting("pen_tip_animation") >= 0.5,
+            classic_taper: b.setting("classic_taper") >= 0.5,
             stamp_secondary: unit("stamp_secondary"),
             stroke_secondary: unit("stroke_secondary"),
             pressure_secondary: both("pressure_secondary"),
@@ -1639,7 +1642,7 @@ impl StrokeBuilder {
     }
 
     fn classic(&self) -> bool {
-        self.brush.extra.get("classic_taper").is_some_and(|&v| v >= 0.5)
+        self.extras.classic_taper
     }
 
     /// How far along the path the start taper grows to full (0: none): the classic one over its
