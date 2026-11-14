@@ -2539,6 +2539,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The canvas view's ear for a pen's side button that comes as a key (true: the second), and what it did. */
     var penKeyHeard: ((second: Boolean, action: PenKeyAction) -> Unit)? = null
 
+    /**
+     * Hides the system's bars again (set by the activity). A drag down from the top bar can show
+     * them for a moment, and a second drag while they show would pull the notification shade
+     * instead of the colour.
+     */
+    var hideSystemBars: (() -> Unit)? = null
+
     /** A pen's side button came as a key (see [penKeyButton]): true if a canvas took it. */
     fun penKey(second: Boolean, action: PenKeyAction = PenKeyAction.PRESSED): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
@@ -6870,7 +6877,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * uptime [ms], by a pen or not ([pen]), pulled out [from] the button's centre or the swatch.
      */
     fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis(), from: Offset = at) {
-        if (swatch == null) closePanels()
+        if (swatch == null) {
+            closePanels()
+            // pulled down from the top edge: the system's bars it may show go again
+            hideSystemBars?.invoke()
+        }
         dropBandTimer?.cancel()
         dropSwatch = swatch
         dropDot = at to (swatch ?: colorRgb())
@@ -6939,6 +6950,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
     fun dropDragEnd(at: Offset?) {
+        if (dropSwatch == null) hideSystemBars?.invoke()
         val step = colourDrag?.now()
         colourDrag = null
         dropBlob = null

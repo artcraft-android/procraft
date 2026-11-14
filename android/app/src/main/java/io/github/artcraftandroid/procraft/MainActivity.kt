@@ -32,6 +32,9 @@ private const val TAP_DRIFT_DP = 24f
 class MainActivity : ComponentActivity() {
     private val vm: CanvasViewModel by viewModels()
 
+    /** Hides the system's bars, as the model asks (let go as this activity goes: the model outlives it). */
+    private val barsHider: () -> Unit = { hideSystemBars() }
+
     // Project canvas: the presentation on a second display, and the displays coming and going
     private var projection: ProjectionPresentation? = null
     private val displays by lazy { getSystemService(DisplayManager::class.java) }
@@ -52,6 +55,8 @@ class MainActivity : ComponentActivity() {
         // wide colour, so a Display P3 canvas's colours show as they are around it too
         if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
+        // a colour dragged down from the top bar puts back the bars the drag showed
+        vm.hideSystemBars = barsHider
         // which graphics backend the app is trying, kept before the model makes the GPU device: a
         // driver that crashes the app then sends the next start to the next backend (one that drew
         // is trusted until the app or the system is updated)
@@ -223,6 +228,11 @@ class MainActivity : ComponentActivity() {
             }
             if (items.isNotEmpty()) data.add(android.view.KeyboardShortcutGroup(group.heading, items))
         }
+    }
+
+    override fun onDestroy() {
+        if (vm.hideSystemBars === barsHider) vm.hideSystemBars = null
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
