@@ -397,29 +397,30 @@ fn home(rest: &str) -> Option<usize> {
         && matches!(bytes.get(8), Some(b'\\' | b'/'));
     let prefix =
         if drive { 9 } else { ["/home/", "/Users/"].iter().find(|p| rest.starts_with(*p)).map(|p| p.len())? };
-    // to the next folder: a space doesn't end it, as a name may have one
+    // to the next folder, or what no account's name holds: a space, an apostrophe or a bracket
+    // doesn't end it, as a name may have them
     let name = rest.get(prefix..)?;
-    let n = name.find(|c: char| "/\\\n\r\t\"'`<>()[]{}|:,;".contains(c)).unwrap_or(name.len());
+    let n = name.find(|c: char| "/\\\n\r\t\"<>|:,;=+*?".contains(c)).unwrap_or(name.len());
     (n > 0).then_some(prefix + n)
 }
 
-/// How far the address at `rest`'s start goes: to a space, a quote or a bracket.
+/// How far the address at `rest`'s start goes: to a space, a double quote or what an address has
+/// only encoded (`<>[]{}|` and the backquote). An apostrophe or a round bracket doesn't end it, as
+/// Android leaves them as they are in a file's name; a closing bracket at its end is the text's,
+/// though, when the address opens none.
 fn address_length(rest: &str) -> usize {
-    rest.find(ends_address).unwrap_or(rest.len())
+    let n = rest.find(|c: char| c.is_whitespace() || "\"`<>[]{}|".contains(c)).unwrap_or(rest.len());
+    let address = rest.get(..n).unwrap_or_default();
+    if address.ends_with(')') && !address.contains('(') { n - 1 } else { n }
 }
 
-fn ends_address(c: char) -> bool {
-    c.is_whitespace() || "\"'`<>()[]{}|".contains(c)
-}
-
-/// How far the path at `rest`'s start goes: to the end of its line, a quote or a bracket, or a
-/// colon, comma or semicolon before a space. A space doesn't end it: a file's name may have them.
+/// How far the path at `rest`'s start goes: to the end of its line, a double quote or what no
+/// file's name holds on the device's shared storage (`<>|`), or a colon, comma or semicolon before a
+/// space. A space, an apostrophe or a bracket doesn't end it: a file's name may have them.
 fn path_length(rest: &str) -> usize {
     let bytes = rest.as_bytes();
     let ends = |i: usize, b: u8| match b {
-        b'\n' | b'\r' | b'\t' | b'"' | b'\'' | b'`' | b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' => {
-            true
-        }
+        b'\n' | b'\r' | b'\t' | b'"' | b'<' | b'>' | b'|' => true,
         b':' | b',' | b';' => bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace),
         _ => false,
     };
@@ -803,18 +804,25 @@ mod tests {
             "panicked at <home>/procraft/crates/core/src/lib.rs:10:5"
         );
         assert_eq!(r("/Users/Jo Smith/x.rs"), "<home>/x.rs");
+        assert_eq!(r("/home/o'brien (work)/x.rs"), "<home>/x.rs");
         assert_eq!(r(r"at C:\Users\jo\src\main.rs and c:/users/jo/x"), r"at <home>\src\main.rs and <home>/x");
         // a file of the person's: only its kind stays, whatever its name holds
         assert_eq!(
-            r("java.io.FileNotFoundException: /storage/emulated/0/Download/My Drawing (2).psd: open failed: EACCES"),
-            "java.io.FileNotFoundException: <storage>/...(2).psd: open failed: EACCES"
+            r("java.io.FileNotFoundException: /storage/emulated/0/Download/Jo's Drawing (2).psd: open failed: EACCES"),
+            "java.io.FileNotFoundException: <storage>/....psd: open failed: EACCES"
         );
-        assert_eq!(r("reading /sdcard/Pictures/holiday.jpg, 2 MB"), "reading <storage>/....jpg, 2 MB");
+        assert_eq!(r("reading /sdcard/Pictures/holiday [1] {b}.jpg, 2 MB"), "reading <storage>/....jpg, 2 MB");
         assert_eq!(
             r("opening content://com.android.providers.downloads.documents/document/msf%3A1000.procraft failed"),
             "opening content://com.android.providers.downloads.documents/....procraft failed"
         );
+        // an apostrophe and round brackets stay as they are in an address's file name
+        assert_eq!(
+            r("content://com.android.externalstorage.documents/document/primary%3AJo's%20sketch%20(2).psd"),
+            "content://com.android.externalstorage.documents/....psd"
+        );
         assert_eq!(r("(file:///storage/emulated/0/Secret%20name.brushset)"), "(file://....brushset)");
+        assert_eq!(r("(content://media/external/images/media/1234)"), "(content://media/...)");
         // nothing else changes: words, numbers, the system's own paths, an address with no file
         let plain = "GPU: Mali-G715 (Vulkan, driver 1.3), /vendor/lib64/egl/libGLES_mali.so at 0x7a, content://media é";
         assert_eq!(r(plain), plain);
@@ -824,8 +832,12 @@ mod tests {
         );
         assert_eq!(once, "at <storage>/....psd\nand content://x/....png and <home>/q\n<app>/f");
         assert_eq!(r(&once), once);
-        // a space in a file's path doesn't end it, so the rest of its line goes too
+        // a space in a file's path doesn't end it, so the rest of its line goes too, unless quoted
         assert_eq!(r("reading /storage/emulated/0/My Art/a b.png took 3 ms"), "reading <storage>/...");
+        assert_eq!(
+            r("reading \"/storage/emulated/0/My Art/a b.png\" took 3 ms"),
+            "reading \"<storage>/....png\" took 3 ms"
+        );
     }
 
     #[test]
