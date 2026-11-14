@@ -5340,7 +5340,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun renameAssetLibrary(i: Int, name: String) {
         renamingAssetLibrary = null
         if (name.isBlank() || assetLibraries.getOrNull(i)?.name == name.trim()) return
-        assetWork("The library couldn't be renamed.") { if (it.renameAssetLibrary(i.toUInt(), name)) true else null }
+        assetWork("The library couldn't be renamed.", { if (it.renameAssetLibrary(i.toUInt(), name)) true else null })
     }
 
     /** A new, empty library after the others, its name ready to edit among the cards. */
@@ -5361,7 +5361,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteAssetLibrary(i: Int) {
         deletingAssetLibrary = null
-        assetWork("The library couldn't be deleted.") { if (it.deleteAssetLibrary(i.toUInt())) true else null }
+        assetWork("The library couldn't be deleted.", { if (it.deleteAssetLibrary(i.toUInt())) true else null })
     }
 
     /** A new folder at the end of the library in use, shown, with its name ready to edit. */
@@ -5377,13 +5377,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         renamingAssetFolder = null
         if (name.isBlank()) return
         val lib = assetLibraryPlace
-        assetWork("The folder couldn't be renamed.") { if (it.renameAssetFolder(lib.toUInt(), folder.toUInt(), name)) true else null }
+        assetWork("The folder couldn't be renamed.", { if (it.renameAssetFolder(lib.toUInt(), folder.toUInt(), name)) true else null })
     }
 
     fun deleteAssetFolder(folder: Int) {
         deletingAssetFolder = null
         val lib = assetLibraryPlace
-        assetWork("The folder couldn't be deleted.") { if (it.deleteAssetFolder(lib.toUInt(), folder.toUInt())) true else null }
+        assetWork("The folder couldn't be deleted.", { if (it.deleteAssetFolder(lib.toUInt(), folder.toUInt())) true else null })
     }
 
     /** Takes [scope] of the open artwork into the shown folder, its new asset named right away. */
@@ -5410,20 +5410,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun renameAsset(id: String, name: String) {
         renamingAsset = null
         if (name.isBlank()) return
-        assetWork("The asset couldn't be renamed.") { if (it.renameAsset(id, name)) true else null }
+        assetWork("The asset couldn't be renamed.", { if (it.renameAsset(id, name)) true else null })
     }
 
     fun deleteAsset(id: String) {
         deletingAsset = null
-        assetWork("The asset couldn't be deleted.") { if (it.deleteAsset(id)) true else null }
+        assetWork("The asset couldn't be deleted.", { if (it.deleteAsset(id)) true else null })
     }
 
     fun duplicateAsset(id: String) {
-        assetWork("The asset couldn't be copied.") { it.duplicateAsset(id) }
+        assetWork("The asset couldn't be copied.", { it.duplicateAsset(id) })
     }
 
     fun moveAsset(id: String, library: Int, folder: Int) {
-        assetWork("The asset couldn't be moved.") { if (it.moveAsset(id, library.toUInt(), folder.toUInt())) true else null }
+        assetWork("The asset couldn't be moved.", { if (it.moveAsset(id, library.toUInt(), folder.toUInt())) true else null })
     }
 
     /** A picture picked to be asset [id]'s thumbnail, in place of the one made from what was added. */
