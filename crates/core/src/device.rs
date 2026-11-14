@@ -69,7 +69,7 @@ static RECORD_FOLDER: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
 
 /// The record's file in [`RECORD_FOLDER`]: "<backend> trying|made|drew", and on a second line the
 /// build that wrote it.
-const RECORD: &str = "gpu-start.txt";
+pub(crate) const RECORD: &str = "gpu-start.txt";
 
 /// Whether a canvas has shown in this run (so nothing is at risk any more).
 #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]

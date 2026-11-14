@@ -9,6 +9,9 @@
 //! buffer in between, so a crash in native code leaves every line before it. A log that reaches
 //! [`MOST`] keeps its start and its latest lines (see [`cut`]), and what could name the person or
 //! their files is left out of every line (see [`redact`]).
+//!
+//! Help's Share log hands both logs on as one text file, with the GPU start record the device
+//! module keeps (see [`write_log_to_share`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -105,6 +108,62 @@ pub fn trace_text(trace: Vec<u8>) -> String {
         }
     };
     trimmed(&text, TRACE_MOST)
+}
+
+/// Writes the log to share into the file `to`: what the GPU start record says and the GPU each run
+/// drew with, then this run's log and the run before's, all from `dir` (the app's files folder);
+/// whether it was written.
+#[uniffi::export]
+pub fn write_log_to_share(dir: String, to: String) -> bool {
+    let text = shared_log(Path::new(&dir));
+    let to = Path::new(&to);
+    if let Some(folder) = to.parent() {
+        let _ = fs::create_dir_all(folder);
+    }
+    fs::write(to, text).map_err(|e| log::warn!("the log to share: {e}")).is_ok()
+}
+
+/// The log to share, from `dir` (see [`write_log_to_share`]), with what could name the person left
+/// out once more: the logs were written so, but a log from another version may not have been.
+fn shared_log(dir: &Path) -> String {
+    use std::fmt::Write as _;
+    let read = |name: &str| fs::read(dir.join(name)).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+    let (now, before) = (read(LOG), read(PREVIOUS_LOG));
+    let record = read(crate::device::RECORD).map(|r| r.trim().to_owned()).filter(|r| !r.is_empty());
+    let mut out = String::from("ProCraft's log\n\n");
+    // "<backend> trying|made|drew", and on a second line the build it was kept for
+    let record = match record {
+        Some(r) => {
+            let mut lines = r.lines();
+            let first = lines.next().unwrap_or_default().trim().to_owned();
+            let build = lines.next().map(str::trim).filter(|b| !b.is_empty());
+            let shown = match first.split_whitespace().next().and_then(|b| b.parse::<usize>().ok()) {
+                Some(backend) => format!("{first} (backend {backend} is {})", procraft_gpu::Gpu::backend_name(backend)),
+                None => first,
+            };
+            match build {
+                Some(build) => format!("{shown}, kept for the build {build}"),
+                None => shown,
+            }
+        }
+        None => "none".to_owned(),
+    };
+    let _ = writeln!(out, "GPU start record ({}): {record}", crate::device::RECORD);
+    for (run, log) in [("this run", &now), ("the run before", &before)] {
+        let _ = writeln!(out, "GPU, {run}: {}", log.as_deref().and_then(gpu_line).unwrap_or("not in its log"));
+    }
+    for (run, name, log) in [("This run", LOG, &now), ("The run before", PREVIOUS_LOG, &before)] {
+        let _ = write!(out, "\n===== {run} ({name}) =====\n{}", log.as_deref().unwrap_or("(none)"));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    redact(&out, &app_folders(dir))
+}
+
+/// The GPU a log says the app drew with: what its last "GPU: " line says.
+fn gpu_line(log: &str) -> Option<&str> {
+    log.lines().rev().find_map(|line| line.find("] GPU: ").and_then(|at| line.get(at + 7..)))
 }
 
 /// The core's log to Android's (through `android`) and into the file, from `info` up.
@@ -910,5 +969,51 @@ mod tests {
         assert!(text.starts_with("  at frame0(f.kt:0)\n") && text.ends_with(" KB more left out ...]\n"));
         // neither text nor a record
         assert_eq!(trace_text(vec![8, 1, 0xff]), "(a trace of 3 bytes the app can't read)");
+    }
+
+    #[test]
+    fn the_log_to_share_holds_both_runs_and_the_gpu_first() {
+        let dir = folder("share");
+        let mut log = LogFile::begin(&dir).unwrap();
+        log.write(
+            "the run before\n[     20 ms INFO  procraft_gpu] GPU: Adreno 750 (Vulkan, driver 1.3), chosen in 3 ms\n",
+        );
+        drop(log);
+        let mut log = LogFile::begin(&dir).unwrap();
+        log.write("this run\n[     21 ms INFO  procraft_gpu] GPU: Adreno 750 (Gl, driver 3.2), chosen in 4 ms\n");
+        drop(log);
+        fs::write(dir.join(crate::device::RECORD), "1 drew").unwrap();
+        // a line from a log written before lines were redacted
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(LOG))
+            .unwrap()
+            .write_all(b"opening /storage/emulated/0/Download/mine.psd\n")
+            .unwrap();
+        let to = dir.parent().unwrap().join("shared").join("procraft-log.txt");
+        assert!(write_log_to_share(dir.display().to_string(), to.display().to_string()));
+        let text = fs::read_to_string(&to).unwrap();
+        let backend = procraft_gpu::Gpu::backend_name(1);
+        assert_eq!(
+            text,
+            format!(
+                "ProCraft's log\n\n\
+                 GPU start record (gpu-start.txt): 1 drew (backend 1 is {backend})\n\
+                 GPU, this run: Adreno 750 (Gl, driver 3.2), chosen in 4 ms\n\
+                 GPU, the run before: Adreno 750 (Vulkan, driver 1.3), chosen in 3 ms\n\
+                 \n===== This run (procraft.log) =====\n\
+                 this run\n[     21 ms INFO  procraft_gpu] GPU: Adreno 750 (Gl, driver 3.2), chosen in 4 ms\n\
+                 opening <storage>/....psd\n\
+                 \n===== The run before (procraft-previous.log) =====\n\
+                 the run before\n[     20 ms INFO  procraft_gpu] GPU: Adreno 750 (Vulkan, driver 1.3), chosen in 3 ms\n"
+            )
+        );
+        // nothing yet: said so
+        let empty = folder("share-empty");
+        let text = shared_log(&empty);
+        assert!(text.contains("GPU start record (gpu-start.txt): none\nGPU, this run: not in its log\n"), "{text}");
+        assert!(text.ends_with("===== The run before (procraft-previous.log) =====\n(none)\n"), "{text}");
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+        fs::remove_dir_all(empty.parent().unwrap()).unwrap();
     }
 }

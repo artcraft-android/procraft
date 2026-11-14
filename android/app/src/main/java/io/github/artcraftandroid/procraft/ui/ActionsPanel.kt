@@ -332,6 +332,16 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     // the app's own settings page, apart from the canvas
                     runCatching { context.startActivity(Intent(context, io.github.artcraftandroid.procraft.SettingsActivity::class.java)) }
                 },
+                Act("Share log") {
+                    // made outside the panel, which may be closed meanwhile
+                    vm.viewModelScope.launch {
+                        val log = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            io.github.artcraftandroid.procraft.AppLog.toShare(context)
+                        }
+                        if (log == null) dialog = "Share log" to "The log couldn't be made ready to share."
+                        else runCatching { shareFile(context, log, "text/plain") }
+                    }
+                },
             ),
         )
     }
