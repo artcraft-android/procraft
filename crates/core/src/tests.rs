@@ -13816,3 +13816,198 @@ fn easings_and_motion_paths_through_the_session() {
     assert!(s.set_timeline_path_handles(clip, 0, None, true));
     assert_eq!(s.timeline_motion_path(clip).unwrap().keys[0].handles, None);
 }
+
+/// Three dots, red, green and blue, each a frame of Animation Assist, the green held 2 more.
+fn three_frames(s: &CanvasSession) {
+    s.set_brush_size(0.6);
+    for (i, colour) in [[1.0, 0.0, 0.0], [0.0, 0.7, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+        if i > 0 {
+            s.add_layer();
+        }
+        s.set_color(colour[0], colour[1], colour[2]);
+        s.stroke_begin(PointerKind::Finger, vec![sample(8.0 + 12.0 * i as f32, 20.0, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    assert!(s.set_animation_assist(true));
+    let frames = s.animation_frames();
+    s.set_frame_hold(frames[1], 2);
+    assert_eq!(s.animation_sequence(), [0, 1, 1, 1, 2]);
+}
+
+#[test]
+fn the_frames_export_as_a_sprite_sheet_with_its_json() {
+    use crate::frame_exports::{SheetLayout, SpriteSheetChoices};
+    let Some(s) = session(40, 40) else { return };
+    three_frames(&s);
+    s.set_name("Dots walk".into());
+    let dir = std::env::temp_dir().join(format!("make2d-sheet-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |n: &str| dir.join(n).to_string_lossy().into_owned();
+    let read = |p: &str| {
+        let decoder = png::Decoder::new(std::io::Cursor::new(std::fs::read(p).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        (info.width, info.height, buf)
+    };
+    let choices = SpriteSheetChoices {
+        layout: SheetLayout::Grid,
+        columns: 0,
+        rows: 0,
+        padding: 0,
+        trim: false,
+        held_once: true,
+        json: true,
+        max_side: 0,
+        transparent: false,
+    };
+
+    // held once: three pictures on a 2 × 2 grid, the green lasting three frames
+    let made = s.export_sprite_sheet(path("grid.png"), choices).unwrap();
+    assert_eq!((made.width, made.height, made.cells, made.frames), (80, 80, 3, 5));
+    assert_eq!(s.export_progress(), 1.0);
+    let (w, h, px) = read(&path("grid.png"));
+    assert_eq!((w, h), (80, 80));
+    let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
+    // each frame its own dot over white: red in the first cell, green in the second, blue below
+    assert!(at(8, 20)[0] > 200 && at(8, 20)[1] < 60, "{:?}", at(8, 20));
+    assert!(at(40 + 20, 20)[1] > 120 && at(40 + 20, 20)[0] < 60, "{:?}", at(60, 20));
+    assert!(at(32, 40 + 20)[2] > 200 && at(32, 40 + 20)[0] < 60, "{:?}", at(32, 60));
+    assert_eq!(at(70, 70)[3], 0, "the empty fourth cell is clear");
+    assert_eq!(at(39, 1), [255, 255, 255, 255], "the background is in each frame");
+    let json_path = made.json_path.unwrap();
+    assert!(json_path.ends_with("grid.json"));
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+    let frames = json["frames"].as_array().unwrap();
+    let rects: Vec<_> =
+        frames.iter().map(|f| (f["frame"]["x"].as_u64().unwrap(), f["frame"]["y"].as_u64().unwrap())).collect();
+    assert_eq!(rects, [(0, 0), (40, 0), (0, 40)]);
+    // at 15 frames a second: one frame, three, one
+    let durations: Vec<_> = frames.iter().map(|f| f["duration"].as_u64().unwrap()).collect();
+    assert_eq!(durations, [67, 200, 66]);
+    assert_eq!(frames[0]["filename"], "Dots_walk 0");
+    assert_eq!(json["meta"]["image"], "grid.png");
+    assert_eq!(json["meta"]["size"], serde_json::json!({ "w": 80, "h": 80 }));
+
+    // a strip with every frame its own, padded, no JSON: evenly cut
+    let strip =
+        SpriteSheetChoices { layout: SheetLayout::Across, padding: 2, held_once: false, json: false, ..choices };
+    let made = s.export_sprite_sheet(path("strip.png"), strip).unwrap();
+    assert_eq!((made.width, made.height, made.cells, made.frames), (5 * 40 + 4 * 2, 40, 5, 5));
+    assert!(made.json_path.is_none());
+    let down = SpriteSheetChoices { layout: SheetLayout::Down, padding: 0, ..strip };
+    let made = s.export_sprite_sheet(path("down.png"), down).unwrap();
+    assert_eq!((made.width, made.height), (40, 200));
+
+    // trimmed and transparent, at half size: each dot alone, where it was kept in the JSON
+    let trimmed =
+        SpriteSheetChoices { trim: true, transparent: true, max_side: 20, layout: SheetLayout::Across, ..choices };
+    let made = s.export_sprite_sheet(path("trim.png"), trimmed).unwrap();
+    assert_eq!(made.cells, 3);
+    assert!(made.width < 60 && made.height <= 20, "{} × {}", made.width, made.height);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(made.json_path.unwrap()).unwrap()).unwrap();
+    let first = &json["frames"][0];
+    assert_eq!(first["trimmed"], true);
+    assert_eq!(first["sourceSize"], serde_json::json!({ "w": 20, "h": 20 }));
+    // the red dot sat left of the blue one
+    let x = |i: usize| json["frames"][i]["spriteSourceSize"]["x"].as_u64().unwrap();
+    assert!(x(0) < x(2), "{} {}", x(0), x(2));
+    let (_, _, px) = read(&path("trim.png"));
+    assert!(px.chunks(4).all(|p| p[3] == 0 || p[0] > 0 || p[1] > 0 || p[2] > 0));
+
+    // on a timeline, the same
+    assert!(s.start_timeline());
+    let made = s.export_sprite_sheet(path("timeline.png"), choices).unwrap();
+    assert_eq!((made.width, made.height, made.cells, made.frames), (80, 80, 3, 5));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_timeline_exports_as_a_harmony_scene() {
+    let Some(s) = session(40, 40) else { return };
+    three_frames(&s);
+    s.set_name("Dots".into());
+    assert!(s.start_timeline());
+    let tracks = s.timeline_tracks();
+    assert_eq!(tracks.len(), 1);
+    // a second track: a drawing on frames 2 and 3 only
+    let id = s.add_timeline_track();
+    assert!(s.rename_timeline_track(id, "Over lay".into()));
+    s.set_timeline_frame(1);
+    let clip = s.add_timeline_drawing();
+    assert!(clip != 0);
+    assert!(s.set_timeline_clip_duration(clip, 2, false));
+    s.set_color(1.0, 0.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+
+    let dir = std::env::temp_dir().join(format!("make2d-harmony-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let zip_path = dir.join("Dots.zip");
+    let made = s.export_harmony(zip_path.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    let bytes = std::fs::read(&zip_path).unwrap();
+    let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
+    let mut names: Vec<&str> = zip.names().collect();
+    names.sort_unstable();
+    let track = &tracks[0].name;
+    let plain = make2d_engine::harmony::Names::plain(track, "Layer");
+    let mut wanted = vec![
+        "Dots/Dots.aux".to_owned(),
+        "Dots/Dots.xstage".to_owned(),
+        "Dots/elements/Background/Background-1.png".to_owned(),
+        "Dots/elements/Over_lay/Over_lay-1.png".to_owned(),
+        format!("Dots/elements/{plain}/{plain}-1.png"),
+        format!("Dots/elements/{plain}/{plain}-2.png"),
+        format!("Dots/elements/{plain}/{plain}-3.png"),
+        "Dots/scene.elementTable".to_owned(),
+        "Dots/scene.versionTable".to_owned(),
+    ];
+    wanted.sort_unstable();
+    assert_eq!(names, wanted);
+    assert_eq!((made.layers, made.drawings, made.frames), (3, 5, 5));
+
+    let stage = String::from_utf8(zip.read("Dots/Dots.xstage").unwrap()).unwrap();
+    let stage = make2d_engine::xml::parse(&stage).unwrap();
+    let columns = stage.find("columns").unwrap().all("column");
+    let sheet: Vec<(String, Vec<(String, String)>)> = columns
+        .iter()
+        .map(|c| {
+            let seq = c
+                .all("elementSeq")
+                .iter()
+                .map(|e| (e.attribute("val").unwrap().to_owned(), e.attribute("exposures").unwrap().to_owned()))
+                .collect();
+            (c.attribute("name").unwrap().to_owned(), seq)
+        })
+        .collect();
+    let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+    assert_eq!(
+        sheet,
+        [
+            ("Background".to_owned(), pairs(&[("1", "1-5")])),
+            // red, green held three frames, blue
+            (plain.clone(), pairs(&[("1", "1"), ("2", "2-4"), ("3", "5")])),
+            ("Over_lay".to_owned(), pairs(&[("1", "2-3")])),
+        ]
+    );
+    assert_eq!(stage.find("scene").unwrap().attribute("nbframes"), Some("5"));
+    // each drawing is the track alone: the overlay's is clear but for its dot
+    let png = zip.read("Dots/elements/Over_lay/Over_lay-1.png").unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+    let mut px = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut px).unwrap();
+    assert_eq!(px[..4], [0, 0, 0, 0]);
+    let dot = &px[((30 * 40 + 30) * 4)..][..4];
+    assert!(dot[0] > 200 && dot[2] > 200 && dot[1] < 60 && dot[3] == 255, "{dot:?}");
+
+    // an Animation Assist canvas is put on a timeline for it, and stays as it was
+    let Some(assist) = session(40, 40) else { return };
+    three_frames(&assist);
+    let made = assist.export_harmony(dir.join("assist.zip").to_string_lossy().into_owned()).unwrap();
+    assert_eq!((made.layers, made.drawings, made.frames), (2, 4, 5));
+    assert!(assist.timeline_info().is_none());
+    assert_eq!(assist.animation_sequence(), [0, 1, 1, 1, 2]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

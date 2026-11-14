@@ -1507,7 +1507,7 @@ pub(crate) fn rgba_png(width: u32, height: u32, premultiplied: &[u8]) -> Vec<u8>
 }
 
 /// A PNG of straight RGBA8 pixels, carrying `icc` if it isn't empty.
-fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>, MobileError> {
+pub(crate) fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>, MobileError> {
     let mut out = Vec::new();
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgba;

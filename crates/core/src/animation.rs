@@ -34,7 +34,7 @@ pub(crate) enum Shot {
 
 /// What an export draws, in order: a timeline's every frame, or Animation Assist's frames each as
 /// often as it holds them.
-fn shots(doc: &Document) -> Vec<Shot> {
+pub(crate) fn shots(doc: &Document) -> Vec<Shot> {
     match &doc.timeline {
         Some(tl) => (0..tl.duration).map(Shot::At).collect(),
         None => sequence(doc).into_iter().map(Shot::Unit).collect(),
@@ -239,12 +239,25 @@ impl CanvasSession {
         transparent: bool,
         max_side: u32,
     ) -> Result<(u32, u32, Vec<u8>), MobileError> {
+        self.render_shot_of(shot, transparent, max_side, |_| {})
+    }
+
+    /// [`Self::render_shot`] of the canvas as `change` leaves a copy of it (some tracks hidden,
+    /// say); the canvas itself is untouched.
+    pub(crate) fn render_shot_of(
+        &self,
+        shot: Shot,
+        transparent: bool,
+        max_side: u32,
+        change: impl FnOnce(&mut Document),
+    ) -> Result<(u32, u32, Vec<u8>), MobileError> {
         let (w, h, rgba) = {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
             let mut doc = st.doc.clone();
+            change(&mut doc);
             if let Shot::Unit(unit) = shot {
                 for id in doc.members(None) {
                     if id != unit {
