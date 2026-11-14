@@ -3,12 +3,12 @@
 //! It is `procraft.log` in the app's own folder, with the run before's kept beside it as
 //! `procraft-previous.log`, as the desktop app keeps its own.
 //!
-//! The interface begins it with a header (the app, the device, how the last runs ended, with the
-//! system's trace of a crash: see [`trace_text`]) and adds its own warnings and errors; the core's
-//! log goes in from `info` up. Each line goes into the file as it comes, with no
-//! buffer in between, so a crash in native code leaves every line before it. A log that reaches
-//! [`MOST`] keeps its start and its latest lines (see [`cut`]), and what could name the person or
-//! their files is left out of every line (see [`redact`]).
+//! The interface begins it with a header (the app, the device) and how the last runs ended (with
+//! the system's trace of a crash: see [`trace_text`]), and adds its own warnings and errors; the
+//! core's log goes in from `info` up. Each line goes into the file as it comes, with no buffer in
+//! between, so a crash in native code leaves every line before it. A log that reaches [`MOST`]
+//! keeps its start and its latest lines (see [`cut`]), and what could name the person or their
+//! files is left out of every line (see [`redact`]).
 //!
 //! Help's Share log hands both logs on as one text file, with the GPU start record the device
 //! module keeps (see [`write_log_to_share`]).
@@ -47,6 +47,11 @@ static KEPT: Mutex<Option<LogFile>> = Mutex::new(None);
 
 /// When the log began: each line says how long after.
 static BEGAN: OnceLock<Instant> = OnceLock::new();
+
+std::thread_local! {
+    /// Whether this thread is writing into the log's file.
+    static WRITING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// How serious a line of the interface's log is.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,8 +203,21 @@ fn line(level: log::Level, target: &str, message: &str) -> String {
     format!("[{ms:>7} ms {level:<5} {target}] {message}\n")
 }
 
-/// Writes `text` into the log's file, if it has begun.
+/// Writes `text` into the log's file, if it has begun. Not from within a write on the same thread
+/// (a panic in it, logged), which holds the file.
 fn write(text: &str) {
+    struct Writing;
+
+    impl Drop for Writing {
+        fn drop(&mut self) {
+            WRITING.with(|w| w.set(false));
+        }
+    }
+
+    if WRITING.with(|w| w.replace(true)) {
+        return;
+    }
+    let _writing = Writing;
     if let Some(file) = kept().as_mut() {
         file.write(text);
     }
