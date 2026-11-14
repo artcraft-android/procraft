@@ -307,6 +307,24 @@ pub struct Layer {
     /// artwork's file keeps them apart.
     #[serde(skip)]
     pub vector: Option<std::sync::Arc<crate::vector::VectorContent>>,
+    /// A layer of a kind a plugin adds (a vector layer, say): what the plugin keeps for it besides
+    /// its pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginLayer>,
+}
+
+/// What makes a layer one of a kind a plugin adds: the kind, and the plugin's data for it. The app
+/// paints, shows and saves the layer's pixels as any layer's; the data is the plugin's (the items it
+/// keeps, say), held here so that undoing a change to the layers brings it back with them, and saved
+/// in a file of its own beside the layer's pixels.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PluginLayer {
+    /// `<plugin id>.<key>`, as the plugin's manifest names the kind.
+    pub kind: String,
+    /// The plugin's data as last kept; none while it has none yet (a new layer), or its file
+    /// couldn't be read. Never in the document's own file.
+    #[serde(skip)]
+    pub data: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl Layer {
@@ -329,13 +347,22 @@ impl Layer {
             private: false,
             assisted: false,
             vector: None,
+            plugin: None,
         }
     }
 
     /// Whether the layer is made of more than its pixels (a text layer's text, a vector layer's
-    /// strokes): what changes pixels alone leaves it be, until it is rasterized.
+    /// strokes): what changes pixels alone leaves it be, until it is rasterized. The same as
+    /// [`Self::drawn_from_data`].
     pub fn is_made(&self) -> bool {
-        self.text.is_some() || self.vector.is_some()
+        self.drawn_from_data()
+    }
+
+    /// Whether its pixels are drawn from what it holds besides them (its text, a vector layer's
+    /// strokes, or a plugin's items): only that changes them, so edits to its pixels alone (a fill,
+    /// an adjustment, a transform) wait until it is rasterized.
+    pub fn drawn_from_data(&self) -> bool {
+        self.text.is_some() || self.vector.is_some() || self.plugin.is_some()
     }
 
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
@@ -1070,12 +1097,16 @@ impl Document {
         true
     }
 
-    /// Makes a text layer an ordinary one, its pixels kept; false if it wasn't one.
+    /// Makes a text layer, or a layer of a plugin's kind, an ordinary one, its pixels kept; false
+    /// if it wasn't one.
     pub fn rasterize(&mut self, id: LayerId) -> bool {
-        let Some(l) = self.layer_mut(id) else { return false };
-        // (both taken, whichever it has)
-        let (text, vector) = (l.text.take(), l.vector.take());
-        text.is_some() || vector.is_some()
+        self.layer_mut(id).is_some_and(|l| {
+            // (all taken, whichever it has)
+            let text = l.text.take().is_some();
+            let vector = l.vector.take().is_some();
+            let plugin = l.plugin.take().is_some();
+            text || vector || plugin
+        })
     }
 
     /// Adds a vector layer above the current one (in its group) and makes it current: an empty
@@ -1086,6 +1117,22 @@ impl Document {
             l.vector = Some(std::sync::Arc::default());
         }
         id
+    }
+
+    /// Adds a layer of a plugin's `kind` (`<plugin id>.<key>`) above the current one (in its
+    /// group), named `name` and with no data yet, and makes it current.
+    pub fn add_plugin_layer(&mut self, kind: String, name: &str) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.name = name.chars().take(256).collect();
+            l.plugin = Some(PluginLayer { kind, data: None });
+        }
+        id
+    }
+
+    /// Keeps `data` as the plugin's data for its layer `id`; false if `id` isn't a plugin's layer.
+    pub fn set_plugin_data(&mut self, id: LayerId, data: Option<std::sync::Arc<Vec<u8>>>) -> bool {
+        self.layer_mut(id).and_then(|l| l.plugin.as_mut()).map(|p| p.data = data).is_some()
     }
 
     /// Layer `id` made a vector layer holding `content` (as read back from where it was kept);
@@ -1910,6 +1957,33 @@ mod tests {
         assert!(d.finish_merge_down(copy));
         assert!(d.layer(t).unwrap().text.is_none());
         assert!(!d.rasterize(t));
+    }
+
+    #[test]
+    fn a_plugin_s_layer_keeps_its_kind_in_the_file_and_its_data_beside_it() {
+        let mut d = Document::new(100, 100);
+        let base = d.current();
+        let v = d.add_plugin_layer("org.example.vectors.vector".to_owned(), "Vector layer 2");
+        assert_eq!(d.current(), v);
+        assert_eq!(d.layer(v).unwrap().kind, LayerKind::Paint, "pixels to show, as any layer's");
+        assert!(!d.set_plugin_data(base, Some(std::sync::Arc::new(vec![1]))), "an ordinary layer has none");
+        assert!(d.set_plugin_data(v, Some(std::sync::Arc::new(vec![1, 2, 3]))));
+        // the file names the kind, never the data
+        let text = serde_json::to_string(&d).unwrap();
+        assert!(text.contains("org.example.vectors.vector"));
+        let back: Document = serde_json::from_str(&text).unwrap();
+        let read = back.layer(v).unwrap().plugin.clone().unwrap();
+        assert_eq!((read.kind.as_str(), read.data), ("org.example.vectors.vector", None));
+        // a file from before has none, and an ordinary layer writes none
+        assert!(!serde_json::to_string(d.layer(base).unwrap()).unwrap().contains("plugin"));
+        // a duplicate shares the data until either changes; merged into, or rasterized, it's ordinary
+        let copy = d.duplicate_layer(v).unwrap();
+        assert_eq!(d.layer(copy).unwrap().plugin, d.layer(v).unwrap().plugin);
+        assert!(d.finish_merge_down(copy));
+        assert!(d.layer(v).unwrap().plugin.is_none());
+        let w = d.add_plugin_layer("org.example.vectors.vector".to_owned(), "Vector layer 3");
+        assert!(d.rasterize(w));
+        assert!(d.layer(w).unwrap().plugin.is_none() && !d.rasterize(w));
     }
 
     fn ids(d: &Document) -> Vec<LayerId> {

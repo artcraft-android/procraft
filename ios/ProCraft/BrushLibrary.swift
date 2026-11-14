@@ -28,7 +28,7 @@ private let pickerInset: CGFloat = 11
 private let pickerMargin: CGFloat = 25
 
 /// A panel's title row: its title (with a chevron when it has a menu) at its left, `action` at its
-/// right.
+/// right. With `rename`, the title is a field editing it, which takes the name once done.
 struct PanelHeader<Action: View>: View {
     let title: String
     var start: CGFloat = 24
@@ -37,15 +37,21 @@ struct PanelHeader<Action: View>: View {
     var chevron = true
     var chevronOn = false
     var onTitle: (() -> Void)?
+    var rename: ((String) -> Void)?
     @ViewBuilder let action: () -> Action
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
-                Text(verbatim: title)
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(Pc.panelTitle)
-                    .lineLimit(1)
+                if let rename {
+                    InlineName(name: title, color: Pc.panelTitle, fontSize: 24, onDone: rename)
+                        .fixedSize()
+                } else {
+                    Text(verbatim: title)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(Pc.panelTitle)
+                        .lineLimit(1)
+                }
                 if chevron {
                     ZStack {
                         Circle().fill(chevronOn ? Pc.rowSelected : Pc.chevronDisc)
@@ -75,7 +81,7 @@ struct PanelHeader<Action: View>: View {
 @Observable
 private final class LibraryUi {
     var adding = false
-    /// The title's menu: Restore default brushes.
+    /// The title's menu: the library renamed or shared, or every library's card.
     var titleMenu = false
     var setMenu: Int?
     var recentMenu = false
@@ -157,15 +163,22 @@ struct BrushLibrary: View {
     @FocusState private var searching: Bool
 
     var body: some View {
-        let title: String = switch model.tool {
-        case .erase: "Erase library"
-        case .smudge: "Smudge library"
-        case .paint: "Brush library"
+        let shown = model.shownSet == CanvasModel.recentSet || model.brushSets.indices.contains(model.shownSet)
+        // every library's card, or a library with no sets yet: a panel of their own
+        if model.showingLibraries || model.brushSets.isEmpty || !shown {
+            LibrariesPanel(model: model, arrowX: arrowX, origin: origin, screen: screen)
+        } else {
+            library
         }
-        Popover(width: libraryWidth, arrowX: arrowX) {
+    }
+
+    private var library: some View {
+        let renaming = model.renamingLibrary == model.libraryPlace
+        return Popover(width: libraryWidth, arrowX: arrowX) {
             PanelHeader(
-                title: title, start: 20, end: 12, height: 52, chevronOn: ui.titleMenu,
-                onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } }
+                title: model.libraryName, start: 20, end: 12, height: 52, chevronOn: ui.titleMenu,
+                onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } },
+                rename: renaming ? { model.renameLibrary(model.libraryPlace, name: $0) } : nil
             ) {
                 PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
                     .frame(width: 41, height: 40)
@@ -209,6 +222,8 @@ struct BrushLibrary: View {
             switch ScreenCapture.libraryShows {
             case "add":
                 ui.adding = true
+            case "title":
+                ui.titleMenu = true
             case "set-menu":
                 ui.setMenu = model.shownSet
             case "icons":
@@ -955,17 +970,10 @@ private struct LibraryMenus: View {
             }
             if ui.titleMenu {
                 MenuDismissal { closeAll() }
-                // under the title
-                let at = kept(CGPoint(x: 12, y: Pc.arrowHeight + 46), CGSize(width: glassMenuWidth, height: 51))
-                GlassMenu(overPanel: true) {
-                    MenuRow(icon: PcIcons.menuRestore, label: "Restore default brushes") {
-                        closeAll()
-                        model.restoreShippedBrushes()
-                    }
-                    .padding(.vertical, 5.5)
-                }
-                .offset(x: at.x, y: at.y)
-                .menuTransition(.top)
+                let at = kept(libraryTitleMenuAt, CGSize(width: glassMenuWidth, height: LibraryTitleMenu.height), below: menuTop)
+                LibraryTitleMenu(model: model) { closeAll() }
+                    .offset(x: at.x, y: at.y)
+                    .menuTransition(.topLeading)
             }
             if ui.recentMenu, let frame = ui.setFrames[CanvasModel.recentSet] {
                 MenuDismissal { closeAll() }

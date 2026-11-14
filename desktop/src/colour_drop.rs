@@ -335,7 +335,7 @@ impl ColourDrop {
         }
         let fill = (self.band == Band::Filling).then(|| {
             let [r, g, b] = of_hex(self.swatch.unwrap_or(current));
-            Fill { r, g, b, threshold: self.threshold }
+            Fill { r, g, b, threshold: self.threshold, continuous: false }
         });
         session.set_touch_filling(fill);
         if self.band != Band::None {

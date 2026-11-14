@@ -143,8 +143,8 @@ private struct PluginFilterPanel: View {
             .padding(.leading, 10)
             .padding(.trailing, 15)
             .frame(width: 500, height: 54)
-        // a file is picked on the plugin's card, not here
         case .file:
+            // a file is picked on the plugin's card, not on its filter's panel
             EmptyView()
         }
     }

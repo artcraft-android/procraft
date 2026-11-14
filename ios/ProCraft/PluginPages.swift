@@ -105,9 +105,8 @@ private struct PluginCard: View {
             RowView(row: .toggle(one.label, on: one.on, change: { PluginsModel.shared.setSwitch(one.key, $0) }))
         case let .slider(one):
             PluginSliderRow(slider: one) { PluginsModel.shared.setSlider($0, $1) }
-        // a file a plugin takes (a brush sound)
         case let .file(one):
-            PluginFileRow(model: model, file: one)
+            PluginFileRow(file: one) { model.showNotice($0, warning: true) }
         }
     }
 
@@ -207,6 +206,23 @@ struct PluginPanelView: View {
             .onTapGesture { model.touchPluginPanel(i, Float((Int(chosen) + 1) % max(options.count, 1))) }
         case let .button(label):
             PluginActionRow(label: label) { model.touchPluginPanel(i, 1) }
+        case let .keys(label, keys):
+            // what it does, then the keys that do it; a tap asks for others
+            HStack(spacing: 0) {
+                Text(verbatim: label)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.actionsRow)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(verbatim: keys)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Pc.accent)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+            .onTapGesture { model.touchPluginPanel(i, 1) }
         }
     }
 
@@ -294,8 +310,8 @@ private struct PanelSliderRow: View {
 /// A file control on a card (a sound): its label, then the name of what was picked and Clear, or
 /// Import; a tap on the row picks another.
 private struct PluginFileRow: View {
-    let model: CanvasModel
     let file: PluginFile
+    let told: (String) -> Void
 
     @State private var picking = false
 
@@ -305,21 +321,19 @@ private struct PluginFileRow: View {
                 .font(.system(size: 17))
                 .foregroundStyle(Pc.actionsRow)
                 .lineLimit(1)
-                .layoutPriority(1)
-            Spacer(minLength: 12)
+            Spacer(minLength: 0)
             if let chosen = file.chosen {
                 Text(verbatim: chosen)
                     .font(.system(size: 15))
-                    .foregroundStyle(Pc.tabIdle)
+                    .foregroundStyle(Pc.slideValue)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
+                    .padding(.leading, 12)
                 Text(verbatim: "Clear")
                     .font(.system(size: 17))
                     .foregroundStyle(Pc.accent)
                     .lineLimit(1)
                     .padding(.leading, 12)
-                    .padding(.trailing, 8)
-                    .frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture { PluginsModel.shared.clearFile(file.key) }
             } else {
@@ -327,20 +341,15 @@ private struct PluginFileRow: View {
                     .font(.system(size: 17))
                     .foregroundStyle(Pc.accent)
                     .lineLimit(1)
-                    .padding(.trailing, 8)
             }
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 8)
+        .padding(.horizontal, 16)
         .frame(height: 44)
         .contentShape(Rectangle())
         .onTapGesture { picking = true }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.audio]) { result in
-            guard case let .success(url) = result else { return }
-            PluginsModel.shared.pickSound(file.key, url) { used in
-                if !used {
-                    model.showNotice("This sound couldn't be used.", warning: true)
-                }
+            if case let .success(url) = result {
+                PluginsModel.shared.pickSound(file.key, from: url, told: told)
             }
         }
     }

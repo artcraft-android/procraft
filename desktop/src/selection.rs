@@ -49,6 +49,11 @@ pub struct Selection {
     /// Whether there is a selection; Color Fill on; the feather's amount; the popover open; the
     /// selections kept and their pictures.
     has: bool,
+    /// On a plugin's layer, the box round the strokes the selection takes (four corners, x then y,
+    /// canvas pixels); empty otherwise. And the artwork's revision and whether anything was selected
+    /// when it was read.
+    taken: Vec<f32>,
+    taken_at: Option<(u64, bool)>,
     color_fill: bool,
     /// Color Fill's Lasso Fill (kept in the preferences): with Color Fill on, each shape drawn is
     /// filled on its own, as one undo step, and nothing stays selected.
@@ -85,6 +90,8 @@ impl Default for Selection {
             sliding: None,
             drag: None,
             has: false,
+            taken: Vec::new(),
+            taken_at: None,
             color_fill: false,
             lasso_fill: false,
             fill_opacity: 1.0,
@@ -201,7 +208,15 @@ impl Selection {
         model: bool,
     ) -> Option<bool> {
         if !self.on {
+            self.taken.clear();
+            self.taken_at = None;
             return None;
+        }
+        // the strokes the selection takes, read again as the artwork changes
+        let at = (session.info().revision, self.has);
+        if self.taken_at != Some(at) {
+            self.taken = if self.has { session.taken_plugin_items_box() } else { Vec::new() };
+            self.taken_at = Some(at);
         }
         let mut x_ray_set = None;
         self.overlay(ctx, session, bar_top);
@@ -455,6 +470,11 @@ impl Selection {
     /// While a selection is made: the rectangle or ellipse dragged and the freehand path (dashed,
     /// its first point a dot to close it on), and the crosshair and bar while a colour selection's
     /// threshold is slid.
+    /// Whether arrow keys move the strokes the selection takes (on a plugin's layer).
+    pub fn nudges(&self) -> bool {
+        self.on && !self.taken.is_empty()
+    }
+
     fn overlay(&self, ctx: &egui::Context, session: &CanvasSession, bar_top: f32) {
         let ppp = ctx.pixels_per_point();
         let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("selection overlay")));
@@ -465,6 +485,32 @@ impl Selection {
             let channel = |i: usize| byte(c.get(i).copied().unwrap_or(0.0));
             Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), byte(0.5 * self.fill_opacity))
         });
+        // the strokes the selection takes on a plugin's layer: their box, as the transform box shows
+        if self.taken.len() == 8 {
+            let view = session.view_matrix();
+            let [a, b, c, d, e, f] =
+                view.get(..6).and_then(|v| <[f32; 6]>::try_from(v).ok()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let corners: Vec<Pos2> = self
+                .taken
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[x, y]| pos2(a * x + c * y + e, b * x + d * y + f) / ppp)
+                .collect();
+            let mut edge = corners.clone();
+            edge.extend(corners.first());
+            painter.extend(Shape::dashed_line_with_offset(
+                &edge,
+                Stroke::new(1.0, argb(DASH_GAP)),
+                &[5.0],
+                &[5.0],
+                5.0,
+            ));
+            painter.extend(Shape::dashed_line_with_offset(&edge, Stroke::new(1.0, argb(DASH)), &[5.0], &[5.0], 0.0));
+            for corner in corners {
+                crate::transform::node(&painter, corner, argb(crate::transform::NODE_BLUE), 1.0);
+            }
+        }
         if let Some((a, b)) = self.drag {
             let (a, b) = (a / ppp, b / ppp);
             let r = Rect::from_two_pos(a, b);

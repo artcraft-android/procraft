@@ -618,7 +618,16 @@ impl CanvasSession {
             }
             return poured;
         }
-        if st.doc.is_locked(current) || layer.is_made() {
+        // a plugin's layer that takes a dropped colour makes of it what it will, as one step
+        if layer.plugin.is_some() && !st.doc.is_locked(current) && st.plugin_layer_fills(current) {
+            let at = Vec2::new(seed.0 as f32 + 0.5, seed.1 as f32 + 0.5);
+            let done = st.fill_plugin_layer(current, at, [r, g, b], threshold);
+            if done {
+                self.shared.frame(st);
+            }
+            return done;
+        }
+        if st.doc.is_locked(current) || layer.drawn_from_data() {
             return false;
         }
         // (a Continuous drag knows the layer as its last fill left it, and what that was measured

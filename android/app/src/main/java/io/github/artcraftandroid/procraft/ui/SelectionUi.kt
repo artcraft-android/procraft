@@ -41,6 +41,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.SelectionKind
 import io.github.artcraftandroid.procraft.canvas.SelectionPopup
 import io.github.artcraftandroid.procraft.core.ToolKind
+import io.github.artcraftandroid.procraft.canvas.toScreen
 import kotlin.math.roundToInt
 
 /** The selection toolbar's buttons with room for all of it (landscape), its widest icon, and its ways' pill. */
@@ -179,7 +180,8 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val drag = vm.shapeDrag
     val path = vm.freehand
     val threshold = vm.thresholdDrag
-    if (drag == null && path.isEmpty() && threshold == null) return
+    val taken = vm.takenBox
+    if (drag == null && path.isEmpty() && threshold == null && taken.size != 8) return
     // Lasso Fill: the shape shows as it will fill, at half its strength (the Paint tool's lasso at
     // its opacity slider's; the Erase tool's grey, as what it takes away)
     val preview = when {
@@ -189,6 +191,21 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
         else -> null
     }
     Canvas(Modifier.fillMaxSize()) {
+        // the strokes the selection takes on a plugin's layer: their box, as the transform box shows
+        if (taken.size == 8) {
+            val m = vm.viewMatrix
+            val corners = List(4) { toScreen(taken[2 * it], taken[2 * it + 1], m) }
+            val edge = Path().apply {
+                moveTo(corners[0].x, corners[0].y)
+                for (c in corners.drop(1)) lineTo(c.x, c.y)
+                close()
+            }
+            val dash = 5.dp.toPx()
+            val width = 1.dp.toPx()
+            drawPath(edge, DashGap, style = Stroke(width, pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, dash), dash)))
+            drawPath(edge, Dash, style = Stroke(width, pathEffect = PathEffect.dashPathEffect(floatArrayOf(dash, dash), 0f)))
+            for (c in corners) node(c, NodeBlue, 1f)
+        }
         drag?.let { (a, b) ->
             val outline = Path().apply {
                 val r = Rect(minOf(a.x, b.x), minOf(a.y, b.y), maxOf(a.x, b.x), maxOf(a.y, b.y))
