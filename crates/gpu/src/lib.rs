@@ -289,6 +289,10 @@ impl Gpu {
     }
 
     fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+        // a driver's own description can run over several lines: one line in the log
+        fn one_line(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
         // each stage timed in the log: on a slow driver, where a start stopped shows
         let started = std::time::Instant::now();
         // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
@@ -300,7 +304,7 @@ impl Gpu {
                 info.backend,
                 info.device_type,
                 info.driver,
-                info.driver_info
+                one_line(&info.driver_info)
             );
         }
         log::info!("the GPUs listed in {} ms", started.elapsed().as_millis());
@@ -317,7 +321,7 @@ impl Gpu {
             "GPU: {} ({:?}, driver {}), chosen in {} ms",
             info.name,
             info.backend,
-            info.driver_info,
+            one_line(&info.driver_info),
             chosen.elapsed().as_millis()
         );
         let made = std::time::Instant::now();
