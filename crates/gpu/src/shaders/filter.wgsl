@@ -9,6 +9,12 @@ struct FilterUniform {
     // (the target's width, height, 1 with a selection, 1 with the layer's alpha locked)
     size: vec4<f32>,
     c: vec4<f32>,
+    // (how much the result fades back to what was there, 1 when `chosen` is a layer mask, 0, 0)
+    d: vec4<f32>,
+    // more of a filter's own values (layer styles)
+    e: vec4<f32>,
+    f: vec4<f32>,
+    g: vec4<f32>,
 }
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -28,12 +34,14 @@ fn vs_filter(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 }
 
 // how much of target pixel i the filter takes: all, or what the selection (or the painted-on mask)
-// takes
+// takes, or an adjustment layer's mask (as much as it is light and opaque); less as it fades
 fn taken(i: vec2<i32>) -> f32 {
+    var t = 1.0;
     if (fu.size.z > 0.5) {
-        return textureLoad(chosen, i, 0).r;
+        let m = textureLoad(chosen, i, 0);
+        t = select(m.r, clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0), fu.d.y > 0.5);
     }
-    return 1.0;
+    return t * (1.0 - fu.d.x);
 }
 
 // the filtered colour on a pixel that held `was`: with the alpha locked, the pixel covered as much
@@ -490,3 +498,183 @@ fn fs_glitch(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return kept(i, valid(out));
 }
 
+
+// pixelate: square cells a.x pixels across from the top left, each the mean of what it covers
+// (up to 8 × 8 samples, each the mean of a few pixels)
+@fragment
+fn fs_pixelate(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let size = max(fu.a.x, 1.0);
+    let corner = floor(pos.xy / size) * size;
+    let far = min(corner + vec2<f32>(size), fu.size.xy);
+    let n = i32(clamp(ceil(size / 2.0), 1.0, 8.0));
+    var sum = vec4<f32>(0.0);
+    for (var y = 0; y < n; y++) {
+        for (var x = 0; x < n; x++) {
+            let t = (vec2<f32>(f32(x), f32(y)) + 0.5) / f32(n);
+            sum += copy_at(mix(corner, far, t));
+        }
+    }
+    return kept(i, sum / f32(n * n));
+}
+
+// the 8 × 8 ordered (Bayer) threshold at cell c, 0..1
+fn bayer(c: vec2<i32>) -> f32 {
+    var v = 0;
+    var x = c.x & 7;
+    var y = c.y & 7;
+    for (var bit = 0; bit < 3; bit++) {
+        let xb = (x >> u32(2 - bit)) & 1;
+        let yb = (y >> u32(2 - bit)) & 1;
+        v = v * 4 + ((xb ^ yb) * 2 + yb);
+    }
+    return (f32(v) + 0.5) / 64.0;
+}
+
+// dither: each channel (or the grey, b.x) brought to a.y steps, the threshold between broken up by
+// a pattern of a.z pixel dots (a.w 0 ordered, 1 noise), a.x of the way
+@fragment
+fn fs_dither(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let c = textureLoad(src, i, 0);
+    if (c.a <= 0.0) {
+        return kept(i, c);
+    }
+    var rgb = c.rgb / c.a;
+    if (fu.b.x > 0.5) {
+        rgb = vec3<f32>(dot(rgb, vec3<f32>(0.299, 0.587, 0.114)));
+    }
+    let cell = vec2<i32>(floor(pos.xy / max(fu.a.z, 1.0)));
+    var threshold = bayer(cell);
+    if (fu.a.w > 0.5) {
+        threshold = cell_random(vec2<f32>(cell), 5.0);
+    }
+    let steps = max(fu.a.y - 1.0, 1.0);
+    let stepped = clamp(floor(rgb * steps + threshold), vec3<f32>(0.0), vec3<f32>(steps)) / steps;
+    let out = mix(c.rgb / c.a, stepped, clamp(fu.a.x, 0.0, 1.0));
+    return kept(i, vec4<f32>(out * c.a, c.a));
+}
+
+// vignette: darker (a.w: lighter) towards the corners by a.x, from a.y of the way from the middle to
+// a corner over a.z of the rest; round whatever the canvas's shape
+@fragment
+fn fs_vignette(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let c = textureLoad(src, i, 0);
+    let half = fu.size.xy * 0.5;
+    let away = length(pos.xy - half) / max(length(half), 1.0);
+    let start = clamp(fu.a.y, 0.0, 1.0);
+    let end = start + max(clamp(fu.a.z, 0.0, 1.0) * (1.5 - start), 0.01);
+    let k = smoothstep(start, end, away) * clamp(fu.a.x, 0.0, 1.0);
+    if (fu.a.w > 0.5) {
+        // towards white, as much as there is colour there
+        return kept(i, vec4<f32>(mix(c.rgb, vec3<f32>(c.a), k), c.a));
+    }
+    return kept(i, vec4<f32>(c.rgb * (1.0 - k), c.a));
+}
+
+// Layer styles: how far each pixel is from what a layer shows (outside it) and from where it shows
+// nothing (inside it), worked out a row and then a column at a time, out to a.x pixels; kept as a
+// share of that in two bytes each (outside red and green, inside blue and alpha).
+
+fn put_two(v: f32) -> vec2<f32> {
+    let t = clamp(v, 0.0, 1.0) * 255.0;
+    let high = floor(t);
+    return vec2<f32>(high / 255.0, t - high);
+}
+
+fn read_two(v: vec2<f32>) -> f32 {
+    return (round(v.x * 255.0) + v.y) / 255.0;
+}
+
+// across the row: the nearest pixel shown (outside) and the nearest not shown (inside), each
+// further the less it is so
+@fragment
+fn fs_style_rows(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let reach = i32(fu.a.x);
+    let width = i32(fu.size.x);
+    var outside = f32(reach);
+    var inside = f32(reach);
+    for (var k = -reach; k <= reach; k++) {
+        let x = i.x + k;
+        if (x < 0 || x >= width) {
+            continue;
+        }
+        let a = textureLoad(src, vec2<i32>(x, i.y), 0).a;
+        let d = f32(abs(k));
+        if (a > 0.004) {
+            outside = min(outside, d + 1.0 - a);
+        }
+        if (a < 0.996) {
+            inside = min(inside, d + a);
+        }
+    }
+    let r = max(fu.a.x, 1.0);
+    return vec4<f32>(put_two(outside / r), put_two(inside / r));
+}
+
+// down the column: the nearest of the rows' over and under, as the crow flies
+@fragment
+fn fs_style_columns(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let reach = i32(fu.a.x);
+    let height = i32(fu.size.y);
+    let r = max(fu.a.x, 1.0);
+    var outside = r;
+    var inside = r;
+    for (var k = -reach; k <= reach; k++) {
+        let y = i.y + k;
+        if (y < 0 || y >= height) {
+            continue;
+        }
+        let row = textureLoad(src, vec2<i32>(i.x, y), 0);
+        let d = f32(k * k);
+        outside = min(outside, sqrt(d + pow(read_two(row.rg) * r, 2.0)));
+        inside = min(inside, sqrt(d + pow(read_two(row.ba) * r, 2.0)));
+    }
+    return vec4<f32>(put_two(outside / r), put_two(inside / r));
+}
+
+// how much of an effect `size` pixels out, `softness` (0..1) of it fading, covers a pixel `d` away
+fn reached(d: f32, size: f32, softness: f32) -> f32 {
+    let start = size * (1.0 - clamp(softness, 0.0, 1.0));
+    return 1.0 - smoothstep(start - 0.5, size + 0.5, d);
+}
+
+// the distances (outside, inside; pixels) at p, none beyond the canvas
+fn distances(p: vec2<i32>) -> vec2<f32> {
+    let dims = vec2<i32>(textureDimensions(before));
+    if (any(p < vec2<i32>(0)) || any(p >= dims)) {
+        return vec2<f32>(fu.a.x);
+    }
+    let v = textureLoad(before, p, 0);
+    return vec2<f32>(read_two(v.rg), read_two(v.ba)) * max(fu.a.x, 1.0);
+}
+
+// premultiplied `top` over `under`
+fn over(top: vec4<f32>, under: vec4<f32>) -> vec4<f32> {
+    return top + under * (1.0 - top.a);
+}
+
+// the layer (src) with its styles drawn round it from its distances (before), bottom up: drop
+// shadow, outer glow, outline, the layer, and the inner glow over it inside it. a: the reach, and
+// the shadow's offset (pixels); b, c, e, f: the outline's, shadow's, outer and inner glow's colour
+// and opacity (none when off); g: the outline's and shadow's size and softness; size (not the
+// canvas's here): the outer and inner glow's
+@fragment
+fn fs_style(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let c = textureLoad(src, i, 0);
+    let here = distances(i);
+    let shadowed = distances(i - vec2<i32>(round(fu.a.yz)));
+    let shadow = fu.c.a * reached(shadowed.x, fu.g.z, fu.g.w);
+    let glow = fu.e.a * reached(here.x, fu.size.x, fu.size.y);
+    let outline = fu.b.a * reached(here.x, fu.g.x, fu.g.y);
+    let inner = fu.f.a * reached(here.y, fu.size.z, fu.size.w);
+    var behind = over(vec4<f32>(fu.e.rgb * glow, glow), vec4<f32>(fu.c.rgb * shadow, shadow));
+    behind = over(vec4<f32>(fu.b.rgb * outline, outline), behind);
+    // the inner glow over the layer, inside it only
+    let lit = vec4<f32>(mix(c.rgb, fu.f.rgb * c.a, inner), c.a);
+    return over(lit, behind);
+}
