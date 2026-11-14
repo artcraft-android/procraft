@@ -1157,7 +1157,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     };
     krita_paint(&mut b, k.opacity, flow, k.opacity_pressure.as_deref(), flow_pressure.as_deref(), k.wash);
     if let Some(t) = &k.texture {
-        krita_paper(&mut b, t, &k.name);
+        krita_paper(&mut b, t, k.speckled, &k.name);
     }
     // a masking brush is a dual brush's second: its size a share of this one's, its coverage
     // combined with this one's by the nearest of the modes
@@ -1180,14 +1180,16 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
 }
 
 /// Gives `b` a Krita preset's texture as its grain: the mask Krita makes of its picture (light
-/// keeping the paint where it multiplies), as deep as its strength, combined with each stamp by
-/// the nearest of the modes to Krita's. Multiplied its own way (not soft), the grain is whole and
-/// the strength is in the paint laid ([`krita_brush`]); subtracted its own way with a strength
-/// that follows the pressure, each stamp less the mask and less what its strength falls short of,
-/// as our height mode takes the mask from a stamp at a twelfth of the depth there; soft, the
-/// strength is how deep the mask goes. A strength that follows the pressure goes stamp by stamp.
-fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, name: &str) {
-    use procraft_engine::brush::{GRAIN_HEIGHT, PressureCurve};
+/// keeping the paint where it multiplies), combined with each stamp by the nearest of the modes
+/// to Krita's. Multiplied its own way (not soft), the grain is whole and the strength is in the
+/// paint laid ([`krita_brush`]). The modes that take paint away as a height (subtract, linear
+/// burn, the heights, hard mix softer) come in as our heights (see [`KritaHeight`]): the grain the
+/// picture their mode takes away by, as deep as their strength raises a stamp (by the pressure, if
+/// it follows it). Soft, the strength is how deep the mask goes. Each stamp is textured as it is
+/// laid, as Krita's are, unless its tip is `speckled` and the strength holds still.
+fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, speckled: bool, name: &str) {
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::geom::Vec2;
     use procraft_engine::krita::KritaPicture;
     let mask = |grey: f32, alpha: f32| (t.mask_value(grey / 255.0, alpha / 255.0) * 255.0).round() as u8;
     let picture = match &t.picture {
@@ -1213,9 +1215,41 @@ fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, name: &s
             Some((g.width, g.height, g.pixels.iter().map(|&v| mask(f32::from(v), 255.0)).collect()))
         }
     };
-    let Some((w, h, pixels)) = picture else { return };
+    let Some((w, h, mut pixels)) = picture else { return };
+    let height = (!t.soft).then(|| KritaHeight::of(t.mode)).flatten();
+    if let Some(height) = height {
+        for v in &mut pixels {
+            *v = (height.grain(f32::from(*v) / 255.0) * 255.0).round() as u8;
+        }
+    }
     paper(b, &[sized_gray_png(w, h, &pixels)], false, t.strength, t.scale);
     if b.grain.source.is_none() {
+        return;
+    }
+    // Krita textures each stamp before it is laid (a stamp of little flow is textured, then
+    // builds up), so ours goes on stamp by stamp too; but a speckled tip's holes, drawn once,
+    // blur in a small stamp and would take its texture away with them, so (as long as the
+    // strength holds still) its texture goes over the stroke as a whole
+    let pressed = t.strength_pressure.as_deref().map(Curve::new);
+    if pressed.is_some() || !speckled {
+        b.set_setting("grain_each_stamp", 1.0);
+    }
+    if let Some(height) = height {
+        b.set_setting("grain_blend", height.mode() as f32);
+        let depth = |strength: f32| (height.raise(strength) / 12.0).clamp(0.0, 1.0);
+        match &pressed {
+            // the strength by the pressure: as deep as the most it goes to, and its share of that
+            // at each pressure
+            Some(curve) => {
+                let places = || (0..=32).map(|i| i as f32 / 32.0);
+                let depths: Vec<(f32, f32)> = places().map(|x| (x, depth(t.strength * curve.eval(x)))).collect();
+                let most = depths.iter().map(|(_, d)| *d).fold(0.0, f32::max).max(1e-4);
+                let points: Vec<Vec2> = depths.iter().map(|&(x, d)| Vec2::new(x, d / most)).collect();
+                b.grain.depth = most;
+                b.pressure_curves.set(PressureCurve::GrainDepth, Some(Curve::new(&points)));
+            }
+            None => b.grain.depth = depth(t.strength),
+        }
         return;
     }
     let mode = t.op().and_then(masking_mode).unwrap_or_else(|| {
@@ -1223,23 +1257,83 @@ fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, name: &s
         procraft_engine::document::BlendMode::Multiply.id()
     });
     b.set_setting("grain_blend", mode as f32);
-    let pressed = t.strength_pressure.as_deref().map(Curve::new);
-    let by_stamp = match (t.mode, t.soft) {
-        (0, false) => {
-            b.grain.depth = 1.0;
-            false
+    match (t.mode, t.soft) {
+        (0, false) => b.grain.depth = 1.0,
+        (0 | 1, true) => b.pressure_curves.set(PressureCurve::GrainDepth, pressed),
+        _ => {}
+    }
+}
+
+/// A Krita texturing mode (not soft) that takes paint away as a height does, as one of our two
+/// heights, which take a stamp's coverage raised by twelve times the depth, less the grain. At a
+/// full stamp Krita's mode lays its raise at the strength less the grain it takes from the mask:
+///
+/// - subtract: the stamp less the mask and less what the strength falls short of 1;
+/// - linear burn: the mask and the stamp times the strength, less 1 (the grain the mask's
+///   inverse: the same at every coverage);
+/// - height (and linear height, which multiplies as well): the stamp over what the strength
+///   (times 0.99) falls short of 1, less that and less the mask;
+/// - their Photoshop forms: the stamp times ten times the strength, less the mask;
+/// - hard mix softer: three times the stamp times the strength, less twice the mask's inverse.
+///   That takes more away than a grain holds: ours lays half of it (the mask's inverse less the
+///   stamp times one and a half times the strength), so it lays nothing just where Krita's does
+///   and as much more for more strength, and its stamps build up to as much.
+///
+/// So the depth at a strength is the raise over 12. Where the strength takes off what it falls
+/// short of (subtract, height), that is taken off a full stamp: a stamp's soft edge keeps a little
+/// more than Krita's at a weak strength.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KritaHeight {
+    Subtract,
+    LinearBurn,
+    Height { linear: bool },
+    PhotoshopHeight { linear: bool },
+    HardMixSofter,
+}
+
+impl KritaHeight {
+    /// The height Krita's mode `mode` comes in as; none for a mode that doesn't take paint away as
+    /// a height.
+    fn of(mode: u32) -> Option<KritaHeight> {
+        Some(match mode {
+            1 => KritaHeight::Subtract,
+            9 => KritaHeight::LinearBurn,
+            11 => KritaHeight::HardMixSofter,
+            12 | 13 => KritaHeight::Height { linear: mode == 13 },
+            14 | 15 => KritaHeight::PhotoshopHeight { linear: mode == 15 },
+            _ => return None,
+        })
+    }
+
+    /// Our grain mode it is drawn by.
+    fn mode(self) -> u32 {
+        use procraft_engine::brush::{GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT};
+        match self {
+            KritaHeight::Height { linear: true } | KritaHeight::PhotoshopHeight { linear: true } => GRAIN_LINEAR_HEIGHT,
+            _ => GRAIN_HEIGHT,
         }
-        (1, false) if pressed.is_some() => {
-            b.grain.depth = t.strength / 12.0;
-            b.set_setting("grain_blend", GRAIN_HEIGHT as f32);
-            true
+    }
+
+    /// The grain a mask value `m` (0 to 1) becomes.
+    fn grain(self, m: f32) -> f32 {
+        match self {
+            KritaHeight::LinearBurn | KritaHeight::HardMixSofter => 1.0 - m,
+            _ => m,
         }
-        (0 | 1, true) => pressed.is_some(),
-        _ => false,
-    };
-    if by_stamp {
-        b.set_setting("grain_each_stamp", 1.0);
-        b.pressure_curves.set(PressureCurve::GrainDepth, pressed);
+    }
+
+    /// How far a full stamp is raised at a strength (0 to 1).
+    fn raise(self, strength: f32) -> f32 {
+        let s = strength.clamp(0.0, 1.0);
+        match self {
+            KritaHeight::Subtract | KritaHeight::LinearBurn => s,
+            KritaHeight::Height { .. } => {
+                let short = 1.0 - 0.99 * s;
+                1.0 / short - short
+            }
+            KritaHeight::PhotoshopHeight { .. } => 10.0 * s,
+            KritaHeight::HardMixSofter => 1.5 * s,
+        }
     }
 }
 
@@ -2182,6 +2276,7 @@ mod tests {
                 angle: 0.0,
                 follows: false,
                 turns_at_random: false,
+                speckled: false,
                 rotation_random: 0.0,
                 rotation_per_stroke: false,
                 follows_tilt: false,
@@ -2208,8 +2303,9 @@ mod tests {
         let (dark, light) =
             (source.pixels.iter().filter(|&&v| v == 0).count(), source.pixels.iter().filter(|&&v| v == 255).count());
         assert!(dark > 0 && light > 3 * dark, "{dark} {light}");
-        // subtracted, as it says; multiplied otherwise, and where a mode has no near one of ours
-        assert_eq!(b.setting("grain_blend"), BlendMode::Subtract.id() as f32);
+        // subtracted, as it says (as a height, by the strength); multiplied otherwise, and where a
+        // mode has no near one of ours
+        assert_eq!(b.setting("grain_blend"), procraft_engine::brush::GRAIN_HEIGHT as f32);
         assert_eq!(
             brush(KritaTexture { mode: 0, ..texture.clone() }).setting("grain_blend"),
             BlendMode::Multiply.id() as f32
@@ -2218,9 +2314,11 @@ mod tests {
             brush(KritaTexture { mode: 2, ..texture.clone() }).setting("grain_blend"),
             BlendMode::Multiply.id() as f32
         );
-        // laid over the whole stroke, at its strength, while that doesn't follow the pressure
+        // each stamp textured as it is laid, as deep as its strength raises it
         let still = brush(KritaTexture { strength: 0.8, ..texture.clone() });
-        assert!(!still.grain_each_stamp() && (still.grain.depth - 0.8).abs() < 1e-6);
+        assert!(still.grain_each_stamp() && (still.grain.depth - 0.8 / 12.0).abs() < 1e-6);
+        let multiplied = brush(KritaTexture { mode: 0, ..texture.clone() });
+        assert!(multiplied.grain_each_stamp() && multiplied.grain.depth == 1.0);
     }
 
     #[test]
@@ -2253,6 +2351,7 @@ mod tests {
                 angle: 0.0,
                 follows: false,
                 turns_at_random: false,
+                speckled: false,
                 rotation_random: 0.0,
                 rotation_per_stroke: false,
                 follows_tilt: false,
@@ -2274,16 +2373,17 @@ mod tests {
                 masking: None,
             })
         };
-        // subtracted (Krita's own way): stamp by stamp, a height a twelfth as deep as the strength,
-        // its depth by the pressure
+        // subtracted (Krita's own way): stamp by stamp, a height a twelfth as deep as the strength
+        // at the pressure
         let b = brush(texture.clone());
         assert!(b.grain_each_stamp());
         assert_eq!(b.setting("grain_blend"), GRAIN_HEIGHT as f32);
-        assert!(near(b.grain.depth, 0.9 / 12.0));
-        assert!(b.pressure_curves.get(PressureCurve::GrainDepth).is_some_and(|c| near(c.eval(0.5), 0.5)));
-        // multiplied: the grain whole, over the whole stroke, the strength less paint laid
+        let depth_at =
+            |b: &Brush, p: f32| b.grain.depth * b.pressure_curves.get(PressureCurve::GrainDepth).unwrap().eval(p);
+        assert!(near(depth_at(&b, 0.5), 0.9 * 0.5 / 12.0) && near(depth_at(&b, 1.0), 0.9 / 12.0));
+        // multiplied: the grain whole, the strength less paint laid
         let multiplied = brush(KritaTexture { mode: 0, ..texture.clone() });
-        assert!(!multiplied.grain_each_stamp() && near(multiplied.grain.depth, 1.0));
+        assert!(multiplied.grain_each_stamp() && near(multiplied.grain.depth, 1.0));
         assert_eq!(multiplied.setting("grain_blend"), BlendMode::Multiply.id() as f32);
         let plain = brush(KritaTexture { mode: 0, strength: 1.0, strength_pressure: None, ..texture.clone() });
         assert!(near(multiplied.flow.powf(0.4), (plain.flow.powf(0.4) * 0.9).min(1.0)) || multiplied.flow < plain.flow);
@@ -2292,10 +2392,119 @@ mod tests {
         let soft = brush(KritaTexture { soft: true, ..texture.clone() });
         assert!(soft.grain_each_stamp() && near(soft.grain.depth, 0.9));
         assert_eq!(soft.setting("grain_blend"), BlendMode::Subtract.id() as f32);
-        // a strength that doesn't follow the pressure: over the whole stroke, as before
+        // a strength that doesn't follow the pressure: as deep as it raises a stamp, always
         let still = brush(KritaTexture { strength_pressure: None, ..texture });
-        assert!(!still.grain_each_stamp() && near(still.grain.depth, 0.9));
-        assert_eq!(still.setting("grain_blend"), BlendMode::Subtract.id() as f32);
+        assert!(still.grain_each_stamp() && near(still.grain.depth, 0.9 / 12.0));
+        assert!(still.pressure_curves.get(PressureCurve::GrainDepth).is_none());
+        assert_eq!(still.setting("grain_blend"), GRAIN_HEIGHT as f32);
+    }
+
+    #[test]
+    fn a_krita_texture_that_takes_paint_away_comes_in_as_a_height() {
+        use procraft_engine::brush::{GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, PressureCurve};
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
+        let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
+        // at a full stamp ours lays twelve times its depth less its grain; Krita's own mode, at a
+        // strength and a mask value, what each says
+        let ours =
+            |h: KritaHeight, s: f32, m: f32| ((h.raise(s) / 12.0).clamp(0.0, 1.0) * 12.0 - h.grain(m)).clamp(0.0, 1.0);
+        type Laid = fn(f32, f32) -> f32;
+        let krita: [(u32, Laid); 4] = [
+            (1, |s, m| 1.0 - m - (1.0 - s)),
+            (9, |s, m| m + s - 1.0),
+            (12, |s, m| {
+                let short = 1.0 - 0.99 * s;
+                1.0 / short - m - short
+            }),
+            (14, |s, m| 10.0 * s - m),
+        ];
+        let (strengths, masks) = ([0.1, 0.5, 0.7, 0.9, 1.0], [0.0, 0.3, 0.7, 1.0]);
+        for (mode, laid) in krita {
+            let h = KritaHeight::of(mode).unwrap();
+            assert_eq!(h.mode(), GRAIN_HEIGHT);
+            for s in strengths {
+                for m in masks {
+                    assert!(near(ours(h, s, m), laid(s, m).clamp(0.0, 1.0)), "mode {mode} at {s}, {m}");
+                }
+            }
+        }
+        // hard mix softer: half of Krita's, so nothing just where it lays nothing
+        let h = KritaHeight::of(11).unwrap();
+        for s in strengths {
+            for m in masks {
+                let laid = 3.0 * s - 2.0 * (1.0 - m);
+                assert!(near(ours(h, s, m), (laid / 2.0).clamp(0.0, 1.0)), "hard mix softer at {s}, {m}");
+            }
+        }
+        // the linear ones multiply as well; the others aren't heights
+        for mode in [13, 15] {
+            assert_eq!(KritaHeight::of(mode).map(KritaHeight::mode), Some(GRAIN_LINEAR_HEIGHT));
+        }
+        assert!([0, 2, 4, 5, 6, 10].iter().all(|&mode| KritaHeight::of(mode).is_none()));
+        // as a preset gives it: a height, stamp by stamp, as deep as the strength at the pressure
+        // raises a stamp
+        let grey: Vec<u8> = (0..16 * 16).flat_map(|_| [128, 128, 128, 255]).collect();
+        let texture = KritaTexture {
+            picture: KritaPicture::Encoded(crate::project::rgba_png(16, 16, &grey)),
+            scale: 1.0,
+            strength: 1.0,
+            strength_pressure: Some(vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]),
+            soft: false,
+            invert: false,
+            mode: 12,
+            brightness: 0.0,
+            contrast: 1.0,
+            neutral: 0.5,
+            cutoff: (0, 0.0, 1.0),
+        };
+        let crease = KritaBrush {
+            name: "Crease".into(),
+            tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
+            spacing: None,
+            angle: 0.0,
+            follows: false,
+            turns_at_random: false,
+            speckled: false,
+            rotation_random: 0.0,
+            rotation_per_stroke: false,
+            follows_tilt: false,
+            mirror: (false, false),
+            scatter: None,
+            color_random: [0.0; 4],
+            color_per_stroke: [0.0; 4],
+            ratio_random: 0.0,
+            ratio_pressure: None,
+            mix_pressure: None,
+            size_pressure: None,
+            opacity_pressure: None,
+            flow_pressure: None,
+            opacity: 1.0,
+            flow: 1.0,
+            wash: true,
+            texture: Some(texture.clone()),
+            missing: Vec::new(),
+            masking: None,
+        };
+        let b = krita_brush(&crease);
+        assert!(b.grain_each_stamp() && b.grain.depth == 1.0);
+        assert_eq!(b.setting("grain_blend"), GRAIN_HEIGHT as f32);
+        let depth = b.pressure_curves.get(PressureCurve::GrainDepth).unwrap();
+        let height = KritaHeight::Height { linear: false };
+        assert!(
+            near(depth.eval(0.0), 0.0) && near(depth.eval(0.5), height.raise(0.5) / 12.0) && near(depth.eval(1.0), 1.0)
+        );
+        // the grain the mask itself
+        let source = b.grain.source.as_ref().unwrap();
+        assert!(source.pixels.iter().all(|&v| v.abs_diff(128) <= 1));
+        // a speckled tip (its holes drawn once) textures the stroke as a whole while the strength
+        // holds still; by the pressure, stamp by stamp all the same
+        let speckled = KritaBrush { speckled: true, ..crease.clone() };
+        assert!(krita_brush(&speckled).grain_each_stamp());
+        let still = KritaTexture { strength_pressure: None, ..texture };
+        let b = krita_brush(&KritaBrush { texture: Some(still.clone()), ..speckled });
+        assert!(!b.grain_each_stamp() && b.grain.depth == 1.0);
+        assert!(krita_brush(&KritaBrush { texture: Some(still), ..crease }).grain_each_stamp());
     }
 
     #[test]
@@ -2312,6 +2521,7 @@ mod tests {
             angle: 0.0,
             follows: false,
             turns_at_random: false,
+            speckled: false,
             rotation_random: 0.0,
             rotation_per_stroke: false,
             follows_tilt: false,
@@ -2360,6 +2570,7 @@ mod tests {
             angle: 0.0,
             follows: false,
             turns_at_random: false,
+            speckled: false,
             rotation_random: 0.6,
             rotation_per_stroke: true,
             follows_tilt: true,
@@ -2414,6 +2625,7 @@ mod tests {
             angle: 0.0,
             follows: false,
             turns_at_random: false,
+            speckled: false,
             rotation_random: 0.0,
             rotation_per_stroke: false,
             follows_tilt: false,

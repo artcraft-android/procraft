@@ -32,6 +32,10 @@ pub struct KritaBrush {
     /// Each stamp turns at random: a round tip drawn with holes or noise in it, which Krita makes
     /// afresh for each stamp.
     pub turns_at_random: bool,
+    /// Its tip is drawn with holes or noise in it (an auto tip of less density, or of some
+    /// randomness), which Krita makes afresh at each stamp's own pixels; ours are drawn once, and
+    /// blur where a stamp is small.
+    pub speckled: bool,
     /// Each stamp turned at random as far as this share of a half turn either way (0 none).
     pub rotation_random: f32,
     /// Each stroke turned at random as it starts.
@@ -341,6 +345,9 @@ fn brush_of<'p>(
     let (tip, turns_at_random) = brush
         .and_then(|b| tip(b, find, &mut missing))
         .unwrap_or((KritaTip::Round { hardness: 1.0, roundness: 1.0 }, false));
+    let speckled = matches!(tip, KritaTip::Image(_))
+        && brush.is_some_and(|b| b.attribute("type") == Some("auto_brush"))
+        && (number(brush, "density").is_some_and(|d| d < 1.0) || number(brush, "randomness").is_some_and(|r| r > 0.0));
     let flag = |name: &str| param(name).is_some_and(|v| v == "true");
     let value = |name: &str| param(name).and_then(real);
     // an option switched on with its pen settings, and driven by a sensor
@@ -424,6 +431,7 @@ fn brush_of<'p>(
         // the tip's rotation by the Drawing Angle sensor, alone or among others
         follows: flag("PressureRotation") && param("RotationSensor").is_some_and(|s| s.contains("drawingangle")),
         turns_at_random,
+        speckled,
         rotation_random: if driven("Rotation", "fuzzy") { turned } else { 0.0 },
         rotation_per_stroke: driven("Rotation", "fuzzystroke") && turned > 0.0,
         follows_tilt: driven("Rotation", "ascension"),
@@ -1412,6 +1420,21 @@ mod tests {
             ),
         );
         assert!(close(read_preset(&kpp(&both), &|_| None).unwrap().spacing, 0.05 * harmonic(|p| p)));
+    }
+
+    #[test]
+    fn an_auto_tip_with_holes_or_noise_is_speckled() {
+        let speckled = |attributes: &str, generator: &str| {
+            let brush = format!(
+                r#"<Brush type="auto_brush" spacing="0.1" {attributes}><MaskGenerator {generator} diameter="40"/></Brush>"#
+            );
+            read_preset(&kpp(&preset("Speckled", &brush, true)), &|_| None).unwrap().speckled
+        };
+        assert!(speckled(r#"density="0.5""#, r#"type="rect" ratio="0.5""#));
+        assert!(speckled(r#"randomness="0.3""#, r#"type="circle""#));
+        // whole, or our round tip: not
+        assert!(!speckled(r#"density="1" randomness="0""#, r#"type="rect" ratio="0.5""#));
+        assert!(!speckled("", r#"type="circle""#));
     }
 
     #[test]
