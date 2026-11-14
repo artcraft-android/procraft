@@ -13974,3 +13974,20 @@ fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
         !options.iter().any(|r| r.option == crate::LayerOption::LayerStyle || r.option == crate::LayerOption::Fill)
     );
 }
+
+#[test]
+fn picked_layers_with_an_adjustment_layer_among_them_stay_apart() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let base = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    assert!(s.adjustment_end(true));
+    let grey = pixel(&s, 32, 32);
+    assert!(s.pick_layer(base));
+    let count = s.layers().len();
+    assert!(!s.merge_picked(), "what it does would be lost");
+    assert_eq!(s.layers().len(), count);
+    assert_eq!(pixel(&s, 32, 32), grey);
+}

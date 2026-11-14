@@ -1101,6 +1101,15 @@ impl CanvasSession {
             st.doc = chosen_before;
             return false;
         };
+        // an adjustment layer has no pixels to merge: what it does would be lost, so they stay
+        // apart (merged in a group, it is drawn with the group)
+        if std::iter::once(lower)
+            .chain(uppers.iter().copied())
+            .any(|l| st.doc.layer(l).is_some_and(|l| l.is_adjustment()))
+        {
+            st.doc = chosen_before;
+            return false;
+        }
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
         // the layer below changes only where they (a group's layers within it) are painted: only
