@@ -259,14 +259,17 @@ impl CanvasSession {
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
-            let played = canvas.play_frame();
+            let (played, camera) = (canvas.play_frame(), canvas.camera_view());
             if let Shot::At(frame) = shot {
+                // a timeline's frame, through its camera
                 canvas.set_play_frame(usize::try_from(frame).ok());
+                canvas.set_camera_view(true);
             }
             canvas.invalidate();
             canvas.render_finished(gpu, &mut doc);
             let rgba = canvas.read_composite(gpu);
             canvas.set_play_frame(played);
+            canvas.set_camera_view(camera);
             canvas.invalidate();
             canvas.render(gpu, &mut st.doc, None);
             self.shared.frame(st);

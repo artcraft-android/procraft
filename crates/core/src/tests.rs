@@ -13816,3 +13816,96 @@ fn easings_and_motion_paths_through_the_session() {
     assert!(s.set_timeline_path_handles(clip, 0, None, true));
     assert_eq!(s.timeline_motion_path(clip).unwrap().keys[0].handles, None);
 }
+
+/// A canvas of four drawings on a timeline's one track (empty layers, each held a frame), shown as
+/// every track.
+fn four_drawings() -> Option<std::sync::Arc<CanvasSession>> {
+    let s = session(40, 40)?;
+    assert!(s.set_animation_assist(true));
+    for _ in 0..3 {
+        s.add_layer();
+    }
+    assert!(s.start_timeline());
+    s.set_timeline_simple(false);
+    Some(s)
+}
+
+#[test]
+fn clips_are_masked_and_grouped_through_the_session() {
+    use crate::timeline::{TimelineClipKind, TimelineMask};
+    let Some(s) = four_drawings() else { return };
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    assert!(s.set_timeline_clip_mask(clips[1], TimelineMask::Luminance));
+    assert!(!s.set_timeline_clip_mask(clips[1], TimelineMask::Luminance), "no change, no step");
+    assert_eq!(s.timeline_tracks()[0].clips[1].mask, TimelineMask::Luminance);
+    // the first two grouped, held six frames, cycling every two
+    let group = s.group_timeline_clips(vec![clips[0], clips[1]]);
+    assert_ne!(group, 0);
+    assert_eq!(s.group_timeline_clips(vec![]), 0);
+    let shown = s.timeline_tracks();
+    assert_eq!(
+        shown[0].clips.iter().map(|c| (c.kind, c.start)).collect::<Vec<_>>(),
+        [(TimelineClipKind::Group, 0), (TimelineClipKind::Drawing, 2), (TimelineClipKind::Drawing, 3)]
+    );
+    assert!(s.set_timeline_clip_duration(group, 6, true));
+    assert!(s.set_timeline_cycle(group, 2, true));
+    let g = s.timeline_tracks()[0].clips[0].clone();
+    assert_eq!((g.cycle, g.continue_across, g.duration), (2, true, 6));
+    // opened: its own track, its clips where they are on the timeline
+    assert!(s.open_timeline_group(Some(group)));
+    assert!(!s.open_timeline_group(Some(clips[2])), "not a group");
+    let info = s.timeline_info().unwrap();
+    assert_eq!(info.open_groups.iter().map(|g| g.id).collect::<Vec<_>>(), [group]);
+    let inner = s.timeline_tracks();
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[0].clips.iter().map(|c| (c.id, c.start)).collect::<Vec<_>>(), [(clips[0], 0), (clips[1], 1)]);
+    assert_eq!(info.track, Some(inner[0].id), "drawn on inside it");
+    // the playhead on the second cycle draws on the drawing it shows
+    let current = |s: &CanvasSession| s.shared.lock().doc.current().0;
+    s.set_timeline_frame(3);
+    assert_eq!(current(&s), inner[0].clips[1].root);
+    // a drawing added inside it, at the playhead's frame of the first cycle
+    s.set_timeline_frame(1);
+    let added = s.add_timeline_drawing();
+    assert_ne!(added, 0);
+    assert_eq!(s.timeline_tracks()[0].clips.iter().map(|c| c.start).collect::<Vec<_>>(), [0, 1, 2]);
+    // keys on a clip inside: on its own frames, told on the timeline's
+    s.set_timeline_frame(3);
+    let opacity = crate::timeline::TimelineChannel::Opacity;
+    assert!(s.set_timeline_key(clips[0], opacity, vec![0.5], crate::timeline::TimelineEasing::Linear, true));
+    assert_eq!(s.timeline_keys(clips[0]).iter().map(|k| k.frame).collect::<Vec<_>>(), [1], "the second cycle's 1");
+    // back out, and taken apart
+    assert!(s.open_timeline_group(None));
+    assert!(s.timeline_info().unwrap().open_groups.is_empty());
+    assert!(s.ungroup_timeline_clip(group));
+    assert!(s.timeline_tracks()[0].clips.iter().all(|c| c.kind == TimelineClipKind::Drawing));
+    assert!(s.undo().is_some());
+    assert_eq!(s.timeline_tracks()[0].clips[0].kind, TimelineClipKind::Group);
+}
+
+#[test]
+fn the_camera_is_keyed_through_the_session() {
+    let Some(s) = four_drawings() else { return };
+    let still = s.timeline_camera().unwrap();
+    assert_eq!((still.x, still.y, still.zoom, still.keyed), (20.0, 20.0, 1.0, false));
+    assert_eq!(still.corners, [0.0, 0.0, 40.0, 0.0, 40.0, 40.0, 0.0, 40.0]);
+    s.set_timeline_frame(0);
+    let easing = crate::timeline::TimelineEasing::Linear;
+    assert!(s.set_timeline_camera_key(10.0, 20.0, 2.0, 350.0, easing, false));
+    assert!(s.set_timeline_camera_key(10.0, 20.0, 2.0, 350.0, easing, true));
+    s.set_timeline_frame(2);
+    assert!(s.set_timeline_camera_key(30.0, 20.0, 2.0, 10.0, easing, true));
+    assert_eq!(s.timeline_camera_keys(), [0, 2]);
+    s.set_timeline_frame(1);
+    let half = s.timeline_camera().unwrap();
+    assert!((half.x - 20.0).abs() < 1e-3 && !half.keyed, "{half:?}");
+    assert!(half.rotation.abs() < 1e-3 || (half.rotation - 360.0).abs() < 1e-3, "the short way: {half:?}");
+    // twice as close: the frame half the canvas across, about its middle
+    assert!((half.corners[0] - 10.0).abs() < 1e-3 && (half.corners[4] - 30.0).abs() < 1e-3, "{half:?}");
+    s.set_timeline_frame(2);
+    assert!(s.remove_timeline_camera_key());
+    assert!(!s.remove_timeline_camera_key());
+    assert_eq!(s.timeline_camera_keys(), [0]);
+    s.set_timeline_camera_view(true);
+    assert!(s.timeline_info().unwrap().camera_view);
+}
