@@ -80,9 +80,9 @@ fn scaled_radius(style: &StrokeStyle, radius: f32, k: f32) -> f32 {
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
 ];
 
 #[repr(C)]
@@ -656,10 +656,10 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
-    /// How many stamps of a gradual stroke go over a point, each pixel building up by its own
-    /// share of the stamp (see `Stamp::overlap`); 0 for any other stroke.
-    overlap: f32,
 }
+
+// (read as 24 floats a stamp by the shader laying stamps by their stroke's rule)
+const _: () = assert!(size_of::<StampInstance>() == 24 * 4);
 
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
 /// painted `in_place` (see [`WORK_AT_ONCE`]).
@@ -671,9 +671,9 @@ fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> u64 {
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
-/// apart for the capped pipeline, or (without one) takes it into the alpha. A gradual stroke's
-/// stamp keeps its own alpha where the stamp shader builds the stroke up `per_pixel`, and stands
-/// in for that rule at full cover anywhere else (laid in place, or over the canvas).
+/// apart for its rule (see [`Canvas::lay_by_rule`]), or (drawn "over", `capped` false) takes it
+/// into the alpha. A gradual stroke's stamp keeps its own alpha where its stroke takes the rule
+/// `per_pixel`, and stands in for that rule at full cover anywhere else (over the canvas).
 fn capped_alpha(style: &StrokeStyle, capped: bool, s: &Stamp, per_pixel: bool) -> (f32, f32) {
     let alpha = if per_pixel { s.alpha } else { s.over_alpha() }.clamp(0.0, 1.0);
     let transfer = if s.transfer.is_finite() { s.transfer.clamp(0.0, 1.0) } else { 1.0 };
@@ -684,10 +684,93 @@ fn capped_alpha(style: &StrokeStyle, capped: bool, s: &Stamp, per_pixel: bool) -
     }
 }
 
-/// How many stamps of a gradual stroke go over a point, as the stamp shader takes it (0: the
-/// stamp laid as it is), where it builds the stroke up `per_pixel`.
-fn stamp_overlap(s: &Stamp, per_pixel: bool) -> f32 {
-    if per_pixel && s.overlap.is_finite() { s.overlap.clamp(0.0, 512.0) } else { 0.0 }
+/// The pixels a side of a part of the canvas stamps laid by their stroke's rule are laid in at a
+/// time (see [`Canvas::lay_by_rule`]), and of each of its tiles (as the shader takes them).
+const RULE_PART: u32 = 1024;
+const RULE_TILE: u32 = 16;
+
+/// The rule a stroke's stamps take pixel by pixel, as the rule shader numbers it, where drawing
+/// them "over" or keeping the strongest can't follow it: building up gradually (1), or towards
+/// the transfer and never past it nor back (2).
+fn by_rule(rendering: Rendering) -> Option<u32> {
+    match rendering {
+        Rendering::Gradual => Some(1),
+        Rendering::Capped => Some(2),
+        Rendering::BuildUp | Rendering::Strongest => None,
+    }
+}
+
+/// How far a stamp's quad reaches on the canvas: a pixel past the stamp, turned any way.
+fn quad_reach(s: &StampInstance) -> IRect {
+    let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+    let r = s.radius.max(0.25) * s.roundness.max(1.0);
+    IRect::around(at, (r + 1.0) * std::f32::consts::SQRT_2 + 1.0)
+}
+
+/// What the rule shader is given for a part `part` of the canvas: its corner, tiles across and
+/// the rule, then each tile's first stamp and count in the list after the table, then the list:
+/// the stamps (as their places among the frame's, `first` on) whose quads reach each tile, in
+/// order. None if none reach the part.
+fn rule_tiles(instances: &[StampInstance], first: u32, part: IRect, rule: u32) -> Option<Vec<u32>> {
+    let (across, down) = (part.width().div_ceil(RULE_TILE), part.height().div_ceil(RULE_TILE));
+    let tiles = (across * down) as usize;
+    if tiles == 0 {
+        return None;
+    }
+    let tile = |v: i32, from: i32| (v - from).max(0) as u32 / RULE_TILE;
+    // each stamp's tiles: first and last across and down
+    let reaches: Vec<Option<[u32; 4]>> = instances
+        .iter()
+        .map(|s| {
+            let b = quad_reach(s).intersect(part);
+            let finite = s.radius.is_finite() && s.center.iter().all(|v| v.is_finite());
+            (finite && !b.is_empty()).then(|| {
+                let [x0, y0] = [tile(b.x0, part.x0), tile(b.y0, part.y0)];
+                [x0, y0, tile(b.x1 - 1, part.x0).min(across - 1), tile(b.y1 - 1, part.y0).min(down - 1)]
+            })
+        })
+        .collect();
+    let mut counts = vec![0u32; tiles];
+    for &[x0, y0, x1, y1] in reaches.iter().flatten() {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if let Some(c) = counts.get_mut((y * across + x) as usize) {
+                    *c += 1;
+                }
+            }
+        }
+    }
+    let listed: u32 = counts.iter().sum();
+    if listed == 0 {
+        return None;
+    }
+    let head = 4 + 2 * tiles as u32;
+    let mut out = Vec::with_capacity((head + listed) as usize);
+    out.extend_from_slice(&[part.x0 as u32, part.y0 as u32, across, rule]);
+    // each tile's first place in the list, and how many
+    let mut next = vec![0u32; tiles];
+    let mut at = head;
+    for (i, &c) in counts.iter().enumerate() {
+        out.extend_from_slice(&[at, c]);
+        if let Some(n) = next.get_mut(i) {
+            *n = at;
+        }
+        at += c;
+    }
+    out.resize((head + listed) as usize, 0);
+    for (k, r) in reaches.iter().enumerate() {
+        let Some([x0, y0, x1, y1]) = *r else { continue };
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let Some(n) = next.get_mut((y * across + x) as usize) else { continue };
+                if let Some(slot) = out.get_mut(*n as usize) {
+                    *slot = first + k as u32;
+                }
+                *n += 1;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// How far past its size a round tip of radius `r` reaches, by its hardness: (scale, growth) for
@@ -1708,6 +1791,7 @@ struct LiquifyUniform {
 /// An adjustment painted on: how much of each pixel the brush has covered (the stroke format, its
 /// red channel read).
 struct PencilMask {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     /// Where it has been painted (canvas pixels): all the adjustment can have changed.
     bounds: IRect,
@@ -1816,8 +1900,10 @@ pub(crate) struct Pipelines {
     uniform_layout: wgpu::BindGroupLayout,
     stamp: wgpu::RenderPipeline,
     stamp_max: wgpu::RenderPipeline,
-    /// Stamps adding towards their transfer (dual-source blending), where the GPU has it.
-    stamp_capped: Option<wgpu::RenderPipeline>,
+    /// Stamps laid by their stroke's rule pixel by pixel (see `Canvas::lay_by_rule`), and what it
+    /// is given.
+    stamp_rule: wgpu::ComputePipeline,
+    rule_layout: wgpu::BindGroupLayout,
     layer: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
@@ -1908,6 +1994,9 @@ pub struct Canvas {
     /// Where the open stroke's tip is drawn (see [`Canvas::set_tip`]), and what it covered.
     tip: Option<IRect>,
     tip_backup: Option<wgpu::Texture>,
+    /// Where stamps laid by their stroke's rule go before their part of the stroke takes them
+    /// (see [`Canvas::lay_by_rule`]), made when first wanted.
+    rule_out: Option<wgpu::Buffer>,
     /// The finished composite, and the other half of its ping-pong pair: where a layer of a
     /// blend mode other than Normal goes, made the first time one does.
     composite: wgpu::Texture,
@@ -2106,21 +2195,6 @@ const MULTIPLY: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
-/// A capped stamp: its paint (scaled by its transfer) plus what is there kept by what the stamp
-/// leaves (the second colour out of the shader), so each stamp adds towards its transfer.
-const TOWARDS_TRANSFER: wgpu::BlendState = wgpu::BlendState {
-    color: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::OneMinusSrc1,
-        operation: wgpu::BlendOperation::Add,
-    },
-    alpha: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::OneMinusSrc1Alpha,
-        operation: wgpu::BlendOperation::Add,
-    },
-};
-
 const MAXIMUM: wgpu::BlendState = wgpu::BlendState {
     color: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
@@ -2291,6 +2365,7 @@ impl Canvas {
             stroke_view,
             tip: None,
             tip_backup: None,
+            rule_out: None,
             composite,
             composite_view,
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
@@ -2832,7 +2907,6 @@ impl Canvas {
             (true, Some(s)) => s.style,
             (true, None) => return IRect::EMPTY,
         };
-        let capped = self.pipelines.stamp_capped.is_some();
         let scale = self.scaled.map(|(_, k)| k);
         let drawn_at = |s: &Stamp| {
             let radius = drawn_radius(&style, s.radius, s.taper);
@@ -2871,14 +2945,13 @@ impl Canvas {
                 distance: if s.distance.is_finite() { s.distance } else { 0.0 },
             })
             .collect();
-        // drawn by the stamp shader, a gradual stroke builds up pixel by pixel
+        // laid by the stroke's rule, a gradual stroke builds up pixel by pixel
         let per_pixel = !style.in_place();
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
                 let radius = drawn_at(s);
-                // without the capped pipeline, the transfer goes into the stamp
-                let (alpha, transfer) = capped_alpha(&style, capped, s, per_pixel);
+                let (alpha, transfer) = capped_alpha(&style, true, s, per_pixel);
                 StampInstance {
                     center: [s.center.x, s.center.y],
                     radius,
@@ -2899,7 +2972,6 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
-                    overlap: stamp_overlap(s, per_pixel),
                 }
             })
             .collect();
@@ -2936,11 +3008,10 @@ impl Canvas {
         else {
             return;
         };
-        let capped = self.pipelines.stamp_capped.is_some();
         self.prediction.extend(
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).map(|s| {
                 // (drawn over the canvas a stamp at a time, by the overlay)
-                let (alpha, transfer) = capped_alpha(&style, capped, s, false);
+                let (alpha, transfer) = capped_alpha(&style, false, s, false);
                 StampInstance {
                     center: [s.center.x, s.center.y],
                     radius: drawn_radius(&style, s.radius, s.taper),
@@ -2957,7 +3028,6 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
-                    overlap: 0.0,
                 }
             }),
         );
@@ -4420,26 +4490,52 @@ impl Canvas {
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
-                    let target = match (&self.pencil, pencil) {
-                        _ if second => self.second_stroke.get(device).1,
-                        (Some(mask), true) => &mask.view,
-                        _ => &self.stroke_view,
-                    };
-                    let mut pass = render_pass(&mut encoder, "stamps", target, load);
-                    if count > 0 {
-                        pass.set_pipeline(match style.rendering {
-                            Rendering::BuildUp | Rendering::Gradual => &self.pipelines.stamp,
-                            Rendering::Strongest => &self.pipelines.stamp_max,
-                            Rendering::Capped => self.pipelines.stamp_capped.as_ref().unwrap_or(&self.pipelines.stamp),
-                        });
-                        pass.set_bind_group(0, &self.uniform_bind, &[offset]);
-                        pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
-                        let start = u64::from(first) * size_of::<StampInstance>() as u64;
-                        let end = u64::from(next_instance) * size_of::<StampInstance>() as u64;
-                        pass.set_vertex_buffer(0, self.stamp_buffer.slice(start..end));
-                        pass.draw(0..6, 0..count);
+                    // a stroke building up gradually or towards its transfer takes its rule pixel
+                    // by pixel
+                    let rule = by_rule(style.rendering);
+                    if rule.is_some() && count > 0 && self.rule_out.is_none() {
+                        self.rule_out = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("stamp rule"),
+                            size: u64::from(RULE_PART * RULE_PART) * 8,
+                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                            mapped_at_creation: false,
+                        }));
                     }
-                    drop(pass);
+                    let (texture, target) = match (&self.pencil, pencil) {
+                        _ if second => self.second_stroke.get(device),
+                        (Some(mask), true) => (&mask.texture, &mask.view),
+                        _ => (&self.stroke, &self.stroke_view),
+                    };
+                    if let (Some(rule), true) = (rule, count > 0) {
+                        if clear {
+                            drop(render_pass(&mut encoder, "stamps clear", target, load));
+                        }
+                        let brush = own_grain.as_ref().unwrap_or(&self.brush_bind);
+                        self.lay_by_rule(
+                            device,
+                            &mut encoder,
+                            (offset, brush),
+                            &instances,
+                            first,
+                            (texture, target),
+                            rule,
+                        );
+                    } else {
+                        let mut pass = render_pass(&mut encoder, "stamps", target, load);
+                        if count > 0 {
+                            pass.set_pipeline(match style.rendering {
+                                Rendering::Strongest => &self.pipelines.stamp_max,
+                                _ => &self.pipelines.stamp,
+                            });
+                            pass.set_bind_group(0, &self.uniform_bind, &[offset]);
+                            pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
+                            let start = u64::from(first) * size_of::<StampInstance>() as u64;
+                            let end = u64::from(next_instance) * size_of::<StampInstance>() as u64;
+                            pass.set_vertex_buffer(0, self.stamp_buffer.slice(start..end));
+                            pass.draw(0..6, 0..count);
+                        }
+                        drop(pass);
+                    }
                     // a dual brush's paint laid in place: put together again where the second went
                     if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
                         let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
@@ -4945,7 +5041,7 @@ impl Canvas {
                         &view,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
-                    self.pencil = Some(PencilMask { view, bounds: IRect::EMPTY });
+                    self.pencil = Some(PencilMask { texture: mask, view, bounds: IRect::EMPTY });
                     // the edit's source now takes the mask where it took the selection
                     let source = self
                         .transforming
@@ -6963,6 +7059,80 @@ impl Canvas {
 
     /// Sends the work recorded so far with the three kinds of uniforms a render's painting uses,
     /// going on with a new encoder (see [`WORK_AT_ONCE`]).
+    /// Lays `instances` (the frame's stamps from `first` on, uploaded already) into `target` by
+    /// their stroke's `rule` pixel by pixel (see [`by_rule`]): a part of the canvas at most
+    /// [`RULE_PART`] pixels a side at a time, each pixel going through the stamps over its tile in
+    /// order as its own paint stands after each, then the part copied into the stroke.
+    fn lay_by_rule(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        (uniform, brush): (u32, &wgpu::BindGroup),
+        instances: &[StampInstance],
+        first: u32,
+        (texture, target): (&wgpu::Texture, &wgpu::TextureView),
+        rule: u32,
+    ) {
+        use wgpu::util::DeviceExt;
+        let Some(out) = self.rule_out.as_ref() else { return };
+        let bounds = instances.iter().fold(IRect::EMPTY, |b, s| b.union(quad_reach(s))).intersect(self.full());
+        let part = RULE_PART as i32;
+        let mut y0 = bounds.y0;
+        while y0 < bounds.y1 {
+            let mut x0 = bounds.x0;
+            while x0 < bounds.x1 {
+                let rect = IRect { x0, y0, x1: (x0 + part).min(bounds.x1), y1: (y0 + part).min(bounds.y1) };
+                x0 += part;
+                let Some(tiles) = rule_tiles(instances, first, rect, rule) else { continue };
+                let tiles = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("stamp rule tiles"),
+                    contents: bytemuck::cast_slice(&tiles),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("stamp rule"),
+                    layout: &self.pipelines.rule_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &self.uniform_buffer,
+                                offset: 0,
+                                size: NonZeroU64::new(UNIFORM_SIZE),
+                            }),
+                        },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.stamp_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: tiles.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(target) },
+                        wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+                    ],
+                });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("stamp rule"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipelines.stamp_rule);
+                pass.set_bind_group(0, &bind, &[uniform]);
+                pass.set_bind_group(1, brush, &[]);
+                pass.dispatch_workgroups(rect.width().div_ceil(RULE_TILE), rect.height().div_ceil(RULE_TILE), 1);
+                drop(pass);
+                encoder.copy_buffer_to_texture(
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: out,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(RULE_PART * 8),
+                            rows_per_image: Some(rect.height()),
+                        },
+                    },
+                    copy_at(texture, rect.x0, rect.y0),
+                    extent(rect.width(), rect.height()),
+                );
+            }
+            y0 += part;
+        }
+    }
+
     fn send_piece(
         &mut self,
         gpu: &Gpu,
@@ -9023,6 +9193,53 @@ impl Pipelines {
         let smudge_deposit = compute("smudge deposit", "cs_deposit");
         let smudge_synthesize = compute("smudge synthesize", "cs_synthesize");
         let smudge_wet_plots = compute("smudge wet plots", "cs_wet_plots");
+        // stamps laid by their stroke's rule: the stamp's uniform, the frame's stamps, the part's
+        // tiles, the stroke as it stands and where the part goes
+        let read_storage = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let rule_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stamp rule"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(UNIFORM_SIZE),
+                    },
+                    count: None,
+                },
+                read_storage(1),
+                read_storage(2),
+                compute_texture(3),
+                storage(4),
+            ],
+        });
+        let rule_module = module(
+            "stamp rule",
+            concat!(
+                include_str!("shaders/blend.wgsl"),
+                include_str!("shaders/stamp.wgsl"),
+                include_str!("shaders/stamp_rule.wgsl")
+            ),
+        );
+        let stamp_rule = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stamp rule"),
+            layout: Some(&layout("stamp rule", &[Some(&rule_layout), Some(&brush_layout)])),
+            module: &rule_module,
+            entry_point: Some("cs_stamp_rule"),
+            compilation_options: Default::default(),
+            cache: kept,
+        });
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
         let stamp_pipeline = |label, blend| {
@@ -9058,48 +9275,6 @@ impl Pipelines {
         };
         let stamp = stamp_pipeline("stamp", PREMULTIPLIED_OVER);
         let stamp_max = stamp_pipeline("stamp max", MAXIMUM);
-        // stamps adding towards their transfer: the paint (scaled by it) over what is there, kept
-        // by what the stamp covers (a second colour out of the shader)
-        let stamp_capped = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
-            let capped_module = module(
-                "stamp capped",
-                concat!(
-                    "enable dual_source_blending;\n",
-                    include_str!("shaders/blend.wgsl"),
-                    include_str!("shaders/stamp.wgsl"),
-                    include_str!("shaders/stamp_capped.wgsl")
-                ),
-            );
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("stamp capped"),
-                layout: Some(&stamp_layout),
-                vertex: wgpu::VertexState {
-                    module: &capped_module,
-                    entry_point: Some("vs_stamp"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<StampInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &STAMP_ATTRIBUTES,
-                    })],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &capped_module,
-                    entry_point: Some("fs_stamp_capped"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: STROKE_FORMAT,
-                        blend: Some(TOWARDS_TRANSFER),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: kept,
-            })
-        });
         let full = |label, entry, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -9214,7 +9389,8 @@ impl Pipelines {
             ),
             stamp,
             stamp_max,
-            stamp_capped,
+            stamp_rule,
+            rule_layout,
             smudge_layout,
             smudge_carry,
             smudge_blur_down,
@@ -10355,7 +10531,8 @@ fn stamp_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("stamps"),
         size: capacity.max(1) * size_of::<StampInstance>() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        // (read as storage by the stamps laid by their stroke's rule)
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }
@@ -10713,6 +10890,40 @@ mod tests {
         assert!((wet_mixture(&style, 0.0, 1.0, 0.0, 1.0, 1.0).0 - diluted).abs() < 1e-5);
         assert!((wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0).0 - diluted * 0.5).abs() < 1e-5);
         assert!(wet_mixture(&style, 264.0, 1.0, 0.0, 1.0, 1.0).0.abs() < 1e-5);
+    }
+
+    #[test]
+    fn stamps_laid_by_their_rule_are_listed_in_order_for_each_tile_they_reach() {
+        let stamp = |x: f32, y: f32, radius: f32| StampInstance {
+            center: [x, y],
+            radius,
+            roundness: 1.0,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        // one over the first tile, one over the first two across and down, one past the part
+        let stamps = [stamp(5.0, 5.0, 2.0), stamp(16.0, 14.0, 3.0), stamp(500.0, 500.0, 2.0)];
+        let part = IRect { x0: 0, y0: 0, x1: 40, y1: 20 };
+        let t = rule_tiles(&stamps, 7, part, 2).unwrap();
+        // the corner, three tiles across (40 px), the rule
+        assert_eq!(t[..4], [0, 0, 3, 2]);
+        let tile = |i: usize| {
+            let (first, count) = (t[4 + 2 * i] as usize, t[5 + 2 * i] as usize);
+            t[first..first + count].to_vec()
+        };
+        // two rows of three tiles: the first two stamps (as the frame's 7th and 8th) in order
+        assert_eq!(tile(0), [7, 8]);
+        assert_eq!(tile(1), [8]);
+        assert!(tile(2).is_empty());
+        assert_eq!(tile(3), [8]);
+        assert_eq!(tile(4), [8]);
+        assert!(tile(5).is_empty());
+        // and none reaching the part: nothing to lay
+        assert!(rule_tiles(&stamps[2..], 0, part, 1).is_none());
+        // the strokes that take their rule this way
+        assert_eq!(by_rule(Rendering::Gradual), Some(1));
+        assert_eq!(by_rule(Rendering::Capped), Some(2));
+        assert_eq!(by_rule(Rendering::BuildUp), None);
+        assert_eq!(by_rule(Rendering::Strongest), None);
     }
 
     #[test]

@@ -1713,12 +1713,7 @@ fn a_capped_stroke_builds_up_to_its_transfer() {
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     let middle = pixel(&canvas.read_composite(&gpu).unwrap(), 64, 32, 32)[0];
-    if gpu.caps_transfer() {
-        assert!((120..=135).contains(&middle), "{middle}");
-    } else {
-        // without dual-source blending each stamp takes its transfer and they build up
-        assert!(middle < 10, "{middle}");
-    }
+    assert!((120..=135).contains(&middle), "{middle}");
 }
 
 #[test]
@@ -1751,6 +1746,63 @@ fn a_gradual_stroke_builds_up_each_pixel_by_its_own_cover() {
         }
         let got = f32::from(pixel(&built, 64, x, 32)[3]) / 255.0;
         assert!((got - rule).abs() < 0.02, "{x}: {got} for {rule} (cover {cover})");
+    }
+}
+
+#[test]
+fn each_rendering_builds_up_pixel_by_pixel_by_its_rule() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // wide enough that the stroke crosses from one part of the canvas laid at a time to the next
+    let (w, h) = (1100u32, 48u32);
+    let lay = |stamps: &[Stamp], rendering: Rendering| {
+        let mut doc = Document::new(w, h);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle { rendering, hardness: 0.0, ..style(StrokeTool::Paint, 1.0) });
+        canvas.add_stamps(stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let (r, from) = (10.0, 980);
+    // how much a soft dot covers each pixel around its middle
+    let once = lay(&[dot(Vec2::new(from as f32, 24.0), r)], Rendering::BuildUp);
+    let cover = |x: i32, y: u32, middle: i32| {
+        let sx = x - middle + from;
+        if (0..w as i32).contains(&sx) { f32::from(pixel(&once, w, sx as u32, y)[3]) / 255.0 } else { 0.0 }
+    };
+    // a pixel a stamp along, faint and strong by turns; the transfer high, low, then high again
+    let n = 90;
+    let stamps: Vec<Stamp> = (0..n)
+        .map(|i| Stamp {
+            transfer: [0.8, 0.3, 0.9][i / 30],
+            ..Stamp::round(Vec2::new((from + i as i32) as f32, 24.0), r, [0.15, 0.7][i % 2])
+        })
+        .collect();
+    for rendering in [Rendering::BuildUp, Rendering::Strongest, Rendering::Gradual, Rendering::Capped] {
+        let got = lay(&stamps, rendering);
+        for y in [24, 28, 31] {
+            for x in (from - 12..from + n as i32 + 12).step_by(3) {
+                // the rule, stamp by stamp, by how much each covers the pixel (a stroke other
+                // than a capped one has its transfer in its stamps' alpha already)
+                let mut a = 0.0f32;
+                for (i, s) in stamps.iter().enumerate() {
+                    let c = cover(x, y, from + i as i32) * s.alpha;
+                    a = match rendering {
+                        // "over": its cover of what is left
+                        Rendering::BuildUp => a + c * (1.0 - a),
+                        // the strongest stamp
+                        Rendering::Strongest => a.max(c),
+                        // its cover of what is left, squared
+                        Rendering::Gradual => a + c * (1.0 - a) * (1.0 - a),
+                        // towards the transfer by its cover, never back from what is there
+                        Rendering::Capped => a.max(a + (s.transfer - a) * c),
+                    };
+                }
+                let g = f32::from(pixel(&got, w, x as u32, y)[3]) / 255.0;
+                assert!((g - a).abs() < 0.012, "{rendering:?} at {x}, {y}: {g} for {a}");
+            }
+        }
     }
 }
 

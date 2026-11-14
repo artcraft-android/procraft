@@ -327,10 +327,8 @@ impl Gpu {
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has them: dual-source blending for strokes that build up only to their
-            // transfer, and the pipelines' compiled form to keep between runs
-            required_features: adapter.features()
-                & (wgpu::Features::DUAL_SOURCE_BLENDING | wgpu::Features::PIPELINE_CACHE),
+            // where the GPU has it: the pipelines' compiled form to keep between runs
+            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits: adapter.limits(),
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
@@ -343,10 +341,6 @@ impl Gpu {
         log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
         // new canvases and crops kept to what its textures can be
         procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
-        log::info!(
-            "GPU capped strokes (dual-source blending): {}",
-            device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
-        );
         // a validation error must never take the app down: log it instead
         let errors = Arc::new(AtomicU64::new(0));
         let counter = Arc::clone(&errors);
@@ -472,12 +466,6 @@ impl Gpu {
     /// GPU validation errors so far (each one is logged); tests expect none.
     pub fn errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
-    }
-
-    /// Whether strokes that build up only to their transfer (the uniformed glaze) can be drawn
-    /// exactly (with dual-source blending); else their transfer is taken into each stamp.
-    pub fn caps_transfer(&self) -> bool {
-        self.device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
     }
 
     pub fn max_texture_size(&self) -> u32 {
