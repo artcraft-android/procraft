@@ -567,6 +567,15 @@ const MOST_PIECES: usize = 64;
 const BLEND_NEAR: f32 = 2.0;
 const BLEND_FAR: f32 = 4.0;
 
+/// The shares four points in a row give a place `t` of the way from the second to the third:
+/// a quarter, a half and a quarter of the first three at the second (`t` 0), of the last three at
+/// the third (1), turning from one to the other over a quarter turn, so a value eased by them
+/// changes smoothly from one stretch to the next.
+fn knot_weights(t: f32) -> [f32; 4] {
+    let (s, c) = (t * std::f32::consts::FRAC_PI_2).sin_cos();
+    [(1.0 - s) * 0.25, (1.0 + c) * 0.25, (1.0 + s) * 0.25, (1.0 - c) * 0.25]
+}
+
 /// The point at `t` (0 at `p1`, 1 at `p2`) of the centripetal Catmull–Rom curve through four
 /// points: through each of them, with no loops or cusps where they bunch up. With no point
 /// before `p1` (or after `p2`) it is the parabola through the three there are, so the first and
@@ -856,6 +865,9 @@ pub struct StrokeBuilder {
     /// How far the start taper reaches, once its time has passed: from then on it is what the
     /// stroke keeps (so what is drawn for good stays as it is when the stroke ends).
     start_settled: Option<f32>,
+    /// How far along the path each point it has walked through lies (canvas pixels, rising): the
+    /// tapers are worked out at them and eased between them (see [`StrokeBuilder::eased`]).
+    knots: Vec<f32>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -1033,6 +1045,7 @@ impl StrokeBuilder {
             kept: 0,
             left_out: 0,
             start_settled: None,
+            knots: Vec::new(),
         }
         .reading_extras()
     }
@@ -1186,6 +1199,8 @@ impl StrokeBuilder {
             Some(_) if self.end_shows() => self.length - self.end_span(0.0),
             Some(_) => f32::INFINITY,
         };
+        // and only as far as the tapers, eased over the points around, no longer change
+        let reach = self.eased_before(reach);
         // the stamps lie in order along the path: the first the taper reaches is after those kept
         let open = self.placed.get(self.kept..).unwrap_or_default();
         let to = open.iter().position(|p| p.distance >= reach).map_or(self.placed.len(), |i| self.kept + i);
@@ -1596,6 +1611,7 @@ impl StrokeBuilder {
                 if i == pieces { c.pos } else { catmull_rom(a.map(|a| a.pos), b.pos, c.pos, d.map(|d| d.pos), t) };
             self.walk_piece(PathPoint { pos, ..b.lerp(c, t) }, Some(whole), out);
         }
+        self.note_knot();
     }
 
     /// Notes how far the input has come with `s`, and when (samples without times of their own
@@ -1751,6 +1767,7 @@ impl StrokeBuilder {
         let Some(from) = self.head else {
             // the first point always gets a stamp, so a tap leaves a dot
             self.head = Some(to);
+            self.note_knot();
             self.place(to, 0.0, out);
             return;
         };
@@ -1792,6 +1809,17 @@ impl StrokeBuilder {
         }
         self.length += seg;
         self.head = Some(to);
+        // a stretch of its own ends at a point of the path; a piece of a curve, at the curve's end
+        if whole.is_none() {
+            self.note_knot();
+        }
+    }
+
+    /// Notes that the path's head is one of its points (once it has moved on from the last).
+    fn note_knot(&mut self) {
+        if self.knots.last().is_none_or(|&k| self.length > k + 1e-3) {
+            self.knots.push(self.length);
+        }
     }
 
     /// The (size, opacity) multipliers the pressure gives a point: none for a finger, which has
@@ -2233,29 +2261,81 @@ impl StrokeBuilder {
         if self.pointer.has_pressure() { &self.brush.pen_taper } else { &self.brush.touch_taper }
     }
 
+    /// `f` (what the tapers leave at a place along the path) at `at`, worked out at the path's
+    /// points and eased between them: at each point a quarter of each neighbour's and a half of
+    /// its own, and between two points a blend of the four around that turns from one point's
+    /// share to the next's over a quarter turn. So where a taper ends the width bends into what
+    /// the pressure gives over a point either side, not at a corner; where it grows evenly it
+    /// grows as it did. The path's ends keep what they have (a missing neighbour taken as far on
+    /// the other side); past its newest point, `f` as it is.
+    fn eased(&self, at: f32, f: impl Fn(f32) -> [f32; 3]) -> [f32; 3] {
+        let k = &self.knots;
+        let i = k.partition_point(|&x| x <= at).saturating_sub(1).min(k.len().saturating_sub(2));
+        let (Some(&b), Some(&c)) = (k.get(i), k.get(i + 1)) else { return f(at) };
+        if at > c {
+            return f(at);
+        }
+        let (fb, fc) = (f(b), f(c));
+        let beyond = |near: [f32; 3], far: [f32; 3]| {
+            let mut out = near;
+            for (o, far) in out.iter_mut().zip(far) {
+                *o = 2.0 * *o - far;
+            }
+            out
+        };
+        let fa = i.checked_sub(1).and_then(|h| k.get(h)).map_or_else(|| beyond(fb, fc), |&a| f(a));
+        let fd = k.get(i + 2).map_or_else(|| beyond(fc, fb), |&d| f(d));
+        // (nothing to ease where all four agree, as along most of a stroke)
+        if fa == fb && fb == fc && fc == fd {
+            return fb;
+        }
+        let t = if c > b { ((at - b) / (c - b)).clamp(0.0, 1.0) } else { 0.0 };
+        let [wa, wb, wc, wd] = knot_weights(t);
+        let mut out = [0.0; 3];
+        for (o, ((a, b), (c, d))) in out.iter_mut().zip(fa.into_iter().zip(fb).zip(fc.into_iter().zip(fd))) {
+            *o = (wa * a + wb * b + wc * c + wd * d).clamp(0.0, 1.0);
+        }
+        out
+    }
+
+    /// The first place along the path from which the eased tapers (see [`StrokeBuilder::eased`])
+    /// of stamps may still change, for those up to `reach` settled: a stamp's taper takes the two
+    /// points either side of the stretch it lies on, so it is settled once both after it are
+    /// known and within `reach`.
+    fn eased_before(&self, reach: f32) -> f32 {
+        let m = self.knots.partition_point(|&x| x <= reach);
+        // (the stretch ending at the point before the last within reach)
+        m.checked_sub(2).and_then(|j| self.knots.get(j)).copied().unwrap_or(f32::NEG_INFINITY)
+    }
+
     /// The stamp `p` as drawn, its start taper growing over `start_span` canvas pixels of the
     /// path and, once the stroke has ended, its end taper over the last `end` of its length:
     /// `(length, end)`.
     fn finish_stamp(&self, p: &Placed, start_span: f32, end: Option<(f32, f32)>) -> Stamp {
         let grown = |gone: f32, span: f32| if span > 0.0 { (gone / span).clamp(0.0, 1.0) } else { 1.0 };
-        let (start, finish) = match end {
-            // a tap keeps its whole size
-            Some((length, _)) if length <= 0.0 => (1.0, 1.0),
-            Some((length, span)) => (grown(p.distance, start_span), grown(length - p.distance, span)),
-            None => (grown(p.distance, start_span), 1.0),
-        };
         let tip = if self.pointer.has_pressure() { self.extras.pen_taper_tip } else { self.extras.touch_taper_tip };
-        let (mut size, mut alpha) = self.taper().applied(start, finish, tip);
         // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
         // bleed and roundness it gave scaled to what the faded pressure gives
         let fade = self.extras.taper_pressure;
         let fading = self.pointer.has_pressure() && fade > 0.0;
+        // what the tapers leave at a place along the path: of the size, the opacity and the
+        // pressure faded into them
+        let tapered = |at: f32| {
+            let (start, finish) = match end {
+                // a tap keeps its whole size
+                Some((length, _)) if length <= 0.0 => (1.0, 1.0),
+                Some((length, span)) => (grown(at, start_span), grown(length - at, span)),
+                None => (grown(at, start_span), 1.0),
+            };
+            let (size, alpha) = self.taper().applied(start, finish, tip);
+            [size, alpha, (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip))]
+        };
+        let [mut size, mut alpha, kept] = self.eased(p.distance, tapered);
         let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
         let [s, o, b, r, _] = p.pressed;
         let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * p.speed_size;
         let (mut faded_left, mut faded_round) = (size_left, r);
         if fading {
-            let kept = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
             let (_, o0) = self.brush.factors(s, o);
             let (s1, o1) = self.brush.factors(s * kept, o * kept);
             (faded_left, faded_round) = (s1 * p.speed_size, r * kept);
@@ -3115,7 +3195,8 @@ mod tests {
         // a finger runs on four shrinking steps (0.66, 0.44, 0.29, 0.19 of the last), a pen one
         let (touch_end, touch_tip, touch_at_lift) = ran_to(Pointer::Finger);
         assert!((touch_end - (300.0 + 15.73)).abs() < 1.0, "{touch_end}");
-        assert!(touch_tip < 0.5 && touch_at_lift > 4.9, "{touch_tip} {touch_at_lift}");
+        // (eased in over the points either side, the taper has just begun at the lift)
+        assert!(touch_tip < 0.5 && touch_at_lift > 4.3, "{touch_tip} {touch_at_lift}");
         let (pen_end, pen_tip, _) = ran_to(Pointer::Stylus);
         assert!((pen_end - 306.6).abs() < 1.0, "{pen_end}");
         assert!(pen_tip < 1.0, "{pen_tip}");
@@ -3268,6 +3349,32 @@ mod tests {
         assert_eq!(at(30.0).radius, 5.0);
         // no end taper set: the end stays whole
         assert_eq!(all.last().unwrap().radius, 5.0);
+    }
+
+    #[test]
+    fn a_taper_bends_into_the_stroke_where_it_ends_rather_than_turning_a_corner() {
+        // a full, sharp start and end on a pen pressed evenly, 4 px every 4 ms: each taper's 25 ms
+        // reaches the eighth point, 28 px in (or back)
+        let taper = Taper { start: 0.3, end: 0.3, size: 1.0, opacity: 0.0 };
+        let brush = Brush { pen_taper: taper, spacing: 0.02, ..plain() };
+        let samples: Vec<Sample> =
+            (0..=60).map(|i| Sample::at(Vec2::new(10.0 + i as f32 * 4.0, 50.0), 1.0, i as f64 * 4.0)).collect();
+        let mut b = StrokeBuilder::new(brush, 20.0, Pointer::Stylus);
+        b.add(&samples);
+        let all = b.finish();
+        let widths: Vec<(f32, f32)> = all.iter().map(|s| (s.distance, 2.0 * s.radius)).collect();
+        let at = |d: f32| widths.iter().min_by(|a, b| (a.0 - d).abs().total_cmp(&(b.0 - d).abs())).unwrap().1;
+        // from a point to the whole width and back, growing evenly halfway in
+        assert!(at(0.0) < 1.0 && at(240.0) < 1.0, "{} {}", at(0.0), at(240.0));
+        assert!((at(14.0) - 10.0).abs() < 0.5 && (at(226.0) - 10.0).abs() < 0.5, "{} {}", at(14.0), at(226.0));
+        assert!(at(120.0) > 19.9, "{}", at(120.0));
+        // where each taper meets the stroke, its slope turns a little from stamp to stamp, never
+        // all at once from the taper's (20 px over 28) to the stroke's (none); the points
+        // themselves aside, where the least stamp holds
+        let inner: Vec<(f32, f32)> = widths.iter().copied().filter(|w| w.0 > 4.0 && w.0 < 236.0).collect();
+        let slopes: Vec<f32> = inner.windows(2).map(|w| (w[1].1 - w[0].1) / (w[1].0 - w[0].0).max(1e-3)).collect();
+        let turn = slopes.windows(2).map(|s| (s[1] - s[0]).abs()).fold(0.0, f32::max);
+        assert!(turn < 0.25 * 20.0 / 28.0, "{turn}");
     }
 
     #[test]
