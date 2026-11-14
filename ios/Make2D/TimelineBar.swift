@@ -59,6 +59,17 @@ final class TimelineTool {
     var keyEasing: TimelineEasing = .smooth
     /// Each clip's keys, by clip.
     private(set) var keys: [UInt64: [TimelineKeyInfo]] = [:]
+    /// The picked clip's options open over the panel: its mask, a group's cycle.
+    var clipOpen = false
+    /// Clips being gathered into a group (a tap takes one in or out), while grouping.
+    var grouping: Set<UInt64>?
+    /// The camera's frame shown over the canvas, dragged to key the camera at the playhead.
+    var cameraOpen = false
+    /// The camera at the playhead, and the frames it has keys on.
+    private(set) var camera: TimelineCamera?
+    private(set) var cameraKeys: [UInt32] = []
+    /// Counts reads from the session, for what is read through it rather than kept here (a pose).
+    private(set) var revision = 0
 
     @ObservationIgnored private var playing: Task<Void, Never>?
     @ObservationIgnored private var reading: Task<Void, Never>?
@@ -112,7 +123,10 @@ final class TimelineTool {
         }
         if picked == nil {
             keysOpen = false
+            clipOpen = false
         }
+        camera = session.timelineCamera()
+        cameraKeys = session.timelineCameraKeys()
         var read: [UInt64: [TimelineKeyInfo]] = [:]
         for t in tracks {
             for c in t.clips {
@@ -123,6 +137,7 @@ final class TimelineTool {
             }
         }
         keys = read
+        revision += 1
         readThumbnails()
     }
 
@@ -281,8 +296,13 @@ final class TimelineTool {
         model.refresh()
     }
 
-    /// Clip `clip` picked: its track drawn on, and the playhead onto it unless it is there.
+    /// Clip `clip` picked: its track drawn on, and the playhead onto it unless it is there. While
+    /// grouping, it is taken into the group or out of it instead.
     func pick(_ clip: TimelineClipInfo, on track: TimelineTrackInfo) {
+        if grouping != nil {
+            grouping?.formSymmetricDifference([clip.id])
+            return
+        }
         stopPlaying()
         picked = clip.id
         if info?.track != track.id {
@@ -356,6 +376,78 @@ final class TimelineTool {
         picked = nil
         _ = model.session.deleteTimelineClip(id: clip, close: close)
         model.refresh()
+    }
+
+    /// Clip `id` masked by the clip on the track below as `mask`.
+    func setMask(_ id: UInt64, _ mask: TimelineMask) {
+        _ = model.session.setTimelineClipMask(id: id, mask: mask)
+        model.refresh()
+    }
+
+    /// Starts gathering clips into a group, the picked one first.
+    func startGrouping() {
+        grouping = Set(picked.map { [$0] } ?? [])
+        clipOpen = false
+        keysOpen = false
+        settingsOpen = false
+    }
+
+    /// The clips gathered made into a group, which is picked.
+    func makeGroup() {
+        let ids = Array(grouping ?? [])
+        grouping = nil
+        guard !ids.isEmpty else { return }
+        let made = model.session.groupTimelineClips(ids: ids)
+        if made == 0 {
+            model.showNotice("Only clips shown together can be grouped.", warning: true)
+        } else {
+            picked = made
+        }
+        model.refresh()
+    }
+
+    func ungroup(_ id: UInt64) {
+        picked = nil
+        _ = model.session.ungroupTimelineClip(id: id)
+        model.refresh()
+    }
+
+    /// Opens group clip `id` (its tracks shown in the panel), or with none, goes back to the
+    /// timeline's own tracks.
+    func open(_ id: UInt64?) {
+        stopPlaying()
+        picked = nil
+        keysOpen = false
+        clipOpen = false
+        _ = model.session.openTimelineGroup(id: id)
+        model.refresh()
+    }
+
+    /// Group `id` plays its first `length` frames over and over (0: once).
+    func setCycle(_ id: UInt64, length: UInt32, continueAcross: Bool) {
+        _ = model.session.setTimelineCycle(id: id, length: length, continueAcross: continueAcross)
+        model.refresh()
+    }
+
+    /// A camera key at the playhead: shown at once, one undo step when `done`.
+    func setCameraKey(x: Float, y: Float, zoom: Float, rotation: Float, done: Bool) {
+        stopPlaying()
+        _ = model.session.setTimelineCameraKey(x: x, y: y, zoom: zoom, rotation: rotation, easing: keyEasing, done: done)
+        camera = model.session.timelineCamera()
+        if done {
+            model.refresh()
+        }
+    }
+
+    func removeCameraKey() {
+        _ = model.session.removeTimelineCameraKey()
+        model.refresh()
+    }
+
+    /// Played frames show through the camera, or the canvas as it is.
+    func setCameraView(_ on: Bool) {
+        model.session.setTimelineCameraView(on: on)
+        info = model.session.timelineInfo()
     }
 
     func togglePlaying() {
@@ -644,6 +736,12 @@ private struct TracksTimeline: View {
             } else if tool.keysOpen, let id = tool.picked {
                 TlPopover(width: 320, arrowX: 160) { KeysPage(model: model, tool: tool, clip: id, frame: tool.frame) }
                     .offset(x: max(width / 2 - 160, 0))
+            } else if tool.clipOpen, let id = tool.picked, let (_, clip) = tool.clip(id) {
+                TlPopover(width: 300, arrowX: 150) { ClipPage(tool: tool, clip: clip, frame: tool.frame) }
+                    .offset(x: max(width / 2 - 150, 0))
+            } else if tool.cameraOpen, let camera = tool.camera {
+                TlPopover(width: 300, arrowX: 150) { CameraPage(model: model, tool: tool, camera: camera, info: info) }
+                    .offset(x: max(width - 300 - 220, 0))
             }
             VStack(spacing: 6) {
                 header
@@ -677,29 +775,201 @@ private struct TracksTimeline: View {
 
     private var header: some View {
         HStack(spacing: 22) {
+            // in a group: back out of it, and its name
+            if let open = info.openGroups.last {
+                BarWord(label: "‹ Back", bold: true) { tool.open(info.openGroups.dropLast().last?.id) }
+                Text(verbatim: open.name)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Pc.accent)
+                    .lineLimit(1)
+                Rectangle().fill(inkDim).frame(width: 1, height: 18)
+            }
             BarWord(label: tool.isPlaying ? "Pause" : "Play", bold: true) { tool.togglePlaying() }
             Text(verbatim: "\(tool.frame + 1) / \(info.duration)")
                 .font(.system(size: 15).monospacedDigit())
                 .foregroundStyle(inkDim)
             Spacer(minLength: 0)
-            if let id = tool.picked, let (_, clip) = tool.clip(id) {
-                let inside = tool.frame > clip.start && tool.frame < clip.start + clip.duration
-                BarWord(label: "Keys", bold: tool.keysOpen) {
-                    tool.keysOpen.toggle()
+            if let gathered = tool.grouping {
+                Text(verbatim: gathered.count == 1 ? "1 clip" : "\(gathered.count) clips")
+                    .font(.system(size: 15))
+                    .foregroundStyle(inkDim)
+                BarWord(label: "Cancel") { tool.grouping = nil }
+                BarWord(label: "Make Group", bold: true, dim: gathered.isEmpty) { tool.makeGroup() }
+            } else {
+                if let id = tool.picked, tool.clip(id) != nil {
+                    BarWord(label: "Keys", bold: tool.keysOpen) {
+                        tool.keysOpen.toggle()
+                        tool.clipOpen = false
+                        tool.settingsOpen = false
+                        tool.cameraOpen = false
+                    }
+                    BarWord(label: "Clip", bold: tool.clipOpen) {
+                        tool.clipOpen.toggle()
+                        tool.keysOpen = false
+                        tool.settingsOpen = false
+                        tool.cameraOpen = false
+                    }
+                    Rectangle().fill(inkDim).frame(width: 1, height: 18)
+                }
+                BarWord(label: "Camera", bold: tool.cameraOpen) {
+                    tool.cameraOpen.toggle()
+                    tool.keysOpen = false
+                    tool.clipOpen = false
                     tool.settingsOpen = false
                 }
-                BarWord(label: "Split", dim: !inside) { if inside { tool.split(id) } }
-                BarWord(label: "Duplicate") { tool.duplicate(id) }
-                BarWord(label: "Delete") { tool.delete(id, close: false) }
-                Rectangle().fill(inkDim).frame(width: 1, height: 18)
+                BarWord(label: "Settings") {
+                    tool.settingsOpen.toggle()
+                    tool.keysOpen = false
+                    tool.clipOpen = false
+                    tool.cameraOpen = false
+                }
+                if info.openGroups.isEmpty {
+                    BarWord(label: "Simple") { tool.setSimple(true) }
+                }
+                BarWord(label: "+ Track") { tool.addTrack() }
+                BarWord(label: "Add Drawing") { tool.addDrawing() }
             }
-            BarWord(label: "Settings") {
-                tool.settingsOpen.toggle()
-                tool.keysOpen = false
+        }
+    }
+}
+
+/// A short word for how a clip is masked, if it is.
+private func maskTag(_ mask: TimelineMask) -> String? {
+    switch mask {
+    case .none: nil
+    case .clipping: "Clipped"
+    case .alpha: "Alpha Matte"
+    case .luminance: "Luma Matte"
+    }
+}
+
+/// The picked clip's options: how the clip on the track below masks it; a group's cycle, and
+/// opening or ungrouping it; grouping it with others, splitting, duplicating and deleting it.
+private struct ClipPage: View {
+    let tool: TimelineTool
+    let clip: TimelineClipInfo
+    let frame: UInt32
+
+    /// The cycle's length as its slider moves, before it is let go.
+    @State private var cycle: UInt32?
+
+    private static let masks: [(TimelineMask, String)] =
+        [(.none, "No Mask"), (.clipping, "Clipping Mask"), (.alpha, "Alpha Matte"), (.luminance, "Luma Matte")]
+
+    var body: some View {
+        let group = clip.kind == .group
+        let drawing = clip.kind == .drawing
+        let inside = frame > clip.start && frame < clip.start + clip.duration
+        VStack(alignment: .leading, spacing: 0) {
+            PanelTitle(text: clip.name, bottom: 4)
+            Text(verbatim: "Masked by the clip on the track below")
+                .font(.system(size: 13))
+                .foregroundStyle(Pc.slideLabel)
+                .padding(.leading, 14)
+                .padding(.bottom, 10)
+            TlGroup {
+                ForEach(Self.masks.indices, id: \.self) { i in
+                    let (mask, label) = Self.masks[i]
+                    if i > 0 {
+                        TlRowLine()
+                    }
+                    TlChoice(label: label, chosen: clip.mask == mask) { tool.setMask(clip.id, mask) }
+                }
             }
-            BarWord(label: "Simple") { tool.setSimple(true) }
-            BarWord(label: "+ Track") { tool.addTrack() }
-            BarWord(label: "Add Drawing") { tool.addDrawing() }
+            if group {
+                let length = cycle ?? clip.cycle
+                let most = max(clip.duration, 2)
+                TlSliderGroup {
+                    TlSlider(
+                        label: "Cycle", value: length == 0 ? "Off" : length == 1 ? "1 frame" : "\(length) frames",
+                        share: Float(length) / Float(most),
+                        onEnd: {
+                            if let c = cycle {
+                                tool.setCycle(clip.id, length: c, continueAcross: clip.continueAcross)
+                            }
+                            cycle = nil
+                        }
+                    ) { v in
+                        cycle = UInt32(wholeNumber(v * Float(most)))
+                    }
+                }
+                .padding(.top, 10)
+                if clip.cycle > 0 {
+                    TlGroup {
+                        TlChoice(label: "Keys Repeat Each Cycle", chosen: !clip.continueAcross) {
+                            tool.setCycle(clip.id, length: clip.cycle, continueAcross: false)
+                        }
+                        TlRowLine()
+                        TlChoice(label: "Keys Continue Across", chosen: clip.continueAcross) {
+                            tool.setCycle(clip.id, length: clip.cycle, continueAcross: true)
+                        }
+                    }
+                    .padding(.top, 10)
+                }
+            }
+            TlGroup {
+                if group {
+                    TlAction(label: "Open Group") { tool.open(clip.id) }
+                    TlRowLine()
+                    TlAction(label: "Ungroup") { tool.ungroup(clip.id) }
+                    TlRowLine()
+                }
+                TlAction(label: "Group With Other Clips…") { tool.startGrouping() }
+                if drawing {
+                    if inside {
+                        TlRowLine()
+                        TlAction(label: "Split Here") { tool.split(clip.id) }
+                    }
+                    TlRowLine()
+                    TlAction(label: "Duplicate") { tool.duplicate(clip.id) }
+                }
+                TlRowLine()
+                TlAction(label: "Delete") { tool.delete(clip.id, close: false) }
+            }
+            .padding(.top, 10)
+        }
+    }
+}
+
+/// The camera at the playhead: played frames shown through it or not, and its key there taken
+/// away. Its frame over the canvas is dragged to key it.
+private struct CameraPage: View {
+    let model: CanvasModel
+    let tool: TimelineTool
+    let camera: TimelineCamera
+    let info: TimelineInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PanelTitle(text: "Camera at frame \(tool.frame + 1)", bottom: 4)
+            Text(verbatim: "Drag the frame to move it, a corner to zoom, the knob to turn.")
+                .font(.system(size: 13))
+                .foregroundStyle(Pc.slideLabel)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+                .fixedSize(horizontal: false, vertical: true)
+            TlGroup {
+                HStack(spacing: 0) {
+                    Text(verbatim: "Play Through Camera")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.panelTitle)
+                    Spacer(minLength: 0)
+                    CheckBox(checked: info.cameraView, fill: Pc.accent)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+                .onTapGesture { tool.setCameraView(!info.cameraView) }
+                TlRowLine()
+                TlAction(label: "Frame Whole Canvas Here") {
+                    let size = model.session.info()
+                    tool.setCameraKey(x: Float(size.width) / 2, y: Float(size.height) / 2, zoom: 1, rotation: 0, done: true)
+                }
+                if camera.keyed {
+                    TlRowLine()
+                    TlAction(label: "Remove Camera Key Here") { tool.removeCameraKey() }
+                }
+            }
         }
     }
 }
@@ -831,7 +1101,7 @@ private struct TracksArea: View {
     }
 
     private func clipView(_ c: TimelineClipInfo, on t: TimelineTrackInfo, row: Int, rows: [TimelineTrackInfo]) -> some View {
-        let picked = tool.picked == c.id
+        let picked = tool.picked == c.id || tool.grouping?.contains(c.id) == true
         let trim = trimming?.clip == c.id ? trimming?.dx ?? 0 : 0
         let move = moving?.clip == c.id ? moving : nil
         let w = max(CGFloat(c.duration) * framePitch + trim, framePitch) - 2
@@ -839,6 +1109,10 @@ private struct TracksArea: View {
         return ZStack(alignment: .leading) {
             shape.fill(picked ? Pc.accent.opacity(0.85) : clipFill)
             shape.strokeBorder(picked ? Pc.accent : clipEdge, lineWidth: 1)
+            if c.kind == .group {
+                // a group: an inner edge, as of the clips inside it
+                shape.inset(by: 3).strokeBorder(picked ? Color.white.opacity(0.6) : clipEdge, lineWidth: 1)
+            }
             HStack(spacing: 6) {
                 if c.root != 0, w > 26 {
                     ZStack {
@@ -855,6 +1129,14 @@ private struct TracksArea: View {
                         .font(.system(size: 13))
                         .foregroundStyle(picked ? Color.white : ink)
                         .lineLimit(1)
+                    // how it is masked, and a group's cycle
+                    let tags = [maskTag(c.mask), c.cycle > 0 ? "↻ \(c.cycle)" : nil].compactMap { $0 }
+                    if !tags.isEmpty, w > 150 {
+                        Text(verbatim: tags.joined(separator: "  "))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(picked ? Color.white.opacity(0.8) : inkDim)
+                            .lineLimit(1)
+                    }
                 }
             }
             .padding(.leading, 5)
@@ -896,6 +1178,8 @@ private struct TracksArea: View {
         .zIndex(move != nil ? 1 : 0)
         .shadow(color: move != nil ? .black.opacity(0.35) : .clear, radius: 8)
         .onTapGesture { tool.pick(c, on: t) }
+        // a group opens with a double tap
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if c.kind == .group, tool.grouping == nil { tool.open(c.id) } })
         .gesture(
             DragGesture(minimumDistance: 8)
                 .onChanged { moving = (c.id, $0.translation.width, $0.translation.height) }
@@ -906,6 +1190,266 @@ private struct TracksArea: View {
                     tool.move(c.id, to: rows[to].id, start: start)
                 }
         )
+    }
+}
+
+// MARK: - Motion path
+
+/// The picked clip's motion path over the canvas while its keys are open: the path its pivot
+/// takes, a dot at each position key, and a bent key's two handles on lines to it. A key's dot is
+/// tapped to go to its frame or dragged to move the key there; a handle's is dragged to bend the
+/// path, the other handle mirroring it. Only the dots take touches: the canvas keeps the rest.
+struct MotionPathOverlay: View {
+    let model: CanvasModel
+
+    /// The path as a drag changes it, before the change is let go.
+    @State private var live: MotionPath?
+    /// The drag under way: the key's frame, and where it (or the handle) and the pose started.
+    @State private var dragging: (frame: UInt32, start: CGPoint, pose: TimelinePose?)?
+
+    var body: some View {
+        let tool = model.timeline
+        if let id = tool.picked, tool.info?.simple == false, !tool.isPlaying, tool.shownFrame == nil,
+           let path = live ?? tool.path, !path.keys.isEmpty {
+            let screen = { (x: Float, y: Float) in model.canvasToWindow(CGPoint(x: CGFloat(x), y: CGFloat(y))) }
+            ZStack(alignment: .topLeading) {
+                Canvas { context, _ in
+                    var line = Path()
+                    for i in 0 ..< path.points.count / 2 {
+                        let at = screen(path.points[i * 2], path.points[i * 2 + 1])
+                        if i == 0 { line.move(to: at) } else { line.addLine(to: at) }
+                    }
+                    context.stroke(line, with: .color(.white.opacity(0.7)), lineWidth: 4)
+                    context.stroke(line, with: .color(Pc.accent), lineWidth: 2)
+                    for key in path.keys {
+                        let at = screen(key.x, key.y)
+                        if let h = key.handles, h.count == 4 {
+                            for (dx, dy) in [(h[0], h[1]), (h[2], h[3])] {
+                                let end = screen(key.x + dx, key.y + dy)
+                                var arm = Path()
+                                arm.move(to: at)
+                                arm.addLine(to: end)
+                                context.stroke(arm, with: .color(Pc.accent), lineWidth: 1.5)
+                                dot(context, at: end, radius: 5)
+                            }
+                        }
+                        dot(context, at: at, radius: 6.5, current: key.frame == tool.frame)
+                    }
+                }
+                .allowsHitTesting(false)
+                ForEach(path.keys, id: \.frame) { key in
+                    if let h = key.handles, h.count == 4 {
+                        grip(at: screen(key.x + h[0], key.y + h[1])) { change(id, key, handle: 0, $0, done: $1) }
+                        grip(at: screen(key.x + h[2], key.y + h[3])) { change(id, key, handle: 1, $0, done: $1) }
+                    }
+                    grip(at: screen(key.x, key.y), tap: { tool.goTo(key.frame) }) { move(id, key, $0, done: $1) }
+                }
+            }
+            // the view as it is, if it hasn't moved since the canvas opened
+            .onAppear {
+                if model.viewMatrix.isEmpty {
+                    model.refreshView()
+                }
+            }
+        }
+    }
+
+    /// A white dot ringed in the accent colour (filled with it on the playhead's key).
+    private func dot(_ context: GraphicsContext, at: CGPoint, radius r: CGFloat, current: Bool = false) {
+        context.fill(Path(ellipseIn: CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2)), with: .color(Pc.accent))
+        let inner = r - 2
+        context.fill(
+            Path(ellipseIn: CGRect(x: at.x - inner, y: at.y - inner, width: inner * 2, height: inner * 2)),
+            with: .color(current ? Pc.accent : .white)
+        )
+    }
+
+    /// Where a dot at `at` takes touches: a tap (if it has one), or a drag to the window point
+    /// given (and whether it is let go).
+    private func grip(at: CGPoint, tap: (() -> Void)? = nil, drag: @escaping (CGPoint?, Bool) -> Void) -> some View {
+        Color.clear
+            .frame(width: 40, height: 40)
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { g in
+                        if dragging != nil || hypot(g.translation.width, g.translation.height) > 4 {
+                            drag(g.location, false)
+                        }
+                    }
+                    .onEnded { g in
+                        if dragging == nil, hypot(g.translation.width, g.translation.height) <= 4 {
+                            tap?()
+                        } else {
+                            drag(g.location, true)
+                        }
+                    }
+            )
+            .position(at)
+    }
+
+    /// Key `key` dragged to window point `to`: the playhead goes to it, and its position key moves
+    /// by as much as the drag has gone (canvas pixels), one undo step when let go.
+    private func move(_ id: UInt64, _ key: PathKey, _ to: CGPoint?, done: Bool) {
+        let tool = model.timeline
+        guard let to, let at = model.windowToCanvas(CGPoint(x: to.x * model.pixels, y: to.y * model.pixels)) else { return }
+        if dragging == nil {
+            tool.goTo(key.frame)
+            dragging = (key.frame, at, tool.pose(id))
+        }
+        guard let d = dragging, let pose = d.pose else { return }
+        tool.moveKey(id, at: d.frame, by: CGPoint(x: at.x - d.start.x, y: at.y - d.start.y), from: pose, done: done)
+        settle(id, done: done)
+    }
+
+    /// Handle `handle` (0 toward the key before, 1 toward the key after) of key `key` dragged to
+    /// window point `to`; the other mirrors it. One undo step when let go.
+    private func change(_ id: UInt64, _ key: PathKey, handle: Int, _ to: CGPoint?, done: Bool) {
+        guard let to, let at = model.windowToCanvas(CGPoint(x: to.x * model.pixels, y: to.y * model.pixels)) else { return }
+        if dragging == nil {
+            dragging = (key.frame, at, nil)
+        }
+        let dx = Float(at.x) - key.x, dy = Float(at.y) - key.y
+        let handles = handle == 0 ? [dx, dy, -dx, -dy] : [-dx, -dy, dx, dy]
+        model.timeline.setHandles(id, at: key.frame, handles, done: done)
+        settle(id, done: done)
+    }
+
+    /// The path read again as it changes; let go, back to the timeline's own.
+    private func settle(_ id: UInt64, done: Bool) {
+        if done {
+            dragging = nil
+            live = nil
+        } else {
+            live = model.session.timelineMotionPath(id: id)
+        }
+    }
+}
+
+// MARK: - Camera
+
+/// The camera's frame over the canvas while the camera is open: where the output frame looks at
+/// the playhead, with a grip at each corner and a knob on a stem off its top edge. Its edge is
+/// dragged to move it, a corner to zoom (the frame keeps the canvas's shape), the knob to turn
+/// it; each drag keys the camera at the playhead (one undo step when let go). Only the edge and
+/// the grips take touches: inside it the canvas is drawn on as ever.
+struct CameraFrameOverlay: View {
+    let model: CanvasModel
+
+    private enum Grip {
+        case move, corner, turn
+    }
+
+    /// The drag under way: what it does, where it started (canvas pixels), and the camera then.
+    @State private var dragging: (grip: Grip, start: CGPoint, camera: TimelineCamera)?
+
+    var body: some View {
+        let tool = model.timeline
+        if tool.cameraOpen, tool.info?.simple == false, !tool.isPlaying, tool.shownFrame == nil,
+           let camera = tool.camera, camera.corners.count == 8 {
+            let corners = (0 ..< 4).map {
+                model.canvasToWindow(CGPoint(x: CGFloat(camera.corners[$0 * 2]), y: CGFloat(camera.corners[$0 * 2 + 1])))
+            }
+            let (stemFoot, knob) = Self.knob(corners)
+            let edge = Path { p in
+                p.addLines(corners)
+                p.closeSubpath()
+            }
+            ZStack(alignment: .topLeading) {
+                Canvas { context, _ in
+                    var stem = Path()
+                    stem.move(to: stemFoot)
+                    stem.addLine(to: knob)
+                    for (path, width) in [(edge, 4.0), (stem, 3.5)] {
+                        context.stroke(path, with: .color(.white.opacity(0.7)), lineWidth: width)
+                    }
+                    context.stroke(edge, with: .color(Pc.accent), style: StrokeStyle(lineWidth: 2, dash: camera.keyed ? [] : [8, 6]))
+                    context.stroke(stem, with: .color(Pc.accent), lineWidth: 1.5)
+                    for at in corners + [knob] {
+                        let r: CGFloat = 7
+                        context.fill(Path(ellipseIn: CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2)), with: .color(Pc.accent))
+                        context.fill(Path(ellipseIn: CGRect(x: at.x - r + 2, y: at.y - r + 2, width: r * 2 - 4, height: r * 2 - 4)), with: .color(.white))
+                    }
+                }
+                .allowsHitTesting(false)
+                // the edge, a band either side of it
+                Color.clear
+                    .contentShape(edge.strokedPath(StrokeStyle(lineWidth: 26)))
+                    .gesture(drag(.move, camera))
+                ForEach(0 ..< 4, id: \.self) { i in
+                    grip(at: corners[i]).gesture(drag(.corner, camera))
+                }
+                grip(at: knob).gesture(drag(.turn, camera))
+            }
+            .onAppear {
+                if model.viewMatrix.isEmpty {
+                    model.refreshView()
+                }
+            }
+        }
+    }
+
+    /// Where the turning knob's stem leaves the top edge, and the knob: out from the edge's
+    /// middle, away from the frame.
+    private static func knob(_ c: [CGPoint]) -> (CGPoint, CGPoint) {
+        let foot = CGPoint(x: (c[0].x + c[1].x) / 2, y: (c[0].y + c[1].y) / 2)
+        let middle = CGPoint(x: (c[0].x + c[2].x) / 2, y: (c[0].y + c[2].y) / 2)
+        let dx = foot.x - middle.x, dy = foot.y - middle.y
+        let length = max(hypot(dx, dy), 1)
+        return (foot, CGPoint(x: foot.x + dx / length * 34, y: foot.y + dy / length * 34))
+    }
+
+    private func grip(at: CGPoint) -> some View {
+        Color.clear
+            .frame(width: 40, height: 40)
+            .contentShape(Circle())
+            .position(at)
+    }
+
+    /// Window point `p` (points) on the canvas.
+    private func canvasPoint(_ p: CGPoint) -> CGPoint? {
+        model.windowToCanvas(CGPoint(x: p.x * model.pixels, y: p.y * model.pixels))
+    }
+
+    private func drag(_ grip: Grip, _ camera: TimelineCamera) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .global)
+            .onChanged { g in
+                guard let at = canvasPoint(g.location) else { return }
+                if dragging == nil, let start = canvasPoint(g.startLocation) {
+                    dragging = (grip, start, camera)
+                }
+                key(at, done: false)
+            }
+            .onEnded { g in
+                if let at = canvasPoint(g.location) {
+                    key(at, done: true)
+                }
+                dragging = nil
+            }
+    }
+
+    /// The camera keyed as the drag to canvas point `at` puts it.
+    private func key(_ at: CGPoint, done: Bool) {
+        guard let d = dragging else { return }
+        let c = d.camera
+        let middle = CGPoint(x: CGFloat(c.x), y: CGFloat(c.y))
+        var (x, y, zoom, rotation) = (c.x, c.y, c.zoom, c.rotation)
+        switch d.grip {
+        case .move:
+            x += Float(at.x - d.start.x)
+            y += Float(at.y - d.start.y)
+        case .corner:
+            // the frame as far out as the corner is: the further, the wider it looks
+            let from = hypot(d.start.x - middle.x, d.start.y - middle.y)
+            let to = max(hypot(at.x - middle.x, at.y - middle.y), 1)
+            zoom = c.zoom * Float(from / to)
+        case .turn:
+            // the frame turns with the knob, which turns the canvas in it the other way
+            let from = atan2(d.start.y - middle.y, d.start.x - middle.x)
+            let to = atan2(at.y - middle.y, at.x - middle.x)
+            rotation = c.rotation - Float((to - from) * 180 / .pi)
+        }
+        model.timeline.setCameraKey(x: x, y: y, zoom: zoom, rotation: rotation, done: done)
     }
 }
 
@@ -940,6 +1484,8 @@ private struct KeysPage: View {
     private var keys: some View {
         let canvas = model.session.info()
         let (w, h) = (Float(max(canvas.width, 1)), Float(max(canvas.height, 1)))
+        // read again whenever the timeline is (a key dragged on the canvas)
+        let _ = tool.revision
         let pose = live ?? tool.pose(clip) ?? Self.still
         let keyedHere = (tool.keys[clip] ?? []).contains { $0.frame == frame }
         let easings: [(TimelineEasing, String)] = [(.linear, "Linear"), (.smooth, "Smooth"), (.easeInOut, "Ease"), (.hold, "Hold")]
@@ -1371,6 +1917,31 @@ private struct TlSliderGroup<Rows: View>: View {
         .frame(maxWidth: .infinity)
         .background(Pc.actionsGroup)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .circular))
+    }
+}
+
+/// A row of a choice, filled with the accent colour and ticked when it is the one chosen.
+private struct TlChoice: View {
+    let label: String
+    let chosen: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: label)
+                .font(.system(size: 17))
+                .foregroundStyle(chosen ? Color.white : Pc.panelTitle)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if chosen {
+                PcIconView(PcIcons.menuTick, size: 22, color: .white)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 40)
+        .background(chosen ? Pc.accent : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
     }
 }
 

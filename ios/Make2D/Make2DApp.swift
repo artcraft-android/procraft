@@ -237,6 +237,29 @@ enum ScreenCapture {
     }
 
     /// Frames of the canvas in four colours recorded, off the main thread; then `then`.
+    /// A line on a timeline keyed to fall and turn a quarter over eight frames, seen half way;
+    /// returns its clip.
+    @discardableResult
+    private static func timelineKeyed(_ model: CanvasModel) -> UInt64? {
+        model.timeline.setOn(true)
+        let s = model.session
+        let at = { (k: Int) in PenSample(x: 700 + Float(k) * 20, y: 1100, pressure: 0.6, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
+        s.strokeBegin(pointer: .stylus, samples: [at(0)])
+        s.strokeAdd(samples: (1 ... 30).map(at))
+        s.strokeEnd(samples: [])
+        guard let clip = s.timelineTracks().first?.clips.first?.id else { return nil }
+        _ = s.setTimelineClipDuration(id: clip, duration: 8, push: true)
+        s.setTimelineFrame(frame: 0)
+        _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 0], easing: .smooth, done: true)
+        _ = s.setTimelineKey(id: clip, channel: .rotation, values: [0], easing: .smooth, done: true)
+        s.setTimelineFrame(frame: 7)
+        _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 500], easing: .smooth, done: true)
+        _ = s.setTimelineKey(id: clip, channel: .rotation, values: [90], easing: .smooth, done: true)
+        s.setTimelineFrame(frame: 3)
+        model.refresh()
+        return clip
+    }
+
     private static func recordFrames(_ model: CanvasModel, then: @escaping () -> Void) {
         let session = model.session
         let lapse = model.timeLapse.lapse
@@ -414,26 +437,71 @@ enum ScreenCapture {
             if name == "animation-colors" {
                 animationColors = true
             }
-        case "timeline-keys":
-            // a line keyed to fall and turn a quarter over eight frames, seen half way
+        case "timeline-keys", "timeline-path":
+            guard let clip = timelineKeyed(model) else { break }
+            model.timeline.picked = clip
+            model.timeline.keysOpen = true
+            if name == "timeline-path" {
+                // the last key bent: its handles show
+                model.timeline.bendPath(clip, at: 7)
+            }
+        case "timeline-camera", "timeline-camera-play":
+            // the keyed line, the camera pushing in and turning over its eight frames
+            timelineKeyed(model)
+            let s = model.session
+            let size = s.info()
+            s.setTimelineFrame(frame: 0)
+            _ = s.setTimelineCameraKey(x: Float(size.width) / 2, y: Float(size.height) / 2, zoom: 1, rotation: 0, easing: .smooth, done: true)
+            s.setTimelineFrame(frame: 7)
+            _ = s.setTimelineCameraKey(x: 900, y: 1300, zoom: 2, rotation: 20, easing: .smooth, done: true)
+            s.setTimelineFrame(frame: 3)
+            model.refresh()
+            if name == "timeline-camera-play" {
+                model.timeline.setCameraView(true)
+                s.setTimelinePlaying(frame: 7)
+            } else {
+                model.timeline.cameraOpen = true
+            }
+        case "timeline-matte":
+            // a broad black stroke below, a red layer above it masked by it (an alpha matte)
+            model.addLayer()
             model.timeline.setOn(true)
             let s = model.session
-            let at = { (k: Int) in PenSample(x: 700 + Float(k) * 20, y: 1100, pressure: 0.6, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
+            let tracks = s.timelineTracks()
+            guard tracks.count == 2, let below = tracks[0].clips.first, let above = tracks[1].clips.first else { break }
+            model.selectLayer(below.root)
+            s.setBrushSize(slider: 1)
+            s.setColor(r: 0, g: 0, b: 0)
+            let at = { (k: Int) in PenSample(x: 500 + Float(k) * 30, y: 900 + Float(k % 6) * 60, pressure: 1, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
             s.strokeBegin(pointer: .stylus, samples: [at(0)])
             s.strokeAdd(samples: (1 ... 30).map(at))
             s.strokeEnd(samples: [])
-            guard let clip = s.timelineTracks().first?.clips.first?.id else { break }
-            _ = s.setTimelineClipDuration(id: clip, duration: 8, push: true)
-            s.setTimelineFrame(frame: 0)
-            _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 0], easing: .smooth, done: true)
-            _ = s.setTimelineKey(id: clip, channel: .rotation, values: [0], easing: .smooth, done: true)
-            s.setTimelineFrame(frame: 7)
-            _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 500], easing: .smooth, done: true)
-            _ = s.setTimelineKey(id: clip, channel: .rotation, values: [90], easing: .smooth, done: true)
-            s.setTimelineFrame(frame: 3)
+            s.setColor(r: 0.86, g: 0.16, b: 0.16)
+            _ = s.fillLayer(id: above.root)
+            _ = s.setTimelineClipMask(id: above.id, mask: .alpha)
             model.refresh()
-            model.timeline.picked = clip
-            model.timeline.keysOpen = true
+            model.timeline.picked = above.id
+            model.timeline.clipOpen = true
+        case "timeline-group", "timeline-group-open":
+            // four drawings, the first two grouped and cycling
+            model.animationAssist.setAssist(true, pages: false)
+            for _ in 0 ..< 3 {
+                model.addLayer()
+            }
+            model.timeline.setOn(true)
+            model.timeline.setSimple(false)
+            let s = model.session
+            guard let track = s.timelineTracks().first(where: { $0.clips.count >= 2 }) else { break }
+            let group = s.groupTimelineClips(ids: [track.clips[0].id, track.clips[1].id])
+            _ = s.setTimelineClipDuration(id: group, duration: 6, push: true)
+            _ = s.setTimelineCycle(id: group, length: 2, continueAcross: false)
+            model.refresh()
+            if name == "timeline-group-open" {
+                model.timeline.open(group)
+            } else {
+                model.timeline.picked = group
+                model.timeline.clipOpen = true
+            }
         case "timeline", "timeline-tracks":
             model.animationAssist.setAssist(true, pages: false)
             for _ in 0 ..< 3 {
