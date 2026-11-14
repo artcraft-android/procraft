@@ -68,6 +68,10 @@ final class SelectionTool {
     /// Color Fill's Lasso Fill (held Color Fill): each shape drawn is filled on its own, as one
     /// undo step, nothing left selected.
     private(set) var lassoFill: Bool
+    /// Lasso Fill as it works now: Color Fill and its Lasso Fill on, and the Lasso Fill plugin on.
+    var lassoFilling: Bool {
+        colorFill && lassoFill && PluginsModel.shared.lassoFills
+    }
     /// How strongly Color Fill fills (its popover's Opacity), 0..1.
     private(set) var fillOpacity: Float
     /// Pixelated, for pixel art (in Feather's popover, the selection's edge being what it sets):
@@ -151,7 +155,7 @@ final class SelectionTool {
         }
         return SelectTouch(
             kind: kind.touch, join: join, threshold: threshold,
-            lassoFill: colorFill && lassoFill, lassoErase: false, lassoTool: false
+            lassoFill: lassoFilling, lassoErase: false, lassoTool: false
         )
     }
 
@@ -486,10 +490,13 @@ struct SelectionPopover: View {
                 } else if tool.popup == .colorFill {
                     ToolbarMenuTitle(text: "Color Fill")
                         .padding(.bottom, 4)
-                    ToolbarMenuGroup {
-                        ToolbarSwitchRow(label: "Lasso Fill", on: tool.lassoFill) { tool.toggleLassoFill() }
+                    // (Lasso Fill is the Lasso Fill plugin's)
+                    if PluginsModel.shared.lassoFills {
+                        ToolbarMenuGroup {
+                            ToolbarSwitchRow(label: "Lasso Fill", on: tool.lassoFill) { tool.toggleLassoFill() }
+                        }
+                        .padding(.bottom, 10)
                     }
-                    .padding(.bottom, 10)
                     ToolbarMenuGroup {
                         let opacity = tool.fillOpacity
                         PanelSlider(
@@ -579,7 +586,7 @@ struct SelectionOverlay: View {
             lassoErasePreview.opacity(Double(0.5 * model.opacity))
         } else if model.lassoToolOn {
             CanvasSpace.shared.color(model.colorRgb()).opacity(Double(0.5 * model.opacity))
-        } else if tool.colorFill, tool.lassoFill {
+        } else if tool.lassoFilling {
             CanvasSpace.shared.color(model.colorRgb()).opacity(Double(0.5 * tool.fillOpacity))
         } else {
             nil

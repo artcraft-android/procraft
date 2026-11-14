@@ -2009,9 +2009,44 @@ fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
         out.extend(s.touch_up(1, vec![sample(x0, y0 + 4.0, t + 4.0)]));
         out
     };
+    // Lasso Fill is the plugin's: without it on, a shape asked to fill is selected as ever, and a
+    // tool's own lasso isn't taken up at all
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-fill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(!plugins.lasso_fills(), "imported, it's off");
     s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
     s.set_color(1.0, 0.0, 0.0);
     let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 0.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "a selection's path, still open, instead");
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255], "nothing filled");
+    s.set_touch_selecting(None);
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    s.touch_down(1, PointerKind::Stylus, vec![sample(10.0, 10.0, 500.0)]);
+    s.touch_move(1, vec![sample(30.0, 10.0, 510.0), sample(30.0, 30.0, 520.0)]);
+    assert!(s.freehand_path().is_empty(), "no lasso drawn");
+    s.touch_up(1, vec![sample(30.0, 30.0, 530.0)]);
+    assert!(!s.has_selection());
+    // (it drew a plain stroke, if anything: taken back)
+    s.undo();
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255]);
+    s.set_touch_selecting(None);
+    // on, shapes fill
+    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.lasso_fills());
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 1.0);
     assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
     assert!(!out.contains(&TouchCommand::SelectionChanged), "{out:?}");
     assert!(s.freehand_path().is_empty(), "the path closed as it lifted");
@@ -2112,6 +2147,7 @@ fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
     assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
     assert!(!s.freehand_path().is_empty(), "still open");
     s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

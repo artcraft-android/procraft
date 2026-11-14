@@ -836,6 +836,7 @@ impl Interface {
         self.plugin_panel(&ctx, session, &mut backdrops);
         crate::model_picture::show(&ctx, &mut self.look, session);
         self.selection.lasso_fill = self.prefs.lasso_fill;
+        self.selection.lasso_fills = self.prefs.plugins.lasso_fills();
         self.selection.fill_opacity = self.prefs.fill_opacity;
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
             self.prefs.selection_x_ray = on;

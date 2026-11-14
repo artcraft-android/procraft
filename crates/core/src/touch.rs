@@ -885,6 +885,16 @@ impl CanvasSession {
 
     /// The selection tool open (each touch selects, as `how` says) or not.
     pub fn set_touch_selecting(&self, how: Option<SelectTouch>) {
+        // Lasso Fill is a plugin's: without one on, a shape drawn is selected as ever, and a tool's
+        // own lasso (which selects nothing) isn't taken up at all
+        let lassos = how.is_some_and(|h| h.lasso_fill)
+            && self.shared.lock().hooks.as_ref().is_some_and(|hooks| hooks.lasso_fill());
+        let how = match how {
+            Some(h) if h.lasso_fill && !lassos => {
+                (!h.lasso_tool).then_some(SelectTouch { lasso_fill: false, lasso_erase: false, ..h })
+            }
+            other => other,
+        };
         let mut t = self.touches();
         t.selecting = how;
         if how.is_none() {

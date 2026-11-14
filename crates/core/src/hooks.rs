@@ -290,6 +290,14 @@ impl Hooks {
             && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
     }
 
+    /// The lasso hook: whether Color Fill's Lasso Fill and the Paint and Erase tools' lassos are
+    /// offered, the shapes they draw filled (or erased) rather than selected. Without it the apps
+    /// show neither, and the core takes a lasso asked for as a plain selection.
+    pub(crate) fn lasso_fill(&self) -> bool {
+        self.has(Hook::LassoFill)
+            && self.through(Hook::LassoFill, false, |running, said| Ok(said | running.lasso_fill()?))
+    }
+
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
@@ -796,10 +804,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
-        const ANSWERING: [&str; 6] = [
+        const ANSWERING: [&str; 7] = [
             "eyedropper-layer",
             "fill-all-layers",
             "hide-undo-notice",
+            "lasso-fill",
             "opacity-together",
             "pin-panels",
             "radial-segments",
@@ -821,23 +830,24 @@ pub(crate) mod tests {
                 hooks.hide_undo_notice(),
                 hooks.opacity_together(),
                 hooks.pin_panels(),
+                hooks.lasso_fill(),
             ];
             (yes, hooks.radial_segments())
         };
-        assert_eq!(said(&hooks), ([false; 5], None), "imported, they say nothing");
+        assert_eq!(said(&hooks), ([false; 6], None), "imported, they say nothing");
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), true), "{name}");
         }
         // the eyedropper's waits for its switch, and radial symmetry makes eight until its slider moves
-        assert_eq!(said(&hooks), ([false, true, true, true, true], Some(8)));
+        assert_eq!(said(&hooks), ([false, true, true, true, true, true], Some(8)));
         // (its switch kept under the setting the app had before it was a plugin)
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
         assert!(plugins.set_slider(format!("{}.parts", id("radial-segments")), 12.0).is_some());
-        assert_eq!(said(&hooks), ([true; 5], Some(12)));
+        assert_eq!(said(&hooks), ([true; 6], Some(12)));
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), false), "{name}");
         }
-        assert_eq!(said(&hooks), ([false; 5], None));
+        assert_eq!(said(&hooks), ([false; 6], None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

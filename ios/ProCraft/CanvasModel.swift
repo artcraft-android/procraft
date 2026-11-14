@@ -230,7 +230,7 @@ final class CanvasModel {
 
     /// The current tool draws with its lasso now (nothing else open over it).
     var lassoToolOn: Bool {
-        !selecting && !transforming && adjustment == nil
+        !selecting && !transforming && adjustment == nil && PluginsModel.shared.lassoFills
             && ((tool == .paint && paintLasso) || (tool == .erase && eraseLasso))
     }
     private(set) var recoloring = false
@@ -451,7 +451,7 @@ final class CanvasModel {
                 showNotice(target == .paint ? "Painting" : "Erasing")
                 return
             }
-            if (selecting && selection.colorFill && selection.lassoFill) || lassoToolOn {
+            if (selecting && selection.lassoFilling) || lassoToolOn {
                 // held while Lasso Fill (or the other tool's lasso) is on: this tool's lasso
                 startLassoTool(target)
                 return

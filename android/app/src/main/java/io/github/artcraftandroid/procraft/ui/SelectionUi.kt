@@ -130,10 +130,13 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
             SelectionPopup.COLOR_FILL -> {
                 MenuTitle("Color Fill")
                 Spacer(Modifier.height(4.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
-                    SwitchRow("Lasso Fill", vm.lassoFill) { vm.toggleLassoFill() }
+                // (Lasso Fill is the Lasso Fill plugin's)
+                if (vm.lassoFills) {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                        SwitchRow("Lasso Fill", vm.lassoFill) { vm.toggleLassoFill() }
+                    }
+                    Spacer(Modifier.height(10.dp))
                 }
-                Spacer(Modifier.height(10.dp))
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
                     val opacity = vm.fillOpacity
                     SliderRow("Opacity", opacity, "${(opacity * 100).roundToInt()}%") { vm.fillOpacityTo(it) }
@@ -187,7 +190,7 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val preview = when {
         vm.lassoToolOn && vm.tool == ToolKind.ERASE -> LassoErasePreview.copy(alpha = 0.5f * vm.opacity)
         vm.lassoToolOn -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.opacity)
-        vm.colorFill && vm.lassoFill -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.fillOpacity)
+        vm.lassoFilling -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.fillOpacity)
         else -> null
     }
     Canvas(Modifier.fillMaxSize()) {

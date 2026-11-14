@@ -35,6 +35,9 @@
 //!   switched on), or -1 to leave it as it is.
 //! - `procraft_pin_panels() -> i32`: for the hook `pin_panels`, whether a touch on the canvas with
 //!   a panel open paints at once and leaves the panel up (not 0).
+//! - `procraft_lasso_fill() -> i32`: for the hook `lasso_fill`, whether Color Fill's Lasso Fill and
+//!   the Paint and Erase tools' lassos are offered (not 0): shapes drawn filled (or erased) on the
+//!   current layer, each as one step, rather than selected.
 //! - `procraft_opacity_together() -> i32`: for the hook `opacity_together`, whether a layer's
 //!   opacity changed while it is one of several picked sets every picked layer's (not 0).
 //! - `procraft_randomise(setting: i32, seed: i32) -> f32`: for the hook `randomise_brush`, where
@@ -181,6 +184,7 @@ const RADIAL_SEGMENTS: &str = "procraft_radial_segments";
 const HIDE_UNDO_NOTICE: &str = "procraft_hide_undo_notice";
 const INTERFACE_COLOUR: &str = "procraft_interface_colour";
 const PIN_PANELS: &str = "procraft_pin_panels";
+const LASSO_FILL: &str = "procraft_lasso_fill";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
@@ -290,6 +294,8 @@ pub(crate) enum Hook {
     /// Kinds of layer of its own (interface 3): not named in `hooks`, but on it whenever its
     /// manifest lists `layer_kinds`.
     Layers,
+    /// Lasso Fill and the tools' lassos offered: shapes drawn are filled, not selected.
+    LassoFill,
 }
 
 impl Hook {
@@ -305,6 +311,7 @@ impl Hook {
             "hide_undo_notice" => Some(Hook::HideUndoNotice),
             "interface_colour" => Some(Hook::InterfaceColour),
             "pin_panels" => Some(Hook::PinPanels),
+            "lasso_fill" => Some(Hook::LassoFill),
             "opacity_together" => Some(Hook::OpacityTogether),
             "randomise_brush" => Some(Hook::RandomiseBrush),
             "colour_triangle" => Some(Hook::ColourTriangle),
@@ -332,6 +339,7 @@ impl Hook {
             Hook::HideUndoNotice => "This plugin can hide the notice undo and redo show.",
             Hook::InterfaceColour => "This plugin can change the interface's colours.",
             Hook::PinPanels => "This plugin can keep panels open while you paint.",
+            Hook::LassoFill => "This plugin can fill or erase the shapes you draw with a lasso.",
             Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
             Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
@@ -361,6 +369,7 @@ impl Hook {
             Hook::HideUndoNotice => exports(module, HIDE_UNDO_NOTICE, &[], &[ValType::I32]),
             Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
             Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
+            Hook::LassoFill => exports(module, LASSO_FILL, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -686,6 +695,7 @@ pub(crate) struct Running {
     hide_undo_notice: Option<TypedFunc<(), i32>>,
     interface_colour: Option<TypedFunc<i32, i32>>,
     pin_panels: Option<TypedFunc<(), i32>>,
+    lasso_fill: Option<TypedFunc<(), i32>>,
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
@@ -825,6 +835,7 @@ impl Running {
             let hide_undo_notice = instance.get_typed_func(&store, HIDE_UNDO_NOTICE).ok();
             let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
             let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
+            let lasso_fill = instance.get_typed_func(&store, LASSO_FILL).ok();
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
@@ -906,6 +917,7 @@ impl Running {
                 hide_undo_notice,
                 interface_colour,
                 pin_panels,
+                lasso_fill,
                 opacity_together,
                 randomise,
                 colour_triangle,
@@ -1655,6 +1667,17 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             pin_panels.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says Lasso Fill and the tools' lassos are offered.
+    pub(crate) fn lasso_fill(&mut self) -> Result<bool, Stop> {
+        let Running { store, lasso_fill, .. } = self;
+        let Some(lasso_fill) = lasso_fill else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            lasso_fill.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
     }

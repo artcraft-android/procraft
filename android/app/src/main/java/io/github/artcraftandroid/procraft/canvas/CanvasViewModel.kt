@@ -879,10 +879,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var eraseLasso by mutableStateOf(false)
         private set
-    /** The current tool draws with its lasso now (nothing else open over it). */
+    /** The current tool draws with its lasso now (nothing else open over it, and the Lasso Fill plugin on). */
     val lassoToolOn: Boolean
         get() = !selecting && !transforming && adjustment == null && !adjustPencil &&
-            ((tool == ToolKind.PAINT && paintLasso) || (tool == ToolKind.ERASE && eraseLasso))
+            ((tool == ToolKind.PAINT && paintLasso) || (tool == ToolKind.ERASE && eraseLasso)) && lassoFills
+
+    /** Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill and the Paint and Erase tools' lassos show. */
+    val lassoFills: Boolean
+        get() {
+            // read again as the plugins change
+            pluginList
+            return plugins.lassoFills()
+        }
+
+    /** Lasso Fill as it works now: Color Fill and its Lasso Fill on, and the Lasso Fill plugin on. */
+    val lassoFilling: Boolean
+        get() = colorFill && lassoFill && lassoFills
     var hasSelection by mutableStateOf(false)
         private set
     /** While the selection tool is open on a plugin's layer: the box round the strokes the selection takes (four corners, x then y, canvas pixels), else empty. */
@@ -3665,7 +3677,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 // held while Lasso Fill (or the other tool's lasso) is on: this tool's lasso
-                (selecting && colorFill && lassoFill) || lassoToolOn -> {
+                (selecting && lassoFilling) || lassoToolOn -> {
                     startLassoTool(target)
                     return
                 }
@@ -6847,7 +6859,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             SelectionKind.RECTANGLE -> io.github.artcraftandroid.procraft.core.SelectKind.RECTANGLE
             SelectionKind.ELLIPSE -> io.github.artcraftandroid.procraft.core.SelectKind.ELLIPSE
         }
-        return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold, colorFill && lassoFill, lassoErase = false, lassoTool = false)
+        return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold, lassoFilling, lassoErase = false, lassoTool = false)
     }
 
     /** The freehand path is read at the next frame: a pen sends many moves a frame, each a longer path. */

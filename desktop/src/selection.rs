@@ -58,6 +58,8 @@ pub struct Selection {
     /// Color Fill's Lasso Fill (kept in the preferences): with Color Fill on, each shape drawn is
     /// filled on its own, as one undo step, and nothing stays selected.
     pub lasso_fill: bool,
+    /// Whether the Lasso Fill plugin is on: without it Lasso Fill isn't offered.
+    pub lasso_fills: bool,
     /// Color Fill's Opacity (kept in the preferences), 0..1.
     pub fill_opacity: f32,
     /// How many buttons the toolbar has, for where a popover points.
@@ -94,6 +96,7 @@ impl Default for Selection {
             taken_at: None,
             color_fill: false,
             lasso_fill: false,
+            lasso_fills: false,
             fill_opacity: 1.0,
             buttons: 8,
             feather: 0.0,
@@ -132,7 +135,7 @@ impl Selection {
     fn touches(&self, session: &CanvasSession) {
         let join =
             if self.removes && self.kind != SelectKind::Automatic { SelectionJoin::Remove } else { SelectionJoin::Add };
-        let lasso_fill = self.color_fill && self.lasso_fill;
+        let lasso_fill = self.lasso_filling();
         session.set_touch_selecting(Some(SelectTouch {
             kind: self.kind,
             join,
@@ -141,6 +144,11 @@ impl Selection {
             lasso_erase: false,
             lasso_tool: false,
         }));
+    }
+
+    /// Lasso Fill as it works now: Color Fill and its Lasso Fill on, and the Lasso Fill plugin on.
+    fn lasso_filling(&self) -> bool {
+        self.color_fill && self.lasso_fill && self.lasso_fills
     }
 
     /// The selection shows tinted while selecting by colour, else striped.
@@ -349,7 +357,8 @@ impl Selection {
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
         let height = match self.popup {
             Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0,
-            Popup::ColorFill => 40.0 + 4.0 + 49.0 + 10.0 + 59.0 + 16.0,
+            // (Lasso Fill's row only with its plugin on)
+            Popup::ColorFill => 40.0 + 4.0 + if self.lasso_fills { 49.0 + 10.0 } else { 0.0 } + 59.0 + 16.0,
             _ => 40.0 + 8.0 + 172.0,
         } + 20.0;
         let screen = ctx.content_rect();
@@ -375,24 +384,28 @@ impl Selection {
             }
             if self.popup == Popup::ColorFill {
                 menu_title(ui, inner, "Color Fill");
-                let row = Rect::from_min_size(pos2(inner.left(), inner.top() + 44.0), vec2(inner.width(), 49.0));
-                ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
-                text(
-                    ui.painter(),
-                    pos2(row.left() + 12.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    "Lasso Fill",
-                    16.0,
-                    Weight::Regular,
-                    argb(MENU_TEXT),
-                );
-                switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.lasso_fill, "Lasso Fill");
-                if ui.interact(row, ui.scope_id().with("lasso fill"), Sense::click()).clicked() {
-                    self.lasso_fill = !self.lasso_fill;
-                    self.touches(session);
+                // Lasso Fill's row, with its plugin on: the Opacity group goes under it, or in its place
+                let mut top = inner.top() + 44.0;
+                if self.lasso_fills {
+                    let row = Rect::from_min_size(pos2(inner.left(), inner.top() + 44.0), vec2(inner.width(), 49.0));
+                    ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
+                    text(
+                        ui.painter(),
+                        pos2(row.left() + 12.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        "Lasso Fill",
+                        16.0,
+                        Weight::Regular,
+                        argb(MENU_TEXT),
+                    );
+                    switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.lasso_fill, "Lasso Fill");
+                    if ui.interact(row, ui.scope_id().with("lasso fill"), Sense::click()).clicked() {
+                        self.lasso_fill = !self.lasso_fill;
+                        self.touches(session);
+                    }
+                    top = row.bottom() + 10.0;
                 }
-                let group =
-                    Rect::from_min_size(pos2(inner.left(), row.bottom() + 10.0), vec2(inner.width(), 59.0 + 16.0));
+                let group = Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), 59.0 + 16.0));
                 ui.painter().rect_filled(group, 13, argb(MENU_GROUP));
                 let shown = format!("{}%", (self.fill_opacity * 100.0).round() as i32);
                 let slider = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
@@ -479,7 +492,7 @@ impl Selection {
         let ppp = ctx.pixels_per_point();
         let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("selection overlay")));
         // Lasso Fill: the shape shows as it will fill, at half its strength
-        let preview = (self.color_fill && self.lasso_fill).then(|| {
+        let preview = self.lasso_filling().then(|| {
             let c = session.color();
             let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             let channel = |i: usize| byte(c.get(i).copied().unwrap_or(0.0));

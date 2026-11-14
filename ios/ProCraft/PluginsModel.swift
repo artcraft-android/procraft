@@ -98,6 +98,9 @@ final class PluginsModel {
     private(set) var randomisesBrushes = false
     /// Whether a plugin pins panels open: a touch on the canvas paints and leaves the panel up.
     private(set) var pinsPanels = false
+    /// Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill and the Paint and Erase tools'
+    /// lassos show.
+    private(set) var lassoFills = false
     /// The artwork open, whose GPU draws a picker plugin's picture.
     @ObservationIgnored weak var pickerSession: CanvasSession?
     /// Words for someone who changed a setting that now comes as a plugin, said once.
@@ -140,6 +143,7 @@ final class PluginsModel {
         pickerOn = store.pickerOn()
         randomisesBrushes = store.randomisesBrushes()
         pinsPanels = store.pinsPanels()
+        lassoFills = store.lassoFills()
     }
 
     private func changed() {

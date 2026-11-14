@@ -320,6 +320,20 @@ than closing it (a tap) or fading it away (a drag). The panel's own button still
 procraft_pin_panels() -> i32
 ```
 
+### `lasso_fill`
+
+Whether Lasso Fill is offered (not 0): Color Fill's Lasso Fill switch, and the Paint and Erase tools'
+own lassos, taken up by holding the tool's button while Lasso Fill is on. With it, a shape drawn with
+a selection tool (or the tool's lasso) is filled with the paint colour, or erased, on the current
+layer as one undo step, and nothing stays selected.
+
+```
+procraft_lasso_fill() -> i32
+```
+
+It only says they're offered: drawing the shapes and filling them stay the app's. With no plugin on
+it, the apps show neither, and a shape the core is asked to fill is selected as ever.
+
 ### `opacity_together`
 
 Whether a layer's opacity changed while it is one of several picked layers sets every picked layer's

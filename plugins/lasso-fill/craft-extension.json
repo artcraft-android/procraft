@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.lasso-fill",
+  "name": "Lasso Fill",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Shapes drawn with a lasso are filled, not selected: Lasso Fill under Color Fill, and the Paint and Erase tools' own lassos, held from their buttons.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["lasso_fill"]
+}

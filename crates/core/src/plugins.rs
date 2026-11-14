@@ -1309,6 +1309,12 @@ impl Plugins {
         self.hooks().pin_panels()
     }
 
+    /// Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill switch and the Paint and Erase
+    /// tools' lassos are shown. Without one, the core takes a lasso asked for as a selection.
+    pub fn lasso_fills(&self) -> bool {
+        self.hooks().lasso_fill()
+    }
+
     /// Whether a plugin sets brushes' settings at random: the brush studio shows Randomise.
     pub fn randomises_brushes(&self) -> bool {
         self.hooks().randomises_brushes()
