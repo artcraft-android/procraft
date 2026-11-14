@@ -47,6 +47,8 @@ fn icon(a: Adjustment) -> &'static Icon {
         Adjustment::Glitch => &icons::ADJUST_GLITCH,
         Adjustment::Halftone => &icons::ADJUST_HALFTONE,
         Adjustment::ChromaticAberration => &icons::ADJUST_CHROMATIC,
+        // (the desktop's own glyphs for these come with their panels)
+        Adjustment::Pixelate | Adjustment::Dither | Adjustment::Vignette => &icons::ADJUSTMENTS,
         Adjustment::Liquify => &icons::ADJUST_LIQUIFY,
         Adjustment::Clone => &icons::ADJUST_CLONE,
         Adjustment::Plugin => &icons::ADJUSTMENTS,

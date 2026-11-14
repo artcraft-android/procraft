@@ -20,6 +20,9 @@ pub enum Adjustment {
     Glitch,
     Halftone,
     ChromaticAberration,
+    Pixelate,
+    Dither,
+    Vignette,
     Liquify,
     Clone,
     /// A plugin's filter: open only from its row, and named after it.
@@ -27,7 +30,7 @@ pub enum Adjustment {
 }
 
 /// Each adjustment: its name, whether its amount is swiped, and its amount when first painted on.
-const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 16] = [
+const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 19] = [
     (Adjustment::Hsb, "Hue, Saturation, Brightness", false, None),
     (Adjustment::ColorBalance, "Color Balance", false, None),
     (Adjustment::Curves, "Curves", false, None),
@@ -41,6 +44,9 @@ const ADJUSTMENTS: [(Adjustment, &str, bool, Option<f32>); 16] = [
     (Adjustment::Glitch, "Glitch", true, Some(0.5)),
     (Adjustment::Halftone, "Halftone", true, Some(0.12)),
     (Adjustment::ChromaticAberration, "Chromatic Aberration", true, Some(1.0)),
+    (Adjustment::Pixelate, "Pixelate", true, Some(0.3)),
+    (Adjustment::Dither, "Dither", true, Some(1.0)),
+    (Adjustment::Vignette, "Vignette", true, Some(0.7)),
     (Adjustment::Liquify, "Liquify", false, None),
     (Adjustment::Clone, "Clone", false, None),
     (Adjustment::Plugin, "Plugin", false, None),
@@ -74,6 +80,13 @@ pub fn adjustment_paintable(adjustment: Adjustment) -> bool {
     !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone | Adjustment::Plugin)
 }
 
+/// Whether it can be an adjustment layer: everything but what moves or copies the layer's own
+/// pixels (Liquify, Clone) and plugins' filters.
+#[uniffi::export]
+pub fn adjustment_live(adjustment: Adjustment) -> bool {
+    !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone | Adjustment::Plugin)
+}
+
 /// The menu's groups in order: colour, blurs, effects, painting.
 #[uniffi::export]
 pub fn adjustment_groups() -> Vec<Vec<Adjustment>> {
@@ -81,7 +94,17 @@ pub fn adjustment_groups() -> Vec<Vec<Adjustment>> {
     vec![
         vec![A::Hsb, A::ColorBalance, A::Curves, A::GradientMap],
         vec![A::GaussianBlur, A::MotionBlur, A::PerspectiveBlur],
-        vec![A::Noise, A::Sharpen, A::Bloom, A::Glitch, A::Halftone, A::ChromaticAberration],
+        vec![
+            A::Noise,
+            A::Sharpen,
+            A::Bloom,
+            A::Glitch,
+            A::Halftone,
+            A::ChromaticAberration,
+            A::Pixelate,
+            A::Dither,
+            A::Vignette,
+        ],
         vec![A::Liquify, A::Clone],
     ]
 }
@@ -130,5 +153,12 @@ mod tests {
             assert_eq!(adjustment.map(adjustment_label), Some(crate::quick_menu::quick_action_label(a)));
         }
         assert_eq!(quick_action_adjustment(QuickAction::Undo), None);
+    }
+
+    #[test]
+    fn what_can_be_an_adjustment_layer() {
+        assert!(adjustment_live(Adjustment::Curves) && adjustment_live(Adjustment::Dither));
+        assert!(!adjustment_live(Adjustment::Liquify) && !adjustment_live(Adjustment::Clone));
+        assert!(adjustment_swiped(Adjustment::Pixelate) && adjustment_swiped(Adjustment::Vignette));
     }
 }

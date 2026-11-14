@@ -50,6 +50,12 @@ pub struct LayerInfo {
     pub can_merge: bool,
     pub can_combine: bool,
     pub can_clip: bool,
+    /// An adjustment layer: the adjustment it redraws what is below it through.
+    #[uniffi(default = None)]
+    pub adjustment: Option<crate::adjust_menu::Adjustment>,
+    /// Its styles (outline, drop shadow, glows) show.
+    #[uniffi(default = false)]
+    pub styled: bool,
 }
 
 /// A layer's pixels' version: new whenever they may have changed.
@@ -115,6 +121,10 @@ pub enum LayerOption {
     MergeDown,
     CombineDown,
     MergeMask,
+    /// An adjustment layer: its adjustment's panels opened on it.
+    AdjustmentSettings,
+    /// A layer's outline, drop shadow and glows.
+    LayerStyle,
 }
 
 /// A row of a layer's options menu: what it does, its label, whether it can be chosen, and for a
@@ -168,6 +178,18 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 row(O::Invert, "Invert", None);
             }
         }
+        // an adjustment layer: its settings, a mask and clipping; no pixels of its own
+        LayerType::Paint if l.adjustment.is_some() => {
+            if unlocked {
+                row(O::AdjustmentSettings, "Adjustment Settings", None);
+            }
+            if !masked {
+                row(O::Mask, "Mask", None);
+            }
+            if l.can_clip {
+                row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
+            }
+        }
         LayerType::Paint => {
             row(O::Select, "Select", None);
             row(O::Copy, "Copy", None);
@@ -188,6 +210,9 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             }
             if l.can_clip {
                 row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
+            }
+            if unlocked {
+                row(O::LayerStyle, "Layer Style", None);
             }
             if l.text {
                 if unlocked {
@@ -423,6 +448,8 @@ impl CanvasSession {
                 can_merge: st.doc.merge_target(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_clip: st.doc.can_clip(l.id),
+                adjustment: l.adjustment.as_ref().and_then(|a| crate::adjusting::adjustment_of(&a.settings)),
+                styled: l.shown_style().is_some(),
             })
             .collect()
     }

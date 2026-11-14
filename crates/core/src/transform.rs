@@ -451,7 +451,9 @@ impl CanvasSession {
     fn begin_transform_of_current(&self, st: &mut State) -> Option<TransformBox> {
         let current = st.doc.current();
         // (a vector layer is transformed on its own, as its strokes and fills: see `end_transform`)
-        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none() && l.plugin.is_none();
+        let movable = |l: &Layer| {
+            !st.doc.is_locked(l.id) && l.visible && l.text.is_none() && l.plugin.is_none() && !l.is_adjustment()
+        };
         // with layers picked, every paint layer chosen (those in a chosen group too) moves
         let chosen = st.doc.chosen();
         // a plugin's layer alone moves its items as items: those the selection takes

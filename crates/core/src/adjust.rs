@@ -47,6 +47,37 @@ pub enum ChromaticKind {
     Displace,
 }
 
+/// A dither's pattern: an ordered grid, or noise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum DitherKind {
+    Ordered,
+    Noise,
+}
+
+/// A vignette darkening the edges, or lightening them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum VignetteKind {
+    Dark,
+    Light,
+}
+
+/// Pixelate's cells (canvas pixels) for the amount: one pixel at none, finer steps low down.
+fn pixelate_size(amount: f32) -> f32 {
+    1.0 + 127.0 * amount.powf(1.5)
+}
+
+/// A dither from its amount and its levels and pattern size sliders (0..1): 2 to 16 steps a
+/// channel, dots 1 to 8 canvas pixels.
+fn dither(kind: DitherKind, amount: f32, levels: f32, scale: f32, mono: bool) -> Filter {
+    Filter::Dither {
+        amount,
+        levels: (2.0 + levels * 14.0).round(),
+        scale: (1.0 + scale * 7.0).round(),
+        kind: kind as u32,
+        mono,
+    }
+}
+
 /// Perspective blur from its puck all round, or only towards its arrow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PerspectiveKind {
@@ -257,6 +288,9 @@ impl State {
 
     /// Ends an open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     pub(crate) fn end_adjustment(&mut self, commit: bool) {
+        if self.end_adjustment_layer(commit) {
+            return;
+        }
         let within = if commit && self.adjusting { self.changed_since_begin() } else { None };
         if self.heed_filter_run() {
             return;
@@ -293,12 +327,86 @@ impl State {
     }
 
     fn adjust(&mut self, filter: Filter) {
+        if self.adjust_layer.is_some() {
+            self.adjust_live(filter, None);
+            return;
+        }
         if self.adjusting
             && let Some(canvas) = self.canvas.as_mut()
         {
             self.last_filter = Some(filter);
             canvas.set_filter(filter);
         }
+    }
+}
+
+impl State {
+    /// An adjustment with a table (curves, gradient map): the table given to the canvas, or kept by
+    /// the adjustment layer open.
+    fn adjust_with_table(&mut self, filter: Filter, entries: Vec<u8>) {
+        if self.adjust_layer.is_some() {
+            self.adjust_live(filter, Some(entries));
+            return;
+        }
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.set_table(gpu, &entries);
+        }
+        self.adjust(filter);
+    }
+
+    /// The adjustment layer open takes `filter` (and `table`, or none unless it still reads its
+    /// own) and the panel's settings as they are now; the canvas shows it.
+    fn adjust_live(&mut self, filter: Filter, table: Option<Vec<u8>>) {
+        let Some(edit) = self.adjust_layer.as_ref() else { return };
+        let (id, previewing) = (edit.layer, edit.preview);
+        self.last_filter = Some(filter);
+        if previewing {
+            return;
+        }
+        let Some(mut adjustment) = self.doc.layer(id).and_then(|l| l.adjustment.clone()) else { return };
+        adjustment.filter = filter;
+        match table {
+            Some(t) => adjustment.table = t,
+            None if !matches!(filter, Filter::Curves | Filter::GradientMap { .. }) => adjustment.table.clear(),
+            None => {}
+        }
+        adjustment.settings = self.adjust.layer_settings();
+        if self.doc.set_adjustment(id, adjustment)
+            && let Some(canvas) = self.canvas.as_mut()
+        {
+            canvas.invalidate();
+        }
+    }
+
+    /// Ends the adjustment layer open, if one is: `commit` keeps what changed as one undo step,
+    /// otherwise the document goes back as it was (a layer just added, gone). Returns whether one
+    /// was open.
+    fn end_adjustment_layer(&mut self, commit: bool) -> bool {
+        let Some(edit) = self.adjust_layer.take() else { return false };
+        self.adjusting = false;
+        self.pencil = false;
+        // previewed as it was: shown as it is again
+        if edit.preview
+            && let Some(mut adjustment) = self.doc.layer(edit.layer).and_then(|l| l.adjustment.clone())
+            && let Some(filter) = self.last_filter
+        {
+            adjustment.filter = filter;
+            self.doc.set_adjustment(edit.layer, adjustment);
+        }
+        if commit {
+            if self.doc != edit.before
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.name_next_step(if edit.added { "add adjustment layer" } else { "change adjustment layer" });
+                canvas.record_document(edit.before);
+            }
+        } else {
+            self.doc = edit.before;
+        }
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.invalidate();
+        }
+        true
     }
 }
 
@@ -404,10 +512,7 @@ impl CanvasSession {
         let entries: Vec<u8> = r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            canvas.set_table(gpu, &entries);
-        }
-        st.adjust(Filter::Curves);
+        st.adjust_with_table(Filter::Curves, entries);
         self.shared.frame(st);
     }
 
@@ -449,6 +554,37 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.adjust(Filter::Halftone { pitch: halftone_pitch(unit(amount)), kind: kind as u32 });
+        self.shared.frame(st);
+    }
+
+    /// Pixelate, its cells growing with `amount` (0..1).
+    pub fn adjust_pixelate(&self, amount: f32) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.adjust(Filter::Pixelate { size: pixelate_size(unit(amount)) });
+        self.shared.frame(st);
+    }
+
+    /// A dither of `kind`, `amount` (0..1) of it, with its levels and pattern size sliders (0..1);
+    /// in black and white when `mono`.
+    pub fn adjust_dither(&self, kind: DitherKind, amount: f32, levels: f32, scale: f32, mono: bool) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.adjust(dither(kind, unit(amount), unit(levels), unit(scale), mono));
+        self.shared.frame(st);
+    }
+
+    /// A vignette of `kind`, `amount` (0..1) of it, starting `size` (0..1) of the way out and fading
+    /// over `softness` (0..1) of the rest.
+    pub fn adjust_vignette(&self, kind: VignetteKind, amount: f32, size: f32, softness: f32) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.adjust(Filter::Vignette {
+            amount: unit(amount),
+            size: unit(size),
+            softness: unit(softness),
+            light: kind == VignetteKind::Light,
+        });
         self.shared.frame(st);
     }
 
@@ -516,10 +652,7 @@ impl CanvasSession {
         let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            canvas.set_table(gpu, &entries);
-        }
-        st.adjust(Filter::GradientMap { amount: a });
+        st.adjust_with_table(Filter::GradientMap { amount: a }, entries);
         self.shared.frame(st);
     }
 
@@ -658,7 +791,8 @@ impl CanvasSession {
     pub fn adjust_pencil(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if !st.adjusting || st.pencil {
+        // an adjustment layer shows through its mask instead
+        if !st.adjusting || st.pencil || st.adjust_layer.is_some() {
             return;
         }
         st.pencil = true;
@@ -708,6 +842,28 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if !st.adjusting {
+            return;
+        }
+        // an adjustment layer: shown doing nothing, or as set
+        if let Some(edit) = st.adjust_layer.as_mut() {
+            edit.preview = false;
+            let id = edit.layer;
+            let shown = if original {
+                Filter::Sharpen { amount: 0.0 }
+            } else {
+                st.last_filter.unwrap_or(Filter::Sharpen { amount: 0.0 })
+            };
+            if let Some(mut adjustment) = st.doc.layer(id).and_then(|l| l.adjustment.clone()) {
+                adjustment.filter = shown;
+                st.doc.set_adjustment(id, adjustment);
+            }
+            if let Some(edit) = st.adjust_layer.as_mut() {
+                edit.preview = original;
+            }
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.invalidate();
+            }
+            self.shared.frame(st);
             return;
         }
         // back from it, a plugin's filter draws as it does on any change
