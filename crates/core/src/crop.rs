@@ -487,15 +487,23 @@ mod tests {
     fn a_crop_past_the_budget_parks_what_doesnt_fit_and_loses_nothing() {
         let (Some(fits), Some(parks)) = (painted(120), painted(120)) else { return };
         let per = 80 * 70 * 4;
-        // room for one layer of the new size: the other two go compressed
-        for (x, angle) in [(10.0, 0.0), (10.5, 0.2)] {
+        // room for one layer of the new size: the other two go compressed. Moved by whole pixels,
+        // every pixel comes across as it was; resampled, those parked are worked out on the CPU and
+        // the rest on the GPU, whose float sums may round a level apart
+        for (x, angle, most) in [(10.0, 0.0, 0u8), (10.5, 0.2, 1)] {
             if let Some(c) = parks.shared.lock().canvas.as_mut() {
                 c.set_resident_budget(per);
             }
             assert!(fits.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert!(parks.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert_eq!(parks.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(2));
-            assert_eq!(contents(&parks), contents(&fits));
+            let ((parked, size), (resident, resident_size)) = (contents(&parks), contents(&fits));
+            assert_eq!((parked.len(), size), (resident.len(), resident_size));
+            for (a, b) in parked.iter().zip(&resident) {
+                assert_eq!(a.len(), b.len());
+                let off = a.iter().zip(b).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+                assert!(off <= most, "{off} levels apart at {x}, {angle}");
+            }
             assert!(parks.undo().is_some());
             assert!(fits.undo().is_some());
         }
