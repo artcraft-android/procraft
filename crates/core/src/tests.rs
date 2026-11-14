@@ -4349,7 +4349,7 @@ fn an_artwork_whose_file_has_settings_it_cant_read_opens_with_its_layers() {
     let Some(s) = session(64, 160) else { return };
     s.add_layer();
     s.add_layer();
-    let dir = std::env::temp_dir().join(format!("procraft-unreadable-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-unreadable-settings-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
     // how it was last shown, what it keeps about itself and the guide no longer readable
