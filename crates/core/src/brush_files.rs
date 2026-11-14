@@ -926,10 +926,107 @@ fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32
     }
 }
 
-/// A brush of a Photoshop preset: its sampled tip, or round with its hardness; its roundness,
-/// spacing and angle; its texture as its grain.
+/// A brush of a Photoshop preset: its tip as [`abr_shape`] makes it, untapered and without
+/// StreamLine, glazed uniformly at its tool's flow and opacity; its size from its tip's pixels;
+/// its shape dynamics, scattering, texture (as its grain), transfer and colour dynamics, and its
+/// dual brush (as a dual brush's second).
 fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
+    use procraft_engine::abr::{ANGLE_BY_DIRECTION, BY_PRESSURE};
+    let mut b = abr_shape(a);
+    let d = a.dynamics;
+    if d.tip && d.angle_control == ANGLE_BY_DIRECTION {
+        b.shape.follow = 1.0;
+    }
+    let flow = d.tool_flow.unwrap_or(1.0);
+    // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at its tool's flow
+    for (key, value) in [
+        ("pen_taper_size", 0.0),
+        ("pen_taper_opacity", 0.0),
+        ("touch_taper_size", 0.0),
+        ("touch_taper_opacity", 0.0),
+        ("streamline", 0.0),
+        ("rendering_mode", 1.0),
+        ("flow", flow),
+    ] {
+        b.set_setting(key, value);
+    }
+    if let Some(opacity) = d.tool_opacity {
+        b.max_opacity = opacity;
+        b.min_opacity = b.min_opacity.min(opacity);
+    }
+    if let Some(mode) = a.blend.as_deref().and_then(tool_blend) {
+        b.set_setting("blend_mode", mode as f32);
+    }
+    if let Some(t) = &a.texture {
+        abr_paper(&mut b, t);
+    }
+    // (its noise has the grain only where its texture hasn't it)
+    if a.noise && b.grain.source.is_none() {
+        abr_noise(&mut b);
+    }
+    // its most size from its tip's pixels, the least 1%
+    if let Some(px) = abr_pixels(a) {
+        procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
+    }
+    // the shape dynamics: pressure or tilt (controls 2, 3) on the size, half of what it lets go
+    // of; tilt to the full; its size jitter
+    let sized = d.tip && matches!(d.size_control, 2 | 3);
+    b.set_setting("pressure_size", if sized { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
+    b.set_setting("tilt_size", if d.tip && d.size_control == 3 { 1.0 } else { 0.0 });
+    b.set_setting("jitter_size", if d.tip { d.size_jitter } else { 0.0 });
+    if d.tip {
+        // each stamp turned at random as far as its angle jitter (a share of a whole turn, as ours
+        // is of half a turn either way), flattened at random or by pressure down to its least
+        // roundness, and mirrored at random
+        b.shape.scatter = d.angle_jitter.clamp(0.0, 1.0);
+        let flattened = d.roundness_jitter.min(1.0 - d.min_roundness).max(0.0);
+        if flattened > 0.0 {
+            b.set_setting("roundness_jitter_y", flattened);
+        }
+        if d.roundness_control == BY_PRESSURE {
+            b.set_setting("pressure_roundness", 1.0 - d.min_roundness);
+        }
+        for (key, on) in [("flip_x", d.flip_x), ("flip_y", d.flip_y)] {
+            if on {
+                b.set_setting(key, 1.0);
+            }
+        }
+    }
+    // the paint dynamics, pressure's (control 2): the opacity down to its least, the flow from the
+    // tool's down to its least; the jitter of either as the opacity's. The stylus page's opacity
+    // is kept as "pressure_flow", its flow as "pressure_opacity".
+    let pressed = |control: i32| d.paint && control == BY_PRESSURE;
+    b.set_setting("pressure_flow", if pressed(d.opacity_control) { 1.0 - d.opacity_min } else { 0.0 });
+    b.set_setting("pressure_opacity", if pressed(d.flow_control) { flow * (1.0 - d.flow_min) } else { 0.0 });
+    b.set_setting("jitter_opacity", if d.paint { d.flow_jitter.max(d.opacity_jitter) } else { 0.0 });
+    if let Some(s) = &a.scatter {
+        abr_scatter(&mut b, s, s.amount / 2.0, 1);
+    }
+    // its colour changed at random, each stamp or each stroke: the brightness either way
+    if let Some(c) = &a.color {
+        let keys = if c.per_tip {
+            ["stamp_hue", "stamp_saturation", "stamp_lightness", "stamp_darkness", "stamp_secondary"]
+        } else {
+            ["stroke_hue", "stroke_saturation", "stroke_lightness", "stroke_darkness", "stroke_secondary"]
+        };
+        let half = c.brightness / 2.0;
+        for (key, amount) in keys.into_iter().zip([c.hue, c.saturation, half, half, c.background]) {
+            if amount > 0.0 {
+                b.set_setting(key, amount);
+            }
+        }
+    }
+    if let Some(dual) = &a.dual {
+        abr_dual(&mut b, a, dual);
+    }
+    b
+}
+
+/// A brush of a Photoshop preset's tip (or a dual brush's): its sampled tip, mirrored as it says,
+/// or round with its hardness; its roundness, spacing and angle.
+fn abr_shape(a: &procraft_engine::abr::AbrBrush) -> Brush {
     let mut b = match &a.tip {
+        Some(t) if a.flipped.0 || a.flipped.1 => tip_brush(&mirrored(t, a.flipped)),
         Some(t) => tip_brush(t),
         None => {
             let mut b = Brush { name: a.name.clone(), ..Brush::round_pen() };
@@ -952,62 +1049,236 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     }
     // Photoshop turns the other way (its 129 degrees are -129 here)
     b.shape.rotation = -a.angle;
-    let d = a.dynamics;
-    if d.tip && d.angle_control == procraft_engine::abr::ANGLE_BY_DIRECTION {
-        b.shape.follow = 1.0;
-    }
-    let flow = d.tool_flow.unwrap_or(1.0);
-    // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at its tool's flow
-    for (key, value) in [
-        ("pen_taper_size", 0.0),
-        ("pen_taper_opacity", 0.0),
-        ("touch_taper_size", 0.0),
-        ("touch_taper_opacity", 0.0),
-        ("streamline", 0.0),
-        ("rendering_mode", 1.0),
-        ("flow", flow),
-    ] {
-        b.set_setting(key, value);
-    }
-    if let Some(t) = &a.texture {
-        let png = sized_gray_png(t.width, t.height, &t.pixels);
-        paper(&mut b, &[png], t.invert, t.depth.unwrap_or(1.0), t.scale.unwrap_or(1.0));
-        if b.grain.source.is_some() {
-            // a stamp's own texture moves with it; else it lies still under the stroke
-            b.set_setting("grain_behavior", if t.each_tip { 0.0 } else { 1.0 });
-            b.set_setting("grain_depth_min", t.min_depth.unwrap_or(0.0));
-            b.set_setting("grain_brightness", (t.brightness as f32 / 255.0).clamp(-1.0, 1.0));
-            b.set_setting("grain_contrast", (t.contrast as f32 / 100.0).clamp(-1.0, 1.0));
-            if let Some(mode) = t.blend.as_deref().and_then(texture_blend) {
-                b.set_setting("grain_blend", mode as f32);
-            }
-        }
-    }
-    // its most size from its tip's pixels (a sampled tip's no taller than its picture), the least 1%
-    let pixels = match (&a.tip, a.diameter) {
-        (None, d) => d,
-        (Some(t), d) => Some(d.map_or(t.height as f32, |d| d.min(t.height as f32))),
-    };
-    if let Some(px) = pixels {
-        procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
-    }
-    // the shape dynamics: pressure or tilt (controls 2, 3) on the size, half of what it lets go
-    // of; tilt to the full; its size jitter
-    let sized = d.tip && matches!(d.size_control, 2 | 3);
-    b.set_setting("pressure_size", if sized { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
-    b.set_setting("tilt_size", if d.tip && d.size_control == 3 { 1.0 } else { 0.0 });
-    b.set_setting("jitter_size", if d.tip { d.size_jitter } else { 0.0 });
-    // the paint dynamics, pressure's (control 2): the opacity down to its least, the flow from the
-    // tool's down to its least; the flow's jitter as the opacity's. The stylus page's opacity is
-    // kept as "pressure_flow", its flow as "pressure_opacity".
-    let pressed = |control: i32| d.paint && control == 2;
-    b.set_setting("pressure_flow", if pressed(d.opacity_control) { 1.0 - d.opacity_min } else { 0.0 });
-    b.set_setting("pressure_opacity", if pressed(d.flow_control) { flow * (1.0 - d.flow_min) } else { 0.0 });
-    b.set_setting("jitter_opacity", if d.paint { d.flow_jitter } else { 0.0 });
     b
 }
 
-/// The grain blend mode of a Photoshop texture's mode (its four-letter name), if we have it.
+/// A Photoshop tip mirrored side to side (`flipped.0`) and top to bottom (`flipped.1`).
+fn mirrored(t: &procraft_engine::abr::AbrTip, (across, down): (bool, bool)) -> procraft_engine::abr::AbrTip {
+    let (w, h) = (t.width as usize, t.height as usize);
+    let pixels = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            let (x, y) = (if across { w - 1 - x } else { x }, if down { h - 1 - y } else { y });
+            t.pixels.get(y * w + x).copied().unwrap_or(0)
+        })
+        .collect();
+    procraft_engine::abr::AbrTip { pixels, ..t.clone() }
+}
+
+/// A Photoshop preset's size in its own pixels: a computed tip's diameter, a sampled one's no
+/// taller than its picture.
+fn abr_pixels(a: &procraft_engine::abr::AbrBrush) -> Option<f32> {
+    match (&a.tip, a.diameter) {
+        (None, d) => d,
+        (Some(t), d) => Some(d.map_or(t.height as f32, |d| d.min(t.height as f32))),
+    }
+}
+
+/// Gives `b` a Photoshop preset's scattering: each stamp thrown across the stroke (and along it,
+/// on both axes) as far as `reach` of its diameters either way (a preset's own tip half its
+/// amount), as far as the pressure lets it if the pressure controls it; as many stamps a step as
+/// its count (times `per_step`), fewer at random by its count jitter, and fewer with less pressure
+/// if the pressure controls the count.
+fn abr_scatter(b: &mut Brush, s: &procraft_engine::abr::AbrScatter, reach: f32, per_step: u32) {
+    use procraft_engine::abr::BY_PRESSURE;
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::geom::Vec2;
+    let rising = || Some(Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]));
+    let control = jitter_control(b, reach);
+    for (on, key, by) in [
+        (true, "jitter_lateral", PressureCurve::LateralJitter),
+        (s.both_axes, "jitter_linear", PressureCurve::LinearJitter),
+    ] {
+        if on && control > 0.0 {
+            b.set_setting(key, control);
+            if s.control == BY_PRESSURE {
+                b.pressure_curves.set(by, rising());
+            }
+        }
+    }
+    b.shape.count = s.count.saturating_mul(per_step).clamp(1, procraft_engine::studio::MAX_COUNT);
+    if b.shape.count > 1 {
+        if s.count_jitter > 0.0 {
+            b.set_setting("count_jitter", s.count_jitter);
+        }
+        if s.count_control == BY_PRESSURE {
+            b.pressure_curves.set(PressureCurve::Count, rising());
+        }
+    }
+}
+
+/// Gives `b` a Photoshop preset's texture as its grain, fixed to the canvas: the pattern (light
+/// letting paint through, dark if it is inverted) tiled at its own size times its scale, made
+/// lighter (before it is inverted) and of more contrast as it says, combined with each stamp as
+/// it is laid if the preset textures each tip, else with the stroke as a whole, by the nearest of
+/// the modes to the preset's. Textured stamp by stamp, the heights come in as our heights, as deep
+/// as their depth raises a stamp (see [`KritaHeight`]: Photoshop's own are the forms that one
+/// names after it), and the depth varies from its least by the pressure (or the pen's lean) as the
+/// preset says, and at random by its depth jitter. Over the stroke as a whole the depth is how
+/// much of the texture shows (none at 0%, the pattern's dark taking all the paint at 100%), so a
+/// height is multiplied: as a height a shallow one would leave no paint at all.
+fn abr_paper(b: &mut Brush, t: &procraft_engine::abr::AbrTexture) {
+    use procraft_engine::abr::{BY_PRESSURE, BY_TILT};
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::document::BlendMode;
+    use procraft_engine::geom::Vec2;
+    let png = sized_gray_png(t.width, t.height, &t.pixels);
+    let depth = t.depth.unwrap_or(1.0);
+    paper(b, &[png], t.invert, depth, t.scale.unwrap_or(1.0));
+    if b.grain.source.is_none() {
+        return;
+    }
+    let heights = matches!(t.blend.as_deref(), Some("Hght" | "linearHeight"));
+    let height = match t.blend.as_deref() {
+        Some("Hght") if t.each_tip => Some(KritaHeight::PhotoshopHeight { linear: false }),
+        Some("linearHeight") if t.each_tip => Some(KritaHeight::PhotoshopHeight { linear: true }),
+        _ => None,
+    };
+    let mode = match height {
+        Some(h) => h.mode(),
+        None if heights => BlendMode::Multiply.id(),
+        None => t.blend.as_deref().and_then(texture_blend).unwrap_or(BlendMode::Multiply.id()),
+    };
+    let deep = |strength: f32| match height {
+        Some(h) => (h.raise(strength) / 12.0).clamp(0.0, 1.0),
+        None => strength.clamp(0.0, 1.0),
+    };
+    b.grain.depth = deep(depth);
+    // the pattern is made lighter before it is inverted: ours is lightened after, so an inverted
+    // one is darkened as far
+    let lighter = (t.brightness as f32 / 255.0).clamp(-1.0, 1.0) * if t.invert { -1.0 } else { 1.0 };
+    for (key, value) in [
+        ("grain_behavior", 1.0),
+        ("grain_blend", mode as f32),
+        ("grain_brightness", lighter),
+        ("grain_contrast", (t.contrast as f32 / 100.0).clamp(-1.0, 1.0)),
+    ] {
+        b.set_setting(key, value);
+    }
+    if !t.each_tip {
+        return;
+    }
+    b.set_setting("grain_each_stamp", 1.0);
+    let least = deep(t.min_depth.unwrap_or(0.0).min(depth));
+    match t.depth_control {
+        BY_PRESSURE => {
+            b.set_setting("grain_depth_min", least);
+            b.pressure_curves
+                .set(PressureCurve::GrainDepth, Some(Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)])));
+        }
+        BY_TILT => {
+            b.set_setting("grain_depth_min", least);
+            b.set_setting("grain_depth_tilt", 1.0);
+        }
+        _ => {}
+    }
+    if t.depth_jitter > 0.0 {
+        b.set_setting("grain_depth_jitter", t.depth_jitter);
+    }
+}
+
+/// Gives `b` a Photoshop preset's noise, which speckles a tip's soft parts: a grain of white noise
+/// fixed to the canvas, a pixel a texel, going on each stamp as a height raising a stamp twice
+/// over, so a stamp's full parts stay whole and a half covered pixel is covered or not at random.
+fn abr_noise(b: &mut Brush) {
+    use procraft_engine::brush::GRAIN_HEIGHT;
+    let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+    let pixels = (0..TEXTURE_SIZE * TEXTURE_SIZE)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 56) as u8
+        })
+        .collect();
+    b.grain.image = None;
+    b.grain.source = Source::new(pixels);
+    b.grain.depth = 2.0 / 12.0;
+    for (key, value) in [
+        ("grain_behavior", 1.0),
+        ("grain_each_stamp", 1.0),
+        ("grain_blend", GRAIN_HEIGHT as f32),
+        ("grain_scale", TEXTURE_SIZE as f32 / procraft_engine::studio::MAX_GRAIN_SCALE),
+        ("grain_filtering", 0.0),
+    ] {
+        b.set_setting(key, value);
+    }
+}
+
+/// Gives `b` a Photoshop preset's dual brush as its second: the second tip's own shape, spacing
+/// and random mirroring (its "Flip") at its size for each of the first's, its stroke combined with
+/// the first's by the nearest of the dual modes to the preset's. Its scatter goes by the first
+/// tip's size: a dual brush's tip a fraction of the first's (grit across a dry brush, say) is
+/// thrown across all of the first's stroke. Thrown farther than our jitter throws a stamp of its
+/// own size, it is sprayed (see [`abr_spray`]).
+fn abr_dual(b: &mut Brush, a: &procraft_engine::abr::AbrBrush, dual: &procraft_engine::abr::AbrBrush) {
+    let main_px = abr_pixels(a).filter(|p| *p > 0.0).unwrap_or(1.0);
+    let dual_px = abr_pixels(dual).filter(|p| *p > 0.0).unwrap_or(main_px);
+    // how far its stamps are thrown either way, pixels; sprayed, no farther than a stamp (of a
+    // picture) as big as a brush may be holds (the first's most size is its own pixels)
+    let thrown = dual.scatter.map_or(0.0, |s| s.amount / 2.0 * main_px);
+    let most = procraft_engine::studio::MOST_SIZE * procraft_engine::brushfile::PIXELS_PER_SIZE;
+    let widest = main_px * most / b.max_size.max(1e-3);
+    let sprayed = (2.0 * thrown + dual_px).min(widest);
+    let plain = procraft_engine::abr::AbrBrush { scatter: None, ..dual.clone() };
+    let (mut second, stamp_px, per_step, thrown) = if (sprayed - dual_px) / 2.0 <= ABR_SPRAYED_FROM * dual_px {
+        (abr_brush(&plain), dual_px, 1, thrown)
+    } else {
+        let (second, per_step) = abr_spray(&plain, dual_px, sprayed);
+        (second, sprayed, per_step, (sprayed - dual_px) / 2.0)
+    };
+    if let Some(s) = &dual.scatter {
+        abr_scatter(&mut second, s, thrown / stamp_px, per_step);
+    }
+    if dual.dynamics.flip_x {
+        second.set_setting("flip_x", 1.0);
+    }
+    let ratio = stamp_px / main_px;
+    second.max_size = (b.max_size * ratio).clamp(0.5, (second.most_size() * second.size_unit()).max(0.5));
+    second.min_size = (b.min_size * ratio).min(second.max_size);
+    b.secondary = Some(Box::new(second));
+    let mode = a.dual_mode.as_deref().and_then(texture_blend).unwrap_or_else(|| {
+        log::warn!("Photoshop preset \"{}\": dual brush mode {:?} combines as multiply", a.name, a.dual_mode);
+        procraft_engine::document::BlendMode::Multiply.id()
+    });
+    b.set_setting("dual_blend", mode as f32);
+}
+
+/// How far (in its own diameters) a dual brush's tip may be thrown before it is sprayed: our
+/// jitter throws a stamp a little over two.
+const ABR_SPRAYED_FROM: f32 = 2.0;
+
+/// A Photoshop dual brush's tip, `dual_px` pixels across, as a spray `stamp_px` across: a stamp as
+/// wide as the reach the tip is thrown across holding it in its middle (see [`spray_tip`]), laying
+/// as many of the tip along the stroke as its own spacing does. A stamp so large keeps a roomy
+/// spacing (see [`procraft_engine::studio::ROOMY_SPACING`]): where the tip's own steps are closer,
+/// more of it are laid at each step. With how many stamps a step lays for each one the tip does.
+fn abr_spray(dual: &procraft_engine::abr::AbrBrush, dual_px: f32, stamp_px: f32) -> (Brush, u32) {
+    use procraft_engine::abr::{AbrBrush, AbrTip};
+    let particle = dual.tip.as_ref().map(|t| mirrored(t, dual.flipped));
+    let tip = spray_tip(particle.as_ref(), dual.hardness.unwrap_or(1.0), (1.0, false), 0.0, dual_px / stamp_px);
+    let sprayed = AbrBrush {
+        tip: Some(AbrTip { name: dual.name.clone(), ..tip }),
+        flipped: (false, false),
+        hardness: None,
+        spacing: None,
+        diameter: Some(stamp_px),
+        ..dual.clone()
+    };
+    let mut b = abr_brush(&sprayed);
+    // the tip's own steps (half a pixel less, as its spacing comes in), and the stamp's
+    let step = (dual.spacing.unwrap_or(ABR_DEFAULT_SPACING) * dual_px - ABR_SPACING_LESS_PX).max(0.1);
+    let spacing = (step / stamp_px).max(procraft_engine::studio::ROOMY_SPACING);
+    b.spacing = Brush::spacing_within_reach(spacing);
+    let per_step = (b.spacing * stamp_px / step).round().clamp(1.0, procraft_engine::studio::MAX_COUNT as f32);
+    (b, per_step as u32)
+}
+
+/// The spacing a Photoshop tip has that doesn't say (its own default), a share of its diameter.
+const ABR_DEFAULT_SPACING: f32 = 0.25;
+
+/// The grain blend mode of a Photoshop texture's or dual brush's mode (its four-letter name), if
+/// we have it.
 fn texture_blend(name: &str) -> Option<u32> {
     use procraft_engine::document::BlendMode;
     Some(match name {
@@ -1021,6 +1292,21 @@ fn texture_blend(name: &str) -> Option<u32> {
         "hardMix" => BlendMode::HardMix.id(),
         "Hght" => procraft_engine::brush::GRAIN_HEIGHT,
         "linearHeight" => procraft_engine::brush::GRAIN_LINEAR_HEIGHT,
+        _ => return None,
+    })
+}
+
+/// The blend mode of a Photoshop tool's mode (its four-letter name), for those we have but Normal.
+fn tool_blend(name: &str) -> Option<u32> {
+    use procraft_engine::document::BlendMode;
+    Some(match name {
+        "Mltp" => BlendMode::Multiply.id(),
+        "Drkn" => BlendMode::Darken.id(),
+        "Lghn" => BlendMode::Lighten.id(),
+        "Scrn" => BlendMode::Screen.id(),
+        "Ovrl" => BlendMode::Overlay.id(),
+        "CBrn" => BlendMode::ColorBurn.id(),
+        "CDdg" => BlendMode::ColorDodge.id(),
         _ => return None,
     })
 }
@@ -3142,7 +3428,8 @@ mod tests {
         assert_eq!((sampled.max_size / sampled.size_unit() * 100.0).round(), 298.0);
         assert_eq!(sampled.setting("pressure_size"), 0.0);
         // as Kyle's charcoal: its tool's flow 76%, the flow by pressure down to 20% (61% on the
-        // stylus page), size by tilt, and a still texture of its own in the Height mode
+        // stylus page), size by tilt, and a texture of its own over the whole stroke in the Height
+        // mode (its least depth only for a texture on each tip)
         let paper = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
         let kyle = abr_brush(&AbrBrush {
             texture: Some(procraft_engine::abr::AbrTexture {
@@ -3154,7 +3441,7 @@ mod tests {
                 depth: Some(0.32),
                 invert: false,
                 min_depth: Some(0.17),
-                depth_control: 0,
+                depth_control: procraft_engine::abr::BY_TILT,
                 depth_jitter: 0.0,
                 brightness: 30,
                 contrast: 20,
@@ -3180,9 +3467,229 @@ mod tests {
         );
         assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (50.0, 100.0));
         assert_eq!((shown(&kyle, "jitter_size"), shown(&kyle, "jitter_opacity")), (9.0, 10.0));
-        assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::brush::GRAIN_HEIGHT);
+        assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::document::BlendMode::Multiply.id());
         assert_eq!((shown(&kyle, "grain_brightness"), shown(&kyle, "grain_contrast")), (12.0, 20.0));
-        assert_eq!((shown(&kyle, "grain_depth_min"), kyle.setting("grain_behavior")), (17.0, 1.0));
+        assert_eq!((shown(&kyle, "grain_depth_min"), kyle.setting("grain_behavior")), (0.0, 1.0));
+        assert!(!kyle.grain_each_stamp());
+    }
+
+    #[test]
+    fn a_photoshop_texture_on_each_tip_stays_on_the_canvas_and_textures_each_stamp() {
+        use procraft_engine::abr::{AbrBrush, AbrTexture, AbrTip, BY_PRESSURE};
+        use procraft_engine::brush::{GRAIN_HEIGHT, GrainMode, PressureCurve};
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let tip = AbrTip { name: "Tip".into(), spacing: None, width: 40, height: 40, pixels: vec![255; 40 * 40] };
+        let paper: Vec<u8> = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
+        let texture = AbrTexture {
+            name: "Rough".into(),
+            width: 64,
+            height: 64,
+            pixels: paper,
+            scale: Some(1.0),
+            depth: Some(0.17),
+            invert: false,
+            min_depth: Some(0.05),
+            depth_control: BY_PRESSURE,
+            depth_jitter: 0.1,
+            brightness: 50,
+            contrast: 15,
+            blend: Some("Hght".into()),
+            each_tip: true,
+        };
+        let brush = |t: AbrTexture| {
+            abr_brush(&AbrBrush {
+                name: "Rowdy".into(),
+                tip: Some(tip.clone()),
+                spacing: Some(0.06),
+                diameter: Some(40.0),
+                texture: Some(t),
+                ..AbrBrush::default()
+            })
+        };
+        // each stamp textured as it is laid, the pattern fixed to the canvas (not moving with each
+        // stamp: so close, the stamps would fill in each other's holes and leave none)
+        let b = brush(texture.clone());
+        assert_eq!(b.grain.mode, GrainMode::Texturized);
+        assert!(b.grain_each_stamp());
+        // a height ten times its depth over the twelve ours raises a stamp by, from its least
+        // depth by the pressure, and at random
+        assert_eq!(b.setting("grain_blend") as u32, GRAIN_HEIGHT);
+        assert!(near(b.grain.depth, 10.0 * 0.17 / 12.0), "{}", b.grain.depth);
+        assert!(near(b.setting("grain_depth_min"), 10.0 * 0.05 / 12.0));
+        let curve = b.pressure_curves.get(PressureCurve::GrainDepth).unwrap();
+        assert!(near(curve.eval(0.0), 0.0) && near(curve.eval(1.0), 1.0));
+        assert!(near(b.setting("grain_depth_jitter"), 0.1));
+        // the whole stroke textured: still on the canvas, its depth held, a height multiplied as
+        // deep as its depth (as a height so shallow, it would leave no paint)
+        let whole = brush(AbrTexture { each_tip: false, ..texture.clone() });
+        assert_eq!(whole.grain.mode, GrainMode::Texturized);
+        assert!(!whole.grain_each_stamp() && whole.pressure_curves.get(PressureCurve::GrainDepth).is_none());
+        assert_eq!(whole.setting("grain_blend") as u32, procraft_engine::document::BlendMode::Multiply.id());
+        assert!(near(whole.grain.depth, 0.17));
+        // lightened before it is inverted: an inverted one darkened as far
+        assert!(near(b.setting("grain_brightness"), 50.0 / 255.0));
+        let inverted = brush(AbrTexture { invert: true, ..texture.clone() });
+        assert!(near(inverted.setting("grain_brightness"), -50.0 / 255.0));
+        // another mode as it says, as deep as it says
+        let burnt = brush(AbrTexture { blend: Some("CBrn".into()), ..texture });
+        assert_eq!(burnt.setting("grain_blend") as u32, procraft_engine::document::BlendMode::ColorBurn.id());
+        assert!(near(burnt.grain.depth, 0.17));
+    }
+
+    #[test]
+    fn a_photoshop_dual_brush_becomes_the_second_at_its_share_of_the_size() {
+        use procraft_engine::abr::{AbrBrush, AbrScatter, AbrTip};
+        use procraft_engine::document::BlendMode;
+        let spatter = AbrTip { name: "Spatter".into(), spacing: None, width: 30, height: 30, pixels: vec![200; 900] };
+        let dual = AbrBrush {
+            name: "Spatter".into(),
+            tip: Some(spatter),
+            spacing: Some(0.25),
+            diameter: Some(30.0),
+            scatter: Some(AbrScatter {
+                amount: 1.35,
+                both_axes: false,
+                control: 0,
+                count: 2,
+                count_jitter: 0.0,
+                count_control: 0,
+            }),
+            ..AbrBrush::default()
+        };
+        let main = AbrBrush {
+            name: "Conte".into(),
+            hardness: Some(1.0),
+            spacing: Some(0.1),
+            diameter: Some(60.0),
+            dual: Some(Box::new(dual)),
+            dual_mode: Some("CBrn".into()),
+            ..AbrBrush::default()
+        };
+        let b = abr_brush(&main);
+        let second = b.secondary.as_deref().unwrap();
+        // half the first's size, its own tip and scatter; combined by colour burn
+        assert!(second.shape.source.is_some());
+        assert!((second.max_size / b.max_size - 0.5).abs() < 1e-3, "{} {}", second.max_size, b.max_size);
+        assert!(second.setting("jitter_lateral") > 0.0 && second.setting("jitter_linear") == 0.0);
+        assert_eq!(second.shape.count, 2);
+        assert_eq!(b.setting("dual_blend") as u32, BlendMode::ColorBurn.id());
+        // the linear height, the hard mix
+        let mode = |name: &str| {
+            abr_brush(&AbrBrush { dual_mode: Some(name.into()), ..main.clone() }).setting("dual_blend") as u32
+        };
+        assert_eq!(mode("linearHeight"), procraft_engine::brush::GRAIN_LINEAR_HEIGHT);
+        assert_eq!(mode("hardMix"), BlendMode::HardMix.id());
+        // grit: a dual tip a sixtieth of the first's, thrown across the first's stroke (its
+        // scatter by the first's size) farther than our jitter throws a stamp of its size: a spray,
+        // a stamp as wide as it is thrown across with the tip small in its middle, as many a step
+        // as fit
+        let grit = AbrBrush {
+            name: "Grit".into(),
+            hardness: Some(1.0),
+            spacing: Some(0.01),
+            diameter: Some(1.5),
+            scatter: Some(AbrScatter {
+                amount: 1.39,
+                both_axes: true,
+                control: 0,
+                count: 1,
+                count_jitter: 0.0,
+                count_control: 0,
+            }),
+            ..AbrBrush::default()
+        };
+        let dry = abr_brush(&AbrBrush { diameter: Some(98.0), dual: Some(Box::new(grit)), ..main.clone() });
+        let second = dry.secondary.as_deref().unwrap();
+        let stamp = 2.0 * 0.695 * 98.0 + 1.5;
+        assert!((second.max_size / dry.max_size - stamp / 98.0).abs() < 1e-2, "{}", second.max_size / dry.max_size);
+        assert!(second.setting("jitter_lateral") > 0.0 && second.setting("jitter_linear") > 0.0);
+        assert_eq!(second.shape.count, 16);
+        let pixels = &second.shape.source.as_ref().unwrap().pixels;
+        let middle = TEXTURE_SIZE / 2;
+        assert!(pixels[middle * TEXTURE_SIZE + middle] > 0 && pixels[(middle + 8) * TEXTURE_SIZE + middle] == 0);
+    }
+
+    #[test]
+    fn a_photoshop_presets_scatter_and_jitters_come_with_it() {
+        use procraft_engine::abr::{AbrBrush, AbrColor, AbrDynamics, AbrScatter, BY_PRESSURE};
+        use procraft_engine::brush::PressureCurve;
+        let a = AbrBrush {
+            name: "Leaves".into(),
+            hardness: Some(0.5),
+            spacing: Some(0.25),
+            diameter: Some(50.0),
+            dynamics: AbrDynamics {
+                tip: true,
+                angle_jitter: 0.5,
+                roundness_jitter: 0.8,
+                min_roundness: 0.25,
+                roundness_control: BY_PRESSURE,
+                flip_y: true,
+                ..AbrDynamics::default()
+            },
+            scatter: Some(AbrScatter {
+                amount: 1.0,
+                both_axes: true,
+                control: BY_PRESSURE,
+                count: 4,
+                count_jitter: 0.5,
+                count_control: 0,
+            }),
+            color: Some(AbrColor { hue: 0.05, saturation: 0.1, brightness: 0.2, background: 0.3, per_tip: true }),
+            ..AbrBrush::default()
+        };
+        let b = abr_brush(&a);
+        // turned at random half a turn's share, flattened at random down to its least and by the
+        // pressure from it, mirrored top to bottom
+        assert_eq!(b.shape.scatter, 0.5);
+        assert!((b.setting("roundness_jitter_y") - 0.75).abs() < 1e-6);
+        assert!((b.setting("pressure_roundness") - 0.75).abs() < 1e-6);
+        assert_eq!((b.setting("flip_x"), b.setting("flip_y")), (0.0, 1.0));
+        // thrown half a diameter either way on both axes, by the pressure; four a step, fewer at
+        // random
+        let thrown = jitter_control(&b, 0.5);
+        assert!(thrown > 0.0);
+        assert_eq!((b.setting("jitter_lateral"), b.setting("jitter_linear")), (thrown, thrown));
+        assert!(b.pressure_curves.get(PressureCurve::LateralJitter).is_some());
+        assert_eq!((b.shape.count, b.setting("count_jitter")), (4, 0.5));
+        // its colour each stamp, the brightness either way
+        assert_eq!(
+            (b.setting("stamp_hue"), b.setting("stamp_lightness"), b.setting("stamp_darkness")),
+            (0.05, 0.1, 0.1)
+        );
+        assert_eq!(b.setting("stamp_secondary"), 0.3);
+        // none of it without shape dynamics on
+        let plain = abr_brush(&AbrBrush { dynamics: AbrDynamics::default(), scatter: None, color: None, ..a });
+        assert_eq!((plain.shape.scatter, plain.setting("roundness_jitter_y"), plain.shape.count), (0.0, 0.0, 1));
+    }
+
+    #[test]
+    fn a_photoshop_presets_noise_speckles_its_soft_parts_where_no_texture_has_the_grain() {
+        use procraft_engine::abr::AbrBrush;
+        let a = AbrBrush {
+            name: "Soft".into(),
+            hardness: Some(0.0),
+            diameter: Some(40.0),
+            noise: true,
+            ..AbrBrush::default()
+        };
+        let b = abr_brush(&a);
+        assert!(b.grain_each_stamp());
+        assert_eq!(b.setting("grain_blend") as u32, procraft_engine::brush::GRAIN_HEIGHT);
+        // white noise: as many dark texels as light
+        let pixels = &b.grain.source.as_ref().unwrap().pixels;
+        let dark = pixels.iter().filter(|&&v| v < 128).count() as f32 / pixels.len() as f32;
+        assert!((dark - 0.5).abs() < 0.02, "{dark}");
+        assert!(abr_brush(&AbrBrush { noise: false, ..a }).grain.source.is_none());
+    }
+
+    #[test]
+    fn a_mirrored_photoshop_tip_comes_in_mirrored() {
+        use procraft_engine::abr::AbrTip;
+        let t = AbrTip { name: String::new(), spacing: None, width: 3, height: 2, pixels: vec![1, 2, 3, 4, 5, 6] };
+        assert_eq!(mirrored(&t, (true, false)).pixels, [3, 2, 1, 6, 5, 4]);
+        assert_eq!(mirrored(&t, (false, true)).pixels, [4, 5, 6, 1, 2, 3]);
+        assert_eq!(mirrored(&t, (true, true)).pixels, [6, 5, 4, 3, 2, 1]);
     }
 
     #[test]
