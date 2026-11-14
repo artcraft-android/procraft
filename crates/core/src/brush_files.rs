@@ -3101,6 +3101,7 @@ mod tests {
                 opacity_control: 2,
                 ..AbrDynamics::default()
             },
+            ..AbrBrush::default()
         };
         let b = abr_brush(&round);
         // a tip flatter than the app's least comes in at the least, as it is read back from our
@@ -3153,6 +3154,8 @@ mod tests {
                 depth: Some(0.32),
                 invert: false,
                 min_depth: Some(0.17),
+                depth_control: 0,
+                depth_jitter: 0.0,
                 brightness: 30,
                 contrast: 20,
                 blend: Some("Hght".into()),
