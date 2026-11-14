@@ -11,9 +11,14 @@
 //! edited has its handles, outline and body dragged. With a panel open over the canvas a touch waits:
 //! a tap only closes the panel; a drag fades it and goes on from where it came down.
 //!
+//! Some pens' touches begin while they are still held near the glass, at no pressure: once a pen
+//! has given a pressure, one touching at none hovers (its cursor follows it) until it presses, and
+//! its touch begins there. A pen that never gives a pressure paints as it touches.
+//!
 //! Positions are window pixels and times the platform's event clock (milliseconds).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod box_pinch;
 mod pen;
@@ -60,6 +65,9 @@ const PEN_HOVER_STALE_S: f32 = 0.5;
 /// After the pen leaves (lifts, or stops being held over the canvas), a finger landing alone is
 /// still taken for the hand that held it for this long (seconds).
 const PEN_GONE_S: f32 = 0.5;
+/// A pen has given a pressure over nothing since the app started: each artwork's touches begin
+/// knowing it.
+static PEN_PRESSURE: AtomicBool = AtomicBool::new(false);
 /// While the pen is near, fingers landing within this long (milliseconds) of each other make a
 /// gesture; one landing alone is a hand resting on the screen.
 const TOGETHER_MS: f64 = 100.0;
@@ -257,6 +265,13 @@ pub enum TouchCommand {
         y: f32,
     },
     CursorGone,
+    /// A pen known to give a pressure touches at none: it is held near the glass, hovering at
+    /// (x, y) until it presses. The app shows it as it shows the pen hovering (the touches have
+    /// been told it hovers); [`TouchCommand::CursorGone`] follows if it lifts away unpressed.
+    PenHovers {
+        x: f32,
+        y: f32,
+    },
     /// A stroke began on a text layer, which takes no paint until it is rasterized.
     TextLayer,
     /// The brush's size or opacity changed (Hover's touch): its sliders show it again.
@@ -524,6 +539,12 @@ pub(crate) struct Touches {
     /// kind and first input), and the hand's touches, which do nothing until they lift.
     palm_wait: Option<(u64, PointerKind, Vec<PenSample>)>,
     palms: Vec<u64>,
+    /// A pen has given a pressure over nothing (in this artwork, or another since the app
+    /// started): from then on a pen touching at none is held near the glass, not pressing. One
+    /// that never gives a pressure paints as it touches.
+    pen_pressure: bool,
+    /// The pen touching at no pressure, hovering until it presses: its pointer and kind.
+    pen_unpressed: Option<(u64, PointerKind)>,
     hover_x: f32,
     hover_spread: f32,
     /// The pen's own gestures: where it hovers, and a squeeze held.
@@ -616,6 +637,8 @@ impl Default for Touches {
             pen_left: None,
             palm_wait: None,
             palms: Vec::new(),
+            pen_pressure: PEN_PRESSURE.load(Ordering::Relaxed),
+            pen_unpressed: None,
             hover_x: 0.0,
             hover_spread: 0.0,
             pen: pen::PenState::default(),
@@ -717,6 +740,66 @@ impl CanvasSession {
     /// The tool a stroke borrows (or the one it gives back): not counted as one chosen.
     fn put_tool(&self, tool: ToolKind) {
         self.shared.lock().tool = tool;
+    }
+
+    /// Where a pen's `samples` press: the first with a pressure over nothing (none while it
+    /// touches at none), or the first of them for a pen never known to give a pressure, which
+    /// paints as it touches.
+    fn pen_presses(t: &Touches, samples: &[PenSample]) -> Option<usize> {
+        if t.pen_pressure { samples.iter().position(|s| s.pressure > 0.0) } else { Some(0) }
+    }
+
+    /// A pen's `samples`: one with a pressure over nothing makes pens known to give one, from now
+    /// on and in each artwork opened after.
+    fn note_pen_pressure(t: &mut Touches, samples: &[PenSample]) {
+        if !t.pen_pressure && samples.iter().any(|s| s.pressure > 0.0) {
+            t.pen_pressure = true;
+            PEN_PRESSURE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The pen touching at no pressure is at `at`: it hovers there, as one held over the canvas.
+    fn pen_hovers_at(&self, at: (f32, f32)) -> Vec<TouchCommand> {
+        let mut out = self.set_touch_pen_hovering(true);
+        out.push(TouchCommand::PenHovers { x: at.0, y: at.1 });
+        out
+    }
+
+    /// The pen touching at no pressure lifted (or was taken back) without pressing: it no longer
+    /// hovers, and its cursor goes.
+    fn pen_hover_ends(&self) -> Vec<TouchCommand> {
+        let mut out = self.set_touch_pen_hovering(false);
+        out.push(TouchCommand::CursorGone);
+        out
+    }
+
+    /// More input from pen `id` touching at no pressure (`lifts`: its last). Where it presses its
+    /// touch begins, as if it had come down there, and goes on with the rest; until then it hovers.
+    fn unpressed_input(
+        &self,
+        id: u64,
+        kind: PointerKind,
+        mut samples: Vec<PenSample>,
+        lifts: bool,
+    ) -> Vec<TouchCommand> {
+        let Some(from) = samples.iter().position(|s| s.pressure > 0.0) else {
+            if lifts {
+                self.touches().pen_unpressed = None;
+                return self.pen_hover_ends();
+            }
+            return samples.last().map_or_else(Vec::new, |s| self.pen_hovers_at((s.x, s.y)));
+        };
+        self.touches().pen_unpressed = None;
+        let rest = samples.split_off(from + 1);
+        let pressed = samples.split_off(from);
+        let mut out = self.touch_down(id, kind, pressed.clone());
+        if lifts {
+            // a tap whose pressure came only as it lifted: a dot where it pressed
+            out.extend(self.lifted(id, if rest.is_empty() { pressed } else { rest }, false));
+        } else if !rest.is_empty() {
+            out.extend(self.touch_move(id, rest));
+        }
+        out
     }
 }
 
@@ -887,10 +970,22 @@ impl CanvasSession {
     /// While the pen is near (on the canvas, held over it, or just gone), a finger landing alone
     /// is a hand resting on the screen and does nothing until it lifts; fingers landing within
     /// [`TOGETHER_MS`] of each other make a gesture as ever.
-    pub fn touch_down(&self, id: u64, kind: PointerKind, samples: Vec<PenSample>) -> Vec<TouchCommand> {
+    ///
+    /// A pen known to give a pressure that touches at none is held near the glass: it hovers
+    /// ([`TouchCommand::PenHovers`]) until it presses, and its touch begins there.
+    pub fn touch_down(&self, id: u64, kind: PointerKind, mut samples: Vec<PenSample>) -> Vec<TouchCommand> {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut t = self.touches();
         if is_pen(kind) {
+            let presses = Self::pen_presses(&t, &samples);
+            Self::note_pen_pressure(&mut t, &samples);
+            t.pen_unpressed = None;
+            let Some(from) = presses else {
+                t.pen_unpressed = Some((id, kind));
+                drop(t);
+                return self.pen_hovers_at((first.x, first.y));
+            };
+            samples.drain(..from);
             t.pen_pointer = Some(id);
             // a finger waiting for another is the hand's
             if let Some((waiting, _, _)) = t.palm_wait.take() {
@@ -1022,6 +1117,16 @@ impl CanvasSession {
         let Some(last) = last_of(&samples).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut t = self.touches();
+        // the pen touching at no pressure hovers on, or presses
+        if let Some((unpressed, kind)) = t.pen_unpressed
+            && unpressed == id
+        {
+            drop(t);
+            return self.unpressed_input(id, kind, samples, false);
+        }
+        if t.pen_pointer == Some(id) {
+            Self::note_pen_pressure(&mut t, &samples);
+        }
         let at = (last.x, last.y);
         let Some(d) = t.down.iter_mut().find(|d| d.id == id) else { return out };
         d.at = at;
@@ -1298,6 +1403,10 @@ impl CanvasSession {
 
     /// A pointer lifts (`samples` its last input).
     pub fn touch_up(&self, id: u64, samples: Vec<PenSample>) -> Vec<TouchCommand> {
+        let unpressed = self.touches().pen_unpressed.filter(|(unpressed, _)| *unpressed == id);
+        if let Some((_, kind)) = unpressed {
+            return self.unpressed_input(id, kind, samples, true);
+        }
         self.lifted(id, samples, false)
     }
 
@@ -1309,16 +1418,16 @@ impl CanvasSession {
 
     /// The platform called the touches off: what they were doing is taken back.
     pub fn touch_cancel(&self) -> Vec<TouchCommand> {
-        let ids: Vec<u64> = {
+        let (ids, unpressed): (Vec<u64>, bool) = {
             let mut t = self.touches();
             t.palms.clear();
             t.palm_wait = None;
             if t.pen_pointer.take().is_some() {
                 t.pen_left = Some(std::time::Instant::now());
             }
-            t.down.iter().map(|d| d.id).collect()
+            (t.down.iter().map(|d| d.id).collect(), t.pen_unpressed.take().is_some())
         };
-        let mut out = Vec::new();
+        let mut out = if unpressed { self.pen_hover_ends() } else { Vec::new() };
         for id in ids {
             out.extend(self.lifted(id, Vec::new(), true));
         }
@@ -1851,6 +1960,12 @@ impl CanvasSession {
     fn lifted(&self, id: u64, samples: Vec<PenSample>, cancelled: bool) -> Vec<TouchCommand> {
         let mut out = Vec::new();
         let mut t = self.touches();
+        // the pen touching at no pressure, taken back: it hovers no more
+        if t.pen_unpressed.is_some_and(|(unpressed, _)| unpressed == id) {
+            t.pen_unpressed = None;
+            drop(t);
+            return self.pen_hover_ends();
+        }
         if t.pen_pointer == Some(id) {
             t.pen_pointer = None;
             match last_of(&samples) {
@@ -2888,6 +3003,101 @@ mod tests {
     /// Whether a touch is painting (no GPU here, so no stroke to look at).
     fn painting(s: &CanvasSession) -> bool {
         matches!(s.touches().mode, Mode::Pen | Mode::Finger)
+    }
+
+    fn pressed(x: f32, y: f32, pressure: f32, ms: f64) -> PenSample {
+        PenSample { x, y, pressure, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }
+    }
+
+    #[test]
+    fn a_pen_known_to_give_a_pressure_hovers_at_none_until_it_presses() {
+        let s = session();
+        s.touches().pen_pressure = false;
+        // a stroke with a pressure: pens are known to give one from now on
+        s.touch_down(1, PointerKind::Stylus, vec![pressed(10.0, 10.0, 0.4, 0.0)]);
+        s.touch_up(1, vec![pressed(30.0, 10.0, 0.2, 20.0)]);
+        assert!(s.touches().pen_pressure);
+        // held near the glass, touching at none: it hovers, its cursor following, and nothing paints
+        let out = s.touch_down(2, PointerKind::Stylus, vec![pressed(100.0, 100.0, 0.0, 1000.0)]);
+        assert_eq!(out, vec![TouchCommand::PenHovers { x: 100.0, y: 100.0 }]);
+        assert!(!painting(&s));
+        let out = s.touch_move(2, vec![pressed(120.0, 100.0, 0.0, 1010.0)]);
+        assert_eq!(out, vec![TouchCommand::PenHovers { x: 120.0, y: 100.0 }]);
+        assert!(!painting(&s));
+        assert!(s.touches().pen_hovering.is_some());
+        // it presses partway through an event: its stroke begins where it pressed and goes on
+        let out = s.touch_move(
+            2,
+            vec![
+                pressed(130.0, 100.0, 0.0, 1020.0),
+                pressed(140.0, 100.0, 0.3, 1030.0),
+                pressed(150.0, 100.0, 0.5, 1040.0),
+            ],
+        );
+        assert!(painting(&s));
+        assert_eq!(s.touches().down_at, (140.0, 100.0));
+        assert!(out.contains(&TouchCommand::Cursor { x: 140.0, y: 100.0 }), "{out:?}");
+        assert!(out.contains(&TouchCommand::Cursor { x: 150.0, y: 100.0 }), "{out:?}");
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::PenHovers { .. })), "{out:?}");
+        // back to none as it rises: the stroke goes on, to end (and taper) as it lifts
+        s.touch_move(2, vec![pressed(160.0, 100.0, 0.0, 1050.0)]);
+        assert!(painting(&s));
+        assert!(s.touch_up(2, vec![pressed(165.0, 100.0, 0.0, 1060.0)]).contains(&TouchCommand::StrokeEnded));
+        // touching at none and lifting away unpressed: its cursor goes, and no stroke ends
+        s.touch_down(3, PointerKind::Stylus, vec![pressed(200.0, 100.0, 0.0, 2000.0)]);
+        assert_eq!(s.touch_up(3, vec![pressed(210.0, 100.0, 0.0, 2010.0)]), vec![TouchCommand::CursorGone]);
+        let t = s.touches();
+        assert!(t.pen_hovering.is_none() && t.pen_unpressed.is_none());
+        drop(t);
+        // the eraser end tapped, its pressure coming only as it lifts: a dot
+        s.touch_down(4, PointerKind::StylusEraser, vec![pressed(250.0, 100.0, 0.0, 3000.0)]);
+        assert!(s.touch_up(4, vec![pressed(250.0, 100.0, 0.6, 3010.0)]).contains(&TouchCommand::StrokeEnded));
+        // called off while it hovers: its cursor goes
+        s.touch_down(5, PointerKind::Stylus, vec![pressed(300.0, 100.0, 0.0, 4000.0)]);
+        assert_eq!(s.touch_cancel(), vec![TouchCommand::CursorGone]);
+        assert!(s.touches().pen_unpressed.is_none());
+    }
+
+    #[test]
+    fn a_pen_never_known_to_give_a_pressure_paints_as_it_touches() {
+        let s = session();
+        s.touches().pen_pressure = false;
+        let out = s.touch_down(1, PointerKind::Stylus, vec![pressed(100.0, 100.0, 0.0, 0.0)]);
+        assert!(out.contains(&TouchCommand::Cursor { x: 100.0, y: 100.0 }), "{out:?}");
+        assert!(painting(&s));
+        s.touch_move(1, vec![pressed(140.0, 100.0, 0.0, 20.0)]);
+        assert!(s.touch_up(1, vec![pressed(160.0, 100.0, 0.0, 40.0)]).contains(&TouchCommand::StrokeEnded));
+        // still not known to: its next touch paints as it lands too, the eraser end's alike
+        assert!(!s.touches().pen_pressure);
+        s.touch_down(2, PointerKind::StylusEraser, vec![pressed(100.0, 200.0, 0.0, 1000.0)]);
+        assert!(painting(&s));
+    }
+
+    #[test]
+    fn a_pen_pressing_as_it_touches_paints_as_ever() {
+        // the same stroke from a pen known to give a pressure and from one not yet: the same touches
+        let stroke = |known: bool| {
+            let s = session();
+            s.touches().pen_pressure = known;
+            let mut out = s.touch_down(1, PointerKind::Stylus, vec![pressed(100.0, 100.0, 0.2, 0.0)]);
+            let began = painting(&s);
+            out.extend(s.touch_move(1, vec![pressed(120.0, 100.0, 0.6, 10.0), pressed(130.0, 100.0, 0.0, 15.0)]));
+            out.extend(s.touch_move(1, vec![pressed(140.0, 100.0, 0.8, 20.0)]));
+            let went_on = painting(&s);
+            out.extend(s.touch_up(1, vec![pressed(150.0, 100.0, 0.0, 30.0)]));
+            (began && went_on, out)
+        };
+        let (painted, out) = stroke(true);
+        assert!(painted);
+        assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert_eq!((painted, out), stroke(false));
+        // a finger or the mouse (which give no pressure of their own) paint at none, as ever
+        for kind in [PointerKind::Finger, PointerKind::Mouse] {
+            let s = session();
+            s.touches().pen_pressure = true;
+            s.touch_down(1, kind, vec![pressed(100.0, 100.0, 0.0, 0.0)]);
+            assert!(painting(&s), "{kind:?}");
+        }
     }
 
     #[test]

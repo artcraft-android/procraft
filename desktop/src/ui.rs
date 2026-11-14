@@ -1234,6 +1234,11 @@ impl Interface {
                 // (else it stays there, left behind)
                 TouchCommand::Cursor { .. } => self.overlays.cursor(ctx, session, None),
                 TouchCommand::CursorGone => self.overlays.cursor(ctx, session, None),
+                // a pen touching at no pressure before it presses: shown as it hovering there
+                TouchCommand::PenHovers { x, y } if self.prefs.cursor_shown(true) => {
+                    self.overlays.cursor(ctx, session, Some((x, y)));
+                }
+                TouchCommand::PenHovers { .. } => self.overlays.cursor(ctx, session, None),
                 TouchCommand::FillThreshold { threshold } => {
                     self.drop.slid(threshold);
                     slid = Some(threshold);

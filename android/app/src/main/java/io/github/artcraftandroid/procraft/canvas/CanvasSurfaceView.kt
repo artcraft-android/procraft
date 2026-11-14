@@ -233,6 +233,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 vm.showCursor(null)
                 vm.transformHeld = null
             }
+            // a pen touching at no pressure before it presses (some begin their touches above the glass): as it hovering there
+            is TouchCommand.PenHovers -> hovered(Offset(c.x, c.y))
             TouchCommand.TextLayer -> vm.askRasterize = true
             TouchCommand.BrushChanged -> vm.brushTouched()
             // Recolor's reticle dragged or tapped elsewhere (its fills on the view model's fill thread)
@@ -422,16 +424,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
                 session?.setTouchPenHovering(true)?.let(::obey)
-                // a spray can's sound (a plugin's) rattles shaken above the canvas
-                session?.soundHover(e.x, e.y)
-                penHovering = true
-                // not over the bars, where the gaps between their buttons come here and the
-                // buttons don't: it came and went as the pen crossed them
-                val at = Offset(e.x, e.y)
-                val overBars = vm.overBars(at)
-                if (overBars) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
-                // and Liquify's ring where the pen hovers
-                if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { overBars })
+                hovered(Offset(e.x, e.y))
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 session?.setTouchPenHovering(false)?.let(::obey)
@@ -441,6 +434,19 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             }
         }
         return true
+    }
+
+    /** The pen is held over the canvas at [at]: hovering, or touching at no pressure before it presses. */
+    private fun hovered(at: Offset) {
+        // a spray can's sound (a plugin's) rattles shaken above the canvas
+        session?.soundHover(at.x, at.y)
+        penHovering = true
+        // not over the bars, where the gaps between their buttons come here and the
+        // buttons don't: it came and went as the pen crossed them
+        val overBars = vm.overBars(at)
+        if (overBars) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
+        // and Liquify's ring where the pen hovers
+        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { overBars })
     }
 
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
