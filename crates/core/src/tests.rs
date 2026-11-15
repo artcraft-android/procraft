@@ -13347,6 +13347,108 @@ fn a_vector_layer_s_items_are_asked_of_its_plugin_once_while_its_data_stays_as_i
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The GPU's live textures and buffers, as wgpu counts them (none where it can't say).
+fn live_gpu_resources(gpu: &Gpu) -> Option<(usize, usize)> {
+    gpu.flush();
+    let report = gpu.instance.generate_report()?;
+    Some((report.hub.textures.num_allocated, report.hub.buffers.num_allocated))
+}
+
+/// A wavy pen stroke `k` across a `w` × `h` window.
+fn wavy_stroke(s: &CanvasSession, k: u32, w: f32, h: f32) {
+    let mut seed = k.wrapping_mul(2_654_435_761).wrapping_add(12345);
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let (x0, y0) = (next() * w * 0.8 + w * 0.1, next() * h * 0.8 + h * 0.1);
+    let (dx, dy) = ((next() - 0.5) * w * 0.5, (next() - 0.5) * h * 0.5);
+    let n = 40;
+    let point = |i: u32| {
+        let t = i as f32 / n as f32;
+        PenSample {
+            x: x0 + dx * t + (t * 9.0).sin() * 20.0,
+            y: y0 + dy * t + (t * 7.0).cos() * 20.0,
+            pressure: 0.4 + 0.5 * (t * 3.0).sin().abs(),
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(i) * 8.0,
+            roll: 0.0,
+        }
+    };
+    s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+    s.stroke_add((1..n).map(point).collect());
+    s.stroke_end(vec![point(n)]);
+}
+
+/// Artworks opened one after another on one GPU, as the desktop app opens them from its gallery:
+/// each drawn on (layers added, strokes, the view moved, frames shown, autosaved) and closed. Each
+/// closed is let go whole, and leaves nothing on the GPU: the textures and buffers there after
+/// each are as many as after the second (the first fills what the device keeps for all, its
+/// readback buffers), so the tenth draws as the first did.
+#[test]
+fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
+    let Ok(gpu) = Gpu::headless() else { return };
+    let (w, h) = (480u32, 320u32);
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let frame = |s: &CanvasSession| {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (w, h), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+    };
+    let root = std::env::temp_dir().join(format!("procraft-one-after-another-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut after_second = None;
+    for round in 0..4u32 {
+        let dir = root.join(format!("artwork-{round}")).to_string_lossy().into_owned();
+        let s = CanvasSession::new(400, 300);
+        s.use_gpu(gpu.clone());
+        s.show_in(w, h);
+        std::sync::Arc::clone(&s).start_autosave(dir.clone());
+        s.set_tracking(true);
+        frame(&s);
+        for k in 0..6 {
+            if k % 3 == 0 {
+                s.add_layer();
+            }
+            wavy_stroke(&s, k + round * 10, w as f32, h as f32);
+            frame(&s);
+        }
+        s.view_gesture(240.0, 160.0, 4.0, 0.0, 1.2, 0.1);
+        frame(&s);
+        assert!(s.time_lapse_frame(256).is_some());
+        // closed as the app closes one
+        s.set_tracking(false);
+        s.stop_autosave();
+        s.save(dir).unwrap();
+        let gone = std::sync::Arc::downgrade(&s);
+        drop(s);
+        // (its autosave looks in now and then, briefly holding it, till it sees it is to stop)
+        let closed = std::time::Instant::now();
+        while gone.strong_count() > 0 && closed.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(gone.strong_count(), 0, "artwork {round} let go when closed");
+        let Some(live) = live_gpu_resources(&gpu) else { continue };
+        match after_second {
+            _ if round == 0 => {}
+            None => after_second = Some(live),
+            Some(second) => assert_eq!(live, second, "textures and buffers after artwork {round}, as after the second"),
+        }
+    }
+    assert_eq!(gpu.errors(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A vector layer of more strokes than the canvas keeps steps: the layer's data, a version a step,
 /// is kept only for the steps the canvas can still undo or redo, and what the versions share is
 /// kept once; undo and redo still put each back.
