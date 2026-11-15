@@ -360,7 +360,7 @@ impl Library {
             }
         } else if let Some(file) = crate::files::pick_file("Import a brush library") {
             // read on a thread of its own, then added as a library and brought into use
-            self.add_brushes(vec![file], true);
+            self.add_brushes(session, vec![file], true);
         }
     }
 

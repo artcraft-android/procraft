@@ -256,13 +256,19 @@ impl Library {
 
     /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
     /// library once read (`added`). `tell`: say that they came in (else only that they held none).
-    pub fn add_brushes(&mut self, files: Vec<(Vec<u8>, String)>, tell: bool) {
+    pub fn add_brushes(&mut self, session: &CanvasSession, files: Vec<(Vec<u8>, String)>, tell: bool) {
         if files.is_empty() {
             return;
         }
         let (done, importing) = std::sync::mpsc::channel();
+        // plugins' brush engines make theirs of the files there too
+        let engines = session.brush_engines();
         std::thread::spawn(move || {
-            let read = files.into_iter().filter_map(|(bytes, name)| read_any_brushes(&bytes, Some(name))).collect();
+            let read = files
+                .into_iter()
+                .filter_map(|(bytes, name)| read_any_brushes(&bytes, Some(name)))
+                .map(|read| engines.make(read))
+                .collect();
             let _ = done.send(read);
         });
         self.importing.push((importing, tell));
@@ -830,7 +836,7 @@ impl Library {
             _ => {
                 let Some(file) = crate::files::pick_file("Import brushes") else { return };
                 self.shown_set = Some(shown);
-                self.add_brushes(vec![file], false);
+                self.add_brushes(session, vec![file], false);
             }
         }
     }

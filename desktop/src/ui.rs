@@ -364,7 +364,7 @@ impl Interface {
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
-        self.library.add_brushes(crate::files::take_pending_brushes(), true);
+        self.library.add_brushes(session, crate::files::take_pending_brushes(), true);
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
@@ -1653,7 +1653,7 @@ impl Interface {
                 brushes.push((bytes, name));
             }
         }
-        self.library.add_brushes(brushes, true);
+        self.library.add_brushes(session, brushes, true);
         if !pictures.is_empty() {
             self.open = None;
             self.insert_files(session, pictures, false);

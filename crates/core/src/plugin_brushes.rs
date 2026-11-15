@@ -886,7 +886,10 @@ mod tests {
         let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
         assert!(plugins.set_on(id.clone(), true));
         s.use_plugins(Arc::clone(&plugins));
-        let set = s.import_any_brushes(square_preset(), Some("Squares.kpp".to_owned()), 0).unwrap();
+        // read off the interface's thread, the engine making its brushes there too, then added
+        let read = crate::read_brushes(square_preset(), Some("Squares.kpp".to_owned())).unwrap();
+        s.make_engine_brushes(Arc::clone(&read));
+        let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), "made by the engine too");
         assert!(s.select_brush(set, 0));
         s.set_color(0.0, 0.0, 0.0);

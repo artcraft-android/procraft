@@ -4845,7 +4845,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             // the shared core tells the kinds apart and makes them brushes off the main
             // thread; they join the library here, once nothing holds a place in it
             val read = withContext(Dispatchers.Default) {
-                io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)
+                // plugins' brush engines make theirs of the file here too, off the main thread
+                io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)?.also { r -> it.makeEngineBrushes(r) }
             }
             if (importCancelled) return
             read?.let {
@@ -4990,7 +4991,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
                 val read = withContext(Dispatchers.Default) {
                     // named after the set, for another app's (kept as .abr by earlier versions)
-                    runCatching { io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-')) }.getOrNull()
+                    runCatching {
+                        io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-'))
+                            ?.also { r -> session?.makeEngineBrushes(r) }
+                    }.getOrNull()
                 }
                 if (session == null) break
                 if (read != null) {

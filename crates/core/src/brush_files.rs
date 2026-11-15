@@ -273,6 +273,34 @@ impl CanvasSession {
     }
 }
 
+/// The brush engines of plugins on, as a session goes through them: what another app's brush
+/// file read off the interface's thread is handed to there too (see [`BrushEngines::make`]), so
+/// that adding its brushes takes no time.
+#[derive(Clone)]
+pub struct BrushEngines(Option<std::sync::Arc<crate::hooks::Hooks>>);
+
+impl BrushEngines {
+    /// `read` with what the brush engines on make of its file joined to its brushes, the file let
+    /// go: a long call, not for the interface's thread.
+    pub fn make(&self, read: ReadBrushes) -> ReadBrushes {
+        match (read, &self.0) {
+            (ReadBrushes::Set { name, mut brushes, file: Some((file_name, bytes)) }, Some(hooks)) => {
+                let made = crate::plugin_brushes::make_brushes(hooks, &file_name, &bytes);
+                crate::plugin_brushes::join_made(&mut brushes, made);
+                ReadBrushes::Set { name, brushes, file: None }
+            }
+            (read, _) => read,
+        }
+    }
+}
+
+impl CanvasSession {
+    /// The brush engines its brushes go through now (see [`BrushEngines`]).
+    pub fn brush_engines(&self) -> BrushEngines {
+        BrushEngines(self.shared.lock().hooks.clone())
+    }
+}
+
 /// Brushes read from a file for an app's interface (Android's) to add on its own thread once
 /// nothing there holds a library place (see [`ReadBrushes`]); the first add takes them.
 #[derive(uniffi::Object)]
@@ -283,6 +311,19 @@ pub struct BrushesRead(std::sync::Mutex<Option<ReadBrushes>>);
 #[uniffi::export]
 pub fn read_brushes(bytes: Vec<u8>, file_name: Option<String>) -> Option<std::sync::Arc<BrushesRead>> {
     read_any_brushes(&bytes, file_name).map(|read| std::sync::Arc::new(BrushesRead(std::sync::Mutex::new(Some(read)))))
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// The brush engines of plugins on make brushes of `read`'s file too (another app's), joined to
+    /// its brushes, so that adding them is quick: a long call, not for the main thread.
+    pub fn make_engine_brushes(&self, read: std::sync::Arc<BrushesRead>) {
+        let engines = self.brush_engines();
+        let mut held = read.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(brushes) = held.take() {
+            *held = Some(engines.make(brushes));
+        }
+    }
 }
 
 #[uniffi::export]
