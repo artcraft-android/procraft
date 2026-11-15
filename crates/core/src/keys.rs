@@ -413,6 +413,8 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             entry(&[alone("b")], "Paint"),
             entry(&[alone("e")], "Erase"),
             entry(&[alone("m")], "Eyedropper: the next touch picks a colour"),
+            // held by itself, as the apps take it: never a shortcut's key, and no plugin's to rebind
+            entry(&[alone(MODIFY_KEY)], "The modify button □, as long as it is held").fixed(),
             entry(&[alone("s")], "Selection"),
             entry(&[alone("v")], "Transform"),
             entry(&[alone("u"), command("u")], "Hue, Saturation, Brightness"),
@@ -472,9 +474,15 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
     ),
 ];
 
+/// The key the list says holds the modify button down while it is held by itself: Alt (a Mac's
+/// Option). The apps take it themselves, not as a press for [`key_shortcut`].
+pub(crate) const MODIFY_KEY: &str = "alt";
+
 /// How `key` (a name as [`key_shortcut`] takes it) is written: a Mac's symbols if `mac`.
 fn key_label(key: &str, mac: bool) -> String {
     match (key, mac) {
+        (MODIFY_KEY, false) => "Alt".into(),
+        (MODIFY_KEY, true) => "⌥".into(),
         ("delete", false) => "Delete".into(),
         ("delete", true) => "⌦".into(),
         ("backspace", false) => "Backspace".into(),
@@ -684,10 +692,11 @@ mod tests {
     fn the_list_shows_each_canvas_shortcut_as_the_keys_do_it() {
         let list = key_shortcut_list(false, MAC);
         let rows: Vec<&ShortcutRow> = list.iter().flat_map(|g| &g.rows).collect();
-        // each press the list shows is one the canvas takes (the arrows while transforming)
+        // each press the list shows is one the canvas takes (the arrows while transforming), but
+        // Alt held by itself, which the apps take as the modify button
         for row in &rows {
             assert!(!row.combos.is_empty(), "{}", row.does);
-            for c in &row.combos {
+            for c in row.combos.iter().filter(|c| c.key != MODIFY_KEY) {
                 assert!(key_shortcut(c.key.clone(), c.command, c.shift, c.alt, true).is_some(), "{c:?}");
             }
         }
@@ -704,6 +713,30 @@ mod tests {
         assert_eq!(row("Save as").keys, "⇧⌘S");
         assert_eq!(row("Zoom").keys, "⌘Space and drag");
         assert!(row("Zoom").combos.is_empty());
+    }
+
+    #[test]
+    fn alt_held_by_itself_is_listed_as_the_modify_button() {
+        let row = |list: Vec<ShortcutGroup>| {
+            list.into_iter()
+                .find(|g| g.heading == "Tools")
+                .and_then(|g| g.rows.into_iter().find(|r| r.does.starts_with("The modify button □")))
+        };
+        for desktop in [false, true] {
+            let other = row(key_shortcut_list(desktop, false)).unwrap();
+            assert_eq!(other.keys, "Alt");
+            assert_eq!(other.combos, [KeyCombo::of(MODIFY_KEY, false, false, false)]);
+            assert_eq!(row(key_shortcut_list(desktop, true)).map(|r| r.keys).as_deref(), Some("⌥"));
+        }
+        // the key alone is no shortcut, and no plugin rebinds it: it stays the modify button
+        assert_eq!(key(MODIFY_KEY, false, false, false), None);
+        let told = shortcuts_told(false, false);
+        assert!(told.contains("Tools\tThe modify button □, as long as it is held\talt\t1\n"), "{told}");
+        let list = shortcut_list_now(false, false, |press| {
+            assert_ne!(press.key, MODIFY_KEY, "asked about the modify key");
+            None
+        });
+        assert!(row(list).is_some());
     }
 
     #[test]
