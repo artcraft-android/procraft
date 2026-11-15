@@ -228,6 +228,7 @@ struct ActionsPanel: View {
                     .act("Animated MP4", action: { model.openAnimatedExport(.mp4) }),
                     .act("Animated HEVC", action: { model.openAnimatedExport(.hevc) }),
                     .act("Sprite Sheet", action: { model.openSpriteSheetExport() }),
+                    .act("Texture Packer", action: { model.openTexturePacker() }),
                     .act("Harmony Scene", action: { model.shareHarmony() }),
                 ],
             ]

@@ -95,6 +95,7 @@ mod studio;
 mod tests;
 mod text;
 mod text_draw;
+mod texture_packer;
 mod timelapse;
 mod timeline;
 mod touch;
@@ -504,6 +505,8 @@ pub(crate) struct State {
     /// The brightest the screen shows now, linear light (1: white; more on an iPad's extended
     /// range), what an HDR canvas's light above white is rolled off to.
     display_peak: f32,
+    /// The Texture Packer's picture and the drawings found on it, while it is open.
+    pub(crate) packer: Option<crate::texture_packer::Packer>,
     /// The app's own smoothing and pressure, on top of every brush's.
     pub(crate) input: make2d_engine::stroke::InputSettings,
     /// Selection mask visibility, 0..1: how strongly what is not selected is banded.
@@ -1605,6 +1608,7 @@ impl CanvasSession {
             light_limit: crate::hdr::LIGHT_LIMIT,
             color_stops: 0.0,
             display_peak: 1.0,
+            packer: None,
             text_edit: None,
             text_drawn: None,
             text_steps: Vec::new(),

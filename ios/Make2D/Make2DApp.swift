@@ -104,7 +104,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr", "layers-vector"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr", "texture-packer", "layers-vector"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -620,6 +620,32 @@ enum ScreenCapture {
             ribbons(model)
         case "light":
             lit(model)
+        case "texture-packer":
+            // three drawings apart and a dot by one, packed, two of them chosen and one renamed
+            let s = model.session
+            s.setBrushSize(slider: 0.6)
+            s.setBrushOpacity(slider: 1)
+            var steps: [() -> Void] = []
+            let shapes: [((Float, Float), (Float, Float), [Float])] = [
+                ((400, 700), (900, 900), [0.85, 0.3, 0.2]),
+                ((1300, 650), (1300, 1200), [0.2, 0.45, 0.8]),
+                ((500, 1500), (1100, 1400), [0.3, 0.65, 0.3]),
+                ((1300, 560), (1302, 560), [0.2, 0.45, 0.8]),
+            ]
+            for (from, to, c) in shapes {
+                steps.append {
+                    s.setColor(r: c[0], g: c[1], b: c[2])
+                    line(s, from, to)
+                }
+            }
+            steps.append {
+                model.openTexturePacker()
+                guard let packer = model.texturePacker else { return }
+                packer.chosen = [0, 2]
+                packer.names[TexturePackerState.key(packer.boxes[0])] = "flag"
+                model.packerFocus(packer, 0)
+            }
+            paced(steps)
         case "hdr":
             // brightened past white: the bands' middles glow on a screen with extended range
             model.setLightLimit(3)

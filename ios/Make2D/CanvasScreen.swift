@@ -26,7 +26,8 @@ struct CanvasScreen: View {
         GeometryReader { place in
             let screen = Interface.shared.screen(place.size)
             let right = AppSettings.shared.rightHanded
-            let hidden = model.barsHidden
+            // (the Texture Packer takes the screen's bars away while it is open)
+            let hidden = model.barsHidden || model.texturePacker != nil
             ZStack(alignment: .topLeading) {
                 CanvasHost(model: model)
                 // (a plugin pinning panels open lets the canvas take it, the panel staying up)
@@ -44,7 +45,7 @@ struct CanvasScreen: View {
                     }
                 }
                 // with the interface hidden, a button in the top left brings it back
-                if hidden {
+                if model.barsHidden, model.texturePacker == nil {
                     ShowInterfaceButton(model: model)
                         .transition(.opacity)
                 }
@@ -203,6 +204,10 @@ struct CanvasScreen: View {
                 if model.spriteSheetExport {
                     SpriteSheetExport(model: model)
                         .transition(.move(edge: .bottom))
+                }
+                if let packer = model.texturePacker {
+                    TexturePackerOverlay(model: model, state: packer, screen: screen.size)
+                        .transition(.opacity)
                 }
                 if model.timeLapse.replaying {
                     TimeLapseReplay(model: model)

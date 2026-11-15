@@ -55,6 +55,7 @@ pub mod quickshape;
 pub mod reference_window;
 pub mod ribbon;
 pub mod selection;
+pub mod sprite_scan;
 pub mod sprites;
 pub mod sqlite;
 mod stock_tones;

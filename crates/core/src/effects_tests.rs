@@ -195,3 +195,49 @@ fn curves_exposure_is_set_from_its_panel_and_kept_by_its_layer() {
     let filter = s.shared.lock().doc.layer(a).and_then(|l| l.adjustment.clone()).map(|a| a.filter);
     assert_eq!(filter, Some(Filter::CURVES.with_values(&[-1.0, 0.0, 1.0, 1.5, 0.95])));
 }
+
+#[test]
+fn the_texture_packer_finds_drawings_and_shares_each_as_a_png() {
+    let Some(s) = session(40) else { return };
+    // two blobs apart, on a white background the packer leaves out
+    s.set_brush_size(0.2);
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(6.0, 6.0), sample(8.0, 6.0)]);
+    s.stroke_end(vec![]);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0), sample(32.0, 30.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(s.texture_packer_open().ok(), Some(2));
+    let boxes = s.texture_packer_boxes(6, 0);
+    assert_eq!(boxes.len(), 2);
+    assert!(boxes[0].y < boxes[1].y, "reading order: {boxes:?}");
+    // far enough apart to join only past their gap
+    assert_eq!(s.texture_packer_boxes(40, 0).len(), 1);
+    let padded = s.texture_packer_boxes(6, 2);
+    assert_eq!(padded[1].width, boxes[1].width + 4);
+    let hit = s.texture_packer_hit(boxes.clone(), boxes[1].x as f32 + 1.0, boxes[1].y as f32 + 1.0);
+    assert_eq!(hit, Some(1));
+    assert!(!s.texture_packer_thumbnail(boxes[0], 56).is_empty());
+    let dir = std::env::temp_dir().join(format!("packer-{}", std::process::id()));
+    let sprites = vec![
+        crate::texture_packer::PackerSprite { place: boxes[0], index: 0, name: "dot/top".to_owned() },
+        crate::texture_packer::PackerSprite { place: boxes[1], index: 1, name: String::new() },
+    ];
+    let paths = s.texture_packer_export(dir.to_string_lossy().into_owned(), sprites).unwrap_or_default();
+    let names: Vec<String> = paths
+        .iter()
+        .filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    assert_eq!(names, ["dot-top.png", "Sprite_02.png"]);
+    // a PNG the box's size, red where drawn and clear round it
+    let png = std::fs::read(&paths[1]).unwrap_or_default();
+    let decoder = png::Decoder::new(std::io::Cursor::new(png));
+    let mut reader = decoder.read_info().ok();
+    let info = reader.as_ref().map(|r| (r.info().width, r.info().height));
+    assert_eq!(info, Some((boxes[1].width, boxes[1].height)));
+    let mut px = vec![0; reader.as_ref().map_or(0, |r| r.output_buffer_size().unwrap_or(0))];
+    reader.as_mut().and_then(|r| r.next_frame(&mut px).ok());
+    assert!(px.chunks(4).any(|p| p[0] > 200 && p[1] < 40 && p[3] == 255), "red in it");
+    s.texture_packer_close();
+    assert!(s.texture_packer_boxes(6, 0).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
