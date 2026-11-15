@@ -591,8 +591,18 @@ impl Interface {
         self.time_lapse.record(&ctx, session, input.idle());
         // the brush studio over everything (the library stays open under it)
         if let Some(new) = self.library.studio.take() {
-            self.studio.plugin_rows = crate::studio::plugin_rows(&self.prefs.plugins);
-            self.studio.begin(&ctx, session, new);
+            // a brush a plugin's brush engine draws opens in that plugin's own studio
+            match session.brush_studio_action().filter(|_| new.is_none()) {
+                Some(key) => self.run_plugin_action(&ctx, session, key),
+                None => {
+                    self.studio.plugin_rows = crate::studio::plugin_rows(&self.prefs.plugins);
+                    self.studio.begin(&ctx, session, new);
+                }
+            }
+        }
+        // a plugin changed a brush (its own studio's): read again and kept
+        if session.take_brushes_changed() {
+            self.library.library_changed();
         }
         if self.studio.open {
             self.canvas_rect = Rect::NOTHING;

@@ -653,6 +653,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             pluginPanel = plugins.panel()
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
+            if (s.takeBrushesChanged()) libraryChanged()
             refresh()
         }
     }
@@ -669,6 +670,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             pluginPanel = plugins.panel()
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
+            // a plugin's studio changed a brush: read again and kept
+            if (s.takeBrushesChanged()) libraryChanged()
             refresh()
         }
     }
@@ -5182,6 +5185,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Opens the studio on the current tool's brush. */
     fun openStudio() {
         val s = session ?: return
+        // a brush a plugin's brush engine draws opens in that plugin's own studio
+        s.brushStudioAction()?.let {
+            runPluginAction(it)
+            return
+        }
         // the brush library stays open under it, so Cancel and Done go back to it
         if (panel != Panel.BRUSHES) closePanels()
         studioName = s.studioBegin()
