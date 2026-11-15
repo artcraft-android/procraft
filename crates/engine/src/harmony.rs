@@ -11,12 +11,24 @@
 //!   exposure sheet and a drawing (READ) node, all three named for the layer.
 //! - The drawing nodes feed one composite, the bottom layer on port 0 (the back), and the
 //!   composite feeds the display and a write node: the network a new scene starts with.
+//! - A layer that blends other than normally goes through a blending node (`BLEND_MODE_MODULE`)
+//!   on its way to the composite, set to Harmony's mode of the same name. Mattes are in the
+//!   drawings already: a layer's drawings are what it shows through its matte.
+//! - Each sound is a sound column (no node), its file in `audio/`, placed on whole frames with
+//!   where in the file it starts and stops.
 
 use std::collections::HashSet;
 use std::ops::Range;
 
+use crate::document::BlendMode;
+use crate::timeline::{MaskMode, Timeline, TrackId};
+
 /// Where drawings are kept, in the scene folder.
 pub const ELEMENTS: &str = "elements";
+/// Where sounds are kept, in the scene folder.
+pub const AUDIO: &str = "audio";
+/// Node names a scene has already: no layer takes one of them.
+const NODES: [&str; 4] = ["Composite", "Display", "Write", "Unconnected_Composite"];
 
 /// `pixmapFormat` of an element whose drawings are PNG files.
 const PNG_PIXMAP_FORMAT: u32 = 10;
@@ -35,6 +47,7 @@ pub struct Scene {
     pub frames: u32,
     /// Bottom first.
     pub layers: Vec<Layer>,
+    pub sounds: Vec<Sound>,
 }
 
 /// A drawing layer.
@@ -46,6 +59,86 @@ pub struct Layer {
     pub drawings: u32,
     /// The drawing showing at each frame; none is blank.
     pub exposures: Vec<Option<u32>>,
+    /// How it blends with the layers under it (a mode Harmony has none of: normally).
+    pub blend: BlendMode,
+}
+
+/// A sound column: a stretch of a sound file, played from a frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sound {
+    /// Its column's name, as [`Names`] gave it.
+    pub name: String,
+    /// Its file's name in [`AUDIO`] (two sounds may share one).
+    pub file: String,
+    /// The frame (from 0) it starts on.
+    pub start: u32,
+    /// Where in its file it starts and stops, seconds.
+    pub clip: Range<f64>,
+}
+
+impl Sound {
+    /// Frame `start` (from 0) and the stretch of the file to play from it, for a sound heard
+    /// `at` seconds into the timeline from `from` seconds into its file, for `length` seconds, at
+    /// `fps`. Harmony starts sounds on whole frames, so the stretch starts earlier in the file by
+    /// the part of a frame `at` is past one; if that would be before the file's start, it starts
+    /// on the next frame instead, missing what plays before it. None if nothing is left to play.
+    pub fn placed(at: f64, from: f64, length: f64, fps: u32) -> Option<(u32, Range<f64>)> {
+        if !(at.is_finite() && from.is_finite() && length.is_finite()) {
+            return None;
+        }
+        let fps = f64::from(fps.max(1));
+        let at = at.max(0.0);
+        let stop = from + length;
+        // a hair under a whole frame is that frame
+        let mut frame = (at * fps + 1e-9).floor();
+        let mut start = from - (at - frame / fps).max(0.0);
+        if start < 0.0 {
+            frame += 1.0;
+            start = from + (frame / fps - at);
+        }
+        (stop - start > 1e-9).then_some((frame as u32, start..stop))
+    }
+
+    /// The frames (from 0) it lasts at `fps`, at least 1.
+    pub fn frames(&self, fps: u32) -> u32 {
+        let seconds = (self.clip.end - self.clip.start).max(0.0);
+        ((seconds * f64::from(fps.max(1)) - 1e-6).ceil() as u32).max(1)
+    }
+}
+
+/// Harmony's name (in the blending node's `blendMode`) for `mode`, as Harmony 21 and later write
+/// it; none for normal and for the modes Harmony hasn't.
+pub fn blend_keyword(mode: BlendMode) -> Option<&'static str> {
+    Some(match mode {
+        BlendMode::Multiply => "eMULTIPLY_OVER",
+        BlendMode::Darken => "eDARKEN_OVER",
+        BlendMode::ColorBurn => "eCOLOR_BURN_OVER",
+        BlendMode::LinearBurn => "eLINEAR_BURN_OVER",
+        BlendMode::Lighten => "eLIGHTEN_OVER",
+        BlendMode::Screen => "eSCREEN_OVER",
+        BlendMode::ColorDodge => "eCOLOR_DODGE_OVER",
+        BlendMode::Add => "eLINEAR_DODGE_OVER",
+        BlendMode::Overlay => "eOVERLAY_OVER",
+        BlendMode::SoftLight => "eSOFTLIGHT_OVER",
+        BlendMode::HardLight => "eHARDLIGHT_OVER",
+        BlendMode::VividLight => "eVIVIDLIGHT_OVER",
+        BlendMode::LinearLight => "eLINEARLIGHT_OVER",
+        BlendMode::PinLight => "ePINLIGHT_OVER",
+        BlendMode::Difference => "eDIFFERENCE_OVER",
+        BlendMode::Exclusion => "eEXCLUSION_OVER",
+        BlendMode::Subtract => "eSUBTRACT_OVER",
+        BlendMode::Divide => "eDIVIDE_OVER",
+        BlendMode::Hue => "eHUE_OVER",
+        BlendMode::Saturation => "eSATURATION_OVER",
+        BlendMode::Color => "eCOLOR_OVER",
+        // Harmony spells it so
+        BlendMode::Luminosity => "eLUNINOSITY_OVER",
+        BlendMode::Normal
+        | BlendMode::Shade
+        | BlendMode::DarkerColor
+        | BlendMode::LighterColor
+        | BlendMode::HardMix => return None,
+    })
 }
 
 /// Names Harmony takes for nodes, elements and the files named after them: ASCII letters,
@@ -57,6 +150,12 @@ pub struct Names {
 }
 
 impl Names {
+    /// Names for a scene's layers and sounds: none of them takes the name of a node every scene
+    /// has.
+    pub fn scene() -> Names {
+        Names { used: NODES.iter().map(|n| n.to_lowercase()).collect() }
+    }
+
     /// `name` as Harmony takes it; `fallback` if nothing of it is left.
     pub fn plain(name: &str, fallback: &str) -> String {
         let mut out = String::new();
@@ -87,6 +186,11 @@ impl Names {
 /// Where drawing `n` of layer `layer` is, in the scene folder.
 pub fn drawing_path(layer: &str, n: u32) -> String {
     format!("{ELEMENTS}/{layer}/{layer}-{n}.png")
+}
+
+/// Where sound file `file` is, in the scene folder.
+pub fn sound_path(file: &str) -> String {
+    format!("{AUDIO}/{file}")
 }
 
 /// A layer's exposure sheet as runs of one drawing, blanks left out: each drawing and the frames
@@ -226,6 +330,33 @@ fn xstage(scene: &Scene, id: u64) -> String {
         }
         xml += "    </column>\n";
     }
+    let fps = scene.fps.max(1);
+    for (i, sound) in scene.sounds.iter().enumerate() {
+        let file = escaped(&sound.file);
+        xml += &format!(
+            "    <column type=\"1\" name=\"{}\" displayOrder=\"{}\" width=\"100\" anonymous=\"false\" disabled=\"false\" videoSync=\"true\" soundLocked=\"false\">\n",
+            escaped(&sound.name),
+            scene.layers.len() + i
+        );
+        xml += &format!(
+            "     <soundSequence startFrame=\"{}\" stopFrame=\"{}\" name=\"{file}\" displayName=\"{file}\" soundColorIsValid=\"false\" soundColor=\"#000000FF\" clippingTimeStart=\"{}\" clippingTimeStop=\"{}\">\n",
+            sound.start + 1,
+            sound.start + sound.frames(fps),
+            sound.clip.start,
+            sound.clip.end
+        );
+        xml += "      <lipSync showSoundForm=\"0\"/>\n     </soundSequence>\n    </column>\n";
+    }
+    // the blending nodes, each layer's that blends other than normally, named for it
+    let mut names = Names::scene();
+    for name in scene.layers.iter().map(|l| &l.name).chain(scene.sounds.iter().map(|s| &s.name)) {
+        names.unique(name, "Layer");
+    }
+    let blends: Vec<Option<(String, &str)>> = scene
+        .layers
+        .iter()
+        .map(|l| blend_keyword(l.blend).map(|k| (names.unique(&format!("{}_Blending", l.name), "Blending"), k)))
+        .collect();
     // the node view: the drawings in a row over the composite, the top layer leftmost
     let spacing = 160i64;
     let count = scene.layers.len() as i64;
@@ -306,10 +437,36 @@ fn xstage(scene: &Scene, id: u64) -> String {
             z = i + 4,
             attrs = indented(&READ_ATTRS.replace("{column}", &name), 7),
         );
+        if let Some(Some((blending, keyword))) = blends.get(i) {
+            let blending = escaped(blending);
+            xml += &format!(
+                r#"     <module type="BLEND_MODE_MODULE" name="{blending}" pos="{x},-60,{z}" publishUnderTab="{blending}">
+      <options>
+       <collapsed val="false"/>
+       <version val="1"/>
+      </options>
+      <attrs>
+       <blendMode val="{keyword}" version="2"/>
+       <clampingMode val="ApplyClampingOnRbgChannels"/>
+       <flashBlendMode val="eNORMAL_BLEND"/>
+      </attrs>
+     </module>
+"#,
+                z = scene.layers.len() + i + 4,
+            );
+        }
     }
     xml += "    </nodeslist>\n    <linkedlist>\n     <link out=\"Composite\" in=\"Display\"/>\n     <link out=\"Composite\" in=\"Write\"/>\n";
     for (i, layer) in scene.layers.iter().enumerate() {
-        xml += &format!("     <link out=\"{}\" in=\"Composite\" inport=\"{i}\"/>\n", escaped(&layer.name));
+        let name = escaped(&layer.name);
+        match blends.get(i) {
+            Some(Some((blending, _))) => {
+                let blending = escaped(blending);
+                xml += &format!("     <link out=\"{name}\" in=\"{blending}\"/>\n");
+                xml += &format!("     <link out=\"{blending}\" in=\"Composite\" inport=\"{i}\"/>\n");
+            }
+            _ => xml += &format!("     <link out=\"{name}\" in=\"Composite\" inport=\"{i}\"/>\n"),
+        }
     }
     xml += &format!(
         r#"    </linkedlist>
@@ -478,6 +635,43 @@ const READ_ATTRS: &str = r#"<enable3d val="false"/>
 <tileHorizontal val="false"/>
 <tileVertical val="false"/>"#;
 
+/// The tracks whose clips mask what track `track` shows at `frame` of `tl`, nearest first: the
+/// clip on the track below it, if it masks with that, then whatever masks that clip, and so on.
+pub fn matte_sources(tl: &Timeline, track: TrackId, frame: u32) -> Vec<TrackId> {
+    let items = tl.plan(frame).items;
+    let mut out = Vec::new();
+    let mut at = items.iter().position(|i| i.track == track);
+    while let Some((_, source)) = at.and_then(|i| items.get(i)).and_then(|i| i.mask) {
+        let Some(item) = items.get(source) else { break };
+        out.push(item.track);
+        at = Some(source);
+    }
+    out
+}
+
+/// `tl` changed to show what track `track` shows at `frame` as a layer of its own: every other
+/// track hidden but those that mask it there (see [`matte_sources`]), which only mask (a clipping
+/// mask's source, drawn too on the timeline, is left to its own layer), and its clip there
+/// blending normally (its mode is its layer's in Harmony).
+pub fn solo(tl: &mut Timeline, track: TrackId, frame: u32) {
+    let sources = matte_sources(tl, track, frame);
+    for t in &mut tl.tracks {
+        let mine = t.id == track;
+        t.hidden = !mine && !sources.contains(&t.id);
+        if t.hidden {
+            continue;
+        }
+        let Some(clip) = t.clips.iter_mut().find(|c| c.covers(frame)) else { continue };
+        // the same matte, its source no longer drawn
+        if clip.mask == MaskMode::Clipping {
+            clip.mask = MaskMode::Alpha;
+        }
+        if mine {
+            clip.blend = BlendMode::Normal;
+        }
+    }
+}
+
 /// Numbers a layer's drawings as they come, a frame at a time: a picture met before (by
 /// `key`, such as a hash of its pixels) is the drawing it was then.
 #[derive(Clone, Debug, Default)]
@@ -522,11 +716,15 @@ impl<K: PartialEq> Drawings<K> {
 }
 
 #[cfg(test)]
+#[path = "harmony_tests.rs"]
+mod harmony_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::xml;
 
-    fn walk() -> Scene {
+    pub(super) fn walk() -> Scene {
         Scene {
             name: "Walk".into(),
             width: 1920,
@@ -534,14 +732,16 @@ mod tests {
             fps: 12,
             frames: 8,
             layers: vec![
-                Layer { name: "Background".into(), drawings: 1, exposures: vec![Some(1); 8] },
+                Layer { name: "Background".into(), drawings: 1, exposures: vec![Some(1); 8], blend: BlendMode::Normal },
                 // 1 held 3, 2 held 2, a blank, 1 again for 2 (a cycle)
                 Layer {
                     name: "Character".into(),
                     drawings: 2,
                     exposures: vec![Some(1), Some(1), Some(1), Some(2), Some(2), None, Some(1), Some(1)],
+                    blend: BlendMode::Normal,
                 },
             ],
+            sounds: Vec::new(),
         }
     }
 
