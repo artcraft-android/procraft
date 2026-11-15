@@ -20,14 +20,19 @@ with the app, off.
   way), scaled by the spacing option.
 - Options and their sensors: size, opacity, flow, rotation, ratio, spacing, scatter (both ways,
   along or across), mirror, softness, darken, mix, hue, saturation and value, the texture's strength;
-  sensors pressure, X and Y tilt, tilt direction and elevation, speed, drawing angle, rotation,
-  distance, time, fade, fuzzy per dab and per stroke (perspective counts as 1); each through its
-  curve, several combined by multiply, add, max, min or difference.
+  sensors pressure, the most pressure so far, X and Y tilt, tilt direction and elevation, speed,
+  drawing angle (the way from the last dab, offset, locked at the start, or fanning dabs round a
+  corner), rotation, distance, time, fade, fuzzy per dab and per stroke (perspective counts as 1);
+  each through its curve (one they share, or each its own; an older preset's kept in its sensor or
+  apart, as Krita reads them), several combined by multiply, add, max, min or difference. Dabs turn
+  with the canvas on screen, as Krita's do. Each engine takes only the options Krita's takes.
 - Painting: wash (dabs build towards their opacity, the stroke keeping near the opacity it has
   averaged) or build-up; the preset's blend mode; eraser presets erase. Sharpness: each dab's mask
   made hard at its threshold (what lies within its softness kept), dabs moved onto whole pixels as
   far as it says. Airbrush: dabs by time as well as by spacing (or by time alone), the app handing
-  the pen again while it holds still.
+  the pen again while it holds still. Precision: below its highest, the last dab drawn afresh is
+  laid again while the next is near enough to it (its size, turn, place within a pixel and the rest,
+  as near as the level says), as Krita keeps and lays its dabs.
 - Texture: the pattern made into Krita's mask (brightness, contrast, invert, neutral point,
   cutoff), scaled, offset (or at random per stroke), combined with each dab by its texturing mode at
   the strength its sensors give, softly where it says.
@@ -98,8 +103,8 @@ readers (which its tests use) run in it.
   (it copies pixels from elsewhere). The chalk brush picks among a few speckled tips (Krita speckles
   each dab afresh). The dyna brush's weight is pulled at each sample the app hands it (Krita at each
   of the tablet's events), so the more samples, the smaller and closer its circles.
-- The bristle brush keeps at most 4,096 bristles, draws its lines smooth whatever its antialiasing
-  and compositing say, and takes its ink as it runs out in pieces within a 64th of it (Krita at
+- The bristle brush keeps at most 4,096 bristles, lays its lines over what is there whatever its
+  compositing says, and takes its ink as it runs out in pieces within a 64th of it (Krita at
   each pixel). The hatching brush keeps its lines inside each dab's tip in
   pieces, each as opaque as the tip where it lies, halved down to a pixel where the tip's edge
   crosses them (Krita masks each pixel), so a thick line's end at the edge is cut square across it.
@@ -108,7 +113,9 @@ readers (which its tests use) run in it.
   colour under its cells lays them in no other colour and without a background.
 - The sketch brush draws each move's lines over each other (Krita draws them into one dab first,
   then lays that at the opacity option's), keeps the last 4,096 points it passed, and takes its tip
-  as round for its reach; the spray brush's particle pictures, its sampled colours and its
+  as round for its reach (Krita's mode that isn't simple takes the tip's own shape); hard lines (its
+  antialiasing off, as it is unless it says, and the bristle brush's) are the pixels a line covers
+  nearly half of or more; the spray brush's particle pictures, its sampled colours and its
   background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
@@ -119,6 +126,10 @@ readers (which its tests use) run in it.
   tip of one is Krita's default tip, as Krita stands it in (round, 40 px across, the studio saying
   so); a masking brush or texture of one is left out.
 - The 1-pixel brush's sharp lines, drawn as dabs.
+- Tips drawn from SVG pictures or text, and the pixel brush's colour sources other than the plain
+  colour (gradient, random, pattern). The hatching brush's mirror and texture.
+- A drawing angle locked at the start takes the way the stroke first goes (Krita takes the way the
+  pen moved just before it touched, which the app doesn't hand).
 - Perspective counts as 1 (the app has no perspective assistant), as in Krita without one; a
   gradient map takes the gradient from the colour to the secondary colour (the app has no current
   gradient).

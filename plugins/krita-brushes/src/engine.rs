@@ -46,6 +46,8 @@ struct Point {
     x: f32,
     y: f32,
     pressure: f32,
+    /// The most the pen has pressed so far.
+    pressure_in: f32,
     x_tilt: f32,
     y_tilt: f32,
     rotation: f32,
@@ -60,6 +62,7 @@ impl Point {
             x: l(a.x, b.x),
             y: l(a.y, b.y),
             pressure: l(a.pressure, b.pressure),
+            pressure_in: l(a.pressure_in, b.pressure_in),
             x_tilt: l(a.x_tilt, b.x_tilt),
             y_tilt: l(a.y_tilt, b.y_tilt),
             rotation: l(a.rotation, b.rotation),
@@ -119,6 +122,11 @@ struct Walker {
     dabs: u32,
     /// When its last dab was laid (ms), for an airbrush.
     last_ms: f32,
+    /// Where its last dab lay on the path (the pen there) and the way the stroke went there
+    /// (radians); the way it went at its start, as a locked drawing angle keeps it.
+    at: Option<Point>,
+    angle: f32,
+    locked: Option<f32>,
 }
 
 /// Spacing below this (canvas pixels) is taken as this, as Krita does.
@@ -261,6 +269,55 @@ impl Walker {
     }
 }
 
+/// The last dab drawn afresh, as a brush's precision compares the next with it: its colour, turn,
+/// box (pixels), place within a pixel and the box's half, softness, lightness, squash, tip and
+/// mirroring, and its diameter.
+#[derive(Clone, Copy, Debug)]
+struct Kept {
+    colour: [f32; 3],
+    angle: f32,
+    size: (f32, f32),
+    within: (f32, f32),
+    half: (f32, f32),
+    softness: f32,
+    lightness: f32,
+    ratio: f32,
+    tip: u32,
+    flips: u32,
+    diameter: f32,
+}
+
+/// How near a dab must be to the kept one, by precision level: its turn (radians), its box's
+/// size (a share), its place within a pixel, its softness, lightness and squash.
+const NEAR: [(f32, f32, f32, f32, f32, f32); 5] = [
+    (PI / 180.0, 0.05, 1.0, 0.01, 0.01, 0.05),
+    (PI / 180.0, 0.01, 1.0, 0.01, 0.01, 0.01),
+    (PI / 180.0, 0.0, 1.0, 0.01, 0.01, 1e-6),
+    (PI / 180.0, 0.0, 0.5, 0.01, 0.01, 1e-6),
+    (1e-6, 0.0, 1e-6, 1e-6, 1e-6, 1e-6),
+];
+
+impl Kept {
+    /// Whether `self`, the next dab, is near enough `kept` at `level` to be it laid again.
+    fn near(&self, kept: &Kept, level: u32) -> bool {
+        let Some(&(angle, size, within, softness, lightness, ratio)) = NEAR.get(level.clamp(1, 5) as usize - 1) else {
+            return false;
+        };
+        let sized = |a: f32, b: f32| (a - b).abs() <= (size * a).trunc();
+        self.colour == kept.colour
+            && (self.angle - kept.angle).abs() <= angle
+            && sized(self.size.0, kept.size.0)
+            && sized(self.size.1, kept.size.1)
+            && (self.within.0 - kept.within.0).abs() <= within
+            && (self.within.1 - kept.within.1).abs() <= within
+            && (self.softness - kept.softness).abs() <= softness
+            && (self.lightness - kept.lightness).abs() <= lightness
+            && (self.ratio - kept.ratio).abs() <= ratio
+            && self.tip == kept.tip
+            && self.flips == kept.flips
+    }
+}
+
 /// How a pipe stands: each of its dimensions' step.
 #[derive(Clone, Debug, Default)]
 struct PipeState {
@@ -399,6 +456,10 @@ pub struct Stroke {
     particles: Vec<Particle>,
     pace: f32,
     speed: f32,
+    /// The way the stroke went at its start, for a drawing angle locked there.
+    locked: f32,
+    /// The last dab drawn afresh, for the brush's precision.
+    kept: Option<Kept>,
     pub out: Vec<Dab>,
     /// The colours under where it starts, if the app handed them.
     pub under: Option<Under>,
@@ -455,6 +516,8 @@ impl Stroke {
             particles: Vec::new(),
             pace: 0.0,
             speed: 0.0,
+            locked: 0.0,
+            kept: None,
             out: Vec::new(),
             under: None,
             canvas: None,
@@ -496,10 +559,12 @@ impl Stroke {
                 }
             }
         }
+        let pressure = s.pressure.clamp(0.0, 1.0);
         Point {
             x: s.x,
             y: s.y,
-            pressure: s.pressure.clamp(0.0, 1.0),
+            pressure,
+            pressure_in: self.last.map_or(pressure, |l| l.pressure_in.max(pressure)),
             x_tilt,
             y_tilt,
             rotation: s.roll.to_degrees(),
@@ -534,6 +599,10 @@ impl Stroke {
             if self.brush.hairy.is_some() || self.brush.curves.is_some() || self.brush.particles.is_some() {
                 match self.last {
                     Some(from) => {
+                        // the way it went, from where it last drew (a bristle brush's drawing angle)
+                        if p.x != from.x || p.y != from.y {
+                            self.angle = (p.y - from.y).atan2(p.x - from.x);
+                        }
                         self.line_move(&from, &p);
                         self.length += ((p.x - from.x).powi(2) + (p.y - from.y).powi(2)).sqrt();
                     }
@@ -545,9 +614,9 @@ impl Stroke {
             }
             let Some(last) = self.last else {
                 // the first point gets a dab of each brush
-                self.dab_at(&p, false);
+                self.walk_dab(&p, false);
                 if self.brush.masking.is_some() {
-                    self.dab_at(&p, true);
+                    self.walk_dab(&p, true);
                 }
                 self.last = Some(p);
                 continue;
@@ -580,7 +649,7 @@ impl Stroke {
                     // the distance sensor's: as far along as this dab
                     let done = ((here.x - last.x).powi(2) + (here.y - last.y).powi(2)).sqrt();
                     self.length = start_length + done;
-                    self.dab_at(&here, second);
+                    self.walk_dab(&here, second);
                     if t <= 0.0 && (here.x - at.x).abs() < 1e-6 && (here.y - at.y).abs() < 1e-6 {
                         // a dab where the walk stood: go on from it
                         at = here;
@@ -593,6 +662,49 @@ impl Stroke {
             self.length += (dx * dx + dy * dy).sqrt();
             self.last = Some(p);
         }
+    }
+
+    /// A dab of one brush (the main one, or its masking brush with `second`) where its walk has
+    /// got to: the way the stroke goes there taken from where its last dab lay, as Krita takes its
+    /// drawing angle; first, where its rotation follows that way with fan corners, a dab at each of
+    /// their steps as the way turns from the last dab's to this one's, along the way between them.
+    fn walk_dab(&mut self, here: &Point, second: bool) {
+        let brush = Rc::clone(&self.brush);
+        let rotation = match (second, &brush.masking) {
+            (true, Some(m)) => &m.dynamics.rotation,
+            _ => &brush.dynamics.rotation,
+        };
+        let walker = if second { &self.second } else { &self.main };
+        let (last, last_angle) = (walker.at, walker.angle);
+        let moved = last.filter(|l| (here.x - l.x).abs() > 1e-6 || (here.y - l.y).abs() > 1e-6);
+        let angle = moved.map_or(last_angle, |l| (here.y - l.y).atan2(here.x - l.x));
+        if let (Some(step), Some(last)) = (rotation.fan_step(), last) {
+            let full = turned(last_angle, angle);
+            let mut current = last_angle;
+            let mut i = 0;
+            // (a step's worth left, give or take rounding, is the dab's own)
+            while turned(current, angle) > step + 1e-4 && i < 720 && self.out.len() < MOST_DABS {
+                current = towards(current, step, angle);
+                let t = step * i as f32 / full;
+                i += 1;
+                self.lay(&Point::between(&last, here, t), current, second, false);
+            }
+        }
+        self.lay(here, angle, second, moved.is_some());
+    }
+
+    /// A dab at `p`, the stroke going the way `angle` there (`moved`: a way it really went).
+    fn lay(&mut self, p: &Point, angle: f32, second: bool, moved: bool) {
+        let walker = if second { &mut self.second } else { &mut self.main };
+        if moved && walker.locked.is_none() {
+            walker.locked = Some(angle);
+        }
+        self.locked = walker.locked.unwrap_or(angle);
+        self.angle = angle;
+        self.dab_at(p, second);
+        let walker = if second { &mut self.second } else { &mut self.main };
+        walker.at = Some(*p);
+        walker.angle = angle;
     }
 
     /// How far from `at` to `to` (0..1) the airbrush's next dab comes, if it comes before `to`:
@@ -627,6 +739,11 @@ impl Stroke {
         }
         // the app squashes a dab no further than a twentieth: a longer line goes in pieces
         let pieces = ((length * LEAST_SQUASH / width.max(1e-3)).ceil() as usize).clamp(1, 1000);
+        // a sketch or bristle brush that doesn't smooth its lines draws them hard: what a line
+        // covers nearly half of or more, fully, the rest not at all (a line between two rows of
+        // pixels lighting both rather than neither)
+        let hard = self.brush.sketch.as_ref().is_some_and(|s| !s.antialias)
+            || self.brush.hairy.as_ref().is_some_and(|h| !h.antialias);
         let piece = length / pieces as f32;
         let long = piece.max(width);
         for i in 0..pieces {
@@ -647,6 +764,7 @@ impl Stroke {
                 colour: colour.unwrap_or([0.0; 3]),
                 strength: 1.0,
                 texture_offset: self.texture_offset,
+                threshold: if hard { 0.55 } else { 0.0 },
                 ..Dab::default()
             });
         }
@@ -724,11 +842,7 @@ impl Stroke {
         let mut fuzz = Fuzz { random: &mut self.random, seed };
         let one = |o: &CurveOption, fuzz: &mut Fuzz<'_>| if o.checked { o.size_like(&info, fuzz, true) } else { 1.0 };
         let scale = one(&brush.dynamics.size, &mut fuzz) * k;
-        let rotation = if brush.dynamics.rotation.checked {
-            (1.0 - brush.dynamics.rotation.rotation_like(&info, &mut fuzz, 0.0, -1.0)) * PI
-        } else {
-            0.0
-        };
+        let rotation = turn_of(&brush.dynamics.rotation, &info, &mut fuzz, self.begin.turn);
         let opacity = if brush.dynamics.opacity.checked {
             brush.dynamics.opacity.size_like(&info, &mut fuzz, true)
         } else {
@@ -838,11 +952,13 @@ impl Stroke {
     fn info(&self, p: &Point, dabs: u32) -> Info {
         Info {
             pressure: p.pressure,
+            pressure_in: p.pressure_in,
             x_tilt: p.x_tilt,
             y_tilt: p.y_tilt,
             rotation: p.rotation,
             speed: p.speed,
             drawing_angle: self.angle,
+            locked_angle: self.locked,
             distance: self.length,
             time: p.time,
             dab: dabs,
@@ -872,8 +988,7 @@ impl Stroke {
         let mut fuzz = Fuzz { random: &mut self.random, seed };
         let d = &brush.dynamics;
         let size = if d.size.checked { d.size.size_like(&info, &mut fuzz, true) } else { 1.0 } * k;
-        let turn =
-            if d.rotation.checked { (1.0 - d.rotation.rotation_like(&info, &mut fuzz, 0.0, -1.0)) * PI } else { 0.0 };
+        let turn = turn_of(&d.rotation, &info, &mut fuzz, self.begin.turn);
         let opacity = if d.opacity.checked { d.opacity.size_like(&info, &mut fuzz, true) } else { d.opacity.strength };
         (size, turn, opacity.clamp(0.0, 1.0))
     }
@@ -1178,7 +1293,8 @@ impl Stroke {
         let thickness_value = one(&hatching.thickness_option, &mut fuzz);
         let (dw, dh) = (tip.width * scale, tip.height * scale);
         // the next dab as the tip spaces it
-        let spacing = spacing_of(tip, dw.max(1e-3), dh.max(1e-3), 1.0, false);
+        let (mw, mh) = measure(tip, dw, dh);
+        let spacing = spacing_of(tip, mw.max(1e-3), mh.max(1e-3), 1.0, false);
         self.main.spacing = spacing;
         self.main.turn = 0.0;
         self.main.dabs += 1;
@@ -1461,12 +1577,7 @@ impl Stroke {
         if scale * w < 0.01 || scale * h < 0.01 {
             scale = 0.0;
         }
-        let rotation = if dynamics.rotation.checked {
-            let v = 1.0 - dynamics.rotation.rotation_like(&info, &mut fuzz, 0.0, -1.0);
-            v * PI
-        } else {
-            0.0
-        };
+        let rotation = turn_of(&dynamics.rotation, &info, &mut fuzz, self.begin.turn);
         let turn = rotation + tip.angle;
         let ratio = one(&dynamics.ratio, &mut fuzz).clamp(0.01, 1.0);
         let (dw, dh) = (w * scale, h * scale * ratio);
@@ -1635,21 +1746,84 @@ impl Stroke {
                 }
             }
         }
+        if let (Some(precision), false) = (&brush.precision, second) {
+            self.keep(&mut dab, precision, (dw, dh), softness.unwrap_or(1.0));
+        }
         if scale > 0.0 && dab.diameter.is_finite() {
             self.out.push(dab);
         }
-        // the spacing this dab sets for the next
+        // the spacing this dab sets for the next: as Krita measures the tip (its box turned by its
+        // own angle, at its size, not squashed by the ratio option), across and down the frame its
+        // rotation option turns
         let extra = one(&dynamics.spacing, &mut Fuzz { random: &mut self.random, seed });
-        let spacing = spacing_of(tip, dw.max(1e-3), dh.max(1e-3), extra, dynamics.isotropic);
+        let (mw, mh) = measure(tip, w * scale, h * scale);
+        let spacing = spacing_of(tip, mw.max(1e-3), mh.max(1e-3), extra, dynamics.isotropic);
         let walker = if second { &mut self.second } else { &mut self.main };
         walker.spacing = spacing;
-        walker.turn = if dynamics.isotropic { 0.0 } else { turn };
+        walker.turn = if dynamics.isotropic { 0.0 } else { rotation };
         walker.dabs += 1;
         walker.last_ms = p.time;
         if !second {
             self.dabs += 1;
         }
     }
+}
+
+impl Stroke {
+    /// `dab` (`size` across and down before it turns) as the brush's precision lays it: the last
+    /// dab drawn afresh laid again in its place, at the whole pixel this one's box starts on, where
+    /// this one is near enough to it; else this one drawn afresh, kept.
+    fn keep(&mut self, dab: &mut Dab, precision: &crate::brush::Precision, size: (f32, f32), softness: f32) {
+        let (s, c) = dab.angle.sin_cos();
+        let (w, h) = ((size.0 * c).abs() + (size.1 * s).abs(), (size.0 * s).abs() + (size.1 * c).abs());
+        let half = (w * 0.5, h * 0.5);
+        let corner = (dab.x - half.0, dab.y - half.1);
+        let next = Kept {
+            colour: dab.colour,
+            angle: dab.angle.rem_euclid(TAU),
+            size: (w.ceil(), h.ceil()),
+            within: (corner.0 - corner.0.floor(), corner.1 - corner.1.floor()),
+            half,
+            softness,
+            lightness: dab.lightness,
+            ratio: dab.ratio,
+            tip: dab.tip,
+            flips: dab.flags & (FLIP_ACROSS | FLIP_DOWN),
+            diameter: dab.diameter,
+        };
+        let level = precision.level(w.min(h));
+        match self.kept {
+            Some(kept) if level < 5 && next.near(&kept, level) => {
+                dab.angle = kept.angle;
+                dab.diameter = kept.diameter;
+                dab.ratio = kept.ratio;
+                dab.x = corner.0.floor() + kept.within.0 + kept.half.0;
+                dab.y = corner.1.floor() + kept.within.1 + kept.half.1;
+            }
+            _ => self.kept = Some(next),
+        }
+    }
+}
+
+/// A dab's turn (radians, as Krita turns its dabs) as its rotation option gives it, the canvas
+/// turned `canvas` (radians) on screen: switched off, the dab turns with the canvas, so it looks
+/// the same on screen; switched on, from there.
+fn turn_of(option: &CurveOption, info: &Info, fuzz: &mut Fuzz<'_>, canvas: f32) -> f32 {
+    if !option.checked {
+        return canvas;
+    }
+    (1.0 - option.rotation_like(info, fuzz, -canvas / TAU, -1.0)) * PI
+}
+
+/// How far apart two ways are (radians, 0..pi), the shorter way round.
+fn turned(a: f32, b: f32) -> f32 {
+    ((b - a + PI).rem_euclid(TAU) - PI).abs()
+}
+
+/// `from` turned `step` (radians) towards `to`, the shorter way round.
+fn towards(from: f32, step: f32, to: f32) -> f32 {
+    let d = (to - from + PI).rem_euclid(TAU) - PI;
+    from + step.copysign(d)
 }
 
 /// A dab's colour where its options change it: mixed with the background colour, darkened, its
@@ -1692,6 +1866,12 @@ fn colour_of(b: &Brush, begin: &Begin, info: &Info, fuzz: &mut Fuzz<'_>) -> Opti
         }
         Some(c.map(|v| v.clamp(0.0, 1.0)))
     }
+}
+
+/// A tip `w` x `h` as Krita measures it for its spacing: the box it fills turned by its own angle.
+fn measure(tip: &Tip, w: f32, h: f32) -> (f32, f32) {
+    let (s, c) = tip.angle.sin_cos();
+    ((w * c).abs() + (h * s).abs(), (w * s).abs() + (h * c).abs())
 }
 
 /// The spacing a dab `w` x `h` sets for the next: across and down its own frame (or the same both

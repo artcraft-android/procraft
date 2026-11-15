@@ -994,7 +994,7 @@ fn option_rows(p: &Preset, page: &mut Page, id: &str, label: &str, checkable: bo
     };
     let otherwise = match id {
         "Spacing" | "Scatter" => 5.0,
-        "SmudgeRadius" => 0.0,
+        "SmudgeRadius" => 3.0,
         _ => 1.0,
     };
     let strength = p.number(&format!("{id}Value"), otherwise);
@@ -1006,7 +1006,8 @@ fn option_rows(p: &Preset, page: &mut Page, id: &str, label: &str, checkable: bo
     if sensors.len() > 1 {
         page.text(&format!("{label} follows {} together.", sensors.join(", ")));
     }
-    let curve = p.get(&format!("{id}commonCurve")).unwrap_or("0,0;1,1;").trim().to_owned();
+    // the curve its sensors share, as the engine reads it
+    let curve = crate::options::common_curve(p, "", id);
     let mut names: Vec<&str> = CURVES.iter().map(|(n, _)| *n).collect();
     let at = CURVES.iter().position(|(_, c)| same_curve(c, &curve));
     let chosen = at.unwrap_or_else(|| {
@@ -1077,6 +1078,9 @@ fn change(p: &mut Preset, does: &Does, value: f32) {
         }
         Does::Sensor(id) => {
             let Some((sensor, _)) = SENSORS.get(value.max(0.0) as usize) else { return };
+            // the curve shown stays: kept as the one they share, as the sensor it was kept in goes
+            let common = crate::options::common_curve(p, "", id);
+            set(p, &format!("{id}commonCurve"), common);
             set(p, &format!("{id}Sensor"), format!(r#"<!DOCTYPE params> <params id="{sensor}"/> "#));
             set(p, &format!("{id}UseSameCurve"), "true".to_owned());
             set(p, &format!("{id}UseCurve"), "true".to_owned());

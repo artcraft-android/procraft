@@ -330,6 +330,116 @@ mod tests {
         stroke.out
     }
 
+    /// A brush along a path turning a right angle (right, then down), the canvas turned `turn`.
+    fn cornered(params: &str, turn: f32) -> Vec<crate::engine::Dab> {
+        let xml = format!(
+            r#"<Preset name="E" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.5" BrushVersion="2"><MaskGenerator type="rect" id="default" diameter="10" ratio="0.3" hfade="1" vfade="1"/></Brush>]]></param>{params}</Preset>"#
+        );
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let brush = load(&data.bytes(), false).unwrap();
+        let begin = Begin { colour: [1.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 5, turn };
+        let mut stroke = Stroke::new(Rc::new(brush), begin);
+        let at = |i: i32| if i < 10 { (50.0 + i as f32 * 5.0, 50.0) } else { (95.0, 50.0 + (i - 9) as f32 * 5.0) };
+        let samples: Vec<Sample> = (0..20)
+            .map(|i| {
+                let (x, y) = at(i);
+                Sample { x, y, pressure: 1.0, ms: f64::from(i) * 8.0, ..Sample::default() }
+            })
+            .collect();
+        stroke.add(&samples);
+        stroke.out
+    }
+
+    /// A dab turned by the way the stroke goes takes that way from where the last dab lay; with fan
+    /// corners, dabs at each of their steps fill a corner (Krita's drawing angle and its fans).
+    #[test]
+    fn a_drawing_angle_fans_round_a_corner_when_it_says() {
+        let rotation = |fan: &str| {
+            format!(
+                r#"<param name="PressureRotation"><![CDATA[true]]></param><param name="RotationSensor"><![CDATA[<params id="drawingangle" fanCornersEnabled="{fan}" fanCornersStep="30" angleOffset="0" lockedAngleMode="0"/>]]></param>"#
+            )
+        };
+        // the dabs turned neither along nor across
+        let between = |dabs: &[crate::engine::Dab]| {
+            let ways = dabs.iter().map(|d| d.angle.to_degrees().rem_euclid(180.0));
+            ways.filter(|a| *a > 10.0 && *a < 80.0).count()
+        };
+        let plain = cornered(&rotation("0"), 0.0);
+        let fanned = cornered(&rotation("1"), 0.0);
+        // 0 to 90 degrees in steps of 30: two dabs between
+        assert_eq!(between(&plain), 0);
+        assert_eq!(between(&fanned), 2);
+        assert_eq!(fanned.len(), plain.len() + 2);
+    }
+
+    /// A dab its rotation option leaves alone turns with the canvas, so it looks the same on screen.
+    #[test]
+    fn an_unturned_dab_turns_with_the_canvas() {
+        let dabs = cornered("", 0.5);
+        assert!(dabs.iter().all(|d| (d.angle + 0.5).abs() < 1e-5), "{}", dabs[0].angle);
+    }
+
+    /// At precision 1 a dab near enough the last drawn afresh is that one laid again, at the
+    /// whole pixel its box starts on: along a steady stroke, every dab at the same place within a
+    /// pixel; at 5, each where it falls.
+    #[test]
+    fn a_low_precision_lays_the_kept_dab_again() {
+        let within = |level: &str| {
+            let params = format!(r#"<param name="KisPrecisionOption/precisionLevel"><![CDATA[{level}]]></param>"#);
+            let dabs = drawn("paintbrush", &params, 21.0);
+            let mut places: Vec<i32> =
+                dabs.iter().map(|d| ((d.x - 10.5).rem_euclid(1.0) * 1000.0).round() as i32).collect();
+            places.sort_unstable();
+            places.dedup();
+            (dabs.len(), places.len())
+        };
+        let (kept, one) = within("1");
+        let (fresh, many) = within("5");
+        assert_eq!(kept, fresh);
+        assert_eq!(one, 1);
+        assert!(many > 1, "{many}");
+    }
+
+    /// Spacing measures the tip as Krita does: its box turned by its own angle, not squashed by the
+    /// ratio option.
+    #[test]
+    fn spacing_measures_the_tip_turned_and_unsquashed() {
+        let down = |tip: &str, params: &str| {
+            let xml = format!(
+                r#"<Preset name="E" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.5" BrushVersion="2" {tip}><MaskGenerator type="rect" id="default" diameter="20" ratio="0.25" hfade="1" vfade="1"/></Brush>]]></param>{params}</Preset>"#
+            );
+            let mut data = Record::new();
+            data.field(1, xml.as_bytes());
+            let brush = load(&data.bytes(), false).unwrap();
+            let begin =
+                Begin { colour: [1.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 5, turn: 0.0 };
+            let mut stroke = Stroke::new(Rc::new(brush), begin);
+            let samples: Vec<Sample> = (0..=20)
+                .map(|i| Sample {
+                    x: 50.0,
+                    y: 50.0 + i as f32 * 5.0,
+                    pressure: 1.0,
+                    ms: f64::from(i) * 8.0,
+                    ..Sample::default()
+                })
+                .collect();
+            stroke.add(&samples);
+            stroke.out.len()
+        };
+        // 100 down: a dab every 2.5 (half of 20 x 0.25), or every 10 with the tip turned upright
+        let flat = down("", "");
+        let upright = down(r#"angle="1.5707964""#, "");
+        assert!((38..=42).contains(&flat), "{flat}");
+        assert!((10..=12).contains(&upright), "{upright}");
+        // the ratio option squashes the dab, not its spacing
+        let squashed = down(
+            r#"angle="1.5707964""#,
+            r#"<param name="PressureRatio"><![CDATA[true]]></param><param name="RatioUseCurve"><![CDATA[false]]></param><param name="RatioValue"><![CDATA[0.25]]></param>"#,
+        );
+        assert_eq!(squashed, upright);
+    }
+
     /// Krita's quick brush lays hard round dabs of its own diameter, close together, each over the
     /// last.
     #[test]

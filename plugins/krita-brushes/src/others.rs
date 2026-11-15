@@ -27,6 +27,9 @@ pub struct Sketch {
     pub random_opacity: bool,
     pub distance_density: bool,
     pub distance_opacity: bool,
+    /// Its lines smooth (else hard, a pixel's worth or not at all, as Krita draws them unless it
+    /// says).
+    pub antialias: bool,
     pub line_width_option: CurveOption,
     pub offset_option: CurveOption,
     pub density_option: CurveOption,
@@ -44,6 +47,7 @@ impl Sketch {
             random_opacity: p.flag("Sketch/randomOpacity", false),
             distance_density: p.flag("Sketch/distanceDensity", true),
             distance_opacity: p.flag("Sketch/distanceOpacity", false),
+            antialias: p.flag("Sketch/antiAliasing", false),
             line_width_option: CurveOption::read(p, "", "Line width", true, 0.0, 1.0),
             offset_option: CurveOption::read(p, "", "Offset scale", true, 0.0, 1.0),
             density_option: CurveOption::read(p, "", "Density", true, 0.0, 1.0),
@@ -220,6 +224,8 @@ pub struct Hairy {
     pub threshold: bool,
     pub connected: bool,
     pub mouse_pressure: bool,
+    /// Its bristles' lines smooth (else hard).
+    pub antialias: bool,
     pub ink: Option<Ink>,
 }
 
@@ -283,6 +289,7 @@ impl Hairy {
             random: n("HairyBristle/random", 2.0),
             threshold: p.flag("HairyBristle/threshold", false),
             connected: p.flag("HairyBristle/isConnected", false),
+            antialias: p.flag("HairyBristle/antialias", false),
             mouse_pressure: p.flag("HairyBristle/useMousePressure", false),
             ink,
         }
