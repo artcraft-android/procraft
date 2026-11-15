@@ -5161,6 +5161,85 @@ fn an_artwork_opens_as_it_was_shown() {
 }
 
 #[test]
+fn an_artwork_left_turned_shows_turned_in_the_gallery() {
+    use std::f32::consts::FRAC_PI_2;
+    let Ok(gpu) = Gpu::headless() else { return };
+    let s = CanvasSession::new(80, 40);
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (200, 200);
+        st.view = Some(View::fit((80, 40), (200, 200)));
+        st.gpu = Some(gpu);
+        st.ensure_canvas();
+    }
+    // red down the canvas's left side (shown 200 wide, 75 to 175 down the window)
+    no_streamline(&s);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.1);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 80.0, 0.0)]);
+    s.stroke_add((1..20).map(|k| sample(20.0, 80.0 + 4.5 * k as f32, f64::from(k) * 8.0)).collect());
+    s.stroke_end(vec![]);
+    // upright, and turned a little: shown upright
+    assert_eq!(s.shown_turns(), 0);
+    s.view_gesture(100.0, 100.0, 0.0, 0.0, 1.0, 0.3);
+    assert_eq!(s.shown_turns(), 0);
+    // turned onto its right side by the fingers
+    s.view_gesture(100.0, 100.0, 0.0, 0.0, 1.0, FRAC_PI_2 - 0.2);
+    assert_eq!(s.shown_turns(), 1);
+    let root = std::env::temp_dir().join(format!("procraft-turned-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("artwork");
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // kept with it, and its thumbnail turned so: the canvas's left side at the top
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("artwork.json")).unwrap()).unwrap();
+    assert_eq!(json.get("turns").and_then(serde_json::Value::as_u64), Some(1));
+    let thumb = crate::project::read_png(&dir.join("thumbnail.png"), 40, 80).unwrap();
+    let red = |rows: std::ops::Range<usize>| {
+        rows.flat_map(|y| (0..40).map(move |x| (y * 40 + x) * 4))
+            .filter(|&i| thumb[i] > 200 && thumb[i + 1] < 100)
+            .count()
+    };
+    assert!(red(0..40) > 20 && red(40..80) == 0, "{} above, {} below", red(0..40), red(40..80));
+    let store = crate::gallery::ArtworkStore::open(root.to_string_lossy().into_owned());
+    let listed: Vec<u32> = store
+        .list(None)
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::gallery::GalleryEntry::Artwork { artwork } => Some(artwork.turns),
+            crate::gallery::GalleryEntry::Stack { .. } => None,
+        })
+        .collect();
+    assert_eq!(listed, [1]);
+    // a package says it shows turned: read back, it is as it showed
+    let package = root.join(format!("turned.{}", procraft_engine::native::EXTENSION));
+    s.export_package(package.to_string_lossy().into_owned(), 7, None).unwrap();
+    let back = procraft_engine::native::read(&std::fs::read(&package).unwrap()).unwrap();
+    assert_eq!((back.document.width(), back.document.height()), (40, 80));
+    // the window turning with the device turns the view, not the canvas
+    s.follow_screen_turn(0.0, 0.0, -FRAC_PI_2);
+    assert_eq!(s.shown_turns(), 1);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // opened again: as it was left, and fitted (without the memory) turned so
+    let t = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(t.shown_turns(), 1);
+    t.forget_saved_view();
+    let m = t.opening_view_matrix(200, 200);
+    assert!((m[1].atan2(m[0]) - FRAC_PI_2).abs() < 1e-3, "{m:?}");
+    // without the memory, turning the canvas leaves the gallery's turn as it was
+    {
+        let mut st = t.shared.lock();
+        st.window_size = (200, 200);
+        st.place_view();
+    }
+    t.view_gesture(100.0, 100.0, 0.0, 0.0, 1.0, -FRAC_PI_2);
+    assert_eq!(t.shown_turns(), 1);
+    // with it, turned back upright by the fingers, upright again
+    s.view_gesture(100.0, 100.0, 0.0, 0.0, 1.0, -FRAC_PI_2);
+    assert_eq!(s.shown_turns(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn saves_at_the_same_time_keep_the_layers_whole() {
     let Some(s) = session(300, 300) else { return };
     s.set_brush_size(0.5);

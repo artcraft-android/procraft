@@ -152,7 +152,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         fun map(x: Float, y: Float) = toPanel(from, x, y).let { (px, py) -> fromPanel(to, px, py) }
         val (ox, oy) = map(0f, 0f)
         val (ux, uy) = map(1f, 0f)
-        s.viewGesture(0f, 0f, ox, oy, 1f, atan2(uy - oy, ux - ox))
+        // (told apart from a turn of the fingers: the artwork's gallery turn counts only those)
+        s.followScreenTurn(ox, oy, atan2(uy - oy, ux - ox))
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

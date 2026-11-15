@@ -2299,13 +2299,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * The gallery zooming into an artwork as it opens ([opening]), or out of it as it closes: the
-     * artwork's cell and where its canvas is (window pixels), and closing, a picture of the canvas.
+     * artwork's cell and where its canvas is (window pixels), and closing, a picture of the canvas;
+     * the cell shows the artwork turned by [turns] quarter turns clockwise.
      */
     class GalleryZoom(
         val cell: androidx.compose.ui.geometry.Rect,
         val canvas: CanvasPlace,
         val opening: Boolean,
         val picture: androidx.compose.ui.graphics.ImageBitmap? = null,
+        val turns: Int = 0,
     )
 
     /**
@@ -2323,6 +2325,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Where each artwork's thumbnail was last shown in the gallery (window pixels), by its folder's name. */
     val thumbAt = mutableMapOf<String, androidx.compose.ui.geometry.Rect>()
+
+    /** The box each artwork's thumbnail was last shown fitted in (window pixels), by its folder's name. */
+    val thumbBoxAt = mutableMapOf<String, androidx.compose.ui.geometry.Rect>()
 
     /** The gallery's grid, kept so it is where it was when the gallery comes back. */
     val galleryGrid = androidx.compose.foundation.lazy.grid.LazyGridState()
@@ -2401,7 +2406,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             s.onSuccess {
                 if (!orientationMemory) it.forgetSavedView()
                 val m = it.openingViewMatrix(windowPx.width.toUInt(), windowPx.height.toUInt())
-                galleryZoom = cell?.let { c -> GalleryZoom(c, canvasPlace(it, m), opening = true) }
+                galleryZoom = cell?.let { c -> GalleryZoom(c, canvasPlace(it, m), opening = true, turns = a.turns) }
                 start(it, a.dir, brushesLoaded = true)
                 then?.invoke()
             }.onFailure { message = "This artwork can't be opened." }
@@ -2527,15 +2532,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         strokeSound.follow(null, false)
         s.detachProjection()
         val dir = artworkDir
-        // the gallery zooms out of the artwork's cell, the canvas fading away over it
-        val cell = dir?.let { thumbAt[it.name] }
+        // the gallery zooms out of the artwork's cell, the canvas fading away over it; the cell as
+        // it will show, turned as the canvas is left
+        val turns = s.shownTurns().toInt()
+        val cell = dir?.let { d ->
+            val info = s.info()
+            val shown = Artwork(d, "", info.width.toInt(), info.height.toInt(), 0, turns)
+            thumbBoxAt[d.name]?.let { io.github.artcraftandroid.procraft.ui.fittedIn(it, shown.ratio) } ?: thumbAt[d.name]
+        }
         galleryZoom = cell?.let { c ->
             val picture = s.canvasThumbnail(CLOSING_PICTURE_SIDE.toUInt())?.let { t ->
                 val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
             }
-            GalleryZoom(c, canvasPlace(s, s.viewMatrix()), opening = false, picture = picture)
+            GalleryZoom(c, canvasPlace(s, s.viewMatrix()), opening = false, picture = picture, turns = turns)
         }
         keepColour()
         // a plugin's panel goes with the artwork it was open over

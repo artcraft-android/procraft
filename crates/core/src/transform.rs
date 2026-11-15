@@ -667,7 +667,8 @@ impl CanvasSession {
         let window = (width.max(1), height.max(1));
         let view = st.view.unwrap_or_else(|| {
             st.saved_view.and_then(|v| v.view(window)).unwrap_or_else(|| {
-                procraft_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
+                let canvas = (st.doc.width(), st.doc.height());
+                procraft_engine::view::View::fit_turned(canvas, window, st.fit_insets, i32::from(st.turns))
             })
         });
         let m = view.to_screen();

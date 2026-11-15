@@ -1127,12 +1127,13 @@ impl App {
             }
             Ok(session) => {
                 let cell = self.gallery.picture_of(&dir);
+                let turns = session.shown_turns();
                 self.open_artwork(Arc::clone(&session), dir);
                 // the gallery zooms into its picture
                 if let (Some(cell), Some(screen)) = (cell, &self.screen) {
                     let size = screen.window.inner_size();
                     let scale = screen.window.scale_factor() as f32 * screen.egui.egui_ctx().zoom_factor();
-                    self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
+                    self.zoom = Some(zoom::Zoom::opening(&session, cell, turns, (size.width, size.height), scale));
                 }
             }
             Err(e) => files::tell("Can't open the artwork", &e),
@@ -1344,11 +1345,13 @@ impl App {
         let opened = match action {
             Action::Gallery => {
                 if self.leave_artwork() {
-                    // the gallery zooms out of the artwork's picture
+                    // the gallery zooms out of the artwork's picture, as it will show (turned as its
+                    // canvas was left)
+                    let (info, turns) = (session.info(), session.shown_turns());
                     if let (Some(dir), Some(screen)) = (&self.artwork, &self.screen)
-                        && let Some(cell) = self.gallery.picture_of(dir)
+                        && let Some(cell) = self.gallery.picture_as(dir, (info.width, info.height), turns)
                     {
-                        self.zoom = Some(zoom::Zoom::closing(screen.egui.egui_ctx(), session, cell));
+                        self.zoom = Some(zoom::Zoom::closing(screen.egui.egui_ctx(), session, cell, turns));
                     }
                     self.session = None;
                     self.artwork = None;

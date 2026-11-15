@@ -660,6 +660,14 @@ pub(crate) struct State {
     pub(crate) backdrop_windows: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
+    /// How the gallery shows the artwork: turned this many quarter turns clockwise, as its canvas
+    /// was left (kept with it).
+    pub(crate) turns: u8,
+    /// How far the view has turned with the window as the device turned (radians), the canvas
+    /// staying put on the glass: not a turn of the canvas, so the gallery's turn leaves it out.
+    pub(crate) screen_follow: f32,
+    /// The gallery's turn follows the canvas's (Canvas Orientation Memory); else it stays.
+    pub(crate) turns_follow_view: bool,
     /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
     /// apart from the document, so that undoing never moves it.
     pub(crate) reference_window: procraft_engine::reference_window::ReferenceWindow,
@@ -769,23 +777,49 @@ impl State {
     }
 
     /// Places the canvas in the window the first time: the view kept with the artwork, unless it
-    /// would leave the canvas off the page, else fitted.
+    /// would leave the canvas off the page, else fitted (turned as the gallery shows it).
     pub(crate) fn place_view(&mut self) {
         if self.view.is_none() {
             let canvas = (self.doc.width(), self.doc.height());
-            let kept = self
-                .saved_view
-                .take()
+            let saved = self.saved_view.take();
+            let kept = saved
                 .and_then(|v| v.view(self.window_size))
                 .filter(|v| project::shows_canvas(v, self.window_size, canvas));
+            // what the kept view had turned with the screen, still left out of the gallery's turn
+            self.screen_follow = kept.and(saved).map_or(0.0, |v| v.followed());
             self.view = Some(kept.unwrap_or_else(|| self.fitted_view()));
         }
     }
 
+    /// The quarter turns clockwise the gallery shows the artwork turned by, as it would be kept
+    /// now: with Canvas Orientation Memory, the nearest to how its canvas is turned (less what the
+    /// view turned with the screen as the device turned); else, or a model, as it was.
+    pub(crate) fn shown_turns(&self) -> u8 {
+        if self.scene.is_some() {
+            return 0;
+        }
+        // while the guide editor is open, as it was before it
+        let view = self.guide_before.as_ref().map_or(self.view, |(_, before)| *before);
+        match view {
+            Some(v) if self.turns_follow_view => {
+                let m = v.to_screen();
+                // its down axis gives its turn whether or not it is mirrored
+                let angle = (-m.c).atan2(m.d) - self.screen_follow;
+                if angle.is_finite() {
+                    ((angle / std::f32::consts::FRAC_PI_2).round() as i32).rem_euclid(4) as u8
+                } else {
+                    self.turns
+                }
+            }
+            _ => self.turns,
+        }
+    }
+
     /// The whole canvas fitted in the window, clear of the insets, turned by the right angle the
-    /// view is nearest (fitting straightens a turned canvas, but keeps it on its side if it is).
+    /// view is nearest (fitting straightens a turned canvas, but keeps it on its side if it is);
+    /// before it is shown, as the gallery shows it.
     pub(crate) fn fitted_view(&self) -> View {
-        let turns = self.view.map_or(0, |v| v.quarter_turns());
+        let turns = self.view.map_or(i32::from(self.turns), |v| v.quarter_turns());
         // in the guide editor, the whole window (behind its bars)
         let insets = if self.guide_before.is_some() { [0.0; 4] } else { self.fit_insets };
         View::fit_turned((self.doc.width(), self.doc.height()), self.window_size, insets, turns)
@@ -1686,6 +1720,9 @@ impl CanvasSession {
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
             saved_view: None,
+            turns: 0,
+            screen_follow: 0.0,
+            turns_follow_view: true,
             reference_window: Default::default(),
             reference_picture: None,
         };
@@ -2330,9 +2367,31 @@ impl CanvasSession {
         st.scene = None;
     }
 
-    /// The artwork opens fitted, not as it was left (Canvas Orientation Memory off).
+    /// The artwork opens fitted, not as it was left, and the gallery's turn of it stays as it is
+    /// (Canvas Orientation Memory off).
     pub fn forget_saved_view(&self) {
-        self.shared.lock().saved_view = None;
+        let mut st = self.shared.lock();
+        st.saved_view = None;
+        st.turns_follow_view = false;
+    }
+
+    /// How many quarter turns clockwise the gallery shows the artwork turned by, as it would be
+    /// kept now (see [`CanvasSession::save`]): as its canvas is turned, to the nearest.
+    pub fn shown_turns(&self) -> u32 {
+        u32::from(self.shared.lock().shown_turns())
+    }
+
+    /// The window turned with the device: the view turns by `rotation` (radians) about the
+    /// window's top-left corner and moves by `pan`, so the canvas stays where it was on the glass.
+    /// As [`CanvasSession::view_gesture`], but not counted as a turn of the canvas.
+    pub fn follow_screen_turn(&self, pan_x: f32, pan_y: f32, rotation: f32) {
+        {
+            let mut st = self.shared.lock();
+            if rotation.is_finite() && st.view.is_some() && !st.scene_shown() {
+                st.screen_follow = (st.screen_follow + rotation).rem_euclid(std::f32::consts::TAU);
+            }
+        }
+        self.view_gesture(0.0, 0.0, pan_x, pan_y, 1.0, rotation);
     }
 
     /// The tool chosen; the one it replaces is kept as the last used (a pen's "switch to the

@@ -71,6 +71,14 @@ struct ArtworkFile {
         skip_serializing_if = "Option::is_none"
     )]
     view: Option<SavedView>,
+    /// How the gallery shows it: turned this many quarter turns clockwise (1 to 3), as its canvas
+    /// was left; none, upright. Its thumbnail is kept turned so.
+    #[serde(
+        default,
+        deserialize_with = "procraft_engine::document::or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    turns: Option<u8>,
     /// The model painted on, if it is one (its current texture set is `document`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<crate::scene3d::SavedModel>,
@@ -94,20 +102,40 @@ struct ArtworkFile {
 pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
 
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
-/// rotation (radians).
+/// rotation (radians), and how much of that rotation was the view turning with the screen as the
+/// device turned (not a turn of the canvas).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SavedView {
     centre: [f32; 2],
     zoom: f32,
     rotation: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    followed: f32,
+}
+
+/// Nothing to keep.
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 impl SavedView {
-    /// The view `view` makes in a window `window` pixels.
-    pub(crate) fn of(view: &View, window: (u32, u32)) -> Option<SavedView> {
+    /// The view `view` makes in a window `window` pixels, `followed` radians of its turn the
+    /// screen's.
+    pub(crate) fn of(view: &View, window: (u32, u32), followed: f32) -> Option<SavedView> {
         let middle = Vec2::new(window.0 as f32 / 2.0, window.1 as f32 / 2.0);
         let centre = view.screen_to_canvas(middle)?;
-        Some(SavedView { centre: [centre.x, centre.y], zoom: view.zoom(), rotation: view.to_screen().rotation() })
+        let followed = if followed.is_finite() { followed } else { 0.0 };
+        Some(SavedView {
+            centre: [centre.x, centre.y],
+            zoom: view.zoom(),
+            rotation: view.to_screen().rotation(),
+            followed,
+        })
+    }
+
+    /// How much of its rotation was the view turning with the screen (radians).
+    pub(crate) fn followed(&self) -> f32 {
+        if self.followed.is_finite() { self.followed } else { 0.0 }
     }
 
     /// It again, in a window `window` pixels.
@@ -304,6 +332,8 @@ impl crate::State {
         // the time on it up to now saved with it
         self.count_tracked_time();
         let model = self.model_snapshot()?;
+        // the gallery's turn, as the canvas is left
+        self.turns = self.shown_turns();
         let file = ArtworkFile {
             format: FORMAT.to_owned(),
             version: VERSION,
@@ -317,8 +347,9 @@ impl crate::State {
                 .as_ref()
                 .map_or(self.view, |(_, before)| *before)
                 .as_ref()
-                .and_then(|v| SavedView::of(v, self.window_size))
+                .and_then(|v| SavedView::of(v, self.window_size, self.screen_follow))
                 .or(self.saved_view),
+            turns: Some(self.turns).filter(|&t| t != 0),
             model: model.as_ref().map(|m| m.saved.clone()),
             reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
             // (opened with its plugin off, it stays the plugin's: its kind and data kept as they were)
@@ -635,9 +666,11 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         if let Some((pw, ph, rgba)) = model.and_then(|m| m.picture) {
             let (tw, th, small) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
             stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &[])), thumb, &mut staged)?;
-        } else if let Some((tw, th, mut small)) =
+        } else if let Some((tw, th, small)) =
             composite.map(|t| (t.width, t.height, straight_alpha(&t.rgba))).or(unshown)
         {
+            // turned as the gallery shows it
+            let (tw, th, mut small) = turned(tw, th, small, file.turns.unwrap_or(0));
             // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
             if let Some(table) = proof_table(&file.document) {
                 table.apply_rgba(&mut small, false);
@@ -866,6 +899,7 @@ impl CanvasSession {
             st.layer_data_unread.extend(data_unread);
             st.info = file.info;
             st.saved_view = file.view;
+            st.turns = file.turns.unwrap_or(0) % 4;
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
@@ -1038,7 +1072,7 @@ impl CanvasSession {
             None => None,
         };
         self.exported(0.0);
-        let (doc, pixels, composite, name, info, reference, reference_picture) = {
+        let (doc, pixels, composite, name, info, reference, reference_picture, turns) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
@@ -1061,10 +1095,13 @@ impl CanvasSession {
             }
             let reference = (st.reference_window.clone(), st.reference_picture.clone());
             st.count_tracked_time();
-            (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1)
+            let turns = st.shown_turns();
+            (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone(), reference.0, reference.1, turns)
         };
         let (w, h) = (doc.width(), doc.height());
-        let (tw, th, mut thumb) = thumbnail(&straight_alpha(&composite), w, h, PACKAGE_PREVIEW_SIDE);
+        // the preview turned as the package says the canvas shows
+        let (tw, th, thumb) = thumbnail(&straight_alpha(&composite), w, h, PACKAGE_PREVIEW_SIDE);
+        let (tw, th, mut thumb) = turned(tw, th, thumb, turns);
         if let Some(table) = proof_table(&doc) {
             table.apply_rgba(&mut thumb, false);
         }
@@ -1082,6 +1119,7 @@ impl CanvasSession {
             time_lapse: time_lapse.as_ref(),
             reference: Some(&reference),
             reference_picture: reference_picture.as_deref().map(Vec::as_slice),
+            turns: u32::from(turns),
         });
         self.exported(0.95);
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
@@ -1860,6 +1898,13 @@ pub fn import_psd(path: String, dir: String, name: String) -> PsdOutcome {
 }
 
 /// The picture scaled down (box filter) to fit `side`, straight alpha, for viewing elsewhere.
+/// A picture (`width` x `height`, RGBA) turned `turns` quarter turns clockwise.
+fn turned(width: u32, height: u32, rgba: Vec<u8>, turns: u8) -> (u32, u32, Vec<u8>) {
+    let turns = u32::from(turns % 4);
+    let rgba = procraft_engine::native::orient(rgba, width as usize, height as usize, 4, turns, false, false);
+    if turns % 2 == 1 { (height, width, rgba) } else { (width, height, rgba) }
+}
+
 pub(crate) fn thumbnail(rgba: &[u8], width: u32, height: u32, side: u32) -> (u32, u32, Vec<u8>) {
     let scale = (side as f32 / width.max(height).max(1) as f32).min(1.0);
     let (tw, th) = (((width as f32 * scale).round() as u32).max(1), ((height as f32 * scale).round() as u32).max(1));

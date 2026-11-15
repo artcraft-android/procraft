@@ -453,10 +453,13 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                 ) {
                                     Box(
-                                        Modifier.padding(top = 39.dp).size(cell.width, cell.thumb).graphicsLayer {
-                                            scaleX = lift.value
-                                            scaleY = lift.value
-                                        },
+                                        Modifier.padding(top = 39.dp).size(cell.width, cell.thumb)
+                                            // the box it is fitted in, for the cell it will be once its canvas is turned
+                                            .onGloballyPositioned { if (vm.galleryZoom == null) vm.thumbBoxAt[a.dir.name] = it.boundsInWindow() }
+                                            .graphicsLayer {
+                                                scaleX = lift.value
+                                                scaleY = lift.value
+                                            },
                                         contentAlignment = Alignment.BottomCenter,
                                     ) {
                                         // where it is, for zooming into it, unless the gallery is zooming itself
@@ -880,7 +883,7 @@ private fun RenameArtwork(a: Artwork, version: Int, from: androidx.compose.ui.ge
         onDone(text.text.trim().ifEmpty { a.name })
     }
     BackHandler(enabled = !closing) { finish() }
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+    val ratio = a.ratio
     BoxWithConstraints(
         Modifier.fillMaxSize().graphicsLayer { alpha = if (closing) shown else 1f }
             .pointerInput(a) { detectTapGestures { finish() } },
@@ -958,8 +961,10 @@ private val DragScrollEdge = 60.dp
 private val DragScrollStep = 12.dp
 
 /** Artwork [a]'s picture as it sits in its thumbnail's [box]: fitted, standing on the box's bottom. */
-private fun fitted(box: androidx.compose.ui.geometry.Rect, a: Artwork): androidx.compose.ui.geometry.Rect {
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+private fun fitted(box: androidx.compose.ui.geometry.Rect, a: Artwork): androidx.compose.ui.geometry.Rect = fittedIn(box, a.ratio)
+
+/** A picture [ratio] wide to its height as it sits in a thumbnail's [box]: fitted, standing on the box's bottom. */
+fun fittedIn(box: androidx.compose.ui.geometry.Rect, ratio: Float): androidx.compose.ui.geometry.Rect {
     val w = if (ratio <= box.width / box.height) box.height * ratio else box.width
     val h = w / ratio
     return androidx.compose.ui.geometry.Rect(box.center.x - w / 2f, box.bottom - h, box.center.x + w / 2f, box.bottom)
@@ -1576,7 +1581,7 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
         if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
         value = decoded ?: value
     }
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+    val ratio = a.ratio
     val cell = LocalCell.current
     val tall = ratio <= cell.width / cell.thumb
     Box(
