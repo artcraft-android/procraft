@@ -13,7 +13,7 @@ Make2D's timeline is Koi Studio's Timeline v2 rebuilt on ProCraft's core. This d
 - Keep everything ProCraft does with pixels: textures, parking, undo, the file format, the brush engine.
 - Open any existing ProCraft or Make2D canvas, including Animation Assist ones, without losing anything.
 
-Not in this phase: adjustment layers (phase 4; effects stay ProCraft's own suite, with no per-layer effect stack). Audio and video came in as phase 3 (see Media, below).
+Adjustment layers came in as phase 4 (see Adjustment clips, below); effects stay ProCraft's own suite, with no per-layer effect stack. Audio and video came in as phase 3 (see Media, below).
 
 Left out on purpose (Nov 14, 2026 scope review): a timeline graph editor, stretching clips, scene split and splitting a project, vector in-betweening, and anything else niche. See the gap map for the full list.
 
@@ -60,7 +60,7 @@ Clip: id, name, start, duration, opacity, blend, mask, adjustment, disabled, lab
         Video   { media, trim_start, rect }
         Audio   { media, trim_start, offset, volume, muted, volume_keys }
 
-ClipKeys: position, scale, rotation, opacity (Channel each), pivot, effects
+ClipKeys: position, scale, rotation, opacity (Channel each), pivot, adjustment (Channel<Filter>)
 Channel<T>: keys sorted by frame;  Key { frame, value, easing, path handles }
 Easing: Linear, Hold, Smooth, CubicBezier, Curve, Bounce, Elastic, Steps,
         ElasticSteps, Cyclic, Random, Fitted(easing, repeat), Reversed(easing)
@@ -92,10 +92,10 @@ PlanItem {
   matte_only: bool,                consumed by the clip above as a matte
 }
 Added in 1d: pose: Option<Affine> (None with no pose keys, the fast path), keyed opacity.
-Phase 4: resolved effect parameters.
+Added in phase 4: adjustment: Option<Filter> (an adjustment clip's keyed adjustment there).
 ```
 
-Groups stay nested in the plan, so the renderer can composite a group as one unit before blending it, with cycles already applied to their frame. Hidden tracks, disabled clips, adjustment clips (until phase 4) and audio draw nothing. This mirrors Koi's `TimelineSampler`, and the plan is what tests assert on: "at frame N, this is what's on screen".
+Groups stay nested in the plan, so the renderer can composite a group as one unit before blending it, with cycles already applied to their frame. Hidden tracks, disabled clips and audio draw nothing. This mirrors Koi's `TimelineSampler`, and the plan is what tests assert on: "at frame N, this is what's on screen".
 
 The plan is pure engine code with no GPU, so the easing maths, groups, cycles and mattes are all unit-testable.
 
@@ -223,6 +223,15 @@ The engine, core and GPU parts are shared; each platform needs its own decoding 
 
 Known gaps everywhere: keyed volume plays (the export mixes at the level at frame 0, and playing takes each sound's level when it starts); no recording from the microphone; splitting or duplicating a sound or video clip isn't offered (the engine's split and duplicate copy drawings).
 
+## Adjustment clips (phase 4)
+
+As built (Nov 15, 2026). An adjustment layer is a top-level layer like any other, so on a timeline it is a drawing clip's root. That clip is an *adjustment clip* (`Clip::adjustment`, kept in step with the layers by `Document::mark_adjustment_clips` on load and as it is keyed): it draws nothing of its own, but redraws what is under it through its adjustment, for its span, at its clip's opacity.
+
+- **Keys.** `ClipKeys::adjustment` is a `Channel<Filter>`: each key holds the whole adjustment, its kind the layer's. `Filter` is `Keyed`, so the timeline's easings (every one, the easing editor's too) ease it value by value from key to key; choices that change in steps (a halftone's kind, a vignette lightening) are the first key's. Keys of another kind than the layer's (the layer changed since) are left out of the drawing, and let go when it is keyed again.
+- **Plan and renderer.** `PlanItem::adjustment` is the keyed adjustment at that frame (none without keys). The compositor draws an adjustment layer with it in place of its own. The frame cache's fingerprint takes the plan whole, so a keyed change is a new frame.
+- **Keys panel.** The picked clip's adjustment values show under its pose as plain rows (`Filter::params`: each value's name, range and unit), at the playhead. Sliding one keys the whole adjustment there, a new key easing as chosen; "Remove Keys Here", copying, pasting, retiming and the easing editor take adjustment keys with the others. No graph: the user chose plain parameter lists.
+- **Not keyed:** curves and gradient maps' tables, kinds and on/off choices, and a blur's region (on a timeline, a blurring adjustment layer still composites the whole canvas, since its keys can change how far it reads).
+
 ## Build order
 
 | Step | What | Where | Done when |
@@ -235,6 +244,7 @@ Known gaps everywhere: keyed volume plays (the export mixes at the level at fram
 | 1f ✓ | Groups and cycles, mattes, keyed camera | engine, gpu, iPad | Koi's group, matte and camera features work (done Nov 14, 2026: clipping masks and alpha and luma mattes drawn on the GPU; group clips made from clips picked on one level, opened to edit their tracks, cycling with their keys repeating or running on, and composited as one; the camera keyed by dragging its frame over the canvas, exports and "Play Through Camera" seen through it) |
 | 1g ✓ | Track clipboard, retime, sync markers (tap to drop one at the playhead while playing; new UI) | engine, iPad | Clips and keys copy and paste, the frame rate changes with the timing kept, markers time the drawings (done Nov 15, 2026: clips copied or cut with their keys and drawings, pasted at the playhead on the track drawn on and the tracks above it, each paste one undo step, the clipboard keeping its drawings' textures while nothing else does; keys copied from a frame or all of a clip's, pasted onto the clip at the playhead; Koi's "Keep Timing" retime, chosen in Settings, scaling clips, keys, cycles, markers and the camera, a sound keeping its start in seconds; markers saved with the timeline, dropped with Mark while playing, shown as amber flags on the ruler, dragged, held to delete, cleared in Settings; also from 1f, a camera lane of its keys under the ruler, and the layers panel listing only the drawing drawn on) |
 | 3 ✓ | Media: sounds and videos on tracks, waveforms, playing and scrubbing with sound, sound in video exports, the animatic detector | engine, core, gpu, iPad | A sound and an animatic can be brought in, timed and played, and drawn over (done Nov 15, 2026; desktop and Android not built, see Media) |
+| 4 ✓ | Adjustment clips: an adjustment layer's values keyed per clip, typed (`Channel<Filter>`) in place of the `Vec<f32>` placeholder | engine, gpu, core, iPad | An adjustment eases with the timeline's channels and easings, keyed from the Keys panel's rows (done Nov 15, 2026) |
 
 Steps 1a and 1b change nothing anyone can see, which makes them safe to land first: the timeline drives everything, but a migrated canvas looks and plays exactly as it did.
 
@@ -244,5 +254,5 @@ Settled Nov 14, 2026:
 
 - **Frame rate:** 1–120 fps, as in Koi (`MAX_FPS`).
 - **Simple mode stays.** `Timeline::simple` names the one track a document shows as a flipbook strip, like Animation Assist today: one thumbnail per drawing, holds as widths, onion skins, play. `None` is the full track view. Both are views of the same document, so switching never changes it, and the other tracks (a background, say) still draw in simple mode. A migrated Animation Assist canvas opens in simple mode on its "Animation" track.
-- **Effect keys** are stored as plain parameter lists by effect id (`Channel<Vec<f32>>`) until phase 4 defines the effect types.
+- **Effect keys** were stored as plain parameter lists by effect id (`Channel<Vec<f32>>`) until phase 4 defined the effect types. As built (Nov 15, 2026), they are typed: one `Channel<Filter>` per clip, an adjustment clip's adjustment. Old files' `effects` lists were never written to, and are dropped on load.
 - **Exposure is one setting per document** (`Timeline::exposure`, frames per new drawing, 1 to 12, default 1 for "on ones").
