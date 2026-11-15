@@ -50,6 +50,9 @@ impl TimeLapseUi {
         // keeps a time-lapse
         if let Some((left, _)) = self.lapse.take() {
             std::thread::spawn(move || {
+                // behind what is drawn meanwhile: a long session's video takes a while to make,
+                // and the next artwork is opening
+                in_background();
                 let _ = for_package(&left);
             });
         }
@@ -58,6 +61,7 @@ impl TimeLapseUi {
         if let Some((_, lapse)) = &self.lapse {
             let lapse = Arc::clone(lapse);
             std::thread::spawn(move || {
+                in_background();
                 let gone = drop_pictures(&lapse);
                 if gone > 0 {
                     log::info!("the time-lapse's videos hold {gone} frames: their pictures went");
@@ -304,6 +308,20 @@ pub fn for_package(dir: &str) -> procraft_core::PackageTimeLapse {
     // the pictures now in a video go, as the artwork file keeps a time-lapse: only as video
     drop_pictures(&lapse);
     lapse.for_package()
+}
+
+/// The thread this is called on yields to the app's others (Windows's background mode: lower
+/// processor and disk priority), for work nobody waits on.
+#[allow(unsafe_code)]
+fn in_background() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+        // SAFETY: the calling thread's own pseudo handle, its priority only
+        if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) } {
+            log::warn!("background priority: {e}");
+        }
+    }
 }
 
 /// The pictures its videos hold too gone, once this system has read those videos: videos go
