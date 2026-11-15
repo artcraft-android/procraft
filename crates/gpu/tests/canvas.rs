@@ -158,6 +158,85 @@ fn a_whole_layer_kept_in_a_step_let_go_undoes_as_it_should() {
     assert!(canvas.read_layer(&gpu, layer).unwrap() == red);
 }
 
+/// Both layers' pixels after each step.
+type States = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Nine steps over two layers on a canvas of a device of little memory, its newest two steps kept
+/// on the GPU: strokes and a whole layer cleared (read back in several bands as it is packed). The
+/// layers after each step.
+fn steps_to_pack(gpu: &Gpu) -> (Document, Canvas, States) {
+    let mut doc = Document::new(1100, 1000);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    canvas.set_resident_budget(1 << 30);
+    canvas.keep_recent_history(Some(0));
+    let first = doc.current();
+    let second = doc.add_layer();
+    let read = |canvas: &Canvas| (canvas.read_layer(gpu, first).unwrap(), canvas.read_layer(gpu, second).unwrap());
+    canvas.render(gpu, &mut doc, None);
+    let mut states = vec![read(&canvas)];
+    for i in 0..9u8 {
+        if i == 5 {
+            canvas.clear_layer(first);
+        } else {
+            let layer = if i % 3 == 2 { second } else { first };
+            let k = f32::from(i) / 9.0;
+            canvas.begin_stroke(layer, StrokeStyle::new(StrokeTool::Paint, [k, 0.5, 1.0 - k], 0.8));
+            canvas.add_stamps(&[dot(Vec2::new(10.0 + f32::from(i) * 11.0, 20.0 + f32::from(i) * 6.0), 9.0)]);
+            canvas.end_stroke();
+        }
+        canvas.render(gpu, &mut doc, None);
+        states.push(read(&canvas));
+    }
+    (doc, canvas, states)
+}
+
+/// The layers of `doc`'s canvas as each was after the steps `states` follows: undone all the way,
+/// then redone.
+fn undo_and_redo_through(gpu: &Gpu, doc: &mut Document, canvas: &mut Canvas, states: &[(Vec<u8>, Vec<u8>)]) {
+    let ids: Vec<_> = doc.layers().iter().map(|l| l.id).collect();
+    let read = |canvas: &Canvas| (canvas.read_layer(gpu, ids[0]).unwrap(), canvas.read_layer(gpu, ids[1]).unwrap());
+    for i in (0..states.len() - 1).rev() {
+        canvas.undo();
+        canvas.render(gpu, doc, None);
+        assert!(read(canvas) == states[i], "undone to {i}");
+    }
+    assert!(!canvas.can_undo());
+    for (i, state) in states.iter().enumerate().skip(1) {
+        canvas.redo();
+        canvas.render(gpu, doc, None);
+        assert!(read(canvas) == *state, "redone to {i}");
+    }
+}
+
+#[test]
+fn older_steps_kept_compressed_off_the_gpu_undo_and_redo_as_they_were() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (mut doc, mut canvas, states) = steps_to_pack(&gpu);
+    canvas.pack_history_now(&gpu);
+    assert!(canvas.history_packed_bytes() > 0, "nothing packed");
+    // the newest two left on the GPU, a stroke's region each: the whole layer cleared is packed
+    let layer = 1100 * 1000 * 4;
+    assert!(canvas.history_bytes() < layer / 4, "{} bytes still on the GPU", canvas.history_bytes());
+    undo_and_redo_through(&gpu, &mut doc, &mut canvas, &states);
+    // packed again once redone, and again as it was
+    canvas.pack_history_now(&gpu);
+    assert!(canvas.history_packed_bytes() > 0);
+    undo_and_redo_through(&gpu, &mut doc, &mut canvas, &states);
+}
+
+#[test]
+fn steps_undone_while_their_pixels_are_being_packed_come_back_as_they_were() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (mut doc, mut canvas, states) = steps_to_pack(&gpu);
+    // a lot being packed (started by the last render, as the app's would be), undone under it
+    assert!(canvas.wants_render(), "no packing under way");
+    undo_and_redo_through(&gpu, &mut doc, &mut canvas, &states);
+    canvas.pack_history_now(&gpu);
+    undo_and_redo_through(&gpu, &mut doc, &mut canvas, &states);
+}
+
 #[test]
 fn stroke_opacity_caps_build_up() {
     let Some(gpu) = gpu() else { return };

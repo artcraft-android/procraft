@@ -122,6 +122,21 @@ const MAX_UNDO: usize = 100;
 const MAX_UNDO_BYTES: u64 = 768 << 20;
 const LEAST_UNDO_BYTES: u64 = 256 << 20;
 
+/// A device of little memory (3 or 4 GB): its layers' textures given at most this much (a
+/// quarter of its memory). There the history keeps its older steps' pixels compressed off the GPU
+/// (see [`Canvas::pack_history`]), and the composite's caches have no second textures of their
+/// own (see [`CachePicture`]).
+const LOW_MEMORY_BUDGET: u64 = 1280 << 20;
+/// On such a device, the newest steps the history keeps on the GPU, so undoing and redoing them
+/// is as quick as ever: those whose pixels come to a quarter of the history's room, and two at
+/// least.
+const RECENT_HISTORY_SHARE: u64 = 4;
+const RECENT_STEPS: usize = 2;
+/// The most pixels one lot of the history's packing reads back, and the most regions (at least
+/// one).
+const PACK_AT_ONCE: u64 = 32 << 20;
+const PACK_MOST_READS: usize = 16;
+
 /// How a transformed layer is resampled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resample {
@@ -1953,17 +1968,158 @@ fn collapsed(steps: Vec<Step>) -> Step {
     out
 }
 
-/// Pixels of a layer region from before an edit.
+/// Pixels of a layer region from before an edit: on the GPU (the region's size, or the whole
+/// layer's for the whole region), or (an older step's on a device of little memory) the region's
+/// rows compressed off it until the step is undone.
 struct Snapshot {
     layer: LayerId,
     rect: IRect,
-    texture: wgpu::Texture,
+    pixels: Held,
+}
+
+enum Held {
+    Texture(wgpu::Texture),
+    /// See [`procraft_engine::applz4`].
+    Packed(Vec<u8>),
 }
 
 impl Snapshot {
-    fn bytes(&self) -> u64 {
-        u64::from(self.rect.width()) * u64::from(self.rect.height()) * 4
+    fn on_gpu(layer: LayerId, rect: IRect, texture: wgpu::Texture) -> Snapshot {
+        Snapshot { layer, rect, pixels: Held::Texture(texture) }
     }
+
+    /// Its texture, if it is on the GPU.
+    fn texture(&self) -> Option<&wgpu::Texture> {
+        match &self.pixels {
+            Held::Texture(t) => Some(t),
+            Held::Packed(_) => None,
+        }
+    }
+
+    /// What it takes on the GPU.
+    fn bytes(&self) -> u64 {
+        match self.pixels {
+            Held::Texture(_) => u64::from(self.rect.width()) * u64::from(self.rect.height()) * 4,
+            Held::Packed(_) => 0,
+        }
+    }
+
+    /// What it takes compressed off the GPU.
+    fn packed_bytes(&self) -> u64 {
+        match &self.pixels {
+            Held::Texture(_) => 0,
+            Held::Packed(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
+/// A lot of the history's pixels to pack (see [`Canvas::pack_history`]): textures and the region
+/// of each to read (from its top left), and where what each packs to goes (none for one that
+/// couldn't be read).
+type PackLot = (Vec<(wgpu::Texture, IRect)>, mpsc::Sender<Vec<Option<Vec<u8>>>>);
+
+/// The rows read back at once as the history's pixels are packed, bytes (one row at least).
+const PACK_BAND: usize = 2 << 20;
+
+/// The thread the history's pixels are packed on, lot after lot, ending once the canvas lets go of
+/// where it sends them (see [`pack_region`]). None if it couldn't be made.
+fn packer(gpu: &Gpu) -> Option<mpsc::Sender<PackLot>> {
+    let (send, lots) = mpsc::channel::<PackLot>();
+    let gpu = gpu.clone();
+    let made = std::thread::Builder::new().name("history".into()).spawn(move || {
+        let mut band = None;
+        while let Ok((regions, back)) = lots.recv() {
+            let packed = regions.iter().map(|(texture, rect)| pack_region(&gpu, &mut band, texture, *rect)).collect();
+            let _ = back.send(packed);
+        }
+    });
+    match made {
+        Ok(_) => Some(send),
+        Err(e) => {
+            log::warn!("the history's pixels can't be packed: {e}");
+            None
+        }
+    }
+}
+
+/// `rect` of `texture` compressed (see [`procraft_engine::applz4`]), read back a band of rows at a
+/// time through `band` (made, or made bigger, as wanted): neither the whole region nor a buffer
+/// its size is ever held (buffers the CPU reads, each of another size, stayed in the process's
+/// memory as it went). None if it couldn't be read.
+fn pack_region(gpu: &Gpu, band: &mut Option<wgpu::Buffer>, texture: &wgpu::Texture, rect: IRect) -> Option<Vec<u8>> {
+    let (width, height) = (rect.width(), rect.height());
+    let row = width as usize * 4;
+    let padded = row.div_ceil(256) * 256;
+    let rows = u32::try_from(PACK_BAND / padded.max(1)).unwrap_or(u32::MAX).clamp(1, height.max(1));
+    let size = padded as u64 * u64::from(rows);
+    if band.as_ref().is_none_or(|b| b.size() < size) {
+        *band = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("history band"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let buffer = band.as_ref()?;
+    let read = || -> Option<Vec<u8>> {
+        let mut packer = procraft_engine::applz4::Packer::default();
+        let mut y = 0;
+        while y < height {
+            let n = rows.min(height - y);
+            // a copy that fails (a texture there was no memory for) leaves what the band held
+            let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder =
+                gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("history band") });
+            encoder.copy_texture_to_buffer(
+                copy_at(texture, rect.x0, rect.y0 + y as i32),
+                wgpu::TexelCopyBufferInfo {
+                    buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded as u32),
+                        rows_per_image: Some(n),
+                    },
+                },
+                extent(width, n),
+            );
+            gpu.queue.submit([encoder.finish()]);
+            if pollster::block_on(invalid.pop()).is_some() {
+                return None;
+            }
+            let used = padded as u64 * u64::from(n);
+            let (sent, mapped) = mpsc::channel();
+            buffer.slice(..used).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = sent.send(r);
+            });
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+            mapped.recv().ok()?.ok()?;
+            {
+                let view = buffer.slice(..used).get_mapped_range().ok()?;
+                for chunk in view.chunks(padded.max(1)) {
+                    packer.push(chunk.get(..row).unwrap_or(chunk));
+                }
+            }
+            buffer.unmap();
+            y += n;
+        }
+        Some(packer.finish())
+    };
+    let packed = read();
+    // (one left mapped, or holding what a failed copy left, is made again)
+    if packed.is_none() {
+        *band = None;
+    }
+    packed
+}
+
+/// Undo steps' pixels being read back to be kept compressed (see [`Canvas::pack_history`]): the
+/// textures read, in order, and each one's rows compressed (none if it couldn't be read), sent
+/// back from the thread that does it. What comes back is taken only while the history's
+/// textures still hold what was read (`generation`).
+struct Packing {
+    textures: Vec<wgpu::Texture>,
+    generation: u64,
+    done: mpsc::Receiver<Vec<Option<Vec<u8>>>>,
 }
 
 /// One undoable step: the document as it was (for structural changes) and the pixels it changed.
@@ -1987,6 +2143,11 @@ impl Step {
     fn bytes(&self) -> u64 {
         let selection = self.selection.as_ref().and_then(Option::as_ref).map_or(0, |s| s.len() as u64);
         self.pixels.iter().map(Snapshot::bytes).sum::<u64>() + selection
+    }
+
+    /// What its pixels kept compressed off the GPU take.
+    fn packed_bytes(&self) -> u64 {
+        self.pixels.iter().map(Snapshot::packed_bytes).sum()
     }
 }
 
@@ -2275,6 +2436,14 @@ pub struct Canvas {
     renders: u64,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    /// The history's older pixels being packed (see [`Canvas::pack_history`]), and a count that
+    /// goes up whenever its textures' pixels change (a step undone or redone).
+    packing: Option<Packing>,
+    history_generation: u64,
+    /// Where lots to pack are sent (see [`packer`]), made when first wanted.
+    packer: Option<mpsc::Sender<PackLot>>,
+    /// The bytes of newest steps kept on the GPU, set by tests (else see [`RECENT_HISTORY_SHARE`]).
+    recent_history: Option<u64>,
     transforming: Option<Transforming>,
     /// Other layers transformed along with it (layers picked together).
     transform_more: Vec<Transforming>,
@@ -2584,6 +2753,10 @@ impl Canvas {
             dirty: IRect::from_size(width, height),
             undo: Vec::new(),
             redo: Vec::new(),
+            packing: None,
+            history_generation: 0,
+            packer: None,
+            recent_history: None,
             transforming: None,
             transform_more: Vec::new(),
             backdrop: None,
@@ -3395,6 +3568,164 @@ impl Canvas {
         }
     }
 
+    /// What the undo history's pixels kept compressed off the GPU take, bytes.
+    pub fn history_packed_bytes(&self) -> u64 {
+        self.undo.iter().chain(&self.redo).map(Step::packed_bytes).sum()
+    }
+
+    /// Whether the device has little memory (see [`LOW_MEMORY_BUDGET`]).
+    fn low_memory(&self) -> bool {
+        self.resident_budget != 0 && self.resident_budget <= LOW_MEMORY_BUDGET
+    }
+
+    /// Keeps the newest undo steps whose pixels come to `bytes` on the GPU (two at least), the
+    /// rest packed on a device of little memory: for tests. None: as the device's room has it.
+    #[doc(hidden)]
+    pub fn keep_recent_history(&mut self, bytes: Option<u64>) {
+        self.recent_history = bytes;
+    }
+
+    /// On a device of little memory, keeps the history's older steps' pixels compressed off the
+    /// GPU, a lot at a time: read back (the copies queued now, the waiting and compressing on a
+    /// thread of its own), then put in place of their textures in a later render. The newest
+    /// steps stay on the GPU (see [`RECENT_HISTORY_SHARE`]), so undoing and redoing them is as
+    /// quick as ever; an older one is uploaded again as it is undone (see [`Canvas::unpacked`]).
+    /// Nothing new is started while an edit is under way.
+    fn pack_history(&mut self, gpu: &Gpu) {
+        if let Some(packing) = self.packing.take() {
+            match packing.done.try_recv() {
+                Ok(packed) => self.take_packed(packing, packed),
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.packing = Some(packing);
+                    return;
+                }
+                // the thread stopped: the textures stay as they are
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        let busy = self.active.is_some()
+            || self.held.is_some()
+            || self.smudge.is_some()
+            || self.transforming.is_some()
+            || self.liquify.is_some();
+        if !self.low_memory() || busy {
+            return;
+        }
+        // the newest steps that fit the room kept for them stay
+        let recent = self.recent_history.unwrap_or(self.history_most() / RECENT_HISTORY_SHARE);
+        let mut kept = 0u64;
+        let mut older = self.undo.len();
+        for (n, step) in self.undo.iter().rev().enumerate() {
+            if n >= RECENT_STEPS && kept + step.bytes() > recent {
+                break;
+            }
+            kept += step.bytes();
+            older -= 1;
+        }
+        // the oldest of the rest on the GPU, up to a lot's worth
+        let mut lot: Vec<wgpu::Texture> = Vec::new();
+        let mut regions = Vec::new();
+        let mut bytes = 0u64;
+        'steps: for step in self.undo.get(..older).unwrap_or_default() {
+            for s in &step.pixels {
+                let Held::Texture(texture) = &s.pixels else { continue };
+                if !lot.is_empty() && (bytes + s.bytes() > PACK_AT_ONCE || lot.len() >= PACK_MOST_READS) {
+                    break 'steps;
+                }
+                bytes += s.bytes();
+                regions.push((texture.clone(), IRect::from_size(s.rect.width(), s.rect.height())));
+                lot.push(texture.clone());
+            }
+        }
+        if lot.is_empty() {
+            return;
+        }
+        if self.packer.is_none() {
+            self.packer = packer(gpu);
+        }
+        let (sent, done) = mpsc::channel();
+        match self.packer.as_ref().map(|packer| packer.send((regions, sent))) {
+            Some(Ok(())) => self.packing = Some(Packing { textures: lot, generation: self.history_generation, done }),
+            // its thread gone: another made next time
+            _ => self.packer = None,
+        }
+    }
+
+    /// Puts what `packing` compressed in place of the textures it read, where the history still
+    /// has them as they were read; the textures let go (those the canvas's size kept as spares).
+    fn take_packed(&mut self, packing: Packing, packed: Vec<Option<Vec<u8>>>) {
+        if packing.generation != self.history_generation {
+            return;
+        }
+        let mut gone = Vec::new();
+        for (texture, bytes) in packing.textures.iter().zip(packed) {
+            let Some(bytes) = bytes else { continue };
+            let held = self.undo.iter_mut().flat_map(|s| s.pixels.iter_mut()).find(|s| s.texture() == Some(texture));
+            if let Some(s) = held
+                && let Held::Texture(old) = std::mem::replace(&mut s.pixels, Held::Packed(bytes))
+            {
+                gone.push(old);
+            }
+        }
+        drop(packing);
+        for texture in gone {
+            self.keep_spare(texture);
+        }
+    }
+
+    /// Packs what there is of the history to pack now, waiting for each lot (see
+    /// [`Canvas::pack_history`]): for tests and measuring.
+    #[doc(hidden)]
+    pub fn pack_history_now(&mut self, gpu: &Gpu) {
+        for _ in 0..10_000 {
+            self.pack_history(gpu);
+            let Some(packing) = self.packing.take() else { return };
+            match packing.done.recv() {
+                Ok(packed) => self.take_packed(packing, packed),
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// `step` with any of its pixels kept compressed (see [`Canvas::pack_history`]) back in
+    /// textures, uploaded in `encoder` before what is recorded after: the upload buffers go in
+    /// `uploaded`, to be given back once it is sent.
+    fn unpacked(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mut step: Step,
+        uploaded: &mut Vec<wgpu::Buffer>,
+    ) -> Step {
+        for s in &mut step.pixels {
+            let Held::Packed(bytes) = &s.pixels else { continue };
+            let (w, h) = (s.rect.width(), s.rect.height());
+            let size = w as usize * h as usize * 4;
+            let Some(rows) = procraft_engine::applz4::decode(bytes, size).filter(|r| r.len() == size) else {
+                log::error!("an undo step's kept pixels are damaged");
+                continue;
+            };
+            // a whole layer's into a texture the canvas's size, as it was kept, else the region's
+            let texture = if s.rect == self.full() {
+                self.take_spare().unwrap_or_else(|| texture(device, "undo", self.width, self.height, LAYER_FORMAT))
+            } else {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("undo"),
+                    size: extent(w, h),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: LAYER_FORMAT,
+                    usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            uploaded.extend(self.upload(device, encoder, &texture, IRect::from_size(w, h), &rows, 0, w as usize * 4));
+            s.pixels = Held::Texture(texture);
+        }
+        step
+    }
+
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
@@ -3800,9 +4131,9 @@ impl Canvas {
     }
 
     /// Whether the canvas has work that more renders do (caches being remade, layers being
-    /// parked): it wants another render soon.
+    /// parked, the history's pixels being packed): it wants another render soon.
     pub fn wants_render(&self) -> bool {
-        self.busy() || self.parking_left
+        self.busy() || self.parking_left || self.packing.is_some()
     }
 
     /// How the last remake of the caches went (none made yet).
@@ -4807,6 +5138,7 @@ impl Canvas {
                 }
                 Op::Undo => {
                     if let Some(step) = self.undo.pop() {
+                        let step = self.unpacked(device, &mut encoder, step, &mut uploaded);
                         let inverse = self.apply_step(gpu, &mut encoder, doc, step);
                         self.redo.push(inverse);
                         history_changed = true;
@@ -4814,6 +5146,7 @@ impl Canvas {
                 }
                 Op::Redo => {
                     if let Some(step) = self.redo.pop() {
+                        let step = self.unpacked(device, &mut encoder, step, &mut uploaded);
                         let inverse = self.apply_step(gpu, &mut encoder, doc, step);
                         self.undo.push(inverse);
                         history_changed = true;
@@ -5048,9 +5381,10 @@ impl Canvas {
                         }
                     } else if let Some(s) = held
                         && let Some(layer) = self.layers.get(&s.layer)
+                        && let Some(texture) = s.texture()
                     {
                         encoder.copy_texture_to_texture(
-                            copy_at(&s.texture, 0, 0),
+                            copy_at(texture, 0, 0),
                             copy_at(&layer.texture, s.rect.x0, s.rect.y0),
                             extent(s.rect.width(), s.rect.height()),
                         );
@@ -5281,7 +5615,7 @@ impl Canvas {
                                     made: 0,
                                     name: None,
                                     doc: None,
-                                    pixels: vec![Snapshot { layer: t.layer, rect, texture }],
+                                    pixels: vec![Snapshot::on_gpu(t.layer, rect, texture)],
                                     selection: None,
                                     flip: None,
                                 });
@@ -5299,9 +5633,9 @@ impl Canvas {
                                     Some(rect) => {
                                         let texture = region_copy(device, &mut encoder, &t.before, rect);
                                         spare = Some(t.before);
-                                        Snapshot { layer: t.layer, rect, texture }
+                                        Snapshot::on_gpu(t.layer, rect, texture)
                                     }
-                                    None => Snapshot { layer: t.layer, rect: full, texture: t.before },
+                                    None => Snapshot::on_gpu(t.layer, full, t.before),
                                 })
                                 .collect();
                             if spare.is_some() {
@@ -5549,6 +5883,7 @@ impl Canvas {
         }
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
+        self.pack_history(gpu);
         // the work held back, in a submission after this one's
         if deferred {
             self.render(gpu, doc, None);
@@ -6135,7 +6470,7 @@ impl Canvas {
             made: 0,
             name: None,
             doc: None,
-            pixels: vec![Snapshot { layer: smudge.layer, rect, texture }],
+            pixels: vec![Snapshot::on_gpu(smudge.layer, rect, texture)],
             selection: None,
             flip: None,
         });
@@ -6537,9 +6872,9 @@ impl Canvas {
                 copy_at(&texture, 0, 0),
                 extent(self.width, self.height),
             );
-            return Some(Snapshot { layer: id, rect, texture });
+            return Some(Snapshot::on_gpu(id, rect, texture));
         }
-        Some(Snapshot { layer: id, rect, texture: region_copy(device, encoder, &layer.texture, rect) })
+        Some(Snapshot::on_gpu(id, rect, region_copy(device, encoder, &layer.texture, rect)))
     }
 
     /// Applies an undo or redo step and returns its inverse: the pixels and document it replaced.
@@ -6549,7 +6884,14 @@ impl Canvas {
         let name = step.name.clone();
         let step_flip = step.flip;
         let mut pixels = Vec::with_capacity(step.pixels.len());
+        // what the history's textures hold changes: packing under way reads what they held
+        self.history_generation = self.history_generation.wrapping_add(1);
         for s in step.pixels {
+            // (a step's pixels kept compressed are back on the GPU by now: see `Canvas::unpacked`)
+            let Some(texture) = s.texture().cloned() else {
+                log::error!("an undo step's pixels couldn't be brought back");
+                continue;
+            };
             self.restore_all(gpu, [s.layer], true);
             let rect = s.rect.intersect(self.full());
             if let Some(layer) = self.layers.get(&s.layer).filter(|_| rect == s.rect && !rect.is_empty()) {
@@ -6563,18 +6905,18 @@ impl Canvas {
                     size,
                 );
                 encoder.copy_texture_to_texture(
-                    copy_at(&s.texture, 0, 0),
+                    copy_at(&texture, 0, 0),
                     copy_at(&layer.texture, rect.x0, rect.y0),
                     size,
                 );
-                encoder.copy_texture_to_texture(copy_at(scratch, 0, 0), copy_at(&s.texture, 0, 0), size);
+                encoder.copy_texture_to_texture(copy_at(scratch, 0, 0), copy_at(&texture, 0, 0), size);
                 pixels.push(s);
             } else if let Some(layer) = self.layers.get(&s.layer) {
                 if let Some(current) = self.snapshot(device, encoder, s.layer, s.rect) {
                     pixels.push(current);
                 }
                 encoder.copy_texture_to_texture(
-                    copy_at(&s.texture, 0, 0),
+                    copy_at(&texture, 0, 0),
                     copy_at(&layer.texture, s.rect.x0, s.rect.y0),
                     extent(s.rect.width(), s.rect.height()),
                 );
@@ -6984,11 +7326,13 @@ impl Canvas {
             self.keep_spare_snapshot(dropped);
         }
         self.undo.push(step);
-        let mut bytes: u64 = self.undo.iter().map(Step::bytes).sum();
+        // what it holds on the GPU and what it keeps compressed alike
+        let held = |s: &Step| s.bytes() + s.packed_bytes();
+        let mut bytes: u64 = self.undo.iter().map(held).sum();
         let most = self.history_most();
         while self.undo.len() > MAX_UNDO || (bytes > most && self.undo.len() > 1) {
             let dropped = self.undo.remove(0);
-            bytes = bytes.saturating_sub(dropped.bytes());
+            bytes = bytes.saturating_sub(held(&dropped));
             self.keep_spare_snapshot(dropped);
         }
     }
@@ -6996,7 +7340,9 @@ impl Canvas {
     /// A step let go: its textures the canvas's size kept as spares.
     fn keep_spare_snapshot(&self, step: Step) {
         for s in step.pixels {
-            self.keep_spare(s.texture);
+            if let Held::Texture(texture) = s.pixels {
+                self.keep_spare(texture);
+            }
         }
     }
 
@@ -7052,7 +7398,7 @@ impl Canvas {
         if let Some(c) = &self.caches {
             // what is below as it was, what is worked on, then what is above as it was
             encoder.copy_texture_to_texture(
-                copy_at(&c.below[0], rect.x0, rect.y0),
+                copy_at(&c.below.texture, rect.x0, rect.y0),
                 copy_at(&self.composite, rect.x0, rect.y0),
                 extent(rect.width(), rect.height()),
             );
@@ -7065,7 +7411,7 @@ impl Canvas {
                     tint: Look::PLAIN.tint,
                     ..Default::default()
                 };
-                let view = &c.above_views[0];
+                let view = &c.above.view;
                 self.draw_onto(
                     device,
                     encoder,
@@ -7192,25 +7538,17 @@ impl Canvas {
             c
         });
         let mut caches = self.caches.take().or(stale).unwrap_or_else(|| {
-            let pair = |label| {
-                let textures = [
-                    texture(device, label, self.width, self.height, LAYER_FORMAT),
-                    texture(device, label, self.width, self.height, LAYER_FORMAT),
-                ];
-                let views = textures.each_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
-                (textures, views)
-            };
-            let ((below, below_views), (above, above_views)) = (pair("below"), pair("above"));
+            // (on a device of little memory, with no second textures of their own)
+            let paired = !self.low_memory();
+            let (width, height) = (self.width, self.height);
             Caches {
                 live: Vec::new(),
                 live_layers: HashSet::new(),
-                below,
-                below_views,
+                below: CachePicture::new(device, "below", width, height, paired),
                 below_items: Vec::new(),
                 // nothing matches until made
                 below_key: !below_key,
-                above,
-                above_views,
+                above: CachePicture::new(device, "above", width, height, paired),
                 above_items: Vec::new(),
                 above_key: !above_key,
             }
@@ -7248,12 +7586,8 @@ impl Canvas {
                 let [r, g, b] = doc.background;
                 let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
                 let offset = start_uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
-                let mut pass = render_pass(
-                    &mut start,
-                    "below",
-                    &caches.below_views[0],
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                );
+                let mut pass =
+                    render_pass(&mut start, "below", &caches.below.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
                 pass.set_pipeline(&self.pipelines.solid);
                 pass.set_bind_group(0, &self.stroke_bind, &[]);
                 pass.set_bind_group(1, &self.uniform_bind, &[offset]);
@@ -7263,7 +7597,7 @@ impl Canvas {
                 drop(render_pass(
                     &mut start,
                     "above",
-                    &caches.above_views[0],
+                    &caches.above.view,
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 ));
             }
@@ -7295,18 +7629,14 @@ impl Canvas {
             let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
             let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
             {
-                let mut pass = render_pass(
-                    encoder,
-                    "below",
-                    &caches.below_views[0],
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                );
+                let mut pass =
+                    render_pass(encoder, "below", &caches.below.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
                 pass.set_pipeline(&self.pipelines.solid);
                 pass.set_bind_group(0, &self.stroke_bind, &[]);
                 pass.set_bind_group(1, &self.uniform_bind, &[offset]);
                 pass.draw(0..3, 0..1);
             }
-            let stack = Stack::pair(&caches.below, &caches.below_views);
+            let stack = caches.below.stack(&self.composite_second, device);
             let mut current = 0;
             self.composite_items(device, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
@@ -7314,8 +7644,8 @@ impl Canvas {
             caches.below_key = below_key;
         }
         if remake_above {
-            drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
-            let stack = Stack::pair(&caches.above, &caches.above_views);
+            drop(render_pass(encoder, "above", &caches.above.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+            let stack = caches.above.stack(&self.composite_second, device);
             let mut current = 0;
             self.composite_items(device, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
@@ -7512,9 +7842,6 @@ impl Canvas {
                 (None, None) => break,
             };
             let (mut at, mut current) = progress;
-            let (textures, views) =
-                if below { (&r.caches.below, &r.caches.below_views) } else { (&r.caches.above, &r.caches.above_views) };
-            let stack = Stack::pair(textures, views);
             // as many whole items as fit and the slice's time allows (at least one), a layer with
             // those clipped to it (their clipping group) as one, each with what it is clipped to; an
             // item painted nowhere is passed over, a normal one composites only where it is painted
@@ -7559,6 +7886,8 @@ impl Canvas {
                 part.push((unit, rect));
             }
             largest = largest.max(part.len());
+            let picture = if below { &r.caches.below } else { &r.caches.above };
+            let stack = picture.stack(&self.composite_second, device);
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
             let mut uniforms = UniformData::default();
@@ -7576,8 +7905,10 @@ impl Canvas {
                 );
             }
             let done = at >= items.len();
-            if done {
+            // a second texture borrowed from the composite is given back between parts
+            if done || picture.borrows() {
                 stack.settle(&mut encoder, full, current);
+                current = 0;
             }
             self.write_uniforms(gpu, &uniforms);
             gpu.queue.submit([encoder.finish()]);
@@ -9268,12 +9599,12 @@ impl Canvas {
         all.extend(self.pencil.as_ref().map(|p| p.view.texture()));
         all.extend(self.liquify.as_ref().map(|l| l.view.texture()));
         all.extend(self.selection.as_ref().map(|s| s.view.texture()));
-        all.extend(self.held.as_ref().map(|h| &h.texture));
+        all.extend(self.held.as_ref().and_then(Snapshot::texture));
         all.extend(self.smudge.iter().flat_map(Smudge::textures));
         for caches in self.caches.iter().chain(self.remake.as_ref().map(|r| &r.caches)) {
-            all.extend(caches.below.iter().chain(&caches.above));
+            all.extend(caches.below.textures().chain(caches.above.textures()));
         }
-        all.extend(self.undo.iter().chain(&self.redo).flat_map(|s| s.pixels.iter().map(|p| &p.texture)));
+        all.extend(self.undo.iter().chain(&self.redo).flat_map(|s| s.pixels.iter().filter_map(Snapshot::texture)));
         all.extend(self.transforming.iter().chain(&self.transform_more).map(|t| &t.before));
         all.extend(self.backdrop.iter().flat_map(|b| b.views.iter().map(wgpu::TextureView::texture)));
         let mut out: Vec<wgpu::Texture> = Vec::with_capacity(all.len());
@@ -10516,17 +10847,54 @@ struct Caches {
     /// The top level's items composited live, and every layer in them.
     live: Vec<LayerId>,
     live_layers: HashSet<LayerId>,
-    /// The items below them, composited over the background (in the first texture), and what
-    /// that was made from.
-    below: [wgpu::Texture; 2],
-    below_views: [wgpu::TextureView; 2],
+    /// The items below them, composited over the background, and what that was made from.
+    below: CachePicture,
     below_items: Vec<LayerId>,
     below_key: u64,
-    /// The items above them, over transparency (in the first texture), and what from.
-    above: [wgpu::Texture; 2],
-    above_views: [wgpu::TextureView; 2],
+    /// The items above them, over transparency, and what from.
+    above: CachePicture,
     above_items: Vec<LayerId>,
     above_key: u64,
+}
+
+/// One of the composite's caches (see [`Caches`]): a picture the canvas's size and the other half
+/// of the ping-pong pair it is made with, an item of a blend mode at a time. On a device of little
+/// memory it has none of its own: the composite's is borrowed while it is made (the two are never
+/// made at once), its picture settled back into its own texture after each part.
+struct CachePicture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    second: Option<(wgpu::Texture, wgpu::TextureView)>,
+}
+
+impl CachePicture {
+    fn new(device: &wgpu::Device, label: &str, width: u32, height: u32, paired: bool) -> CachePicture {
+        let made = || {
+            let t = texture(device, label, width, height, LAYER_FORMAT);
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        };
+        let (texture, view) = made();
+        CachePicture { texture, view, second: paired.then(made) }
+    }
+
+    /// The pair it is made with: its own second texture, or `borrowed`.
+    fn stack<'a>(&'a self, borrowed: &'a OnDemand, device: &'a wgpu::Device) -> Stack<'a> {
+        let second = match &self.second {
+            Some((t, v)) => Second::Made(t, v),
+            None => Second::OnDemand(borrowed, device),
+        };
+        Stack { first: (&self.texture, &self.view), second }
+    }
+
+    /// Whether it borrows the second texture of its pair.
+    fn borrows(&self) -> bool {
+        self.second.is_none()
+    }
+
+    fn textures(&self) -> impl Iterator<Item = &wgpu::Texture> {
+        std::iter::once(&self.texture).chain(self.second.as_ref().map(|(t, _)| t))
+    }
 }
 
 /// How many layers a render reads back to park, at most, and how long it goes on reading them

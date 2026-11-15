@@ -275,11 +275,12 @@ fn frame_cost() {
 }
 
 /// What a long session on a large canvas holds as it goes: strokes across a 3000 square canvas of
-/// six layers (`MEMORY_COST_SIDE`, `MEMORY_COST_LAYERS`), saved every ten as the autosave does, with
-/// the canvas's textures, the undo history's share of them, the layers on the GPU and parked, and
-/// the process's resident memory (where the system says) after each ten. `MEMORY_COST_RAM` (GB)
-/// sets the budgets as the app sets them for a device of that much memory (4). Run on a device
-/// with `--ignored --nocapture`.
+/// six layers (`MEMORY_COST_SIDE`, `MEMORY_COST_LAYERS`), each drawn as the screen would until the
+/// canvas wants no more, saved every ten as the autosave does, with the canvas's textures, the
+/// undo history's share of them and what it keeps compressed, the layers on the GPU and parked,
+/// and the process's resident memory (where the system says) after each ten; then what undoing
+/// the newest steps and older ones takes. `MEMORY_COST_RAM` (GB) sets the budgets as the app sets
+/// them for a device of that much memory (4). Run on a device with `--ignored --nocapture`.
 #[test]
 #[ignore]
 fn memory_cost() {
@@ -293,28 +294,47 @@ fn memory_cost() {
     crate::layers::set_resident_budget(ram / 4);
     let Some(s) = session(side, 1600) else { return };
     let mb = |b: u64| b as f64 / f64::from(1u32 << 20);
-    // the process's resident memory, where the system tells it
+    // the process's resident memory, where the system tells it, and what of it is the heap's
     let resident = || {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|t| {
-                t.lines().find(|l| l.starts_with("VmRSS:")).map(|l| l.split_whitespace().nth(1).map(str::to_owned))
-            })
-            .flatten()
-            .and_then(|kb| kb.parse::<u64>().ok())
-            .map_or_else(|| "?".to_owned(), |kb| format!("{:.0}", kb as f64 / 1024.0))
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let mb_of = |key: &str| {
+            status
+                .lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+                .map_or_else(|| "?".to_owned(), |kb| format!("{:.0}", kb as f64 / 1024.0))
+        };
+        format!("{} (anon {})", mb_of("VmRSS:"), mb_of("RssAnon:"))
     };
     let report = |when: &str| {
         let st = s.shared.lock();
         if let Some(c) = st.canvas.as_ref() {
             println!(
-                "{when:<22} textures {:7.0} MB | history {:6.0} MB | layers on the GPU {:2}, parked {:2} | resident {} MB",
+                "{when:<22} textures {:7.0} MB | history {:6.0} MB, packed {:5.0} MB | layers on the GPU {:2}, parked {:2} | resident {} MB",
                 mb(c.texture_bytes()),
                 mb(c.history_bytes()),
+                mb(c.history_packed_bytes()),
                 c.layer_texture_count(),
                 c.parked_layers(),
                 resident()
             );
+        }
+    };
+    // drawn as the screen would: once, or a frame every 8 ms until the canvas wants no more
+    let drawn = |settle: bool| {
+        for frame in 0..10_000 {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
+            if frame > 0 && (!settle || !c.wants_render()) {
+                g.flush();
+                return;
+            }
+            c.render(g, &mut st.doc, None);
+            drop(guard);
+            if settle {
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
         }
     };
     let dir = std::env::temp_dir().join(format!("procraft-memory-cost-{}", std::process::id()));
@@ -339,6 +359,7 @@ fn memory_cost() {
                 .collect(),
         );
         s.stroke_end(vec![]);
+        drawn(true);
         if (k + 1) % 10 == 0 {
             let t = std::time::Instant::now();
             let saved = s.save(dir.to_string_lossy().into_owned());
@@ -351,6 +372,19 @@ fn memory_cost() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+    // undone and shown, a step at a time: the newest few, then older ones
+    let undone = |n: usize| {
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            s.undo();
+            drawn(false);
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / n.max(1) as f64
+    };
+    let newest = undone(3);
+    let older = undone(20);
+    println!("undone: the newest 3 in {newest:.1} ms each, the 20 before them in {older:.1} ms each");
+    report("undone 23");
 }
 
 /// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
