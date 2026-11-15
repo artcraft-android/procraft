@@ -131,6 +131,8 @@ struct SmudgeStamp {
     // pixel `pass_origin` on); 0: from the layer as it is
     passed: u32,
     pass_origin: vec2<i32>,
+    // 1: it picks up from the image as last shown (every layer), else from its layer
+    source_image: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -159,6 +161,8 @@ struct WetPass {
 @group(0) @binding(7) var before_tex: texture_2d<f32>;
 // a smudge: the layer as its last pass left it, which its stamps pick up from
 @group(0) @binding(8) var pass_tex: texture_2d<f32>;
+// the image as last shown, the canvas's size (a stroke picking up from every layer)
+@group(0) @binding(9) var image_tex: texture_2d<f32>;
 @group(1) @binding(0) var shapes: texture_2d_array<f32>;
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
@@ -194,6 +198,10 @@ fn in_part(i: vec2<u32>, n: u32) -> bool {
 
 fn pixel(x: i32, y: i32) -> vec4<f32> {
     let c = vec2<i32>(clamp(x, 0, i32(st.size.x) - 1), clamp(y, 0, i32(st.size.y) - 1));
+    // a stroke picking up from every layer reads the image as last shown
+    if (st.source_image == 1u) {
+        return textureLoad(image_tex, c, 0);
+    }
     // a glaze picks up the layer as it was before the stroke
     if (st.source_before == 1u) {
         return before_at(c);
@@ -226,7 +234,8 @@ fn passed_pixel(x: i32, y: i32) -> vec4<f32> {
 // what a smudge picks up at a canvas position (pixel centres at +0.5), bilinear: the layer as the
 // last pass left it, or as it is
 fn picked_at(q: vec2<f32>) -> vec4<f32> {
-    if (st.passed == 0u) {
+    // (from every layer: the image as last shown, whatever the passes)
+    if (st.passed == 0u || st.source_image == 1u) {
         return layer_at(q);
     }
     let p = q - 0.5;

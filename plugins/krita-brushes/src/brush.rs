@@ -159,6 +159,8 @@ pub struct Smudge {
     pub dulls: bool,
     pub newer: bool,
     pub smear_alpha: bool,
+    /// It picks up from every layer (Krita's overlay mode).
+    pub overlay: bool,
 }
 
 impl Smudge {
@@ -177,6 +179,7 @@ impl Smudge {
             dulls: p.number("SmudgeRateMode", 0.0) as u32 == 1,
             newer,
             smear_alpha: p.flag("SmudgeRateSmearAlpha", true),
+            overlay: p.flag("MergedPaint", false),
         }
     }
 
@@ -923,6 +926,10 @@ impl Brush {
         // a colour smudge's dabs move paint, a grid's that takes the colour under it pick it up
         if self.smudge.is_some() || self.grid.as_ref().is_some_and(|g| g.sample) {
             look.byte(9, 1);
+        }
+        // in overlay mode, from every layer
+        if self.smudge.as_ref().is_some_and(|s| s.overlay) {
+            look.byte(10, 1);
         }
         // (a smudge's dabs are laid each as far as it says)
         look.byte(2, u8::from(self.wash && self.smudge.is_none() && self.grid.is_none()));

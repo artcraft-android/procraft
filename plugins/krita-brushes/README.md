@@ -37,7 +37,8 @@ with the app, off.
   that paint made one colour first (dulling, from the share of it its smudge radius says, weighed by
   the tip in the newer engine), the colour mixed in at its colour rate (the gradient option moving
   it towards the secondary colour; an eraser's is clear, taking the paint away), laid as far as its
-  smudge rate says (in place of what is there, or over it without smearing alpha), by the older engine's sums or the newer's; the first dab only marks where the
+  smudge rate says (in place of what is there, or over it without smearing alpha), picked up from
+  every layer in overlay mode, by the older engine's sums or the newer's; the first dab only marks where the
   next picks up from.
 - Other engines: the quick brush (hard round dabs of its diameter and spacing), the tangent normal
   brush (a pixel brush painting the pen's lean, or the stroke's way, or the pen's turn, as a normal
@@ -100,8 +101,9 @@ readers (which its tests use) run in it.
   background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
-- Colour smudge's overlay mode (picking up from every layer: it picks up from the layer drawn on)
-  and its paint thickness (lightness tips' height).
+- Colour smudge's paint thickness (lightness tips' height). Its overlay mode picks up from the
+  image as last shown, so within one batch of the pen's moves it doesn't see what it has just laid
+  (Krita keeps its own copy of the image up to date dab by dab).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
   tip of one is Krita's default tip, as Krita stands it in (round, 40 px across, the studio saying
   so); a masking brush or texture of one is left out.

@@ -693,6 +693,7 @@ fn smudge_page(p: &Preset, page: &mut Page) {
     page.chosen(p, "SmudgeRateMode", "Smudge mode", &["Smearing", "Dulling"], &["0", "1"], 0);
     page.flag(p, "SmudgeRateSmearAlpha", "Smear alpha", true);
     page.flag(p, "SmudgeRateUseNewEngine", "Newer smudge engine", false);
+    page.flag(p, "MergedPaint", "Overlay: picks up from every layer", false);
 }
 
 /// A tangent normal brush's tilt: which way each channel goes, what turns it, how much it leans.
@@ -1198,6 +1199,8 @@ mod tests {
         );
         assert_eq!(p.get("ColorRatecommonCurve"), Some("0,1;1,0;"));
         // tangent normal: the red channel down the Y axis
+        let p = set_on_page("colorsmudge", "", "Smudge", |d| matches!(d, Does::Flag(k) if k == "MergedPaint"), 1.0);
+        assert!(p.flag("MergedPaint", false));
         let p = set_on_page(
             "tangentnormal",
             "",

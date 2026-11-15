@@ -278,6 +278,12 @@ mod tests {
         );
         stroke.add(&samples);
         assert!(stroke.out.iter().all(|d| d.flags & 256 == 256), "laid over");
+        // in overlay mode its look says it picks up from every layer
+        let overlay = xml.replace("</Preset>", r#"<param name="MergedPaint"><![CDATA[true]]></param></Preset>"#);
+        let mut data = Record::new();
+        data.field(1, overlay.as_bytes());
+        let look = load(&data.bytes(), false).unwrap().look();
+        assert!(fields(&look).any(|(f, v)| f == 10 && v == [1]));
     }
 
     /// A picture tip the preset names but doesn't hold is Krita's default tip, as Krita stands it

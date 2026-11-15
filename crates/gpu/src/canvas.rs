@@ -195,6 +195,8 @@ pub struct StrokeStyle {
     /// Wet paint mixes with the layer as it was before the stroke (a glaze), not with the stroke
     /// as it goes (a blending mode).
     pub wet_from_before: bool,
+    /// A smudge picks up from the image as last shown (every layer), not from its layer alone.
+    pub from_image: bool,
     /// Wet mix: how many stamps' worth of paint the brush holds; none never runs out.
     pub load: f32,
     /// Wet mix: water in the paint, 0..1: it goes on thinner.
@@ -314,6 +316,7 @@ impl StrokeStyle {
             grain_contrast: 0.0,
             wet_pull: None,
             wet_from_before: false,
+            from_image: false,
             load: 0.0,
             dilution: 0.0,
             falloff: 0.0,
@@ -377,6 +380,7 @@ impl StrokeStyle {
             // wet mix once any of its settings is set
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
             wet_from_before: wet && !brush.mixes_with_stroke(),
+            from_image: false,
             load: if wet { brush.setting("wet_charge").clamp(0.0, 1.0) } else { 0.0 },
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
             falloff: brush.setting("falloff").clamp(0.0, 1.0),
@@ -1300,7 +1304,8 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         smear_over: 0,
         passed: 0,
         pass_origin: [0; 2],
-        _pad: [0; 2],
+        source_image: u32::from(style.from_image),
+        _pad: 0,
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1477,7 +1482,9 @@ struct SmudgeUniform {
     /// kept from canvas pixel `pass_origin` on; 0: from the layer as it is.
     passed: u32,
     pass_origin: [i32; 2],
-    _pad: [u32; 2],
+    /// 1: it picks up from the image as last shown (see [`StrokeStyle::from_image`]).
+    source_image: u32,
+    _pad: u32,
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -9979,6 +9986,8 @@ impl Pipelines {
                 compute_texture(7),
                 // the layer as a smudge's last pass left it
                 compute_texture(8),
+                // the image as last shown (a smudge picking up from every layer)
+                compute_texture(9),
             ],
         });
         let smudge_module =

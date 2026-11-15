@@ -3193,6 +3193,40 @@ fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
 }
 
 #[test]
+fn a_smudge_from_the_image_picks_up_the_layers_under_its_own() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // red on the left of the layer below; a smudge on an empty layer over it, its first stamp in
+    // the red, its next in the clear, picking up behind it
+    let laid = |from_image: bool| {
+        let mut doc = Document::new(96, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let below = doc.current();
+        canvas.begin_stroke(below, StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(-8.0, y as f32), 40.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        let top = doc.add_layer();
+        canvas.render(&gpu, &mut doc, None);
+        let pick = PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false, here: false };
+        let mut style = StrokeStyle::new(StrokeTool::Smudge, [0.0, 0.0, 1.0], 1.0);
+        style.from_image = from_image;
+        canvas.begin_stroke(top, style);
+        let first = Stamp { alpha: 0.0, pick_up: Some(pick), ..dot(Vec2::new(16.0, 32.0), 8.0) };
+        let next = Stamp { pick_up: Some(pick), ..dot(Vec2::new(60.0, 32.0), 8.0) };
+        canvas.add_stamps(&[first, next]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        pixel(&canvas.read_layer(&gpu, top).unwrap(), 96, 60, 32)
+    };
+    // from its own layer: nothing there to move
+    let own = laid(false);
+    assert!(own[3] < 16, "{own:?}");
+    // from the image: the red below moved onto its layer
+    let image = laid(true);
+    assert!(image[0] > 240 && image[2] < 16 && image[3] > 240, "{image:?}");
+}
+
+#[test]
 fn a_smudge_carries_fine_detail_without_blurring_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

@@ -85,6 +85,8 @@ mod field {
     pub const AIRBRUSH: u16 = 8;
     /// Its dabs move paint (u8 1): a smudge whose stamps pick up behind them.
     pub const SMUDGES: u16 = 9;
+    /// What its dabs pick up is the image as shown (every layer), not their layer alone (u8 1).
+    pub const FROM_IMAGE: u16 = 10;
     /// A load: the brush's id and data, and whether the app holds its look already.
     pub const LOAD_ID: u16 = 1;
     pub const LOAD_DATA: u16 = 2;
@@ -165,6 +167,8 @@ pub(crate) struct BrushLook {
     pub airbrush: Option<f32>,
     /// Its dabs move paint (as a smudge's stamps do, picking up behind them).
     pub smudges: bool,
+    /// What they pick up is the image as shown, every layer.
+    pub from_image: bool,
     pub tips: TipSet,
     pub build: Build,
     pub blend: Option<u32>,
@@ -201,10 +205,11 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
     });
     let mut tips = Vec::new();
     let (mut build, mut blend, mut erases, mut texture, mut second) = (Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges) = (None, false);
+    let (mut airbrush, mut smudges, mut from_image) = (None, false, false);
     for (f, value) in fields(bytes) {
         match f {
             field::SMUDGES => smudges = value.first() == Some(&1),
+            field::FROM_IMAGE => from_image = value.first() == Some(&1),
             field::AIRBRUSH => airbrush = f32_of(value).filter(|ms| *ms > 0.0).map(|ms| ms.max(MOST_AIRBRUSH_MS)),
             field::TIP => tips.push(read_tip(value, kind.channels() as usize)?),
             field::BUILD => build = read_build(value),
@@ -215,7 +220,17 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
             _ => {}
         }
     }
-    Some(BrushLook { airbrush, smudges, tips: tip_set(&tips, id, kind)?, build, blend, erases, texture, second })
+    Some(BrushLook {
+        airbrush,
+        smudges,
+        from_image,
+        tips: tip_set(&tips, id, kind)?,
+        build,
+        blend,
+        erases,
+        texture,
+        second,
+    })
 }
 
 /// The most samples a brush engine is handed at once.
@@ -382,7 +397,7 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
 /// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
 /// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
 /// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
-const KEPT_LOOK_VERSION: u32 = 4;
+const KEPT_LOOK_VERSION: u32 = 5;
 
 fn kept_tips(set: &TipSet) -> Vec<u8> {
     let mut r = Record::default();
@@ -409,6 +424,7 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
         r.field(8, &ms.to_le_bytes());
     }
     r.field(9, &[u8::from(look.smudges)]);
+    r.field(10, &[u8::from(look.from_image)]);
     if let Some(t) = &look.texture {
         let mut tex = Record::default();
         tex.field(1, &t.side.to_le_bytes())
@@ -456,11 +472,12 @@ fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
 pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
     let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
         (None, None, Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges) = (None, false);
+    let (mut airbrush, mut smudges, mut from_image) = (None, false, false);
     for (f, value) in fields(bytes) {
         match f {
             1 => version = u32_of(value),
             9 => smudges = value.first() == Some(&1),
+            10 => from_image = value.first() == Some(&1),
             8 => airbrush = f32_of(value).filter(|ms| *ms >= MOST_AIRBRUSH_MS),
             2 => tips = Some(tips_kept(value, id)?),
             3 => build = read_build(value),
@@ -501,7 +518,7 @@ pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
         }
     }
     (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
-    Some(BrushLook { airbrush, smudges, tips: tips?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, smudges, from_image, tips: tips?, build, blend, erases, texture, second })
 }
 
 /// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
@@ -959,10 +976,12 @@ fn look_styles(
     };
     let mut style = paint(look.build, starting.opacity);
     if tool == StrokeTool::Smudge && look.smudges {
-        // what each stamp picks up behind it, laid as it says: nothing kept, nothing blurred
+        // what each stamp picks up behind it, laid as it says: nothing kept, nothing blurred; from
+        // the image as shown if it says
         style.pull = 0.0;
         style.blur = 0.0;
         style.rendering = Rendering::BuildUp;
+        style.from_image = look.from_image;
     }
     if let Some(blend) = look.blend {
         style.blend = blend.min(procraft_engine::brush::BRUSH_BEHIND);

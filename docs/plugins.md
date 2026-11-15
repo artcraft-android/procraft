@@ -1064,7 +1064,8 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
     lightness their grey says (a middle grey keeps the colour's own, as far as the dab's lightness
     strength goes), 3 in a colour between the colour (black) and the secondary colour (white).
   - field 9 (u8 1), its dabs move paint, as a smudge's do (see flag 16 below), whatever the tool
-    but the eraser.
+    but the eraser; with field 10 (u8 1) they pick it up from the image as last shown (every layer)
+    rather than from the layer they lay it on.
   - field 8, how often it wants the pen while it holds still (f32 ms, at least 4), as an airbrush
     lays dabs by time: until the pen lifts, the app hands it the pen as it last was, at the time
     then, every half of that.

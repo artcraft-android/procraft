@@ -422,6 +422,7 @@ impl Canvas {
         if !self.window_in(gpu, encoder, (reach, before), &each) {
             return false;
         }
+        let from_image = pieces.iter().any(|p| p.uniforms.iter().any(|u| u.source_image == 1));
         let Some(smudge) = self.smudge.as_ref() else { return false };
         let Some(window) = smudge.window.as_ref() else { return false };
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
@@ -461,6 +462,16 @@ impl Canvas {
                     resource: wgpu::BindingResource::TextureView(
                         smudge.passed.as_ref().map_or(&window.before_view, |p| &p.1),
                     ),
+                },
+                // the image as last shown, for a stroke that picks up from it (else anything: not
+                // read)
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(if from_image {
+                        &self.composite_view
+                    } else {
+                        &window.before_view
+                    }),
                 },
             ],
         });
