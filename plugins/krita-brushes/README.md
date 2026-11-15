@@ -9,7 +9,11 @@ brushes as Krita's pixel brush draws them. It comes with the app, off.
 - Tips: auto tips (circle or rectangle; default, soft-by-curve or Gaussian edge; ratio, fades,
   spikes, density and randomness, drawn afresh from a few variants), and pictures: PNGs, GIMP
   brushes (`.gbr`) and pipes (`.gih`, a cell picked per dab by each dimension's selection: constant,
-  incremental, random, pressure, angular, velocity, tilt).
+  incremental, random, pressure, angular, velocity, tilt), applied as the preset says: as a mask,
+  stamped in their own colours, as a lightness map (its strength an option of its own) or as a
+  gradient map (from the colour to the secondary colour), a colour picture's grey through its
+  middle point, brightness and contrast; older presets' scale and adjustments read as Krita reads
+  them.
 - Spacing: fixed or automatic, by the dab's size across and down its own frame (or the same every
   way), scaled by the spacing option.
 - Options and their sensors: size, opacity, flow, rotation, ratio, spacing, scatter (both ways,
@@ -18,12 +22,19 @@ brushes as Krita's pixel brush draws them. It comes with the app, off.
   distance, time, fade, fuzzy per dab and per stroke (perspective counts as 1); each through its
   curve, several combined by multiply, add, max, min or difference.
 - Painting: wash (dabs build towards their opacity, the stroke keeping near the opacity it has
-  averaged) or build-up; the preset's blend mode; eraser presets erase.
+  averaged) or build-up; the preset's blend mode; eraser presets erase. Sharpness: each dab's mask
+  made hard at its threshold (what lies within its softness kept), dabs moved onto whole pixels as
+  far as it says. Airbrush: dabs by time as well as by spacing (or by time alone), the app handing
+  the pen again while it holds still.
 - Texture: the pattern made into Krita's mask (brightness, contrast, invert, neutral point,
   cutoff), scaled, offset (or at random per stroke), combined with each dab by its texturing mode at
   the strength its sensors give, softly where it says.
 - Masking brushes: a second brush along the same path, its size a share of the main brush's, its
   coverage combined with the main stroke's by its composite op.
+
+The app draws each brush's preview with the plugin, and QuickShape, layers of a plugin's own laying
+their strokes again and painting on a 3D model go through it too; brush files the app writes keep
+the plugin's data.
 
 The Krita brush studio (the plugin's action, opened by the app's brush studio for its brushes) shows
 a brush's Krita settings a page at a time: tip, spacing, size, opacity and flow, turn and squash,
@@ -38,10 +49,14 @@ readers (which its tests use) run in it.
 
 - Krita's other engines (colour smudge, deform, and the rest): those presets come in as the app
   reads them.
-- Colour picture tips (stamped in their own colours), lightness and gradient tips and texturing
-  modes: drawn as masks, and the two texturing modes as subtract.
-- Sharpness (threshold and pixel snapping), airbrush (dabs by time while the pen holds still),
-  perspective.
+- The lightness and gradient texturing modes take the texture's grey alone (a pattern's
+  see-through parts are taken as opaque).
+- Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
+  tip of one is drawn round, a masking brush or texture of one left out.
+- The 1-pixel brush's sharp lines, drawn as dabs.
+- Perspective counts as 1 (the app has no perspective assistant), as in Krita without one; a
+  gradient map takes the gradient from the colour to the secondary colour (the app has no current
+  gradient).
 - Dabs are rotated, scaled and textured on the GPU from tips drawn once, not drawn afresh at each
   dab's own pixels as Krita draws them.
 

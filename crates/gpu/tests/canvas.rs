@@ -9,7 +9,7 @@ use procraft_engine::profile::Profile;
 use procraft_engine::stroke::{Stamp, StrokeBuilder, Tint};
 use procraft_engine::textures::TEXTURE_SIZE;
 use procraft_engine::view::View;
-use procraft_gpu::{Backdrop, Canvas, Gpu, Resample, StrokeStyle, StrokeTool, SurroundGrid, Target, wgpu};
+use procraft_gpu::{Backdrop, Canvas, Gpu, Resample, StrokeStyle, StrokeTool, SurroundGrid, Target, TipKind, wgpu};
 
 fn gpu() -> Option<Gpu> {
     match Gpu::headless() {
@@ -4060,7 +4060,7 @@ fn each_stamp_draws_with_its_own_tip_from_the_stroke_s_set() {
         if let Some(r) = rule {
             style.rendering = r;
         }
-        canvas.use_tip_set(&gpu, &mut style, 0x5e7, side as u32, &[&whole, &half]);
+        canvas.use_tip_set(&gpu, &mut style, 0x5e7, side as u32, &[&whole, &half], TipKind::Mask);
         assert_eq!(style.full_shape, Some(0x5e7));
         let layer = doc.add_layer();
         canvas.render(&gpu, &mut doc, None);
@@ -4076,6 +4076,93 @@ fn each_stamp_draws_with_its_own_tip_from_the_stroke_s_set() {
         assert!(a(24) > 240 && a(40) > 240, "{rule:?}: {} {}", a(24), a(40));
         assert!(a(88) > 240 && a(104) < 16, "{rule:?}: {} {}", a(88), a(104));
     }
+}
+
+#[test]
+fn a_tip_s_kind_colours_its_stamps_and_a_threshold_makes_them_hard() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let side = 32_usize;
+    // one picture of a colour all over, opaque; drawn with a blue brush and a white secondary
+    let tip = |rgba: [u8; 4]| rgba.repeat(side * side);
+    let mut laid = |kind: TipKind, picture: &[u8], stamp: Stamp| {
+        let mut s = style(StrokeTool::Paint, 1.0);
+        s.color = [0.0, 0.0, 1.0];
+        s.secondary = [1.0, 1.0, 1.0];
+        canvas.use_tip_set(&gpu, &mut s, 0x7a0 + kind as u64 + u64::from(picture[0]), side as u32, &[picture], kind);
+        assert_eq!(s.tip_kind, kind);
+        let layer = doc.add_layer();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.begin_stroke(layer, s);
+        canvas.add_stamps(&[stamp]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        pixel(&canvas.read_layer(&gpu, layer).unwrap(), 64, 32, 32)
+    };
+    let stamp = Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0);
+    // a picture in its own colour: red, whatever the brush's
+    let red = laid(TipKind::Picture, &tip([255, 0, 0, 255]), stamp);
+    assert!(red[0] > 240 && red[2] < 16 && red[3] > 240, "{red:?}");
+    // a lightness map: a middle grey keeps the brush's blue; white makes it white; at no strength
+    // white keeps it too
+    let mid = laid(TipKind::Lightness, &tip([128, 128, 128, 255]), stamp);
+    assert!(mid[2] > 240 && mid[0] < 16, "{mid:?}");
+    let white = laid(TipKind::Lightness, &tip([255, 255, 255, 255]), stamp);
+    assert!(white[0] > 240 && white[1] > 240 && white[2] > 240, "{white:?}");
+    let weak = laid(TipKind::Lightness, &tip([254, 254, 254, 255]), Stamp { lightness: 0.0, ..stamp });
+    assert!(weak[2] > 240 && weak[0] < 16, "{weak:?}");
+    // a gradient map: black the colour, white the secondary, between them between
+    let gradient = laid(TipKind::Gradient, &tip([128, 128, 128, 255]), stamp);
+    assert!(gradient[0].abs_diff(128) <= 8 && gradient[2] > 240, "{gradient:?}");
+    // a texture's grey as the colour's lightness: a middle grey keeps it, white whitens it
+    let textured = |grey: u8, rule: u32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut s = style(StrokeTool::Paint, 1.0);
+        s.color = [0.0, 0.0, 1.0];
+        s.secondary = [1.0, 1.0, 1.0];
+        canvas.use_full_grain(
+            &gpu,
+            &mut s,
+            0x9e0 + u64::from(grey) + u64::from(rule),
+            side as u32,
+            &vec![grey; side * side],
+        );
+        s.grain_mode = procraft_engine::brush::GrainMode::Moving;
+        s.grain_scale = 32.0;
+        s.grain_depth = 1.0;
+        s.grain_blend = rule;
+        let layer = doc.add_layer();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.begin_stroke(layer, s);
+        canvas.add_stamps(&[Stamp {
+            grain_offset: Vec2::new(32.0, 32.0),
+            ..Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)
+        }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        pixel(&canvas.read_layer(&gpu, layer).unwrap(), 64, 32, 32)
+    };
+    let kept = textured(128, 46);
+    assert!(kept[2] > 240 && kept[0] < 16 && kept[3] > 240, "{kept:?}");
+    let whitened = textured(255, 46);
+    assert!(whitened[0] > 240 && whitened[1] > 240, "{whitened:?}");
+    // its grey a colour between the colour and the secondary
+    let between = textured(128, 47);
+    assert!(between[0].abs_diff(128) <= 10 && between[2] > 240 && between[3] > 240, "{between:?}");
+    // a soft mask a third there: as it is, then hard under a threshold below it, and gone under
+    // one above it (none of it within its soft share)
+    let third = vec![85_u8; side * side];
+    let soft = laid(TipKind::Mask, &third, stamp);
+    assert!(soft[3].abs_diff(85) <= 4, "{soft:?}");
+    let hard = laid(TipKind::Mask, &third, Stamp { threshold: [0.8, 0.0], ..stamp });
+    assert!(hard[3] > 250, "{hard:?}");
+    let gone = laid(TipKind::Mask, &third, Stamp { threshold: [0.5, 0.0], ..stamp });
+    assert!(gone[3] < 4, "{gone:?}");
+    let kept = laid(TipKind::Mask, &third, Stamp { threshold: [0.5, 0.8], ..stamp });
+    assert!(kept[3].abs_diff(85) <= 4, "{kept:?}");
 }
 
 #[test]

@@ -290,6 +290,28 @@ pub enum PointerKind {
     Mouse,
 }
 
+/// Where `brush`'s sliders start for `tool`: where its file left them, else at the size its preview
+/// shows it, full opacity.
+pub(crate) fn starting_sliders_of(brush: &Brush, tool: ToolKind) -> Sliders {
+    if let Some(&Some([size, opacity])) = brush.sliders.get(brushes::notch_tool(tool)) {
+        return Sliders { size, opacity };
+    }
+    let curve = procraft_engine::brush::SIZE_CURVE;
+    let size = brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve);
+    Sliders { size, ..DEFAULT_SLIDERS }
+}
+
+impl From<Pointer> for PointerKind {
+    fn from(p: Pointer) -> PointerKind {
+        match p {
+            Pointer::Finger => PointerKind::Finger,
+            Pointer::Stylus => PointerKind::Stylus,
+            Pointer::StylusEraser => PointerKind::StylusEraser,
+            Pointer::Mouse => PointerKind::Mouse,
+        }
+    }
+}
+
 impl From<PointerKind> for Pointer {
     fn from(p: PointerKind) -> Pointer {
         match p {
@@ -564,6 +586,9 @@ pub(crate) struct State {
     /// The drawing pad's strokes as drawn (pointer and input), drawn again when the brush changes;
     /// `None` on a canvas that keeps none.
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
+    /// The open stroke's brush engine wanting the pen again while it holds still (an airbrush):
+    /// every how many ms, the pen as it last was, and when next.
+    pub(crate) airbrush: Option<(f64, PenSample, f64)>,
     /// Brush files' grains at their own size.
     pub(crate) grain_store: grain_store::GrainStore,
     /// Where the library was last kept or read whole, and what it held then (see
@@ -976,14 +1001,7 @@ impl State {
 
     /// Where a brush's sliders start: at the size its preview shows it, full opacity.
     fn starting_sliders(&self, tool: ToolKind) -> Sliders {
-        let brush = self.brush(tool);
-        // where its file left them, else its preview size
-        if let Some(&Some([size, opacity])) = brush.sliders.get(brushes::notch_tool(tool)) {
-            return Sliders { size, opacity };
-        }
-        let curve = procraft_engine::brush::SIZE_CURVE;
-        let size = brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve);
-        Sliders { size, ..DEFAULT_SLIDERS }
+        starting_sliders_of(self.brush(tool), tool)
     }
 
     /// Brush `index` of `set` (`brush`) holding where its sliders stand for each tool it has been
@@ -1581,6 +1599,7 @@ impl CanvasSession {
             projection_stop: false,
             frames: 0,
             pad_strokes: None,
+            airbrush: None,
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
             plugin_stepping: 0,
@@ -1838,6 +1857,10 @@ impl CanvasSession {
         // a brush a plugin's brush engine made is drawn by it while it is on: its stamps, how they
         // are laid and its second stroke are the engine's
         let outside = st.outside_stroke(&brush, tool, current, pointer, diameter, seed);
+        st.airbrush = outside.as_ref().and_then(|o| o.airbrush).zip(samples.last()).map(|(ms, last)| {
+            let every = f64::from(ms) * 0.5;
+            (every, *last, last.time_ms + every)
+        });
         let laid = match outside {
             Some(o) => {
                 builder = builder.with_engine(Box::new(o.first));
@@ -1868,7 +1891,8 @@ impl CanvasSession {
         st.began =
             matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase).then(|| quickshape::LastStroke {
                 layer: current,
-                style,
+                // as it was laid: a brush engine's, its tips
+                style: laid.as_ref().map_or(style, |(laid, _)| *laid),
                 brush: brush.clone(),
                 diameter,
                 pointer,
@@ -1878,6 +1902,7 @@ impl CanvasSession {
                 fresh: second.is_none().then(|| builder.clone()),
                 samples: Vec::new(),
                 line: builder.clone(),
+                seed,
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         let (style, second) = match laid {
@@ -1911,6 +1936,9 @@ impl CanvasSession {
             return;
         }
         st.keep_pad_input(&samples);
+        if let (Some(airbrush), Some(last)) = (st.airbrush.as_mut(), samples.last()) {
+            airbrush.1 = *last;
+        }
         let canvas_samples = st.assisted(st.to_canvas(&samples));
         // a snapped shape turns and grows with the pen still holding it
         if st.shape.is_some() {
@@ -1960,6 +1988,7 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
             self.shared.frame(st);
             return;
@@ -2018,6 +2047,7 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {
             self.shared.frame(st);
             return;

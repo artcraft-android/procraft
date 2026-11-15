@@ -1058,7 +1058,14 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   it and answers nothing. Otherwise it answers how the brush looks, which the app keeps on the
   disk with the plugin, for the brush's data, until the plugin is imported again:
   - field 1 for each of its tips: its width (field 1, u32), height (field 2, u32) and pixels
-    (field 3, a byte each, how much it paints), at most 255. Dabs pick one each.
+    (field 3, a byte each, how much it paints; four with field 7), at most 255. Dabs pick one each.
+  - field 7, what its tips are (u8): 0 masks, as above; else RGBA pictures (straight, rows from
+    the top) that paint as far as they are opaque: 1 in their own colours, 2 in the colour at the
+    lightness their grey says (a middle grey keeps the colour's own, as far as the dab's lightness
+    strength goes), 3 in a colour between the colour (black) and the secondary colour (white).
+  - field 8, how often it wants the pen while it holds still (f32 ms, at least 4), as an airbrush
+    lays dabs by time: until the pen lifts, the app hands it the pen as it last was, at the time
+    then, every half of that.
   - field 2, how its dabs build up (u8): 0 each laid over the last, 1 each towards its opacity by its
     flow, never past it and never back.
   - field 3, the blend mode it lays its stroke with (u32, the layers' modes in the order the Layers
@@ -1069,7 +1076,9 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
     u32): 32 multiply, 33 subtract, 34 darken, 35 overlay, 36 colour dodge, 37 colour burn, 38 linear
     dodge, 39 linear burn, 40 hard mix, 41 softer hard mix, 42 height, 43 linear height, 44 and 45
     the heights weighed as image editors weigh them, each at the dab's strength; 48 on the same,
-    softly (the strength taking the texture away, not the paint).
+    softly (the strength taking the texture away, not the paint); 46 its grey the dab's colour's
+    lightness (as a lightness tip's), 47 its grey a colour between the colour and the secondary
+    colour, mixed in at the dab's strength.
   - field 6, a second stroke along the same path whose coverage combines with the first's, as a
     dual brush's does: its tips (field 1 each), how they build up (field 2) and how it combines
     (field 3, u32, a blend mode's number, or 27 and 28 for heights).
@@ -1081,15 +1090,21 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
 - `procraft_brush_add` is handed samples, 32 bytes each as layers' items hold them: x, y (canvas
   pixels), pressure (through the app's pressure curve), tilt, azimuth and roll (radians), then the
   milliseconds since the stroke's first sample as a 64-bit float.
-- Dabs come back 64 bytes each, sixteen 32-bit numbers: x, y, its diameter (the longer side of its
+- Dabs come back 96 bytes each, twenty-four 32-bit numbers: x, y, its diameter (the longer side of its
   tip, canvas pixels), its angle (radians, clockwise), its squash (0..1 across its angle), its
   opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2 mirrored down, 4 its own
   colour, 8 for the second stroke), its colour (three f32, sRGB 0..1, with flag 4), the texture's
-  strength in it (0..1), and how far the texture is moved where it reads it (x, y), then 0.
+  strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
+  lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it
+  paints fully, what is under it by more than the next number's share of it not at all), that
+  share, then six 0s.
 
 A stroke's start, a batch of samples and its end may each take 40,000,000 steps, for at most a
 quarter of a second; a load 2,000,000,000, for 10 seconds. A stroke laid this way shows no
-prediction of where the pen goes next.
+prediction of where the pen goes next. The brush's preview in the library is a stroke the engine
+draws, and the engine's stroke goes on through what redraws a stroke: QuickShape, a layer of its own
+laying its strokes again, painting on a 3D model. A brush file the app writes keeps the engine's
+name and data (in its folder `Engine`), so the brush comes back as it was.
 
 The `brush.data` permission gives these functions, which answer while the brush studio of one of
 the plugin's own brushes is open (or for the current brush, if the plugin's engine made it):

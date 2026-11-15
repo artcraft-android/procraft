@@ -169,8 +169,8 @@ pub(crate) fn decoded_image(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
     let rgba = match channels {
         1 => picture.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        2 => picture.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
-        3 => picture.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        2 => picture.as_chunks::<2>().0.iter().flat_map(|&[g, a]| [g, g, g, a]).collect(),
+        3 => picture.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect(),
         4 => picture,
         _ => return None,
     };

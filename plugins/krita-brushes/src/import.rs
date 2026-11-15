@@ -103,7 +103,7 @@ fn without_resources(text: &str) -> String {
 /// naming it put in where none does).
 fn without_pattern(text: &str, preset: &Preset) -> (String, Option<(String, Vec<u8>)>) {
     const KEY: &str = "name=\"Texture/Pattern/Pattern\"";
-    let carried = preset.get("Texture/Pattern/Pattern").and_then(crate::files::base64).filter(|b| !b.is_empty());
+    let carried = preset.get("Texture/Pattern/Pattern").and_then(crate::files::carried_picture);
     let (Some(bytes), Some(at)) = (carried, text.find(KEY)) else { return (text.to_owned(), None) };
     let (Some(from), Some(end)) = (text[..at].rfind("<param"), text[at..].find("</param>")) else {
         return (text.to_owned(), None);
@@ -162,6 +162,7 @@ pub fn load(data: &[u8], light: bool) -> Option<Brush> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brush::Kind;
     use crate::engine::{Begin, Sample, Stroke};
     use std::rc::Rc;
 
@@ -189,6 +190,45 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A colour picture tip paints as its preset says Krita applies it, and at twice its scale in a
+    /// preset from before tips had their second version.
+    #[test]
+    fn a_colour_picture_tip_paints_as_its_preset_applies_it() {
+        let mut red = Vec::new();
+        for x in [29, 2, 2, 1, 4] {
+            red.extend_from_slice(&u32::to_be_bytes(x));
+        }
+        red.extend_from_slice(b"GIMP");
+        red.extend_from_slice(&u32::to_be_bytes(10));
+        red.push(0);
+        red.extend([255, 0, 0, 255].repeat(2));
+        let tip = |attributes: &str| {
+            let xml = format!(
+                r#"<Preset name="P" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="gbr_brush" filename="red.gbr" scale="1" {attributes}/>]]></param></Preset>"#
+            );
+            let mut file = Record::new();
+            file.field(1, b"red.gbr").field(2, &red);
+            let mut data = Record::new();
+            data.field(1, xml.as_bytes()).field(2, &file.bytes());
+            let brush = load(&data.bytes(), false).unwrap();
+            (brush.tip.kind, brush.tip.masks[0].pixels.clone(), brush.tip.width)
+        };
+        // red's grey, as Krita weighs it
+        let grey = crate::gimp::grey(255, 0, 0);
+        let v2 = r#"BrushVersion="2""#;
+        assert_eq!(tip(&format!(r#"{v2} brushApplication="1""#)), (Kind::Stamp, [255, 0, 0, 255].repeat(2), 2.0));
+        assert_eq!(tip(&format!(r#"{v2} ColorAsMask="1""#)), (Kind::Mask, vec![255 - grey; 2], 2.0));
+        assert_eq!(tip(&format!(r#"{v2} ColorAsMask="0""#)).0, Kind::Stamp);
+        assert_eq!(
+            tip(&format!(r#"{v2} preserveLightness="1""#)),
+            (Kind::Lightness, [grey, grey, grey, 255].repeat(2), 2.0)
+        );
+        assert_eq!(tip(&format!(r#"{v2} brushApplication="3""#)).0, Kind::Gradient);
+        // saying nothing, a picture with colour stamps itself; an older preset's is twice its size
+        assert_eq!(tip("").0, Kind::Stamp);
+        assert_eq!(tip("").2, 4.0);
     }
 
     /// A texture's picture carried in a setting comes out of it as a file of the brush's, by its name.

@@ -984,10 +984,32 @@ impl CanvasSession {
         self.touches().shape_editing = editing;
     }
 
-    /// When the touches next need [`CanvasSession::touch_tick`] (a hold, a repeat), if ever.
+    /// When the touches next need [`CanvasSession::touch_tick`] (a hold, a repeat, an airbrush's
+    /// next dab), if ever.
     pub fn touch_deadline(&self) -> Option<f64> {
-        let t = self.touches();
-        [t.hold_due, t.quickshape_due, t.rapid_due, t.liquify_due].into_iter().flatten().reduce(f64::min)
+        let due = {
+            let t = self.touches();
+            [t.hold_due, t.quickshape_due, t.rapid_due, t.liquify_due].into_iter().flatten().reduce(f64::min)
+        };
+        let airbrush = self.shared.lock().airbrush.map(|(_, _, next)| next);
+        [due, airbrush].into_iter().flatten().reduce(f64::min)
+    }
+
+    /// An airbrush's stroke whose pen holds still is handed the pen again, as it last was, now.
+    fn airbrush_tick(&self, now_ms: f64) {
+        let again = {
+            let mut st = self.shared.lock();
+            match st.airbrush.as_mut() {
+                Some((every, last, next)) if *next <= now_ms => {
+                    *next = now_ms + *every;
+                    Some(PenSample { time_ms: now_ms, ..*last })
+                }
+                _ => None,
+            }
+        };
+        if let Some(sample) = again {
+            self.stroke_add(vec![sample]);
+        }
     }
 
     /// A pointer goes down on the canvas (`samples` its first input).
@@ -1475,8 +1497,9 @@ impl CanvasSession {
         out
     }
 
-    /// Runs the waits (a hold, a repeat) that have run out by `now_ms`.
+    /// Runs the waits (a hold, a repeat, an airbrush's next dab) that have run out by `now_ms`.
     pub fn touch_tick(&self, now_ms: f64) -> Vec<TouchCommand> {
+        self.airbrush_tick(now_ms);
         let mut out = Vec::new();
         let mut t = self.touches();
         // a finger waiting for a panel held still: the hold goes on below, the panel staying

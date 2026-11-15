@@ -83,7 +83,7 @@ const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 =
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
 const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32x4
 ];
 
 #[repr(C)]
@@ -211,8 +211,9 @@ pub struct StrokeStyle {
     pub full_grain: Option<u64>,
     pub grain_side: f32,
     /// The brush file's shape it reads at its own size, if it does (see
-    /// [`Canvas::use_full_shape`]).
+    /// [`Canvas::use_full_shape`]), and what its shapes are.
     pub full_shape: Option<u64>,
+    pub tip_kind: TipKind,
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
     /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
@@ -311,6 +312,7 @@ impl StrokeStyle {
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
+            tip_kind: TipKind::Mask,
             shape_sharp: false,
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
@@ -377,6 +379,7 @@ impl StrokeStyle {
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
+            tip_kind: TipKind::Mask,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: if brush.setting("shape_filtering").round() == 1.0 {
                 SHAPE_LOD_CAP_CLASSIC
@@ -657,9 +660,11 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
-    /// Which shape image it is, counted on from the stroke's (see `Stamp::tip`), and room for more.
+    /// Which shape image it is, counted on from the stroke's (see `Stamp::tip`), how strongly a
+    /// lightness tip shows (`Stamp::lightness`) and its sharpness threshold (`Stamp::threshold`).
     tip: f32,
-    spare: [f32; 3],
+    lightness: f32,
+    threshold: [f32; 2],
 }
 
 // (read as 28 floats a stamp by the shader laying stamps by their stroke's rule)
@@ -841,7 +846,8 @@ struct StampUniform {
     shape_lod_cap: f32,
     /// Pixels a side of the image a moving grain is read from.
     grain_side: f32,
-    _pad: u32,
+    /// What its shapes are (see [`TipKind`]).
+    tip_kind: u32,
 }
 
 #[repr(C)]
@@ -1211,7 +1217,10 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         alpha: (s.alpha * style.opacity).clamp(0.0, 1.0),
         pull: 1.0,
         hardness: style.hardness.clamp(0.0, 1.0),
-        shape: style.shape.map_or(-1, |s| s as i32),
+        // each stamp its own of a set of shapes (see `Stamp::tip`)
+        shape: style.shape.map_or(-1, |shape| shape as i32 + s.tip as i32),
+        tip_kind: style.tip_kind as u32,
+        _pad: [0; 3],
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1371,7 +1380,12 @@ struct SmudgeUniform {
     origin: [i32; 2],
     /// The part of a dispatch's cells or plot texels it does (see the shader).
     part: u32,
+    /// What its shapes are (see [`TipKind`]): pictures cover as far as they are opaque.
+    tip_kind: u32,
+    _pad: [u32; 3],
 }
+
+const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
 /// from: 8 texels a side, so that a thin tip keeps its strength.
@@ -2588,11 +2602,21 @@ impl Canvas {
 
     /// `style` reads its shapes from the set `id` (`tips`, each `side` square, in order) in place of
     /// the brush images, each stamp the one its `tip` says: kept on the GPU while it is among the
-    /// last few used. Nothing if they don't fit (see [`MOST_TIPS`]).
-    pub fn use_tip_set(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, tips: &[&[u8]]) {
-        if self.full_shapes.hold_set(gpu, id, side, tips) {
+    /// last few used. A grey byte a pixel for masks, else four (RGBA, straight; see [`TipKind`]).
+    /// Nothing if they don't fit (see [`MOST_TIPS`]).
+    pub fn use_tip_set(
+        &mut self,
+        gpu: &Gpu,
+        style: &mut StrokeStyle,
+        id: u64,
+        side: u32,
+        tips: &[&[u8]],
+        kind: TipKind,
+    ) {
+        if self.full_shapes.hold_set(gpu, id, side, tips, kind.channels()) {
             style.shape = Some(0);
             style.full_shape = Some(id);
+            style.tip_kind = kind;
         }
     }
 
@@ -3017,7 +3041,8 @@ impl Canvas {
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
                     tip: s.tip.min(MOST_TIPS - 1) as f32,
-                    spare: [0.0; 3],
+                    lightness: if s.lightness.is_finite() { s.lightness.clamp(0.0, 1.0) } else { 1.0 },
+                    threshold: s.threshold.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
                 }
             })
             .collect();
@@ -3075,7 +3100,8 @@ impl Canvas {
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
                     tip: s.tip.min(MOST_TIPS - 1) as f32,
-                    spare: [0.0; 3],
+                    lightness: if s.lightness.is_finite() { s.lightness.clamp(0.0, 1.0) } else { 1.0 },
+                    threshold: s.threshold.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
                 }
             }),
         );
@@ -4536,7 +4562,7 @@ impl Canvas {
                         shape_sharp: u32::from(style.shape_sharp),
                         shape_lod_cap: style.shape_lod_cap,
                         grain_side: style.grain_side,
-                        _pad: 0,
+                        tip_kind: style.tip_kind as u32,
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -10336,6 +10362,29 @@ const FULL_GRAINS_HELD: usize = 3;
 /// The most shape images a stroke's own set holds (see [`Canvas::use_tip_set`]).
 pub const MOST_TIPS: u32 = 255;
 
+/// What a stroke's own shapes are, and how they colour its stamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TipKind {
+    /// How much each pixel paints, in the stroke's colour.
+    #[default]
+    Mask = 0,
+    /// Pictures: each pixel paints its own colour, as far as it is opaque.
+    Picture = 1,
+    /// Each pixel's grey sets the colour's lightness (a middle grey keeping it as it is, as far as
+    /// the stamp's lightness strength goes), as far as it is opaque.
+    Lightness = 2,
+    /// Each pixel's grey picks a colour between the stroke's (black) and its secondary colour
+    /// (white), as far as it is opaque.
+    Gradient = 3,
+}
+
+impl TipKind {
+    /// Bytes a pixel of its images take.
+    pub fn channels(self) -> u32 {
+        if self == TipKind::Mask { 1 } else { 4 }
+    }
+}
+
 /// Brush files' grains or shapes at their own size, each an array with its mip levels, the image in its first
 /// layer: only the last few used, so that their memory doesn't grow with the brushes.
 #[derive(Default)]
@@ -10347,21 +10396,23 @@ struct FullGrains {
 impl FullGrains {
     /// Has the image `id` ready; false if `pixels` aren't `side` square.
     fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
-        self.hold_set(gpu, id, side, &[pixels])
+        self.hold_set(gpu, id, side, &[pixels], 1)
     }
 
-    /// Has the images `id` ready, one to a layer in their order; false if any isn't `side` square,
-    /// there are none or more than [`MOST_TIPS`].
-    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]]) -> bool {
+    /// Has the images `id` ready, one to a layer in their order, `channels` bytes a pixel (1 grey,
+    /// 4 RGBA straight, held premultiplied); false if any isn't `side` square, there are none or
+    /// more than [`MOST_TIPS`].
+    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]], channels: u32) -> bool {
         self.clock += 1;
         let clock = self.clock;
         if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
             slot.2 = clock;
             return true;
         }
-        let square = (side as usize).pow(2);
+        let square = (side as usize).pow(2) * channels as usize;
         let most = MOST_TIPS.min(gpu.device.limits().max_texture_array_layers.saturating_sub(1)) as usize;
         if !side.is_power_of_two()
+            || !matches!(channels, 1 | 4)
             || images.is_empty()
             || images.len() > most
             || images.iter().any(|i| i.len() != square)
@@ -10375,12 +10426,26 @@ impl FullGrains {
             mip_level_count: side.ilog2() + 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: if channels == 4 { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::R8Unorm },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         for (layer, pixels) in images.iter().enumerate() {
-            write_image_levels(gpu, &texture, layer as u32, side, pixels);
+            if channels == 4 {
+                // premultiplied, so that its smaller levels don't darken its edges
+                let premultiplied: Vec<u8> = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|&[r, g, b, a]| {
+                        let by = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
+                        [by(r), by(g), by(b), a]
+                    })
+                    .collect();
+                write_image_levels_of(gpu, &texture, layer as u32, side, &premultiplied, 4);
+            } else {
+                write_image_levels(gpu, &texture, layer as u32, side, pixels);
+            }
         }
         if self.held.len() >= FULL_GRAINS_HELD
             && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
@@ -10486,6 +10551,11 @@ fn write_brush_image(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, pixels: &[u
 
 /// A greyscale image `n` square into `layer` of `texture`, every mip level.
 fn write_image_levels(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pixels: &[u8]) {
+    write_image_levels_of(gpu, texture, layer, n, pixels, 1);
+}
+
+/// [`write_image_levels`] for an image of `channels` bytes a pixel.
+fn write_image_levels_of(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pixels: &[u8], channels: u32) {
     let mut level = pixels.to_vec();
     let mut size = n;
     for mip in 0..n.ilog2() + 1 {
@@ -10497,14 +10567,37 @@ fn write_image_levels(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pi
                 aspect: wgpu::TextureAspect::All,
             },
             &level,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size), rows_per_image: Some(size) },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * channels), rows_per_image: Some(size) },
             wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
         );
         if size > 1 {
-            level = half_size(&level, size as usize);
+            level = if channels == 1 {
+                half_size(&level, size as usize)
+            } else {
+                half_size_of(&level, size as usize, channels as usize)
+            };
             size /= 2;
         }
     }
+}
+
+/// [`half_size`] for an image of `channels` bytes a pixel, each channel on its own.
+fn half_size_of(pixels: &[u8], size: usize, channels: usize) -> Vec<u8> {
+    let half = size / 2;
+    let at = |x: usize, y: usize, c: usize| u32::from(pixels.get((y * size + x) * channels + c).copied().unwrap_or(0));
+    let mut out = Vec::with_capacity(half * half * channels);
+    for y in 0..half {
+        for x in 0..half {
+            for c in 0..channels {
+                let sum = at(2 * x, 2 * y, c)
+                    + at(2 * x + 1, 2 * y, c)
+                    + at(2 * x, 2 * y + 1, c)
+                    + at(2 * x + 1, 2 * y + 1, c);
+                out.push(((sum + 2) / 4) as u8);
+            }
+        }
+    }
+    out
 }
 
 /// A square greyscale image at half the size: each pixel the average of four.

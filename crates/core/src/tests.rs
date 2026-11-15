@@ -7141,7 +7141,7 @@ fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brush
             out.push(format!("{k} added"));
         }
     }
-    let fields: [(&str, bool); 15] = [
+    let fields: [(&str, bool); 16] = [
         ("name", a.name == b.name),
         ("author", a.author == b.author),
         ("max_size", a.max_size == b.max_size),
@@ -7157,6 +7157,7 @@ fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brush
         ("sliders", sliders_kept(&a.sliders, &b.sliders)),
         ("notches", a.notches == b.notches),
         ("author pictures", a.author_picture == b.author_picture && a.signature == b.signature),
+        ("engine", a.engine == b.engine),
     ];
     out.extend(fields.iter().filter(|f| !f.1).map(|f| f.0.to_owned()));
     let order = |f: &procraft_engine::brushfile::BrushFile| f.settings.iter().map(|s| s.0.clone()).collect::<Vec<_>>();

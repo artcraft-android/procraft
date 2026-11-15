@@ -237,7 +237,9 @@ impl CurveOption {
         if !scaling.is_empty() {
             let most = scaling.iter().copied().fold(f32::MIN, f32::max);
             let least = scaling.iter().copied().fold(f32::MAX, f32::min);
+            // (one sensor is its value, however several would combine)
             parts.scaling = Some(match self.mode {
+                _ if scaling.len() == 1 => most,
                 1 => scaling.iter().sum(),
                 2 => most,
                 3 => least,
@@ -348,5 +350,14 @@ mod tests {
         // fuzz at its middle adds nothing: half of the scaling
         let v = o.size_like(&Info { pressure: 0.5, ..Info::default() }, &mut Still, true);
         assert!((v - 0.25).abs() < 1e-4, "{v}");
+    }
+
+    #[test]
+    fn a_lone_sensor_is_its_value_whatever_the_mode_says() {
+        // "difference" of one value would be nothing
+        let p = preset(&[("PressureOpacity", "true"), ("OpacitycurveMode", "4"), ("OpacityValue", "0.8")]);
+        let o = CurveOption::read(&p, "", "Opacity", true, 0.0, 1.0);
+        let v = o.size_like(&Info { pressure: 0.5, ..Info::default() }, &mut Still, true);
+        assert!((v - 0.4).abs() < 1e-4, "{v}");
     }
 }

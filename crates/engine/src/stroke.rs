@@ -78,6 +78,11 @@ pub struct Stamp {
     /// Which of its stroke's shape images it is, counted from the stroke's own (0): a brush
     /// engine outside the app picks one for each stamp from the set its brush has.
     pub tip: u32,
+    /// How strongly a lightness tip moves the colour's lightness (0..1; see the GPU's tip kinds).
+    pub lightness: f32,
+    /// Its shape made sharp: what is over the first (0..1; 0: as it is) paints fully, what is
+    /// under that share of it (the second, 0..1) of it not at all, what lies between as it is.
+    pub threshold: [f32; 2],
 }
 
 impl Stamp {
@@ -107,6 +112,8 @@ impl Stamp {
             distance: 0.0,
             overlap: 0.0,
             tip: 0,
+            lightness: 1.0,
+            threshold: [0.0; 2],
         }
     }
 
@@ -2528,6 +2535,8 @@ impl StrokeBuilder {
             distance: p.distance,
             overlap: p.overlap,
             tip: 0,
+            lightness: 1.0,
+            threshold: [0.0; 2],
         }
     }
 }

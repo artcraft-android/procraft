@@ -50,6 +50,9 @@ pub struct BrushFile {
     pub signature: Option<Vec<u8>>,
     /// A dual brush's second (in the folder `Sub01` beside it).
     pub secondary: Option<Box<BrushFile>>,
+    /// The brush engine outside the app that draws it, and its data for it (see
+    /// [`crate::brush::OutsideBrush`]), in the folder `Engine`: other apps pass it over.
+    pub engine: Option<(String, Vec<u8>)>,
 }
 
 /// A shape or grain image as a brush file names it.
@@ -781,6 +784,11 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         } else {
             read_in(zip, &format!("{prefix}{SECONDARY}")).map(Box::new)
         },
+        engine: zip
+            .read(&format!("{prefix}{ENGINE_KEY}"))
+            .and_then(|key| String::from_utf8(key).ok())
+            .filter(|key| !key.is_empty() && key.len() <= MOST_ENGINE_KEY)
+            .zip(zip.read(&format!("{prefix}{ENGINE_DATA}"))),
     })
 }
 
@@ -813,6 +821,11 @@ const SLIDERS: [(&str, &str); 3] =
     [("paintSize", "paintOpacity"), ("smudgeSize", "smudgeOpacity"), ("eraseSize", "eraseOpacity")];
 
 const AUTHOR_PICTURE: &str = "AuthorPicture/AuthorPicture.png";
+/// Where a brush's folder keeps the brush engine that draws it, and its data for it.
+const ENGINE_KEY: &str = "Engine/Key.txt";
+const ENGINE_DATA: &str = "Engine/Data.bin";
+/// The most bytes of an engine's name.
+const MOST_ENGINE_KEY: usize = 256;
 /// The folder a dual brush's second is kept in, beside the first's files.
 const SECONDARY: &str = "Sub01/";
 const SIGNATURE: &str = "Signature/SignaturePicture.png";
@@ -999,6 +1012,10 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
         if let Some(png) = png {
             zip.add(&format!("{prefix}{path}"), png);
         }
+    }
+    if let Some(engine) = &brush.engine {
+        zip.add(&format!("{prefix}{ENGINE_KEY}"), engine.engine.as_bytes());
+        zip.add(&format!("{prefix}{ENGINE_DATA}"), &engine.data);
     }
     if let (Some(second), Some(pictures)) = (&brush.secondary, &pictures.secondary) {
         add_brush(zip, &format!("{prefix}{SECONDARY}"), second, author, pictures);

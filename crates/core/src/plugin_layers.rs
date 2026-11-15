@@ -1487,12 +1487,48 @@ impl State {
                 .seen_at(item.seen_at);
             if exact { builder.exact_path() } else { builder }
         };
-        let mut builder = make(brush, diameter * scale, item.seed);
+        let mut builder = make(brush.clone(), diameter * scale, item.seed);
         let mut second_builder = second.as_ref().map(|(b, _, d)| make(b.clone(), d * scale, item.seed ^ SECOND_SEED));
         let guide = item.symmetry.map_or_else(Guide::default, |s| s.moved(t).guide());
-        let Some(canvas) = self.canvas.as_mut() else { return (IRect::EMPTY, false) };
+        let starting = crate::plugin_brushes::Starting {
+            colour: item.colour,
+            secondary: item.secondary,
+            diameter: diameter * scale,
+            start_diameter: brush.diameter(crate::starting_sliders_of(&brush, item.tool).size),
+            opacity: item.opacity.clamp(0.0, 1.0),
+            tool: match item.tool.stroke_tool() {
+                procraft_gpu::StrokeTool::Erase => 1,
+                procraft_gpu::StrokeTool::Smudge => 2,
+                _ => 0,
+            },
+            pointer: match item.pointer {
+                crate::PointerKind::Finger => 0,
+                crate::PointerKind::Mouse => 2,
+                _ => 1,
+            },
+            seed: item.seed,
+            turn: item.rotation,
+        };
+        let hooks = self.hooks.clone().filter(|_| brush.engine.is_some());
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return (IRect::EMPTY, false) };
+        let engine = hooks.and_then(|hooks| {
+            let look = (item.alpha_lock, false);
+            crate::plugin_brushes::engine_stroke(&hooks, &brush, item.tool.stroke_tool(), starting, look, canvas, gpu)
+        });
+        let (style, second) = match engine {
+            Some(o) => {
+                builder = builder.with_engine(Box::new(o.first));
+                // (a shape is its first alone)
+                let o_second = o.second.filter(|_| !exact);
+                second_builder = o_second.map(|_| {
+                    make(brush.clone(), diameter * scale, item.seed ^ SECOND_SEED).with_engine(Box::new(o.second_half))
+                });
+                (o.style, o_second)
+            }
+            None => (style, second.map(|(_, s, _)| s)),
+        };
         match second {
-            Some((_, second, _)) => canvas.begin_dual_stroke(layer, style, second),
+            Some(second) => canvas.begin_dual_stroke(layer, style, second),
             None => canvas.begin_stroke(layer, style),
         }
         // in the steps they came in: drawn as they came, the last as the pen lifted

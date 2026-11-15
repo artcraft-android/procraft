@@ -370,6 +370,17 @@ const BASE64: [u8; 256] = {
     table
 };
 
+/// A picture a setting carries in base64: Krita writes a pattern's file as base64 text, which
+/// its settings then write as base64 again, so it is read through twice where once leaves text.
+pub fn carried_picture(text: &str) -> Option<Vec<u8>> {
+    let picture = |b: &[u8]| b.starts_with(b"\x89PNG") || b.get(20..24) == Some(b"GPAT");
+    let once = base64(text).filter(|b| !b.is_empty())?;
+    if picture(&once) {
+        return Some(once);
+    }
+    std::str::from_utf8(&once).ok().and_then(base64).filter(|b| picture(b)).or(Some(once))
+}
+
 /// `text` as base64, white space passed over; none if it isn't.
 pub fn base64(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();

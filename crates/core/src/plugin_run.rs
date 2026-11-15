@@ -260,7 +260,7 @@ const MOST_BRUSH_LOAD_TIME: Duration = Duration::from_secs(10);
 const DAB_FUEL: u64 = 40_000_000;
 const MOST_DAB_TIME: Duration = Duration::from_millis(250);
 /// The bytes of one dab, and the most dabs one call may answer.
-pub(crate) const DAB_BYTES: usize = 64;
+pub(crate) const DAB_BYTES: usize = 96;
 const MOST_DABS: usize = 1 << 16;
 /// The most a brush's look or the brushes made of a file may be, in bytes.
 const MOST_LOOK: usize = 128 << 20;

@@ -1874,6 +1874,11 @@ fn brush_from(file: &BrushFile) -> Brush {
     };
     // its own preview, if it can be shown
     b.thumbnail = file.thumbnail.as_deref().filter(|t| thumbnail_pixels(t).is_some()).map(Into::into);
+    // drawn by a plugin's brush engine, if one was
+    b.engine = file.engine.as_ref().map(|(engine, data)| procraft_engine::brush::OutsideBrush {
+        engine: engine.clone(),
+        data: data.as_slice().into(),
+    });
     // who made it, if the file says
     let png = |bytes: &Option<Vec<u8>>| bytes.as_deref().filter(|p| decode_png(p).is_some()).map(Into::into);
     let (picture, signature) = (png(&file.author_picture), png(&file.signature));

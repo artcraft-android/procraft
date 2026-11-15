@@ -24,6 +24,7 @@ pub fn grey(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// A colour picture as a mask, as Krita takes one: dark paints, as far as it is opaque.
+#[cfg(test)]
 pub fn mask_of(image: &Rgba) -> Mask {
     let pixels = image
         .pixels
@@ -35,9 +36,16 @@ pub fn mask_of(image: &Rgba) -> Mask {
     Mask { width: image.width, height: image.height, pixels }
 }
 
-/// A brush in `bytes`, and how many bytes it took; `pixels`: its pixels too, else only its size
-/// (read from its header: the rest of it needn't be there).
-pub fn gbr(bytes: &[u8], pixels: bool) -> Option<(Mask, usize)> {
+/// Whether every pixel of `image` is grey (its alpha aside).
+pub fn all_grey(image: &Rgba) -> bool {
+    image.pixels.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2])
+}
+
+/// A brush in `bytes` as Krita takes its picture (RGBA, straight: a grey brush opaque, its grey the
+/// lightness of what it doesn't paint), whether it is a grey brush, and how many bytes it took;
+/// `pixels`: its pixels too, else only its size (read from its header: the rest of it needn't be
+/// there).
+pub fn gbr(bytes: &[u8], pixels: bool) -> Option<(Rgba, bool, usize)> {
     let header = be32(bytes, 0)? as usize;
     let version = be32(bytes, 4)?;
     let (width, height, depth) = (be32(bytes, 8)?, be32(bytes, 12)?, be32(bytes, 16)?);
@@ -50,21 +58,15 @@ pub fn gbr(bytes: &[u8], pixels: bool) -> Option<(Mask, usize)> {
     let count = width as usize * height as usize;
     let used = header + count * depth as usize;
     if !pixels {
-        return matches!(depth, 1 | 4).then_some((Mask { width, height, pixels: Vec::new() }, used));
+        return matches!(depth, 1 | 4).then_some((Rgba { width, height, pixels: Vec::new() }, depth == 1, used));
     }
     let data = bytes.get(header..used)?;
     let pixels = match depth {
-        // grey: how much each pixel paints
-        1 => data.to_vec(),
-        4 => data
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| ((255 - u32::from(grey(p[0], p[1], p[2]))) * u32::from(p[3]) / 255) as u8)
-            .collect(),
+        1 => data.iter().flat_map(|&v| [255 - v, 255 - v, 255 - v, 255]).collect(),
+        4 => data.to_vec(),
         _ => return None,
     };
-    Some((Mask { width, height, pixels }, used))
+    Some((Rgba { width, height, pixels }, depth == 1, used))
 }
 
 /// How a pipe picks its next cell along one of its dimensions.
@@ -80,10 +82,12 @@ pub enum Selection {
     TiltY,
 }
 
-/// A pipe: its cells, and for each dimension how many steps it has and how one is picked.
+/// A pipe: its cells (as [`gbr`] takes them), whether they are grey brushes, and for each
+/// dimension how many steps it has and how one is picked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pipe {
-    pub cells: Vec<Mask>,
+    pub cells: Vec<Rgba>,
+    pub grey: bool,
     pub ranks: Vec<u32>,
     pub selections: Vec<Selection>,
 }
@@ -127,10 +131,14 @@ pub fn gih(bytes: &[u8], pixels: bool) -> Option<Pipe> {
         }
     }
     let mut cells = Vec::with_capacity(count.min(1024));
+    let mut grey = true;
     let mut at = first + 1 + second + 1;
     for _ in 0..count.min(1024) {
-        let Some((mask, used)) = bytes.get(at..).and_then(|b| gbr(b, pixels)) else { break };
-        cells.push(mask);
+        let Some((cell, is_grey, used)) = bytes.get(at..).and_then(|b| gbr(b, pixels)) else { break };
+        if cells.is_empty() {
+            grey = is_grey;
+        }
+        cells.push(cell);
         at += used;
     }
     if cells.is_empty() {
@@ -147,7 +155,7 @@ pub fn gih(bytes: &[u8], pixels: bool) -> Option<Pipe> {
         ranks = vec![cells.len() as u32];
         selections.truncate(1);
     }
-    Some(Pipe { cells, ranks, selections })
+    Some(Pipe { cells, grey, ranks, selections })
 }
 
 /// A GIMP pattern in `bytes`: grey, grey and alpha, colour, or colour and alpha; `pixels`: its
@@ -200,7 +208,10 @@ mod tests {
         file.extend(brush(3, 1, 7));
         let pipe = gih(&file, true).unwrap();
         assert_eq!(pipe.cells.len(), 2);
-        assert_eq!((pipe.cells[1].width, pipe.cells[1].pixels[0]), (3, 7));
+        assert!(pipe.grey);
+        // a grey brush's grey: the lightness of what it doesn't paint
+        assert_eq!((pipe.cells[1].width, pipe.cells[1].pixels[0]), (3, 255 - 7));
+        assert_eq!(mask_of(&pipe.cells[1]).pixels[0], 7);
         assert_eq!(
             (pipe.ranks.as_slice(), pipe.selections.as_slice()),
             ([2_u32].as_slice(), [Selection::Random].as_slice())

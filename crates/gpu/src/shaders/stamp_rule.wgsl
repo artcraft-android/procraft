@@ -57,6 +57,7 @@ fn rule_stamp(k: u32, p: vec2<f32>, out: ptr<function, StampOut>) -> bool {
     (*out).grain_bleed = more.y;
     (*out).transfer = more.z;
     (*out).layer = su.shape + i32(rule_stamps[b + 24u]);
+    (*out).finish = vec3<f32>(rule_stamps[b + 25u], rule_stamps[b + 26u], rule_stamps[b + 27u]);
     return true;
 }
 

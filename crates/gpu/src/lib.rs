@@ -18,8 +18,8 @@ pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerThumbnailStep, LiquifyMode, LiquifyStamp, MOST_TIPS,
     PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke, SelectionLook,
-    SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, most_resident,
-    read_texture, start_reading, textures_bytes,
+    SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, TipKind,
+    most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;

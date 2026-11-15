@@ -112,6 +112,8 @@ struct Walker {
     spacing: (f32, f32),
     turn: f32,
     dabs: u32,
+    /// When its last dab was laid (ms), for an airbrush.
+    last_ms: f32,
 }
 
 /// Spacing below this (canvas pixels) is taken as this, as Krita does.
@@ -157,7 +159,7 @@ struct PipeState {
     steps: Vec<u32>,
 }
 
-/// A dab, as the app takes it (see the app's guide): 16 numbers.
+/// A dab, as the app takes it (see the app's guide): 24 numbers.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Dab {
     pub x: f32,
@@ -172,6 +174,11 @@ pub struct Dab {
     pub colour: [f32; 3],
     pub strength: f32,
     pub texture_offset: (f32, f32),
+    /// How strongly a lightness tip's grey shows; its sharpness threshold (0: none) and the share
+    /// below it kept as it is.
+    pub lightness: f32,
+    pub threshold: f32,
+    pub softness: f32,
 }
 
 const FLIP_ACROSS: u32 = 1;
@@ -181,7 +188,7 @@ const FOR_SECOND: u32 = 8;
 
 impl Dab {
     pub fn write(&self, out: &mut Vec<u8>) {
-        let words: [u32; 16] = [
+        let words: [u32; 24] = [
             self.x.to_bits(),
             self.y.to_bits(),
             self.diameter.to_bits(),
@@ -197,6 +204,14 @@ impl Dab {
             self.strength.to_bits(),
             self.texture_offset.0.to_bits(),
             self.texture_offset.1.to_bits(),
+            self.lightness.to_bits(),
+            self.threshold.to_bits(),
+            self.softness.to_bits(),
+            0,
+            0,
+            0,
+            0,
+            0,
             0,
         ];
         for w in words {
@@ -341,9 +356,20 @@ impl Stroke {
                 let mut at = last;
                 let start_length = self.length;
                 while self.out.len() < MOST_DABS {
+                    // an airbrush lays a dab when its time comes, wherever its spacing has got to
+                    let timed = if second { None } else { self.airbrushed(&at, &p) };
+                    let until = timed.map_or(p, |k| Point::between(&at, &p, k));
+                    let ignore = !second && self.brush.airbrush.as_ref().is_some_and(|a| a.ignore_spacing);
                     let walker = if second { &mut self.second } else { &mut self.main };
-                    let Some(t) = walker.next((at.x, at.y), (p.x, p.y)) else { break };
-                    let here = Point::between(&at, &p, t);
+                    let spaced = if ignore { None } else { walker.next((at.x, at.y), (until.x, until.y)) };
+                    let (t, here) = match (spaced, timed) {
+                        (Some(t), _) => (t, Point::between(&at, &until, t)),
+                        (None, Some(_)) => {
+                            walker.gone = (0.0, 0.0);
+                            (1.0, until)
+                        }
+                        (None, None) => break,
+                    };
                     // the distance sensor's: as far along as this dab
                     let done = ((here.x - last.x).powi(2) + (here.y - last.y).powi(2)).sqrt();
                     self.length = start_length + done;
@@ -359,6 +385,28 @@ impl Stroke {
             }
             self.length += (dx * dx + dy * dy).sqrt();
             self.last = Some(p);
+        }
+    }
+
+    /// How far from `at` to `to` (0..1) the airbrush's next dab comes, if it comes before `to`:
+    /// once its interval (scaled by its rate option where `at` is) has passed since the last.
+    fn airbrushed(&mut self, at: &Point, to: &Point) -> Option<f32> {
+        let airbrush = self.brush.airbrush.clone()?;
+        let info = self.info(at, self.main.dabs);
+        let seed = self.begin.seed;
+        let mut fuzz = Fuzz { random: &mut self.random, seed };
+        let scale = if airbrush.rate.checked { airbrush.rate.size_like(&info, &mut fuzz, true) } else { 1.0 };
+        if scale <= 0.0 {
+            return None;
+        }
+        let need = airbrush.interval / scale - (at.time - self.main.last_ms);
+        let span = to.time - at.time;
+        if need <= 0.0 {
+            Some(0.0)
+        } else if span > 0.0 && need <= span {
+            Some(need / span)
+        } else {
+            None
         }
     }
 
@@ -464,6 +512,9 @@ impl Stroke {
             colour: [0.0; 3],
             strength: 1.0,
             texture_offset: self.texture_offset,
+            lightness: 1.0,
+            threshold: 0.0,
+            softness: 0.0,
         };
         // its tip: a pipe's cell, or an auto tip's drawing (noise afresh, softness as it says)
         dab.tip = match &tip.tips {
@@ -492,6 +543,26 @@ impl Stroke {
             if let Some(t) = &brush.texture {
                 dab.strength = t.strength.apply(&info, &mut fuzz).clamp(0.0, 1.0);
             }
+            if brush.lightness.checked {
+                dab.lightness = brush.lightness.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);
+            }
+            let sharp = &brush.sharpness;
+            if sharp.option.checked {
+                let value = sharp.option.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);
+                // (a threshold of nothing would leave nothing: the app takes 0 as none)
+                dab.threshold = value.max(1e-6);
+                dab.softness = sharp.softness;
+                if sharp.align && sharp.option.strength > 0.0 {
+                    // its corner moved towards a whole pixel as far as the value goes
+                    let snap = |c: f32, side: f32| {
+                        let corner = c - side * 0.5;
+                        value * corner.round() + (1.0 - value) * corner + side * 0.5
+                    };
+                    let side = dab.diameter.round().max(1.0);
+                    dab.x = snap(dab.x, side);
+                    dab.y = snap(dab.y, side);
+                }
+            }
             if let Some(colour) = colour_of(&brush, &self.begin, &info, &mut fuzz) {
                 dab.colour = colour;
                 dab.flags |= OWN_COLOUR;
@@ -507,6 +578,7 @@ impl Stroke {
         walker.spacing = spacing;
         walker.turn = if dynamics.isotropic { 0.0 } else { turn };
         walker.dabs += 1;
+        walker.last_ms = p.time;
         if !second {
             self.dabs += 1;
         }

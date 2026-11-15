@@ -28,7 +28,7 @@ use procraft_engine::brush::{Brush, OutsideBrush};
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
 use procraft_engine::stroke::{OutsideEngine, Stamp, Tint};
-use procraft_gpu::{SecondStroke, StrokeStyle, StrokeTool};
+use procraft_gpu::{SecondStroke, StrokeStyle, StrokeTool, TipKind};
 
 use crate::CanvasSession;
 use crate::hooks::{Hooks, Shared, at_work};
@@ -79,6 +79,10 @@ mod field {
     pub const TEXTURE_MODE: u16 = 5;
     pub const SECOND: u16 = 6;
     pub const SECOND_COMBINE: u16 = 3;
+    /// What its tips are (u8, the GPU's tip kinds; masks if it doesn't say).
+    pub const TIP_KIND: u16 = 7;
+    /// How often it lays a dab while the pen holds still (f32 ms), if it does (an airbrush).
+    pub const AIRBRUSH: u16 = 8;
     /// A load: the brush's id and data, and whether the app holds its look already.
     pub const LOAD_ID: u16 = 1;
     pub const LOAD_DATA: u16 = 2;
@@ -113,12 +117,13 @@ const MOST_TEXTURE_SIDE: u32 = 2048;
 /// The looks each plugin keeps by the brushes' data.
 pub(crate) const LOOKS_KEPT: usize = 16;
 
-/// The tips a stroke picks from, fitted into squares a power of two a side for the GPU, and their
-/// id there.
+/// The tips a stroke picks from, fitted into squares a power of two a side for the GPU, what they
+/// are (a byte a pixel for masks, else RGBA, straight), and their id there.
 #[derive(Debug, PartialEq)]
 pub(crate) struct TipSet {
     pub id: u64,
     pub side: u32,
+    pub kind: TipKind,
     pub layers: Vec<Vec<u8>>,
 }
 
@@ -145,6 +150,8 @@ pub(crate) struct LookTexture {
 /// How a brush an engine draws looks (see the module's notes).
 #[derive(Debug, PartialEq)]
 pub(crate) struct BrushLook {
+    /// Every how many milliseconds its engine is handed the pen again while it holds still.
+    pub airbrush: Option<f32>,
     pub tips: TipSet,
     pub build: Build,
     pub blend: Option<u32>,
@@ -173,11 +180,19 @@ fn f32_of(bytes: &[u8]) -> Option<f32> {
 /// The record `bytes` as a look, the tips' set given `id` (and the second's and the texture's
 /// near it); none if it doesn't hold up.
 pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
+    let kind = fields(bytes).find(|(f, _)| *f == field::TIP_KIND).map_or(TipKind::Mask, |(_, v)| match v.first() {
+        Some(1) => TipKind::Picture,
+        Some(2) => TipKind::Lightness,
+        Some(3) => TipKind::Gradient,
+        _ => TipKind::Mask,
+    });
     let mut tips = Vec::new();
     let (mut build, mut blend, mut erases, mut texture, mut second) = (Build::Over, None, false, None, None);
+    let mut airbrush = None;
     for (f, value) in fields(bytes) {
         match f {
-            field::TIP => tips.push(read_tip(value)?),
+            field::AIRBRUSH => airbrush = f32_of(value).filter(|ms| *ms > 0.0).map(|ms| ms.max(MOST_AIRBRUSH_MS)),
+            field::TIP => tips.push(read_tip(value, kind.channels() as usize)?),
             field::BUILD => build = read_build(value),
             field::BLEND => blend = u32_of(value),
             field::ERASES => erases = value.first().is_some_and(|&b| b != 0),
@@ -186,8 +201,11 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
             _ => {}
         }
     }
-    Some(BrushLook { tips: tip_set(&tips, id)?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, tips: tip_set(&tips, id, kind)?, build, blend, erases, texture, second })
 }
+
+/// The pen is handed again at most this often (ms), however often an airbrush lays its dabs.
+const MOST_AIRBRUSH_MS: f32 = 4.0;
 
 /// A set's tips, as the GPU takes them.
 fn layers(set: &TipSet) -> Vec<&[u8]> {
@@ -198,8 +216,8 @@ fn read_build(value: &[u8]) -> Build {
     if value.first().is_some_and(|&b| b == 1) { Build::Towards } else { Build::Over }
 }
 
-/// A tip: its width, height and grey pixels (255 paints).
-fn read_tip(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+/// A tip: its width, height and pixels, `channels` bytes each (a grey, 255 painting; or RGBA).
+fn read_tip(bytes: &[u8], channels: usize) -> Option<(u32, u32, Vec<u8>)> {
     let (mut w, mut h, mut pixels) = (None, None, None);
     for (f, value) in fields(bytes) {
         match f {
@@ -211,7 +229,7 @@ fn read_tip(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
     let (w, h, pixels) = (w?, h?, pixels?);
     let fits = (1..=MOST_TIP_SIDE).contains(&w) && (1..=MOST_TIP_SIDE).contains(&h);
-    (fits && pixels.len() == (w as usize) * (h as usize)).then(|| (w, h, pixels.to_vec()))
+    (fits && pixels.len() == (w as usize) * (h as usize) * channels).then(|| (w, h, pixels.to_vec()))
 }
 
 fn read_second(bytes: &[u8], id: u64) -> Option<SecondLook> {
@@ -219,13 +237,13 @@ fn read_second(bytes: &[u8], id: u64) -> Option<SecondLook> {
     let (mut build, mut combine) = (Build::Towards, 1);
     for (f, value) in fields(bytes) {
         match f {
-            field::TIP => tips.push(read_tip(value)?),
+            field::TIP => tips.push(read_tip(value, 1)?),
             field::BUILD => build = read_build(value),
             field::SECOND_COMBINE => combine = u32_of(value)?,
             _ => {}
         }
     }
-    Some(SecondLook { tips: tip_set(&tips, id)?, build, combine })
+    Some(SecondLook { tips: tip_set(&tips, id, TipKind::Mask)?, build, combine })
 }
 
 fn read_texture(bytes: &[u8], id: u64) -> Option<LookTexture> {
@@ -242,7 +260,7 @@ fn read_texture(bytes: &[u8], id: u64) -> Option<LookTexture> {
             _ => {}
         }
     }
-    let (w, h, pixels) = read_tip(&parts.bytes())?;
+    let (w, h, pixels) = read_tip(&parts.bytes(), 1)?;
     if !(0.01..=1000.0).contains(&scale) {
         return None;
     }
@@ -254,18 +272,56 @@ fn read_texture(bytes: &[u8], id: u64) -> Option<LookTexture> {
 
 /// The tips as a set for the GPU: each fitted into a square, all one side (a power of two, as small
 /// as keeps the largest whole, held within what a set may take).
-fn tip_set(tips: &[(u32, u32, Vec<u8>)], id: u64) -> Option<TipSet> {
+fn tip_set(tips: &[(u32, u32, Vec<u8>)], id: u64, kind: TipKind) -> Option<TipSet> {
     let most = procraft_gpu::MOST_TIPS as usize;
     if tips.is_empty() || tips.len() > most {
         return None;
     }
+    let channels = kind.channels() as usize;
     let largest = tips.iter().map(|(w, h, _)| *w.max(h)).max().unwrap_or(1);
     let mut side = largest.next_power_of_two().clamp(16, MOST_SET_SIDE);
-    while side > 16 && (side as usize).pow(2) * tips.len() > MOST_SET_BYTES {
+    while side > 16 && (side as usize).pow(2) * tips.len() * channels > MOST_SET_BYTES {
         side /= 2;
     }
-    let layers = tips.iter().map(|(w, h, pixels)| fitted(*w, *h, pixels, side)).collect();
-    Some(TipSet { id, side, layers })
+    let layers = tips
+        .iter()
+        .map(
+            |(w, h, pixels)| {
+                if channels == 1 { fitted(*w, *h, pixels, side) } else { fitted_rgba(*w, *h, pixels, side) }
+            },
+        )
+        .collect();
+    Some(TipSet { id, side, kind, layers })
+}
+
+/// RGBA `pixels` (`w` x `h`, straight) fitted as [`fitted`] fits a grey picture: each channel as
+/// it covers, so that clear pixels lend none of their colour; straight again.
+fn fitted_rgba(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
+    let px = pixels.as_chunks::<4>().0;
+    let channel = |c: usize| -> Vec<u8> {
+        let plane: Vec<u8> = px
+            .iter()
+            .map(|&[r, g, b, a]| {
+                let v = match c {
+                    0 => r,
+                    1 => g,
+                    2 => b,
+                    _ => return a,
+                };
+                ((u32::from(v) * u32::from(a) + 127) / 255) as u8
+            })
+            .collect();
+        fitted(w, h, &plane, side)
+    };
+    let [r, g, b, a] = [channel(0), channel(1), channel(2), channel(3)];
+    let straight =
+        |v: u8, a: u8| if a == 0 { 0 } else { ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8 };
+    r.iter()
+        .zip(&g)
+        .zip(&b)
+        .zip(&a)
+        .flat_map(|(((&r, &g), &b), &a)| [straight(r, a), straight(g, a), straight(b, a), a])
+        .collect()
 }
 
 /// `pixels` (`w` x `h`) fitted into a square `side` a side, its longer side across all of it,
@@ -309,11 +365,11 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
 /// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
 /// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
 /// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
-const KEPT_LOOK_VERSION: u32 = 1;
+const KEPT_LOOK_VERSION: u32 = 3;
 
 fn kept_tips(set: &TipSet) -> Vec<u8> {
     let mut r = Record::default();
-    r.field(1, &set.side.to_le_bytes());
+    r.field(1, &set.side.to_le_bytes()).field(3, &[set.kind as u8]);
     for layer in &set.layers {
         r.field(2, layer);
     }
@@ -332,6 +388,9 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
         r.field(4, &blend.to_le_bytes());
     }
     r.field(5, &[u8::from(look.erases)]);
+    if let Some(ms) = look.airbrush {
+        r.field(8, &ms.to_le_bytes());
+    }
     if let Some(t) = &look.texture {
         let mut tex = Record::default();
         tex.field(1, &t.side.to_le_bytes())
@@ -350,20 +409,28 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
 
 /// A tip set as kept: a side a power of two the GPU takes, each layer that square.
 fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
-    let mut side = None;
+    let (mut side, mut kind) = (None, TipKind::Mask);
     let mut layers = Vec::new();
     for (f, value) in fields(bytes) {
         match f {
             1 => side = u32_of(value),
             2 => layers.push(value.to_vec()),
+            3 => {
+                kind = match value.first() {
+                    Some(1) => TipKind::Picture,
+                    Some(2) => TipKind::Lightness,
+                    Some(3) => TipKind::Gradient,
+                    _ => TipKind::Mask,
+                }
+            }
             _ => {}
         }
     }
     let side = side.filter(|s| s.is_power_of_two() && (16..=MOST_SET_SIDE).contains(s))?;
     let fits = !layers.is_empty()
         && layers.len() <= procraft_gpu::MOST_TIPS as usize
-        && layers.iter().all(|l| l.len() == (side as usize).pow(2));
-    fits.then_some(TipSet { id, side, layers })
+        && layers.iter().all(|l| l.len() == (side as usize).pow(2) * kind.channels() as usize);
+    fits.then_some(TipSet { id, side, kind, layers })
 }
 
 /// The look kept on the disk as `bytes`, its tips' set given `id` (and the rest near it, as
@@ -371,9 +438,11 @@ fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
 pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
     let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
         (None, None, Build::Over, None, false, None, None);
+    let mut airbrush = None;
     for (f, value) in fields(bytes) {
         match f {
             1 => version = u32_of(value),
+            8 => airbrush = f32_of(value).filter(|ms| *ms >= MOST_AIRBRUSH_MS),
             2 => tips = Some(tips_kept(value, id)?),
             3 => build = read_build(value),
             4 => blend = u32_of(value),
@@ -413,7 +482,7 @@ pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
         }
     }
     (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
-    Some(BrushLook { tips: tips?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, tips: tips?, build, blend, erases, texture, second })
 }
 
 /// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
@@ -705,7 +774,7 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     let float = |i: usize| f32::from_le_bytes(word(i));
     let [x, y, diameter, angle, ratio, opacity, flow] = [0, 1, 2, 3, 4, 5, 6].map(float);
     let (tip, flags) = (u32::from_le_bytes(word(7)), u32::from_le_bytes(word(8)));
-    let [r, g, b, strength, tx, ty] = [9, 10, 11, 12, 13, 14].map(float);
+    let [r, g, b, strength, tx, ty, lightness, threshold, softness] = [9, 10, 11, 12, 13, 14, 15, 16, 17].map(float);
     if ![x, y, diameter].iter().all(|v| v.is_finite()) || diameter <= 0.0 || tips == 0 {
         return None;
     }
@@ -728,6 +797,10 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     let offset = if tx.is_finite() && ty.is_finite() { Vec2::new(tx, ty) } else { Vec2::ZERO };
     s.grain_offset = center + offset;
     s.grain_depth = unit(strength, 1.0);
+    s.lightness = unit(lightness, 1.0);
+    // made sharp, if it says (a threshold of 0 says not)
+    s.threshold =
+        if threshold.is_finite() && threshold > 0.0 { [threshold.min(1.0), unit(softness, 0.0)] } else { [0.0; 2] };
     s.time_ms = first_ms;
     Some(s)
 }
@@ -805,13 +878,109 @@ impl OutsideEngine for EngineHalf {
 /// A stroke a plugin's engine draws: how its first stroke and its second (if it has one) are laid,
 /// and the halves of the engine's stroke each builder takes.
 pub(crate) struct OutsideStroke {
+    /// Every how many milliseconds its engine wants the pen again while it holds still.
+    pub airbrush: Option<f32>,
     pub style: StrokeStyle,
     pub second: Option<SecondStroke>,
     pub first: EngineHalf,
     pub second_half: EngineHalf,
 }
 
+/// How a stroke of a look is laid on `canvas` with `tool`, as `starting` says (its colours and
+/// opacity): its style and its second's, its tips and texture on the GPU. None if the GPU can't
+/// hold its tips.
+fn look_styles(
+    look: &BrushLook,
+    tool: StrokeTool,
+    starting: &Starting,
+    (alpha_lock, preview): (bool, bool),
+    canvas: &mut procraft_gpu::Canvas,
+    gpu: &procraft_gpu::Gpu,
+) -> Option<(StrokeStyle, Option<SecondStroke>)> {
+    // a brush that erases does so with the paint tool (its preview showing what it takes away)
+    let tool = match tool {
+        StrokeTool::Paint if look.erases && !preview => StrokeTool::Erase,
+        other => other,
+    };
+    let paint = |build: Build, opacity: f32| {
+        let mut style = StrokeStyle::new(tool, starting.colour, opacity);
+        style.preserve_alpha = alpha_lock;
+        style.secondary = starting.secondary;
+        style.preview = preview;
+        style.wetness = StrokeStyle::wetness_at(opacity);
+        style.rendering = match build {
+            Build::Over => Rendering::BuildUp,
+            Build::Towards => Rendering::Capped,
+        };
+        style
+    };
+    let mut style = paint(look.build, starting.opacity);
+    if let Some(blend) = look.blend {
+        style.blend = blend.min(procraft_engine::brush::BRUSH_BEHIND);
+    }
+    let mut second = look.second.as_ref().map(|s| SecondStroke {
+        style: paint(s.build, 1.0).as_second(),
+        mode: s.combine,
+        threshold: -1.0,
+    });
+    canvas.use_tip_set(gpu, &mut style, look.tips.id, look.tips.side, &layers(&look.tips), look.tips.kind);
+    // tips the GPU can't hold leave the brush as the app read it
+    style.full_shape?;
+    if let Some(t) = &look.texture {
+        canvas.use_full_grain(gpu, &mut style, t.id, t.side, &t.pixels);
+        style.grain_mode = procraft_engine::brush::GrainMode::Moving;
+        style.grain_scale = t.tile.max(1.0);
+        style.grain_depth = 1.0;
+        style.grain_blend = t.mode;
+    }
+    if let (Some(s), Some(look)) = (second.as_mut(), look.second.as_ref()) {
+        canvas.use_tip_set(gpu, &mut s.style, look.tips.id, look.tips.side, &layers(&look.tips), TipKind::Mask);
+        if s.style.full_shape.is_none() {
+            second = None;
+        }
+    }
+    Some((style, second))
+}
+
+/// A stroke of `brush` drawn by the brush engine that made it, if that is on, on `canvas` with
+/// `tool`, as `starting` says (`look`: the layer's alpha lock, and whether it is a preview's).
+pub(crate) fn engine_stroke(
+    hooks: &Arc<Hooks>,
+    brush: &Brush,
+    tool: StrokeTool,
+    starting: Starting,
+    look: (bool, bool),
+    canvas: &mut procraft_gpu::Canvas,
+    gpu: &procraft_gpu::Gpu,
+) -> Option<OutsideStroke> {
+    brush.engine.as_ref()?;
+    let (brush_look, id) = look_of(hooks, brush)?;
+    let (style, second) = look_styles(&brush_look, tool, &starting, look, canvas, gpu)?;
+    let airbrush = brush_look.airbrush;
+    let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting)?;
+    Some(OutsideStroke { airbrush, style, second, first, second_half })
+}
+
 impl crate::State {
+    /// `builder` (not fed yet) drawn by its brush's engine as a fresh stroke seeded with `seed`, if
+    /// the brush is an engine's and that is on (a builder's copy draws as the app reads the brush).
+    pub(crate) fn engine_again(
+        &mut self,
+        builder: procraft_engine::stroke::StrokeBuilder,
+        layer: procraft_engine::document::LayerId,
+        seed: u32,
+    ) -> procraft_engine::stroke::StrokeBuilder {
+        if builder.brush().engine.is_none() || builder.is_outside() {
+            return builder;
+        }
+        let brush = builder.brush().clone();
+        let pointer = builder.pointer().into();
+        match self.outside_stroke(&brush, self.tool, layer, pointer, builder.diameter(), seed) {
+            Some(o) => builder.with_engine(Box::new(o.first)),
+            None => builder,
+        }
+    }
+
     /// A stroke of `brush` with `tool` on `layer`, drawn by the brush engine that made the brush if
     /// that is on, at `diameter` canvas pixels (the size slider's, the brush scale in it): its
     /// style laid by what the engine says the brush looks like, its tips and texture on the GPU.
@@ -827,60 +996,12 @@ impl crate::State {
     ) -> Option<OutsideStroke> {
         brush.engine.as_ref()?;
         let hooks = self.hooks.clone()?;
-        let (look, id) = look_of(&hooks, brush)?;
-        let sliders = self.sliders(tool);
-        let start = brush.diameter(self.starting_sliders(tool).size);
-        let opacity = sliders.opacity.clamp(0.0, 1.0);
-        // a brush that erases does so with the paint tool
-        let stroke_tool = match tool.stroke_tool() {
-            StrokeTool::Paint if look.erases => StrokeTool::Erase,
-            other => other,
-        };
-        let alpha_lock = self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
-        let paint = |build: Build, opacity: f32| {
-            let mut style = StrokeStyle::new(stroke_tool, self.color, opacity);
-            style.preserve_alpha = alpha_lock;
-            style.secondary = self.secondary;
-            style.preview = self.pad_strokes.is_some();
-            style.wetness = StrokeStyle::wetness_at(opacity);
-            style.rendering = match build {
-                Build::Over => Rendering::BuildUp,
-                Build::Towards => Rendering::Capped,
-            };
-            style
-        };
-        let mut style = paint(look.build, opacity);
-        if let Some(blend) = look.blend {
-            style.blend = blend.min(procraft_engine::brush::BRUSH_BEHIND);
-        }
-        let mut second = look.second.as_ref().map(|s| SecondStroke {
-            style: paint(s.build, 1.0).as_second(),
-            mode: s.combine,
-            threshold: -1.0,
-        });
-        let (canvas, gpu) = (self.canvas.as_mut()?, self.gpu.as_ref()?);
-        canvas.use_tip_set(gpu, &mut style, look.tips.id, look.tips.side, &layers(&look.tips));
-        // tips the GPU can't hold leave the brush as the app read it
-        style.full_shape?;
-        if let Some(t) = &look.texture {
-            canvas.use_full_grain(gpu, &mut style, t.id, t.side, &t.pixels);
-            style.grain_mode = procraft_engine::brush::GrainMode::Moving;
-            style.grain_scale = t.tile.max(1.0);
-            style.grain_depth = 1.0;
-            style.grain_blend = t.mode;
-        }
-        if let (Some(s), Some(look)) = (second.as_mut(), look.second.as_ref()) {
-            canvas.use_tip_set(gpu, &mut s.style, look.tips.id, look.tips.side, &layers(&look.tips));
-            if s.style.full_shape.is_none() {
-                second = None;
-            }
-        }
         let starting = Starting {
             colour: self.color,
             secondary: self.secondary,
             diameter,
-            start_diameter: start,
-            opacity,
+            start_diameter: brush.diameter(self.starting_sliders(tool).size),
+            opacity: self.sliders(tool).opacity.clamp(0.0, 1.0),
             tool: match tool.stroke_tool() {
                 StrokeTool::Erase => 1,
                 StrokeTool::Smudge => 2,
@@ -894,8 +1015,9 @@ impl crate::State {
             seed,
             turn: self.view.map_or(0.0, |v| v.rotation()),
         };
-        let (first, second_half) = begin_stroke(&hooks, brush, look, id, starting)?;
-        Some(OutsideStroke { style, second, first, second_half })
+        let look = (self.doc.layer(layer).is_some_and(|l| l.alpha_lock), self.pad_strokes.is_some());
+        let (canvas, gpu) = (self.canvas.as_mut()?, self.gpu.as_ref()?);
+        engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu)
     }
 }
 
@@ -967,7 +1089,14 @@ mod tests {
     /// A Krita preset of a hard square tip 20 pixels across, spaced 2 diameters apart: a PNG with
     /// only its settings in it.
     pub(crate) fn square_preset() -> Vec<u8> {
-        let xml = r#"<Preset name="Squares" paintopid="paintbrush"><param name="brush_definition" type="string"><![CDATA[<Brush type="auto_brush" spacing="2" useAutoSpacing="0" angle="0" density="1" randomness="0"><MaskGenerator type="rect" id="default" diameter="20" ratio="1" hfade="1" vfade="1" spikes="2" antialiasEdges="0"/></Brush>]]></param><param name="PaintOpAction" type="string"><![CDATA[1]]></param><param name="CompositeOp" type="string"><![CDATA[normal]]></param><param name="PressureSize" type="string"><![CDATA[false]]></param><param name="OpacityUseCurve" type="string"><![CDATA[false]]></param><param name="FlowUseCurve" type="string"><![CDATA[false]]></param></Preset>"#;
+        preset_of("")
+    }
+
+    /// The square preset with `more` params besides.
+    fn preset_of(more: &str) -> Vec<u8> {
+        let xml = format!(
+            r#"<Preset name="Squares" paintopid="paintbrush"><param name="brush_definition" type="string"><![CDATA[<Brush type="auto_brush" spacing="2" useAutoSpacing="0" angle="0" density="1" randomness="0"><MaskGenerator type="rect" id="default" diameter="20" ratio="1" hfade="1" vfade="1" spikes="2" antialiasEdges="0"/></Brush>]]></param><param name="PaintOpAction" type="string"><![CDATA[1]]></param><param name="CompositeOp" type="string"><![CDATA[normal]]></param><param name="PressureSize" type="string"><![CDATA[false]]></param><param name="OpacityUseCurve" type="string"><![CDATA[false]]></param><param name="FlowUseCurve" type="string"><![CDATA[false]]></param>{more}</Preset>"#
+        );
         let chunk = |kind: &[u8], data: &[u8]| {
             let mut c = (data.len() as u32).to_be_bytes().to_vec();
             c.extend_from_slice(kind);
@@ -1043,6 +1172,44 @@ mod tests {
         assert!(alpha(&on, 20, 60) > 240 && alpha(&on, 28, 52) > 200, "the first square");
         assert!(alpha(&on, 60, 60) > 240, "the next, 40 on");
         assert_eq!(alpha(&on, 40, 60), 0, "nothing between them");
+        // held still, the line it drew snaps to a line, laid again by the engine: squares 40 apart
+        let layer = s.add_layer();
+        let at = |x: f32, t: f64| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: t,
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(20.0, 0.0)]);
+        s.stroke_add((21..=180).map(|x| at(x as f32, f64::from(x))).collect());
+        assert!(s.quickshape_hold().is_some(), "a line");
+        s.stroke_end(vec![]);
+        s.quickshape_done();
+        let shape = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        assert!(alpha(&shape, 20, 60) > 240 && alpha(&shape, 60, 60) > 240, "squares along the shape");
+        assert_eq!(alpha(&shape, 40, 60), 0, "spaced as the engine spaces them");
+        // its preview drawn by the engine: squares too, not the preset's picture
+        let preview = s.brush_preview(set, 0, 400, 120).expect("a preview");
+        assert!(preview.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
+        // an eraser's preview shows what it takes away
+        let read = crate::read_brushes(
+            preset_of(r#"<param name="EraserMode"><![CDATA[true]]></param>"#),
+            Some("Eraser.kpp".to_owned()),
+        )
+        .unwrap();
+        s.make_engine_brushes(Arc::clone(&read));
+        let erasers = s.add_brushes_read(read, 0).unwrap();
+        let preview = s.brush_preview(erasers, 0, 400, 120).expect("an eraser's preview");
+        assert!(preview.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "an eraser's preview draws");
+        // written out as a brush file and read back, it keeps its engine and data
+        let file = s.brush_as_file(set, 0).unwrap();
+        let back = s.import_brushes(file).unwrap();
+        let engine = |set: u32| s.shared.lock().library[set as usize].brushes[0].engine.clone();
+        assert!(engine(back).is_some());
+        assert_eq!(engine(back), engine(set));
         // its studio, the plugin's own: the tip made 40 across on its first page
         let studio = s.brush_studio_action().expect("its plugin's studio");
         assert!(plugins.run_action(studio, Arc::clone(&s)));
@@ -1065,6 +1232,52 @@ mod tests {
         let off = draw(&s);
         assert!(off.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
         assert_ne!(off, bigger);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An airbrush's engine is handed the pen again while it holds still, and lays its dabs as
+    /// the time passes.
+    #[test]
+    fn an_airbrush_lays_dabs_while_the_pen_holds_still() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-airbrush-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        s.use_plugins(Arc::clone(&plugins));
+        // a dab every 50 ms
+        let airbrush = r#"<param name="PaintOpSettings/isAirbrushing" type="string"><![CDATA[true]]></param><param name="PaintOpSettings/rate" type="string"><![CDATA[20]]></param>"#;
+        let read = crate::read_brushes(preset_of(airbrush), Some("Air.kpp".to_owned())).unwrap();
+        let set = s.add_brushes_read(read, 0).unwrap();
+        assert!(s.select_brush(set, 0));
+        let at = |t: f64| crate::PenSample {
+            x: 50.0,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: t,
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(1000.0)]);
+        let count = |s: &crate::CanvasSession| s.shared.lock().stroke.as_ref().map_or(0, |b| b.stamp_count());
+        let first = count(&s);
+        assert_eq!(s.touch_deadline(), Some(1025.0), "handed again every half interval");
+        s.touch_tick(1500.0);
+        assert!(count(&s) >= first + 9, "{first} then {}", count(&s));
+        s.stroke_end(vec![]);
+        assert_eq!(s.touch_deadline(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

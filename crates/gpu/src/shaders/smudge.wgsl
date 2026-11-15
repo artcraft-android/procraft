@@ -112,6 +112,9 @@ struct SmudgeStamp {
     // the part of a dispatch's cells or plot texels this one does: from (x0, y0) up to (x1, y1), a
     // byte each from the lowest
     part: u32,
+    // what its shapes are (the canvas's TipKind): all but masks (0) RGBA, covering as far as they
+    // are opaque
+    tip_kind: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -323,12 +326,14 @@ fn mask(t: vec2<f32>) -> f32 {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
-        return textureLoad(shapes, at, st.shape, 0).r;
+        let texel = textureLoad(shapes, at, st.shape, 0);
+        return select(texel.r, texel.a, st.tip_kind > 0u);
     }
     // (a brush file's own image is bigger than the brush images, by as many levels)
     let side = f32(textureDimensions(shapes).x);
     let lod = clamp(log2(0.5 * side / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap + log2(side / 256.0));
-    return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
+    let texel = textureSampleLevel(shapes, shape_smp, uv, st.shape, lod);
+    return select(texel.r, texel.a, st.tip_kind > 0u);
 }
 
 // how much of the stamp the grain lets through at canvas point `p`
