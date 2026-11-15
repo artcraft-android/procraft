@@ -383,7 +383,7 @@ impl Studio {
             Shows::Sketch => sketch_page(p, &mut page),
             Shows::Lines => {
                 option_rows(p, &mut page, "Line width", "Line width", true);
-                option_rows(p, &mut page, "Offset scale", "Offset", true);
+                option_rows(p, &mut page, "Offset scale", "Offset scale", true);
                 option_rows(p, &mut page, "Density", "Density", true);
             }
             Shows::Quick => quick_page(p, &mut page),
@@ -405,7 +405,7 @@ impl Studio {
             Shows::Curves => curves_page(p, &mut page),
             Shows::CurveOptions => {
                 option_rows(p, &mut page, "Line width", "Line width", true);
-                option_rows(p, &mut page, "Curves opacity", "Curves' opacity", true);
+                option_rows(p, &mut page, "Curves opacity", "Curves opacity", true);
                 option_rows(p, &mut page, "Opacity", "Opacity", false);
             }
             Shows::Particles2 => particle_page(p, &mut page),
@@ -704,8 +704,8 @@ fn smudge_page(p: &Preset, page: &mut Page) {
     option_rows(p, page, "SmudgeRate", "Smudge length", true);
     page.chosen(p, "SmudgeRateMode", "Smudge mode", &["Smearing", "Dulling"], &["0", "1"], 0);
     page.flag(p, "SmudgeRateSmearAlpha", "Smear alpha", true);
-    page.flag(p, "SmudgeRateUseNewEngine", "Newer smudge engine", false);
-    page.flag(p, "MergedPaint", "Overlay: picks up from every layer", false);
+    page.flag(p, "SmudgeRateUseNewEngine", "Use new smudge algorithm", false);
+    page.flag(p, "MergedPaint", "Overlay mode", false);
 }
 
 /// A tangent normal brush's tilt: which way each channel goes, what turns it, how much it leans.
@@ -718,26 +718,26 @@ fn tangent_page(p: &Preset, page: &mut Page) {
     page.chosen(
         p,
         "Tangent/directionType",
-        "Its direction from",
-        &["Tilt", "Drawing angle", "Rotation", "Tilt and drawing angle"],
+        "Tilt options",
+        &["Tilt", "Direction", "Rotation", "Direction/Tilt Mix"],
         &["0", "1", "2", "3"],
         0,
     );
-    page.setting(p, "Tangent/elevationSensitivity", "Elevation sensitivity", (0.0, 100.0), 1.0, 100.0, "%");
-    page.setting(p, "Tangent/mixValue", "Drawing angle's share", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "Tangent/elevationSensitivity", "Elevation Sensitivity", (0.0, 100.0), 1.0, 100.0, "%");
+    page.setting(p, "Tangent/mixValue", "Direction/Tilt Mix Value", (0.0, 100.0), 1.0, 50.0, "%");
 }
 
 /// A sketch brush's lines: how far they reach out, how likely, how wide, and what they do.
 fn sketch_page(p: &Preset, page: &mut Page) {
-    page.setting(p, "Sketch/offset", "Offset", (0.0, 200.0), 1.0, 30.0, "%");
+    page.setting(p, "Sketch/offset", "Offset scale", (0.0, 200.0), 1.0, 30.0, "%");
     page.setting(p, "Sketch/probability", "Density", (0.0, 100.0), 0.01, 0.5, "%");
     page.setting(p, "Sketch/lineWidth", "Line width", (1.0, 100.0), 1.0, 1.0, " px");
-    page.flag(p, "Sketch/makeConnection", "Line from where it was", true);
+    page.flag(p, "Sketch/makeConnection", "Paint connection line", true);
     page.flag(p, "Sketch/magnetify", "Magnetify", true);
-    page.flag(p, "Sketch/randomRGB", "Random colour", false);
+    page.flag(p, "Sketch/randomRGB", "Random RGB", false);
     page.flag(p, "Sketch/randomOpacity", "Random opacity", false);
-    page.flag(p, "Sketch/distanceDensity", "Fewer lines further away", true);
-    page.flag(p, "Sketch/distanceOpacity", "Fainter lines further away", false);
+    page.flag(p, "Sketch/distanceDensity", "Use distance density", true);
+    page.flag(p, "Sketch/distanceOpacity", "Distance opacity", false);
 }
 
 /// A quick brush's own settings: its diameter and spacing.
@@ -756,13 +756,13 @@ fn quick_page(p: &Preset, page: &mut Page) {
 /// A spray brush's area: its size, shape, spacing and how many particles it lays, spread how.
 fn spray_area_page(p: &Preset, page: &mut Page) {
     page.setting(p, "Spray/diameter", "Diameter", (1.0, 1000.0), 1.0, 100.0, " px");
-    page.setting(p, "Spray/aspect", "Aspect", (1.0, 300.0), 0.01, 1.0, "%");
-    page.setting(p, "Spray/rotation", "Turn", (0.0, 360.0), 1.0, 0.0, "°");
-    page.setting(p, "Spray/scale", "Scale", (1.0, 1000.0), 0.01, 1.0, "%");
-    page.setting(p, "Spray/spacing", "Spacing", (1.0, 1000.0), 0.01, 0.5, "%");
-    page.flag(p, "Spray/jitterMovement", "Jitter", false);
-    page.setting(p, "Spray/jitterMoveAmount", "Jitter amount", (0.0, 500.0), 0.01, 0.0, "%");
-    page.flag(p, "Spray/useDensity", "By coverage", false);
+    page.setting(p, "Spray/aspect", "Aspect ratio", (0.0, 200.0), 0.01, 1.0, "%");
+    page.setting(p, "Spray/rotation", "Angle", (0.0, 360.0), 1.0, 0.0, "°");
+    page.setting(p, "Spray/scale", "Scale", (0.0, 1000.0), 0.01, 1.0, "%");
+    page.setting(p, "Spray/spacing", "Spacing", (0.0, 500.0), 0.01, 0.5, "%");
+    page.flag(p, "Spray/jitterMovement", "Jitter movement", false);
+    page.setting(p, "Spray/jitterMoveAmount", "Jitter", (0.0, 500.0), 0.01, 0.0, "%");
+    page.flag(p, "Spray/useDensity", "Use density", false);
     if p.flag("Spray/useDensity", false) {
         page.setting(p, "Spray/coverage", "Coverage", (0.0, 100.0), 1.0, 10.0, "%");
     } else {
@@ -775,20 +775,20 @@ fn spray_area_page(p: &Preset, page: &mut Page) {
     };
     page.choice(
         Does::Choose { key: "Spray/radialDistributionType".to_owned(), values: &["uniform", "gaussian"] },
-        "Spread",
-        &["Even", "Gaussian"],
+        "Radial distribution",
+        &["Uniform", "Gaussian"],
         usize::from(gaussian),
     );
     if gaussian {
-        page.setting(p, "Spray/radialDistributionStdDeviation", "Deviation", (1.0, 100.0), 0.01, 0.5, "%");
+        page.setting(p, "Spray/radialDistributionStdDeviation", "Standard deviation", (1.0, 100.0), 0.01, 0.5, "%");
     }
-    page.flag(p, "Spray/radialDistributionCenterBiased", "More towards the middle", true);
+    page.flag(p, "Spray/radialDistributionCenterBiased", "Center biased", true);
 }
 
 /// A spray brush's particles: their shape and size, or the brush's tip.
 fn particles_page(p: &Preset, page: &mut Page) {
     let own = p.flag("SprayShape/enabled", true);
-    page.flag(p, "SprayShape/enabled", "A shape of their own (off: the tip)", true);
+    page.flag(p, "SprayShape/enabled", "Spray shape (off: the brush tip)", true);
     if !own {
         page.text("Each particle is the brush's tip (see Tip).");
         return;
@@ -797,13 +797,13 @@ fn particles_page(p: &Preset, page: &mut Page) {
         p,
         "SprayShape/shape",
         "Shape",
-        &["Ellipse", "Rectangle", "Smooth pixel", "Pixel"],
+        &["Ellipse", "Rectangle", "Anti-aliased pixel", "Pixel"],
         &["0", "1", "2", "3"],
         0,
     );
     page.setting(p, "SprayShape/width", "Width", (1.0, 1000.0), 1.0, 6.0, " px");
     page.setting(p, "SprayShape/height", "Height", (1.0, 1000.0), 1.0, 6.0, " px");
-    page.flag(p, "SprayShape/proportional", "Sized by the diameter (%)", false);
+    page.flag(p, "SprayShape/proportional", "Proportional", false);
 }
 
 /// A spray brush's particles' dynamics: their size and turn, at random, fixed or following.
@@ -815,34 +815,34 @@ fn shape_dynamics_page(p: &Preset, page: &mut Page) {
         page.flag(p, &at("enabled"), "Shape dynamics", false);
     }
     page.flag(p, &at("randomSize"), "Random size", false);
-    page.flag(p, &at("fixedRotation"), "Fixed turn", false);
-    page.setting(p, &at("fixedAngle"), "Turn", (0.0, 360.0), 1.0, 0.0, "°");
-    page.flag(p, &at("randomRotation"), "Random turn", false);
-    page.setting(p, &at("randomRotationWeight"), "Random turn's weight", (0.0, 100.0), 0.01, 0.5, "%");
-    page.flag(p, &at("followCursor"), "Follow the pen", false);
-    page.setting(p, &at("followCursorWeigth"), "Following the pen", (0.0, 100.0), 0.01, 0.5, "%");
-    page.flag(p, &at("followDrawingAngle"), "Follow the drawing angle", false);
-    page.setting(p, &at("followDrawingAngleWeigth"), "Following the angle", (0.0, 100.0), 0.01, 0.5, "%");
+    page.flag(p, &at("fixedRotation"), "Fixed rotation", false);
+    page.setting(p, &at("fixedAngle"), "Fixed rotation angle", (0.0, 360.0), 1.0, 0.0, "°");
+    page.flag(p, &at("randomRotation"), "Randomize rotation", false);
+    page.setting(p, &at("randomRotationWeight"), "Randomize rotation weight", (0.0, 100.0), 0.01, 0.5, "%");
+    page.flag(p, &at("followCursor"), "Follow cursor", false);
+    page.setting(p, &at("followCursorWeigth"), "Follow cursor weight", (0.0, 100.0), 0.01, 0.5, "%");
+    page.flag(p, &at("followDrawingAngle"), "Follow drawing angle", false);
+    page.setting(p, &at("followDrawingAngleWeigth"), "Angle weight", (0.0, 100.0), 0.01, 0.5, "%");
 }
 
 /// A spray brush's particles' colours.
 fn spray_colour_page(p: &Preset, page: &mut Page) {
-    page.flag(p, "ColorOption/useRandomHSV", "Random hue, saturation, value", false);
+    page.flag(p, "ColorOption/useRandomHSV", "Random HSV", false);
     page.setting(p, "ColorOption/hue", "Hue", (-180.0, 180.0), 1.0, 0.0, "°");
     page.setting(p, "ColorOption/saturation", "Saturation", (-100.0, 100.0), 1.0, 0.0, "%");
     page.setting(p, "ColorOption/value", "Value", (-100.0, 100.0), 1.0, 0.0, "%");
     page.flag(p, "ColorOption/useRandomOpacity", "Random opacity", false);
-    page.flag(p, "ColorOption/colorPerParticle", "Each particle its own colour", false);
-    page.flag(p, "ColorOption/mixBgColor", "Mixed with the secondary colour", false);
+    page.flag(p, "ColorOption/colorPerParticle", "Color per particle", false);
+    page.flag(p, "ColorOption/mixBgColor", "Mix with background color", false);
 }
 
 /// The hatching styles a hatching brush offers, by the flag Krita keeps each as (none the first).
 const HATCH_STYLES: [(&str, &str); 5] = [
-    ("Hatching/bool_nocrosshatching", "None"),
-    ("Hatching/bool_perpendicular", "Perpendicular"),
-    ("Hatching/bool_minusthenplus", "Minus then plus"),
-    ("Hatching/bool_plusthenminus", "Plus then minus"),
-    ("Hatching/bool_moirepattern", "Moiré"),
+    ("Hatching/bool_nocrosshatching", "No crosshatching"),
+    ("Hatching/bool_perpendicular", "Perpendicular plane"),
+    ("Hatching/bool_minusthenplus", "-45° then +45°"),
+    ("Hatching/bool_plusthenminus", "+45° then -45°"),
+    ("Hatching/bool_moirepattern", "Moiré pattern"),
 ];
 
 /// A choice of a curve for setting `key` (one of its own shown as such).
@@ -859,29 +859,29 @@ fn curve_choice(p: &Preset, page: &mut Page, key: &str, label: &str) {
 
 /// A bristle brush's bristles: how far apart, sheared, shaken, how many, and how they draw.
 fn bristles_page(p: &Preset, page: &mut Page) {
-    page.setting(p, "HairyBristle/scale", "Spread", (1.0, 1000.0), 0.01, 2.0, "%");
+    page.setting(p, "HairyBristle/scale", "Scale", (-1000.0, 1000.0), 0.01, 2.0, "%");
     page.setting(p, "HairyBristle/shear", "Shear", (-200.0, 200.0), 0.01, 0.0, "%");
-    page.setting(p, "HairyBristle/random", "Randomness", (0.0, 1000.0), 0.01, 2.0, "%");
+    page.setting(p, "HairyBristle/random", "Random offset", (-1000.0, 1000.0), 0.01, 2.0, "%");
     page.setting(p, "HairyBristle/density", "Density", (0.0, 100.0), 1.0, 100.0, "%");
-    page.flag(p, "HairyBristle/threshold", "Threshold by pressure", false);
-    page.flag(p, "HairyBristle/isConnected", "Connected paths", false);
-    page.flag(p, "HairyBristle/antialias", "Smooth", false);
-    page.flag(p, "HairyBristle/useCompositing", "Bristles over each other", false);
+    page.flag(p, "HairyBristle/threshold", "Threshold", false);
+    page.flag(p, "HairyBristle/isConnected", "Connect hairs", false);
+    page.flag(p, "HairyBristle/antialias", "Anti-aliasing", false);
+    page.flag(p, "HairyBristle/useCompositing", "Composite bristles", false);
     page.flag(p, "HairyBristle/useMousePressure", "Mouse pressure", false);
 }
 
 /// A bristle brush's ink: whether it runs out, how fast, and what that takes away.
 fn ink_page(p: &Preset, page: &mut Page) {
-    page.flag(p, "HairyInk/enabled", "Ink runs out", false);
-    page.setting(p, "HairyInk/inkAmount", "Ink", (1.0, 10000.0), 1.0, 1024.0, "");
-    curve_choice(p, page, "HairyInk/inkDepletionCurve", "Running out");
-    page.flag(p, "HairyInk/useOpacity", "Opacity falls", true);
-    page.flag(p, "HairyInk/useSaturation", "Saturation falls", false);
-    page.flag(p, "HairyInk/useWeights", "By weights", false);
-    page.setting(p, "HairyInk/pressureWeights", "Pressure's weight", (0.0, 100.0), 1.0, 50.0, "%");
-    page.setting(p, "HairyInk/bristleLengthWeights", "Bristle length's weight", (0.0, 100.0), 1.0, 50.0, "%");
-    page.setting(p, "HairyInk/bristleInkAmountWeight", "Ink's weight", (0.0, 100.0), 1.0, 50.0, "%");
-    page.setting(p, "HairyInk/inkDepletionWeight", "Running out's weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.flag(p, "HairyInk/enabled", "Ink depletion", false);
+    page.setting(p, "HairyInk/inkAmount", "Ink Amount", (1.0, 10000.0), 1.0, 1024.0, "");
+    curve_choice(p, page, "HairyInk/inkDepletionCurve", "Ink depletion curve");
+    page.flag(p, "HairyInk/useOpacity", "Opacity", true);
+    page.flag(p, "HairyInk/useSaturation", "Saturation", false);
+    page.flag(p, "HairyInk/useWeights", "Weighted saturation", false);
+    page.setting(p, "HairyInk/pressureWeights", "Pressure Weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/bristleLengthWeights", "Bristle Length Weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/bristleInkAmountWeight", "Bristle Ink Weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/inkDepletionWeight", "Ink Depletion Curve Weight", (0.0, 100.0), 1.0, 50.0, "%");
     page.flag(p, "HairyInk/soak", "Soak ink", false);
 }
 
@@ -889,10 +889,10 @@ fn ink_page(p: &Preset, page: &mut Page) {
 /// how they cross.
 fn hatching_page(p: &Preset, page: &mut Page) {
     page.setting(p, "Hatching/angle", "Angle", (-90.0, 90.0), 1.0, -60.0, "°");
-    page.setting(p, "Hatching/separation", "Separation", (1.0, 100.0), 1.0, 6.0, " px");
-    page.setting(p, "Hatching/thickness", "Thickness", (1.0, 100.0), 1.0, 1.0, " px");
-    page.setting(p, "Hatching/origin_x", "Origin across", (-500.0, 500.0), 1.0, 50.0, " px");
-    page.setting(p, "Hatching/origin_y", "Origin down", (-500.0, 500.0), 1.0, 50.0, " px");
+    page.setting(p, "Hatching/separation", "Separation", (1.0, 30.0), 1.0, 6.0, " px");
+    page.setting(p, "Hatching/thickness", "Thickness", (1.0, 30.0), 1.0, 1.0, " px");
+    page.setting(p, "Hatching/origin_x", "Origin X", (-300.0, 300.0), 1.0, 50.0, " px");
+    page.setting(p, "Hatching/origin_y", "Origin Y", (-300.0, 300.0), 1.0, 50.0, " px");
     let style = if p.flag("Hatching/bool_moirepattern", false) {
         4
     } else {
@@ -900,49 +900,49 @@ fn hatching_page(p: &Preset, page: &mut Page) {
     };
     let names: Vec<&str> = HATCH_STYLES.iter().map(|(_, n)| *n).collect();
     page.choice(Does::HatchStyle, "Crosshatching", &names, style);
-    page.setting(p, "Hatching/separationintervals", "Separation's steps", (2.0, 7.0), 1.0, 2.0, "");
-    page.flag(p, "Hatching/bool_antialias", "Smooth lines", false);
-    page.flag(p, "Hatching/bool_opaquebackground", "Background behind them", false);
-    page.flag(p, "Hatching/bool_subpixelprecision", "Between pixels", false);
+    page.setting(p, "Hatching/separationintervals", "Input-based intervals", (2.0, 7.0), 1.0, 2.0, "");
+    page.flag(p, "Hatching/bool_antialias", "Antialiased lines", false);
+    page.flag(p, "Hatching/bool_opaquebackground", "Color background", false);
+    page.flag(p, "Hatching/bool_subpixelprecision", "Subpixel precision", false);
 }
 
 /// A curve brush's curves: their width, how many points they go through, how they bend.
 fn curves_page(p: &Preset, page: &mut Page) {
     page.setting(p, "Curve/lineWidth", "Line width", (1.0, 100.0), 1.0, 1.0, " px");
-    page.flag(p, "Curve/makeConnection", "Line from where it was", false);
-    page.setting(p, "Curve/strokeHistorySize", "Points a curve goes through", (3.0, 100.0), 1.0, 30.0, "");
+    page.flag(p, "Curve/makeConnection", "Paint connection line", false);
+    page.setting(p, "Curve/strokeHistorySize", "History size", (2.0, 300.0), 1.0, 30.0, "");
     page.flag(p, "Curve/smoothing", "Smoothing", false);
-    page.setting(p, "Curve/curvesOpacity", "Curves' opacity", (0.0, 100.0), 0.01, 0.0, "%");
+    page.setting(p, "Curve/curvesOpacity", "Curves opacity", (0.0, 100.0), 0.01, 0.0, "%");
 }
 
 /// A particle brush's particles: how many, how many steps, how they are pulled.
 fn particle_page(p: &Preset, page: &mut Page) {
-    page.setting(p, "Particle/count", "Particles", (1.0, 2000.0), 1.0, 50.0, "");
-    page.setting(p, "Particle/iterations", "Steps", (1.0, 200.0), 1.0, 10.0, "");
-    page.setting(p, "Particle/gravity", "Gravity", (0.0, 100.0), 0.01, 0.989, "%");
-    page.setting(p, "Particle/weight", "Weight", (0.0, 100.0), 0.01, 0.2, "%");
-    page.setting(p, "Particle/scaleX", "Pull across", (-200.0, 200.0), 0.01, 0.3, "%");
-    page.setting(p, "Particle/scaleY", "Pull down", (-200.0, 200.0), 0.01, 0.3, "%");
+    page.setting(p, "Particle/count", "Particles", (1.0, 500.0), 1.0, 50.0, "");
+    page.setting(p, "Particle/iterations", "Iterations", (1.0, 200.0), 1.0, 10.0, "");
+    page.setting(p, "Particle/gravity", "Gravity", (-1000.0, 1000.0), 0.001, 0.989, "‰");
+    page.setting(p, "Particle/weight", "Opacity weight", (1.0, 100.0), 0.01, 0.2, "%");
+    page.setting(p, "Particle/scaleX", "dx scale", (-1000.0, 1000.0), 0.01, 0.3, "%");
+    page.setting(p, "Particle/scaleY", "dy scale", (-1000.0, 1000.0), 0.01, 0.3, "%");
 }
 
 /// A grid brush's grid: its reach, cells, offset, division and borders, and its cells' shape.
 fn grid_page(p: &Preset, page: &mut Page) {
-    page.setting(p, "Grid/diameter", "Diameter", (1.0, 1000.0), 1.0, 25.0, " px");
-    page.setting(p, "Grid/gridWidth", "Cell width", (1.0, 1000.0), 1.0, 25.0, " px");
-    page.setting(p, "Grid/gridHeight", "Cell height", (1.0, 1000.0), 1.0, 25.0, " px");
-    page.setting(p, "Grid/scale", "Scale", (1.0, 1000.0), 0.01, 1.0, "%");
-    page.setting(p, "Grid/horizontalOffset", "Offset across", (-500.0, 500.0), 1.0, 0.0, " px");
-    page.setting(p, "Grid/verticalOffset", "Offset down", (-500.0, 500.0), 1.0, 0.0, " px");
-    page.setting(p, "Grid/divisionLevel", "Division", (0.0, 20.0), 1.0, 0.0, "");
+    page.setting(p, "Grid/diameter", "Diameter", (1.0, 999.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/gridWidth", "Grid width", (1.0, 999.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/gridHeight", "Grid height", (1.0, 999.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/scale", "Scale", (10.0, 1000.0), 0.01, 1.0, "%");
+    page.setting(p, "Grid/horizontalOffset", "Horizontal offset", (-50.0, 50.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/verticalOffset", "Vertical offset", (-50.0, 50.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/divisionLevel", "Division level", (0.0, 25.0), 1.0, 0.0, "");
     page.flag(p, "Grid/pressureDivision", "Division by pressure", false);
-    page.setting(p, "Grid/verticalBorder", "Border across", (0.0, 100.0), 1.0, 0.0, " px");
-    page.setting(p, "Grid/horizontalBorder", "Border down", (0.0, 100.0), 1.0, 0.0, " px");
-    page.flag(p, "Grid/randomBorder", "Random border", false);
+    page.setting(p, "Grid/verticalBorder", "Vertical border", (0.0, 100.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/horizontalBorder", "Horizontal border", (0.0, 100.0), 1.0, 0.0, " px");
+    page.flag(p, "Grid/randomBorder", "Jitter borders", false);
     page.chosen(
         p,
         "GridShape/shape",
         "Shape",
-        &["Ellipse", "Rectangle", "Pixel line", "Line", "Thick line"],
+        &["Ellipse", "Rectangle", "Line", "Pixel", "Anti-aliased pixel"],
         &["0", "1", "2", "3", "4"],
         0,
     );
@@ -966,15 +966,15 @@ fn dyna_page(p: &Preset, page: &mut Page) {
 
 /// A grid brush's cells' colours.
 fn grid_colour_page(p: &Preset, page: &mut Page) {
-    page.flag(p, "ColorOption/sampleInputColor", "The colour under each cell", false);
-    page.flag(p, "ColorOption/fillBackground", "Background behind them", false);
-    page.flag(p, "ColorOption/mixBgColor", "Mixed with the secondary colour", false);
-    page.flag(p, "ColorOption/useRandomHSV", "Random hue, saturation, value", false);
+    page.flag(p, "ColorOption/sampleInputColor", "Sample input layer", false);
+    page.flag(p, "ColorOption/fillBackground", "Fill background", false);
+    page.flag(p, "ColorOption/mixBgColor", "Mix with background color", false);
+    page.flag(p, "ColorOption/useRandomHSV", "Random HSV", false);
     page.setting(p, "ColorOption/hue", "Hue", (-180.0, 180.0), 1.0, 0.0, "°");
     page.setting(p, "ColorOption/saturation", "Saturation", (-100.0, 100.0), 1.0, 0.0, "%");
     page.setting(p, "ColorOption/value", "Value", (-100.0, 100.0), 1.0, 0.0, "%");
     page.flag(p, "ColorOption/useRandomOpacity", "Random opacity", false);
-    page.flag(p, "ColorOption/colorPerParticle", "Each cell its own colour", false);
+    page.flag(p, "ColorOption/colorPerParticle", "Color per particle", false);
 }
 
 /// An option's rows: whether it follows the pen (where it can be switched off), its strength, the
