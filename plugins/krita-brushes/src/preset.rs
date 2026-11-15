@@ -6,12 +6,26 @@ use std::collections::BTreeMap;
 use crate::files::base64;
 use crate::xml::{self, Element};
 
-/// A picture a preset or its bundle holds: its file name, its name, and its bytes.
+/// A picture a preset holds: its file name, its name, and its bytes as base64 (decoded only when
+/// they are wanted).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resource {
     pub file: String,
     pub name: String,
-    pub bytes: Vec<u8>,
+    pub base64: String,
+}
+
+impl Resource {
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        base64(&self.base64)
+    }
+
+    /// Its first `n` bytes or so (all of them if it is shorter): enough of a picture to read its
+    /// header.
+    pub fn head(&self, n: usize) -> Option<Vec<u8>> {
+        let end = (n.div_ceil(3) * 4).min(self.base64.len());
+        base64(self.base64.get(..end)?)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -108,6 +122,6 @@ fn resource(e: &Element) -> Option<Resource> {
     Some(Resource {
         file: e.attribute("filename").unwrap_or_default().to_owned(),
         name: e.attribute("name").unwrap_or_default().to_owned(),
-        bytes: base64(&e.text())?,
+        base64: e.text().trim().to_owned(),
     })
 }

@@ -27,14 +27,17 @@ pub fn grey(r: u8, g: u8, b: u8) -> u8 {
 pub fn mask_of(image: &Rgba) -> Mask {
     let pixels = image
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((255 - u32::from(grey(p[0], p[1], p[2]))) * u32::from(p[3]) / 255) as u8)
         .collect();
     Mask { width: image.width, height: image.height, pixels }
 }
 
-/// A brush in `bytes`, and how many bytes it took.
-pub fn gbr(bytes: &[u8]) -> Option<(Mask, usize)> {
+/// A brush in `bytes`, and how many bytes it took; `pixels`: its pixels too, else only its size
+/// (read from its header: the rest of it needn't be there).
+pub fn gbr(bytes: &[u8], pixels: bool) -> Option<(Mask, usize)> {
     let header = be32(bytes, 0)? as usize;
     let version = be32(bytes, 4)?;
     let (width, height, depth) = (be32(bytes, 8)?, be32(bytes, 12)?, be32(bytes, 16)?);
@@ -45,17 +48,23 @@ pub fn gbr(bytes: &[u8]) -> Option<(Mask, usize)> {
         return None;
     }
     let count = width as usize * height as usize;
-    let data = bytes.get(header..header + count * depth as usize)?;
+    let used = header + count * depth as usize;
+    if !pixels {
+        return matches!(depth, 1 | 4).then_some((Mask { width, height, pixels: Vec::new() }, used));
+    }
+    let data = bytes.get(header..used)?;
     let pixels = match depth {
         // grey: how much each pixel paints
         1 => data.to_vec(),
         4 => data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| ((255 - u32::from(grey(p[0], p[1], p[2]))) * u32::from(p[3]) / 255) as u8)
             .collect(),
         _ => return None,
     };
-    Some((Mask { width, height, pixels }, header + count * depth as usize))
+    Some((Mask { width, height, pixels }, used))
 }
 
 /// How a pipe picks its next cell along one of its dimensions.
@@ -93,8 +102,9 @@ fn selection_named(name: &str) -> Selection {
 }
 
 /// A pipe in `bytes`: a line with its name, a line with its cell count and its settings, then the
-/// cells, each a brush.
-pub fn gih(bytes: &[u8]) -> Option<Pipe> {
+/// cells, each a brush; `pixels`: the cells' pixels too, else only their sizes (as many as it
+/// says, those past what `bytes` holds of it the size of the last read).
+pub fn gih(bytes: &[u8], pixels: bool) -> Option<Pipe> {
     let first = bytes.iter().position(|&b| b == b'\n')?;
     let rest = bytes.get(first + 1..)?;
     let second = rest.iter().position(|&b| b == b'\n')?;
@@ -119,12 +129,16 @@ pub fn gih(bytes: &[u8]) -> Option<Pipe> {
     let mut cells = Vec::with_capacity(count.min(1024));
     let mut at = first + 1 + second + 1;
     for _ in 0..count.min(1024) {
-        let Some((mask, used)) = bytes.get(at..).and_then(gbr) else { break };
+        let Some((mask, used)) = bytes.get(at..).and_then(|b| gbr(b, pixels)) else { break };
         cells.push(mask);
         at += used;
     }
     if cells.is_empty() {
         return None;
+    }
+    if !pixels && at >= bytes.len() {
+        let last = cells.last().cloned()?;
+        cells.resize(count.min(1024), last);
     }
     ranks.truncate(dim);
     selections.truncate(dim);
@@ -136,12 +150,16 @@ pub fn gih(bytes: &[u8]) -> Option<Pipe> {
     Some(Pipe { cells, ranks, selections })
 }
 
-/// A GIMP pattern in `bytes`: grey, grey and alpha, colour, or colour and alpha.
-pub fn pat(bytes: &[u8]) -> Option<Rgba> {
+/// A GIMP pattern in `bytes`: grey, grey and alpha, colour, or colour and alpha; `pixels`: its
+/// pixels too, else only its size.
+pub fn pat(bytes: &[u8], pixels: bool) -> Option<Rgba> {
     let header = be32(bytes, 0)? as usize;
     let (width, height, depth) = (be32(bytes, 8)?, be32(bytes, 12)?, be32(bytes, 16)?);
     if bytes.get(20..24)? != b"GPAT" || !(1..=MOST_SIDE).contains(&width) || !(1..=MOST_SIDE).contains(&height) {
         return None;
+    }
+    if !pixels {
+        return Some(Rgba { width, height, pixels: Vec::new() });
     }
     let count = width as usize * height as usize;
     let data = bytes.get(header..header + count * depth as usize)?;
@@ -180,7 +198,7 @@ mod tests {
         let mut file = b"name\n2 ncells:2 dim:1 rank0:2 sel0:random\n".to_vec();
         file.extend(brush(2, 2, 9));
         file.extend(brush(3, 1, 7));
-        let pipe = gih(&file).unwrap();
+        let pipe = gih(&file, true).unwrap();
         assert_eq!(pipe.cells.len(), 2);
         assert_eq!((pipe.cells[1].width, pipe.cells[1].pixels[0]), (3, 7));
         assert_eq!(

@@ -2,7 +2,7 @@
 //! it paints (washed or built up, its blend), its texture and its masking brush; and how it looks to
 //! the app (its tips as grey pictures, the rest as the app's own numbers).
 
-use crate::files::{Rgba, png_decode};
+use crate::files::{Rgba, png_decode, png_size};
 use crate::gimp::{self, Mask, Selection};
 use crate::options::CurveOption;
 use crate::preset::Preset;
@@ -187,15 +187,19 @@ fn texture_rule(mode: u32, soft: bool) -> u32 {
 }
 
 /// A mask of a picture file: a GIMP brush or pipe, or a PNG (grey and opaque: dark paints; else
-/// dark paints as far as it is opaque).
-fn picture_masks(bytes: &[u8]) -> Option<(Vec<Mask>, Option<PipePick>)> {
+/// dark paints as far as it is opaque). `light`: only their sizes, no pixels.
+fn picture_masks(bytes: &[u8], light: bool) -> Option<(Vec<Mask>, Option<PipePick>)> {
     if bytes.starts_with(b"\x89PNG") {
+        if light {
+            let (width, height) = png_size(bytes)?;
+            return Some((vec![Mask { width, height, pixels: Vec::new() }], None));
+        }
         return Some((vec![gimp::mask_of(&png_decode(bytes)?)], None));
     }
-    if let Some((mask, _)) = gimp::gbr(bytes) {
+    if let Some((mask, _)) = gimp::gbr(bytes, !light) {
         return Some((vec![mask], None));
     }
-    let pipe = gimp::gih(bytes)?;
+    let pipe = gimp::gih(bytes, !light)?;
     let pick = PipePick { ranks: pipe.ranks, selections: pipe.selections };
     Some((pipe.cells, Some(pick)))
 }
@@ -206,7 +210,7 @@ fn stand_in(diameter: f32) -> Tip {
         r#"<Brush type="auto_brush" spacing="0.1"><MaskGenerator type="circle" id="default" diameter="{diameter}" ratio="1" hfade="1" vfade="1" antialiasEdges="1"/></Brush>"#
     );
     let brush = crate::xml::parse(&xml).unwrap_or_default();
-    read_tip(&brush, &|_| None, None).unwrap_or(Tip {
+    read_tip(&brush, &|_| None, None, false).unwrap_or(Tip {
         tips: Tips::Images { count: 1, pipe: None },
         width: diameter,
         height: diameter,
@@ -218,8 +222,13 @@ fn stand_in(diameter: f32) -> Tip {
 }
 
 /// The tip a `Brush` element describes, its pictures found by `find`; `softness`: the brush varies
-/// its softness, so an auto tip is drawn at several.
-fn read_tip(brush: &Element, find: &dyn Fn(&str) -> Option<Vec<u8>>, softness: Option<&CurveOption>) -> Option<Tip> {
+/// its softness, so an auto tip is drawn at several. `light`: its pictures' sizes only, none drawn.
+fn read_tip(
+    brush: &Element,
+    find: &dyn Fn(&str) -> Option<Vec<u8>>,
+    softness: Option<&CurveOption>,
+    light: bool,
+) -> Option<Tip> {
     let spacing = brush.number("spacing").unwrap_or(0.1).max(0.0);
     let auto_spacing = (brush.attribute("useAutoSpacing") == Some("1")
         || brush.attribute("useAutoSpacing") == Some("true"))
@@ -245,7 +254,7 @@ fn read_tip(brush: &Element, find: &dyn Fn(&str) -> Option<Vec<u8>>, softness: O
             (seed >> 8) as f32 / (1 << 24) as f32
         };
         let mut masks = Vec::new();
-        for _ in 0..variants {
+        for _ in 0..if light { 0 } else { variants } {
             for level in 0..levels {
                 let soft = if levels == 1 { 1.0 } else { 0.1 + 0.9 * level as f32 / (levels - 1) as f32 };
                 masks.push(tip.draw(side as u32, soft, &mut random));
@@ -263,16 +272,23 @@ fn read_tip(brush: &Element, find: &dyn Fn(&str) -> Option<Vec<u8>>, softness: O
     }
     let scale = brush.number("scale").unwrap_or(1.0).max(1e-3);
     let file = brush.attribute("filename")?;
-    let (masks, pipe) = picture_masks(&find(file)?)?;
+    let (masks, pipe) = picture_masks(&find(file)?, light)?;
     let first = masks.first()?;
     let (w, h) = (first.width as f32 * scale, first.height as f32 * scale);
     let count = masks.len() as u32;
     Some(Tip { tips: Tips::Images { count, pipe }, width: w, height: h, angle, spacing, auto_spacing, masks })
 }
 
-/// A pattern's picture: a PNG or a GIMP pattern.
-fn pattern(bytes: &[u8]) -> Option<Rgba> {
-    if bytes.starts_with(b"\x89PNG") { png_decode(bytes) } else { gimp::pat(bytes) }
+/// A pattern's picture: a PNG or a GIMP pattern. `light`: its size only.
+fn pattern(bytes: &[u8], light: bool) -> Option<Rgba> {
+    if !bytes.starts_with(b"\x89PNG") {
+        return gimp::pat(bytes, !light);
+    }
+    if light {
+        let (width, height) = png_size(bytes)?;
+        return Some(Rgba { width, height, pixels: Vec::new() });
+    }
+    png_decode(bytes)
 }
 
 /// The mask Krita makes of a pattern for its texture: each pixel's grey where it is opaque (white
@@ -286,7 +302,9 @@ fn texture_mask(p: &Preset, picture: &Rgba) -> Mask {
     let (left, right) = (k("CutoffLeft", 0.0) / 255.0, k("CutoffRight", 255.0) / 255.0);
     let pixels = picture
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|px| {
             let alpha = f32::from(px[3]) / 255.0;
             let g = f32::from(gimp::grey(px[0], px[1], px[2])) / 255.0;
@@ -311,7 +329,9 @@ fn texture_mask(p: &Preset, picture: &Rgba) -> Mask {
 
 impl Brush {
     /// The pixel brush `p` describes, its pictures found by `find`; none for another engine's.
-    pub fn read(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Brush> {
+    /// `light`: only to draw strokes with, its look not made (its pictures neither drawn nor
+    /// decoded).
+    pub fn read(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Brush> {
         if p.paintop != "paintbrush" {
             return None;
         }
@@ -319,11 +339,11 @@ impl Brush {
         let definition = p.element("brush_definition");
         let tip = definition
             .as_ref()
-            .and_then(|b| read_tip(b, find, Some(&dynamics.softness)))
+            .and_then(|b| read_tip(b, find, Some(&dynamics.softness), light))
             .unwrap_or_else(|| stand_in(definition.as_ref().and_then(|b| b.number("diameter")).unwrap_or(40.0)));
         let op = p.get("CompositeOp").unwrap_or("normal").trim().to_owned();
-        let texture = p.flag("Texture/Pattern/Enabled", false).then(|| Brush::read_texture(p, find)).flatten();
-        let masking = p.flag("MaskingBrush/Enabled", false).then(|| Brush::read_masking(p, find)).flatten();
+        let texture = p.flag("Texture/Pattern/Enabled", false).then(|| Brush::read_texture(p, find, light)).flatten();
+        let masking = p.flag("MaskingBrush/Enabled", false).then(|| Brush::read_masking(p, find, light)).flatten();
         Some(Brush {
             tip,
             dynamics,
@@ -341,12 +361,15 @@ impl Brush {
         })
     }
 
-    fn read_texture(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Texture> {
+    fn read_texture(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Texture> {
         // its picture: carried in the setting itself (older presets), else a file it names
-        let bytes = p.get("Texture/Pattern/Pattern").and_then(crate::files::base64).filter(|b| !b.is_empty()).or_else(
-            || ["Texture/Pattern/PatternFileName", "Texture/Pattern/Name"].iter().find_map(|k| find(p.get(k)?.trim())),
-        )?;
-        let picture = pattern(&bytes)?;
+        // (read only to draw, only its header: its size)
+        let carried =
+            p.get("Texture/Pattern/Pattern").map(|t| if light { t.get(..t.len().min(8192)).unwrap_or(t) } else { t });
+        let bytes = carried.and_then(crate::files::base64).filter(|b| !b.is_empty()).or_else(|| {
+            ["Texture/Pattern/PatternFileName", "Texture/Pattern/Name"].iter().find_map(|k| find(p.get(k)?.trim()))
+        })?;
+        let picture = pattern(&bytes, light)?;
         let k = |key: &str, otherwise: f32| p.number(&format!("Texture/Pattern/{key}"), otherwise);
         Some(Texture {
             mask: texture_mask(p, &picture),
@@ -361,11 +384,11 @@ impl Brush {
         })
     }
 
-    fn read_masking(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Masking> {
+    fn read_masking(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Masking> {
         let prefix = "MaskingBrush/Preset/";
         let dynamics = Dynamics::read(p, prefix);
         let definition = p.element(&format!("{prefix}brush_definition"))?;
-        let tip = read_tip(&definition, find, None)?;
+        let tip = read_tip(&definition, find, None, light)?;
         let size = if p.flag("MaskingBrush/UseMasterSize", true) {
             p.number("MaskingBrush/MasterSizeCoeff", 1.0).max(0.0)
         } else {

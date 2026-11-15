@@ -6965,11 +6965,30 @@ fn a_photoshop_brush_files_tips_become_a_set() {
 /// Real brush files, when a folder of them is given (`BRUSH_CORPUS=folder`, never committed):
 /// every brush file in it and below (ours, and Photoshop's, GIMP's, Krita's and Clip Studio's)
 /// imports, each brush draws in its
-/// preview, and a brush written out, read back and written out again comes out the same.
+/// preview, and a brush written out, read back and written out again comes out the same. With
+/// `BRUSH_CORPUS_PLUGINS` set, the brush-engine plugin the app comes with is on as it imports.
 #[test]
 fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     use procraft_engine::brushfile::{self, BrushFile};
     let Ok(root) = std::env::var("BRUSH_CORPUS") else { return };
+    let store = std::env::temp_dir().join(format!("procraft-corpus-plugins-{}", std::process::id()));
+    let plugins = std::env::var_os("BRUSH_CORPUS_PLUGINS").map(|_| {
+        let _ = std::fs::remove_dir_all(&store);
+        let plugins = crate::Plugins::with_store(store.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        plugins
+    });
+    let session = |canvas: u32, window: u32| {
+        let s = session(canvas, window)?;
+        if let Some(plugins) = &plugins {
+            s.use_plugins(std::sync::Arc::clone(plugins));
+        }
+        Some(s)
+    };
+    let mut engines = 0;
     let extension =
         |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     let mut files = Vec::new();
@@ -7045,6 +7064,14 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
                 );
             grained += usize::from(grain);
             tipped += usize::from(tip);
+            engines += usize::from(
+                s.shared
+                    .lock()
+                    .library
+                    .get(set as usize)
+                    .and_then(|l| l.brushes.get(i as usize))
+                    .is_some_and(|b| b.engine.is_some()),
+            );
             if let Some(mode) = dual {
                 *duals.entry(mode).or_default() += 1;
             }
@@ -7082,6 +7109,8 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     }
     eprintln!("{} files, {brushes} brushes, {tipped} with a tip and {grained} with a grain of their own", files.len());
     eprintln!("{} dual brushes, by mode: {duals:?}", duals.values().sum::<usize>());
+    eprintln!("{engines} drawn by plugins' brush engines");
+    let _ = std::fs::remove_dir_all(&store);
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 

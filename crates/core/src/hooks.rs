@@ -673,6 +673,20 @@ impl Hooks {
         }
     }
 
+    /// The look engine `key` of plugin `id` gave the brush whose data is `data`, as it was kept on
+    /// the disk.
+    pub(crate) fn look_on_disk(&self, id: &str, key: &str, data: u64) -> Option<Vec<u8>> {
+        plugin_file::read_look(self.store.as_deref()?, id, key, data)
+    }
+
+    /// Keeps `look` on the disk with plugin `id`, as engine `key`'s for the brush whose data is
+    /// `data`.
+    pub(crate) fn keep_look_on_disk(&self, id: &str, key: &str, data: u64, look: &[u8]) {
+        if let Some(store) = &self.store {
+            plugin_file::write_look(store, id, key, data, look);
+        }
+    }
+
     /// The keys of `id`'s rows in the brush studio, in their order.
     pub(crate) fn brush_keys(&self, id: &str, keys: Vec<String>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {

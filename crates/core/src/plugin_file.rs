@@ -50,6 +50,13 @@ const MOST_FILES: usize = 8;
 const CHOSEN: &str = "chosen";
 /// What a plugin's code keeps of its own (`procraft_keep`), a file in its home.
 const KEPT: &str = "kept";
+/// The folder in a plugin's home where the looks its brush engines gave are kept, each by its
+/// engine and the brush's data. It goes whenever a version of the plugin is kept (a new one may draw
+/// them otherwise), and with the plugin.
+const LOOKS: &str = "looks";
+/// The most bytes of one look kept, and of all a plugin's: past it, those read longest ago go.
+pub(crate) const MOST_LOOK: usize = 64 << 20;
+const MOST_LOOKS: u64 = 256 << 20;
 const MOST_HOOKS: usize = 8;
 /// The reason a stopped plugin gives, in bytes.
 const MOST_STOP_NOTE: usize = 200;
@@ -994,6 +1001,70 @@ pub(crate) fn write_kept(dir: &Path, id: &str, data: &[u8]) -> bool {
     moved.map_err(|e| log::warn!("couldn't keep what a plugin keeps: {e}")).is_ok()
 }
 
+/// Where the look engine `key` of plugin `id`, kept in `dir`, gave the brush whose data is `data`
+/// is kept.
+fn look_path(dir: &Path, id: &str, key: &str, data: u64) -> PathBuf {
+    dir.join(id).join(LOOKS).join(format!("{key}-{data:016x}"))
+}
+
+/// The look engine `key` of plugin `id`, kept in `dir`, gave the brush whose data is `data`, if it
+/// was kept. Read now, it is the last to go.
+pub(crate) fn read_look(dir: &Path, id: &str, key: &str, data: u64) -> Option<Vec<u8>> {
+    let path = look_path(dir, id, key, data);
+    let bytes = read_capped(&path, MOST_LOOK)?;
+    if let Ok(file) = std::fs::File::options().write(true).open(&path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+    Some(bytes)
+}
+
+/// Keeps `look`, which engine `key` of plugin `id`, kept in `dir`, gave the brush whose data is
+/// `data`: written beside, then moved into place, so a read finds all of it or none. Those read
+/// longest ago go while all take more than a plugin's may.
+pub(crate) fn write_look(dir: &Path, id: &str, key: &str, data: u64, look: &[u8]) {
+    let home = dir.join(id);
+    if look.len() > MOST_LOOK || !home.is_dir() {
+        return;
+    }
+    let folder = home.join(LOOKS);
+    let beside = spare(&folder, LOOKS);
+    let written = std::fs::create_dir_all(&folder)
+        .and_then(|()| std::fs::write(&beside, look))
+        .and_then(|()| std::fs::rename(&beside, look_path(dir, id, key, data)));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&beside);
+        log::warn!("couldn't keep a brush's look: {e}");
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&folder) else { return };
+    // what an earlier run left half written goes
+    let ours = format!("-{}-", std::process::id());
+    let mut looks: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { return false };
+            if name.starts_with('.') && !name.contains(&ours) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            !name.starts_with('.')
+        })
+        .filter_map(|entry| {
+            let facts = entry.metadata().ok()?;
+            Some((facts.modified().ok()?, facts.len(), entry.path()))
+        })
+        .collect();
+    let mut total: u64 = looks.iter().map(|(_, len, _)| len).sum();
+    looks.sort_by_key(|(read, ..)| *read);
+    for (_, len, path) in looks {
+        if total <= MOST_LOOKS {
+            break;
+        }
+        let _ = std::fs::remove_file(path);
+        total -= len;
+    }
+}
+
 /// Takes plugin `id`'s folder out of `dir`: gone from the next read on, even if what is moved
 /// aside can't be deleted now (the next start tries again). False if it stays.
 pub(crate) fn forget(dir: &Path, id: &str) -> bool {
@@ -1223,7 +1294,7 @@ pub(crate) fn read_all(dir: &Path) -> Vec<Manifest> {
             // the files picked for its controls and what it keeps, beside its versions; what was
             // left half written goes
             let name = version.file_name();
-            if name == CHOSEN || name == KEPT {
+            if name == CHOSEN || name == KEPT || name == LOOKS {
                 continue;
             }
             if name.to_str().is_some_and(|n| n.starts_with('.')) {

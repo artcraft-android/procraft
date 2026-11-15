@@ -11,7 +11,8 @@
 //!   (grey pictures, one picked per dab), whether its dabs build up over each other or towards their
 //!   opacity, its blend mode, whether it erases, a texture dabs read where they land, and a second
 //!   stroke whose coverage combines with the first (a dual brush). Kept for the brush's data while
-//!   the plugin stays on.
+//!   the plugin stays on, and on the disk with the plugin, so the next start needn't ask again: the
+//!   engine then only reads the brush to draw it.
 //! - **Strokes.** A stroke's samples go to the engine as they come ([`EngineHalf`]), and the dabs it
 //!   answers become the stroke's stamps: each its place, size, angle, squash, opacity, flow, tip,
 //!   mirroring, its own colour if it has one, and how strongly the texture shows in it.
@@ -78,6 +79,10 @@ mod field {
     pub const TEXTURE_MODE: u16 = 5;
     pub const SECOND: u16 = 6;
     pub const SECOND_COMBINE: u16 = 3;
+    /// A load: the brush's id and data, and whether the app holds its look already.
+    pub const LOAD_ID: u16 = 1;
+    pub const LOAD_DATA: u16 = 2;
+    pub const LOAD_LOOK_HELD: u16 = 3;
     /// A stroke starting: the brush's id, the colour and the secondary colour, the size now and
     /// where it starts, the opacity slider, the tool, the pointer, a seed and the view's turn.
     pub const BEGIN_BRUSH: u16 = 1;
@@ -300,10 +305,125 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
     out
 }
 
-/// What a brush's load hands its engine: the brush's id (field 1, u64) and its data (field 2).
-fn load_record(id: u64, data: &[u8]) -> Vec<u8> {
+/// A look as it is kept on the disk: as the GPU takes it (its tips fitted, its texture a square),
+/// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
+/// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
+/// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
+const KEPT_LOOK_VERSION: u32 = 1;
+
+fn kept_tips(set: &TipSet) -> Vec<u8> {
     let mut r = Record::default();
-    r.field(1, &id.to_le_bytes()).field(2, data);
+    r.field(1, &set.side.to_le_bytes());
+    for layer in &set.layers {
+        r.field(2, layer);
+    }
+    r.bytes()
+}
+
+fn kept_build(build: Build) -> u8 {
+    u8::from(build == Build::Towards)
+}
+
+/// `look` as it is kept on the disk.
+pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
+    let mut r = Record::default();
+    r.field(1, &KEPT_LOOK_VERSION.to_le_bytes()).field(2, &kept_tips(&look.tips)).field(3, &[kept_build(look.build)]);
+    if let Some(blend) = look.blend {
+        r.field(4, &blend.to_le_bytes());
+    }
+    r.field(5, &[u8::from(look.erases)]);
+    if let Some(t) = &look.texture {
+        let mut tex = Record::default();
+        tex.field(1, &t.side.to_le_bytes())
+            .field(2, &t.pixels)
+            .field(3, &t.tile.to_le_bytes())
+            .field(4, &t.mode.to_le_bytes());
+        r.field(6, &tex.bytes());
+    }
+    if let Some(s) = &look.second {
+        let mut second = Record::default();
+        second.field(1, &kept_tips(&s.tips)).field(2, &[kept_build(s.build)]).field(3, &s.combine.to_le_bytes());
+        r.field(7, &second.bytes());
+    }
+    r.bytes()
+}
+
+/// A tip set as kept: a side a power of two the GPU takes, each layer that square.
+fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
+    let mut side = None;
+    let mut layers = Vec::new();
+    for (f, value) in fields(bytes) {
+        match f {
+            1 => side = u32_of(value),
+            2 => layers.push(value.to_vec()),
+            _ => {}
+        }
+    }
+    let side = side.filter(|s| s.is_power_of_two() && (16..=MOST_SET_SIDE).contains(s))?;
+    let fits = !layers.is_empty()
+        && layers.len() <= procraft_gpu::MOST_TIPS as usize
+        && layers.iter().all(|l| l.len() == (side as usize).pow(2));
+    fits.then_some(TipSet { id, side, layers })
+}
+
+/// The look kept on the disk as `bytes`, its tips' set given `id` (and the rest near it, as
+/// [`read_look`] gives them); none if it doesn't hold up, or was kept by another version.
+pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
+    let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
+        (None, None, Build::Over, None, false, None, None);
+    for (f, value) in fields(bytes) {
+        match f {
+            1 => version = u32_of(value),
+            2 => tips = Some(tips_kept(value, id)?),
+            3 => build = read_build(value),
+            4 => blend = u32_of(value),
+            5 => erases = value.first().is_some_and(|&b| b != 0),
+            6 => {
+                let (mut side, mut pixels, mut tile, mut mode) = (None, None, None, None);
+                for (f, value) in fields(value) {
+                    match f {
+                        1 => side = u32_of(value),
+                        2 => pixels = Some(value.to_vec()),
+                        3 => tile = f32_of(value),
+                        4 => mode = u32_of(value),
+                        _ => {}
+                    }
+                }
+                let (side, pixels) = (side?, pixels?);
+                let square =
+                    side.is_power_of_two() && side <= MOST_TEXTURE_SIDE && pixels.len() == (side as usize).pow(2);
+                if !square {
+                    return None;
+                }
+                texture = Some(LookTexture { id: id ^ 0x7e47_0001, side, pixels, tile: tile?, mode: mode? });
+            }
+            7 => {
+                let (mut tips, mut build, mut combine) = (None, Build::Towards, None);
+                for (f, value) in fields(value) {
+                    match f {
+                        1 => tips = Some(tips_kept(value, id ^ 0x5eed_0002)?),
+                        2 => build = read_build(value),
+                        3 => combine = u32_of(value),
+                        _ => {}
+                    }
+                }
+                second = Some(SecondLook { tips: tips?, build, combine: combine? });
+            }
+            _ => {}
+        }
+    }
+    (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
+    Some(BrushLook { tips: tips?, build, blend, erases, texture, second })
+}
+
+/// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
+/// look, that it needn't answer one.
+fn load_record(id: u64, data: &[u8], look_held: bool) -> Vec<u8> {
+    let mut r = Record::default();
+    r.field(field::LOAD_ID, &id.to_le_bytes()).field(field::LOAD_DATA, data);
+    if look_held {
+        r.field(field::LOAD_LOOK_HELD, &[1]);
+    }
     r.bytes()
 }
 
@@ -402,8 +522,8 @@ pub(crate) struct Starting {
 }
 
 /// The look of `brush` drawn by its engine, if that is on (asked of it once for its data, then
-/// kept), with the engine's plugin and code. One that stops goes off, and the brush draws as the
-/// app read it.
+/// kept, in memory and on the disk), and the id it goes by. One that stops goes off, and the brush
+/// draws as the app read it.
 pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u64)> {
     let outside = brush.engine.as_ref()?;
     let (plugin, running, index) = hooks.engine(&outside.engine)?;
@@ -411,7 +531,14 @@ pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u
     if let Some(look) = hooks.look_kept(&outside.engine, id) {
         return Some((look, id));
     }
-    let answer = at_work(&running).brush_load(index, &load_record(id, &outside.data));
+    // kept on the disk by an earlier start (one that doesn't hold up is asked for again)
+    let kept = hooks.look_on_disk(&plugin, &outside.engine, id).and_then(|bytes| look_kept_as(&bytes, id));
+    if let Some(look) = kept {
+        let look = Arc::new(look);
+        hooks.keep_look(&outside.engine, id, Arc::clone(&look));
+        return Some((look, id));
+    }
+    let answer = at_work(&running).brush_load(index, &load_record(id, &outside.data, false));
     let record = match answer {
         Ok(record) => record?,
         Err(stop) => {
@@ -423,6 +550,7 @@ pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u
         log::warn!("a brush engine's look of {} doesn't hold up", brush.name);
         return None;
     };
+    hooks.keep_look_on_disk(&plugin, &outside.engine, id, &kept_look(&look));
     let look = Arc::new(look);
     hooks.keep_look(&outside.engine, id, Arc::clone(&look));
     Some((look, id))
@@ -458,8 +586,8 @@ pub(crate) fn begin_stroke(
         if let Some(number) = code.brush_begin(&record)? {
             return Ok(Some(number));
         }
-        // its brush first, then again
-        if code.brush_load(index, &load_record(id, &outside.data))?.is_none() {
+        // its brush first (its look is held), then again
+        if code.brush_load(index, &load_record(id, &outside.data, true))?.is_none() {
             return Ok(None);
         }
         code.brush_begin(&record)
@@ -940,6 +1068,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A look its engine gave is kept on the disk with the plugin: the next start reads it from
+    /// there, and the engine only reads the brush to draw it. Kept again, the plugin's looks go.
+    #[test]
+    fn a_look_is_kept_on_the_disk_until_its_plugin_is_kept_again() {
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        let dir = std::env::temp_dir().join(format!("procraft-kept-looks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = || crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let plugins = store();
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id.clone(), true));
+        let hooks = plugins.hooks();
+        let mut brushes = Vec::new();
+        join_made(&mut brushes, make_brushes(&hooks, "Squares.kpp", &square_preset()));
+        let brush = &brushes[0];
+        let key = brush.engine.as_ref().unwrap().engine.clone();
+        let (look, data) = look_of(&hooks, brush).unwrap();
+        let kept = hooks.look_on_disk(&id, &key, data).expect("kept on the disk");
+        assert_eq!(look_kept_as(&kept, data).as_ref(), Some(&*look));
+        drop((plugins, hooks));
+
+        // the next start: what is kept there (a look of a 3 x 5 tip put in its place) is taken
+        let next = store();
+        assert!(next.set_on(id.clone(), true), "on again, as the app turns it on at a start");
+        let hooks = next.hooks();
+        let mut other = Record::default();
+        other.field(field::TIP, &tip(3, 5));
+        let other = read_look(&other.bytes(), data).unwrap();
+        crate::plugin_file::write_look(&dir, &id, &key, data, &kept_look(&other));
+        let (again, _) = look_of(&hooks, brush).unwrap();
+        assert_eq!(*again, other);
+        // the engine reads the brush, its look held, and draws it
+        let starting = Starting {
+            colour: [0.0; 3],
+            secondary: [1.0; 3],
+            diameter: 1.0,
+            start_diameter: 1.0,
+            opacity: 1.0,
+            tool: 0,
+            pointer: 1,
+            seed: 7,
+            turn: 0.0,
+        };
+        let (mut first, _) = begin_stroke(&hooks, brush, again, data, starting).expect("a stroke");
+        let samples: Vec<Sample> =
+            (0..100).map(|i| Sample::at(Vec2::new(20.0 + i as f32, 60.0), 1.0, f64::from(i))).collect();
+        let stamps = first.add(&samples);
+        assert!(stamps.len() >= 2 && stamps.iter().all(|s| s.tip == 0), "squares, 40 apart");
+        // the plugin kept again: its looks go
+        assert_eq!(next.install(packed.to_vec()), None);
+        assert_eq!(hooks.look_on_disk(&id, &key, data), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// How long the bundled Krita plugin takes on a real file, in the interpreter: making its
     /// brushes, reading each, and a stroke of each (`KRITA_FILE=x.bundle cargo test -p
     /// procraft-core krita_timings -- --ignored --nocapture`).
@@ -954,7 +1137,7 @@ mod tests {
         let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
         assert_eq!(plugins.install(packed.to_vec()), None);
         let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
-        assert!(plugins.set_on(id, true));
+        assert!(plugins.set_on(id.clone(), true));
         let hooks = plugins.hooks();
         let bytes = std::fs::read(&path).unwrap();
         let t = Instant::now();
@@ -994,6 +1177,30 @@ mod tests {
             drawing += t.elapsed();
         }
         println!("{} read in {loading:?}; their strokes' {dabs} dabs in {drawing:?}", brushes.len());
+        // the next start: each look from the disk, the engine reading each brush only to draw it
+        let next = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        assert!(next.set_on(id, true));
+        let hooks = next.hooks();
+        let t = Instant::now();
+        let (mut begun, mut looking) = (0, std::time::Duration::ZERO);
+        for brush in &brushes {
+            let t = Instant::now();
+            let Some((look, id)) = look_of(&hooks, brush) else { continue };
+            looking += t.elapsed();
+            let starting = Starting {
+                colour: [0.0; 3],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                opacity: 1.0,
+                tool: 0,
+                pointer: 1,
+                seed: 7,
+                turn: 0.0,
+            };
+            begun += usize::from(begin_stroke(&hooks, brush, look, id, starting).is_some());
+        }
+        println!("the next start: {begun} looks kept and strokes begun in {:?} (the looks {looking:?})", t.elapsed());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

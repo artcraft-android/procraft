@@ -141,9 +141,24 @@ back an answer, and the app checks that answer before using it. Changing the art
 
 At a hook, nothing but the numbers the hook hands it (the two that tell of an event: the functions
 its permissions give, as an action). A module imports only the app's functions its
-`permissions` give (see [Actions](#actions)), so it has no files, no network and no clock. A module
-that imports anything else is refused. A function it exports for a hook it didn't list is never
-called.
+`permissions` give (see [Actions](#actions)) and the [utilities](#utilities), so it has no files, no
+network and no clock. A module that imports anything else is refused. A function it exports for a
+hook it didn't list is never called.
+
+### Utilities
+
+Any module may import these from `"procraft"`, without a permission, and call them at a hook as in
+an action (interface 4). They do work on bytes the module hands over, many times faster than the
+module's own code would in the app:
+
+| Function | Does |
+|---|---|
+| `inflate(from: i32, len: i32, kind: i32) -> i32` | Unpacks the `len` bytes at `from`, raw deflate (`kind` 0) or zlib (1): their length unpacked, -1 if they don't unpack or unpack to more than 256 MiB |
+| `decode_image(from: i32, len: i32) -> i64` | Decodes the PNG or JPEG at `from`: its width, and its height times 2^32; 0 if it isn't one |
+| `read_answer(to: i32) -> i32` | Writes what the last of the two made at `to` (unpacked bytes, or the picture as RGBA, 8 bits a channel, not premultiplied, rows from the top): 1 if it did |
+
+What one makes waits for `read_answer` until the next call to either, so a module makes room for it
+first, by its length or size.
 
 ### The crate
 
@@ -1038,8 +1053,10 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
 - `procraft_brush_import` is handed the file's name (field 1, UTF-8) and its bytes (field 2). It
   answers with a field 1 for each brush it makes: its name (field 1), its data (field 2) and, if it
   has one, its preview as a PNG (field 3). A long call, with 256 MiB of memory.
-- `procraft_brush_load` is handed the app's id for a brush (field 1, u64) and its data (field 2), and
-  answers how the brush looks:
+- `procraft_brush_load` is handed the app's id for a brush (field 1, u64), its data (field 2) and,
+  if the app holds how the brush looks already, field 3 (u8 1): the engine reads the brush to draw
+  it and answers nothing. Otherwise it answers how the brush looks, which the app keeps on the
+  disk with the plugin, for the brush's data, until the plugin is imported again:
   - field 1 for each of its tips: its width (field 1, u32), height (field 2, u32) and pixels
     (field 3, a byte each, how much it paints), at most 255. Dabs pick one each.
   - field 2, how its dabs build up (u8): 0 each laid over the last, 1 each towards its opacity by its
@@ -1220,9 +1237,9 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
-keeps. Interface 3 added kinds of layer, and interface 4 brush engines and the `brush.data` permission. What a
-hook calls stays as it's written here, and the app keeps every interface's template, so a plugin goes
-on working as it was written.
+keeps. Interface 3 added kinds of layer, and interface 4 brush engines, the `brush.data` permission
+and the utilities. What a hook calls stays as it's written here, and the app keeps every interface's
+template, so a plugin goes on working as it was written.
 
 Something that needs more uses a newer interface number, and an older app says it needs a newer
 ProCraft. So does an app that doesn't have a hook a plugin lists, or something `holds` names.

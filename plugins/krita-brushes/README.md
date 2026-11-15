@@ -29,6 +29,11 @@ The Krita brush studio (the plugin's action, opened by the app's brush studio fo
 a brush's Krita settings a page at a time: tip, spacing, size, opacity and flow, turn and squash,
 scatter and mirror, colour and texture, each option with the sensor it follows and its curve.
 
+The app keeps how each brush looks (its tips drawn, its texture's mask) with the plugin, so only a
+brush's first stroke ever waits for them; after that the plugin only reads the brush's settings.
+In the app, the app's utilities unpack bundles and decode pictures, much faster than the plugin's own
+readers (which its tests use) run in it.
+
 ## Not yet
 
 - Krita's other engines (colour smudge, deform, and the rest): those presets come in as the app

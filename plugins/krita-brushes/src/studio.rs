@@ -590,24 +590,6 @@ fn change(p: &mut Preset, does: &Does, value: f32) {
     }
 }
 
-/// Text as base64.
-pub fn base64_of(bytes: &[u8]) -> String {
-    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ABC[((n >> (18 - 6 * i)) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 impl Preset {
     /// Its XML again, as Krita writes a preset: its settings, and the pictures it carries.
     pub fn to_xml(&self) -> String {
@@ -620,12 +602,11 @@ impl Preset {
         }
         if !self.resources.is_empty() {
             out.push_str("<resources>");
-            for Resource { file, name, bytes } in &self.resources {
+            for Resource { file, name, base64 } in &self.resources {
                 out.push_str(&format!(
-                    r#"<resource name="{}" filename="{}"><![CDATA[{}]]></resource>"#,
+                    r#"<resource name="{}" filename="{}"><![CDATA[{base64}]]></resource>"#,
                     escape(name),
                     escape(file),
-                    base64_of(bytes)
                 ));
             }
             out.push_str("</resources>");
@@ -645,7 +626,6 @@ mod tests {
         let p = Preset::read(text).unwrap();
         let again = Preset::read(&p.to_xml()).unwrap();
         assert_eq!(p, again);
-        assert_eq!(base64_of(b"hello"), "aGVsbG8=");
     }
 
     #[test]

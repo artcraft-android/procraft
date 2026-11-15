@@ -1905,7 +1905,7 @@ pub(crate) fn thumbnail_pixels(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 /// An image's pixels at 8 bits a sample: width, height, samples a pixel and the samples. A brush
 /// file's images are PNG or JPEG, whatever they are named.
-fn decode_picture(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
+pub(crate) fn decode_picture(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     decode_png(bytes).or_else(|| decode_jpeg(bytes))
 }
 

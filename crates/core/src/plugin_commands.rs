@@ -3,6 +3,9 @@
 //! what its permissions give, with the types written here, or the file is refused. The functions
 //! work only while the plugin runs one of its actions (a tap on its card), never inside a hook,
 //! which only answers; what an action changes is one step undo takes back.
+//!
+//! Besides them, any plugin may import the utilities (interface 4): work on bytes it hands over,
+//! done by the app faster than its own code would, at a hook as in an action.
 
 use std::sync::Arc;
 
@@ -71,11 +74,13 @@ pub(crate) struct Host {
     pub(crate) close_panel: bool,
     /// The plugin's id, for what only its own may reach (its brushes' data).
     pub(crate) owner: String,
+    /// What the last utility made, until the plugin reads it.
+    pub(crate) answer: Vec<u8>,
 }
 
 impl Host {
     pub(crate) fn new(limits: StoreLimits) -> Host {
-        Host { limits, session: None, panel: None, close_panel: false, owner: String::new() }
+        Host { limits, session: None, panel: None, close_panel: false, owner: String::new(), answer: Vec::new() }
     }
 }
 
@@ -118,16 +123,85 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
 /// The most bytes of a brush's data a plugin may hand back.
 const MOST_BRUSH_DATA: usize = 64 << 20;
 
-/// Whether everything `module` imports is one of the app's functions `granted` gives, with its
-/// types.
+/// The utilities, which need no permission: their names, parameters and results.
+const UTILITIES: &[(&str, &[ValType], &[ValType])] =
+    &[("inflate", &[I32, I32, I32], &[I32]), ("decode_image", &[I32, I32], &[I64]), ("read_answer", &[I32], &[I32])];
+
+/// The most bytes a utility makes (what unpacks to more, or a larger picture, is refused), and
+/// the most a plugin may hand one.
+const MOST_ANSWER: usize = 256 << 20;
+const MOST_HANDED: usize = 256 << 20;
+
+/// Whether everything `module` imports is a utility or one of the app's functions `granted` gives,
+/// with its types.
 pub(crate) fn imports_fit(module: &Module, granted: &[PluginPermission]) -> bool {
     module.imports().all(|import| {
-        let found = COMMANDS.iter().find(|(name, ..)| import.module() == FROM && import.name() == *name);
-        found.is_some_and(|(_, needs, params, results)| {
-            granted.contains(needs)
-                && import.ty().func().is_some_and(|func| func.params() == *params && func.results() == *results)
-        })
+        let typed = |params: &[ValType], results: &[ValType]| {
+            import.ty().func().is_some_and(|func| func.params() == params && func.results() == results)
+        };
+        if import.module() != FROM {
+            return false;
+        }
+        if let Some((_, params, results)) = UTILITIES.iter().find(|(name, ..)| import.name() == *name) {
+            return typed(params, results);
+        }
+        let found = COMMANDS.iter().find(|(name, ..)| import.name() == *name);
+        found.is_some_and(|(_, needs, params, results)| granted.contains(needs) && typed(params, results))
     })
+}
+
+/// `bytes` unpacked: raw deflate (`kind` 0) or zlib (1); none if they don't unpack, or unpack to
+/// more than a utility makes.
+pub(crate) fn inflated(bytes: &[u8], kind: i32) -> Option<Vec<u8>> {
+    use miniz_oxide::inflate::{decompress_to_vec_with_limit, decompress_to_vec_zlib_with_limit};
+    match kind {
+        0 => decompress_to_vec_with_limit(bytes, MOST_ANSWER).ok(),
+        1 => decompress_to_vec_zlib_with_limit(bytes, MOST_ANSWER).ok(),
+        _ => None,
+    }
+}
+
+/// A PNG or JPEG decoded: its width, height and pixels, straight RGBA8, rows from the top.
+pub(crate) fn decoded_image(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let (w, h, channels, picture) = crate::brush_files::decode_picture(bytes)?;
+    if w.checked_mul(h)?.checked_mul(4)? > MOST_ANSWER {
+        return None;
+    }
+    let rgba = match channels {
+        1 => picture.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        2 => picture.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        3 => picture.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        4 => picture,
+        _ => return None,
+    };
+    let (width, height) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    (rgba.len() == w * h * 4).then_some((width, height, rgba))
+}
+
+/// The utilities, put in `linker` for any plugin's module to import.
+fn link_utilities(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
+    fn handed(caller: &Caller<'_, Host>, from: i32, len: i32) -> Option<Vec<u8>> {
+        let len = usize::try_from(len).ok().filter(|&n| n <= MOST_HANDED)?;
+        read_bytes(caller, from, len)
+    }
+    linker.func_wrap(FROM, "inflate", |mut caller: Caller<'_, Host>, from: i32, len: i32, kind: i32| -> i32 {
+        let made = handed(&caller, from, len).and_then(|bytes| inflated(&bytes, kind));
+        let length = made.as_ref().map_or(-1, |m| i32::try_from(m.len()).unwrap_or(-1));
+        caller.data_mut().answer = made.unwrap_or_default();
+        length
+    })?;
+    linker.func_wrap(FROM, "decode_image", |mut caller: Caller<'_, Host>, from: i32, len: i32| -> i64 {
+        let made = handed(&caller, from, len).and_then(|bytes| decoded_image(&bytes));
+        let size = made.as_ref().map_or(0, |(w, h, _)| (u64::from(*w) | (u64::from(*h) << 32)) as i64);
+        caller.data_mut().answer = made.map(|(_, _, pixels)| pixels).unwrap_or_default();
+        size
+    })?;
+    linker.func_wrap(FROM, "read_answer", |mut caller: Caller<'_, Host>, to: i32| -> i32 {
+        let answer = std::mem::take(&mut caller.data_mut().answer);
+        let (Some(memory), Ok(at)) = (memory(&caller), usize::try_from(to)) else { return 0 };
+        i32::from(memory.write(&mut caller, at, &answer).is_ok())
+    })?;
+    Ok(())
 }
 
 /// The artwork the running action works on, if one is running.
@@ -233,8 +307,10 @@ impl CanvasSession {
     }
 }
 
-/// The app's functions `granted` gives, put in `linker` for a plugin's module to import.
+/// The utilities and the app's functions `granted` gives, put in `linker` for a plugin's module
+/// to import.
 pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> Result<(), wasmi::Error> {
+    link_utilities(linker)?;
     let read = granted.contains(&PluginPermission::ArtworkRead);
     let write = granted.contains(&PluginPermission::ArtworkWrite);
     if read {

@@ -88,7 +88,7 @@ impl Element {
 
 /// The document's root element, if it holds up.
 pub fn parse(text: &str) -> Option<Element> {
-    let mut reader = Reader { s: text.as_bytes(), at: 0, depth: 0 };
+    let mut reader = Reader { t: text, s: text.as_bytes(), at: 0, depth: 0 };
     loop {
         reader.skip_space();
         if reader.starts("<?") {
@@ -105,7 +105,10 @@ pub fn parse(text: &str) -> Option<Element> {
     }
 }
 
+/// Where it has read to in the text: always just before or after a mark (`<`, `>`, a quote, white
+/// space), so slicing the text there is slicing its characters.
 struct Reader<'a> {
+    t: &'a str,
     s: &'a [u8],
     at: usize,
     depth: usize,
@@ -128,12 +131,29 @@ impl Reader<'_> {
         }
     }
 
+    /// Where the next `mark` is (a search many bytes at a time: a long text, a picture in base64
+    /// say, is passed over quickly).
+    fn next(&self, from: usize, mark: char) -> Option<usize> {
+        Some(from + self.t.get(from..)?.find(mark)?)
+    }
+
     /// On past the next `end`.
     fn skip_past(&mut self, end: &str) -> Option<()> {
-        let rest = self.s.get(self.at..)?;
-        let found = rest.windows(end.len()).position(|w| w == end.as_bytes())?;
-        self.at += found + end.len();
-        Some(())
+        let first = end.chars().next()?;
+        let mut from = self.at;
+        loop {
+            let found = self.next(from, first)?;
+            if self.s.get(found..)?.starts_with(end.as_bytes()) {
+                self.at = found + end.len();
+                return Some(());
+            }
+            from = found + first.len_utf8();
+        }
+    }
+
+    /// The text from `from` to where it has read to.
+    fn read_since(&self, from: usize) -> Option<&str> {
+        self.t.get(from..self.at)
     }
 
     /// A `<!DOCTYPE ...>`, brackets inside it counted.
@@ -156,7 +176,7 @@ impl Reader<'_> {
         while self.peek().is_some_and(|c| !c.is_ascii_whitespace() && !matches!(c, b'>' | b'/' | b'=')) {
             self.at += 1;
         }
-        (self.at > from).then(|| String::from_utf8_lossy(&self.s[from..self.at]).into_owned())
+        (self.at > from).then(|| self.read_since(from).map(str::to_owned)).flatten()
     }
 
     fn element(&mut self) -> Option<Element> {
@@ -201,7 +221,7 @@ impl Reader<'_> {
                     while self.peek()? != quote {
                         self.at += 1;
                     }
-                    let value = unescape(&String::from_utf8_lossy(&self.s[from..self.at]));
+                    let value = unescape(self.read_since(from)?);
                     self.at += 1;
                     element.attributes.push((key, value));
                 }
@@ -218,7 +238,7 @@ impl Reader<'_> {
                 self.at += 9;
                 let from = self.at;
                 self.skip_past("]]>")?;
-                let text = String::from_utf8_lossy(&self.s[from..self.at - 3]).into_owned();
+                let text = self.t.get(from..self.at - 3)?.to_owned();
                 element.children.push(Node::Text(text));
             } else if self.starts("<!--") {
                 self.skip_past("-->")?;
@@ -229,13 +249,8 @@ impl Reader<'_> {
                 element.children.push(Node::Element(child));
             } else {
                 let from = self.at;
-                while self.peek().is_some_and(|c| c != b'<') {
-                    self.at += 1;
-                }
-                if self.peek().is_none() {
-                    return None;
-                }
-                let text = unescape(&String::from_utf8_lossy(&self.s[from..self.at]));
+                self.at = self.next(from, '<')?;
+                let text = unescape(self.read_since(from)?);
                 if !text.trim().is_empty() {
                     element.children.push(Node::Text(text));
                 }

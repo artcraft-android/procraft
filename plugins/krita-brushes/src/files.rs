@@ -1,7 +1,6 @@
 //! The file formats a Krita brush comes in: PNG (a preset is one, its settings in a text chunk;
-//! tips and patterns are too), zip (a bundle), base64 (pictures carried inside a preset).
-
-use miniz_oxide::inflate::{decompress_to_vec, decompress_to_vec_zlib_with_limit};
+//! tips and patterns are too), zip (a bundle), base64 (pictures carried inside a preset). In the
+//! app, the app's utilities unpack and decode (`utilities.rs`); elsewhere, the code here does.
 
 /// An image as RGBA, 8 bits a channel, straight, rows from the top.
 #[derive(Clone, Debug, PartialEq)]
@@ -12,8 +11,25 @@ pub struct Rgba {
 }
 
 /// The largest side of a picture taken, and the most bytes one may unpack to.
+#[cfg(not(target_arch = "wasm32"))]
 const MOST_SIDE: u32 = 8192;
-const MOST_UNPACKED: usize = 256 << 20;
+const MOST_UNPACKED: usize = 64 << 20;
+
+/// `data` unpacked: zlib, or raw deflate.
+fn unpack(data: &[u8], zlib: bool) -> Option<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    let unpacked = crate::utilities::inflate(data, zlib);
+    #[cfg(not(target_arch = "wasm32"))]
+    let unpacked = {
+        use miniz_oxide::inflate::{decompress_to_vec_with_limit, decompress_to_vec_zlib_with_limit};
+        if zlib {
+            decompress_to_vec_zlib_with_limit(data, MOST_UNPACKED).ok()
+        } else {
+            decompress_to_vec_with_limit(data, MOST_UNPACKED).ok()
+        }
+    };
+    unpacked.filter(|d| d.len() <= MOST_UNPACKED)
+}
 
 fn be32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(*b.get(at..)?.first_chunk::<4>()?))
@@ -40,7 +56,7 @@ pub fn png_texts(png: &[u8]) -> Vec<(String, String)> {
         let rest = &data[zero + 1..];
         let text = match kind {
             b"tEXt" => Some(rest.to_vec()),
-            b"zTXt" => rest.get(1..).and_then(|z| decompress_to_vec_zlib_with_limit(z, MOST_UNPACKED).ok()),
+            b"zTXt" => rest.get(1..).and_then(|z| unpack(z, true)),
             b"iTXt" => (|| {
                 let (&compressed, rest) = rest.split_first()?;
                 let rest = rest.get(1..)?;
@@ -48,11 +64,7 @@ pub fn png_texts(png: &[u8]) -> Vec<(String, String)> {
                 let rest = &rest[lang + 1..];
                 let translated = rest.iter().position(|&b| b == 0)?;
                 let body = &rest[translated + 1..];
-                if compressed != 0 {
-                    decompress_to_vec_zlib_with_limit(body, MOST_UNPACKED).ok()
-                } else {
-                    Some(body.to_vec())
-                }
+                if compressed != 0 { unpack(body, true) } else { Some(body.to_vec()) }
             })(),
             _ => None,
         };
@@ -84,7 +96,21 @@ pub fn png_picture_only(png: &[u8]) -> Option<Vec<u8>> {
     any.then_some(out)
 }
 
+/// A PNG's width and height, from its header.
+pub fn png_size(png: &[u8]) -> Option<(u32, u32)> {
+    let (kind, header) = chunks(png).next()?;
+    let (w, h) = (be32(header, 0)?, be32(header, 4)?);
+    (kind == b"IHDR" && w > 0 && h > 0).then_some((w, h))
+}
+
 /// A PNG decoded: any colour type and depth, interlaced or not.
+#[cfg(target_arch = "wasm32")]
+pub fn png_decode(png: &[u8]) -> Option<Rgba> {
+    crate::utilities::decode_image(png)
+}
+
+/// A PNG decoded: any colour type and depth, interlaced or not.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn png_decode(png: &[u8]) -> Option<Rgba> {
     let mut header = None;
     let mut palette: &[u8] = &[];
@@ -116,7 +142,7 @@ pub fn png_decode(png: &[u8]) -> Option<Rgba> {
     if !matches!(depth, 1 | 2 | 4 | 8 | 16) || (depth > 8 && colour == 3) || (depth < 8 && !matches!(colour, 0 | 3)) {
         return None;
     }
-    let raw = decompress_to_vec_zlib_with_limit(&packed, MOST_UNPACKED).ok()?;
+    let raw = unpack(&packed, true)?;
     let bits = channels * depth as usize;
     let mut pixels = vec![0_u8; width as usize * height as usize * 4];
     let format = Format { channels, depth, colour, palette, alpha };
@@ -157,6 +183,7 @@ pub fn png_decode(png: &[u8]) -> Option<Rgba> {
     Some(Rgba { width, height, pixels })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Format<'a> {
     channels: usize,
     depth: u8,
@@ -165,6 +192,7 @@ struct Format<'a> {
     alpha: &'a [u8],
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Format<'_> {
     /// Sample `i` (a channel) of pixel `x` in `row`, as 8 bits (palette indices as they are).
     fn sample(&self, row: &[u8], x: usize, i: usize) -> u8 {
@@ -212,6 +240,7 @@ impl Format<'_> {
 }
 
 /// Rows of `stride` bytes undone from PNG's filters (each row its filter byte first).
+#[cfg(not(target_arch = "wasm32"))]
 fn unfilter(raw: &[u8], stride: usize, rows: usize, bpp: usize) -> Option<Vec<u8>> {
     let mut out = vec![0_u8; stride * rows];
     for y in 0..rows {
@@ -307,26 +336,63 @@ impl<'a> Zip<'a> {
         let data = b.get(start..start + packed)?;
         match method {
             0 => Some(data.to_vec()),
-            8 => decompress_to_vec(data).ok().filter(|d| d.len() <= MOST_UNPACKED),
+            8 => unpack(data, false),
             _ => None,
         }
     }
 }
 
+/// What each byte is worth in base64: 64 for white space, 65 for its end, 66 for anything else.
+const BASE64: [u8; 256] = {
+    let mut table = [66_u8; 256];
+    let mut i = 0;
+    while i < 26 {
+        table[b'A' as usize + i] = i as u8;
+        table[b'a' as usize + i] = 26 + i as u8;
+        i += 1;
+    }
+    let mut d = 0;
+    while d < 10 {
+        table[b'0' as usize + d] = 52 + d as u8;
+        d += 1;
+    }
+    table[b'+' as usize] = 62;
+    table[b'-' as usize] = 62;
+    table[b'/' as usize] = 63;
+    table[b'_' as usize] = 63;
+    table[b'=' as usize] = 65;
+    let mut w = 0;
+    let space = [b' ', b'\t', b'\n', b'\r', 0x0c];
+    while w < space.len() {
+        table[space[w] as usize] = 64;
+        w += 1;
+    }
+    table
+};
+
 /// `text` as base64, white space passed over; none if it isn't.
 pub fn base64(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 3);
+    // four letters at a time while they are all letters, as they mostly are
+    let mut at = 0;
+    while let Some(four) = bytes.get(at..at + 4) {
+        let v =
+            [BASE64[four[0] as usize], BASE64[four[1] as usize], BASE64[four[2] as usize], BASE64[four[3] as usize]];
+        if (v[0] | v[1] | v[2] | v[3]) >= 64 {
+            break;
+        }
+        let n = (u32::from(v[0]) << 18) | (u32::from(v[1]) << 12) | (u32::from(v[2]) << 6) | u32::from(v[3]);
+        out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+        at += 4;
+    }
     let (mut acc, mut bits) = (0_u32, 0);
-    for c in text.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            c if c.is_ascii_whitespace() => continue,
-            _ => return None,
+    for &c in &bytes[at..] {
+        let v = match BASE64[c as usize] {
+            64 => continue,
+            65 => break,
+            66 => return None,
+            v => v,
         };
         acc = (acc << 6) | u32::from(v);
         bits += 6;
