@@ -93,7 +93,7 @@ fn weak_gpu(name: &str, device_type: wgpu::DeviceType) -> bool {
         return true;
     }
     if let Some(n) = number_after("mali-g") {
-        return matches!(n, 31 | 51 | 52 | 57 | 71 | 72);
+        return matches!(n, 31 | 51 | 52 | 53 | 57 | 71 | 72 | 310);
     }
     if let Some(n) = number_after("adreno (tm)").or_else(|| number_after("adreno")) {
         return n < 630 || (700..710).contains(&n);
@@ -576,6 +576,8 @@ mod tests {
             "PowerVR B-Series BXM-8-256",
             "Mali-G52 MC2",
             "Mali-G57 MC2",
+            "Mali-G53 MC2",
+            "Mali-G310 MC1",
             "Mali-T830 MP2",
             "Adreno (TM) 610",
             "Adreno (TM) 619",
