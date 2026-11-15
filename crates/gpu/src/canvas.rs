@@ -115,9 +115,12 @@ const IN_PLACE_PIXEL_WORK: u64 = 16;
 const IN_PLACE_STAMP_WORK: u64 = 256 << 10;
 
 /// Undo steps kept, and the most memory they may hold (their pixels and the selections they put
-/// back).
+/// back): no more than half the layers' textures' budget, where there is one (a device of little
+/// memory), so the history never leaves the layers worked on too little room to stay on the GPU;
+/// but never less than the least (a budget that small isn't a device's).
 const MAX_UNDO: usize = 100;
 const MAX_UNDO_BYTES: u64 = 768 << 20;
+const LEAST_UNDO_BYTES: u64 = 256 << 20;
 
 /// How a transformed layer is resampled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3363,6 +3366,15 @@ impl Canvas {
     /// What the undo and redo history's pixels take on the GPU, bytes.
     pub fn history_bytes(&self) -> u64 {
         self.undo.iter().chain(&self.redo).map(Step::bytes).sum()
+    }
+
+    /// The most the undo history's pixels may take (see [`MAX_UNDO_BYTES`]).
+    pub fn history_most(&self) -> u64 {
+        if self.resident_budget == 0 {
+            MAX_UNDO_BYTES
+        } else {
+            (self.resident_budget / 2).clamp(LEAST_UNDO_BYTES, MAX_UNDO_BYTES)
+        }
     }
 
     /// Drops the open stroke.
@@ -6783,7 +6795,8 @@ impl Canvas {
         }
         self.undo.push(step);
         let mut bytes: u64 = self.undo.iter().map(Step::bytes).sum();
-        while self.undo.len() > MAX_UNDO || (bytes > MAX_UNDO_BYTES && self.undo.len() > 1) {
+        let most = self.history_most();
+        while self.undo.len() > MAX_UNDO || (bytes > most && self.undo.len() > 1) {
             let dropped = self.undo.remove(0);
             bytes = bytes.saturating_sub(dropped.bytes());
             self.keep_spare_snapshot(dropped);
@@ -11195,6 +11208,26 @@ mod tests {
         // never none
         canvas.set_resident_budget(per);
         assert_eq!(canvas.most_resident(), 1);
+    }
+
+    #[test]
+    fn with_little_memory_the_history_keeps_to_half_the_room_for_layers() {
+        use procraft_engine::document::Document;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // no budget: the history's own bound
+        assert_eq!(canvas.history_most(), MAX_UNDO_BYTES);
+        // a tablet of 4 GB (a quarter of it for the layers' textures): half that; of 3 GB likewise
+        canvas.set_resident_budget(1 << 30);
+        assert_eq!(canvas.history_most(), 512 << 20);
+        canvas.set_resident_budget(750 << 20);
+        assert_eq!(canvas.history_most(), 375 << 20);
+        // a device of plenty keeps the history's own bound, and none goes below the least
+        canvas.set_resident_budget(3 << 30);
+        assert_eq!(canvas.history_most(), MAX_UNDO_BYTES);
+        canvas.set_resident_budget(64 << 20);
+        assert_eq!(canvas.history_most(), LEAST_UNDO_BYTES);
     }
 
     #[test]
