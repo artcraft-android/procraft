@@ -5674,8 +5674,8 @@ impl Canvas {
             // a stamp picking up behind it reads where the last stamp lay, keeping nothing older
             let pick_up = picks.get(k).copied().flatten();
             let pick = match pick_up {
-                Some(_) => smudge.last_anchor.unwrap_or(anchor),
-                None => anchor,
+                Some(p) if !p.here => smudge.last_anchor.unwrap_or(anchor),
+                _ => anchor,
             };
             smudge.last_anchor = Some(anchor);
             let (paint_rate, paint, dull, dull_weighted) = pick_up.map_or((0.0, style.color, 0.0, 0), |p| {

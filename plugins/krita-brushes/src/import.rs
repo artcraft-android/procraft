@@ -380,7 +380,7 @@ mod tests {
         let dabs = drawn("sketchbrush", lines, 40.0);
         // a line for each move at the least, and more back to the points it passed
         assert!(dabs.len() > 40, "{}", dabs.len());
-        assert!(dabs.iter().all(|d| d.tip == 0 && d.ratio <= 1.0));
+        assert!(dabs.iter().all(|d| d.tip == 1 && d.ratio <= 1.0));
         assert!(dabs.iter().any(|d| d.diameter > 6.0), "lines longer than a move");
     }
 
@@ -396,6 +396,77 @@ mod tests {
         let own = format!("{spray}{}", r#"<param name="SprayShape/enabled"><![CDATA[false]]></param>"#);
         let dabs = drawn("spraybrush", &own, 20.0);
         assert!(dabs.iter().all(|d| d.tip == dabs[0].tip && (d.diameter - 20.0).abs() < 0.5), "{:?}", dabs[0].diameter);
+    }
+
+    /// Krita's bristle brush: each bristle of its tip a line at each move, a pixel wide, spread by its
+    /// scale, as opaque as the tip is there.
+    #[test]
+    fn a_bristle_brush_draws_a_line_for_each_bristle_at_each_move() {
+        let bristles = r#"<param name="HairyBristle/scale"><![CDATA[2]]></param><param name="HairyBristle/random"><![CDATA[0]]></param><param name="HairyBristle/isConnected"><![CDATA[true]]></param>"#;
+        let dabs = drawn("hairybrush", bristles, 6.0);
+        // a 6-across round tip has a few dozen bristles; 29 moves after the first point
+        assert!(!dabs.is_empty() && dabs.len().is_multiple_of(29), "{}", dabs.len());
+        let per_move = dabs.len() / 29;
+        assert!((20..=40).contains(&per_move), "{per_move}");
+        assert!(dabs.iter().all(|d| d.tip == 1 && d.ratio <= 1.0 && d.opacity <= 1.0));
+        // spread by the scale: twice the tip's reach from the path
+        assert!(dabs.iter().all(|d| (d.y - 50.0).abs() <= 7.0), "within reach");
+        assert!(dabs.iter().any(|d| (d.y - 50.0).abs() >= 3.5), "spread");
+    }
+
+    /// Krita's hatching brush: inside each dab of its tip, the lines of a hatching anchored to the
+    /// canvas, a separation apart, the tip laid as the mask they are multiplied by.
+    #[test]
+    fn a_hatching_brush_lays_canvas_lines_inside_its_tip() {
+        let hatching = r#"<param name="Hatching/angle"><![CDATA[0]]></param><param name="Hatching/separation"><![CDATA[4]]></param><param name="Hatching/thickness"><![CDATA[1]]></param><param name="Hatching/origin_x"><![CDATA[0]]></param><param name="Hatching/origin_y"><![CDATA[0]]></param><param name="Hatching/bool_nocrosshatching"><![CDATA[true]]></param>"#;
+        let dabs = drawn("hatchingbrush", hatching, 20.0);
+        let (masks, lines): (Vec<&crate::engine::Dab>, Vec<_>) = dabs.iter().partition(|d| d.flags & 8 != 0);
+        assert!(!masks.is_empty() && !lines.is_empty());
+        // level lines on the canvas's rows a separation apart
+        assert!(lines.iter().all(|d| d.angle.abs() < 1e-3 && d.tip == 1), "level");
+        assert!(lines.iter().all(|d| (d.y.rem_euclid(4.0)).min(4.0 - d.y.rem_euclid(4.0)) < 0.01), "on the rows");
+        assert!(masks.iter().all(|d| (d.diameter - 20.0).abs() < 0.5), "the tip as the mask");
+    }
+
+    /// Krita's curve brush: a line for each move, and once it has passed as many points as it
+    /// keeps, a curve through them at each move.
+    #[test]
+    fn a_curve_brush_draws_lines_and_curves_through_its_points() {
+        let curves = r#"<param name="Curve/strokeHistorySize"><![CDATA[6]]></param><param name="Curve/makeConnection"><![CDATA[true]]></param><param name="Curve/curvesOpacity"><![CDATA[0.5]]></param><param name="Curve/lineWidth"><![CDATA[2]]></param>"#;
+        let dabs = drawn("curvebrush", curves, 10.0);
+        // 29 lines, and 24 pieces of a curve from the sixth point on
+        assert_eq!(dabs.len(), 29 + (29 - 5) * 24);
+        assert!(dabs.iter().all(|d| d.tip == 1));
+        assert!(dabs.iter().any(|d| (d.opacity - 0.5).abs() < 1e-4), "the curves at their opacity");
+    }
+
+    /// Krita's particle brush: its particles pulled towards the pen, a dot for each at each step.
+    #[test]
+    fn a_particle_brush_lays_a_dot_for_each_particle_at_each_step() {
+        let particles = r#"<param name="Particle/count"><![CDATA[5]]></param><param name="Particle/iterations"><![CDATA[3]]></param><param name="Particle/weight"><![CDATA[0.5]]></param>"#;
+        let dabs = drawn("particlebrush", particles, 10.0);
+        assert_eq!(dabs.len(), 30 * 5 * 3);
+        assert!(dabs.iter().all(|d| d.diameter == 1.0 && (d.opacity - 0.5).abs() < 1e-4));
+        // they set out from the first point
+        assert!(dabs.iter().take(15).all(|d| (d.x - 50.0).abs() < 1.0 && (d.y - 50.0).abs() < 1.0));
+    }
+
+    /// Krita's grid brush: the cells of a grid anchored to the canvas, each its shape; or each
+    /// picking up the colour under its middle.
+    #[test]
+    fn a_grid_brush_lays_the_canvas_grid_s_cells() {
+        let grid = r#"<param name="Grid/gridWidth"><![CDATA[10]]></param><param name="Grid/gridHeight"><![CDATA[10]]></param><param name="Grid/diameter"><![CDATA[20]]></param><param name="Grid/scale"><![CDATA[1]]></param><param name="GridShape/shape"><![CDATA[1]]></param>"#;
+        let dabs = drawn("gridbrush", grid, 10.0);
+        assert!(!dabs.is_empty());
+        // boxes 10 across, their middles on the grid's
+        assert!(dabs.iter().all(|d| (d.diameter - 10.0).abs() < 1e-3 && d.tip == 1), "boxes");
+        assert!(
+            dabs.iter().all(|d| (d.x - 5.0).rem_euclid(10.0) < 1e-3 && (d.y - 5.0).rem_euclid(10.0) < 1e-3),
+            "on the grid"
+        );
+        let sampled = format!("{grid}{}", r#"<param name="ColorOption/sampleInputColor"><![CDATA[true]]></param>"#);
+        let dabs = drawn("gridbrush", &sampled, 10.0);
+        assert!(dabs.iter().all(|d| d.flags & (16 | 32 | 512) == 16 | 32 | 512), "picking up under them");
     }
 
     /// A texture's picture carried in a setting comes out of it as a file of the brush's, by its name.

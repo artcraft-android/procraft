@@ -1,7 +1,8 @@
 //! Krita brushes, a plugin for ProCraft: a brush engine (the app's `brush_engines`) that reads
 //! Krita's presets (`.kpp`) and bundles (`.bundle`) and draws their brushes as Krita's pixel
-//! brush and colour smudge brush do, and its quick, tangent normal, sketch and spray brushes as far
-//! as dabs draw them. The app hands it each stroke's input and lays the dabs it answers on the GPU.
+//! brush and colour smudge brush do, and its quick, tangent normal, sketch, spray, bristle, hatching,
+//! curve, particle and grid brushes as far as dabs draw them. The app hands it each stroke's input
+//! and lays the dabs it answers on the GPU.
 //!
 //! - Importing: each preset of an engine it draws becomes a brush whose data is the preset's
 //!   settings and the pictures it names (its tip, its masking brush's, its texture's), found in it

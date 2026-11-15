@@ -3046,31 +3046,32 @@ fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
     };
     // from the red into the clear
     let moved = |pick: PickUp| moved_from(pick, 16.0, 60.0);
+    let clear = PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false, here: false };
     // smeared: the red laid where it was clear, and where the first lay left as it was
-    let (smeared, first) = moved(PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false });
+    let (smeared, first) = moved(PickUp { over: false, ..clear });
     assert!(smeared[0] > 240 && smeared[2] < 16 && smeared[3] > 240, "{smeared:?}");
     assert!(first[0] > 240 && first[3] > 240, "{first:?}");
     // half the stroke's colour (blue) mixed in
-    let (mixed, _) = moved(PickUp { paint_share: 0.5, paint: None, dull: None, clear: false, over: false });
+    let (mixed, _) = moved(PickUp { paint_share: 0.5, ..clear });
     assert!(mixed[0].abs_diff(128) <= 12 && mixed[2].abs_diff(128) <= 12 && mixed[3] > 240, "{mixed:?}");
     // clear paint (an erasing brush's) mixed in: half the red taken away
-    let (thinned, _) = moved(PickUp { paint_share: 0.5, paint: None, dull: None, clear: true, over: false });
+    let (thinned, _) = moved(PickUp { paint_share: 0.5, clear: true, ..clear });
     assert!(thinned[3].abs_diff(128) <= 12 && thinned[2] < 16 && thinned[0] > 100, "{thinned:?}");
     // the clear smeared into the red: in its place it clears it, laid over it the red stays
-    let clear = PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false };
     let (cleared, _) = moved_from(clear, 60.0, 16.0);
     assert!(cleared[3] < 16, "{cleared:?}");
     let (kept, _) = moved_from(PickUp { over: true, ..clear }, 60.0, 16.0);
     assert!(kept[0] > 240 && kept[3] > 240, "{kept:?}");
     // dulled to one colour, then a quarter of its own colour (green) mixed in
-    let (dulled, _) = moved(PickUp {
-        paint_share: 0.25,
-        paint: Some([0.0, 1.0, 0.0]),
-        dull: Some((1.0, true)),
-        clear: false,
-        over: false,
-    });
+    let (dulled, _) =
+        moved(PickUp { paint_share: 0.25, paint: Some([0.0, 1.0, 0.0]), dull: Some((1.0, true)), ..clear });
     assert!(dulled[0].abs_diff(191) <= 12 && dulled[1].abs_diff(64) <= 12 && dulled[3] > 240, "{dulled:?}");
+    // picking up where it lies: made one colour, the colour under its middle, wherever the last lay
+    let here = PickUp { dull: Some((0.0, false)), here: true, ..clear };
+    let (red, _) = moved_from(here, 60.0, 20.0);
+    assert!(red[0] > 240 && red[3] > 240, "{red:?}");
+    let (none, _) = moved_from(here, 20.0, 60.0);
+    assert!(none[3] < 16, "{none:?}");
 }
 
 #[test]

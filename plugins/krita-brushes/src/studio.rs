@@ -3,7 +3,9 @@
 //! brush's tip, spacing, size, opacity and flow, turn and squash, scatter and mirroring, colour and
 //! texture; a colour smudge brush's smudge, its radius and colour rate; a sketch brush's lines; a
 //! spray brush's area, particles, their dynamics and colours; a tangent normal brush's tilt; a quick
-//! brush's own. Each option comes with the sensor it follows and the curve it takes. The app opens
+//! brush's own; a bristle brush's bristles and ink; a hatching brush's hatching; a curve brush's
+//! curves; a particle brush's particles; a grid brush's grid and colours. Each option comes with the
+//! sensor it follows and the curve it takes. The app opens
 //! it in place of its own brush studio for a brush this plugin's engine made; each change is
 //! written back to the brush (the app's `brush.data` permission) and draws from the next stroke on.
 
@@ -89,6 +91,16 @@ enum Shows {
     Particles,
     ShapeDynamics,
     SprayColour,
+    Bristles,
+    Ink,
+    Hatching,
+    AngleCrosshatching,
+    SeparationThickness,
+    Curves,
+    CurveOptions,
+    Particles2,
+    Grid,
+    GridColour,
 }
 
 /// A pixel brush's pages, as the page row offers them.
@@ -143,6 +155,24 @@ fn pages(paintop: &str) -> &'static [(Shows, &'static str)] {
             (Shows::Tip, "Tip"),
         ],
         "roundmarker" => &[(Shows::Quick, "Quick brush"), (Shows::Size, "Size")],
+        "hairybrush" => &[
+            (Shows::Bristles, "Bristles"),
+            (Shows::Ink, "Ink"),
+            (Shows::SizeOpacity, "Size and opacity"),
+            (Shows::Turn, "Turn"),
+            (Shows::Tip, "Tip"),
+        ],
+        "hatchingbrush" => &[
+            (Shows::Tip, "Tip"),
+            (Shows::Spacing, "Spacing"),
+            (Shows::Hatching, "Hatching"),
+            (Shows::AngleCrosshatching, "Angle and crosshatching"),
+            (Shows::SeparationThickness, "Separation and thickness"),
+            (Shows::SizeOpacity, "Size and opacity"),
+        ],
+        "curvebrush" => &[(Shows::Curves, "Curves"), (Shows::CurveOptions, "Options")],
+        "particlebrush" => &[(Shows::Particles2, "Particles")],
+        "gridbrush" => &[(Shows::Grid, "Grid"), (Shows::GridColour, "Colour")],
         _ => &PIXEL_PAGES,
     }
 }
@@ -192,6 +222,10 @@ enum Does {
         per: f32,
     },
     Flag(String),
+    /// A curve setting of its own (not an option's), set to the chosen one.
+    PlainCurve(String),
+    /// A hatching's crosshatching style, kept as a flag for each.
+    HatchStyle,
     /// A setting set to the chosen one of `values`.
     Choose {
         key: String,
@@ -353,6 +387,26 @@ impl Studio {
             Shows::Particles => particles_page(p, &mut page),
             Shows::ShapeDynamics => shape_dynamics_page(p, &mut page),
             Shows::SprayColour => spray_colour_page(p, &mut page),
+            Shows::Bristles => bristles_page(p, &mut page),
+            Shows::Ink => ink_page(p, &mut page),
+            Shows::Hatching => hatching_page(p, &mut page),
+            Shows::AngleCrosshatching => {
+                option_rows(p, &mut page, "Angle", "Angle", true);
+                option_rows(p, &mut page, "Crosshatching", "Crosshatching", true);
+            }
+            Shows::SeparationThickness => {
+                option_rows(p, &mut page, "Separation", "Separation", true);
+                option_rows(p, &mut page, "Thickness", "Thickness", true);
+            }
+            Shows::Curves => curves_page(p, &mut page),
+            Shows::CurveOptions => {
+                option_rows(p, &mut page, "Line width", "Line width", true);
+                option_rows(p, &mut page, "Curves opacity", "Curves' opacity", true);
+                option_rows(p, &mut page, "Opacity", "Opacity", false);
+            }
+            Shows::Particles2 => particle_page(p, &mut page),
+            Shows::Grid => grid_page(p, &mut page),
+            Shows::GridColour => grid_colour_page(p, &mut page),
             Shows::ScatterMirror => {
                 option_rows(p, &mut page, "Scatter", "Scatter", true);
                 let (x, y) = (p.flag("Scattering/AxisX", true), p.flag("Scattering/AxisY", true));
@@ -639,7 +693,6 @@ fn smudge_page(p: &Preset, page: &mut Page) {
     page.chosen(p, "SmudgeRateMode", "Smudge mode", &["Smearing", "Dulling"], &["0", "1"], 0);
     page.flag(p, "SmudgeRateSmearAlpha", "Smear alpha", true);
     page.flag(p, "SmudgeRateUseNewEngine", "Newer smudge engine", false);
-    page.flag(p, "MergedPaint", "Overlay: picks up from every layer", false);
 }
 
 /// A tangent normal brush's tilt: which way each channel goes, what turns it, how much it leans.
@@ -770,6 +823,131 @@ fn spray_colour_page(p: &Preset, page: &mut Page) {
     page.flag(p, "ColorOption/mixBgColor", "Mixed with the secondary colour", false);
 }
 
+/// The hatching styles a hatching brush offers, by the flag Krita keeps each as (none the first).
+const HATCH_STYLES: [(&str, &str); 5] = [
+    ("Hatching/bool_nocrosshatching", "None"),
+    ("Hatching/bool_perpendicular", "Perpendicular"),
+    ("Hatching/bool_minusthenplus", "Minus then plus"),
+    ("Hatching/bool_plusthenminus", "Plus then minus"),
+    ("Hatching/bool_moirepattern", "Moiré"),
+];
+
+/// A choice of a curve for setting `key` (one of its own shown as such).
+fn curve_choice(p: &Preset, page: &mut Page, key: &str, label: &str) {
+    let curve = p.get(key).unwrap_or("0,0;1,1;").trim().to_owned();
+    let mut names: Vec<&str> = CURVES.iter().map(|(n, _)| *n).collect();
+    let at = CURVES.iter().position(|(_, c)| same_curve(c, &curve));
+    let chosen = at.unwrap_or_else(|| {
+        names.push("Its own");
+        names.len() - 1
+    });
+    page.choice(Does::PlainCurve(key.to_owned()), label, &names, chosen);
+}
+
+/// A bristle brush's bristles: how far apart, sheared, shaken, how many, and how they draw.
+fn bristles_page(p: &Preset, page: &mut Page) {
+    page.setting(p, "HairyBristle/scale", "Spread", (1.0, 1000.0), 0.01, 2.0, "%");
+    page.setting(p, "HairyBristle/shear", "Shear", (-200.0, 200.0), 0.01, 0.0, "%");
+    page.setting(p, "HairyBristle/random", "Randomness", (0.0, 1000.0), 0.01, 2.0, "%");
+    page.setting(p, "HairyBristle/density", "Density", (0.0, 100.0), 1.0, 100.0, "%");
+    page.flag(p, "HairyBristle/threshold", "Threshold by pressure", false);
+    page.flag(p, "HairyBristle/isConnected", "Connected paths", false);
+    page.flag(p, "HairyBristle/antialias", "Smooth", false);
+    page.flag(p, "HairyBristle/useCompositing", "Bristles over each other", false);
+    page.flag(p, "HairyBristle/useMousePressure", "Mouse pressure", false);
+}
+
+/// A bristle brush's ink: whether it runs out, how fast, and what that takes away.
+fn ink_page(p: &Preset, page: &mut Page) {
+    page.flag(p, "HairyInk/enabled", "Ink runs out", false);
+    page.setting(p, "HairyInk/inkAmount", "Ink", (1.0, 10000.0), 1.0, 1024.0, "");
+    curve_choice(p, page, "HairyInk/inkDepletionCurve", "Running out");
+    page.flag(p, "HairyInk/useOpacity", "Opacity falls", true);
+    page.flag(p, "HairyInk/useSaturation", "Saturation falls", false);
+    page.flag(p, "HairyInk/useWeights", "By weights", false);
+    page.setting(p, "HairyInk/pressureWeights", "Pressure's weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/bristleLengthWeights", "Bristle length's weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/bristleInkAmountWeight", "Ink's weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.setting(p, "HairyInk/inkDepletionWeight", "Running out's weight", (0.0, 100.0), 1.0, 50.0, "%");
+    page.flag(p, "HairyInk/soak", "Soak ink", false);
+}
+
+/// A hatching brush's hatching: its lines' angle, separation and thickness, where they start, and
+/// how they cross.
+fn hatching_page(p: &Preset, page: &mut Page) {
+    page.setting(p, "Hatching/angle", "Angle", (-90.0, 90.0), 1.0, -60.0, "°");
+    page.setting(p, "Hatching/separation", "Separation", (1.0, 100.0), 1.0, 6.0, " px");
+    page.setting(p, "Hatching/thickness", "Thickness", (1.0, 100.0), 1.0, 1.0, " px");
+    page.setting(p, "Hatching/origin_x", "Origin across", (-500.0, 500.0), 1.0, 50.0, " px");
+    page.setting(p, "Hatching/origin_y", "Origin down", (-500.0, 500.0), 1.0, 50.0, " px");
+    let style = if p.flag("Hatching/bool_moirepattern", false) {
+        4
+    } else {
+        HATCH_STYLES.iter().take(4).position(|(key, _)| p.flag(key, *key == HATCH_STYLES[0].0)).unwrap_or(0)
+    };
+    let names: Vec<&str> = HATCH_STYLES.iter().map(|(_, n)| *n).collect();
+    page.choice(Does::HatchStyle, "Crosshatching", &names, style);
+    page.setting(p, "Hatching/separationintervals", "Separation's steps", (2.0, 7.0), 1.0, 2.0, "");
+    page.flag(p, "Hatching/bool_antialias", "Smooth lines", false);
+    page.flag(p, "Hatching/bool_opaquebackground", "Background behind them", false);
+    page.flag(p, "Hatching/bool_subpixelprecision", "Between pixels", false);
+}
+
+/// A curve brush's curves: their width, how many points they go through, how they bend.
+fn curves_page(p: &Preset, page: &mut Page) {
+    page.setting(p, "Curve/lineWidth", "Line width", (1.0, 100.0), 1.0, 1.0, " px");
+    page.flag(p, "Curve/makeConnection", "Line from where it was", false);
+    page.setting(p, "Curve/strokeHistorySize", "Points a curve goes through", (3.0, 100.0), 1.0, 30.0, "");
+    page.flag(p, "Curve/smoothing", "Smoothing", false);
+    page.setting(p, "Curve/curvesOpacity", "Curves' opacity", (0.0, 100.0), 0.01, 0.0, "%");
+}
+
+/// A particle brush's particles: how many, how many steps, how they are pulled.
+fn particle_page(p: &Preset, page: &mut Page) {
+    page.setting(p, "Particle/count", "Particles", (1.0, 2000.0), 1.0, 50.0, "");
+    page.setting(p, "Particle/iterations", "Steps", (1.0, 200.0), 1.0, 10.0, "");
+    page.setting(p, "Particle/gravity", "Gravity", (0.0, 100.0), 0.01, 0.989, "%");
+    page.setting(p, "Particle/weight", "Weight", (0.0, 100.0), 0.01, 0.2, "%");
+    page.setting(p, "Particle/scaleX", "Pull across", (-200.0, 200.0), 0.01, 0.3, "%");
+    page.setting(p, "Particle/scaleY", "Pull down", (-200.0, 200.0), 0.01, 0.3, "%");
+}
+
+/// A grid brush's grid: its reach, cells, offset, division and borders, and its cells' shape.
+fn grid_page(p: &Preset, page: &mut Page) {
+    page.setting(p, "Grid/diameter", "Diameter", (1.0, 1000.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/gridWidth", "Cell width", (1.0, 1000.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/gridHeight", "Cell height", (1.0, 1000.0), 1.0, 25.0, " px");
+    page.setting(p, "Grid/scale", "Scale", (1.0, 1000.0), 0.01, 1.0, "%");
+    page.setting(p, "Grid/horizontalOffset", "Offset across", (-500.0, 500.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/verticalOffset", "Offset down", (-500.0, 500.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/divisionLevel", "Division", (0.0, 20.0), 1.0, 0.0, "");
+    page.flag(p, "Grid/pressureDivision", "Division by pressure", false);
+    page.setting(p, "Grid/verticalBorder", "Border across", (0.0, 100.0), 1.0, 0.0, " px");
+    page.setting(p, "Grid/horizontalBorder", "Border down", (0.0, 100.0), 1.0, 0.0, " px");
+    page.flag(p, "Grid/randomBorder", "Random border", false);
+    page.chosen(
+        p,
+        "GridShape/shape",
+        "Shape",
+        &["Ellipse", "Rectangle", "Pixel line", "Line", "Thick line"],
+        &["0", "1", "2", "3", "4"],
+        0,
+    );
+}
+
+/// A grid brush's cells' colours.
+fn grid_colour_page(p: &Preset, page: &mut Page) {
+    page.flag(p, "ColorOption/sampleInputColor", "The colour under each cell", false);
+    page.flag(p, "ColorOption/fillBackground", "Background behind them", false);
+    page.flag(p, "ColorOption/mixBgColor", "Mixed with the secondary colour", false);
+    page.flag(p, "ColorOption/useRandomHSV", "Random hue, saturation, value", false);
+    page.setting(p, "ColorOption/hue", "Hue", (-180.0, 180.0), 1.0, 0.0, "°");
+    page.setting(p, "ColorOption/saturation", "Saturation", (-100.0, 100.0), 1.0, 0.0, "%");
+    page.setting(p, "ColorOption/value", "Value", (-100.0, 100.0), 1.0, 0.0, "%");
+    page.flag(p, "ColorOption/useRandomOpacity", "Random opacity", false);
+    page.flag(p, "ColorOption/colorPerParticle", "Each cell its own colour", false);
+}
+
 /// An option's rows: whether it follows the pen (where it can be switched off), its strength, the
 /// sensor it follows and its curve.
 fn option_rows(p: &Preset, page: &mut Page, id: &str, label: &str, checkable: bool) {
@@ -836,6 +1014,17 @@ fn change(p: &mut Preset, does: &Does, value: f32) {
     match does {
         Does::Number { key, per } => set(p, key, number(value * per)),
         Does::Flag(key) => set(p, key, (value >= 0.5).to_string()),
+        Does::PlainCurve(key) => {
+            if let Some((_, curve)) = CURVES.get(value.max(0.0) as usize) {
+                set(p, key, (*curve).to_owned());
+            }
+        }
+        Does::HatchStyle => {
+            let chosen = (value.max(0.0) as usize).min(HATCH_STYLES.len() - 1);
+            for (i, (key, _)) in HATCH_STYLES.iter().enumerate() {
+                set(p, key, (i == chosen).to_string());
+            }
+        }
         Does::Choose { key, values } => {
             if let Some(v) = values.get(value.max(0.0) as usize) {
                 set(p, key, (*v).to_owned());
@@ -1008,8 +1197,6 @@ mod tests {
             5.0,
         );
         assert_eq!(p.get("ColorRatecommonCurve"), Some("0,1;1,0;"));
-        let p = set_on_page("colorsmudge", "", "Smudge", |d| matches!(d, Does::Flag(k) if k == "MergedPaint"), 1.0);
-        assert!(p.flag("MergedPaint", false));
         // tangent normal: the red channel down the Y axis
         let p = set_on_page(
             "tangentnormal",
@@ -1064,6 +1251,52 @@ mod tests {
             1.0,
         );
         assert!(p.flag("ShapeDynamics/randomSize", false));
+        // a bristle brush's spread, a hatching's style, a curve's points, a particle's count and a
+        // grid's cells
+        let p = set_on_page(
+            "hairybrush",
+            "",
+            "Bristles",
+            |d| matches!(d, Does::Number { key, .. } if key == "HairyBristle/scale"),
+            500.0,
+        );
+        assert!((p.number("HairyBristle/scale", 0.0) - 5.0).abs() < 1e-4);
+        let p = set_on_page("hairybrush", "", "Ink", |d| matches!(d, Does::PlainCurve(_)), 5.0);
+        assert_eq!(p.get("HairyInk/inkDepletionCurve"), Some("0,1;1,0;"));
+        let p = set_on_page("hatchingbrush", "", "Hatching", |d| *d == Does::HatchStyle, 4.0);
+        assert!(p.flag("Hatching/bool_moirepattern", false) && !p.flag("Hatching/bool_nocrosshatching", true));
+        let p = set_on_page(
+            "hatchingbrush",
+            "",
+            "Separation and thickness",
+            |d| matches!(d, Does::Flag(k) if k == "PressureThickness"),
+            1.0,
+        );
+        assert!(p.flag("PressureThickness", false));
+        let p = set_on_page(
+            "curvebrush",
+            "",
+            "Curves",
+            |d| matches!(d, Does::Number { key, .. } if key == "Curve/strokeHistorySize"),
+            12.0,
+        );
+        assert_eq!(p.number("Curve/strokeHistorySize", 0.0), 12.0);
+        let p = set_on_page(
+            "particlebrush",
+            "",
+            "Particles",
+            |d| matches!(d, Does::Number { key, .. } if key == "Particle/count"),
+            80.0,
+        );
+        assert_eq!(p.number("Particle/count", 0.0), 80.0);
+        let p = set_on_page(
+            "gridbrush",
+            "",
+            "Grid",
+            |d| matches!(d, Does::Choose { key, .. } if key == "GridShape/shape"),
+            1.0,
+        );
+        assert_eq!(p.get("GridShape/shape"), Some("1"));
         // the quick brush: its diameter
         let p = set_on_page(
             "roundmarker",

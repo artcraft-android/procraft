@@ -127,6 +127,99 @@ const LEAST_SPACING: f32 = 0.5;
 const MOST_DABS: usize = 20_000;
 const MOST_SKETCH_POINTS: usize = 4096;
 
+/// Where a bristle brush's bristle was (from the pen, after its last move), how many pixels it has
+/// painted and how much ink it has left.
+#[derive(Clone, Copy, Debug)]
+struct BristleState {
+    x: f32,
+    y: f32,
+    counter: u32,
+    ink: f32,
+}
+
+/// One of a particle brush's particles: where it is, its pull towards the pen as it builds, and how
+/// hard the pen pulls it.
+#[derive(Clone, Copy, Debug)]
+struct Particle {
+    at: (f32, f32),
+    next: (f32, f32),
+    pull: f32,
+}
+
+/// The lines of a hatching at `angle` degrees, `separation` apart, anchored to the canvas at its
+/// origin, across the box `(x, y, w, h)`: each from where it meets the box's sides to where it
+/// leaves them (on whole pixels unless it says otherwise).
+fn hatch_lines(
+    hatching: &crate::others::Hatching,
+    angle: f32,
+    separation: f32,
+    (x, y, w, h): (f32, f32, f32, f32),
+) -> Vec<((f32, f32), (f32, f32))> {
+    let mut lines = Vec::new();
+    let round = |v: f32| if hatching.subpixel { v } else { if v - v.floor() >= 0.5 { v.ceil() } else { v.floor() } };
+    let (ox, oy) = hatching.origin;
+    if angle.abs() == 90.0 {
+        // upright lines, a separation apart
+        let first = (ox - x) % separation;
+        let mut k = ((-first) / separation).floor() as i32;
+        while k < 10_000 {
+            let lx = first + separation * k as f32;
+            k += 1;
+            if lx < 0.0 {
+                continue;
+            }
+            if lx > w {
+                break;
+            }
+            let lx = round(lx);
+            lines.push(((x + lx, y), (x + lx, y + round(h))));
+        }
+        return lines;
+    }
+    let slope = angle.to_radians().tan();
+    let mut dy = (separation / angle.to_radians().cos()).abs();
+    if !hatching.subpixel {
+        dy = dy.trunc();
+    }
+    if dy <= 0.0 {
+        return lines;
+    }
+    // the lines' intercepts on the box's left side: the canvas's lines through the origin
+    let base = oy - slope * ox;
+    let here = y - slope * x;
+    let hot = (base - here) % dy;
+    let (lo, hi) = (-(slope * w).abs() - h, h + (slope * w).abs());
+    let first = ((lo - hot) / dy).floor() as i32;
+    let last = ((hi - hot) / dy).ceil() as i32;
+    for k in first..=last.min(first + 10_000) {
+        let c = hot + dy * k as f32;
+        // where the line v = slope u + c meets the box's sides
+        let mut ends = Vec::with_capacity(2);
+        if (0.0..=h).contains(&c) {
+            ends.push((0.0, c));
+        }
+        let right = slope * w + c;
+        if (0.0..=h).contains(&right) {
+            ends.push((w, right));
+        }
+        if slope != 0.0 {
+            let top = -c / slope;
+            if top > 0.0 && top < w {
+                ends.push((top, 0.0));
+            }
+            let bottom = (h - c) / slope;
+            if bottom > 0.0 && bottom < w {
+                ends.push((bottom, h));
+            }
+        }
+        if ends.len() >= 2 {
+            let (a, b) = (ends[0], ends[1]);
+            lines.push(((x + round(a.0), y + round(a.1)), (x + round(b.0), y + round(b.1))));
+        }
+    }
+    lines
+}
+
 /// A number of the standard normal distribution (Box and Muller's way).
 fn gaussian(random: &mut Random) -> f32 {
     let u = random.next().max(1e-7);
@@ -207,6 +300,11 @@ const DULLS: u32 = 32;
 const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
 const LAID_OVER: u32 = 256;
+const PICKS_HERE: u32 = 512;
+/// The tip lines, dots and boxes are drawn with: a square (the round one first).
+const LINE_TIP: u32 = 1;
+/// The least squash the app lays a dab at.
+const LEAST_SQUASH: f32 = 0.05;
 
 impl Dab {
     pub fn write(&self, out: &mut Vec<u8>) {
@@ -260,8 +358,14 @@ pub struct Stroke {
     texture_offset: (f32, f32),
     /// For the speed: the last samples' moves and the time between samples, averaged.
     moves: Vec<f32>,
-    /// A sketch brush's points passed, the latest last.
+    /// A sketch or curve brush's points passed, the latest last.
     points: Vec<(f32, f32)>,
+    /// A bristle brush's bristles as they went, its moves and the mouse's pressure; a particle
+    /// brush's particles.
+    bristles: Vec<BristleState>,
+    hairy_moves: u32,
+    old_pressure: f32,
+    particles: Vec<Particle>,
     pace: f32,
     speed: f32,
     pub out: Vec<Dab>,
@@ -288,6 +392,7 @@ impl Stroke {
             },
         };
         let main_pipe = pipe(&brush.tip, &mut random);
+        let bristles = brush.hairy.as_ref().map_or(0, |h| h.bristles.len());
         let second_pipe = brush.masking.as_ref().map(|m| pipe(&m.tip, &mut random)).unwrap_or_default();
         Stroke {
             brush,
@@ -305,6 +410,10 @@ impl Stroke {
             texture_offset,
             moves: Vec::new(),
             points: Vec::new(),
+            bristles: vec![BristleState { x: 0.0, y: 0.0, counter: 0, ink: 1.0 }; bristles],
+            hairy_moves: 0,
+            old_pressure: 1.0,
+            particles: Vec::new(),
             pace: 0.0,
             speed: 0.0,
             out: Vec::new(),
@@ -366,6 +475,20 @@ impl Stroke {
                 let from = self.last.unwrap_or(p);
                 self.sketch_move(&from, &p);
                 self.length += ((p.x - from.x).powi(2) + (p.y - from.y).powi(2)).sqrt();
+                self.last = Some(p);
+                continue;
+            }
+            // a bristle, curve or particle brush draws at each move (a particle brush where it
+            // starts too)
+            if self.brush.hairy.is_some() || self.brush.curves.is_some() || self.brush.particles.is_some() {
+                match self.last {
+                    Some(from) => {
+                        self.line_move(&from, &p);
+                        self.length += ((p.x - from.x).powi(2) + (p.y - from.y).powi(2)).sqrt();
+                    }
+                    None if self.brush.particles.is_some() => self.line_move(&p, &p),
+                    None => {}
+                }
                 self.last = Some(p);
                 continue;
             }
@@ -443,30 +566,39 @@ impl Stroke {
         }
     }
 
-    /// A dab of a line from `a` to `b`, `width` across, with tip `tip` (a square), `opacity`, its
-    /// colour its own if given.
+    /// A dab of a line from `a` to `b`, `width` across (a dot where they meet), with the square tip,
+    /// `opacity`, its colour its own if given.
     fn line(&mut self, a: (f32, f32), b: (f32, f32), width: f32, opacity: f32, colour: Option<[f32; 3]>) {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let length = (dx * dx + dy * dy).sqrt();
-        if length < 1e-3 || opacity <= 0.0 || self.out.len() >= MOST_DABS {
+        if !length.is_finite() || opacity <= 0.0 || self.out.len() >= MOST_DABS {
             return;
         }
-        let long = length.max(width);
-        self.out.push(Dab {
-            x: (a.0 + b.0) * 0.5,
-            y: (a.1 + b.1) * 0.5,
-            diameter: long,
-            angle: dy.atan2(dx),
-            ratio: (width / long).clamp(0.01, 1.0),
-            opacity,
-            flow: 1.0,
-            tip: 0,
-            flags: if colour.is_some() { OWN_COLOUR } else { 0 },
-            colour: colour.unwrap_or([0.0; 3]),
-            strength: 1.0,
-            texture_offset: self.texture_offset,
-            ..Dab::default()
-        });
+        // the app squashes a dab no further than a twentieth: a longer line goes in pieces
+        let pieces = ((length * LEAST_SQUASH / width.max(1e-3)).ceil() as usize).clamp(1, 1000);
+        let piece = length / pieces as f32;
+        let long = piece.max(width);
+        for i in 0..pieces {
+            if self.out.len() >= MOST_DABS {
+                return;
+            }
+            let t = (i as f32 + 0.5) / pieces as f32;
+            self.out.push(Dab {
+                x: a.0 + dx * t,
+                y: a.1 + dy * t,
+                diameter: long,
+                angle: dy.atan2(dx),
+                ratio: (width.min(long) / long).clamp(LEAST_SQUASH, 1.0),
+                opacity,
+                flow: 1.0,
+                tip: LINE_TIP,
+                flags: if colour.is_some() { OWN_COLOUR } else { 0 },
+                colour: colour.unwrap_or([0.0; 3]),
+                strength: 1.0,
+                texture_offset: self.texture_offset,
+                ..Dab::default()
+            });
+        }
     }
 
     /// A sketch brush's move from `last` to `p`: a line between them if it says, and a line from
@@ -666,13 +798,440 @@ impl Stroke {
         }
     }
 
+    /// A move of a brush that draws at each move (a bristle, curve or particle brush) from `a` to
+    /// `b`.
+    fn line_move(&mut self, a: &Point, b: &Point) {
+        if self.brush.hairy.is_some() {
+            self.hairy_move(a, b);
+        } else if self.brush.curves.is_some() {
+            self.curve_move(a, b);
+        } else if self.brush.particles.is_some() {
+            self.particle_move(b);
+        }
+        self.dabs += 1;
+    }
+
+    /// The options' values a line-drawing brush takes at `p`: its size (the app's slider in it),
+    /// its turn (radians) and its opacity.
+    fn size_turn_opacity(&mut self, p: &Point) -> (f32, f32, f32) {
+        let brush = Rc::clone(&self.brush);
+        let info = self.info(p, self.dabs);
+        let seed = self.begin.seed;
+        let k = self.size_factor();
+        let mut fuzz = Fuzz { random: &mut self.random, seed };
+        let d = &brush.dynamics;
+        let size = if d.size.checked { d.size.size_like(&info, &mut fuzz, true) } else { 1.0 } * k;
+        let turn =
+            if d.rotation.checked { (1.0 - d.rotation.rotation_like(&info, &mut fuzz, 0.0, -1.0)) * PI } else { 0.0 };
+        let opacity = if d.opacity.checked { d.opacity.size_like(&info, &mut fuzz, true) } else { d.opacity.strength };
+        (size, turn, opacity.clamp(0.0, 1.0))
+    }
+
+    /// A bristle brush's move from `a` to `b`: each bristle a line from where it was to where it is
+    /// now (from where it would have been at `a`, unless its path is connected), a pixel wide.
+    fn hairy_move(&mut self, a: &Point, b: &Point) {
+        let brush = Rc::clone(&self.brush);
+        let Some(h) = &brush.hairy else { return };
+        let (size, turn, opacity) = self.size_turn_opacity(b);
+        let mut scale = size * h.scale;
+        self.hairy_moves += 1;
+        let first = self.hairy_moves == 1;
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        // the mouse's pressure: how slowly it moves, kept smooth
+        let mut mouse = 1.0;
+        if h.mouse_pressure {
+            let factor = (1.0 - (dx * dx + dy * dy).sqrt() / 20.0).max(0.0);
+            let kept = (4.0 * self.old_pressure + 0.02 + factor) / 5.0;
+            self.old_pressure = kept;
+            mouse = 1.0 - kept;
+            scale *= mouse;
+        }
+        let pressure = mouse * b.pressure * 2.0;
+        let threshold = 1.0 - b.pressure;
+        let shear = pressure * h.shear;
+        let (sin, cos) = (-turn).sin_cos();
+        let paint = self.begin.colour;
+        for (i, bristle) in h.bristles.iter().enumerate() {
+            let rx = (self.random.next() * 2.0 - 1.0) * h.random;
+            let ry = (self.random.next() * 2.0 - 1.0) * h.random;
+            // sheared, shaken, scaled, turned
+            let (sx, sy) = (bristle.x + shear * bristle.y, bristle.y + shear * bristle.x);
+            let (tx, ty) = ((sx + rx) * scale, (sy + ry) * scale);
+            let (fx, fy) = (tx * cos - ty * sin, tx * sin + ty * cos);
+            let Some(state) = self.bristles.get_mut(i) else { continue };
+            let (fx1, fy1) = if first || !h.connected { (fx, fy) } else { (state.x, state.y) };
+            state.x = fx;
+            state.y = fy;
+            if h.threshold && bristle.length < threshold {
+                continue;
+            }
+            let from = (a.x + fx1, a.y + fy1);
+            let to = (b.x + fx, b.y + fy);
+            let pixels = (((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt().ceil() as u32).max(1);
+            let mut colour = bristle.colour;
+            let alpha = match &h.ink {
+                Some(ink) if !ink.depletion.is_empty() => {
+                    // the ink as it runs out along this line, taken at its middle
+                    let at = (state.counter as usize + pixels as usize / 2).min(ink.depletion.len() - 1);
+                    let depletion = ink.depletion[at];
+                    if ink.saturation {
+                        let s = match ink.weights {
+                            Some([pw, lw, iw, dw]) => {
+                                pressure * pw + bristle.length * lw + state.ink * iw + (1.0 - depletion) * dw
+                            }
+                            None => pressure * bristle.length * state.ink * (1.0 - depletion),
+                        } - 1.0;
+                        let [ch, cs, cv] = hsv(colour.unwrap_or(paint));
+                        let cs = if s < 0.0 { cs * (1.0 + s) } else { cs + (1.0 - cs) * s };
+                        colour = Some(rgb([ch, cs.clamp(0.0, 1.0), cv]));
+                    }
+                    let alpha = if ink.opacity {
+                        match ink.weights {
+                            Some([pw, lw, iw, dw]) => {
+                                pressure * pw + bristle.length * lw + state.ink * iw + (1.0 - depletion) * dw
+                            }
+                            None => bristle.length * state.ink,
+                        }
+                        .clamp(0.0, 1.0)
+                    } else {
+                        bristle.length
+                    };
+                    let end = (state.counter as usize + pixels as usize).min(ink.depletion.len() - 1);
+                    state.ink = 1.0 - ink.depletion[end];
+                    state.counter = state.counter.saturating_add(pixels);
+                    alpha
+                }
+                _ => bristle.length,
+            };
+            self.line(from, to, 1.0, alpha * opacity, colour);
+        }
+    }
+
+    /// A curve brush's move from `a` to `b`: a line between them if it says; once it has passed
+    /// as many points as it keeps, a curve from the first to the last through those between.
+    fn curve_move(&mut self, a: &Point, b: &Point) {
+        let brush = Rc::clone(&self.brush);
+        let Some(c) = &brush.curves else { return };
+        let info = self.info(b, self.dabs);
+        let seed = self.begin.seed;
+        let mut fuzz = Fuzz { random: &mut self.random, seed };
+        let one = |o: &CurveOption, fuzz: &mut Fuzz<'_>| if o.checked { o.size_like(&info, fuzz, true) } else { 1.0 };
+        let width = (one(&c.line_width_option, &mut fuzz) * c.line_width).max(1.0);
+        let curve_opacity = one(&c.opacity_option, &mut fuzz) * c.opacity;
+        let d = &brush.dynamics;
+        let opacity = if d.opacity.checked { d.opacity.size_like(&info, &mut fuzz, true) } else { d.opacity.strength };
+        self.points.push((b.x, b.y));
+        let over = self.points.len().saturating_sub(c.history);
+        self.points.drain(..over);
+        if c.connection {
+            self.line((a.x, a.y), (b.x, b.y), width, opacity, None);
+        }
+        if self.points.len() < c.history {
+            return;
+        }
+        let points = self.points.clone();
+        let (first, last) = (points[0], points[points.len() - 1]);
+        let at = |t: f32| -> (f32, f32) {
+            let u = 1.0 - t;
+            if c.smoothing {
+                let m = points[c.history / 2];
+                (
+                    u * u * first.0 + 2.0 * u * t * m.0 + t * t * last.0,
+                    u * u * first.1 + 2.0 * u * t * m.1 + t * t * last.1,
+                )
+            } else {
+                let step = c.history / 3;
+                let (p1, p2) = (points[step], points[2 * step]);
+                let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+                (
+                    w[0] * first.0 + w[1] * p1.0 + w[2] * p2.0 + w[3] * last.0,
+                    w[0] * first.1 + w[1] * p1.1 + w[2] * p2.1 + w[3] * last.1,
+                )
+            }
+        };
+        const PIECES: u32 = 24;
+        let mut from = first;
+        for i in 1..=PIECES {
+            let to = at(i as f32 / PIECES as f32);
+            self.line(from, to, width, opacity * curve_opacity, None);
+            from = to;
+        }
+    }
+
+    /// A particle brush's move to `p`: each particle pulled towards it a few steps, each step a
+    /// dot of the brush's weight where the particle got to.
+    fn particle_move(&mut self, p: &Point) {
+        let brush = Rc::clone(&self.brush);
+        let Some(pt) = &brush.particles else { return };
+        // they start where the stroke does, each pulled harder than the last
+        if self.particles.is_empty() {
+            self.particles = (0..pt.count)
+                .map(|i| Particle { at: (p.x, p.y), next: (p.x, p.y), pull: (i + pt.iterations) as f32 * 0.5 })
+                .collect();
+        }
+        let opacity = brush.dynamics.opacity.strength.clamp(0.0, 1.0) * pt.weight;
+        const TIME: f32 = 0.000_03;
+        for _ in 0..pt.iterations {
+            for j in 0..self.particles.len() {
+                let q = &mut self.particles[j];
+                let pull = ((p.x - q.at.0) * pt.scale.0 * q.pull, (p.y - q.at.1) * pt.scale.1 * q.pull);
+                q.next = ((q.next.0 + pull.0) * pt.gravity, (q.next.1 + pull.1) * pt.gravity);
+                q.at = (q.at.0 + q.next.0 * TIME, q.at.1 + q.next.1 * TIME);
+                let at = q.at;
+                // (one whose pull grows without end is drawn no more)
+                if at.0.abs() < 1e7 && at.1.abs() < 1e7 && self.out.len() < MOST_DABS {
+                    self.out.push(Dab {
+                        x: at.0,
+                        y: at.1,
+                        diameter: 1.0,
+                        opacity,
+                        flow: 1.0,
+                        tip: LINE_TIP,
+                        strength: 1.0,
+                        texture_offset: self.texture_offset,
+                        ..Dab::default()
+                    });
+                }
+            }
+        }
+    }
+
+    /// A hatching brush's dab at `p`: the hatching's lines across the dab's box, each as thick as
+    /// it says, crosshatched as it says (its tip, laid as the masking stroke, keeps them inside it).
+    fn hatch_at(&mut self, p: &Point, hatching: &crate::others::Hatching) {
+        let brush = Rc::clone(&self.brush);
+        let Some(mask) = &brush.masking else { return };
+        let info = self.info(p, self.main.dabs);
+        let seed = self.begin.seed;
+        let k = self.size_factor();
+        let mut fuzz = Fuzz { random: &mut self.random, seed };
+        let d = &brush.dynamics;
+        let one = |o: &CurveOption, fuzz: &mut Fuzz<'_>| if o.checked { o.size_like(&info, fuzz, true) } else { 1.0 };
+        let scale = one(&d.size, &mut fuzz) * k;
+        let opacity = if d.opacity.checked { d.opacity.size_like(&info, &mut fuzz, true) } else { d.opacity.strength };
+        let angle_value = one(&hatching.angle_option, &mut fuzz);
+        let cross_value = one(&hatching.crosshatching_option, &mut fuzz);
+        let separation_value = one(&hatching.separation_option, &mut fuzz);
+        let thickness_value = one(&hatching.thickness_option, &mut fuzz);
+        let (dw, dh) = (mask.tip.width * scale, mask.tip.height * scale);
+        // the next dab as the tip spaces it
+        let spacing = spacing_of(&mask.tip, dw.max(1e-3), dh.max(1e-3), 1.0, false);
+        self.main.spacing = spacing;
+        self.main.turn = 0.0;
+        self.main.dabs += 1;
+        self.main.last_ms = p.time;
+        self.dabs += 1;
+        if dw <= 0.01 || dh <= 0.01 {
+            return;
+        }
+        // the dab's box, on whole pixels
+        let (w, h) = (dw.ceil(), dh.ceil());
+        let (x0, y0) = ((p.x - w * 0.5).round(), (p.y - h * 0.5).round());
+        let thickness = (hatching.thickness * thickness_value).round().max(1.0);
+        let separation = if hatching.separation_option.checked {
+            hatching.separation_at(separation_value)
+        } else {
+            hatching.separation
+        };
+        if hatching.opaque_background {
+            let long = w.max(h);
+            self.out.push(Dab {
+                x: x0 + w * 0.5,
+                y: y0 + h * 0.5,
+                diameter: long,
+                angle: if w >= h { 0.0 } else { FRAC_PI_2 },
+                ratio: (w.min(h) / long).clamp(0.01, 1.0),
+                opacity,
+                flow: 1.0,
+                tip: LINE_TIP,
+                flags: OWN_COLOUR,
+                colour: self.begin.secondary,
+                strength: 1.0,
+                texture_offset: self.texture_offset,
+                ..Dab::default()
+            });
+        }
+        // the passes: a crosshatching's by its style and value, then the hatching's own
+        let mut angles = Vec::new();
+        let cross = hatching.crosshatching_option.checked;
+        match (hatching.style, cross) {
+            (1, true) if cross_value > 0.5 => angles.push(hatching.spun(90.0)),
+            (1, false) => angles.push(hatching.spun(90.0)),
+            (2 | 3, true) => {
+                let (first, then) = if hatching.style == 2 { (-45.0, 45.0) } else { (45.0, -45.0) };
+                if cross_value > 0.33 {
+                    angles.push(hatching.spun(first));
+                }
+                if cross_value > 0.67 {
+                    angles.push(hatching.spun(then));
+                }
+            }
+            (2 | 3, false) => {
+                let (first, then) = if hatching.style == 2 { (-45.0, 45.0) } else { (45.0, -45.0) };
+                angles.push(hatching.spun(first));
+                angles.push(hatching.spun(then));
+            }
+            (4, true) => angles.push(hatching.spun(cross_value * 360.0)),
+            (4, false) => angles.push(hatching.spun(-10.0)),
+            _ => {}
+        }
+        if hatching.angle_option.checked {
+            angles.push(hatching.spun(angle_value * 360.0 + hatching.angle));
+        } else if hatching.style != 4 {
+            angles.push(hatching.angle);
+        }
+        for angle in angles {
+            // Krita's thickness runs across the line's lesser axis (down a flat line, across a
+            // steep one), so its width across the line is less as it leans
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let across = thickness * sin.abs().max(cos.abs());
+            for (a, b) in hatch_lines(hatching, angle, separation, (x0, y0, w, h)) {
+                self.line(a, b, across, opacity, None);
+            }
+        }
+    }
+
+    /// A grid brush's dab at `p`: the cells of its grid around it, each divided, inset by its
+    /// borders and drawn as its shape, in the colour (moved as it says) or picking up the one
+    /// under its middle.
+    fn grid_at(&mut self, p: &Point, g: &crate::others::Grid) {
+        let brush = Rc::clone(&self.brush);
+        let opacity = brush.dynamics.opacity.strength.clamp(0.0, 1.0);
+        let grid = g.diameter * g.scale;
+        let cell = (g.cell.0 * g.scale, g.cell.1 * g.scale);
+        let mut divide = if g.pressure_division { (g.division as f32 * p.pressure) as i32 } else { g.division as i32 };
+        divide = ((g.scale * divide as f32).round() as i32).max(1);
+        // the grid anchored to the canvas
+        let mut x = p.x - grid / 2.0 + cell.0 / 2.0 - g.offset.0;
+        let mut y = p.y - grid / 2.0 + cell.1 / 2.0 - g.offset.1;
+        x = x - x % cell.0 + g.offset.0;
+        y = y - y % cell.1 + g.offset.1;
+        let step = (cell.0 / divide as f32, cell.1 / divide as f32);
+        let (mut vertical, mut horizontal) = g.border;
+        if g.random_border {
+            if vertical == horizontal {
+                let r = self.random.next();
+                vertical *= r;
+                horizontal *= r;
+            } else {
+                vertical *= self.random.next();
+                horizontal *= self.random.next();
+            }
+        }
+        let rect =
+            |dab: &mut Vec<Dab>, (x0, y0, w, h): (f32, f32, f32, f32), tip: u32, colour: [f32; 3], alpha: f32| {
+                let long = w.max(h);
+                if long <= 0.0 {
+                    return;
+                }
+                dab.push(Dab {
+                    x: x0 + w * 0.5,
+                    y: y0 + h * 0.5,
+                    diameter: long,
+                    angle: if w >= h { 0.0 } else { FRAC_PI_2 },
+                    ratio: (w.min(h) / long).clamp(0.01, 1.0),
+                    opacity: alpha,
+                    flow: 1.0,
+                    tip,
+                    flags: OWN_COLOUR,
+                    colour,
+                    strength: 1.0,
+                    ..Dab::default()
+                });
+            };
+        let mut out = std::mem::take(&mut self.out);
+        if g.fill_background && !g.sample {
+            rect(
+                &mut out,
+                (x.floor(), y.floor(), cell.0.ceil(), cell.1.ceil()),
+                LINE_TIP,
+                self.begin.secondary,
+                opacity,
+            );
+        }
+        let mut colour = None;
+        let rows = (grid / step.1).ceil() as i32;
+        let columns = (grid / step.0).ceil() as i32;
+        'cells: for row in 0..rows {
+            for column in 0..columns {
+                if out.len() >= MOST_DABS {
+                    break 'cells;
+                }
+                let (tx, ty) = (x + column as f32 * step.0 + vertical, y + row as f32 * step.1 + horizontal);
+                let (tw, th) = ((step.0 - 2.0 * vertical).abs(), (step.1 - 2.0 * horizontal).abs());
+                let (tx, ty) = (tx.min(tx + tw), ty.min(ty + th));
+                // the colour: the stroke's mixed with the secondary, moved at random, once or for each cell
+                let mut alpha = opacity;
+                if colour.is_none() || g.per_cell {
+                    let mut c = self.begin.colour;
+                    if g.mix_background {
+                        let w = p.pressure;
+                        c = [0, 1, 2].map(|i| c[i] * w + self.begin.secondary[i] * (1.0 - w));
+                    }
+                    if let Some((hue, sat, val)) = g.random_hsv {
+                        let [mut ch, mut cs, mut cv] = hsv(c);
+                        ch = (ch + hue / 360.0 * self.random.next()).rem_euclid(1.0);
+                        cs = (cs + sat / 100.0 * self.random.next()).clamp(0.0, 1.0);
+                        cv = (cv + val / 100.0 * self.random.next()).clamp(0.0, 1.0);
+                        c = rgb([ch, cs, cv]);
+                    }
+                    if g.random_opacity {
+                        alpha *= self.random.next();
+                    }
+                    colour = Some((c, alpha));
+                }
+                let (c, a) = colour.unwrap_or((self.begin.colour, opacity));
+                if g.sample {
+                    // the colour under the cell's middle, laid over the cell
+                    let before = out.len();
+                    rect(&mut out, (tx, ty, tw, th), if g.shape == 0 { 0 } else { LINE_TIP }, c, 1.0);
+                    if let Some(d) = out.get_mut(before) {
+                        d.flags = MOVES_PAINT | DULLS | PICKS_HERE;
+                        d.opacity = a;
+                    }
+                    continue;
+                }
+                match g.shape {
+                    0 => rect(&mut out, (tx, ty, tw, th), 0, c, a * a),
+                    1 => rect(&mut out, (tx, ty, tw, th), LINE_TIP, c, a),
+                    _ => {
+                        let width = if g.shape == 4 { 5.5 } else { 1.0 };
+                        self.out = out;
+                        self.line((tx + tw, ty), (tx, ty + th), width, a * a, Some(c));
+                        out = std::mem::take(&mut self.out);
+                    }
+                }
+            }
+        }
+        for d in &mut out {
+            d.texture_offset = self.texture_offset;
+        }
+        self.out = out;
+        // the next a cell on
+        let spacing = (g.cell.0 * g.scale).max(LEAST_SPACING);
+        self.main.spacing = (spacing, spacing);
+        self.main.turn = 0.0;
+        self.main.dabs += 1;
+        self.main.last_ms = p.time;
+        self.dabs += 1;
+    }
+
     /// A dab of the main brush, or its masking brush, at `p`.
     fn dab_at(&mut self, p: &Point, second: bool) {
         let brush = Rc::clone(&self.brush);
         let k = self.size_factor();
-        // a spray brush lays its particles there instead
+        // a spray brush lays its particles there instead, a hatching brush its lines and a grid
+        // brush its cells
         if let (Some(spray), false) = (&brush.spray, second) {
             self.spray_at(p, spray);
+            return;
+        }
+        if let (Some(hatching), false) = (&brush.hatching, second) {
+            self.hatch_at(p, hatching);
+            return;
+        }
+        if let (Some(grid), false) = (&brush.grid, second) {
+            self.grid_at(p, grid);
             return;
         }
         let (tip, dynamics, coeff) = match (second, &brush.masking) {

@@ -110,12 +110,13 @@ const OWN_COLOUR: u32 = 4;
 const FOR_SECOND: u32 = 8;
 /// A dab that moves the paint under where the stroke's last lay; that paint made one colour first;
 /// that weighed by its tip; the colour it mixes in clear (taking paint away); what it moves laid over
-/// what is there (not in its place).
+/// what is there (not in its place); picking up where it lies itself.
 const MOVES_PAINT: u32 = 16;
 const DULLS: u32 = 32;
 const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
 const LAID_OVER: u32 = 256;
+const PICKS_HERE: u32 = 512;
 
 /// The most tips, and the largest side of one, and of a texture.
 const MOST_TIP_SIDE: u32 = 4096;
@@ -216,6 +217,9 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
     }
     Some(BrushLook { airbrush, smudges, tips: tip_set(&tips, id, kind)?, build, blend, erases, texture, second })
 }
+
+/// The most samples a brush engine is handed at once.
+const SAMPLES_A_CALL: usize = 4;
 
 /// The pen is handed again at most this often (ms), however often an airbrush lays its dabs.
 const MOST_AIRBRUSH_MS: f32 = 4.0;
@@ -720,6 +724,14 @@ struct StrokeCore {
 impl StrokeCore {
     /// `samples` handed to the engine, its dabs kept for the halves.
     fn feed(&mut self, samples: &[Sample]) {
+        // a few at a time, so that an engine laying many dabs for each (a line for each of a
+        // bristle brush's bristles) stays within what a call may answer
+        for some in samples.chunks(SAMPLES_A_CALL) {
+            self.feed_some(some);
+        }
+    }
+
+    fn feed_some(&mut self, samples: &[Sample]) {
         let Some(number) = self.number else { return };
         let first = *self.first_ms.get_or_insert(samples.first().map_or(0.0, |s| s.time_ms));
         let mut bytes = Vec::with_capacity(samples.len() * 32);
@@ -823,6 +835,7 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
                 .then(|| (if radius.is_finite() { radius.clamp(0.0, 3.0) } else { 0.0 }, flags & WEIGHED != 0)),
             clear: flags & CLEAR_PAINT != 0,
             over: flags & LAID_OVER != 0,
+            here: flags & PICKS_HERE != 0,
         });
     }
     // made sharp, if it says (a threshold of 0 says not)

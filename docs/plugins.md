@@ -1089,16 +1089,18 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   where it starts for the brush (field 10), the opacity slider (field 5), the tool (field 6, u8: 0
   paint, 1 erase, 2 smudge), the pointer (field 7, u8: 0 finger, 1 pen, 2 mouse), a seed (field 8,
   u32) and how far the canvas is turned on screen (field 9, f32 radians).
-- `procraft_brush_add` is handed samples, 32 bytes each as layers' items hold them: x, y (canvas
-  pixels), pressure (through the app's pressure curve), tilt, azimuth and roll (radians), then the
-  milliseconds since the stroke's first sample as a 64-bit float.
+- `procraft_brush_add` is handed samples, at most four at a time, 32 bytes each as layers' items
+  hold them: x, y (canvas pixels), pressure (through the app's pressure curve), tilt, azimuth and
+  roll (radians), then the milliseconds since the stroke's first sample as a 64-bit float.
 - Dabs come back 96 bytes each, twenty-four 32-bit numbers: x, y, its diameter (the longer side of its
-  tip, canvas pixels), its angle (radians, clockwise), its squash (0..1 across its angle), its
-  opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2 mirrored down, 4 its own
-  colour, 8 for the second stroke, 16 it moves the paint under where the stroke's last dab lay to
-  where it lies, 32 that paint made one colour first, 64 that colour weighed by the dab's tip, 128
+  tip, canvas pixels), its angle (radians, clockwise), its squash (0..1 across its angle, laid at
+  0.05 at the least), its opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2
+  mirrored down, 4 its own colour, 8 for the second stroke, 16 it moves the paint under where the
+  stroke's last dab lay to where it lies, 32 that paint made one colour first, 64 that colour
+  weighed by the dab's tip, 128
   the colour it mixes in clear, taking paint away, 256 what it moves laid over what is there, never
-  thinning it, rather than in its place), its
+  thinning it, rather than in its place, 512 it picks up where it lies itself rather than where the
+  last lay), its
   colour (three f32, sRGB 0..1, with flag 4), the texture's
   strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
   lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it

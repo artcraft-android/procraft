@@ -233,6 +233,11 @@ pub struct Brush {
     pub sketch: Option<crate::others::Sketch>,
     pub spray: Option<crate::others::Spray>,
     pub tangent: Option<crate::others::Tangent>,
+    pub hairy: Option<crate::others::Hairy>,
+    pub hatching: Option<crate::others::Hatching>,
+    pub curves: Option<crate::others::Curves>,
+    pub particles: Option<crate::others::Particles>,
+    pub grid: Option<crate::others::Grid>,
     pub sketch_radius: f32,
     /// How strongly a lightness tip's grey shows, and its sharpness.
     pub lightness: CurveOption,
@@ -250,9 +255,23 @@ pub struct Brush {
 }
 
 /// Krita's engines this one draws: its pixel brush, colour smudge, quick brush, tangent normal,
-/// sketch and spray brushes.
-pub const ENGINES: [&str; 6] =
-    ["paintbrush", "colorsmudge", "roundmarker", "tangentnormal", "sketchbrush", "spraybrush"];
+/// sketch, spray, bristle, hatching, curve, particle and grid brushes.
+pub const ENGINES: [&str; 11] = [
+    "paintbrush",
+    "colorsmudge",
+    "roundmarker",
+    "tangentnormal",
+    "sketchbrush",
+    "spraybrush",
+    "hairybrush",
+    "hatchingbrush",
+    "curvebrush",
+    "particlebrush",
+    "gridbrush",
+];
+
+/// The engines that lay lines, dots and shapes rather than their tip, each over the last.
+const SHAPES: [&str; 6] = ["sketchbrush", "spraybrush", "hairybrush", "curvebrush", "particlebrush", "gridbrush"];
 
 /// Krita's composite ops as the app's blend modes number them.
 pub fn blend_number(op: &str) -> Option<u32> {
@@ -471,6 +490,93 @@ fn tip_picture(picture: &Rgba, kind: Kind, image: bool, adjust: &Adjustment) -> 
     Mask { width, height, pixels }
 }
 
+/// A tip as drawn once: its width, height, coverage and (a colour picture's) colours.
+type DrawnTip = (u32, u32, Vec<u8>, Option<Vec<[u8; 3]>>);
+
+/// A bristle brush's bristles: each pixel of its tip at its own size that isn't clear (kept as likely
+/// as `density` says, at most [`crate::others::MOST_BRISTLES`]), where it lies from the tip's middle,
+/// how opaque it is, and its colour where the tip stamps its own.
+fn bristles_of(
+    definition: Option<&Element>,
+    find: &dyn Fn(&str) -> Option<Vec<u8>>,
+    density: f32,
+) -> Vec<crate::others::Bristle> {
+    let stand = crate::xml::parse(STAND_IN).unwrap_or_default();
+    let element = definition.unwrap_or(&stand);
+    // the tip as Krita draws it once: its coverage and (a colour picture's) colours
+    let drawn = |e: &Element| -> Option<DrawnTip> {
+        if e.attribute("type") == Some("auto_brush") {
+            let tip = AutoTip::read(e)?;
+            let mut seed = 0x2545_f491_u32;
+            let mut random = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed >> 8) as f32 / (1 << 24) as f32
+            };
+            let m = tip.draw(tip.diameter.round().max(1.0) as u32, 1.0, &mut random);
+            return Some((m.width, m.height, m.pixels, None));
+        }
+        let older = e.attribute("BrushVersion").is_none_or(|v| v.trim() == "1");
+        let scale = e.number("scale").unwrap_or(1.0).max(1e-3) * if older { 2.0 } else { 1.0 };
+        let Pictures { cells, image, colourful, .. } = pictures(&find(e.attribute("filename")?)?, false)?;
+        let cell = cells.first()?;
+        let mask = tip_picture(cell, Kind::Mask, image, &Adjustment::read(e));
+        let (w, h) =
+            (((cell.width as f32 * scale).round() as u32).max(1), ((cell.height as f32 * scale).round() as u32).max(1));
+        let at = |x: u32, y: u32| {
+            let sx = ((x as f32 + 0.5) / scale) as u32;
+            let sy = ((y as f32 + 0.5) / scale) as u32;
+            (sy.min(cell.height - 1) * cell.width + sx.min(cell.width - 1)) as usize
+        };
+        let coverage = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| mask.pixels[at(x, y)]).collect();
+        let colours = (application(e, colourful) == Kind::Stamp).then(|| {
+            let px = cell.pixels.as_chunks::<4>().0;
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let [r, g, b, _] = px[at(x, y)];
+                    [r, g, b]
+                })
+                .collect()
+        });
+        Some((w, h, coverage, colours))
+    };
+    let Some((w, h, coverage, colours)) = drawn(element).or_else(|| drawn(&stand)) else { return Vec::new() };
+    let (cx, cy) = ((w as f32 * 0.5) as i32, (h as f32 * 0.5) as i32);
+    let mut seed = 0x9e37_79b9_u32;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / (1 << 24) as f32
+    };
+    let mut bristles = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let alpha = f32::from(coverage[i]) / 255.0;
+            if alpha <= 0.0 || (density < 1.0 && random() > density) {
+                continue;
+            }
+            let colour = colours.as_ref().map(|c| c[i].map(|v| f32::from(v) / 255.0));
+            bristles.push(crate::others::Bristle {
+                x: (x as i32 - cx) as f32,
+                y: (y as i32 - cy) as f32,
+                length: alpha,
+                colour,
+            });
+        }
+    }
+    // thinned out evenly where there are too many
+    let most = crate::others::MOST_BRISTLES;
+    if bristles.len() > most {
+        let n = bristles.len();
+        bristles = (0..most).map(|k| bristles[k * n / most]).collect();
+    }
+    bristles
+}
+
 /// A hard round tip `diameter` across.
 fn round_tip(diameter: f32) -> Tip {
     tip_of(
@@ -633,16 +739,20 @@ impl Brush {
         }
         let smudge = (p.paintop == "colorsmudge").then(|| Smudge::read(p));
         let mut dynamics = Dynamics::read(p, "");
-        // the quick, sketch and spray brushes have only some of the pixel brush's options: what a
-        // preset still says of the rest (from the engine it was made with) does nothing
+        // Krita's other engines have only some of the pixel brush's options: what a preset still
+        // says of the rest (from the engine it was made with) does nothing
         let only: Option<&[&str]> = match p.paintop.as_str() {
             "roundmarker" => Some(&["size", "spacing"]),
-            "sketchbrush" | "spraybrush" => Some(&["size", "opacity", "rotation"]),
+            "sketchbrush" | "spraybrush" | "hairybrush" => Some(&["size", "opacity", "rotation"]),
+            "hatchingbrush" => Some(&["size", "opacity"]),
+            "curvebrush" => Some(&["opacity"]),
+            "particlebrush" | "gridbrush" => Some(&[]),
             _ => None,
         };
         if let Some(only) = only {
             let d = &mut dynamics;
             let options = [
+                ("size", &mut d.size),
                 ("opacity", &mut d.opacity),
                 ("flow", &mut d.flow),
                 ("rotation", &mut d.rotation),
@@ -680,18 +790,35 @@ impl Brush {
             // as Krita does, its default tip where the preset's picture can't be found
             .unwrap_or_else(stand_in);
         let sketch_radius = 0.5 * tip.width.max(tip.height);
-        let (sketch, spray) = match p.paintop.as_str() {
+        let engine = p.paintop.as_str();
+        let (sketch, spray) = match engine {
             "sketchbrush" => (Some(crate::others::Sketch::read(p)), None),
             "spraybrush" => (None, Some(crate::others::Spray::read(p))),
             _ => (None, None),
         };
-        if sketch.is_some() || spray.as_ref().is_some_and(|s| !s.own_tip) {
-            // its lines' and particles' tips: a hard round one, a square (unless its particles
-            // are its own tip)
+        let hairy = (engine == "hairybrush").then(|| {
+            let density = (p.number("HairyBristle/density", 100.0) / 100.0).clamp(0.0, 1.0);
+            crate::others::Hairy::read(p, bristles_of(definition.as_ref(), find, density))
+        });
+        let hatching = (engine == "hatchingbrush").then(|| crate::others::Hatching::read(p));
+        let curves = (engine == "curvebrush").then(|| crate::others::Curves::read(p));
+        let particles = (engine == "particlebrush").then(|| crate::others::Particles::read(p));
+        let grid = (engine == "gridbrush").then(|| crate::others::Grid::read(p));
+        // a hatching's lines are laid inside its tip: the tip a mask its lines are multiplied by
+        let hatched = hatching.as_ref().map(|_| {
+            let mut dynamics = dynamics.clone();
+            dynamics.opacity.checked = false;
+            dynamics.opacity.strength = 1.0;
+            let tip = definition.as_ref().and_then(|b| read_tip(b, find, None, light, true)).unwrap_or_else(stand_in);
+            Masking { tip, dynamics, size: 0.0, combine: combine_number("multiply") }
+        });
+        let own_tip = spray.as_ref().is_some_and(|s| s.own_tip);
+        if (SHAPES.contains(&engine) && !own_tip) || hatching.is_some() {
+            // its lines', dots' and shapes' tips: a hard round one, a square (unless a spray's
+            // particles are its own tip)
             let round = round_tip(64.0).masks.into_iter().next();
             let square = Mask { width: 1, height: 1, pixels: if light { Vec::new() } else { vec![255] } };
-            let masks: Vec<Mask> =
-                if sketch.is_some() { vec![square] } else { round.into_iter().chain([square]).collect() };
+            let masks: Vec<Mask> = round.into_iter().chain([square]).collect();
             let count = masks.len() as u32;
             tip = Tip { tips: Tips::Images { count, pipe: None }, kind: Kind::Mask, masks, ..tip };
         }
@@ -699,9 +826,13 @@ impl Brush {
         let texture = (pixel_options && p.flag("Texture/Pattern/Enabled", false))
             .then(|| Brush::read_texture(p, find, light))
             .flatten();
+        let washes = p.number("PaintOpAction", 2.0) != 1.0;
         let masking = (pixel_options && p.flag("MaskingBrush/Enabled", false))
             .then(|| Brush::read_masking(p, find, light))
             .flatten();
+        // a masked one always washes
+        let wash = (washes || masking.is_some()) && !SHAPES.contains(&engine) && engine != "roundmarker";
+        let masking = masking.or(hatched);
         let colour = |key: &str| {
             let mut option = CurveOption::read(p, "", key, true, 0.0, 1.0);
             option.checked &= pixel_options;
@@ -717,6 +848,11 @@ impl Brush {
             sketch,
             spray,
             tangent: (p.paintop == "tangentnormal").then(|| crate::others::Tangent::read(p)),
+            hairy,
+            hatching,
+            curves,
+            particles,
+            grid,
             sketch_radius,
             lightness: colour("LightnessStrength"),
             sharpness,
@@ -725,10 +861,9 @@ impl Brush {
             hue: colour("h"),
             saturation: colour("s"),
             value: colour("v"),
-            // washed unless it says it builds up; a masked one always is; the quick, sketch and
-            // spray brushes lay each dab over the last
-            wash: (p.number("PaintOpAction", 2.0) != 1.0 || masking.is_some())
-                && !matches!(p.paintop.as_str(), "roundmarker" | "sketchbrush" | "spraybrush"),
+            // washed unless it says it builds up; the quick brush and those laying lines, dots and
+            // shapes lay each over the last
+            wash,
             blend: blend_number(&op),
             erases: op == "erase" || p.flag("EraserMode", false),
             texture,
@@ -785,11 +920,12 @@ impl Brush {
         if let Some(a) = &self.airbrush {
             look.real(8, a.interval);
         }
-        if self.smudge.is_some() {
+        // a colour smudge's dabs move paint, a grid's that takes the colour under it pick it up
+        if self.smudge.is_some() || self.grid.as_ref().is_some_and(|g| g.sample) {
             look.byte(9, 1);
         }
         // (a smudge's dabs are laid each as far as it says)
-        look.byte(2, u8::from(self.wash && self.smudge.is_none()));
+        look.byte(2, u8::from(self.wash && self.smudge.is_none() && self.grid.is_none()));
         if let Some(blend) = self.blend {
             look.word(3, blend);
         }
