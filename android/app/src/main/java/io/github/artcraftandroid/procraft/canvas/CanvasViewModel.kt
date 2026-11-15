@@ -2985,13 +2985,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             showNotice(said)
             return
         }
-        val ids = session?.layersAt(at.x, at.y).orEmpty()
-        if (ids.isEmpty()) {
-            message = "Nothing is drawn there."
-            return
+        val s = session ?: return
+        // read back from the GPU off the main thread, as a finger set to pick layers asks on every touch
+        viewModelScope.launch {
+            val ids = withContext(Dispatchers.Default) { s.layersAt(at.x, at.y) }
+            if (session !== s) return@launch
+            if (ids.isEmpty()) {
+                message = "Nothing is drawn there."
+                return@launch
+            }
+            selectLayer(ids.first())
+            layerChoice = if (ids.size > 1) at to ids else null
         }
-        selectLayer(ids.first())
-        layerChoice = if (ids.size > 1) at to ids else null
     }
 
     /** The QuickMenu, open around this window point. */

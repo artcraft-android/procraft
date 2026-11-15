@@ -326,11 +326,17 @@ impl CanvasSession {
 
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
-        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, px, py) else { return Vec::new() };
+        // the copy started under the lock, waited for once it is let go: touches and frames go
+        // on while the GPU finishes what it was given before
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
+            canvas.start_alphas_at(gpu, &mut st.doc, px, py)
+        };
+        let Ok(alphas) = pending.alphas() else { return Vec::new() };
+        let st = self.shared.lock();
         let doc = &st.doc;
         alphas
             .into_iter()

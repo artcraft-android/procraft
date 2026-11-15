@@ -8222,12 +8222,18 @@ impl Canvas {
         self.sample_view(gpu, &layer.view, rect, max_side)
     }
 
-    /// The whole picture as composited, scaled to fit `max_side` pixels (never enlarged).
     /// Each paint layer's coverage (alpha, 0 to 255) at canvas pixel (`x`, `y`), in the
     /// document's order; none for a point off the canvas.
     pub fn alphas_at(&mut self, gpu: &Gpu, doc: &mut Document, x: u32, y: u32) -> Result<Vec<(LayerId, u8)>, GpuError> {
+        self.start_alphas_at(gpu, doc, x, y).alphas()
+    }
+
+    /// [`Canvas::alphas_at`] started: the layers' pixels there are copied back while the canvas is
+    /// let go, and waited for by [`PendingAlphas::alphas`] (a touch picking a layer needn't hold the
+    /// canvas while the GPU finishes what it was given before).
+    pub fn start_alphas_at(&mut self, gpu: &Gpu, doc: &mut Document, x: u32, y: u32) -> PendingAlphas {
         if x >= self.width || y >= self.height {
-            return Ok(Vec::new());
+            return PendingAlphas::default();
         }
         self.render(gpu, doc, None);
         let paint: Vec<LayerId> = doc.layers().iter().filter(|l| l.kind == LayerKind::Paint).map(|l| l.id).collect();
@@ -8244,15 +8250,11 @@ impl Canvas {
             })
             .collect();
         if ids.is_empty() {
-            return Ok(paint.iter().filter_map(|id| Some((*id, *parked.get(id)?))).collect());
+            return PendingAlphas { paint, ids, parked, read: None };
         }
         // one pixel of each layer, each in its own 256-byte row of a buffer
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("layer pixels"),
-            size: 256 * ids.len() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let size = 256 * ids.len() as u64;
+        let buffer = gpu.readback_buffer(size);
         let mut encoder =
             gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("layer pixels") });
         for (i, id) in ids.iter().enumerate() {
@@ -8272,18 +8274,20 @@ impl Canvas {
         }
         gpu.queue.submit([encoder.finish()]);
         let (tx, rx) = mpsc::channel();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        buffer.slice(..size).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
-        rx.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
-        let mapped = buffer.slice(..).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
-        let read: HashMap<LayerId, u8> =
-            ids.iter().enumerate().map(|(i, id)| (*id, mapped.get(256 * i + 3).copied().unwrap_or(0))).collect();
-        drop(mapped);
-        buffer.unmap();
-        // in the document's order, parked or not
-        Ok(paint.iter().filter_map(|id| Some((*id, *read.get(id).or_else(|| parked.get(id))?))).collect())
+        // each layer's pixel the first 4 bytes of its row
+        let read = Readback::Copying {
+            device: gpu.device.clone(),
+            buffer,
+            size,
+            kept: gpu.readbacks.clone(),
+            row: 4,
+            padded: 256,
+            mapped: rx,
+        };
+        PendingAlphas { paint, ids, parked, read: Some(read) }
     }
 
     /// Layer `id` over the whole canvas (not cropped to what is drawn) fitted to `max_side`, as
@@ -10748,6 +10752,31 @@ pub enum Readback {
         padded: usize,
         mapped: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     },
+}
+
+/// The layers' coverage at a point, as [`Canvas::start_alphas_at`] started reading it.
+#[derive(Default)]
+pub struct PendingAlphas {
+    /// The paint layers in the document's order, those read from the GPU, and the parked ones'.
+    paint: Vec<LayerId>,
+    ids: Vec<LayerId>,
+    parked: HashMap<LayerId, u8>,
+    read: Option<Readback>,
+}
+
+impl PendingAlphas {
+    /// Each paint layer's coverage (alpha, 0 to 255), in the document's order, once the GPU has
+    /// copied it.
+    pub fn alphas(self) -> Result<Vec<(LayerId, u8)>, GpuError> {
+        let read: HashMap<LayerId, u8> = match self.read {
+            Some(read) => {
+                let pixels = read.pixels()?;
+                self.ids.iter().enumerate().map(|(i, id)| (*id, pixels.get(4 * i + 3).copied().unwrap_or(0))).collect()
+            }
+            None => HashMap::new(),
+        };
+        Ok(self.paint.iter().filter_map(|id| Some((*id, *read.get(id).or_else(|| self.parked.get(id))?))).collect())
+    }
 }
 
 /// The most bytes of readback buffers kept: two layers the size of a large tablet canvas.
