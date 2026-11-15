@@ -13,7 +13,7 @@ Make2D's timeline is Koi Studio's Timeline v2 rebuilt on ProCraft's core. This d
 - Keep everything ProCraft does with pixels: textures, parking, undo, the file format, the brush engine.
 - Open any existing ProCraft or Make2D canvas, including Animation Assist ones, without losing anything.
 
-Not in this phase: adjustment layers (phase 4; effects stay ProCraft's own suite, with no per-layer effect stack), audio and video decoding (phase 3).
+Not in this phase: adjustment layers (phase 4; effects stay ProCraft's own suite, with no per-layer effect stack). Audio and video came in as phase 3 (see Media, below).
 
 Left out on purpose (Nov 14, 2026 scope review): a timeline graph editor, stretching clips, scene split and splitting a project, vector in-betweening, and anything else niche. See the gap map for the full list.
 
@@ -126,7 +126,7 @@ The core API for the apps (uniffi) is a thin layer: a `TimelineInfo` snapshot fo
 
 ## Files
 
-The timeline is saved inside the document's JSON as it is. Media goes in the package as `media/<id>.<ext>`.
+The timeline is saved inside the document's JSON as it is. Media goes in the artwork's folder as `media/<id>.<ext>` (see Media).
 
 ProCraft (upstream) ignores the field it doesn't know, so a Make2D animation opened in ProCraft shows its drawings as plain top-level groups. To keep that useful, Make2D can also write an Animation Assist block (one frame per drawing on the bottom track, holds from durations). That's a nice-to-have.
 
@@ -148,6 +148,61 @@ The tests convert canvases with holds, a background, a foreground, both, a hidde
 
 When a document is read, `Timeline::repaired` makes the timeline consistent with its layers: a drawing whose layer is gone is dropped (the layers stay), a clip that overlaps the one before it is dropped, no layer is drawn by two clips, and keys are put in frame order. A timeline that can't be read at all is left out rather than failing the document.
 
+## Media (phase 3)
+
+Built Nov 15, 2026: sounds and videos on tracks, and the animatic detector, ported from Koi Studio (`PaintCore/Audio`, `PaintCore/Video`) with a Make2D-native panel.
+
+### Model
+
+The engine keeps what places media in time (`crates/engine/src/media.rs`); the platform decodes and plays.
+
+- `Timeline::media: [Media]`, each `{ id, name, kind (Audio | Video), seconds, extension, size }`. The id is a hash of the file's bytes (`MediaHasher`, FNV over 8-byte words), so bringing the same file in twice shares it. `extension` and `size` are new with serde defaults; a timeline written before media has no `media` list and opens as it was.
+- A sound or video clip is an ordinary clip (frames, track, keys), its content `Audio { media, trim_start, offset, volume, muted, volume_keys }` or `Video { media, trim_start, rect }`. Unlike Koi, whose audio clips live apart from the tracks and are timed in seconds, a Make2D sound is a clip on a track like any other, so moving, grouping, cycling, hiding and the track rules all apply with no new code. `trim_start` (where it starts in its file) and a sound's `offset` (a start under a frame after its first frame, for sync finer than a frame) are seconds, so it stays in sync to the sample.
+- A clip is never longer than what is left of its file from `trim_start` (`set_duration` clamps). `trim_media_start` drags the left edge (later or earlier in the file, the end kept, never before the file's start or the clip before it); `slip_media` plays another part of the file where the clip is.
+- A new sound goes on a track of its own at the bottom (`add_sound`), a new video on one under the drawings, above the sound tracks, fitted into the canvas (`add_video`).
+- `Timeline::sounds()` is every sound as it plays in timeline seconds (start, where in the file, how long, level, its volume keys): a group's sounds counted from its start and again on every cycle, cut where the group ends; a hidden track's are muted, a disabled clip's left out. `Sound::gain_at(frame)` is its keyed level.
+- The plan's `Shows::Video { media, seconds, rect }` is what a video draws at a frame. It is in `PlanItem`, so `same_shot` (Harmony and sprite sheets) tells video frames apart.
+- `Timeline::repaired` keeps the values sane (finite, non-negative trims, volume 0..1, a rect with some size). A clip whose file is missing stays: it plays and draws nothing until the file is back.
+
+### Files
+
+An artwork's folder keeps each file the document plays as `media/<16 hex id>.<ext>`, with a sound's waveform beside it as `<id>.peaks` (little-endian f32s, the loudest sample in each 50th of a second). A file brought in waits in the system temporary folder (`make2d-media/`, named the same way) until a save copies it in. A save moves the files the document no longer plays out to that folder rather than deleting them, because an undo can bring a clip back; `MediaStore` (core) looks in the artwork's folders it was opened from or saved to and then the waiting folder. Nothing about media is in the document's undo copies but the small `Media` records.
+
+### Platform interface
+
+The core never decodes media (`crates/core/src/media.rs`):
+
+- `import_timeline_media(MediaImport { path, name, kind, seconds, width, height, peaks })`: the app reads the length, picture size and waveform; the core hashes and copies the file and makes the clip, one undo step ("Add Sound", "Add Video"), starting a timeline if there isn't one.
+- `timeline_sounds(frame)`: the sounds to play, with their files' paths. The app schedules and mixes them.
+- `VideoFrames` (a uniffi foreign trait the app implements): `picture(path, seconds, max_side) -> ThumbnailImage`. The GPU canvas (`gpu/src/canvas/video.rs`) holds one texture per video and asks for a new picture only when the time shown changes; it draws it into the clip's rect through the clip's pose, opacity and blend (the transform shader, as a posed drawing is). Exports and Harmony go through the same render, so video shows in them with no more code.
+- The animatic detector: `animatic_scores(frames, w, h)` scores grey thumbnails the app decodes, `animatic_holds(scores, sensitivity, shortest)` cuts them, `make_timing_track(clip, holds)` lays the drawings.
+
+### iPad
+
+- `+ Media` in the panel's header: Sound… or Video… from Files (`TimelineMedia.swift`, `TimelineMediaViews.swift`).
+- On its lane a sound shows its waveform (the part it plays, in a teal clip; dimmed when muted), a video a strip of film. Picked, the left edge trims into the file and the right edge as any clip's.
+- A sound or video's Clip page: the whole file as a strip with the part played lit, dragged to slip; Level and Nudge (the sub-frame offset); Mute; for a video, Fit Canvas / Fill Canvas / Actual Size and Make Timing Track…; Play From the File's Start, Delete.
+- Playing: `SoundPlayer` (AVAudioEngine) starts every sound together a moment ahead and the frames are paced by the clock from then, so they stay together; a loop or a jump starts the sounds again from there, and ping-pong's way back is silent. Scrubbing plays the slice of sound under each frame (at least 60 ms).
+- MP4 and HEVC exports get the sounds mixed under them (`MediaExport.swift`, AVMutableComposition and an audio mix for the levels); at an export rate other than the timeline's, each sound starts where its frame is shown. GIF and PNG carry no sound.
+- Video pictures come from `AVAssetImageGenerator` (within 10 ms of the time asked, scaled to the canvas's longest side).
+- Debug scenes: `-screen timeline-sound`, `timeline-video`, `timeline-animatic` make a sound and an animatic on the spot.
+
+### Animatic detector
+
+Koi's `VideoDrawingDetector` finds where a video of held drawings (a storyboard or animatic export) changes drawing. Each frame the clip covers is decoded at the time it shows there, shrunk to a grey picture of at most 128 pixels (decoded at twice that and pooled 2×2 to average away compression noise), and compared with the frame before: its score is the share of pixels whose lightness moved by more than 16. Scores are worked out once; a cut is wherever a score reaches the threshold (sensitivity 0 to 1 mapped log-evenly from 0.3, cuts only, to 0.0005, every change), and a cut less than the shortest hold after the last is folded into it (so does a too-short last hold). Make Track lays a new, empty drawing for each hold on a track just above the video, to draw over with the video's timing. The iPad's sheet shows the frame looked at, the scores as bars with the threshold across them and a tick at each cut, Sensitivity and Shortest Hold; both are remembered.
+
+Left out from Koi: putting the video's frame as a reference layer under each new drawing ("Include video drawings"); the video stays on its own track under them instead, which shows the same thing without copying pixels.
+
+### Not built: desktop and Android
+
+The engine, core and GPU parts are shared; each platform needs its own decoding and audio:
+
+- **Desktop** (`desktop/`): a `VideoFrames` on a decoder (ffmpeg through a crate such as `ffmpeg-next`, or GStreamer), reading a file's length, size and waveform for `MediaImport`; sound out through `cpal` (or `rodio`), scheduling `timeline_sounds` and following the playhead as the iPad does; a file picker for `+ Media`; muxing the sounds into video exports (the desktop's video export would need to exist first).
+- **Android**: `MediaExtractor`/`MediaCodec` or `MediaMetadataRetriever.getFrameAtTime` for `VideoFrames` and the detector's thumbnails, `MediaMetadataRetriever` for length and size, decoding to PCM for the waveform; `AudioTrack` or ExoPlayer clips for playing; `MediaMuxer` for exports.
+- Neither has the panel's media UI yet; the core calls are the same.
+
+Known gaps everywhere: keyed volume plays (the export mixes at the level at frame 0, and playing takes each sound's level when it starts); no recording from the microphone; splitting or duplicating a sound or video clip isn't offered (the engine's split and duplicate copy drawings).
+
 ## Build order
 
 | Step | What | Where | Done when |
@@ -159,6 +214,7 @@ When a document is read, `Timeline::repaired` makes the timeline consistent with
 | 1e ✓ | Full easing library, a small easing editor window, motion paths | engine, iPad | Matches Koi's easing curves (done Nov 14, 2026: every Koi easing, checked against Koi's own numbers; Bézier motion paths timed by distance along them; on iPad the picked clip's path shows over the canvas while its keys are open, a key's dot tapped to go to it or dragged to move it, a handle dragged to bend the path, the other mirroring it) |
 | 1f ✓ | Groups and cycles, mattes, keyed camera | engine, gpu, iPad | Koi's group, matte and camera features work (done Nov 14, 2026: clipping masks and alpha and luma mattes drawn on the GPU; group clips made from clips picked on one level, opened to edit their tracks, cycling with their keys repeating or running on, and composited as one; the camera keyed by dragging its frame over the canvas, exports and "Play Through Camera" seen through it) |
 | 1g | Track clipboard, retime, sync markers (tap to drop one at the playhead while playing; new UI) | engine, iPad | |
+| 3 ✓ | Media: sounds and videos on tracks, waveforms, playing and scrubbing with sound, sound in video exports, the animatic detector | engine, core, gpu, iPad | A sound and an animatic can be brought in, timed and played, and drawn over (done Nov 15, 2026; desktop and Android not built, see Media) |
 
 Steps 1a and 1b change nothing anyone can see, which makes them safe to land first: the timeline drives everything, but a migrated canvas looks and plays exactly as it did.
 
