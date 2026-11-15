@@ -194,6 +194,10 @@ struct SavedBrush {
     /// A dual brush's second, kept whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secondary: Option<Box<SavedBrush>>,
+    /// What a plugin's brush engine made of it: the engine's name, and its data (as text, or the
+    /// name of a file of its own beside the library).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine: Option<(String, String)>,
 }
 
 /// A brush's maker as kept: their name, and their picture and signature (PNG, as text).
@@ -680,6 +684,7 @@ impl State {
             metallic_stock: brush.stock.metallic.as_ref().map(|s| (s.name.clone(), s.inverted)),
             roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
             secondary: brush.secondary.as_ref().map(|s| Box::new(self.saved_brush(s, None, images))),
+            engine: brush.engine.as_ref().map(|e| (e.engine.clone(), images.bytes(&e.data))),
         }
     }
 
@@ -773,6 +778,10 @@ impl State {
         };
         let png = |text: &Option<String>| text.as_deref().and_then(picture).map(Into::into);
         brush.thumbnail = png(&b.thumbnail);
+        brush.engine = b.engine.as_ref().and_then(|(engine, text)| {
+            let data = picture(text)?;
+            Some(procraft_engine::brush::OutsideBrush { engine: engine.clone(), data: data.into() })
+        });
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
             (brush.shape.image, brush.shape.source, _) = crate::brush_files::shape_for(&texture);

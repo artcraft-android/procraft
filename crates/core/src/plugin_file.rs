@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 3;
+const INTERFACE: u32 = 4;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -129,6 +129,8 @@ pub(crate) struct Manifest {
     pub kinds: Vec<crate::plugin_canvas::PluginKind>,
     /// The kinds of layer it adds (interface 3).
     pub layer_kinds: Vec<crate::plugin_canvas::PluginKind>,
+    /// The brush engines it has (interface 4).
+    pub brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
     pub permissions: Vec<crate::plugin_commands::PluginPermission>,
     files: Vec<Listed>,
 }
@@ -196,7 +198,22 @@ struct RawManifest {
     kinds: Vec<RawKind>,
     #[serde(default)]
     layer_kinds: Vec<RawKind>,
+    #[serde(default)]
+    brush_engines: Vec<RawEngine>,
 }
+
+/// A brush engine a plugin has: its key, what it is called, and the endings of the names of the
+/// brush files it reads.
+#[derive(Deserialize)]
+struct RawEngine {
+    key: String,
+    label: String,
+    accepts: Vec<String>,
+}
+
+/// The most brush engines a plugin has, and file endings each reads.
+const MOST_ENGINES: usize = 4;
+const MOST_ACCEPTS: usize = 8;
 
 /// A kind of artwork a plugin makes: its key and its name in the gallery's menu (or a kind of
 /// layer, and what its thumbnails show it by).
@@ -633,7 +650,12 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         }
         // code steps in somewhere, does something when tapped, or makes artworks or layers of its
         // own
-        if hooks.is_empty() && raw.actions.is_empty() && raw.kinds.is_empty() && raw.layer_kinds.is_empty() {
+        if hooks.is_empty()
+            && raw.actions.is_empty()
+            && raw.kinds.is_empty()
+            && raw.layer_kinds.is_empty()
+            && raw.brush_engines.is_empty()
+        {
             return Err(Refusal::Described);
         }
     } else if !raw.hooks.is_empty() {
@@ -719,6 +741,35 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if !layer_kinds.is_empty() {
         hooks.push(Hook::Layers);
     }
+    // brush engines, for code written to interface 4 or later: on the brushes hook while it has any
+    let engined = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= 4);
+    let mut engine_keys = HashSet::new();
+    let ending =
+        |e: &String| (1..=8).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let engines_fit = raw.brush_engines.len() <= MOST_ENGINES
+        && raw.brush_engines.iter().all(|e| {
+            let mut endings = HashSet::new();
+            valid_key(&e.key)
+                && plain(&e.label)
+                && engine_keys.insert(e.key.clone())
+                && (1..=MOST_ACCEPTS).contains(&e.accepts.len())
+                && e.accepts.iter().all(|a| ending(a) && endings.insert(a.clone()))
+        });
+    if !engines_fit || (!engined && !raw.brush_engines.is_empty()) {
+        return Err(Refusal::Described);
+    }
+    let brush_engines: Vec<crate::plugin_brushes::BrushEngine> = raw
+        .brush_engines
+        .into_iter()
+        .map(|e| crate::plugin_brushes::BrushEngine {
+            key: format!("{id}.{}", e.key),
+            label: e.label,
+            accepts: e.accepts,
+        })
+        .collect();
+    if !brush_engines.is_empty() {
+        hooks.push(Hook::Brushes);
+    }
     // a place this app doesn't have is for a newer one
     let mut actions = Vec::new();
     for a in raw.actions {
@@ -742,6 +793,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         actions,
         kinds,
         layer_kinds,
+        brush_engines,
         permissions,
         files,
     })
@@ -1002,6 +1054,11 @@ pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook
     let folder = dir.join(id).join(version);
     let manifest = read_folder(&folder, id, version)?;
     Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
+}
+
+/// The brush engines of plugin `id` at `version` in `dir`, if it holds up as it did.
+pub(crate) fn read_brush_engines(dir: &Path, id: &str, version: &str) -> Vec<crate::plugin_brushes::BrushEngine> {
+    read_folder(&dir.join(id).join(version), id, version).map(|m| m.brush_engines).unwrap_or_default()
 }
 
 /// The picture's code of the picker `id` at `version` in `dir`, if it holds up as it did.
@@ -1772,7 +1829,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(4)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(5)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);

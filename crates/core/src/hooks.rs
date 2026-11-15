@@ -12,9 +12,9 @@ use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
-type Shared = Arc<Mutex<Running>>;
+pub(crate) type Shared = Arc<Mutex<Running>>;
 
-fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
+pub(crate) fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
     running.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -32,6 +32,10 @@ struct OnHook {
     events: Option<Shared>,
     /// The kinds of layer it adds (keys `<id>.<key>`), in its manifest's order.
     layer_kinds: Vec<crate::PluginKind>,
+    /// Its brush engines, in its manifest's order, and the looks of the brushes they drew lately,
+    /// by engine and data (the latest last).
+    brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
+    looks: Vec<(String, u64, Arc<crate::plugin_brushes::BrushLook>)>,
 }
 
 #[derive(Default)]
@@ -479,7 +483,17 @@ impl Hooks {
         let running = Arc::new(Mutex::new(running));
         working.on.insert(
             at,
-            OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
+            OnHook {
+                id,
+                running,
+                hooks,
+                brush_keys: Vec::new(),
+                picture: None,
+                events: None,
+                layer_kinds: Vec::new(),
+                brush_engines: Vec::new(),
+                looks: Vec::new(),
+            },
         );
         self.rehook(&working);
         self.changed();
@@ -586,6 +600,68 @@ impl Hooks {
         };
         let done = work(&mut at_work(&running), index);
         done.inspect_err(|stop| self.stopped(&id, *stop)).ok()
+    }
+
+    /// The brush engines `id` has, in its manifest's order.
+    pub(crate) fn brush_engines(&self, id: &str, engines: Vec<crate::plugin_brushes::BrushEngine>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.brush_engines = engines;
+        }
+    }
+
+    /// The brush engines on that read files whose names end `ending` (all of them for none): each
+    /// plugin's id, code, the engine's place among its engines and its key.
+    pub(crate) fn engines_reading(&self, ending: Option<&str>) -> Vec<(String, Shared, usize, String)> {
+        if !self.has(Hook::Brushes) {
+            return Vec::new();
+        }
+        let working = self.working();
+        let mut found = Vec::new();
+        for p in &working.on {
+            for (index, engine) in p.brush_engines.iter().enumerate() {
+                if ending.is_none_or(|e| engine.accepts.iter().any(|a| a == e)) {
+                    found.push((p.id.clone(), Arc::clone(&p.running), index, engine.key.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    /// The brush engine `key` (`<id>.<key>`), if its plugin is on: its plugin's id, code and the
+    /// engine's place among its engines.
+    pub(crate) fn engine(&self, key: &str) -> Option<(String, Shared, usize)> {
+        if !self.has(Hook::Brushes) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| {
+            let index = p.brush_engines.iter().position(|e| e.key == key)?;
+            Some((p.id.clone(), Arc::clone(&p.running), index))
+        })
+    }
+
+    /// The look engine `key` gave the brush whose data is `id`, if it is kept.
+    pub(crate) fn look_kept(&self, key: &str, id: u64) -> Option<Arc<crate::plugin_brushes::BrushLook>> {
+        let mut working = self.working();
+        let plugin = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key))?;
+        let at = plugin.looks.iter().position(|(k, i, _)| k == key && *i == id)?;
+        // the latest last
+        let kept = plugin.looks.remove(at);
+        let look = Arc::clone(&kept.2);
+        plugin.looks.push(kept);
+        Some(look)
+    }
+
+    /// The look engine `key` gave the brush whose data is `id`, kept while its plugin stays on (the
+    /// last few).
+    pub(crate) fn keep_look(&self, key: &str, id: u64, look: Arc<crate::plugin_brushes::BrushLook>) {
+        let mut working = self.working();
+        if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {
+            plugin.looks.retain(|(k, i, _)| !(k == key && *i == id));
+            plugin.looks.push((key.to_owned(), id, look));
+            let over = plugin.looks.len().saturating_sub(crate::plugin_brushes::LOOKS_KEPT);
+            plugin.looks.drain(..over);
+        }
     }
 
     /// The keys of `id`'s rows in the brush studio, in their order.

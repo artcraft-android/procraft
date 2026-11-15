@@ -53,6 +53,7 @@ mod palettes;
 mod pick;
 mod pickers;
 mod plugin_artwork;
+mod plugin_brushes;
 mod plugin_canvas;
 mod plugin_commands;
 mod plugin_file;
@@ -1777,6 +1778,19 @@ impl CanvasSession {
         let mut builder = make(st, brush.clone(), diameter, seed);
         let mut second_builder =
             second.as_ref().map(|(b, _, d)| make(st, b.clone(), d * st.brush_scale(), seed ^ 0x5eed_0002));
+        // a brush a plugin's brush engine made is drawn by it while it is on: its stamps, how they
+        // are laid and its second stroke are the engine's
+        let outside = st.outside_stroke(&brush, tool, current, pointer, diameter, seed);
+        let laid = match outside {
+            Some(o) => {
+                builder = builder.with_engine(Box::new(o.first));
+                second_builder = o.second.as_ref().map(|_| {
+                    make(st, brush.clone(), diameter, seed ^ 0x5eed_0002).with_engine(Box::new(o.second_half))
+                });
+                Some((o.style, o.second))
+            }
+            None => None,
+        };
         let canvas_samples = st.to_canvas(&samples);
         st.assist_from = canvas_samples.first().map(|s| s.pos);
         st.assist_angle = None;
@@ -1809,8 +1823,12 @@ impl CanvasSession {
                 line: builder.clone(),
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
+        let (style, second) = match laid {
+            Some(laid) => laid,
+            None => (style, second.map(|(_, s, _)| s)),
+        };
         match second {
-            Some((_, second, _)) => canvas.begin_dual_stroke(current, style, second),
+            Some(second) => canvas.begin_dual_stroke(current, style, second),
             None => canvas.begin_stroke(current, style),
         }
         draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide());

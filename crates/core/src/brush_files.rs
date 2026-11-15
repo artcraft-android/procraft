@@ -146,8 +146,9 @@ pub(crate) fn brush_names<'n>(names: impl Iterator<Item = &'n str>) -> bool {
 /// ([`CanvasSession::add_read_brushes`]), quickly.
 pub enum ReadBrushes {
     /// A set of their own at the top of the library (a set file's, or another app's brushes),
-    /// called `name` ("Imported" if that is blank).
-    Set { name: String, brushes: Vec<Brush> },
+    /// called `name` ("Imported" if that is blank); another app's with its file (its name, if
+    /// known, and its bytes), for a plugin's brush engine to make brushes of too.
+    Set { name: String, brushes: Vec<Brush>, file: Option<(String, std::sync::Arc<[u8]>)> },
     /// One brush, at the top of the "Imported" set.
     One(Box<Brush>),
     /// A file of ours from before (a set, or a brush for the set shown), as its text.
@@ -178,16 +179,18 @@ fn read_library(bytes: &[u8], name: String) -> Option<ReadBrushes> {
 /// Our brush file's or set file's brushes in `bytes`.
 fn read_ours(bytes: &[u8]) -> Option<ReadBrushes> {
     if let Some((name, files)) = brushfile::read_set(bytes) {
-        return Some(ReadBrushes::Set { name, brushes: files.iter().map(brush_from).collect() });
+        return Some(ReadBrushes::Set { name, brushes: files.iter().map(brush_from).collect(), file: None });
     }
     Some(ReadBrushes::One(Box::new(brush_from(&brushfile::read(bytes)?))))
 }
 
 /// Another app's brushes in `bytes` (see [`CanvasSession::import_other_brushes`]), in a set
-/// called `name` unless the file names its own; none if it holds none.
-fn read_other(bytes: &[u8], name: String) -> Option<ReadBrushes> {
+/// called `name` unless the file names its own, the file called `file_name` if that is known;
+/// none if it holds none.
+fn read_other(bytes: &[u8], name: String, file_name: &str) -> Option<ReadBrushes> {
     let (name, brushes) = other_brushes(bytes, name)?;
-    (!brushes.is_empty()).then_some(ReadBrushes::Set { name, brushes })
+    let file = Some((file_name.to_owned(), bytes.into()));
+    (!brushes.is_empty()).then_some(ReadBrushes::Set { name, brushes, file })
 }
 
 /// The brushes in a file the user chose, called `file_name` (if known), as
@@ -207,14 +210,14 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
         return Some(read);
     }
     if other {
-        return read_other(bytes, stem);
+        return read_other(bytes, stem, &name);
     }
     read_ours(bytes)
         .or_else(|| {
             let text = std::str::from_utf8(bytes).ok().filter(|t| crate::brush_library::is_brush_text(t))?;
             Some(ReadBrushes::Text(text.to_owned()))
         })
-        .or_else(|| read_other(bytes, if stem.is_empty() { IMPORTED.into() } else { stem }))
+        .or_else(|| read_other(bytes, if stem.is_empty() { IMPORTED.into() } else { stem }, &name))
 }
 
 impl CanvasSession {
@@ -224,7 +227,13 @@ impl CanvasSession {
     /// Returns the set they went into, or none if they couldn't be added.
     pub fn add_read_brushes(&self, read: ReadBrushes, shown: u32) -> Option<u32> {
         match read {
-            ReadBrushes::Set { name, mut brushes } => {
+            ReadBrushes::Set { name, mut brushes, file } => {
+                // the brush engines of plugins on make brushes of another app's file too
+                let hooks = self.shared.lock().hooks.clone();
+                if let (Some(hooks), Some((file_name, bytes))) = (hooks, file) {
+                    let made = crate::plugin_brushes::make_brushes(&hooks, &file_name, &bytes);
+                    crate::plugin_brushes::join_made(&mut brushes, made);
+                }
                 let mut st = self.shared.lock();
                 brushes.iter_mut().for_each(|b| st.grain_store.take(b));
                 let name = if name.trim().is_empty() { IMPORTED.to_owned() } else { name.trim().to_owned() };
@@ -308,7 +317,7 @@ impl CanvasSession {
     /// (a bundle's own name first; else "Imported") at the top of the library, each with the
     /// file's shape and spacing. Returns the set, or none if the file holds none.
     pub fn import_other_brushes(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
-        self.add_read_brushes(read_other(&bytes, name)?, 0)
+        self.add_read_brushes(read_other(&bytes, name, "")?, 0)
     }
 
     /// Adds the brushes in a file the user chose, called `file_name` (if known), into the library
@@ -422,7 +431,7 @@ fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
 }
 
 /// `t` fitted into a square `n` pixels a side, as [`fitted`] fits it.
-fn fitted_at(t: &procraft_engine::abr::AbrTip, n: usize) -> Vec<u8> {
+pub(crate) fn fitted_at(t: &procraft_engine::abr::AbrTip, n: usize) -> Vec<u8> {
     let (w, h) = (t.width as usize, t.height as usize);
     let mut out = vec![0u8; n * n];
     if w == 0 || h == 0 {

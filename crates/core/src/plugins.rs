@@ -636,6 +636,13 @@ impl Plugins {
                 self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
                 // the kinds of layer it adds, for the sessions' layers of them to go through it
                 self.hooks.layer_kinds(&plugin.id, plugin.layer_kinds.clone());
+                // its brush engines, for brush files and the brushes made of them
+                if hooks.contains(&Hook::Brushes)
+                    && let Some(store) = store
+                {
+                    let engines = plugin_file::read_brush_engines(store, &plugin.id, &plugin.version);
+                    self.hooks.brush_engines(&plugin.id, engines);
+                }
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)
                     && let Some(text) =
