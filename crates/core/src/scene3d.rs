@@ -3187,6 +3187,7 @@ impl State {
                     _ => 1,
                 },
                 seed,
+                under_at: None,
                 turn: 0.0,
             };
             (hooks, starting)

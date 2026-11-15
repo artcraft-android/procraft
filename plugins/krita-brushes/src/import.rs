@@ -420,6 +420,51 @@ mod tests {
         assert!(dabs.iter().any(|d| (d.y - 50.0).abs() >= 3.5), "spread");
     }
 
+    /// A bristle brush's ink runs out pixel by pixel along its lines, and soaking it up its bristles
+    /// take the colours where the stroke starts.
+    #[test]
+    fn a_bristle_brush_s_ink_runs_out_and_soaks_up_the_colours_under_it() {
+        let ink = r#"<param name="HairyBristle/scale"><![CDATA[1]]></param><param name="HairyBristle/random"><![CDATA[0]]></param><param name="HairyBristle/isConnected"><![CDATA[true]]></param><param name="HairyInk/enabled"><![CDATA[true]]></param><param name="HairyInk/inkAmount"><![CDATA[40]]></param><param name="HairyInk/soak"><![CDATA[true]]></param>"#;
+        let xml = format!(
+            r#"<Preset name="E" paintopid="hairybrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="4" ratio="1" hfade="1" vfade="1"/></Brush>]]></param>{ink}</Preset>"#
+        );
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let brush = load(&data.bytes(), false).unwrap();
+        // it wants the colours where its strokes start
+        let side =
+            fields(&brush.look()).find(|(f, _)| *f == 11).and_then(|(_, v)| v.try_into().ok()).map(u32::from_le_bytes);
+        assert!(side.is_some_and(|s| s >= 4), "{side:?}");
+        let mut stroke = Stroke::new(
+            Rc::new(brush),
+            Begin {
+                colour: [1.0, 0.0, 0.0],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                seed: 5,
+                turn: 0.0,
+            },
+        );
+        // green under where it starts
+        let side = 16_u32;
+        let mut bytes = Vec::new();
+        for v in [42_u32, 42, side] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes.extend((0..side * side).flat_map(|_| [0_u8, 255, 0, 255]));
+        stroke.under = crate::engine::Under::read(&bytes);
+        let samples: Vec<Sample> =
+            (0..30).map(|i| Sample { x: 50.0 + i as f32 * 3.0, y: 50.0, pressure: 1.0, ..Sample::default() }).collect();
+        stroke.add(&samples);
+        let dabs = &stroke.out;
+        assert!(dabs.iter().all(|d| d.colour == [0.0, 1.0, 0.0] && d.flags & 4 != 0), "soaked up green");
+        // running out: the last lines fainter than the first, in steps a 64th apart at most
+        let first = dabs.iter().take(8).map(|d| d.opacity).fold(0.0, f32::max);
+        let last = dabs.iter().rev().take(8).map(|d| d.opacity).fold(0.0, f32::max);
+        assert!(last < first * 0.5, "{first} {last}");
+    }
+
     /// Krita's hatching brush: inside each dab of its tip, the lines of a hatching anchored to the
     /// canvas, a separation apart, each kept inside the dab's tip.
     #[test]

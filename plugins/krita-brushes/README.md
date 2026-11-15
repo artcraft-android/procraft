@@ -52,7 +52,8 @@ with the app, off.
   long as the tip is opaque there; at each move each bristle a line a pixel wide from where it was,
   or would have been, to where it is, the bristles spread by its scale and size, shaken by its
   randomness, sheared as the pen presses, turned by the rotation option, cut by the pressure's
-  threshold, their ink running out along its curve, taking their opacity and saturation, by its
+  threshold, their ink running out pixel by pixel along its curve (soaked up from the colours
+  under where the stroke starts if it says), taking their opacity and saturation, by its
   weights or not); the hatching brush (at each dab of its tip, the lines of a hatching anchored to
   the canvas at its origin, a separation apart, as thick as it says, at its angle, crosshatched as
   its style and the crosshatching option say, its separation stepped by the separation option, on
@@ -89,9 +90,9 @@ readers (which its tests use) run in it.
   (it filters what is under it), the deform brush (it moves the pixels under it) and the clone brush
   (it copies pixels from elsewhere). The dyna and chalk brushes could be drawn as dabs and aren't
   yet.
-- The bristle brush keeps at most 4,096 bristles, takes its ink as it runs out once for each line
-  (Krita at each pixel), draws its lines smooth whatever its antialiasing and compositing say, and
-  doesn't soak up the canvas's colours. The hatching brush keeps its lines inside each dab's tip in
+- The bristle brush keeps at most 4,096 bristles, draws its lines smooth whatever its antialiasing
+  and compositing say, and takes its ink as it runs out in pieces within a 64th of it (Krita at
+  each pixel). The hatching brush keeps its lines inside each dab's tip in
   pieces, each as opaque as the tip where it lies, halved down to a pixel where the tip's edge
   crosses them (Krita masks each pixel), so a thick line's end at the edge is cut square across it.
   The curve brush lays a move's line and curve over each

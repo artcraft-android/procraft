@@ -1507,6 +1507,7 @@ impl State {
                 _ => 1,
             },
             seed: item.seed,
+            under_at: None,
             turn: item.rotation,
         };
         let hooks = self.hooks.clone().filter(|_| brush.engine.is_some());

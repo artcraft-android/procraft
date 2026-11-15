@@ -87,6 +87,9 @@ mod field {
     pub const SMUDGES: u16 = 9;
     /// What its dabs pick up is the image as shown (every layer), not their layer alone (u8 1).
     pub const FROM_IMAGE: u16 = 10;
+    /// Its strokes want the colours of their layer under where they start, a square this many
+    /// pixels a side (u32).
+    pub const UNDER_START: u16 = 11;
     /// A load: the brush's id and data, and whether the app holds its look already.
     pub const LOAD_ID: u16 = 1;
     pub const LOAD_DATA: u16 = 2;
@@ -103,6 +106,9 @@ mod field {
     pub const BEGIN_SEED: u16 = 8;
     pub const BEGIN_TURN: u16 = 9;
     pub const BEGIN_START_DIAMETER: u16 = 10;
+    /// The colours under where the stroke starts, if its look asks: the square's left and top
+    /// (i32, canvas pixels), its side (u32), then its pixels (RGBA8, straight, rows from the top).
+    pub const BEGIN_UNDER: u16 = 11;
 }
 
 /// A dab's flags.
@@ -169,6 +175,8 @@ pub(crate) struct BrushLook {
     pub smudges: bool,
     /// What they pick up is the image as shown, every layer.
     pub from_image: bool,
+    /// How big a square of the layer's colours under where a stroke starts it wants (0 none).
+    pub under_start: u32,
     pub tips: TipSet,
     pub build: Build,
     pub blend: Option<u32>,
@@ -205,11 +213,12 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
     });
     let mut tips = Vec::new();
     let (mut build, mut blend, mut erases, mut texture, mut second) = (Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges, mut from_image) = (None, false, false);
+    let (mut airbrush, mut smudges, mut from_image, mut under_start) = (None, false, false, 0);
     for (f, value) in fields(bytes) {
         match f {
             field::SMUDGES => smudges = value.first() == Some(&1),
             field::FROM_IMAGE => from_image = value.first() == Some(&1),
+            field::UNDER_START => under_start = u32_of(value).unwrap_or(0).min(MOST_UNDER_START),
             field::AIRBRUSH => airbrush = f32_of(value).filter(|ms| *ms > 0.0).map(|ms| ms.max(MOST_AIRBRUSH_MS)),
             field::TIP => tips.push(read_tip(value, kind.channels() as usize)?),
             field::BUILD => build = read_build(value),
@@ -224,6 +233,7 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
         airbrush,
         smudges,
         from_image,
+        under_start,
         tips: tip_set(&tips, id, kind)?,
         build,
         blend,
@@ -397,7 +407,10 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
 /// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
 /// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
 /// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
-const KEPT_LOOK_VERSION: u32 = 5;
+const KEPT_LOOK_VERSION: u32 = 6;
+
+/// The largest square of colours under a stroke's start an engine may ask for.
+const MOST_UNDER_START: u32 = 512;
 
 fn kept_tips(set: &TipSet) -> Vec<u8> {
     let mut r = Record::default();
@@ -425,6 +438,7 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
     }
     r.field(9, &[u8::from(look.smudges)]);
     r.field(10, &[u8::from(look.from_image)]);
+    r.field(11, &look.under_start.to_le_bytes());
     if let Some(t) = &look.texture {
         let mut tex = Record::default();
         tex.field(1, &t.side.to_le_bytes())
@@ -472,12 +486,13 @@ fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
 pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
     let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
         (None, None, Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges, mut from_image) = (None, false, false);
+    let (mut airbrush, mut smudges, mut from_image, mut under_start) = (None, false, false, 0);
     for (f, value) in fields(bytes) {
         match f {
             1 => version = u32_of(value),
             9 => smudges = value.first() == Some(&1),
             10 => from_image = value.first() == Some(&1),
+            11 => under_start = u32_of(value).unwrap_or(0).min(MOST_UNDER_START),
             8 => airbrush = f32_of(value).filter(|ms| *ms >= MOST_AIRBRUSH_MS),
             2 => tips = Some(tips_kept(value, id)?),
             3 => build = read_build(value),
@@ -518,7 +533,7 @@ pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
         }
     }
     (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
-    Some(BrushLook { airbrush, smudges, from_image, tips: tips?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, smudges, from_image, under_start, tips: tips?, build, blend, erases, texture, second })
 }
 
 /// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
@@ -624,6 +639,9 @@ pub(crate) struct Starting {
     pub seed: u32,
     /// How far the canvas is turned on screen (radians).
     pub turn: f32,
+    /// The layer the stroke is laid on and where it starts (canvas pixels), for an engine that
+    /// wants the colours there; none where it isn't a stroke of the pen's.
+    pub under_at: Option<(procraft_engine::document::LayerId, f32, f32)>,
 }
 
 /// The look of `brush` drawn by its engine, if that is on (asked of it once for its data, then
@@ -669,6 +687,7 @@ pub(crate) fn begin_stroke(
     look: Arc<BrushLook>,
     id: u64,
     starting: Starting,
+    under: Option<(i32, i32, u32, Vec<u8>)>,
 ) -> Option<(EngineHalf, EngineHalf)> {
     let outside = brush.engine.as_ref()?;
     let (plugin, running, index) = hooks.engine(&outside.engine)?;
@@ -685,6 +704,14 @@ pub(crate) fn begin_stroke(
         .field(field::BEGIN_POINTER, &[starting.pointer])
         .field(field::BEGIN_SEED, &starting.seed.to_le_bytes())
         .field(field::BEGIN_TURN, &floats(&[starting.turn]));
+    if let Some((x0, y0, side, pixels)) = under {
+        let mut bytes = Vec::with_capacity(12 + pixels.len());
+        bytes.extend_from_slice(&x0.to_le_bytes());
+        bytes.extend_from_slice(&y0.to_le_bytes());
+        bytes.extend_from_slice(&side.to_le_bytes());
+        bytes.extend_from_slice(&pixels);
+        record.field(field::BEGIN_UNDER, &bytes);
+    }
     let record = record.bytes();
     let begun = (|| {
         let mut code = at_work(&running);
@@ -1025,7 +1052,30 @@ pub(crate) fn engine_stroke(
     let (brush_look, id) = look_of(hooks, brush)?;
     let (style, second) = look_styles(&brush_look, tool, &starting, look, canvas, gpu)?;
     let airbrush = brush_look.airbrush;
-    let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting)?;
+    // the colours under where it starts, if the engine wants them
+    let under = starting.under_at.filter(|_| brush_look.under_start > 0).and_then(|(layer, x, y)| {
+        let side = brush_look.under_start as i32;
+        let (x0, y0) = (x.round() as i32 - side / 2, y.round() as i32 - side / 2);
+        let rect = procraft_engine::geom::IRect::new(x0, y0, x0 + side, y0 + side);
+        let (width, height) = canvas.size();
+        let got = rect.intersect(procraft_engine::geom::IRect::from_size(width, height));
+        let pixels = canvas.read_layer_part(gpu, layer, got).ok()?;
+        let mut square = vec![0_u8; (side * side * 4) as usize];
+        for (row, line) in pixels.chunks_exact((got.width() * 4) as usize).enumerate() {
+            for (column, p) in line.as_chunks::<4>().0.iter().enumerate() {
+                let (sx, sy) = (got.x0 - x0 + column as i32, got.y0 - y0 + row as i32);
+                let at = ((sy * side + sx) * 4) as usize;
+                // straight colours
+                let a = u32::from(p[3]);
+                let straight = |c: u8| if a == 0 { 0 } else { ((u32::from(c) * 255 + a / 2) / a).min(255) as u8 };
+                if let Some(out) = square.get_mut(at..at + 4) {
+                    out.copy_from_slice(&[straight(p[0]), straight(p[1]), straight(p[2]), p[3]]);
+                }
+            }
+        }
+        Some((x0, y0, side as u32, square))
+    });
+    let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting, under)?;
     Some(OutsideStroke { airbrush, style, second, first, second_half })
 }
 
@@ -1043,7 +1093,7 @@ impl crate::State {
         }
         let brush = builder.brush().clone();
         let pointer = builder.pointer().into();
-        match self.outside_stroke(&brush, self.tool, layer, pointer, builder.diameter(), seed) {
+        match self.outside_stroke(&brush, self.tool, layer, pointer, builder.diameter(), seed, None) {
             Some(o) => builder.with_engine(Box::new(o.first)),
             None => builder,
         }
@@ -1061,6 +1111,7 @@ impl crate::State {
         pointer: crate::PointerKind,
         diameter: f32,
         seed: u32,
+        first: Option<(f32, f32)>,
     ) -> Option<OutsideStroke> {
         brush.engine.as_ref()?;
         let hooks = self.hooks.clone()?;
@@ -1082,9 +1133,15 @@ impl crate::State {
             },
             seed,
             turn: self.view.map_or(0.0, |v| v.rotation()),
+            under_at: first.map(|(x, y)| (layer, x, y)),
         };
         let look = (self.doc.layer(layer).is_some_and(|l| l.alpha_lock), self.pad_strokes.is_some());
         let (canvas, gpu) = (self.canvas.as_mut()?, self.gpu.as_ref()?);
+        // an engine wanting the colours under where the stroke starts reads the layer as it is now,
+        // what is still to be laid on it laid first
+        if first.is_some() && look_of(&hooks, brush).is_some_and(|(l, _)| l.under_start > 0) {
+            canvas.render(gpu, &mut self.doc, None);
+        }
         engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu)
     }
 }
@@ -1366,6 +1423,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A brush engine that asks for the colours under where a stroke starts is handed them: a Krita
+    /// bristle brush soaking up its ink paints in the red it starts on, whatever the colour.
+    #[test]
+    fn an_engine_is_handed_the_colours_under_where_a_stroke_starts() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-soak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        s.use_plugins(Arc::clone(&plugins));
+        let xml = r#"<Preset name="Soak" paintopid="hairybrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="6" ratio="1" hfade="1" vfade="1"/></Brush>]]></param><param name="HairyBristle/scale"><![CDATA[1]]></param><param name="HairyBristle/random"><![CDATA[0]]></param><param name="HairyBristle/isConnected"><![CDATA[true]]></param><param name="HairyInk/enabled"><![CDATA[true]]></param><param name="HairyInk/soak"><![CDATA[true]]></param><param name="HairyInk/useOpacity"><![CDATA[false]]></param></Preset>"#;
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+        kpp.extend(chunk(b"IEND", &[]));
+        let read = crate::read_brushes(kpp, Some("Soak.kpp".to_owned())).unwrap();
+        let set = s.add_brushes_read(read, 0).unwrap();
+        assert!(s.select_brush(set, 0));
+        // red on the left half of the layer
+        let layer = s.add_layer();
+        {
+            let mut st = s.shared.lock();
+            let rect = procraft_engine::geom::IRect::new(0, 0, 100, 120);
+            st.rewrite_layer(procraft_engine::document::LayerId(layer), rect, [255, 0, 0, 255].repeat(100 * 120));
+        }
+        s.set_color(0.0, 0.0, 1.0);
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
+        s.stroke_add((61..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let px = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
+        // out in the clear, the bristles' red, not the colour's blue
+        assert!(at_x(140)[3] > 64 && at_x(140)[0] > 200 && at_x(140)[2] < 64, "soaked up red: {:?}", at_x(140));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An airbrush's engine is handed the pen again while it holds still, and lays its dabs as
     /// the time passes.
     #[test]
@@ -1455,8 +1575,9 @@ mod tests {
             pointer: 1,
             seed: 7,
             turn: 0.0,
+            under_at: None,
         };
-        let (mut first, _) = begin_stroke(&hooks, brush, again, data, starting).expect("a stroke");
+        let (mut first, _) = begin_stroke(&hooks, brush, again, data, starting, None).expect("a stroke");
         let samples: Vec<Sample> =
             (0..100).map(|i| Sample::at(Vec2::new(20.0 + i as f32, 60.0), 1.0, f64::from(i))).collect();
         let stamps = first.add(&samples);
@@ -1504,8 +1625,9 @@ mod tests {
                 pointer: 1,
                 seed: 7,
                 turn: 0.0,
+                under_at: None,
             };
-            let Some((mut first, _)) = begin_stroke(&hooks, brush, look, id, starting) else { continue };
+            let Some((mut first, _)) = begin_stroke(&hooks, brush, look, id, starting, None) else { continue };
             let t = Instant::now();
             // a second of a pen at 240 samples a second, 4 at a time as frames bring them
             for batch in 0..60 {
@@ -1541,8 +1663,9 @@ mod tests {
                 pointer: 1,
                 seed: 7,
                 turn: 0.0,
+                under_at: None,
             };
-            begun += usize::from(begin_stroke(&hooks, brush, look, id, starting).is_some());
+            begun += usize::from(begin_stroke(&hooks, brush, look, id, starting, None).is_some());
         }
         println!("the next start: {begun} looks kept and strokes begun in {:?} (the looks {looking:?})", t.elapsed());
         let _ = std::fs::remove_dir_all(&dir);

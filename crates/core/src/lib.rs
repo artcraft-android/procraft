@@ -1861,7 +1861,8 @@ impl CanvasSession {
             second.as_ref().map(|(b, _, d)| make(st, b.clone(), d * st.brush_scale(), seed ^ 0x5eed_0002));
         // a brush a plugin's brush engine made is drawn by it while it is on: its stamps, how they
         // are laid and its second stroke are the engine's
-        let outside = st.outside_stroke(&brush, tool, current, pointer, diameter, seed);
+        let first = st.to_canvas(samples.get(..1).unwrap_or_default()).first().map(|s| (s.pos.x, s.pos.y));
+        let outside = st.outside_stroke(&brush, tool, current, pointer, diameter, seed, first);
         st.airbrush = outside.as_ref().and_then(|o| o.airbrush).zip(samples.last()).map(|(ms, last)| {
             let every = f64::from(ms) * 0.5;
             (every, *last, last.time_ms + every)

@@ -222,6 +222,18 @@ pub struct Hairy {
     pub ink: Option<Ink>,
 }
 
+impl Hairy {
+    /// How big a square of the colours under where a stroke starts it soaks its bristles from (0
+    /// none): its tip's, where its ink runs out and it soaks it up.
+    pub fn soaks(&self) -> u32 {
+        if !self.ink.as_ref().is_some_and(|i| i.soak) {
+            return 0;
+        }
+        let reach = self.bristles.iter().fold(0.0_f32, |r, b| r.max(b.x.abs()).max(b.y.abs()));
+        (2.0 * reach).ceil() as u32 + 3
+    }
+}
+
 /// How a bristle brush's ink runs out: over `depletion` (the curve taken at each pixel a bristle
 /// has painted), its opacity and saturation falling, by its weights or not.
 #[derive(Clone, Debug)]
@@ -231,6 +243,8 @@ pub struct Ink {
     pub opacity: bool,
     /// The pressure's, the bristle's length's, its ink's and the depletion's weights.
     pub weights: Option<[f32; 4]>,
+    /// Its bristles take their colours from the layer where the stroke starts.
+    pub soak: bool,
 }
 
 impl Hairy {
@@ -258,6 +272,7 @@ impl Hairy {
                         n("HairyInk/inkDepletionWeight", 50.0),
                     ]
                 }),
+                soak: p.flag("HairyInk/soak", false),
             }
         });
         Hairy {

@@ -135,6 +135,8 @@ struct BristleState {
     y: f32,
     counter: u32,
     ink: f32,
+    /// The colour it soaked up where the stroke started.
+    colour: Option<[f32; 3]>,
 }
 
 /// One of a particle brush's particles: where it is, its pull towards the pen as it builds, and how
@@ -340,6 +342,35 @@ impl Dab {
     }
 }
 
+/// The colours of the layer under where a stroke starts, as the app hands them: a square's left and
+/// top (canvas pixels), its side and its pixels (RGBA8, straight).
+pub struct Under {
+    x0: i32,
+    y0: i32,
+    side: u32,
+    pixels: Vec<u8>,
+}
+
+impl Under {
+    pub fn read(bytes: &[u8]) -> Option<Under> {
+        let word = |i: usize| bytes.get(i * 4..i * 4 + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+        let (x0, y0, side) = (word(0)? as i32, word(1)? as i32, word(2)?);
+        let pixels = bytes.get(12..)?.to_vec();
+        (pixels.len() as u64 == u64::from(side) * u64::from(side) * 4).then_some(Under { x0, y0, side, pixels })
+    }
+
+    /// The colour at canvas pixel (x, y), if the square holds it.
+    fn at(&self, x: i32, y: i32) -> Option<[f32; 3]> {
+        let (i, j) = (x - self.x0, y - self.y0);
+        if i < 0 || j < 0 || i >= self.side as i32 || j >= self.side as i32 {
+            return None;
+        }
+        let at = ((j as u32 * self.side + i as u32) * 4) as usize;
+        let p = self.pixels.get(at..at + 3)?;
+        Some([p[0], p[1], p[2]].map(|v| f32::from(v) / 255.0))
+    }
+}
+
 pub struct Stroke {
     brush: Rc<Brush>,
     begin: Begin,
@@ -369,6 +400,8 @@ pub struct Stroke {
     pace: f32,
     speed: f32,
     pub out: Vec<Dab>,
+    /// The colours under where it starts, if the app handed them.
+    pub under: Option<Under>,
 }
 
 impl Stroke {
@@ -410,13 +443,14 @@ impl Stroke {
             texture_offset,
             moves: Vec::new(),
             points: Vec::new(),
-            bristles: vec![BristleState { x: 0.0, y: 0.0, counter: 0, ink: 1.0 }; bristles],
+            bristles: vec![BristleState { x: 0.0, y: 0.0, counter: 0, ink: 1.0, colour: None }; bristles],
             hairy_moves: 0,
             old_pressure: 1.0,
             particles: Vec::new(),
             pace: 0.0,
             speed: 0.0,
             out: Vec::new(),
+            under: None,
         }
     }
 
@@ -851,6 +885,16 @@ impl Stroke {
         let shear = pressure * h.shear;
         let (sin, cos) = (-turn).sin_cos();
         let paint = self.begin.colour;
+        // soaking its ink up: each bristle takes the colour under it where the stroke starts
+        if first
+            && h.ink.as_ref().is_some_and(|i| i.soak)
+            && let Some(under) = &self.under
+        {
+            for (state, bristle) in self.bristles.iter_mut().zip(&h.bristles) {
+                let (x, y) = ((bristle.x + a.x).round() as i32, (bristle.y + a.y).round() as i32);
+                state.colour = Some(under.at(x, y).unwrap_or([0.0; 3]));
+            }
+        }
         for (i, bristle) in h.bristles.iter().enumerate() {
             let rx = (self.random.next() * 2.0 - 1.0) * h.random;
             let ry = (self.random.next() * 2.0 - 1.0) * h.random;
@@ -868,42 +912,55 @@ impl Stroke {
             let from = (a.x + fx1, a.y + fy1);
             let to = (b.x + fx, b.y + fy);
             let pixels = (((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt().ceil() as u32).max(1);
-            let mut colour = bristle.colour;
-            let alpha = match &h.ink {
-                Some(ink) if !ink.depletion.is_empty() => {
-                    // the ink as it runs out along this line, taken at its middle
-                    let at = (state.counter as usize + pixels as usize / 2).min(ink.depletion.len() - 1);
-                    let depletion = ink.depletion[at];
-                    if ink.saturation {
-                        let s = match ink.weights {
-                            Some([pw, lw, iw, dw]) => {
-                                pressure * pw + bristle.length * lw + state.ink * iw + (1.0 - depletion) * dw
-                            }
-                            None => pressure * bristle.length * state.ink * (1.0 - depletion),
-                        } - 1.0;
-                        let [ch, cs, cv] = hsv(colour.unwrap_or(paint));
-                        let cs = if s < 0.0 { cs * (1.0 + s) } else { cs + (1.0 - cs) * s };
-                        colour = Some(rgb([ch, cs.clamp(0.0, 1.0), cv]));
-                    }
-                    let alpha = if ink.opacity {
-                        match ink.weights {
-                            Some([pw, lw, iw, dw]) => {
-                                pressure * pw + bristle.length * lw + state.ink * iw + (1.0 - depletion) * dw
-                            }
-                            None => bristle.length * state.ink,
-                        }
-                        .clamp(0.0, 1.0)
-                    } else {
-                        bristle.length
-                    };
-                    let end = (state.counter as usize + pixels as usize).min(ink.depletion.len() - 1);
-                    state.ink = 1.0 - ink.depletion[end];
-                    state.counter = state.counter.saturating_add(pixels);
-                    alpha
-                }
-                _ => bristle.length,
+            let base = state.colour.or(bristle.colour);
+            let Some(ink) = h.ink.as_ref().filter(|i| !i.depletion.is_empty()) else {
+                self.line(from, to, 1.0, bristle.length * opacity, base);
+                continue;
             };
-            self.line(from, to, 1.0, alpha * opacity, colour);
+            // the ink as it runs out pixel by pixel along the line: at pixel `k` of it, its
+            // opacity and colour (the ink it has the last pixel's leaving)
+            let last = ink.depletion.len() - 1;
+            let (counter, ink_then) = (state.counter as usize, state.ink);
+            let at = |k: usize| -> (f32, Option<[f32; 3]>) {
+                let depletion = ink.depletion[(counter + k).min(last)];
+                let left = if k == 0 { ink_then } else { 1.0 - ink.depletion[(counter + k - 1).min(last)] };
+                let weighed = |[pw, lw, iw, dw]: [f32; 4]| {
+                    pressure * pw + bristle.length * lw + left * iw + (1.0 - depletion) * dw
+                };
+                let mut colour = base;
+                if ink.saturation {
+                    let s = ink.weights.map_or(pressure * bristle.length * left * (1.0 - depletion), weighed) - 1.0;
+                    let [ch, cs, cv] = hsv(colour.unwrap_or(paint));
+                    let cs = if s < 0.0 { cs * (1.0 + s) } else { cs + (1.0 - cs) * s };
+                    colour = Some(rgb([ch, cs.clamp(0.0, 1.0), cv]));
+                }
+                let alpha = if ink.opacity {
+                    ink.weights.map_or(bristle.length * left, weighed).clamp(0.0, 1.0)
+                } else {
+                    bristle.length
+                };
+                (alpha, colour)
+            };
+            // pieces as long as the ink stays within a 64th
+            let n = pixels as usize;
+            let mut start = 0;
+            let (mut alpha0, _) = at(0);
+            for k in 1..=n {
+                let next = (k < n).then(|| at(k).0);
+                if next.is_some_and(|a| (a - alpha0).abs() <= 1.0 / 64.0) {
+                    continue;
+                }
+                let (alpha, colour) = at((start + k) / 2);
+                let (t0, t1) = (start as f32 / n as f32, k as f32 / n as f32);
+                let p0 = (from.0 + (to.0 - from.0) * t0, from.1 + (to.1 - from.1) * t0);
+                let p1 = (from.0 + (to.0 - from.0) * t1, from.1 + (to.1 - from.1) * t1);
+                self.line(p0, p1, 1.0, alpha * opacity, colour);
+                start = k;
+                alpha0 = next.unwrap_or(alpha0);
+            }
+            let Some(state) = self.bristles.get_mut(i) else { continue };
+            state.ink = 1.0 - ink.depletion[(counter + n - 1).min(last)];
+            state.counter = state.counter.saturating_add(pixels);
         }
     }
 

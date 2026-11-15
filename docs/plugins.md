@@ -1066,6 +1066,8 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   - field 9 (u8 1), its dabs move paint, as a smudge's do (see flag 16 below), whatever the tool
     but the eraser; with field 10 (u8 1) they pick it up from the image as last shown (every layer)
     rather than from the layer they lay it on.
+  - field 11 (u32, at most 512), a stroke of the pen's wants the colours of its layer under where it
+    starts, a square that many pixels a side around its first point: the begin is handed them.
   - field 8, how often it wants the pen while it holds still (f32 ms, at least 4), as an airbrush
     lays dabs by time: until the pen lifts, the app hands it the pen as it last was, at the time
     then, every half of that.
@@ -1089,7 +1091,10 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   (fields 2 and 3, three f32, sRGB 0..1), the size the slider asks for (field 4, canvas pixels) and
   where it starts for the brush (field 10), the opacity slider (field 5), the tool (field 6, u8: 0
   paint, 1 erase, 2 smudge), the pointer (field 7, u8: 0 finger, 1 pen, 2 mouse), a seed (field 8,
-  u32) and how far the canvas is turned on screen (field 9, f32 radians).
+  u32) and how far the canvas is turned on screen (field 9, f32 radians); and, if its look asks
+  (field 11 above), the colours under where it starts (field 11: the square's left and top, i32
+  canvas pixels, its side, u32, then its pixels, RGBA8 straight, rows from the top, clear off the
+  canvas).
 - `procraft_brush_add` is handed samples, at most four at a time, 32 bytes each as layers' items
   hold them: x, y (canvas pixels), pressure (through the app's pressure curve), tilt, azimuth and
   roll (radians), then the milliseconds since the stroke's first sample as a 64-bit float.

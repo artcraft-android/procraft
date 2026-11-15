@@ -933,6 +933,10 @@ impl Brush {
         if self.smudge.as_ref().is_some_and(|s| s.overlay) {
             look.byte(10, 1);
         }
+        // a bristle brush soaking up its ink wants the colours where its strokes start
+        if let Some(side) = self.hairy.as_ref().map(crate::others::Hairy::soaks).filter(|&s| s > 0) {
+            look.word(11, side);
+        }
         // (a smudge's dabs are laid each as far as it says)
         look.byte(2, u8::from(self.wash && self.smudge.is_none() && self.grid.is_none()));
         if let Some(blend) = self.blend {

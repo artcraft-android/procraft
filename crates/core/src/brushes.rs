@@ -492,6 +492,7 @@ impl CanvasSession {
             tool: 0,
             pointer: 1,
             seed: PREVIEW_SEED,
+            under_at: None,
             turn: 0.0,
         };
         let o = crate::plugin_brushes::engine_stroke(
