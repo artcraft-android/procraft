@@ -49,6 +49,8 @@ pub enum Filter {
     /// light multiplied by 2^`exposure` (stops, −5..5) as one value per pixel, so hue holds. With
     /// `above` (0..1 of white) only what is at least that bright takes all of it, fading in from
     /// `soft` (0..1) of the way below; past white on an HDR canvas, scaled back to it on another.
+    /// After the curves, a limit: what is brighter than `knee` (0..0.95) of `peak` (stops above
+    /// white, 0..5) eased towards the peak, hue kept; none at [`LIMIT_OFF`].
     Curves {
         #[serde(default)]
         exposure: f32,
@@ -56,6 +58,10 @@ pub enum Filter {
         above: f32,
         #[serde(default = "half")]
         soft: f32,
+        #[serde(default = "limit_off")]
+        peak: f32,
+        #[serde(default = "knee")]
+        knee: f32,
     },
     /// The gradient the canvas is given (its table) by brightness, `amount` of the way.
     GradientMap { amount: f32 },
@@ -219,9 +225,13 @@ fn param_specs(f: &Filter) -> &'static [(&'static str, f32, f32, ParamUnit)] {
         Filter::Vignette { .. } => {
             &[("Amount", 0.0, 1.0, Percent), ("Size", 0.0, 1.0, Percent), ("Softness", 0.0, 1.0, Percent)]
         }
-        Filter::Curves { .. } => {
-            &[("Exposure", -5.0, 5.0, Stops), ("Above", 0.0, 1.0, Percent), ("Soft", 0.0, 1.0, Percent)]
-        }
+        Filter::Curves { .. } => &[
+            ("Exposure", -5.0, 5.0, Stops),
+            ("Above", 0.0, 1.0, Percent),
+            ("Soft", 0.0, 1.0, Percent),
+            ("Peak", 0.0, LIMIT_OFF, Stops),
+            ("Knee", 0.0, 0.95, Percent),
+        ],
         Filter::Liquify { .. } | Filter::Clone { .. } => &[],
     }
 }
@@ -250,7 +260,7 @@ impl Filter {
             Filter::Pixelate { size } => vec![size],
             Filter::Dither { amount, levels, scale, .. } => vec![amount, levels, scale],
             Filter::Vignette { amount, size, softness, .. } => vec![amount, size, softness],
-            Filter::Curves { exposure, above, soft } => vec![exposure, above, soft],
+            Filter::Curves { exposure, above, soft, peak, knee } => vec![exposure, above, soft, peak, knee],
             Filter::Liquify { .. } | Filter::Clone { .. } => Vec::new(),
         }
     }
@@ -299,7 +309,7 @@ impl Filter {
             Filter::Pixelate { .. } => Filter::Pixelate { size: g(0) },
             Filter::Dither { kind, mono, .. } => Filter::Dither { amount: g(0), levels: g(1), scale: g(2), kind, mono },
             Filter::Vignette { light, .. } => Filter::Vignette { amount: g(0), size: g(1), softness: g(2), light },
-            Filter::Curves { .. } => Filter::Curves { exposure: g(0), above: g(1), soft: g(2) },
+            Filter::Curves { .. } => Filter::Curves { exposure: g(0), above: g(1), soft: g(2), peak: g(3), knee: g(4) },
             Filter::Liquify { .. } | Filter::Clone { .. } => self,
         }
     }
@@ -353,11 +363,22 @@ impl Filter {
 
 impl Filter {
     /// Curves with no exposure (the curves alone).
-    pub const CURVES: Filter = Filter::Curves { exposure: 0.0, above: 0.0, soft: 0.5 };
+    pub const CURVES: Filter = Filter::Curves { exposure: 0.0, above: 0.0, soft: 0.5, peak: LIMIT_OFF, knee: 0.8 };
 }
+
+/// Curves' limit at this peak (stops above white), or past it: none.
+pub const LIMIT_OFF: f32 = 6.0;
 
 fn half() -> f32 {
     0.5
+}
+
+fn limit_off() -> f32 {
+    LIMIT_OFF
+}
+
+fn knee() -> f32 {
+    0.8
 }
 
 impl serde::Serialize for Filter {
@@ -410,13 +431,14 @@ mod tests {
     fn curves_written_before_their_exposure_read_with_none() {
         let back: Option<Filter> = serde_json::from_str("\"Curves\"").ok();
         assert_eq!(back, Some(Filter::CURVES));
-        let f = Filter::Curves { exposure: 1.5, above: 0.6, soft: 0.25 };
+        let f = Filter::Curves { exposure: 1.5, above: 0.6, soft: 0.25, peak: 2.0, knee: 0.5 };
         let text = serde_json::to_string(&f).ok();
         let back: Option<Filter> = text.as_deref().and_then(|t| serde_json::from_str(t).ok());
         assert_eq!(back, Some(f));
         // keyed, the exposure eases
-        assert_eq!(f.values(), vec![1.5, 0.6, 0.25]);
-        assert_eq!(Filter::CURVES.with_param(0, 9.0), Filter::Curves { exposure: 5.0, above: 0.0, soft: 0.5 });
+        assert_eq!(f.values(), vec![1.5, 0.6, 0.25, 2.0, 0.5]);
+        let lifted = Filter::Curves { exposure: 5.0, above: 0.0, soft: 0.5, peak: LIMIT_OFF, knee: 0.8 };
+        assert_eq!(Filter::CURVES.with_param(0, 9.0), lifted);
     }
 
     #[test]

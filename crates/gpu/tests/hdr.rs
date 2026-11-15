@@ -274,12 +274,16 @@ fn a_standard_canvas_takes_no_wide_pixels() {
 
 /// An adjustment layer of curves (straight) with an exposure of `stops`, starting `above`.
 fn exposure_scene(gpu: &Gpu, range: DynamicRange, stops: f32, above: f32) -> (Canvas, Document) {
+    curves_scene(gpu, range, Filter::CURVES.with_values(&[stops, above, 0.0]))
+}
+
+/// An adjustment layer of curves (straight) as `filter` says, over a colour.
+fn curves_scene(gpu: &Gpu, range: DynamicRange, filter: Filter) -> (Canvas, Document) {
     let mut doc = document(range);
     let mut canvas = Canvas::new(gpu, &doc).unwrap();
     let base = doc.current();
     fill(&mut canvas, base, [0.8, 0.4, 0.2]);
     let table: Vec<u8> = (0..=255u8).flat_map(|v| [v, v, v, v]).collect();
-    let filter = Filter::Curves { exposure: stops, above, soft: 0.0 };
     doc.add_adjustment_layer("Curves".to_owned(), LayerAdjustment { filter, table, settings: serde_json::Value::Null });
     canvas.render(gpu, &mut doc, None);
     (canvas, doc)
@@ -309,4 +313,21 @@ fn curves_exposure_on_a_standard_canvas_stops_at_white_keeping_its_hue() {
     let (canvas, _doc) = exposure_scene(&gpu, DynamicRange::Standard, 2.0, 0.9);
     let [r, g, b, _] = at(&canvas.read_composite(&gpu).unwrap(), 16, 16);
     assert!(r.abs_diff(204) <= 1 && g.abs_diff(102) <= 1 && b.abs_diff(51) <= 1, "{r} {g} {b}");
+}
+
+#[test]
+fn curves_limit_eases_light_past_its_peak_back_keeping_its_hue() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // lifted two stops (red 1.47, green 0.73), then limited to white from 0.8 of it
+    let (canvas, _doc) = curves_scene(&gpu, DynamicRange::High, Filter::CURVES.with_values(&[2.0, 0.0, 0.0, 0.0, 0.8]));
+    let [r, g, b, _] = wide_at(&canvas.read_composite_wide(&gpu).unwrap(), 16, 16);
+    assert!(r > 0.98 && r < 1.0, "{r} {g} {b}");
+    // the others scaled with it
+    assert!((g - 0.73 * r / 1.468).abs() < 0.02 && (b - 0.39 * r / 1.468).abs() < 0.02, "{r} {g} {b}");
+    // off (its peak at LIMIT_OFF) it leaves the light as it was
+    let off = Filter::CURVES.with_values(&[2.0, 0.0, 0.0, make2d_engine::filter::LIMIT_OFF, 0.8]);
+    let (canvas, _doc) = curves_scene(&gpu, DynamicRange::High, off);
+    let [r, _, _, _] = wide_at(&canvas.read_composite_wide(&gpu).unwrap(), 16, 16);
+    assert!((r - 1.468).abs() < 0.03, "{r}");
 }

@@ -351,9 +351,9 @@ private struct CurvesPanel: View {
     @State private var added = false
     @State private var moved = false
 
-    /// The channels listed: Exposure an HDR canvas's only.
+    /// The channels listed: Exposure and Limit an HDR canvas's only.
     private var channels: [String] {
-        ["Gamma", "Red", "Green", "Blue"] + (model.isHdr ? ["Exposure"] : [])
+        ["Gamma", "Red", "Green", "Blue"] + (model.isHdr ? ["Exposure", "Limit"] : [])
     }
 
     private var channel: Int {
@@ -362,6 +362,39 @@ private struct CurvesPanel: View {
 
     private var exposing: Bool {
         channel == 4
+    }
+
+    private var limiting: Bool {
+        channel == 5
+    }
+
+    /// The limit's peak (stops above white) at which, and past it, there is none.
+    private static let limitOff: Float = 6
+
+    /// Limit's sliders: its peak, white to +5 stops and Off at the end (as it starts), and its
+    /// knee, how far below the peak the easing starts.
+    private var limitRows: some View {
+        let peak = shown.limit.indices.contains(0) ? shown.limit[0] : Self.limitOff
+        let knee = shown.limit.indices.contains(1) ? shown.limit[1] : 0.8
+        let set = { (k: UInt32, v: Float) in model.adjust { $0.adjustmentLimit(k: k, value: v) } }
+        let shownPeak = peak >= Self.limitOff ? "Off" : peak <= 0 ? "White" : String(format: "+%.1f stops", peak)
+        return VStack(spacing: 0) {
+            TrackRow(
+                left: "Peak", right: shownPeak, leftInk: hsbLabel, value: peak / Self.limitOff,
+                track: [Color(white: 0.75), .white], knob: .white, height: 50
+            ) { v in
+                // tenths of a stop up to +5, the last of the track Off
+                let p = (v * Self.limitOff * 10).rounded() / 10
+                set(0, p > 5 ? Self.limitOff : p)
+            }
+            TrackRow(
+                left: "Knee", right: "\(wholeNumber(knee * 100))%", leftInk: hsbLabel, value: knee / 0.95,
+                track: [sliderTick, sliderTrack], knob: .white, height: 50
+            ) { set(1, $0 * 0.95) }
+        }
+        .padding(.horizontal, 10)
+        // as Exposure's three rows sit, the two from the top
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     /// Exposure's sliders: −5 to +5 stops, then Above and Soft (0..1), as the session keeps them.
@@ -478,6 +511,8 @@ private struct CurvesPanel: View {
         HStack(spacing: 16) {
             if exposing {
                 exposureRows
+            } else if limiting {
+                limitRows
             } else {
             GeometryReader { g in
                 ZStack(alignment: .topLeading) {

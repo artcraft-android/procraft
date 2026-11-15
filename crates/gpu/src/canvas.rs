@@ -6991,7 +6991,17 @@ impl Canvas {
             Filter::Bloom { sigma, amount, threshold, transition, burn } => {
                 ("fs_bloom", values([amount, threshold, transition, burn], [sigma, 0.0, 0.0, 0.0]))
             }
-            Filter::Curves { exposure, above, soft } => ("fs_curves", values([exposure, above, soft, 0.0], [0.0; 4])),
+            Filter::Curves { exposure, above, soft, peak, knee } => {
+                // the limit on encoded values, as the canvas holds them: its peak, and where it eases
+                // from (none past LIMIT_OFF)
+                let limit = if peak < make2d_engine::filter::LIMIT_OFF {
+                    let top = make2d_engine::hdr::encoded(2f32.powf(peak.max(0.0)));
+                    [top, top * knee.clamp(0.0, 0.95), 1.0, 0.0]
+                } else {
+                    [0.0; 4]
+                };
+                ("fs_curves", values([exposure, above, soft, 0.0], limit))
+            }
             Filter::Liquify { amount } => {
                 let [across, down] = self.liquify.as_ref().map_or([1.0; 2], |l| l.scale);
                 ("fs_liquified", values([amount, across, down, 0.0], [0.0; 4]))

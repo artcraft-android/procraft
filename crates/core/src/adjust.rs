@@ -1,6 +1,7 @@
 //! Adjustments: the current layer redrawn through a filter while its values are dragged, kept as
 //! one undo step or put back; only what is selected changes.
 
+use make2d_engine::filter::LIMIT_OFF;
 use make2d_engine::geom::Vec2;
 use make2d_engine::selection::feather_radius;
 use make2d_engine::tone;
@@ -508,8 +509,17 @@ impl CanvasSession {
     /// Curves: the points (x, y pairs in 0..1) of the curve for all three channels and of the red,
     /// green and blue curves; each runs through its points as a smooth spline. `exposure` is the
     /// exposure before them: its stops (−5..5), and the brightness it starts above and how softly
-    /// (0..1); none when left out.
-    pub fn adjust_curves(&self, all: Vec<f32>, red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>, exposure: Vec<f32>) {
+    /// (0..1); `limit` the limit after them: its peak (stops above white, 0..5, none from 6) and
+    /// knee (0..0.95). Each none when left out.
+    pub fn adjust_curves(
+        &self,
+        all: Vec<f32>,
+        red: Vec<f32>,
+        green: Vec<f32>,
+        blue: Vec<f32>,
+        exposure: Vec<f32>,
+        limit: Vec<f32>,
+    ) {
         let points = |v: &[f32]| v.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect::<Vec<_>>();
         let [a, r, g, b] = [&all, &red, &green, &blue].map(|v| tone::curve_table(&points(v)));
         let entries: Vec<u8> = r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
@@ -520,6 +530,8 @@ impl CanvasSession {
             exposure: at(0, 0.0).clamp(-5.0, 5.0),
             above: at(1, 0.0).clamp(0.0, 1.0),
             soft: at(2, 0.5).clamp(0.0, 1.0),
+            peak: limit.first().copied().filter(|v| v.is_finite()).unwrap_or(LIMIT_OFF).clamp(0.0, LIMIT_OFF),
+            knee: limit.get(1).copied().filter(|v| v.is_finite()).unwrap_or(0.8).clamp(0.0, 0.95),
         };
         st.adjust_with_table(filter, entries);
         self.shared.frame(st);

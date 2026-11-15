@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use make2d_engine::filter::LIMIT_OFF;
 use make2d_engine::geom::Vec2;
 use make2d_engine::view::View;
 
@@ -28,11 +29,19 @@ const PENCIL_BLOOM_BURN: f32 = 0.57;
 /// How close (0..1) a curve's point may come to its neighbours.
 const CURVE_GAP: f32 = 0.01;
 
-/// Curves' channels: all, red, green, blue, and its exposure.
-const CURVE_CHANNELS: usize = 5;
+/// Curves' channels: all, red, green, blue, its exposure and its limit.
+const CURVE_CHANNELS: usize = 6;
 
 /// Curves' exposure untouched: no stops, from the darkest, half soft.
 const NO_EXPOSURE: [f32; 3] = [0.0, 0.0, 0.5];
+
+/// Curves' limit untouched: none, its knee where Koi Studio's starts.
+const NO_LIMIT: [f32; 2] = [LIMIT_OFF, 0.8];
+
+/// Curves' limit kept to its ranges.
+fn limit_kept([peak, knee]: [f32; 2]) -> [f32; 2] {
+    [peak.clamp(0.0, LIMIT_OFF), knee.clamp(0.0, 0.95)]
+}
 
 /// Curves' exposure kept to its ranges.
 fn exposure_kept([stops, above, soft]: [f32; 3]) -> [f32; 3] {
@@ -85,6 +94,8 @@ pub struct AdjustShown {
     /// Curves' exposure: its stops (−5..5), and the brightness it starts above and how softly
     /// (0..1).
     pub exposure: Vec<f32>,
+    /// Curves' limit: its peak (stops above white, 0..5; none from 6) and its knee (0..0.95).
+    pub limit: Vec<f32>,
     /// The gradient mapped by (its place in the library).
     pub gradient: u32,
     pub noise_kind: NoiseKind,
@@ -153,6 +164,7 @@ struct LayerSettings {
     curve_channel: u32,
     curves: Vec<Vec<f32>>,
     exposure: Vec<f32>,
+    limit: Vec<f32>,
     gradient: u32,
     noise_kind: u32,
     noise: Vec<f32>,
@@ -211,6 +223,7 @@ pub(crate) struct Adjusting {
     curve_channel: usize,
     curves: [Vec<(f32, f32)>; 4],
     exposure: [f32; 3],
+    limit: [f32; 2],
     gradient: usize,
     gradients: Option<Arc<Gradients>>,
     noise_kind: NoiseKind,
@@ -283,6 +296,7 @@ impl Default for Adjusting {
             curve_channel: 0,
             curves: [straight(), straight(), straight(), straight()],
             exposure: NO_EXPOSURE,
+            limit: NO_LIMIT,
             gradient: 0,
             gradients: None,
             noise_kind: NoiseKind::Clouds,
@@ -408,7 +422,9 @@ impl Adjusting {
         match self.open {
             Some(Adjustment::Hsb) => self.hsb.iter().any(|&v| v != 0.5),
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
-            Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()) || self.exposure[0] != 0.0,
+            Some(Adjustment::Curves) => {
+                self.curves.iter().any(|c| *c != straight()) || self.exposure[0] != 0.0 || self.limit[0] < LIMIT_OFF
+            }
             Some(Adjustment::GradientMap | Adjustment::Plugin) => true,
             Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
@@ -427,6 +443,7 @@ impl Adjusting {
             curve_channel: self.curve_channel as u32,
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
             exposure: self.exposure.to_vec(),
+            limit: self.limit.to_vec(),
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind,
             noise: self.noise.to_vec(),
@@ -470,6 +487,7 @@ impl Adjusting {
             curve_channel: self.curve_channel as u32,
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
             exposure: self.exposure.to_vec(),
+            limit: self.limit.to_vec(),
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind as u32,
             noise: self.noise.to_vec(),
@@ -518,6 +536,13 @@ impl Adjusting {
             }
         }
         self.exposure = exposure_kept(self.exposure);
+        self.limit = NO_LIMIT;
+        for (v, &x) in self.limit.iter_mut().zip(&s.limit) {
+            if x.is_finite() {
+                *v = x;
+            }
+        }
+        self.limit = limit_kept(self.limit);
         self.gradient = s.gradient as usize;
         use {ChromaticKind as C, DitherKind as D, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
         self.noise_kind = nth(&[N::Clouds, N::Billows, N::Ridges], s.noise_kind, N::Clouds);
@@ -570,7 +595,7 @@ enum Redraw {
     Swipe(SwipeAdjustment, f32),
     Hsb([f32; 3]),
     Balance([f32; 9]),
-    Curves([Vec<f32>; 4], [f32; 3]),
+    Curves([Vec<f32>; 4], [f32; 3], [f32; 2]),
     Gradient(Vec<f32>, f32),
     Noise(NoiseKind, f32, [f32; 3], bool, bool),
     Bloom(f32, [f32; 3]),
@@ -601,6 +626,7 @@ impl Adjusting {
             Some(Adjustment::Curves) => Redraw::Curves(
                 self.curves.clone().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()),
                 self.exposure,
+                self.limit,
             ),
             Some(Adjustment::GradientMap) => {
                 let list = self.gradients.as_ref().map(|g| g.list()).unwrap_or_default();
@@ -725,8 +751,8 @@ impl CanvasSession {
                 let tone = |k: usize| v.get(k * 3..k * 3 + 3).map(<[f32]>::to_vec).unwrap_or_default();
                 self.adjust_color_balance(tone(0), tone(1), tone(2));
             }
-            Redraw::Curves([all, red, green, blue], exposure) => {
-                self.adjust_curves(all, red, green, blue, exposure.to_vec())
+            Redraw::Curves([all, red, green, blue], exposure, limit) => {
+                self.adjust_curves(all, red, green, blue, exposure.to_vec(), limit.to_vec())
             }
             Redraw::Gradient(stops, amount) => self.adjust_gradient_map(stops, amount),
             Redraw::Noise(kind, amount, [scale, octaves, turbulence], multi, added) => {
@@ -815,6 +841,7 @@ impl CanvasSession {
             a.balance = [0.5; 9];
             a.curves = [straight(), straight(), straight(), straight()];
             a.exposure = NO_EXPOSURE;
+            a.limit = NO_LIMIT;
             a.chroma_offset = (0.0, 0.0);
             a.perspective_kind = PerspectiveKind::Positional;
             a.perspective = Perspective { origin: None, arrow: up };
@@ -984,6 +1011,7 @@ impl CanvasSession {
             a.balance = [0.5; 9];
             a.curves = [straight(), straight(), straight(), straight()];
             a.exposure = NO_EXPOSURE;
+            a.limit = NO_LIMIT;
             a.chroma_offset = (0.0, 0.0);
             a.liquified = false;
             a.touched = false;
@@ -1079,8 +1107,8 @@ impl CanvasSession {
         });
     }
 
-    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue, 4 exposure (its sliders in place of a
-    /// curve).
+    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue, 4 exposure, 5 limit (their sliders in
+    /// place of a curve).
     pub fn adjustment_curve_channel(&self, channel: u32) {
         self.adjusting(|a, _| a.curve_channel = (channel as usize).min(CURVE_CHANNELS - 1));
     }
@@ -1095,6 +1123,19 @@ impl CanvasSession {
                 *v = value;
             }
             a.exposure = exposure_kept(a.exposure);
+        });
+    }
+
+    /// Curves' limit slider `k` (0 its peak, stops above white, 0..5 and none from 6; 1 its knee,
+    /// 0..0.95) moved to `value`.
+    pub fn adjustment_limit(&self, k: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.limit.get_mut(k as usize)
+                && value.is_finite()
+            {
+                *v = value;
+            }
+            a.limit = limit_kept(a.limit);
         });
     }
 

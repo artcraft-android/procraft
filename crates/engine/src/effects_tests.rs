@@ -153,7 +153,9 @@ fn a_psd_keeps_the_adjustments_it_has_kinds_for() {
     assert_eq!((word(0), word(10), word(12), word(14)), (2, 90, -50, 25));
     let table: Vec<u8> = (0..=255u8).flat_map(|v| [255 - v, v, v, v / 2]).collect();
     // with an exposure, which Photoshop's curves can't say, it is flattened
-    assert!(formats::psd_adjustment(&Filter::Curves { exposure: 1.0, above: 0.0, soft: 0.5 }, &table).is_none());
+    let exposed = Filter::CURVES.with_param(0, 1.0);
+    assert!(formats::psd_adjustment(&exposed, &table).is_none());
+    assert!(formats::psd_adjustment(&Filter::CURVES.with_param(3, 2.0), &table).is_none());
     let (key, data) = formats::psd_adjustment(&Filter::CURVES, &table).unwrap();
     assert_eq!(&key, b"curv");
     assert_eq!(data.len() % 2, 0);

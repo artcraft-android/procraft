@@ -386,7 +386,24 @@ fn exposed(rgb: vec3<f32>) -> vec3<f32> {
     return linear_to_srgb(light);
 }
 
-// curves: the exposure, then each channel through the curve for all three, then its own
+// the limit (b.z on): what is brighter (by its brightest channel, encoded) than b.y eased towards
+// the peak b.x, the others scaled with it so its hue holds
+fn limited(rgb: vec3<f32>) -> vec3<f32> {
+    if (fu.b.z < 0.5) {
+        return rgb;
+    }
+    let m = max(max(rgb.r, rgb.g), rgb.b);
+    let knee = fu.b.y;
+    if (m <= knee) {
+        return rgb;
+    }
+    let range = max(fu.b.x - knee, 0.0001);
+    let mapped = knee + range * (1.0 - exp(-(m - knee) / range));
+    return rgb * (mapped / m);
+}
+
+// curves: the exposure, then each channel through the curve for all three, then its own, then
+// the limit
 @fragment
 fn fs_curves(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = vec2<i32>(pos.xy);
@@ -400,7 +417,7 @@ fn fs_curves(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let b = look(look(rgb.b).a).b;
     // light above white (an HDR canvas's) keeps how far past white it is, scaled as white is
     let past = select(vec3<f32>(1.0), max(rgb, vec3<f32>(1.0)), CEILING > 1.0);
-    return kept(i, vec4<f32>(vec3<f32>(r, g, b) * past * c.a, c.a));
+    return kept(i, vec4<f32>(limited(vec3<f32>(r, g, b) * past) * c.a, c.a));
 }
 
 // gradient map: the gradient's colour at the pixel's brightness, a.x of the way

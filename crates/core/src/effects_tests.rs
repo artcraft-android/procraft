@@ -177,12 +177,21 @@ fn curves_exposure_is_set_from_its_panel_and_kept_by_its_layer() {
     assert!(s.adjustment_end(true));
     let a = s.shared.lock().doc.current();
     let filter = s.shared.lock().doc.layer(a).and_then(|l| l.adjustment.clone()).map(|a| a.filter);
-    assert_eq!(filter, Some(Filter::Curves { exposure: -1.0, above: 0.0, soft: 1.0 }));
+    assert_eq!(filter, Some(Filter::CURVES.with_values(&[-1.0, 0.0, 1.0])));
     // a stop down: half the light (red 1.0 to 0.5, encoded 0.735)
     let [r, g, b, _] = pixel(&s, None, 20, 20);
     assert!(r.abs_diff(188) <= 2 && g == 0 && b == 0, "{r} {g} {b}");
     // opened again, its panel shows the exposure as it was left
     assert_eq!(s.adjustment_layer_edit(a.0), Some(crate::Adjustment::Curves));
     assert_eq!(s.adjustment_shown().exposure, vec![-1.0, 0.0, 1.0]);
-    s.adjustment_end(false);
+    // its limit, the next channel: off until its peak is brought down
+    assert_eq!(s.adjustment_shown().limit, vec![make2d_engine::filter::LIMIT_OFF, 0.8]);
+    s.adjustment_curve_channel(5);
+    s.adjustment_limit(0, 1.5);
+    s.adjustment_limit(1, 2.0);
+    let shown = s.adjustment_shown();
+    assert_eq!((shown.curve_channel, shown.limit), (5, vec![1.5, 0.95]));
+    assert!(s.adjustment_end(true));
+    let filter = s.shared.lock().doc.layer(a).and_then(|l| l.adjustment.clone()).map(|a| a.filter);
+    assert_eq!(filter, Some(Filter::CURVES.with_values(&[-1.0, 0.0, 1.0, 1.5, 0.95])));
 }
