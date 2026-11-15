@@ -370,7 +370,25 @@ final class TimelineTool {
     func split(_ clip: UInt64) {
         optionsOpen = false
         if !model.session.splitTimelineClip(id: clip) {
-            model.showNotice("Move the playhead inside the drawing to split it there.", warning: true)
+            model.showNotice("Move the playhead inside the clip to split it there.", warning: true)
+        }
+        model.refresh()
+    }
+
+    /// Clip `id` taken out of the group open, onto the level the group is on.
+    func moveOutOfGroup(_ id: UInt64) {
+        if model.session.moveTimelineClipOutOfGroup(id: id) {
+            // shown where it went
+            open(model.session.timelineInfo()?.openGroups.dropLast().last?.id)
+            picked = id
+        }
+        model.refresh()
+    }
+
+    /// Clip `id` dropped onto group clip `group`: put inside it.
+    func moveIntoGroup(_ id: UInt64, _ group: UInt64) {
+        if model.session.moveTimelineClipIntoGroup(id: id, group: group) {
+            picked = group
         }
         model.refresh()
     }
@@ -1056,6 +1074,10 @@ private struct ClipPage: View {
                     TlRowLine()
                     TlAction(label: "Duplicate") { tool.duplicate(clip.id) }
                 }
+                if tool.info?.openGroups.isEmpty == false {
+                    TlRowLine()
+                    TlAction(label: "Move Out of Group") { tool.moveOutOfGroup(clip.id) }
+                }
                 TlRowLine()
                 TlAction(label: "Delete") { tool.delete(clip.id, close: false) }
             }
@@ -1339,7 +1361,15 @@ private struct TracksArea: View {
                     moving = nil
                     let start = Int(c.start) + Int((drag.translation.width / framePitch).rounded())
                     let to = min(max(row + Int((drag.translation.height / rowHeight).rounded()), 0), rows.count - 1)
-                    tool.move(c.id, to: rows[to].id, start: start)
+                    // dropped onto a group clip: into it
+                    let onto = rows[to].clips.first {
+                        $0.kind == .group && $0.id != c.id && Int($0.start) <= start && start < Int($0.start + $0.duration)
+                    }
+                    if let group = onto, to != row {
+                        tool.moveIntoGroup(c.id, group.id)
+                    } else {
+                        tool.move(c.id, to: rows[to].id, start: start)
+                    }
                 }
         )
     }
@@ -1450,7 +1480,9 @@ struct MotionPathOverlay: View {
             dragging = (key.frame, at, tool.pose(id))
         }
         guard let d = dragging, let pose = d.pose else { return }
-        tool.moveKey(id, at: d.frame, by: CGPoint(x: at.x - d.start.x, y: at.y - d.start.y), from: pose, done: done)
+        // as the clip's keys count it, through the groups it is in
+        let by = model.session.timelineMotionDelta(id: id, frame: d.frame, dx: Float(at.x - d.start.x), dy: Float(at.y - d.start.y))
+        tool.moveKey(id, at: d.frame, by: CGPoint(x: CGFloat(by.first ?? 0), y: CGFloat(by.last ?? 0)), from: pose, done: done)
         settle(id, done: done)
     }
 

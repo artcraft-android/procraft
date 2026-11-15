@@ -97,6 +97,22 @@ final class TimelineMediaTool {
         model.refresh()
     }
 
+    /// A sound's level: keyed at the playhead when it has level keys (or `key`, keying it there
+    /// first), else its one level.
+    func setLevel(_ c: TimelineMediaClip, _ level: Float, key: Bool = false, done: Bool) {
+        if c.volumeKeys.isEmpty, !key {
+            setSound(c, volume: level, done: done)
+            return
+        }
+        _ = session.setTimelineVolumeKey(id: c.clip, volume: level, done: done)
+        model.refresh()
+    }
+
+    func removeLevelKey(_ c: TimelineMediaClip) {
+        _ = session.removeTimelineVolumeKey(id: c.clip)
+        model.refresh()
+    }
+
     func placeVideo(_ id: UInt64, _ rect: [Float], done: Bool) {
         _ = session.setTimelineVideoRect(id: id, rect: rect, done: done)
         model.refresh()
@@ -122,6 +138,7 @@ final class TimelineMediaTool {
         if next != frame &+ 1 || !sounds.playing {
             return play(from: next)
         }
+        sounds.level(at: next)
         return 0
     }
 
@@ -253,10 +270,25 @@ final class VideoFrameReader: VideoFrames, @unchecked Sendable {
     }
 }
 
-/// Plays the timeline's sounds: a player for each, all started together at one moment.
+extension TimelineSound {
+    /// Heard somewhere: its level, or any of its keyed levels, above silence.
+    var audible: Bool {
+        gain > 0 || levels.contains { $0 > 0 }
+    }
+
+    /// Its level on timeline frame `frame`: keyed, or its one level.
+    func level(at frame: UInt32) -> Float {
+        guard !levels.isEmpty else { return gain }
+        let i = min(max(Int(frame) - Int(levelsFrom), 0), levels.count - 1)
+        return levels[i]
+    }
+}
+
+/// Plays the timeline's sounds: a player for each, all started together at one moment, a keyed
+/// sound's level following the frames as they play.
 final class SoundPlayer {
     private let engine = AVAudioEngine()
-    private var players: [AVAudioPlayerNode] = []
+    private var players: [(node: AVAudioPlayerNode, sound: TimelineSound)] = []
     private var files: [String: AVAudioFile] = [:]
     private(set) var playing = false
     /// How far ahead sounds are scheduled, so they all start at once.
@@ -293,7 +325,7 @@ final class SoundPlayer {
     /// start (0 with nothing to play).
     func start(_ sounds: [TimelineSound], at time: Double) -> Double {
         stop()
-        let heard = sounds.filter { $0.gain > 0 && $0.at + $0.length > time }
+        let heard = sounds.filter { $0.audible && $0.at + $0.length > time }
         guard !heard.isEmpty, ready() else { return 0 }
         schedule(heard, at: time, length: nil)
         playing = true
@@ -326,12 +358,19 @@ final class SoundPlayer {
             node.volume = s.gain
             node.scheduleSegment(f, startingFrame: first, frameCount: min(count, AVAudioFrameCount(f.length - first)), at: nil)
             node.play(at: AVAudioTime(hostTime: startHost + AVAudioTime.hostTime(forSeconds: wait)))
-            players.append(node)
+            players.append((node, s))
+        }
+    }
+
+    /// The keyed sounds' levels as they are on timeline frame `frame`.
+    func level(at frame: UInt32) {
+        for p in players where !p.sound.levels.isEmpty {
+            p.node.volume = p.sound.level(at: frame)
         }
     }
 
     func stop() {
-        for node in players {
+        for (node, _) in players {
             node.stop()
             engine.detach(node)
         }

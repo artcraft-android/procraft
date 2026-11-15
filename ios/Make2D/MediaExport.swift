@@ -7,7 +7,7 @@ enum MediaExport {
     /// The sounds of `session`'s timeline mixed under the video at `url` (its frames written at
     /// `fps` a second), in place. True when there was nothing to add or it was added.
     static func addSounds(to url: URL, session: CanvasSession, fps: Float, hevc: Bool) -> Bool {
-        let sounds = session.timelineSounds(frame: 0).filter { $0.gain > 0 }
+        let sounds = session.timelineSounds(frame: 0).filter(\.audible)
         guard !sounds.isEmpty, let timelineFps = session.timelineInfo()?.fps else { return true }
         // played at another rate than the timeline's, the sounds start where their frames are shown
         let scale = Double(timelineFps) / Double(max(fps, 1))
@@ -40,7 +40,18 @@ enum MediaExport {
                 continue
             }
             let level = AVMutableAudioMixInputParameters(track: track)
-            level.setVolume(s.gain, at: .zero)
+            if s.levels.isEmpty {
+                level.setVolume(s.gain, at: .zero)
+            } else {
+                // keyed: frame by frame, eased from each frame's level to the next's
+                let frameLength = scale / Double(timelineFps)
+                let time = { (i: Int) in CMTime(seconds: Double(Int(s.levelsFrom) + i) * frameLength, preferredTimescale: 48000) }
+                level.setVolume(s.levels[0], at: .zero)
+                for i in 0 ..< s.levels.count - 1 {
+                    let range = CMTimeRange(start: time(i), end: time(i + 1))
+                    level.setVolumeRamp(fromStartVolume: s.levels[i], toEndVolume: s.levels[i + 1], timeRange: range)
+                }
+            }
             levels.append(level)
         }
         guard !levels.isEmpty else { return true }

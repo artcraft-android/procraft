@@ -246,7 +246,7 @@ enum ScreenCapture {
     /// A line on a timeline keyed to fall and turn a quarter over eight frames, seen half way;
     /// returns its clip.
     @discardableResult
-    private static func timelineKeyed(_ model: CanvasModel) -> UInt64? {
+    static func timelineKeyed(_ model: CanvasModel) -> UInt64? {
         model.timeline.setOn(true)
         let s = model.session
         let at = { (k: Int) in PenSample(x: 700 + Float(k) * 20, y: 1100, pressure: 0.6, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
@@ -508,6 +508,10 @@ enum ScreenCapture {
     private static func open(_ name: String, in model: CanvasModel) {
         if MediaDebug.scenes.contains(name) {
             MediaDebug.open(name, in: model)
+            return
+        }
+        if TimelineFixesDebug.scenes.contains(name) {
+            TimelineFixesDebug.open(name, in: model)
             return
         }
         if let page = pages[name] {
@@ -1060,7 +1064,11 @@ enum ScreenCapture {
         }
     }
 
-    static func start(open: @escaping (CanvasModel) -> Void) {
+    /// Shows a canvas in place of the one shown (for scenes that go from one canvas to another).
+    static var opener: ((CanvasModel?) -> Void)?
+
+    static func start(open: @escaping (CanvasModel?) -> Void) {
+        opener = open
         let arguments = ProcessInfo.processInfo.arguments
         guard let at = arguments.firstIndex(of: "-screen"), at + 1 < arguments.count else { return }
         let name = arguments[at + 1]

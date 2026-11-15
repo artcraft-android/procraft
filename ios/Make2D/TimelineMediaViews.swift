@@ -171,20 +171,21 @@ struct MediaClipPage: View {
                 SlipStrip(media: media, c: c, plays: plays)
                     .padding(.bottom, 10)
                 if c.kind == .audio {
-                    let level = volume ?? c.volume
+                    let keyed = !c.volumeKeys.isEmpty
+                    let level = volume ?? (keyed ? c.level : c.volume)
                     let ahead = nudge ?? c.offset
                     TlSliderGroup {
                         TlSlider(
-                            label: "Level", value: "\(Int((level * 100).rounded()))%", share: level,
+                            label: keyed ? "Level Here" : "Level", value: "\(Int((level * 100).rounded()))%", share: level,
                             onEnd: {
                                 if let v = volume {
-                                    media.setSound(c, volume: v, done: true)
+                                    media.setLevel(c, v, done: true)
                                 }
                                 volume = nil
                             }
                         ) { v in
                             volume = v
-                            media.setSound(c, volume: v, done: false)
+                            media.setLevel(c, v, done: false)
                         }
                         TlSlider(
                             label: "Nudge", value: "+\(Int((ahead * 1000).rounded())) ms",
@@ -214,6 +215,14 @@ struct MediaClipPage: View {
                         .onTapGesture { media.setSound(c, muted: !c.muted, done: true) }
                     }
                     .padding(.top, 10)
+                    TlGroup {
+                        if c.keyedHere {
+                            TlAction(label: "Remove Level Key") { media.removeLevelKey(c) }
+                        } else {
+                            TlAction(label: keyed ? "Key Level Here" : "Key Level Over Time") { media.setLevel(c, c.level, key: true, done: true) }
+                        }
+                    }
+                    .padding(.top, 10)
                 } else {
                     let canvas = model.session.info()
                     TlGroup {
@@ -234,8 +243,20 @@ struct MediaClipPage: View {
                     }
                     .padding(.top, 10)
                 }
+                let frame = model.timeline.info?.frame ?? 0
+                let inside = frame > clip.start && frame < clip.start + clip.duration
                 TlGroup {
                     TlAction(label: "Play From the File's Start") { media.slip(c.clip, to: 0, done: true) }
+                    if inside {
+                        TlRowLine()
+                        TlAction(label: "Split Here") { model.timeline.split(clip.id) }
+                    }
+                    TlRowLine()
+                    TlAction(label: "Duplicate") { model.timeline.duplicate(clip.id) }
+                    if model.timeline.info?.openGroups.isEmpty == false {
+                        TlRowLine()
+                        TlAction(label: "Move Out of Group") { model.timeline.moveOutOfGroup(clip.id) }
+                    }
                     TlRowLine()
                     TlAction(label: "Delete") { model.timeline.delete(clip.id, close: false) }
                 }
