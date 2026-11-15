@@ -116,6 +116,26 @@ Onion skins become "the drawings before and after on the selected track", reusin
 
 A per-frame composite cache (keyed by frame and document revision) makes scrubbing cheap. Koi's `StackCache` is the reference for invalidation.
 
+As built (Nov 15, 2026): `gpu::canvas::frame_cache`. Each timeline frame composited whole, with nothing under way (no stroke, smudge, transform, adjustment, held layer or liquify), is kept as a copy of the composite, keyed by the frame and how it shows (drawn on with its onion skins, played, or played through the camera). The "revision" is the frame's own: a fingerprint of everything it was composited from, namely its plan (clips, poses, opacities, blends, mattes, groups), the onion skins on each track, the camera at that frame when it is used, the background, every setting of every layer it draws, and those layers' pixel versions. Going to a kept frame whose fingerprint still holds copies it into the composite instead of compositing it.
+
+Invalidation follows from that, as Koi's `StackCache` does from its dependencies:
+
+- Painting a drawing (and undoing it, or any other pixel change) drops at once every kept frame that draws it, as a clip, a matte or an onion skin.
+- A clip, key, camera or settings edit changes the fingerprint of exactly the frames whose plan, skins or camera it changes, and those are composited again when next shown. A camera key changes only frames played through the camera, onion skin settings only frames drawn on.
+- What the cache can't see clears it, or keeps a frame out of it: a frame showing a video isn't kept, a change of the canvas's size or format lets everything go, and `Canvas::forget_frames` lets everything go for anything else.
+
+Memory: kept frames are textures the composite's size and format, used again as frames are replaced. When the budget is full, the frame used least lately goes. The budget is per canvas: the iPad sets it to an eighth of the memory the app may use (`set_frame_cache_budget`, next to the layers' quarter), and without one (desktop, the simulator) it is 512 MB.
+
+Scrubbing a 120-frame 1920 × 1080 timeline frame by frame (24 drawings on fives, two onion skins each side, drawn on; the GPU test `scrubbing_120_frames`, release build, Apple M2 Pro), timed until the GPU finishes each frame:
+
+| | ms a frame |
+|---|---|
+| No cache | 3.1–4.1 |
+| First pass, filling the cache | 3.4–3.8 |
+| From the cache | 0.66–0.81 |
+
+That is four to five times faster, and the saving grows with what a frame draws: the copy costs the same however many tracks, groups, mattes and posed clips the frame has. The GPU tests in `crates/gpu/tests/frame_cache.rs` compare every frame, in each of the three ways it shows, from the cache against a canvas with no cache, after painting, undo, a clip's opacity, a key, a matte, grouping, camera keys, onion settings, a layer hidden and the background changed, and check which frames each edit sends back to compositing.
+
 ## Editing and undo
 
 `Document` is cloned for undo already, so timeline edits are undoable for free. Each user action is one step: moving a clip, setting a key, or adding a drawing (a new group plus its clip).

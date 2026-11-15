@@ -22,7 +22,9 @@ use make2d_engine::timeline::{MaskMode, PlanItem, Showing, Shows, Timeline};
 use wgpu::util::DeviceExt;
 
 use crate::{Gpu, GpuError};
+pub use frame_cache::{FrameCacheStats, frame_cache_budget, set_frame_cache_budget};
 
+pub(crate) mod frame_cache;
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
 
@@ -2248,6 +2250,8 @@ pub struct Canvas {
     transform_more: Vec<Transforming>,
     /// For frosted panels, made when first needed.
     backdrop: Option<BackdropGpu>,
+    /// Timeline frames as they were composited, for going back to (see [`frame_cache`]).
+    frames: frame_cache::FrameCache,
 }
 
 const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
@@ -2573,6 +2577,7 @@ impl Canvas {
             transforming: None,
             transform_more: Vec::new(),
             backdrop: None,
+            frames: frame_cache::FrameCache::default(),
             shapes,
             grains,
             brush_images: images,
@@ -3869,6 +3874,7 @@ impl Canvas {
         self.changed.insert(id);
         self.version += 1;
         self.versions.insert(id, self.version);
+        self.frames.forget_layer(id);
     }
 
     /// Layer `id`'s pixels' version as of the last render: it is new whenever they may have
@@ -4087,6 +4093,45 @@ impl Canvas {
             self.camera_view = on;
             self.invalidate();
         }
+    }
+
+    /// What this canvas's kept timeline frames may take, bytes: none said, what
+    /// [`set_frame_cache_budget`] set for every canvas. 0 keeps none.
+    pub fn set_frame_budget(&mut self, bytes: Option<u64>) {
+        self.frames.set_budget(bytes);
+    }
+
+    /// Lets go of every kept timeline frame: for a change the cache can't see.
+    pub fn forget_frames(&mut self) {
+        self.frames.forget();
+    }
+
+    /// How the kept timeline frames have done.
+    pub fn frame_cache_stats(&self) -> FrameCacheStats {
+        self.frames.stats()
+    }
+
+    /// The timeline frame about to be composited, if it can be kept: only with nothing under way
+    /// that shows in the composite but not in the document (a stroke, a smudge, a transform or
+    /// adjustment, a held layer, liquify).
+    fn frame_wanted(&self, doc: &Document) -> Option<frame_cache::Wanted> {
+        let tl = doc.timeline.as_ref()?;
+        let quiet = self.ops.is_empty()
+            && self.active.is_none()
+            && self.smudge.is_none()
+            && self.transforming.is_none()
+            && self.transform_more.is_empty()
+            && self.held.is_none()
+            && self.liquify.is_none()
+            && self.pencil.is_none()
+            && self.caches.is_none();
+        if !quiet {
+            return None;
+        }
+        let (frame, playing) = self.timeline_at();
+        let camera = playing && self.camera_view;
+        let key = frame_cache::FrameKey { frame, playing, camera };
+        self.frames.wanted(doc, tl, key, camera, (self.width, self.height), |id| self.layer_version(id))
     }
 
     /// The timeline frame shown, and whether it is playing.
@@ -5578,9 +5623,18 @@ impl Canvas {
         let device = &gpu.device;
         // while caches are remade the composite stays as it was, what changed kept for after
         if self.remake.is_none() {
-            if !dirty.is_empty() {
+            // a timeline frame composited whole may be one kept from before, or kept for after
+            let wanted = if dirty == self.full() && !deferred { self.frame_wanted(doc) } else { None };
+            if let Some(w) = &wanted
+                && self.frames.restore(&mut encoder, w, &self.composite)
+            {
+                self.composites = self.composites.wrapping_add(1);
+            } else if !dirty.is_empty() {
                 self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
                 self.composites = self.composites.wrapping_add(1);
+                if let Some(w) = wanted {
+                    self.frames.keep(device, &mut encoder, w, &self.composite);
+                }
             }
             self.dirty = IRect::EMPTY;
         }

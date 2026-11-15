@@ -32,6 +32,8 @@ mod crop;
 mod crop_edit;
 mod device;
 mod frame;
+#[cfg(test)]
+mod frame_cache_tests;
 mod frame_exports;
 mod gallery;
 mod gestures;
