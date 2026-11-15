@@ -1208,8 +1208,13 @@ fn lay_stroke(
     }
     let drawn = builder.stamp_count();
     let for_good = if canvas.shows_tip() { builder.drawn_for_good() } else { None };
+    // a smudge, or an adjustment painted on, has laid its stamps for good as they came
+    let laid = canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil();
+    if laid {
+        builder.hold_laid();
+    }
     let all = builder.finish();
-    if canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() {
+    if laid {
         canvas.add_stamps(&guide::mirrored(guide, all.get(drawn..).unwrap_or(&[])));
     } else if let Some(rest) = for_good.and_then(|stamps| all.strip_prefix(stamps.as_slice())) {
         // nothing laid changes: a long stroke's end needn't lay it all again

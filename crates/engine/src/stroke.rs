@@ -230,6 +230,47 @@ struct Placed {
     overlap: f32,
 }
 
+/// Where the walk along the path stood as a piece of it began: enough to walk on again from there.
+#[derive(Clone, Copy, Debug)]
+struct WalkState {
+    head: Option<PathPoint>,
+    length: f32,
+    carry: f32,
+    pending_gap: Option<f32>,
+    last_seg: f32,
+    heading: Vec2,
+    direction: f32,
+    random: Random,
+    grain_last: Option<(Vec2, Vec2)>,
+    dab_turn: f32,
+    /// How many stamps the stroke had, counting those a copy leaves out.
+    stamps: usize,
+}
+
+/// A piece of the path as it was walked (see [`StrokeBuilder::walk_piece`]), when, and the walk
+/// as it stood before it.
+#[derive(Clone, Copy, Debug)]
+struct Walked {
+    to: PathPoint,
+    whole: Option<f32>,
+    now_ms: f64,
+    before: WalkState,
+}
+
+/// What the tapers leave of a stamp at a place along the path (see [`StrokeBuilder::tapered`]).
+#[derive(Clone, Copy, Debug)]
+struct Tapered {
+    /// The shares of its size (what leaning grows it by aside) and of its alpha they leave.
+    size: f32,
+    alpha: f32,
+    /// The share of its whole width left: what leaning grows it by stays.
+    thinned: f32,
+    /// Its roundness after over before, where they change it.
+    round: Option<(f32, f32)>,
+    /// The pressure its grain takes, where the pressure fades into them.
+    grain_press: Option<f32>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PathPoint {
     pos: Vec2,
@@ -765,13 +806,17 @@ const RUN_ON_SHRINK: f32 = 0.66;
 const RUN_ON_TURN: f32 = 1.125;
 /// Stamps a stroke may hold (a guard against runaway input, far above any real stroke).
 const MAX_STAMPS: usize = 400_000;
+/// The pieces of path kept to walk again (see [`StrokeBuilder::walk_again`]) are looked through
+/// for those no taper can reach any more once there are this many, and again each time as many
+/// more have come as were kept.
+const WALKED_LOOKED_THROUGH: usize = 256;
 /// How far the path goes before the stroke's direction (which stamps following it turn to) has
 /// turned the way it now goes, a share of the brush's size, and at the least in canvas pixels.
 const TURN_REACH: f32 = 0.25;
 const TURN_REACH_LEAST: f32 = 1.5;
 
 /// A small deterministic random source (xorshift), so a stroke replays identically.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Random(u32);
 
 impl Random {
@@ -938,6 +983,18 @@ pub struct StrokeBuilder {
     knots: Vec<f32>,
     /// The engine laying its stamps in place of the brush's settings, if one does.
     outside: OutsideSlot,
+    /// The pieces of path walked that a taper may yet reach, to walk again once it is known (see
+    /// [`StrokeBuilder::walk_again`]); and how many were kept when last looked through.
+    walked: Vec<Walked>,
+    walked_kept: usize,
+    /// How far the stamps placed before the path had a direction were turned once it had one.
+    dab_turn: f32,
+    /// The end taper the spacing goes by while the path is walked again: the path's length and
+    /// the taper's span (none while it is drawn).
+    spacing_end: Option<(f32, f32)>,
+    /// The stamps laid as the stroke is drawn stay as they are when it ends (see
+    /// [`StrokeBuilder::hold_laid`]).
+    laid_held: bool,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -1174,6 +1231,11 @@ impl StrokeBuilder {
             start_settled: None,
             knots: Vec::new(),
             outside: OutsideSlot(None),
+            walked: Vec::new(),
+            walked_kept: 0,
+            dab_turn: 0.0,
+            spacing_end: None,
+            laid_held: false,
         }
         .reading_extras()
     }
@@ -1350,6 +1412,7 @@ impl StrokeBuilder {
         // the tip as if the stroke ended here: walked on to the input
         let mut ended = self.open_copy(to);
         ended.reach_input(&mut Vec::new());
+        ended.respace_tip();
         (kept, ended.tip_from(0))
     }
 
@@ -1362,6 +1425,7 @@ impl StrokeBuilder {
         let mut ahead = self.open_copy(self.kept);
         ahead.add(samples);
         ahead.reach_input(&mut Vec::new());
+        ahead.respace_tip();
         ahead.tip_from(0)
     }
 
@@ -1372,12 +1436,31 @@ impl StrokeBuilder {
         let from = from.min(self.placed.len());
         let open = self.placed.split_off(from);
         let before = std::mem::replace(&mut self.placed, open);
+        // (and of the pieces of path walked, those it may walk again)
+        let least = self.left_out + from;
+        let cut = self.walked.partition_point(|w| w.before.stamps < least);
+        let open_walked = self.walked.split_off(cut);
+        let walked_before = std::mem::replace(&mut self.walked, open_walked);
         let mut copy = self.clone();
         copy.left_out += from;
         copy.kept = 0;
         let open = std::mem::replace(&mut self.placed, before);
         self.placed.extend(open);
+        let open_walked = std::mem::replace(&mut self.walked, walked_before);
+        self.walked.extend(open_walked);
         copy
+    }
+
+    /// Walks again what the tip's tapers reach, as they would be were the stroke to end here.
+    fn respace_tip(&mut self) {
+        let end = self.end_shows().then(|| (self.length, self.end_span(0.0)));
+        self.respace(end);
+    }
+
+    /// The stamps laid as the stroke is drawn stay as they are when it ends (a smudge's, which
+    /// has moved the paint already): its end isn't walked again, only tapered.
+    pub fn hold_laid(&mut self) {
+        self.laid_held = true;
     }
 
     /// The stamps from `from` on as they would be drawn were the stroke to end here (its end
@@ -1462,6 +1545,11 @@ impl StrokeBuilder {
             self.placed.truncate(1);
         }
         let (start, end) = (self.start_span(), self.end_span(run_on));
+        // what the tapers reach walked again now they are known, so its stamps lie as close as
+        // they are small
+        if length > 0.0 && !self.laid_held {
+            self.respace(Some((length, end)));
+        }
         let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect();
         self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
         stamps
@@ -1537,7 +1625,13 @@ impl StrokeBuilder {
         } else {
             self.go_on(target, dt, batched, out);
         }
+        let open = self.start_open();
         self.settle_start();
+        // the start taper's reach known: the stroke so far walked again, spaced as it tapers
+        if open && !self.start_open() && self.respaces() {
+            self.walk_again(f32::NEG_INFINITY);
+        }
+        self.forget_walked();
     }
 
     /// Takes the path on to `target`, `dt` milliseconds after the last (none: it is the first;
@@ -1848,6 +1942,12 @@ impl StrokeBuilder {
         self.start_settled = Some(if timed { self.start_input() } else { self.start_span() });
     }
 
+    /// Whether the newer start taper's reach is still to be known (the input not yet past its
+    /// time).
+    fn start_open(&self) -> bool {
+        self.start_settled.is_none() && self.taper().start > 0.0 && !self.classic()
+    }
+
     /// Whether the end taper shows while the stroke is drawn: with the tip animation on, a
     /// finger's as a pen's (a classic taper's only as it ends, where it runs on).
     fn end_shows(&self) -> bool {
@@ -1924,6 +2024,10 @@ impl StrokeBuilder {
     /// As [`walk_to`](Self::walk_to), a piece of a stretch of input `whole` long (for how much
     /// a lean compresses), else a stretch of its own.
     fn walk_piece(&mut self, to: PathPoint, whole: Option<f32>, out: &mut Vec<Stamp>) {
+        if self.respaces() {
+            let before = self.walk_state();
+            self.walked.push(Walked { to, whole, now_ms: self.now_ms, before });
+        }
         let Some(from) = self.head else {
             // the first point always gets a stamp, so a tap leaves a dot
             self.head = Some(to);
@@ -1944,16 +2048,17 @@ impl StrokeBuilder {
             for p in &mut self.placed {
                 p.angle += turn;
             }
+            self.dab_turn = turn;
         }
         self.last_seg = whole.unwrap_or(seg);
         let mut done = 0.0f32;
         // each input segment goes on from the plain gap where it starts
-        let mut last = self.step(from);
+        let mut last = self.spaced(from, self.length);
         while self.left_out + self.placed.len() < MAX_STAMPS {
             let gap = match self.pending_gap.take() {
                 Some(gap) => gap,
                 None => {
-                    last = self.gap(from.lerp(to, done / seg), last);
+                    last = self.gap(from.lerp(to, done / seg), self.length + done, last);
                     last
                 }
             };
@@ -2046,23 +2151,143 @@ impl StrokeBuilder {
     /// shorter side (a flat stamp lies as close as its height says), and half a pixel more (and a
     /// little with the spacing).
     fn step(&self, p: PathPoint) -> f32 {
+        self.step_as(p, 1.0, self.roundness_at(p))
+    }
+
+    /// As [`step`](Self::step), for a stamp with `thinned` of its width left and round `roundness`.
+    fn step_as(&self, p: PathPoint, thinned: f32, roundness: f32) -> f32 {
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
-        let shorter = self.square_at(p) * SPACED_SQUARE * self.roundness_at(p).min(1.0);
+        let shorter = self.square_at(p) * thinned * SPACED_SQUARE * roundness.min(1.0);
         (spacing * shorter * self.extras.spacing_stride + extra).max(0.25)
     }
 
-    /// The gap to the next stamp at `p`, the one before it `last`: the two gaps' mean, widened
-    /// by the spacing jitter (a random share of it, as far as its curve lets it) and by the
-    /// input's speed. Gaps only ever widen.
-    fn gap(&mut self, p: PathPoint, last: f32) -> f32 {
+    /// The plain distance to the next stamp at `p`, `at` along the path, for the stamp as the
+    /// tapers leave it there: a tapered tip's smaller stamps lie closer. The start taper as it
+    /// stands, the end taper only once known (see [`StrokeBuilder::walk_again`]).
+    fn spaced(&self, p: PathPoint, at: f32) -> f32 {
+        if !self.respaces() {
+            return self.step(p);
+        }
+        let share = self.drawn_share(p);
+        let left = self.tapered(at, p.soft, self.speed_size(p), share, self.start_span(), self.spacing_end);
+        let roundness = match left.round {
+            Some((after, before)) => (self.roundness_at(p) * after / before).clamp(0.05, MOST_ROUNDNESS),
+            None => self.roundness_at(p),
+        };
+        self.step_as(p, left.thinned, roundness)
+    }
+
+    /// Whether the tapers change the stamps' size, so how far apart they lie: the pieces of path
+    /// walked are kept to walk again once the tapers are known.
+    fn respaces(&self) -> bool {
+        let t = self.taper();
+        let fades = self.pointer.has_pressure() && self.extras.taper_pressure > 0.0;
+        self.outside.0.is_none() && (t.start > 0.0 || t.end > 0.0) && (t.size > 0.0 || fades)
+    }
+
+    /// Where the walk along the path stands.
+    fn walk_state(&self) -> WalkState {
+        WalkState {
+            head: self.head,
+            length: self.length,
+            carry: self.carry,
+            pending_gap: self.pending_gap,
+            last_seg: self.last_seg,
+            heading: self.heading,
+            direction: self.direction,
+            random: self.random,
+            grain_last: self.grain_last,
+            dab_turn: self.dab_turn,
+            stamps: self.left_out + self.placed.len(),
+        }
+    }
+
+    /// Walks the path again from the last piece of it walked that began at or before `from` along
+    /// it (never before the stamps drawn for good, nor those a copy leaves out), laying its stamps
+    /// anew: their spacing then follows the tapers as they now stand.
+    fn walk_again(&mut self, from: f32) {
+        let least = self.laid_for_good();
+        let Some(first) = self.walked.iter().position(|w| w.before.stamps >= least) else { return };
+        let at = self.walked.iter().rposition(|w| w.before.length <= from).filter(|&i| i >= first).unwrap_or(first);
+        let again = self.walked.split_off(at);
+        let Some(&Walked { before: b, .. }) = again.first() else { return };
+        self.placed.truncate(b.stamps.saturating_sub(self.left_out));
+        // the stamps placed before the path had a direction turn with it again
+        let undo = b.dab_turn - self.dab_turn;
+        if undo != 0.0 {
+            for p in &mut self.placed {
+                p.angle += undo;
+            }
+        }
+        (self.head, self.length, self.carry, self.pending_gap, self.last_seg) =
+            (b.head, b.length, b.carry, b.pending_gap, b.last_seg);
+        (self.heading, self.direction, self.random, self.grain_last, self.dab_turn) =
+            (b.heading, b.direction, b.random, b.grain_last, b.dab_turn);
+        let now = self.now_ms;
+        let mut ignored = Vec::new();
+        for w in again {
+            self.now_ms = w.now_ms;
+            self.walk_piece(w.to, w.whole, &mut ignored);
+        }
+        self.now_ms = now;
+    }
+
+    /// Walks again what the tapers reach that was walked before they were known: from the start
+    /// while the start taper still grows, else from where the end taper begins (`end`: the path's
+    /// length and the end taper's span, where it shows).
+    fn respace(&mut self, end: Option<(f32, f32)>) {
+        if !self.respaces() {
+            return;
+        }
+        let end = end.filter(|&(_, span)| span > 0.0);
+        let from = match end {
+            _ if self.start_open() => f32::NEG_INFINITY,
+            Some((length, span)) => self.eased_before(length - span),
+            None => return,
+        };
+        self.spacing_end = end;
+        self.walk_again(from);
+        self.spacing_end = None;
+    }
+
+    /// How many of the stroke's stamps (counting those a copy leaves out) are laid as they'll stay:
+    /// those drawn for good where the end taper shows as the stroke is drawn (where it doesn't,
+    /// it thins them once known).
+    fn laid_for_good(&self) -> usize {
+        self.left_out + if self.end_shows() { self.kept } else { 0 }
+    }
+
+    /// Lets go of the pieces of path walked that can't be walked again: those before the stamps
+    /// drawn for good and, the start taper's reach known, those well before where the end taper
+    /// would begin were the stroke to end now (it begins further on as the stroke goes on).
+    fn forget_walked(&mut self) {
+        if self.walked.len() < WALKED_LOOKED_THROUGH.max(2 * self.walked_kept) {
+            return;
+        }
+        let least = self.laid_for_good();
+        let mut cut = self.walked.iter().position(|w| w.before.stamps >= least).unwrap_or(self.walked.len());
+        if !self.start_open() {
+            let from = self.eased_before(self.length - 2.0 * self.end_span(0.0));
+            if let Some(i) = self.walked.iter().rposition(|w| w.before.length <= from) {
+                cut = cut.max(i);
+            }
+        }
+        self.walked.drain(..cut);
+        self.walked_kept = self.walked.len();
+    }
+
+    /// The gap to the next stamp at `p`, `at` along the path, the one before it `last`: the two
+    /// gaps' mean, widened by the spacing jitter (a random share of it, as far as its curve lets
+    /// it) and by the input's speed. Gaps only ever widen.
+    fn gap(&mut self, p: PathPoint, at: f32, last: f32) -> f32 {
         let x = self.extras;
         let mut widen = p.speed * x.speed_spacing * SPACING_FILE_SCALE;
         if x.spacing_jitter > 0.0 {
             let by = self.brush.pressure_curves.at(PressureCurve::SpacingJitter, p.soft[4].clamp(0.0, 1.0));
             widen += by * x.spacing_jitter * SPACING_FILE_SCALE * self.random.next();
         }
-        ((1.0 + widen.max(0.0)) * (last + self.step(p)) * 0.5).max(0.25)
+        ((1.0 + widen.max(0.0)) * (last + self.spaced(p, at)) * 0.5).max(0.25)
     }
 
     /// Each use's pressure followed from `before` towards `now` over `frames` (of a 60 Hz display)
@@ -2473,54 +2698,13 @@ impl StrokeBuilder {
     /// path and, once the stroke has ended, its end taper over the last `end` of its length:
     /// `(length, end)`.
     fn finish_stamp(&self, p: &Placed, start_span: f32, end: Option<(f32, f32)>) -> Stamp {
-        let grown = |gone: f32, span: f32| if span > 0.0 { (gone / span).clamp(0.0, 1.0) } else { 1.0 };
-        let tip = if self.pointer.has_pressure() { self.extras.pen_taper_tip } else { self.extras.touch_taper_tip };
-        // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
-        // bleed and roundness it gave scaled to what the faded pressure gives
-        let fade = self.extras.taper_pressure;
-        let fading = self.pointer.has_pressure() && fade > 0.0;
-        // what the tapers leave at a place along the path: of the size, the opacity and the
-        // pressure faded into them
-        let tapered = |at: f32| {
-            let (start, finish) = match end {
-                // a tap keeps its whole size
-                Some((length, _)) if length <= 0.0 => (1.0, 1.0),
-                Some((length, span)) => (grown(at, start_span), grown(length - at, span)),
-                None => (grown(at, start_span), 1.0),
-            };
-            let (size, alpha) = self.taper().applied(start, finish, tip);
-            [size, alpha, (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip))]
+        let Tapered { size, alpha, thinned, round, grain_press } =
+            self.tapered(p.distance, p.pressed, p.speed_size, p.drawn_share, start_span, end);
+        let mut grain_press = grain_press.unwrap_or(p.grain_press);
+        let roundness = match round {
+            Some((after, before)) => (p.roundness * after / before).clamp(0.05, MOST_ROUNDNESS),
+            None => p.roundness,
         };
-        let [mut size, mut alpha, kept] = self.eased(p.distance, tapered);
-        let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
-        let [s, o, b, r, _] = p.pressed;
-        let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * p.speed_size;
-        let (mut faded_left, mut faded_round) = (size_left, r);
-        if fading {
-            let (_, o0) = self.brush.factors(s, o);
-            let (s1, o1) = self.brush.factors(s * kept, o * kept);
-            (faded_left, faded_round) = (s1 * p.speed_size, r * kept);
-            let sized = self.sized(size_left);
-            if sized > 0.0 {
-                size *= self.sized(faded_left) / sized;
-            }
-            if o0 > 0.0 {
-                alpha *= (o1 / o0).powf(FLOW_POWER);
-            }
-            grain_press = (b * kept).clamp(0.0, 1.0);
-        }
-        // a taper thins what the stamp is drawn at; what leaning grows it by comes after, so a
-        // leaning pen's tips keep that
-        let share = p.drawn_share;
-        let thinned = share * size + (1.0 - share);
-        if fading || share < 1.0 {
-            let before = self.pressed_roundness(share, r, size_left);
-            let left_share = if thinned > 0.0 { share * size / thinned } else { share };
-            if before > 0.0 {
-                let after = self.pressed_roundness(left_share, faded_round, faded_left);
-                roundness = (roundness * after / before).clamp(0.05, MOST_ROUNDNESS);
-            }
-        }
         // the bleed: the pressure's, through the pressure, and the lean's, whatever the pressure
         let pressed_bleed = self.extras.pressure_bleed.clamp(0.0, 1.0);
         let grain_bleed = pressed_bleed + p.bleed_lean;
@@ -2568,6 +2752,69 @@ impl StrokeBuilder {
             pick_up: None,
             threshold: [0.0; 2],
         }
+    }
+
+    /// What the tapers leave of a stamp `at` along the path, the start taper growing over
+    /// `start_span` canvas pixels and the end taper as `end` says (see
+    /// [`StrokeBuilder::finish_stamp`]): a stamp pressed `pressed`, with `speed_size` of its size
+    /// left by the speed and `share` of it drawn (not grown by leaning).
+    fn tapered(
+        &self,
+        at: f32,
+        pressed: [f32; 5],
+        speed_size: f32,
+        share: f32,
+        start_span: f32,
+        end: Option<(f32, f32)>,
+    ) -> Tapered {
+        let grown = |gone: f32, span: f32| if span > 0.0 { (gone / span).clamp(0.0, 1.0) } else { 1.0 };
+        let tip = if self.pointer.has_pressure() { self.extras.pen_taper_tip } else { self.extras.touch_taper_tip };
+        // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
+        // bleed and roundness it gave scaled to what the faded pressure gives
+        let fade = self.extras.taper_pressure;
+        let fading = self.pointer.has_pressure() && fade > 0.0;
+        // what the tapers leave at a place along the path: of the size, the opacity and the
+        // pressure faded into them
+        let tapered = |at: f32| {
+            let (start, finish) = match end {
+                // a tap keeps its whole size
+                Some((length, _)) if length <= 0.0 => (1.0, 1.0),
+                Some((length, span)) => (grown(at, start_span), grown(length - at, span)),
+                None => (grown(at, start_span), 1.0),
+            };
+            let (size, alpha) = self.taper().applied(start, finish, tip);
+            [size, alpha, (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip))]
+        };
+        let [mut size, mut alpha, kept] = self.eased(at, tapered);
+        let mut grain_press = None;
+        let [s, o, b, r, _] = pressed;
+        let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * speed_size;
+        let (mut faded_left, mut faded_round) = (size_left, r);
+        if fading {
+            let (_, o0) = self.brush.factors(s, o);
+            let (s1, o1) = self.brush.factors(s * kept, o * kept);
+            (faded_left, faded_round) = (s1 * speed_size, r * kept);
+            let sized = self.sized(size_left);
+            if sized > 0.0 {
+                size *= self.sized(faded_left) / sized;
+            }
+            if o0 > 0.0 {
+                alpha *= (o1 / o0).powf(FLOW_POWER);
+            }
+            grain_press = Some((b * kept).clamp(0.0, 1.0));
+        }
+        // a taper thins what the stamp is drawn at; what leaning grows it by comes after, so a
+        // leaning pen's tips keep that
+        let thinned = share * size + (1.0 - share);
+        let mut round = None;
+        if fading || share < 1.0 {
+            let before = self.pressed_roundness(share, r, size_left);
+            let left_share = if thinned > 0.0 { share * size / thinned } else { share };
+            if before > 0.0 {
+                round = Some((self.pressed_roundness(left_share, faded_round, faded_left), before));
+            }
+        }
+        Tapered { size, alpha, thinned, round, grain_press }
     }
 }
 
@@ -2810,6 +3057,45 @@ mod tests {
         let leant = |i: usize| Sample { tilt: 1.2, ..along(i) };
         let upright = gap_of(leaning.clone(), &along);
         assert!(gap_of(leaning, &leant) < upright * 0.95, "{upright}");
+    }
+
+    #[test]
+    fn a_tapered_tips_stamps_lie_as_close_as_they_are_small() {
+        // tapers at both ends, the end's known as the pen lifts or shown as it is drawn: thinning,
+        // or only fading (which leaves the spacing as it is)
+        let laid = |size: f32, animated: f32| {
+            let mut brush = Brush { spacing: 0.5, ..plain() };
+            brush.pen_taper = Taper { start: 0.5, end: 0.5, size, opacity: 1.0 - size };
+            brush.set_setting("pen_tip_animation", animated);
+            let mut stroke = StrokeBuilder::new(brush, 20.0, Pointer::Stylus);
+            stroke.add_tipped(&line(100, 600.0));
+            stroke.finish()
+        };
+        let within =
+            |all: &[Stamp], from: f32, to: f32| all.iter().filter(|s| (from..to).contains(&s.center.x)).count();
+        for animated in [0.0, 1.0] {
+            let (faded, thinned) = (laid(0.0, animated), laid(1.0, animated));
+            let gaps: Vec<f32> = faded.windows(2).map(|w| w[0].center.distance(w[1].center)).collect();
+            assert!(gaps.iter().all(|g| (g - gaps[0]).abs() < 1e-3), "{gaps:?}");
+            for (from, to) in [(0.0, 40.0), (560.0, 601.0)] {
+                let (few, many) = (within(&faded, from, to), within(&thinned, from, to));
+                assert!(many >= 3 * few, "{animated}: {from}..{to}: {many} {few}");
+            }
+            // between the tips they lie as far apart as ever
+            let middle: Vec<&Stamp> = thinned.iter().filter(|s| (200.0..400.0).contains(&s.center.x)).collect();
+            for w in middle.windows(2) {
+                assert!((w[0].center.distance(w[1].center) - gaps[0]).abs() < 1e-3);
+            }
+        }
+        // a stroke whose stamps were laid as they came keeps them where they lie as it ends
+        let mut brush = Brush { spacing: 0.5, ..plain() };
+        brush.pen_taper = Taper { end: 0.5, size: 1.0, ..Taper::NONE };
+        let mut stroke = StrokeBuilder::new(brush, 20.0, Pointer::Stylus);
+        let laid = stroke.add(&line(100, 600.0));
+        stroke.hold_laid();
+        let all = stroke.finish();
+        assert!(laid.len() > 10 && all.len() >= laid.len());
+        assert!(laid.iter().zip(&all).all(|(a, b)| a.center == b.center));
     }
 
     #[test]
@@ -3534,6 +3820,7 @@ mod tests {
             let mut copy = b.clone();
             copy.add(ahead);
             copy.reach_input(&mut Vec::new());
+            copy.respace_tip();
             copy.tip_from(b.kept)
         };
         let mut checked = 0;
@@ -4173,7 +4460,7 @@ mod tests {
         let off = |s: &Stamp| (s.center.y - 50.0).abs();
         let tips = all.iter().take_while(|s| s.radius < 1.0).map(off).fold(0.0, f32::max);
         let whole = all.iter().rev().take(100).map(off).fold(0.0, f32::max);
-        assert!(tips < 4.0, "{tips}");
+        assert!(tips < 10.0, "{tips}");
         assert!(whole > 30.0, "{whole}");
     }
 
@@ -4307,8 +4594,9 @@ mod tests {
         assert!(flow_light.alpha < plain_light.alpha * 0.5, "{} {}", flow_light.alpha, plain_light.alpha);
         // a blunt tip keeps width at the stroke's ends (all but the very first stamp)
         let taper = Taper { start: 0.3, end: 0.3, size: 1.0, opacity: 0.0 };
-        let sharp = stroke(&[], 1.0, taper.clone())[2].radius;
-        let blunt = stroke(&[("pen_taper_tip", 1.0)], 1.0, taper)[2].radius;
+        let past = |v: Vec<Stamp>| v.iter().find(|s| s.distance > 4.0).map_or(0.0, |s| s.radius);
+        let sharp = past(stroke(&[], 1.0, taper.clone()));
+        let blunt = past(stroke(&[("pen_taper_tip", 1.0)], 1.0, taper));
         assert!(blunt > sharp + 1.0, "{blunt} {sharp}");
         // the secondary colour: by pressure, as its curve says, and jittered per stamp
         assert_eq!(mid(&stroke(&[], 0.3, Taper::NONE)).secondary, 0.0);
