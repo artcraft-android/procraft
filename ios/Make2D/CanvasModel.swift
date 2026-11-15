@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 
 /// Which panel hangs from the top bar.
 enum Panel {
-    case none, layers, color, brushes, actions, adjustments
+    case none, layers, color, brushes, actions, adjustments, light
 }
 
 /// Which slider's panel shows beside it: the size's or the opacity's.
@@ -65,6 +65,8 @@ final class CanvasModel {
     @ObservationIgnored var onClose: () -> Void = {}
 
     private(set) var tool: ToolKind = .paint
+    /// What the light tool does to the paint under the brush, and how strongly.
+    private(set) var light = LightSettings(kind: .brighten, strength: 0.5)
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
     /// The colour panel's mode, kept from one session to the next.
@@ -431,16 +433,27 @@ final class CanvasModel {
             return
         }
         if tool == pressed {
+            // the light tool's own panel: its brush is the paint tool's, chosen there
+            if pressed == .light {
+                toggle(.light)
+                return
+            }
             if let current = currentBrush {
                 shownSet = Int(current.set)
             }
             toggle(.brushes)
         } else {
             select(pressed)
-            if panel == .brushes {
+            if panel == .brushes || panel == .light {
                 panel = .none
             }
         }
+    }
+
+    /// The light tool's settings changed (from its panel).
+    func setLight(_ settings: LightSettings) {
+        session.setLight(light: settings)
+        light = session.light()
     }
 
     /// A tool button held: that tool takes the brush the current one has (erasing with the
@@ -474,6 +487,7 @@ final class CanvasModel {
         case .paint: doing = "Painting"
         case .smudge: doing = "Smudging"
         case .erase: doing = "Erasing"
+        case .light: doing = "Lighting"
         }
         showNotice("\(doing) with the current brush")
     }

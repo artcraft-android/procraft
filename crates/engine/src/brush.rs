@@ -761,12 +761,13 @@ impl Brush {
     }
 
     /// The brush as a dual brush's second: drawn apart as coverage alone, its grain goes on stamp
-    /// by stamp, even one fixed to the canvas.
-    pub fn as_second(mut self) -> Brush {
-        if self.grain.mode == GrainMode::Texturized {
-            self.grain.mode = GrainMode::Moving;
+    /// by stamp, even one fixed to the canvas, and it is stamped, never a ribbon.
+    pub fn as_second(self) -> Brush {
+        let mut second = self.without_ribbon();
+        if second.grain.mode == GrainMode::Texturized {
+            second.grain.mode = GrainMode::Moving;
         }
-        self
+        second
     }
 
     /// What a brush file gave the grain the brush has now.

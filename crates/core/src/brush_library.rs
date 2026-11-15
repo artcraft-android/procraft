@@ -375,6 +375,11 @@ pub(crate) const RECENT_BRUSHES: usize = 8;
 /// The tools in the order [`SavedChoices`] keeps them.
 const TOOLS: [crate::ToolKind; 3] = [crate::ToolKind::Paint, crate::ToolKind::Erase, crate::ToolKind::Smudge];
 
+/// The tools whose sliders [`SavedChoices`] keeps, by their place here: those with a brush of their
+/// own, then the light tool (which uses the paint tool's brush).
+const SLIDER_TOOLS: [crate::ToolKind; 4] =
+    [crate::ToolKind::Paint, crate::ToolKind::Erase, crate::ToolKind::Smudge, crate::ToolKind::Light];
+
 /// How many brushes each shipped set had when the library was first kept: a kept library has had
 /// the chance to hold those, and what shipped after them joins it once.
 const FIRST_SHIPPED: [u32; 6] = [3, 3, 3, 2, 2, 2];
@@ -592,7 +597,7 @@ impl State {
     /// The tools' brushes, the sets' last choices and each brush's sliders, as kept between
     /// sessions (JSON; see [`CanvasSession::saved_brush_choices`]).
     pub(crate) fn choices_saved(&self) -> String {
-        let tool_index = |tool| TOOLS.iter().position(|&t| t == tool).unwrap_or(0) as u8;
+        let tool_index = |tool| SLIDER_TOOLS.iter().position(|&t| t == tool).unwrap_or(0) as u8;
         let mut sliders: Vec<_> =
             self.sliders.iter().map(|(&(tool, s, i), v)| (tool_index(tool), s, i, v.size, v.opacity)).collect();
         sliders.sort_by_key(|&(t, s, i, ..)| (t, s, i));
@@ -1163,7 +1168,7 @@ impl CanvasSession {
         let before = st.brush_ref(st.tool);
         st.note_choice(before);
         match st.tool {
-            crate::ToolKind::Paint => st.paint_brush = (s, 0),
+            crate::ToolKind::Paint | crate::ToolKind::Light => st.paint_brush = (s, 0),
             crate::ToolKind::Erase => st.erase_brush = (s, 0),
             crate::ToolKind::Smudge => st.smudge_brush = (s, 0),
         }
@@ -1471,7 +1476,7 @@ impl CanvasSession {
         for (tool, place) in TOOLS.into_iter().zip(tools) {
             let Some(place) = place.filter(|&p| st.holds(p)) else { continue };
             match tool {
-                crate::ToolKind::Paint => st.paint_brush = place,
+                crate::ToolKind::Paint | crate::ToolKind::Light => st.paint_brush = place,
                 crate::ToolKind::Erase => st.erase_brush = place,
                 crate::ToolKind::Smudge => st.smudge_brush = place,
             }
@@ -1501,7 +1506,7 @@ impl CanvasSession {
             }
         }
         for (tool, s, i, size, opacity) in sliders {
-            let Some(&tool) = TOOLS.get(usize::from(tool)) else { continue };
+            let Some(&tool) = SLIDER_TOOLS.get(usize::from(tool)) else { continue };
             if st.holds((s, i)) && size.is_finite() && opacity.is_finite() {
                 let v = crate::Sliders { size: size.clamp(0.0, 1.0), opacity: opacity.clamp(0.0, 1.0) };
                 st.sliders.insert((tool, s, i), v);

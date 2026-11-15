@@ -1125,6 +1125,8 @@ func libraryButton(_ tool: ToolKind) -> Int {
     case .erase: 2
     case .smudge: 3
     case .paint: 4
+    // the light tool's button, left of the brush's (its brushes are the paint tool's)
+    case .light: 5
     }
 }
 

@@ -425,7 +425,15 @@ struct Extras {
     /// one-pixel line's doubled pixels and corners left out, and no gap of more than a pixel.
     pixelated: bool,
     pixel_perfect: bool,
+    /// The stamps are a ribbon's rungs (see [`crate::ribbon`]): close together, on the path,
+    /// none thrown about, mirrored or squeezed.
+    ribbon: bool,
 }
+
+/// A ribbon's rungs are this far apart (canvas pixels), but no nearer than a hundredth of the
+/// stamp's size and no further than a quarter: close enough for its sides to curve smoothly, and
+/// a big ribbon not drowned in them.
+const RIBBON_RUNG: f32 = 2.5;
 
 /// Each tilt switch's angle (its dial's share of a quarter turn), none where the switch is off.
 #[derive(Clone, Copy, Debug, Default)]
@@ -455,6 +463,30 @@ struct TiltAngles {
 
 impl Extras {
     fn of(b: &Brush) -> Extras {
+        let extras = Extras::of_stamps(b);
+        if !b.is_ribbon() {
+            return extras;
+        }
+        // a ribbon's rungs keep to the path, evenly: what throws stamps about, spaces them
+        // unevenly, mirrors or squeezes them has no meaning for one strip
+        Extras {
+            spacing_jitter: 0.0,
+            jitter_lateral: 0.0,
+            jitter_linear: 0.0,
+            count_jitter: 0.0,
+            roundness_jitter: [0.0; 2],
+            speed_spacing: 0.0,
+            flip_x: false,
+            flip_y: false,
+            pixelated: false,
+            pixel_perfect: false,
+            ribbon: true,
+            ..extras
+        }
+    }
+
+    /// The controls as a stamped brush reads them.
+    fn of_stamps(b: &Brush) -> Extras {
         let unit = |k: &str| b.setting(k).clamp(0.0, 1.0);
         let both = |k: &str| b.setting(k).clamp(-1.0, 1.0);
         let switch = |k: &str| (b.setting(k) >= 0.5).then(|| unit(&format!("{k}_angle")));
@@ -537,8 +569,24 @@ impl Extras {
             spacing_stride: if b.setting("spacing_version") < 0.5 { std::f32::consts::FRAC_1_SQRT_2 } else { 1.0 },
             pixelated: b.setting("pixelated") >= 0.5,
             pixel_perfect: b.setting("pixelated") >= 0.5 && b.setting("pixel_perfect") >= 0.5,
+            ribbon: false,
         }
     }
+}
+
+/// `brush` as a ribbon's rungs are placed (any other brush as it is): one rung a step, on the path,
+/// square to it and as wide as the stamp, turned nowhere at random; the shape's own turn and
+/// roundness are for stamps.
+fn ribbon_rungs(mut brush: Brush) -> Brush {
+    if brush.is_ribbon() {
+        brush.shape = crate::brush::Shape {
+            image: brush.shape.image,
+            source: brush.shape.source.take(),
+            follow: 1.0,
+            ..crate::brush::Shape::default()
+        };
+    }
+    brush
 }
 
 /// The path curves through its points in chords this long at most (canvas pixels), and at most
@@ -993,6 +1041,7 @@ impl StrokeBuilder {
     /// As [`StrokeBuilder::new`], with the seed for scatter, jitter and random rotation.
     pub fn with_seed(brush: Brush, diameter: f32, pointer: Pointer, seed: u32) -> StrokeBuilder {
         let diameter = if diameter.is_finite() { diameter.max(0.5) } else { 1.0 };
+        let brush = ribbon_rungs(brush);
         let roll_turns = brush.setting("input_style") >= 1.5;
         let roll_relative = brush.setting("relative_to_stroke") >= 0.5;
         StrokeBuilder {
@@ -1934,6 +1983,10 @@ impl StrokeBuilder {
     /// shorter side (a flat stamp lies as close as its height says), and half a pixel more (and a
     /// little with the spacing).
     fn step(&self, p: PathPoint) -> f32 {
+        if self.extras.ribbon {
+            let size = self.diameter_at(p);
+            return RIBBON_RUNG.clamp(0.01 * size, 0.25 * size).max(0.25);
+        }
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
         let shorter = self.square_at(p) * SPACED_SQUARE * self.roundness_at(p).min(1.0);
@@ -2077,7 +2130,12 @@ impl StrokeBuilder {
         let mut alpha = ranged.powf(FLOW_POWER) * through * falloff;
         // (wet paint is laid stamp by stamp as it is mixed, and a stroke laid in place takes the
         // rule pixel by pixel, not built up gradually)
-        if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place() {
+        // (nor a ribbon, one strip that nothing overlaps)
+        if self.brush.rendering == Rendering::Gradual
+            && !self.brush.mixes_wet()
+            && !self.brush.laid_in_place()
+            && !x.ribbon
+        {
             alpha = StrokeBuilder::gradual(alpha, diameter / self.step(p));
         }
         let shape = self.brush.shape.clone();
@@ -2432,6 +2490,70 @@ mod tests {
 
     fn line(n: usize, len: f32) -> Vec<Sample> {
         (0..=n).map(|i| Sample::at(Vec2::new(len * i as f32 / n as f32, 50.0), 1.0, i as f64 * 4.0)).collect()
+    }
+
+    /// `plain()` as a ribbon of a shape image, its stamps thrown about, squeezed and scattered
+    /// as a stamped brush would have them.
+    fn ribbon_brush() -> Brush {
+        let mut b = plain();
+        b.shape.image = Some(0);
+        b.shape.scatter = 1.0;
+        b.shape.count = 4;
+        b.shape.roundness = 0.3;
+        b.shape.size_jitter = 0.5;
+        b.set_setting("jitter_lateral", 0.8);
+        b.set_setting("spacing", 0.8);
+        b.set_setting("ribbon", 1.0);
+        b
+    }
+
+    #[test]
+    fn a_ribbon_s_rungs_lie_close_and_even_on_the_path() {
+        let mut s = StrokeBuilder::new(ribbon_brush(), 40.0, Pointer::Stylus);
+        s.add(&line(20, 200.0));
+        let stamps = s.finish();
+        // a rung every 2.5 pixels however widely the brush spaces its stamps, one a step, on the
+        // line, as wide as the stamp
+        assert!(stamps.len() >= 70, "{}", stamps.len());
+        for pair in stamps.windows(2) {
+            let gap = pair[1].center.distance(pair[0].center);
+            assert!((gap - RIBBON_RUNG).abs() < 0.2 || gap < RIBBON_RUNG, "{gap}");
+        }
+        assert!(stamps.iter().all(|r| (r.center.y - 50.0).abs() < 1e-3 && r.roundness == 1.0), "{stamps:?}");
+        assert!(stamps.iter().all(|r| (r.radius - 20.0).abs() < 1e-3), "{stamps:?}");
+        // laid as a strip end to end
+        let mut ribbon = crate::ribbon::Ribbon::new(1.0);
+        let pieces = ribbon.extend(&stamps);
+        assert_eq!(pieces.len(), stamps.len() - 1);
+        assert!(pieces.windows(2).all(|p| p[0].to == p[1].from));
+    }
+
+    #[test]
+    fn a_ribbon_s_width_follows_the_pressure() {
+        let mut b = ribbon_brush();
+        b.pressure_size = 1.0;
+        let mut s = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        let pressed: Vec<Sample> = (0..=20)
+            .map(|i| Sample::at(Vec2::new(10.0 * i as f32, 50.0), 0.2 + 0.04 * i as f32, i as f64 * 4.0))
+            .collect();
+        s.add(&pressed);
+        let stamps = s.finish();
+        let first = stamps.iter().take(5).map(|r| r.radius).sum::<f32>();
+        let last = stamps.iter().rev().take(5).map(|r| r.radius).sum::<f32>();
+        assert!(last > 2.0 * first, "{first} {last}");
+    }
+
+    #[test]
+    fn a_ribbon_needs_a_shape_and_the_round_tip_stamps_as_before() {
+        // set on the round tip, the switch changes nothing
+        let mut round = plain();
+        round.set_setting("ribbon", 1.0);
+        let draw = |b: Brush| {
+            let mut s = StrokeBuilder::new(b, 20.0, Pointer::Stylus);
+            s.add(&line(10, 100.0));
+            s.finish()
+        };
+        assert_eq!(draw(round), draw(plain()));
     }
 
     #[test]

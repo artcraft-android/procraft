@@ -1,5 +1,6 @@
 // Brush stamps into the stroke texture: one instanced quad per stamp, turned and squashed as the
-// stamp says, with the round tip or a shape image, and a moving grain if the brush has one.
+// stamp says, with the round tip or a shape image, and a moving grain if the brush has one. A
+// ribbon brush's pieces (vs_ribbon) go the same way, the shape image stretched along each.
 // Written premultiplied; the pipeline blends them "over" (light glaze) or keeps the maximum
 // (uniform glaze).
 
@@ -34,6 +35,8 @@ struct StampUniform {
     grain_side: f32,
     // 1: pixel art, each stamp laid on whole pixels and hard-edged
     pixelated: u32,
+    // 1: a ribbon's pieces, the shape read along the strip (see vs_ribbon)
+    ribbon: u32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -127,6 +130,50 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     return o;
 }
 
+// A ribbon's piece (see make2d_engine::ribbon): its two rungs, each its middle and the way to its
+// left edge (as long as half the strip's width), and their alphas and places along the image (in
+// tiles). The stamp it is laid for, beside it, gives its look.
+struct RibbonIn {
+    @location(12) start: vec4<f32>,
+    @location(13) end: vec4<f32>,
+    @location(14) ends: vec4<f32>,
+}
+
+// A ribbon's piece as two triangles from rung to rung, a pixel wider each side than the strip so
+// the shape's own edge is what shows. Its frame for the fragments: q.x how far along the image (in
+// tiles, read by its fraction), q.y across it from -1 at the left edge (the image's top) to 1.
+@vertex
+fn vs_ribbon(@builtin(vertex_index) vi: u32, inst: StampIn, piece: RibbonIn) -> StampOut {
+    // (which rung, which side)
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    );
+    let corner = corners[vi % 6u];
+    let to = corner.x > 0.5;
+    let rung = select(piece.start, piece.end, to);
+    let half = max(length(rung.zw), 1e-3);
+    let side = corner.y * (half + 1.0) / half;
+    let p = rung.xy - rung.zw * side;
+    var o: StampOut;
+    o.pos = vec4<f32>(p.x / su.canvas_size.x * 2.0 - 1.0, 1.0 - p.y / su.canvas_size.y * 2.0, 0.0, 1.0);
+    o.q = vec2<f32>(select(piece.ends.z, piece.ends.w, to), side);
+    o.radius = max(inst.radius, 0.01);
+    o.alpha = select(piece.ends.x, piece.ends.y, to);
+    let gc = cos(inst.grain_turn);
+    let gs = sin(inst.grain_turn);
+    let from_middle = p - inst.center;
+    o.grain_at = inst.grain_offset + vec2<f32>(from_middle.x * gc - from_middle.y * gs, from_middle.x * gs + from_middle.y * gc);
+    o.fill = vec2<f32>(1.0);
+    o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
+    // a leaning pen's shading across a stamp has no leading edge on a strip
+    o.look = vec4<f32>(inst.look.xyz, 0.0);
+    o.grain_press = inst.more.x;
+    o.grain_bleed = inst.more.y;
+    o.transfer = inst.more.z;
+    return o;
+}
+
 // hue (0..1), saturation and brightness of a colour, and back
 fn to_hsb(c: vec3<f32>) -> vec3<f32> {
     let hi = max(c.r, max(c.g, c.b));
@@ -192,8 +239,12 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
             a = min(rim, soft);
         }
     } else {
-        // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across
-        let uv = i.q * i.fill * 0.5 + 0.5;
+        // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across; a
+        // ribbon's tiles along the strip, from its left edge to its right across it
+        var uv = i.q * i.fill * 0.5 + 0.5;
+        if (su.ribbon == 1u) {
+            uv = vec2<f32>(fract(i.q.x), i.q.y * 0.5 + 0.5);
+        }
         // the mip level that matches the quad's size on the canvas
         // (a brush file's own image is bigger than the brush images, by as many levels)
         let side = f32(textureDimensions(shapes).x);

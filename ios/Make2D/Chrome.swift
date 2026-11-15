@@ -45,6 +45,10 @@ struct TopBar: View {
                 .padding(.leading, Pc.barMargin)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: gaps.tool) {
+                    // brightens or dims the paint under the brush (tapped again, its panel)
+                    ToolButton(icon: PcIcons.light, selected: !panelOpen && model.tool == .light) {
+                        model.toolPressed(.light)
+                    }
                     ToolButton(icon: PcIcons.brush, selected: !panelOpen && model.tool == .paint, onHold: { model.toolHeld(.paint) }) {
                         model.toolPressed(.paint)
                     }

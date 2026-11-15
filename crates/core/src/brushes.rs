@@ -272,7 +272,8 @@ impl CanvasSession {
         let before = st.brush_ref(st.tool);
         st.note_choice(before);
         match st.tool {
-            crate::ToolKind::Paint => st.paint_brush = (set, index),
+            // the light tool lights with the paint tool's brush
+            crate::ToolKind::Paint | crate::ToolKind::Light => st.paint_brush = (set, index),
             crate::ToolKind::Erase => st.erase_brush = (set, index),
             crate::ToolKind::Smudge => st.smudge_brush = (set, index),
         }
@@ -294,9 +295,11 @@ impl CanvasSession {
     }
 }
 
-/// Where a tool's notches are kept on a brush.
+/// Where a tool's notches are kept on a brush: the light tool's with the paint tool's, whose brush
+/// it uses.
 pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
-    make2d_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
+    let painting = matches!(tool, crate::ToolKind::Paint | crate::ToolKind::Light);
+    make2d_engine::brush::Notches::tool(painting, tool == crate::ToolKind::Smudge)
 }
 
 /// A square grey picture `n` pixels a side averaged down to half that.
@@ -396,6 +399,10 @@ impl CanvasSession {
         self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
+        // a ribbon's stamp on its own is its shape, as any brush's
+        if stamp_only {
+            style.ribbon = None;
+        }
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
             let second = second.clone().as_second();
             let mut second_style =

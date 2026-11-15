@@ -486,6 +486,11 @@ private struct PanelHost: View {
             let place = place(colorPanelWidth, buttonX)
             ColorPanel(model: model, arrowX: place.arrowX, screenHeight: screen.height)
                 .offset(x: place.left, y: Pc.barHeight)
+        case .light:
+            let buttonX = screen.width - Pc.toolCentreFromRight(libraryButton(.light), barWidth: screen.width)
+            let place = place(lightPanelWidth, buttonX)
+            LightPanel(model: model, arrowX: place.arrowX)
+                .offset(x: place.left, y: Pc.barHeight)
         default:
             EmptyView()
         }

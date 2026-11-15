@@ -100,6 +100,7 @@ impl State {
                 crate::ToolKind::Paint => 0,
                 crate::ToolKind::Erase => 1,
                 crate::ToolKind::Smudge => 2,
+                crate::ToolKind::Light => 3,
             };
             let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
             let [r, g, b] = self.color;

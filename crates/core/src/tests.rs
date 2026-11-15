@@ -847,6 +847,72 @@ fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
 }
 
 #[test]
+fn a_ribbon_brush_s_preview_shows_its_shape_along_the_stroke() {
+    let Some(s) = session(100, 100) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(set, l)| {
+            l.brushes.iter().position(|b| !b.round_tip() && !b.mixes_wet()).map(|index| (set, index))
+        });
+        found.unwrap()
+    };
+    let change = |key: &str, value: f32| {
+        let mut st = s.shared.lock();
+        st.library.get_mut(set).and_then(|l| l.brushes.get_mut(index)).unwrap().set_setting(key, value);
+    };
+    let preview = || s.brush_preview(set as u32, index as u32, 240, 60).unwrap().rgba;
+    let stamped = preview();
+    change("ribbon", 1.0);
+    let ribbon = preview();
+    assert_ne!(stamped, ribbon);
+    assert!(ribbon.iter().skip(3).step_by(4).filter(|&&a| a > 0).count() > 100, "the ribbon shows");
+    // and its scale with it
+    change("ribbon_scale", 1.0);
+    assert_ne!(ribbon, preview());
+    // a smudge with it smudges stamp by stamp
+    let brush = s.shared.lock().library.get(set).and_then(|l| l.brushes.get(index)).cloned().unwrap();
+    let smudge = make2d_gpu::StrokeStyle::for_brush(&brush, make2d_gpu::StrokeTool::Smudge, [0.0; 3], 1.0, false);
+    assert!(smudge.ribbon.is_none());
+}
+
+#[test]
+fn the_light_tool_brightens_and_dims_with_the_paint_brush_and_keeps_the_hue() {
+    use crate::{LightKind, LightSettings};
+    let Some(s) = session(64, 64) else { return };
+    no_streamline(&s);
+    let across = |s: &CanvasSession| {
+        s.set_brush_size(1.0);
+        s.set_brush_opacity(1.0);
+        s.stroke_begin(PointerKind::Finger, vec![sample(2.0, 32.0, 0.0)]);
+        s.stroke_add((1..16).map(|i| sample(2.0 + i as f32 * 4.0, 32.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    };
+    s.set_color(0.5, 0.3, 0.1);
+    across(&s);
+    let before = pixel(&s, 32, 32);
+    assert_eq!(before[3], 255);
+    // with the paint tool's brush
+    s.set_tool(ToolKind::Light);
+    {
+        let st = s.shared.lock();
+        assert_eq!(st.brush_ref(ToolKind::Light), st.brush_ref(ToolKind::Paint));
+    }
+    assert_eq!(s.light(), LightSettings { kind: LightKind::Brighten, strength: 0.5 });
+    across(&s);
+    let lit = pixel(&s, 32, 32);
+    assert!(lit[0] > before[0] + 20 && lit[1] > before[1] && lit[2] > before[2], "{before:?} {lit:?}");
+    // its hue as it was: the channels in the same order and much the same proportions
+    assert!(lit[0] > lit[1] && lit[1] > lit[2]);
+    assert_eq!(s.undo().as_deref(), Some("Light stroke"));
+    assert_eq!(pixel(&s, 32, 32), before);
+    s.set_light(LightSettings { kind: LightKind::Dim, strength: 2.0 });
+    assert_eq!(s.light().strength, 1.0);
+    across(&s);
+    let dim = pixel(&s, 32, 32);
+    assert!(dim[0] + 40 < before[0] && dim[0] > dim[1], "{before:?} {dim:?}");
+}
+
+#[test]
 fn brushes_keep_their_own_sliders() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.9);

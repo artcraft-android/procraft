@@ -6,7 +6,7 @@
 struct LayerUniform {
     opacity: f32,
     // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked,
-    // 4: it takes the layer's place where it reaches
+    // 4: it takes the layer's place where it reaches, 5: it changes the light (see `lit`)
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
@@ -53,6 +53,9 @@ struct LayerUniform {
     // where this one's top left is in those (x: the scale, yz: the point): grain fixed to the
     // canvas is read where it is on that canvas
     scaled: vec4<f32>,
+    // a light stroke's mode (0 brighten, 1 dim, 2 tame), how many stops a stroke covering fully
+    // moves the light, and the brightest a brightened colour's strongest channel goes (linear)
+    light: vec4<f32>,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -180,6 +183,39 @@ fn burnt(under: vec4<f32>, r: vec4<f32>, w: f32) -> vec4<f32> {
     return mix(r, vec4<f32>(unpremultiply(b) * r.a, r.a), clamp(w, 0.0, 1.0));
 }
 
+// sRGB to linear light and back, carried on past white as it goes (for light above white)
+fn light_of(v: f32) -> f32 {
+    return select(v / 12.92, pow((v + 0.055) / 1.055, 2.4), v > 0.04045);
+}
+
+fn encoded(v: f32) -> f32 {
+    return select(v * 12.92, 1.055 * pow(v, 1.0 / 2.4) - 0.055, v > 0.0031308);
+}
+
+// the light tool on premultiplied colour `c`, as far as the stroke covers it (`amount`): its
+// channels scaled alike in linear light, so its hue and saturation stay. Brightening goes no
+// further than the ceiling (nor lowers what is above it), dimming halves the light for each stop,
+// taming draws only what is above white back towards it. Black has no light to scale. (One way
+// out: see `stroke_into`.)
+fn lit(c: vec4<f32>, amount: f32) -> vec4<f32> {
+    let straight = max(c.rgb / max(c.a, 1e-6), vec3<f32>(0.0));
+    let linear = vec3<f32>(light_of(straight.r), light_of(straight.g), light_of(straight.b));
+    let peak = max(linear.r, max(linear.g, linear.b));
+    let k = clamp(amount, 0.0, 1.0);
+    let stops = lu.light.y * k;
+    var goal = peak;
+    if (lu.light.x < 0.5) {
+        goal = max(peak, min(peak * exp2(stops), lu.light.z));
+    } else if (lu.light.x < 1.5) {
+        goal = peak * exp2(-stops);
+    } else if (peak > 1.0) {
+        goal = mix(peak, 1.0, k);
+    }
+    let scaled = linear * (goal / max(peak, 1e-6));
+    let out = vec3<f32>(encoded(scaled.r), encoded(scaled.g), encoded(scaled.b));
+    return select(c, vec4<f32>(out * c.a, c.a), c.a > 1e-4 && peak > 1e-5 && k > 0.0);
+}
+
 // a layer with the stroke in progress on it applied
 fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     var c = c0;
@@ -197,6 +233,8 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         }
         if (lu.stroke_mode == 2u) {
             c = c * (1.0 - s.a);
+        } else if (lu.stroke_mode == 5u) {
+            c = lit(c, s.a);
         } else {
             // painted (1), or recoloured keeping the layer's alpha (3): the blend written once, as
             // Direct3D 12's compiler takes a long while over each copy of its modes
