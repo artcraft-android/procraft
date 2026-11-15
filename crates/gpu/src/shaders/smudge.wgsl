@@ -607,18 +607,26 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
     }
+    // a Normal second's share of the colour: where the first laid little, the second shows in the
+    // stroke's own colour (none for any other dual mode)
+    var toward = 0.0;
     if (st.dual != 0u) {
         var b = textureLoad(second_tex, p, 0).a;
         if (st.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > st.dual_threshold);
         }
         a = dual_rise(dual_combine(a, b, st.dual - 1u), built, st.dual - 1u);
+        if (st.dual == 1u) {
+            toward = clamp((1.0 - laid) * b, 0.0, 1.0);
+        }
     }
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
         var kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
+        // (the paint as it was laid, for a Normal second)
+        var first = unpack4x8unorm(grained[k]);
         if (st.burnt > 0.0) {
             // burnt edges show where the stroke is thin: where its grain or its second took paint
             // away, or without either wherever it is less than full. The paint itself, blended
@@ -626,9 +634,19 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             let full = select(1.0, built, st.grain_once > 0.5 || st.dual != 0u);
             let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
             let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
-            kept = over_layer(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
+            let burning = mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0));
+            kept = over_layer(was, burning, laid * scale);
+            first = over_layer(was, burning, laid);
         }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
+        if (toward > 0.0) {
+            // a Normal second: the paint as laid turned toward the stroke's own colour as far as
+            // the second shows where the first laid little, then shown as far as the two together
+            // (where the first laid nothing, the second's colour over the layer)
+            let turned = mix(first, vec4<f32>(st.paint.rgb, 1.0), toward);
+            let shown = toward + (1.0 - toward) * laid;
+            out = over_layer(was, turned, min(a / max(shown, 1e-6), LAID_MOST_SCALE));
+        }
     }
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));

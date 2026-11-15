@@ -2915,6 +2915,45 @@ fn a_dual_brush_s_first_fades_into_its_second_s_colour() {
 }
 
 #[test]
+fn a_wet_dual_brush_s_first_fades_into_its_second_s_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // over red, a soft wet first that lays the red it picks up (no paint of its own), the stroke
+    // blue, inside a wide second by Normal: where the first fades out its colour gives way to the
+    // second's (the stroke's own) as far as the second shows past it
+    let mut doc = Document::new(64, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+    canvas.add_stamps(&(0..32).map(|y| dot(Vec2::new(32.0, y as f32), 48.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let first = StrokeStyle {
+        hardness: 0.1,
+        wet_pull: Some(0.5),
+        dilution: 1.0,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0)
+    };
+    let second = procraft_gpu::SecondStroke {
+        style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
+        mode: 0,
+        threshold: -1.0,
+    };
+    canvas.begin_dual_stroke(doc.current(), first, second);
+    canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, 1.0)]);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 12.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // the first's own (picked up) colour in its middle, the second's past it, and both between
+    let [r, _, b, _] = pixel(&layer, 64, 32, 16);
+    assert!(r > 200 && b < 60, "middle: red {r} blue {b}");
+    assert_eq!(pixel(&layer, 64, 58, 16), [0, 0, 255, 255]);
+    // (6 px out the first lays about 0.6: there the colour is about half the way to blue)
+    let [r, _, b, a] = pixel(&layer, 64, 38, 16);
+    assert!(a > 250 && r > 60 && b > 60, "red {r} blue {b} alpha {a}");
+}
+
+#[test]
 fn a_glaze_shows_its_wet_paint_only_as_far_as_its_own_build_up() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
