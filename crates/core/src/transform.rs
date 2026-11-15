@@ -386,8 +386,8 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && !l.drawn_from_data();
-        // with layers picked, every paint layer chosen (those in a chosen group too) moves
+        // with layers picked or a group current, every paint layer chosen (those in a chosen
+        // group too) moves
         let chosen = st.doc.chosen();
         // a plugin's layer alone moves its items as items: those the selection takes
         st.transform_items = None;
@@ -399,18 +399,7 @@ impl CanvasSession {
             }
             st.transform_items = Some((current, ids, false));
         }
-        let movable = |l: &Layer| movable(l) || st.transform_items.as_ref().is_some_and(|(id, ..)| *id == l.id);
-        let targets: Vec<LayerId> = if chosen.len() > 1 {
-            st.doc
-                .layers()
-                .iter()
-                .filter(|l| l.kind == LayerKind::Paint && movable(l))
-                .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
-                .map(|l| l.id)
-                .collect()
-        } else {
-            st.doc.layer(current).filter(|l| movable(l)).map(|_| current).into_iter().collect()
-        };
+        let targets = st.edited_layers_but(|id| st.transform_items.as_ref().is_some_and(|(items, ..)| *items == id));
         if targets.is_empty() {
             st.transform_items = None;
             return None;
@@ -491,6 +480,8 @@ impl CanvasSession {
             "Rasterize the layer to transform it"
         } else if st.selection.is_some() {
             "Nothing is selected on this layer"
+        } else if current.is_some_and(|l| l.kind == LayerKind::Group) {
+            "This group is empty"
         } else {
             "This layer is empty"
         }

@@ -5795,6 +5795,54 @@ fn picked_layers_transform_together() {
     assert_eq!(pixel(&s, 40, 40), [0, 0, 0, 255]);
 }
 
+#[test]
+fn a_group_current_transforms_what_is_in_it() {
+    use crate::transform::TransformHandle;
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0, 20.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    dot(40.0, 40.0);
+    let above = s.layers().iter().find(|l| l.current).unwrap().id;
+    // a layer outside the group stays where it is
+    s.add_layer();
+    dot(80.0, 80.0);
+    assert!(s.select_layer(above));
+    assert!(s.pick_layer(below));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.select_layer(group));
+    assert_eq!(s.chosen_layers(), [group]);
+    // the box holds both dots in it, not the one outside
+    let b = s.transform_begin().expect("the group's layers transform");
+    let [x0, y0, x1, _, _, y1, ..] = b.corners[..] else { panic!() };
+    assert!(x0 < 20.0 && y0 < 20.0 && x1 > 40.0 && y1 > 40.0 && x1 < 70.0 && y1 < 70.0, "{b:?}");
+    s.transform_grab(TransformHandle::Move, 30.0, 30.0);
+    s.transform_drag(60.0, 30.0);
+    s.transform_release();
+    s.transform_end(true);
+    assert_eq!(pixel(&s, 50, 20), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 70, 40), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 20, 20), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 80), [0, 0, 0, 255]);
+    // one step puts both back
+    s.undo();
+    assert_eq!(pixel(&s, 20, 20), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 40, 40), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 20), [255, 255, 255, 255]);
+    // a group holding nothing painted says so
+    let empty = s.add_layer();
+    assert!(s.select_layer(empty));
+    let lone = s.group_picked();
+    assert!(s.select_layer(lone));
+    assert!(s.transform_begin().is_none());
+    assert_eq!(s.transform_refusal(), "This group is empty");
+}
+
 /// On request (`BRUSH_SHEET=path.png`): every library brush's sample stroke, three to a row on
 /// dark grey, with their names listed beside it (`path.txt`), to look the library over.
 #[test]

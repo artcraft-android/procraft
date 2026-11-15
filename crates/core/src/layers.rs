@@ -1166,6 +1166,32 @@ impl CanvasSession {
     }
 }
 
+impl crate::State {
+    /// The layers an edit of what is chosen works on (a transform, Liquify): with several chosen
+    /// or a group current, every paint layer chosen or in a chosen group; else the current layer.
+    /// Only those that can change: unlocked, shown, and not drawn from data (`also` lets one of
+    /// those in).
+    pub(crate) fn edited_layers_but(&self, also: impl Fn(LayerId) -> bool) -> Vec<LayerId> {
+        let doc = &self.doc;
+        let changes = |l: &procraft_engine::document::Layer| {
+            (!doc.is_locked(l.id) && l.visible && !l.drawn_from_data()) || also(l.id)
+        };
+        let chosen = doc.chosen();
+        let current = doc.current();
+        let group = doc.layer(current).is_some_and(|l| l.kind == LayerKind::Group);
+        if chosen.len() > 1 || group {
+            doc.layers()
+                .iter()
+                .filter(|l| l.kind == LayerKind::Paint && changes(l))
+                .filter(|l| chosen.iter().any(|c| *c == l.id || doc.is_inside(l.id, *c)))
+                .map(|l| l.id)
+                .collect()
+        } else {
+            doc.layer(current).filter(|l| changes(l)).map(|_| current).into_iter().collect()
+        }
+    }
+}
+
 /// Why the current layer takes no change (see [`CanvasSession::why_blocked`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
