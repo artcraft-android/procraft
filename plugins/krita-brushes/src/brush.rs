@@ -228,6 +228,12 @@ pub struct Brush {
     pub airbrush: Option<Airbrush>,
     /// Its colour smudge, if it is one.
     pub smudge: Option<Smudge>,
+    /// Krita's other engines it may be (see `others.rs`), and a sketch brush's reach (half its tip
+    /// across, at size 1).
+    pub sketch: Option<crate::others::Sketch>,
+    pub spray: Option<crate::others::Spray>,
+    pub tangent: Option<crate::others::Tangent>,
+    pub sketch_radius: f32,
     /// How strongly a lightness tip's grey shows, and its sharpness.
     pub lightness: CurveOption,
     pub sharpness: Sharpness,
@@ -242,6 +248,11 @@ pub struct Brush {
     pub texture: Option<Texture>,
     pub masking: Option<Masking>,
 }
+
+/// Krita's engines this one draws: its pixel brush, colour smudge, quick brush, tangent normal,
+/// sketch and spray brushes.
+pub const ENGINES: [&str; 6] =
+    ["paintbrush", "colorsmudge", "roundmarker", "tangentnormal", "sketchbrush", "spraybrush"];
 
 /// Krita's composite ops as the app's blend modes number them.
 pub fn blend_number(op: &str) -> Option<u32> {
@@ -602,33 +613,106 @@ impl Brush {
     /// `light`: only to draw strokes with, its look not made (its pictures neither drawn nor
     /// decoded).
     pub fn read(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Brush> {
-        if p.paintop != "paintbrush" && p.paintop != "colorsmudge" {
+        if !ENGINES.contains(&p.paintop.as_str()) {
             return None;
         }
         let smudge = (p.paintop == "colorsmudge").then(|| Smudge::read(p));
-        let dynamics = Dynamics::read(p, "");
-        let definition = p.element("brush_definition");
-        let tip = definition
+        let mut dynamics = Dynamics::read(p, "");
+        // the quick, sketch and spray brushes have only some of the pixel brush's options: what a
+        // preset still says of the rest (from the engine it was made with) does nothing
+        let only: Option<&[&str]> = match p.paintop.as_str() {
+            "roundmarker" => Some(&["size", "spacing"]),
+            "sketchbrush" | "spraybrush" => Some(&["size", "opacity", "rotation"]),
+            _ => None,
+        };
+        if let Some(only) = only {
+            let d = &mut dynamics;
+            let options = [
+                ("opacity", &mut d.opacity),
+                ("flow", &mut d.flow),
+                ("rotation", &mut d.rotation),
+                ("ratio", &mut d.ratio),
+                ("spacing", &mut d.spacing),
+                ("scatter", &mut d.scatter),
+                ("mirror", &mut d.mirror),
+                ("softness", &mut d.softness),
+            ];
+            for (name, option) in options {
+                if !only.contains(&name) {
+                    option.checked = false;
+                    // the brush's opacity stays the preset's; its flow is full
+                    if name == "flow" {
+                        option.strength = 1.0;
+                    }
+                }
+            }
+        }
+        let pixel_options = only.is_none();
+        let definition = match p.paintop.as_str() {
+            // the quick brush: a hard round tip of its own diameter and spacing
+            "roundmarker" => crate::xml::parse(&format!(
+                r#"<Brush type="auto_brush" spacing="{}" useAutoSpacing="{}" autoSpacingCoeff="{}"><MaskGenerator type="circle" id="default" diameter="{}" ratio="1" hfade="1" vfade="1" antialiasEdges="1"/></Brush>"#,
+                p.number("spacing", 0.02),
+                u8::from(p.flag("useAutoSpacing", false)),
+                p.number("autoSpacingCoeff", 1.0),
+                p.number("diameter", 30.0),
+            )),
+            _ => p.element("brush_definition"),
+        };
+        let mut tip = definition
             .as_ref()
             .and_then(|b| read_tip(b, find, Some(&dynamics.softness), light, false))
             .unwrap_or_else(|| stand_in(definition.as_ref().and_then(|b| b.number("diameter")).unwrap_or(40.0)));
+        let sketch_radius = 0.5 * tip.width.max(tip.height);
+        let (sketch, spray) = match p.paintop.as_str() {
+            "sketchbrush" => (Some(crate::others::Sketch::read(p)), None),
+            "spraybrush" => (None, Some(crate::others::Spray::read(p))),
+            _ => (None, None),
+        };
+        if sketch.is_some() || spray.as_ref().is_some_and(|s| !s.own_tip) {
+            // its lines' and particles' tips: a hard round one, a square (unless its particles
+            // are its own tip)
+            let round = stand_in(64.0).masks.into_iter().next();
+            let square = Mask { width: 1, height: 1, pixels: if light { Vec::new() } else { vec![255] } };
+            let masks: Vec<Mask> =
+                if sketch.is_some() { vec![square] } else { round.into_iter().chain([square]).collect() };
+            let count = masks.len() as u32;
+            tip = Tip { tips: Tips::Images { count, pipe: None }, kind: Kind::Mask, masks, ..tip };
+        }
         let op = p.get("CompositeOp").unwrap_or("normal").trim().to_owned();
-        let texture = p.flag("Texture/Pattern/Enabled", false).then(|| Brush::read_texture(p, find, light)).flatten();
-        let masking = p.flag("MaskingBrush/Enabled", false).then(|| Brush::read_masking(p, find, light)).flatten();
+        let texture = (pixel_options && p.flag("Texture/Pattern/Enabled", false))
+            .then(|| Brush::read_texture(p, find, light))
+            .flatten();
+        let masking = (pixel_options && p.flag("MaskingBrush/Enabled", false))
+            .then(|| Brush::read_masking(p, find, light))
+            .flatten();
+        let colour = |key: &str| {
+            let mut option = CurveOption::read(p, "", key, true, 0.0, 1.0);
+            option.checked &= pixel_options;
+            option
+        };
+        let mut sharpness = Sharpness::read(p);
+        sharpness.option.checked &= pixel_options;
         Some(Brush {
             tip,
             dynamics,
             airbrush: Airbrush::read(p),
             smudge,
-            lightness: CurveOption::read(p, "", "LightnessStrength", true, 0.0, 1.0),
-            sharpness: Sharpness::read(p),
-            darken: CurveOption::read(p, "", "Darken", true, 0.0, 1.0),
-            mix: CurveOption::read(p, "", "Mix", true, 0.0, 1.0),
-            hue: CurveOption::read(p, "", "h", true, 0.0, 1.0),
-            saturation: CurveOption::read(p, "", "s", true, 0.0, 1.0),
-            value: CurveOption::read(p, "", "v", true, 0.0, 1.0),
-            // washed unless it says it builds up; a masked one always is
-            wash: p.number("PaintOpAction", 2.0) != 1.0 || masking.is_some(),
+            sketch,
+            spray,
+            tangent: (p.paintop == "tangentnormal").then(|| crate::others::Tangent::read(p)),
+            sketch_radius,
+            lightness: colour("LightnessStrength"),
+            sharpness,
+            darken: colour("Darken"),
+            mix: colour("Mix"),
+            hue: colour("h"),
+            saturation: colour("s"),
+            value: colour("v"),
+            // washed unless it says it builds up; a masked one always is; the quick, sketch and
+            // spray brushes lay each dab over the last
+            wash: (p.number("PaintOpAction", 2.0) != 1.0 || masking.is_some())
+                && !matches!(p.paintop.as_str(), "roundmarker" | "sketchbrush" | "spraybrush"),
             blend: blend_number(&op),
             erases: op == "erase" || p.flag("EraserMode", false),
             texture,

@@ -2,7 +2,8 @@
 
 A ProCraft plugin that is a brush engine (see the guide's "Brush engines of its own"): it reads
 Krita's brush presets (`.kpp`) and bundles (`.bundle`) as they are imported, and draws their
-brushes as Krita's pixel brush and colour smudge brush draw them. It comes with the app, off.
+brushes as Krita's pixel brush and colour smudge brush draw them, and its quick, tangent normal,
+sketch and spray brushes as far as dabs draw them. It comes with the app, off.
 
 ## What it draws
 
@@ -37,6 +38,16 @@ brushes as Krita's pixel brush and colour smudge brush draw them. It comes with 
   it towards the secondary colour; an eraser's is clear, taking the paint away), laid as far as its
   smudge rate says, by the older engine's sums or the newer's; the first dab only marks where the
   next picks up from.
+- Other engines: the quick brush (hard round dabs of its diameter and spacing), the tangent normal
+  brush (a pixel brush painting the pen's lean, or the stroke's way, or the pen's turn, as a normal
+  map's colour, its channels swizzled as it says), the sketch brush (at each move a line from where
+  it was, and lines towards the points it passed within its tip's reach, as likely as its density
+  and their distance say, offset, magnetised, their colour and opacity at random if it says, each
+  line a thin dab) and the spray brush (at each of its dabs its particles, as many as its count or
+  as its coverage says, scattered by its distribution, squashed, turned and scaled, each an
+  ellipse, a rectangle, a pixel or the brush's own tip, sized, turned and coloured at random as it
+  says). As in Krita, the quick brush takes only its size and spacing options, and the sketch and
+  spray brushes their size, opacity and rotation.
 
 The app draws each brush's preview with the plugin, and QuickShape, layers of a plugin's own laying
 their strokes again and painting on a 3D model go through it too; brush files the app writes keep
@@ -53,8 +64,15 @@ readers (which its tests use) run in it.
 
 ## Not yet
 
-- Krita's other engines (sketch, spray, deform, and the rest): those presets come in as the app
-  reads them.
+- Krita's other engines come in as the app reads them. Some lay no dabs at all, so a brush engine
+  of dabs can't draw them: the shape brush (it fills the outline the stroke makes), the filter brush
+  (it filters what is under it), the deform brush (it moves the pixels under it) and the clone brush
+  (it copies pixels from elsewhere). The bristle, hatching, curve, particle, grid, dyna and chalk
+  brushes could be drawn as dabs (lines and shapes) and aren't yet.
+- The sketch brush draws each move's lines over each other (Krita draws them into one dab first,
+  then lays that at the opacity option's), keeps the last 4,096 points it passed, and takes its tip
+  as round for its reach; the spray brush's particle pictures, its sampled colours and its
+  background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
 - Colour smudge's overlay mode (picking up from every layer: it picks up from the layer drawn on),
@@ -62,6 +80,8 @@ readers (which its tests use) run in it.
   (as smearing alpha does, whatever the preset says).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
   tip of one is drawn round, a masking brush or texture of one left out.
+- The Krita brush studio's pages are the pixel brush's: a colour smudge, sketch, spray or tangent
+  normal brush's own settings aren't on them.
 - The 1-pixel brush's sharp lines, drawn as dabs.
 - Perspective counts as 1 (the app has no perspective assistant), as in Krita without one; a
   gradient map takes the gradient from the colour to the secondary colour (the app has no current
@@ -85,7 +105,9 @@ sources for facts only (formulas, defaults and file layouts), none of it copied 
 - GIMP brush, pipe and pattern files and how pipes pick cells;
 - the texture's mask and its texturing modes; the masking brush and its composite ops;
 - the colour smudge brush: its smudge rate, colour rate, smudge radius and gradient options, its
-  dulling and smearing modes and how its older and newer engines combine them.
+  dulling and smearing modes and how its older and newer engines combine them;
+- the quick, tangent normal, sketch and spray brushes: their settings, and how they lay their dabs,
+  lines and particles.
 
 The file formats (PNG, zip, base64, a small XML reader) are written here from their public
 specifications.

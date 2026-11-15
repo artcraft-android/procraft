@@ -49,7 +49,7 @@ pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
 fn add(made: &mut Record, kpp: &[u8], find: &dyn Fn(&str) -> Option<Vec<u8>>) {
     let Some(text) = preset_text(kpp) else { return };
     let Some(preset) = Preset::read(&text) else { return };
-    if preset.paintop != "paintbrush" && preset.paintop != "colorsmudge" {
+    if !crate::brush::ENGINES.contains(&preset.paintop.as_str()) {
         return;
     }
     let mut data = Record::new();
@@ -245,7 +245,7 @@ mod tests {
         assert!(fields(&look).any(|(f, v)| f == 2 && v == [0]), "each laid as far as it says");
         let mut stroke = Stroke::new(
             Rc::new(brush),
-            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3 },
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3, turn: 0.0 },
         );
         let samples: Vec<Sample> =
             (0..40).map(|i| Sample { x: 10.0 + i as f32 * 2.0, y: 50.0, pressure: 1.0, ..Sample::default() }).collect();
@@ -264,10 +264,116 @@ mod tests {
         data.field(1, eraser.as_bytes());
         let mut stroke = Stroke::new(
             Rc::new(load(&data.bytes(), false).unwrap()),
-            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3 },
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3, turn: 0.0 },
         );
         stroke.add(&samples);
         assert!(stroke.out.iter().all(|d| d.flags & 176 == 176), "moving paint, dulled, clear");
+    }
+
+    /// A brush of `engine` with `params`, its tip a round one `diameter` across, drawn along a line.
+    fn drawn(engine: &str, params: &str, diameter: f32) -> Vec<crate::engine::Dab> {
+        let xml = format!(
+            r#"<Preset name="E" paintopid="{engine}"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="{diameter}" ratio="1" hfade="1" vfade="1"/></Brush>]]></param>{params}</Preset>"#
+        );
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let brush = load(&data.bytes(), false).unwrap();
+        let mut stroke = Stroke::new(
+            Rc::new(brush),
+            Begin {
+                colour: [1.0, 0.0, 0.0],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                seed: 5,
+                turn: 0.0,
+            },
+        );
+        let samples: Vec<Sample> = (0..30)
+            .map(|i| Sample {
+                x: 50.0 + i as f32 * 3.0,
+                y: 50.0,
+                pressure: 1.0,
+                ms: f64::from(i) * 8.0,
+                ..Sample::default()
+            })
+            .collect();
+        stroke.add(&samples);
+        stroke.out
+    }
+
+    /// Krita's quick brush lays hard round dabs of its own diameter, close together, each over the
+    /// last.
+    #[test]
+    fn a_quick_brush_lays_hard_round_dabs() {
+        let dabs = drawn(
+            "roundmarker",
+            r#"<param name="diameter"><![CDATA[12]]></param><param name="spacing"><![CDATA[0.1]]></param>"#,
+            40.0,
+        );
+        assert!(dabs.len() > 30);
+        assert!(dabs.iter().all(|d| (d.diameter - 12.0).abs() < 0.5 && d.opacity == 1.0));
+        // the preset's opacity whatever the pressure: the quick brush has no opacity option
+        let xml = r#"<Preset name="Q" paintopid="roundmarker"><param name="diameter"><![CDATA[12]]></param><param name="OpacityValue"><![CDATA[1]]></param></Preset>"#;
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let mut stroke = Stroke::new(
+            Rc::new(load(&data.bytes(), false).unwrap()),
+            Begin {
+                colour: [1.0, 0.0, 0.0],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                seed: 5,
+                turn: 0.0,
+            },
+        );
+        let light: Vec<Sample> = (0..30)
+            .map(|i| Sample {
+                x: 50.0 + i as f32 * 3.0,
+                y: 50.0,
+                pressure: 0.3,
+                ms: f64::from(i) * 8.0,
+                ..Sample::default()
+            })
+            .collect();
+        stroke.add(&light);
+        assert!(!stroke.out.is_empty() && stroke.out.iter().all(|d| d.opacity == 1.0 && d.flow == 1.0));
+    }
+
+    /// Krita's tangent normal brush paints the pen's lean as a normal: an upright pen the normal
+    /// straight up (blue).
+    #[test]
+    fn a_tangent_normal_brush_paints_the_pen_s_lean() {
+        let dabs = drawn("tangentnormal", "", 20.0);
+        let c = dabs[0].colour;
+        assert!((c[0] - 0.5).abs() < 0.02 && (c[1] - 0.5).abs() < 0.02 && (c[2] - 1.0).abs() < 0.02, "{c:?}");
+    }
+
+    /// Krita's sketch brush lays lines: from each move's start to its end, and to points it passed
+    /// within its tip's reach.
+    #[test]
+    fn a_sketch_brush_lays_lines() {
+        let lines = r#"<param name="Sketch/probability"><![CDATA[1]]></param><param name="Sketch/distanceDensity"><![CDATA[false]]></param>"#;
+        let dabs = drawn("sketchbrush", lines, 40.0);
+        // a line for each move at the least, and more back to the points it passed
+        assert!(dabs.len() > 40, "{}", dabs.len());
+        assert!(dabs.iter().all(|d| d.tip == 0 && d.ratio <= 1.0));
+        assert!(dabs.iter().any(|d| d.diameter > 6.0), "lines longer than a move");
+    }
+
+    /// Krita's spray brush lays its particles at each of its dabs: as many as its count, within
+    /// its diameter of where it lies.
+    #[test]
+    fn a_spray_brush_lays_its_particles() {
+        let spray = r#"<param name="Spray/diameter"><![CDATA[40]]></param><param name="Spray/particleCount"><![CDATA[10]]></param><param name="Spray/spacing"><![CDATA[1]]></param><param name="SprayShape/width"><![CDATA[4]]></param><param name="SprayShape/height"><![CDATA[4]]></param>"#;
+        let dabs = drawn("spraybrush", spray, 20.0);
+        assert!(dabs.len() >= 20 && dabs.len().is_multiple_of(10), "{}", dabs.len());
+        assert!(dabs.iter().all(|d| (d.y - 50.0).abs() <= 20.5 && d.diameter >= 1.0 && d.diameter <= 4.5));
+        // its shape option off, its particles are its own tip, 20 across
+        let own = format!("{spray}{}", r#"<param name="SprayShape/enabled"><![CDATA[false]]></param>"#);
+        let dabs = drawn("spraybrush", &own, 20.0);
+        assert!(dabs.iter().all(|d| d.tip == dabs[0].tip && (d.diameter - 20.0).abs() < 0.5), "{:?}", dabs[0].diameter);
     }
 
     /// A texture's picture carried in a setting comes out of it as a file of the brush's, by its name.
@@ -326,7 +432,7 @@ mod tests {
             assert_eq!(brush.tip.masks.iter().all(|m| m.pixels.is_empty()), light);
             let mut stroke = Stroke::new(
                 Rc::new(brush),
-                Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3 },
+                Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3, turn: 0.0 },
             );
             let samples: Vec<Sample> = (0..60)
                 .map(|i| Sample {
@@ -382,7 +488,7 @@ mod tests {
             let loaded = t.elapsed();
             let mut stroke = Stroke::new(
                 Rc::new(brush),
-                Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 7 },
+                Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 7, turn: 0.0 },
             );
             let samples: Vec<Sample> = (0..120)
                 .map(|i| Sample {

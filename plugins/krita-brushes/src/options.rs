@@ -139,7 +139,7 @@ impl Sensor {
 }
 
 /// The direction the pen leans, 0..1 round the circle, as Krita reckons it.
-fn tilt_direction(info: &Info) -> f32 {
+pub fn tilt_direction(info: &Info) -> f32 {
     let (x, y) = (info.x_tilt, info.y_tilt);
     let angle = if x.abs() < 1e-6 && y.abs() < 1e-6 {
         let sign = |v: f32| if v < 0.0 { -1.0 } else { 1.0 };
@@ -151,7 +151,7 @@ fn tilt_direction(info: &Info) -> f32 {
 }
 
 /// How upright the pen is, 0..1 (1 upright), as Krita reckons it.
-fn tilt_elevation(info: &Info) -> f32 {
+pub fn tilt_elevation(info: &Info) -> f32 {
     let x = (info.x_tilt / 60.0).clamp(-1.0, 1.0);
     let y = (info.y_tilt / 60.0).clamp(-1.0, 1.0);
     let e = if x.abs() > y.abs() { (1.0 + y * y).sqrt() } else { (1.0 + x * x).sqrt() };
