@@ -135,6 +135,40 @@ pub fn linear(v: f32) -> f32 {
     l.copysign(v)
 }
 
+/// The sRGB curve, carried on past white (and mirrored below black): [`linear`] undone.
+pub fn encoded(v: f32) -> f32 {
+    let m = v.abs();
+    let e = if m <= 0.003_130_8 { m * 12.92 } else { 1.055 * m.powf(1.0 / 2.4) - 0.055 };
+    e.copysign(v)
+}
+
+/// The most stops above white a colour is taken to: past half floats' reach, a colour is
+/// no longer one.
+pub const MOST_STOPS: f32 = 15.0;
+
+/// A colour (sRGB-encoded, carried on past white) as a colour within white and how many stops
+/// above white it is lit: its brightest channel, in linear light, brought down to white. A colour
+/// within white is itself, 0 stops.
+pub fn above_white(rgb: [f32; 3]) -> ([f32; 3], f32) {
+    let lit = rgb.map(|c| if c.is_finite() { linear(c.max(0.0)) } else { 0.0 });
+    let brightest = lit.iter().copied().fold(0.0, f32::max);
+    if brightest <= 1.0 {
+        return (rgb.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 }), 0.0);
+    }
+    let stops = brightest.log2().min(MOST_STOPS);
+    (lit.map(|c| encoded(c / brightest).clamp(0.0, 1.0)), stops)
+}
+
+/// A colour within white (sRGB-encoded) lit `stops` above white: [`above_white`] undone.
+pub fn lit_above_white(rgb: [f32; 3], stops: f32) -> [f32; 3] {
+    let stops = if stops.is_finite() { stops.clamp(0.0, MOST_STOPS) } else { 0.0 };
+    if stops == 0.0 {
+        return rgb;
+    }
+    let k = stops.exp2();
+    rgb.map(|c| encoded(linear(c) * k))
+}
+
 /// How bright the brightest colour of HDR pixels is, in linear light (1: white).
 pub fn brightest(half: &[u8]) -> f32 {
     half.as_chunks::<HDR_PIXEL>()
@@ -318,6 +352,27 @@ mod tests {
                 assert_eq!(f32_to_half(f), h, "{h:#x}");
             }
         }
+    }
+
+    #[test]
+    fn a_colour_above_white_splits_into_a_colour_and_stops_and_back() {
+        for v in [0.0f32, 0.002, 0.04, 0.2, 0.5, 1.0, 1.7, 3.0] {
+            assert!((linear(encoded(v)) - v).abs() < 1e-5, "{v}");
+        }
+        // within white: itself, no stops
+        assert_eq!(above_white([0.2, 0.6, 1.0]), ([0.2, 0.6, 1.0], 0.0));
+        assert_eq!(lit_above_white([0.2, 0.6, 1.0], 0.0), [0.2, 0.6, 1.0]);
+        // two stops: four times white's light in its brightest channel, its hue kept
+        let lit = lit_above_white([1.0, 0.5, 0.25], 2.0);
+        assert!((linear(lit[0]) - 4.0).abs() < 1e-4);
+        assert!((linear(lit[1]) / linear(lit[0]) - linear(0.5)).abs() < 1e-5);
+        let (colour, stops) = above_white(lit);
+        assert!((stops - 2.0).abs() < 1e-4, "{stops}");
+        for (a, b) in colour.iter().zip([1.0, 0.5, 0.25]) {
+            assert!((a - b).abs() < 1e-4, "{colour:?}");
+        }
+        // what isn't a colour is black
+        assert_eq!(above_white([f32::NAN, f32::INFINITY, -1.0]), ([0.0; 3], 0.0));
     }
 
     #[test]

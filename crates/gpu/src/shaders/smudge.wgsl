@@ -2,7 +2,8 @@
 // with the brush a whole pixel at a time, holds what it carries (so nothing is resampled as it
 // goes); for each stamp, in order, it picks up some of what is under it (cs_carry) and lays what
 // it carries back down under the stamp's shape (cs_deposit). The layer being smudged is a buffer
-// of packed premultiplied RGBA8 pixels, read and written in place.
+// of its premultiplied pixels, read and written in place (in the canvas's format: see
+// smudge_rgba8.wgsl and smudge_rgba16f.wgsl).
 
 struct SmudgeStamp {
     center: vec2<f32>,
@@ -19,7 +20,7 @@ struct SmudgeStamp {
     // the stroke's first stamp); the rest load what is under them, as a stroke's start does
     kept: i32,
     preserve_alpha: u32,
-    // u32 words per buffer row
+    // pixels per buffer row
     stride: u32,
     // the pixels this stamp can touch: x0, y0, x1, y1
     bbox: vec4<i32>,
@@ -148,9 +149,9 @@ fn pixel(x: i32, y: i32) -> vec4<f32> {
     let k = u32(cy) * st.stride + u32(cx);
     // the brush picks up the stroke as it is without the grain laid over it, or its second
     if (st.laid_apart == 2u) {
-        return unpack4x8unorm(grained[k]);
+        return grained_at(k);
     }
-    return unpack4x8unorm(work[k]);
+    return work_at(k);
 }
 
 // the layer at a canvas position (pixel centres at +0.5), bilinear
@@ -381,7 +382,7 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let g = grain_at(vec2<f32>(p) + 0.5);
     let m = shape * st.alpha;
     let k = u32(p.y) * st.stride + u32(p.x);
-    let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), st.laid_apart == 2u);
+    let w = select(work_at(k), grained_at(k), st.laid_apart == 2u);
     // smudging: the grain lets less of what is carried through
     var out = mix(w, carried(p), m * g);
     if (st.mode == 1u) {
@@ -411,15 +412,14 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // outside the selection the layer stays as it is
     out = mix(w, out, selected_at(p));
-    // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
-    // add up as they should instead of rounding away
+    // rounded at random (see `put_work`)
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
     if (st.laid_apart == 2u) {
         // wet paint kept as it was laid; shown by cs_synthesize
-        grained[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+        put_grained(k, out, h);
         return;
     }
-    work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+    put_work(k, out, h);
 }
 
 // Paint laid in place with a texturized grain or a second, put together where its stamps or its
@@ -446,7 +446,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         // had; over a full layer, as far as it touched)
         var shown = laid;
         if (st.laid_apart == 2u && was.a < 0.999) {
-            let now = unpack4x8unorm(grained[k]).a;
+            let now = grained_at(k).a;
             shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0);
         }
         let x = 4.5 * max(shown, 1e-4);
@@ -467,13 +467,13 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
-        var kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
+        var kept = over_layer(was, grained_at(k), scale);
         if (st.burnt > 0.0) {
             // burnt edges show where the stroke is thin: where its grain or its second took paint
             // away, or without either wherever it is less than full. The paint itself, blended
             // once more with what was under it (nothing shows where the layer was empty)
             let full = select(1.0, laid, st.grain_once > 0.5 || st.dual != 0u);
-            let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
+            let own = clamp(over_layer(was, grained_at(k), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
             let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
             kept = over_layer(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
         }
@@ -485,7 +485,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     out = mix(was, out, selected_at(p));
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
-    work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+    put_work(k, out, h);
 }
 
 // a number in 0..1 that looks random, from three

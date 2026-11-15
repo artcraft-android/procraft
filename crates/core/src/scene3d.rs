@@ -2933,7 +2933,7 @@ impl State {
             let [r, g, b, _] = canvas.read_composite_pixel(gpu, tx, ty)?;
             Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
         });
-        Some(crate::pick::Pick { rgb, side, pixels })
+        Some(crate::pick::Pick { rgb, stops: 0.0, side, pixels })
     }
 
     /// A tool that works on the texture, not through the camera (a transform, Liquify, Clone), is
