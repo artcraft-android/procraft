@@ -49,9 +49,9 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Selection | a dashed curve: a selection's marching path (lork's drawing) |
 | Transform | a notched arrowhead on a long tail, pointing up and to the right (lork's drawing, its head shortened) |
 | Paint | a long tapering handle and a curled tip (lork's drawing) |
-| Smudge | a fingertip pressing on a smear |
-| Erase | an eraser block with a band, on a line |
-| Layers | two stacked sheets, the top one solid |
+| Smudge | a hand pointing down to the left (lork's drawing) |
+| Erase | an eraser block with a band at its lower end (lork's drawing, its end drawn whole) |
+| Layers | two rounded sheets, the back one up to the right (lork's drawing, set further apart) |
 | Undo / Redo | a curved arrow turning back / forward |
 
 ## The Actions panel's tabs
@@ -160,7 +160,7 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 |---|---|
 | About this artwork | the Brush Studio's name tag |
 | Dimensions | a ruler, its marks cut in from one edge |
-| Layers | the bar's two stacked sheets |
+| Layers | two stacked sheets, the top one solid |
 | Colour profile | a triangle of colours inside the ring of all colours |
 | Video settings | the Actions tab's camera |
 | Statistics | a pie chart with one slice pulled out |
@@ -190,7 +190,7 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Full Screen | the menus' corner-to-corner arrow |
 | Clear Layer | the colour history's bin |
 | Copy & Paste | the Selection toolbar's two sheets |
-| Layer Select | the bar's two stacked sheets |
+| Layer Select | two stacked sheets, the top one solid |
 | Hover | a stylus held just above the glass |
 | General | the Actions tab's switch |
 
