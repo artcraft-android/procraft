@@ -5488,6 +5488,13 @@ fn a_stamp_preview_shows_the_stamp_alone() {
     // as wide as that share of the most size, in the preview's pixels (327 of the canvas's 1060)
     let expected = share * biggest * 327.0 / 1060.0;
     assert!((narrow - expected).abs() < expected * 0.2 + 3.0, "{narrow} against {expected}");
+    // a least size: that share of the way from it to the most
+    let least = 0.5 * share * biggest;
+    s.shared.lock().library[b.set as usize].brushes[b.index as usize].min_size = least;
+    let (left, right) = stamp_at(&s, share);
+    let expected = (least + (biggest - least) * share) * 327.0 / 1060.0;
+    let wide = (right - left) as f32;
+    assert!((wide - expected).abs() < expected * 0.2 + 3.0, "{wide} against {expected}");
 }
 
 #[test]
