@@ -50,6 +50,7 @@ mod layer_ops;
 mod layer_style;
 mod layers;
 mod liquify;
+mod media;
 mod modes;
 mod palettes;
 mod pick;
@@ -703,6 +704,8 @@ pub(crate) struct State {
     /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
     /// apart from the document, so that undoing never moves it.
     pub(crate) reference_window: make2d_engine::reference_window::ReferenceWindow,
+    /// Where the timeline's sounds and videos are kept, and how videos' pictures are read.
+    pub(crate) media: media::MediaStore,
     pub(crate) reference_picture: Option<Arc<Vec<u8>>>,
     pub(crate) revision: u64,
     /// The open transform, how its handles act and how it resamples.
@@ -1710,6 +1713,7 @@ impl CanvasSession {
             saved_view: None,
             reference_window: Default::default(),
             reference_picture: None,
+            media: Default::default(),
         };
         Arc::new_cyclic(|me| CanvasSession {
             me: me.clone(),

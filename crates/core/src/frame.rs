@@ -88,6 +88,7 @@ impl State {
     ) {
         self.needs_frame = false;
         self.frame_due = None;
+        self.attach_media();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
