@@ -997,10 +997,11 @@ impl Stroke {
     }
 
     /// A hatching brush's dab at `p`: the hatching's lines across the dab's box, each as thick as
-    /// it says, crosshatched as it says (its tip, laid as the masking stroke, keeps them inside it).
+    /// it says, crosshatched as it says, kept inside the dab's tip: in pieces, each as opaque as the
+    /// tip is where it lies.
     fn hatch_at(&mut self, p: &Point, hatching: &crate::others::Hatching) {
         let brush = Rc::clone(&self.brush);
-        let Some(mask) = &brush.masking else { return };
+        let Some(tip) = &brush.hatch_tip else { return };
         let info = self.info(p, self.main.dabs);
         let seed = self.begin.seed;
         let k = self.size_factor();
@@ -1013,9 +1014,9 @@ impl Stroke {
         let cross_value = one(&hatching.crosshatching_option, &mut fuzz);
         let separation_value = one(&hatching.separation_option, &mut fuzz);
         let thickness_value = one(&hatching.thickness_option, &mut fuzz);
-        let (dw, dh) = (mask.tip.width * scale, mask.tip.height * scale);
+        let (dw, dh) = (tip.width * scale, tip.height * scale);
         // the next dab as the tip spaces it
-        let spacing = spacing_of(&mask.tip, dw.max(1e-3), dh.max(1e-3), 1.0, false);
+        let spacing = spacing_of(tip, dw.max(1e-3), dh.max(1e-3), 1.0, false);
         self.main.spacing = spacing;
         self.main.turn = 0.0;
         self.main.dabs += 1;
@@ -1033,17 +1034,19 @@ impl Stroke {
         } else {
             hatching.separation
         };
+        let (cx, cy) = (x0 + w * 0.5, y0 + h * 0.5);
         if hatching.opaque_background {
-            let long = w.max(h);
+            // the secondary colour behind them, in the tip's own shape
+            let long = dw.max(dh);
             self.out.push(Dab {
-                x: x0 + w * 0.5,
-                y: y0 + h * 0.5,
+                x: cx,
+                y: cy,
                 diameter: long,
-                angle: if w >= h { 0.0 } else { FRAC_PI_2 },
-                ratio: (w.min(h) / long).clamp(0.01, 1.0),
+                angle: tip.angle,
+                ratio: (dw.min(dh) / long).clamp(0.01, 1.0),
                 opacity,
                 flow: 1.0,
-                tip: LINE_TIP,
+                tip: LINE_TIP + 1,
                 flags: OWN_COLOUR,
                 colour: self.begin.secondary,
                 strength: 1.0,
@@ -1051,6 +1054,21 @@ impl Stroke {
                 ..Dab::default()
             });
         }
+        // how much of the tip is at a point on the canvas
+        let (turn_sin, turn_cos) = (-tip.angle).sin_cos();
+        let cover = |x: f32, y: f32| -> f32 {
+            let Some(m) = tip.masks.first() else { return 1.0 };
+            let (u, v) = (x - cx, y - cy);
+            let (u, v) = (u * turn_cos - v * turn_sin, u * turn_sin + v * turn_cos);
+            let (fu, fv) = (u / dw + 0.5, v / dh + 0.5);
+            if !(0.0..1.0).contains(&fu) || !(0.0..1.0).contains(&fv) || m.width == 0 || m.height == 0 {
+                return 0.0;
+            }
+            let (i, j) = ((fu * m.width as f32) as usize, (fv * m.height as f32) as usize);
+            m.pixels.get(j * m.width as usize + i).map_or(1.0, |&a| f32::from(a) / 255.0)
+        };
+        // pieces short enough to follow the tip's edge
+        let step = (dw.min(dh) / 24.0).max(1.5);
         // the passes: a crosshatching's by its style and value, then the hatching's own
         let mut angles = Vec::new();
         let cross = hatching.crosshatching_option.checked;
@@ -1086,7 +1104,33 @@ impl Stroke {
             let (sin, cos) = angle.to_radians().sin_cos();
             let across = thickness * sin.abs().max(cos.abs());
             for (a, b) in hatch_lines(hatching, angle, separation, (x0, y0, w, h)) {
-                self.line(a, b, across, opacity, None);
+                let length = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                let pieces = ((length / step).ceil() as usize).clamp(1, 4096);
+                let point = |t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                // each piece halved where the tip's edge crosses it, down to a pixel
+                let mut left: Vec<(f32, f32, f32, f32)> = (0..pieces)
+                    .rev()
+                    .map(|i| {
+                        let (t0, t1) = (i as f32 / pieces as f32, (i + 1) as f32 / pieces as f32);
+                        let (p0, p1) = (point(t0), point(t1));
+                        (t0, t1, cover(p0.0, p0.1), cover(p1.0, p1.1))
+                    })
+                    .collect();
+                while let Some((t0, t1, c0, c1)) = left.pop() {
+                    if (c0 - c1).abs() > 0.04 && (t1 - t0) * length > 1.0 {
+                        let t = (t0 + t1) * 0.5;
+                        let m = point(t);
+                        let cm = cover(m.0, m.1);
+                        left.push((t, t1, cm, c1));
+                        left.push((t0, t, c0, cm));
+                        continue;
+                    }
+                    let (p0, p1) = (point(t0), point(t1));
+                    let c = cover((p0.0 + p1.0) * 0.5, (p0.1 + p1.1) * 0.5).max((c0 + c1) * 0.5);
+                    if c > 0.002 {
+                        self.line(p0, p1, across, opacity * c, None);
+                    }
+                }
             }
         }
     }

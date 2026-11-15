@@ -238,6 +238,8 @@ pub struct Brush {
     pub tangent: Option<crate::others::Tangent>,
     pub hairy: Option<crate::others::Hairy>,
     pub hatching: Option<crate::others::Hatching>,
+    /// A hatching brush's tip, drawn (its lines are kept inside each dab of it).
+    pub hatch_tip: Option<Tip>,
     pub curves: Option<crate::others::Curves>,
     pub particles: Option<crate::others::Particles>,
     pub grid: Option<crate::others::Grid>,
@@ -807,21 +809,20 @@ impl Brush {
         let curves = (engine == "curvebrush").then(|| crate::others::Curves::read(p));
         let particles = (engine == "particlebrush").then(|| crate::others::Particles::read(p));
         let grid = (engine == "gridbrush").then(|| crate::others::Grid::read(p));
-        // a hatching's lines are laid inside its tip: the tip a mask its lines are multiplied by
-        let hatched = hatching.as_ref().map(|_| {
-            let mut dynamics = dynamics.clone();
-            dynamics.opacity.checked = false;
-            dynamics.opacity.strength = 1.0;
-            let tip = definition.as_ref().and_then(|b| read_tip(b, find, None, light, true)).unwrap_or_else(stand_in);
-            Masking { tip, dynamics, size: 0.0, combine: combine_number("multiply") }
-        });
+        // a hatching's lines are laid inside each dab of its tip: the tip drawn, to be read where
+        // they lie
+        let hatch_tip = hatching
+            .as_ref()
+            .map(|_| definition.as_ref().and_then(|b| read_tip(b, find, None, false, true)).unwrap_or_else(stand_in));
         let own_tip = spray.as_ref().is_some_and(|s| s.own_tip);
         if (SHAPES.contains(&engine) && !own_tip) || hatching.is_some() {
             // its lines', dots' and shapes' tips: a hard round one, a square (unless a spray's
             // particles are its own tip)
             let round = round_tip(64.0).masks.into_iter().next();
             let square = Mask { width: 1, height: 1, pixels: if light { Vec::new() } else { vec![255] } };
-            let masks: Vec<Mask> = round.into_iter().chain([square]).collect();
+            // (and a hatching's own, for the background behind its lines)
+            let own = hatch_tip.as_ref().and_then(|t| t.masks.first().cloned());
+            let masks: Vec<Mask> = round.into_iter().chain([square]).chain(own).collect();
             let count = masks.len() as u32;
             tip = Tip { tips: Tips::Images { count, pipe: None }, kind: Kind::Mask, masks, ..tip };
         }
@@ -835,7 +836,7 @@ impl Brush {
             .flatten();
         // a masked one always washes
         let wash = (washes || masking.is_some()) && !SHAPES.contains(&engine) && engine != "roundmarker";
-        let masking = masking.or(hatched);
+
         let colour = |key: &str| {
             let mut option = CurveOption::read(p, "", key, true, 0.0, 1.0);
             option.checked &= pixel_options;
@@ -853,6 +854,7 @@ impl Brush {
             tangent: (p.paintop == "tangentnormal").then(|| crate::others::Tangent::read(p)),
             hairy,
             hatching,
+            hatch_tip,
             curves,
             particles,
             grid,

@@ -421,17 +421,36 @@ mod tests {
     }
 
     /// Krita's hatching brush: inside each dab of its tip, the lines of a hatching anchored to the
-    /// canvas, a separation apart, the tip laid as the mask they are multiplied by.
+    /// canvas, a separation apart, each kept inside the dab's tip.
     #[test]
     fn a_hatching_brush_lays_canvas_lines_inside_its_tip() {
         let hatching = r#"<param name="Hatching/angle"><![CDATA[0]]></param><param name="Hatching/separation"><![CDATA[4]]></param><param name="Hatching/thickness"><![CDATA[1]]></param><param name="Hatching/origin_x"><![CDATA[0]]></param><param name="Hatching/origin_y"><![CDATA[0]]></param><param name="Hatching/bool_nocrosshatching"><![CDATA[true]]></param>"#;
         let dabs = drawn("hatchingbrush", hatching, 20.0);
-        let (masks, lines): (Vec<&crate::engine::Dab>, Vec<_>) = dabs.iter().partition(|d| d.flags & 8 != 0);
-        assert!(!masks.is_empty() && !lines.is_empty());
+        assert!(!dabs.is_empty() && dabs.iter().all(|d| d.flags & 8 == 0), "no masking stroke");
         // level lines on the canvas's rows a separation apart
-        assert!(lines.iter().all(|d| d.angle.abs() < 1e-3 && d.tip == 1), "level");
-        assert!(lines.iter().all(|d| (d.y.rem_euclid(4.0)).min(4.0 - d.y.rem_euclid(4.0)) < 0.01), "on the rows");
-        assert!(masks.iter().all(|d| (d.diameter - 20.0).abs() < 0.5), "the tip as the mask");
+        assert!(dabs.iter().all(|d| d.angle.abs() < 1e-3 && d.tip == 1), "level");
+        assert!(dabs.iter().all(|d| (d.y.rem_euclid(4.0)).min(4.0 - d.y.rem_euclid(4.0)) < 0.01), "on the rows");
+        assert!(dabs.iter().any(|d| (d.y - 44.0).abs() < 0.01) && dabs.iter().any(|d| (d.y - 56.0).abs() < 0.01));
+        // one dab's lines: inside its round tip, 20 across, not out in its box's corners
+        let xml = format!(
+            r#"<Preset name="E" paintopid="hatchingbrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="20" ratio="1" hfade="1" vfade="1"/></Brush>]]></param>{hatching}</Preset>"#
+        );
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let mut stroke = Stroke::new(
+            Rc::new(load(&data.bytes(), false).unwrap()),
+            Begin {
+                colour: [1.0, 0.0, 0.0],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                seed: 5,
+                turn: 0.0,
+            },
+        );
+        stroke.add(&[Sample { x: 50.0, y: 50.0, pressure: 1.0, ..Sample::default() }]);
+        assert!(!stroke.out.is_empty());
+        assert!(stroke.out.iter().all(|d| (d.x - 50.0).hypot(d.y - 50.0) <= 11.0), "inside the tip");
     }
 
     /// Krita's curve brush: a line for each move, and once it has passed as many points as it

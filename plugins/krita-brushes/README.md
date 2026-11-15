@@ -91,8 +91,10 @@ readers (which its tests use) run in it.
   yet.
 - The bristle brush keeps at most 4,096 bristles, takes its ink as it runs out once for each line
   (Krita at each pixel), draws its lines smooth whatever its antialiasing and compositing say, and
-  doesn't soak up the canvas's colours. The hatching brush keeps its lines inside the stroke's tips
-  as a whole (Krita inside each dab's). The curve brush lays a move's line and curve over each
+  doesn't soak up the canvas's colours. The hatching brush keeps its lines inside each dab's tip in
+  pieces, each as opaque as the tip where it lies, halved down to a pixel where the tip's edge
+  crosses them (Krita masks each pixel), so a thick line's end at the edge is cut square across it.
+  The curve brush lays a move's line and curve over each
   other; the particle brush lays nothing more while the pen holds still; the grid brush taking the
   colour under its cells lays them in no other colour and without a background.
 - The sketch brush draws each move's lines over each other (Krita draws them into one dab first,
