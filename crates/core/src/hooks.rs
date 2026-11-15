@@ -1918,6 +1918,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_loop_bending_in_and_out_snaps_to_a_closed_curve_while_a_plugin_says_so() {
+        use crate::QuickShapeKind;
+        let Some(s) = session() else { return };
+        let dir = store("closed-curves");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        s.use_plugins(Arc::clone(&plugins));
+        // a cloud: once round, bulging out and dipping in five times, ending where it began
+        let cloud = |s: &CanvasSession, t0: f64| {
+            let samples: Vec<PenSample> = (0..=100)
+                .map(|i| {
+                    let t = i as f32 / 100.0 * std::f32::consts::TAU;
+                    let r = 60.0 * (1.0 + 0.3 * (5.0 * t).cos());
+                    sample(100.0 + r * t.cos(), 100.0 + r * t.sin(), t0 + f64::from(i) * 8.0)
+                })
+                .collect();
+            s.stroke_begin(PointerKind::Finger, samples[..1].to_vec());
+            s.stroke_add(samples[1..].to_vec());
+            s.quickshape_hold()
+        };
+        // off: QuickShape's ellipse
+        assert_eq!(cloud(&s, 0.0).expect("it snaps").kind, QuickShapeKind::Ellipse);
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        assert!(plugins.set_on("io.github.artcraftandroid.quickshape-curves".to_owned(), true));
+        let shape = cloud(&s, 2000.0).expect("it snaps");
+        assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
+        assert!(shape.choices.contains(&QuickShapeKind::Ellipse));
+        // its last anchor is its first: dragged, both go
+        let at = |h: &[f32], i: usize| (h[2 * i], h[2 * i + 1]);
+        let last = shape.handles.len() / 2 - 1;
+        assert_eq!(at(&shape.handles, 0), at(&shape.handles, last));
+        let moved = s.quickshape_move_handle(0, 20.0, 30.0).unwrap();
+        assert_eq!(at(&moved.handles, last), at(&moved.handles, 0));
+        // tapped there it steps on as one anchor, at either end
+        let tapped = s.quickshape_cycle_anchor(last as u32).unwrap();
+        assert_eq!(tapped.anchors.first(), tapped.anchors.last());
+        assert_eq!(tapped.anchors[0], crate::QuickShapeAnchor::Broken);
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn randomise_sets_the_studio_brush_as_a_plugin_says() {
         let Some(s) = session() else { return };
         let dir = store("randomise");
