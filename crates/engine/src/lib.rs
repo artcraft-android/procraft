@@ -3,6 +3,7 @@
 //! feeds it input.
 
 pub mod abr;
+mod adjustment_clips;
 pub mod animatic;
 pub mod animation;
 pub mod applz4;
@@ -18,6 +19,8 @@ pub mod curve;
 #[cfg(test)]
 mod damaged;
 pub mod document;
+#[cfg(test)]
+mod effects_tests;
 pub mod environment;
 pub mod fill;
 pub mod filter;

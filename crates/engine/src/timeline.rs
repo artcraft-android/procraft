@@ -12,10 +12,9 @@
 //! sampling a frame into what the renderer draws ([`Timeline::plan`]). Keyed values, the easings'
 //! maths and editing come next.
 
-use std::collections::BTreeMap;
-
 use crate::animation::{self, Playback};
 use crate::document::{BlendMode, Document, LayerId};
+use crate::filter::Filter;
 use crate::geom::{Affine, Vec2};
 
 /// Most frames a second.
@@ -42,11 +41,6 @@ pub struct ClipId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MediaId(pub u64);
-
-/// A layer effect in a clip's stack (live effects come in phase 4; their keys are kept here).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct EffectId(pub u64);
 
 /// The document's animation: how fast and how long it plays, its tracks, and its camera.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -114,7 +108,9 @@ pub struct Clip {
     pub opacity: f32,
     pub blend: BlendMode,
     pub mask: MaskMode,
-    /// Draws nothing of its own: its effects change what is under it.
+    /// Its drawing is an adjustment layer: it draws nothing of its own but redraws what is under
+    /// it, and its adjustment keys ([`ClipKeys::adjustment`]) change that layer's values over
+    /// time. Kept in step with the layers by [`Document::mark_adjustment_clips`].
     #[serde(default)]
     pub adjustment: bool,
     /// Left out: draws nothing, masks nothing, exports nothing.
@@ -268,9 +264,10 @@ pub struct ClipKeys {
     /// what is painted then), cleared with its last.
     #[serde(default)]
     pub pivot: Option<[f32; 2]>,
-    /// Effects' parameters, keyed, by effect.
+    /// An adjustment clip's adjustment, keyed: its values eased key to key (see
+    /// [`crate::filter::Filter`]'s `Keyed`), in place of the layer's own while it has keys.
     #[serde(default)]
-    pub effects: BTreeMap<EffectId, Channel<Vec<f32>>>,
+    pub adjustment: Channel<Filter>,
 }
 
 impl ClipKeys {
@@ -649,8 +646,7 @@ impl Timeline {
     }
 
     /// What shows at `frame`, bottom first: each track's clip there, groups opened at their own
-    /// frame. Keyed values (pose, opacity keys, effects) aren't applied yet: each clip draws at its
-    /// own opacity, in place.
+    /// frame, each clip with its keyed pose, opacity and (an adjustment clip's) adjustment there.
     pub fn plan(&self, frame: u32) -> FramePlan {
         let mut items = Vec::new();
         sample(&self.tracks, frame, self.fps, &mut items);
@@ -1358,7 +1354,7 @@ fn shifted_keys(keys: &ClipKeys, by: i64) -> ClipKeys {
         rotation: shift(&keys.rotation, by),
         opacity: shift(&keys.opacity, by),
         pivot: keys.pivot,
-        effects: keys.effects.iter().map(|(id, c)| (*id, shift(c, by))).collect(),
+        adjustment: shift(&keys.adjustment, by),
     }
 }
 
@@ -1422,6 +1418,9 @@ pub struct PlanItem {
     pub mask: Option<(MaskMode, usize)>,
     /// Only a matte for the item above: it doesn't draw of its own.
     pub matte_only: bool,
+    /// An adjustment clip's adjustment here, as its keys ease it; none without keys (the layer's
+    /// own is drawn).
+    pub adjustment: Option<Filter>,
 }
 
 /// What a clip in a frame draws.
@@ -1441,7 +1440,7 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
     // the item the track just below put in, a mask's source
     let mut below: Option<usize> = None;
     for track in tracks {
-        let clip = if track.hidden { None } else { track.clip_at(frame).filter(|c| !c.disabled && !c.adjustment) };
+        let clip = if track.hidden { None } else { track.clip_at(frame).filter(|c| !c.disabled) };
         let Some(clip) = clip else {
             below = None;
             continue;
@@ -1488,6 +1487,7 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
             blend: clip.blend,
             mask,
             matte_only: false,
+            adjustment: clip.adjustment.then(|| clip.keys.adjustment.value_at(keyed as f32)).flatten(),
         });
         below = Some(out.len() - 1);
     }
@@ -1520,7 +1520,7 @@ fn repair_tracks(tracks: &mut Vec<Track>, top: &[LayerId], seen: &mut Seen) {
             }
             tidy(&mut clip.keys.rotation);
             tidy(&mut clip.keys.opacity);
-            clip.keys.effects.values_mut().for_each(tidy);
+            tidy(&mut clip.keys.adjustment);
             match &mut clip.content {
                 ClipContent::Drawing(d) => top.contains(&d.root) && seen.roots.insert(d.root),
                 ClipContent::Group(g) => {
@@ -2111,12 +2111,12 @@ impl ClipKeys {
         self.scale.scale_keys(ratio);
         self.rotation.scale_keys(ratio);
         self.opacity.scale_keys(ratio);
-        self.effects.values_mut().for_each(|c| c.scale_keys(ratio));
+        self.adjustment.scale_keys(ratio);
     }
 
     /// Whether no channel has keys.
     pub fn is_empty(&self) -> bool {
-        !self.posed() && self.opacity.keys.is_empty() && self.effects.values().all(|c| c.keys.is_empty())
+        !self.posed() && self.opacity.keys.is_empty() && self.adjustment.keys.is_empty()
     }
 
     /// The earliest key's frame on any channel.
@@ -2129,7 +2129,7 @@ impl ClipKeys {
             first(&mut self.opacity.keys.iter().map(|k| k.frame)),
         ]
         .into_iter()
-        .chain(self.effects.values().map(|c| c.keys.first().map(|k| k.frame)))
+        .chain([self.adjustment.keys.first().map(|k| k.frame)])
         .flatten()
         .min()
     }
@@ -2145,12 +2145,7 @@ impl ClipKeys {
             rotation: only(&self.rotation, frame),
             opacity: only(&self.opacity, frame),
             pivot: self.pivot,
-            effects: self
-                .effects
-                .iter()
-                .map(|(id, c)| (*id, only(c, frame)))
-                .filter(|(_, c)| !c.keys.is_empty())
-                .collect(),
+            adjustment: only(&self.adjustment, frame),
         }
     }
 
@@ -2171,9 +2166,7 @@ impl ClipKeys {
         lay(&mut self.scale, &keys.scale, at);
         lay(&mut self.rotation, &keys.rotation, at);
         lay(&mut self.opacity, &keys.opacity, at);
-        for (id, c) in &keys.effects {
-            lay(self.effects.entry(*id).or_default(), c, at);
-        }
+        lay(&mut self.adjustment, &keys.adjustment, at);
         if self.pivot.is_none() && keys.posed() {
             self.pivot = keys.pivot;
         }

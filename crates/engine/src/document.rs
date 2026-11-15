@@ -973,7 +973,7 @@ impl Document {
         self.layers.iter().find(|l| l.id == id)
     }
 
-    fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
+    pub(crate) fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
     }
 
@@ -1204,7 +1204,11 @@ impl Document {
         if items.iter().any(|id| self.is_locked(*id)) {
             return None;
         }
-        let at = items.iter().position(|id| self.layer(*id).is_some_and(|l| l.kind == LayerKind::Paint))?;
+        // the bottom one takes the others' pixels: an adjustment layer has none (one below it
+        // has nothing among them to redraw, and stays as it is)
+        let at = items
+            .iter()
+            .position(|id| self.layer(*id).is_some_and(|l| l.kind == LayerKind::Paint && !l.is_adjustment()))?;
         let lower = *items.get(at)?;
         let uppers: Vec<LayerId> = items
             .get(at + 1..)?
@@ -1229,9 +1233,10 @@ impl Document {
             }
         }
         self.layers.retain(|l| Some(l.id) != mask);
-        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        // merged, it shows at full: its opacity and styles went into its pixels (a hidden one's
+        // were let go)
         if let Some(l) = self.layer_mut(lower) {
-            (l.visible, l.opacity) = (true, 1.0);
+            (l.visible, l.opacity, l.style) = (true, 1.0, None);
         }
         self.current = lower;
         self.picked.clear();
@@ -1785,8 +1790,7 @@ impl Document {
     /// and the one below's are each applied to its layer first.
     pub fn merge_target(&self, id: LayerId) -> Option<LayerId> {
         match self.layer(id)?.kind {
-            // an adjustment layer has no pixels to merge, nor takes any
-            LayerKind::Paint if self.layer(id)?.is_adjustment() => None,
+            // an adjustment layer merges what it does into the layer below; none takes pixels
             LayerKind::Paint => self
                 .below(id)
                 .filter(|b| self.layer(*b).is_some_and(|l| l.kind == LayerKind::Paint && !l.is_adjustment())),
@@ -1809,13 +1813,13 @@ impl Document {
                 LayerKind::Group => {}
             }
         };
-        if !self.is_inside(top, group) || self.layer(top)?.is_adjustment() {
+        if !self.is_inside(top, group) {
             return None;
         }
         let start = self.unit(top)?.start;
         let under = self.layers.get(start.checked_sub(1)?)?;
         let under = if under.kind == LayerKind::Mask { self.layer(under.parent?)? } else { under };
-        (under.kind == LayerKind::Paint).then_some((top, under.id))
+        (under.kind == LayerKind::Paint && !under.is_adjustment()).then_some((top, under.id))
     }
 
     /// Removes `id` after it was merged down; the layer below becomes current. For a group, its
@@ -1837,9 +1841,10 @@ impl Document {
         let mask = self.mask_of(lower);
         self.layers.drain(unit);
         self.layers.retain(|l| Some(l.id) != mask);
-        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        // merged, it shows at full: its opacity and styles went into its pixels (a hidden one's
+        // were let go)
         if let Some(l) = self.layer_mut(lower) {
-            (l.visible, l.opacity) = (true, 1.0);
+            (l.visible, l.opacity, l.style) = (true, 1.0, None);
         }
         self.current = current;
         // merged into, a text layer's pixels are no longer just its text
@@ -2035,6 +2040,7 @@ impl Document {
         self.picked.retain(|p| *p != current && ids.contains(p));
         let top = self.members(None);
         self.timeline = self.timeline.take().map(|t| t.repaired(&top));
+        self.mark_adjustment_clips();
         self
     }
 
@@ -2262,11 +2268,11 @@ mod tests {
     }
 
     #[test]
-    fn an_adjustment_layer_is_neither_merged_nor_clipped_to() {
+    fn an_adjustment_layer_merges_down_but_is_neither_merged_into_nor_clipped_to() {
         let mut d = Document::new(100, 100);
         let base = d.current();
         let a = d.add_adjustment_layer("Curves".to_owned(), hsb_adjustment(0.5));
-        assert_eq!(d.merge_target(a), None, "no pixels to merge down");
+        assert_eq!(d.merge_target(a), Some(base), "baked into the layer below");
         let top = d.add_layer();
         assert_eq!(d.merge_target(top), None, "nothing to merge into");
         assert!(!d.can_clip(top), "an adjustment layer is no base");
