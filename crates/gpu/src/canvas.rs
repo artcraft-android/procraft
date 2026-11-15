@@ -466,8 +466,11 @@ pub struct Backdrop<'a> {
 pub type SmallScene<'s> = &'s mut dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, (u32, u32));
 
 /// The backdrop's blur is this many texels wide (sigma) where it is worked out: the scene is
-/// drawn that much smaller, and drawn back up as it is that's a window's softening.
+/// drawn that much smaller, and drawn back up as it is that's a window's softening. On a weak GPU
+/// half that: a quarter of the texels, each blurred over half the taps (the blur as wide, its
+/// picture coarser under it, which so wide a blur hides).
 const BACKDROP_TEXELS: f32 = 5.0;
+const BACKDROP_TEXELS_WEAK: f32 = 2.5;
 
 /// The scene drawn small for frosted panels, half blurred, and blurred; and what it was drawn
 /// for, while it still shows that (see [`Canvas::frost_ready`]).
@@ -2254,8 +2257,10 @@ pub struct Canvas {
     transforming: Option<Transforming>,
     /// Other layers transformed along with it (layers picked together).
     transform_more: Vec<Transforming>,
-    /// For frosted panels, made when first needed.
+    /// For frosted panels, made when first needed, and how many texels wide their blur is where
+    /// it is worked out (see [`BACKDROP_TEXELS`]).
     backdrop: Option<BackdropGpu>,
+    backdrop_texels: f32,
     /// Where the composite changed since the glass's scene was drawn (canvas pixels), and how many
     /// times it has been drawn.
     frost_stale: IRect,
@@ -2561,6 +2566,7 @@ impl Canvas {
             transforming: None,
             transform_more: Vec::new(),
             backdrop: None,
+            backdrop_texels: if gpu.is_weak() { BACKDROP_TEXELS_WEAK } else { BACKDROP_TEXELS },
             frost_stale: IRect::from_size(width, height),
             frosts: 0,
             shapes,
@@ -8158,7 +8164,7 @@ impl Canvas {
         backdrop: Backdrop<'_>,
         other: Option<SmallScene<'_>>,
     ) -> f32 {
-        let k = (backdrop.sigma / BACKDROP_TEXELS).floor().clamp(1.0, 16.0);
+        let k = (backdrop.sigma / self.backdrop_texels).floor().clamp(1.0, 16.0);
         let size = ((target.size.0 as f32 / k).ceil() as u32, (target.size.1 as f32 / k).ceil() as u32);
         if self.backdrop.as_ref().is_none_or(|b| b.size != size || b.format != target.format) {
             self.backdrop =

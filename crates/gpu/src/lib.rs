@@ -72,6 +72,44 @@ fn gl_array_layers(n: u32) -> u32 {
     if n.is_multiple_of(6) { n + 1 } else { n }
 }
 
+/// Whether a GPU named `name` is a weak one, as budget tablets and phones have (PowerVR's, the
+/// smaller Malis, Adrenos below the 630s and 710), or draws on the CPU: what costs it most and
+/// shows least is made cheaper (the glass's blur is worked out on a smaller picture).
+fn weak_gpu(name: &str, device_type: wgpu::DeviceType) -> bool {
+    if device_type == wgpu::DeviceType::Cpu {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    // the number after `prefix`, if the name has one there ("adreno (tm) 610" → 610)
+    let number_after = |prefix: &str| -> Option<u32> {
+        let rest = name.get(name.find(prefix)? + prefix.len()..)?;
+        let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    if name.contains("powervr") || name.contains("llvmpipe") || name.contains("swiftshader") {
+        return true;
+    }
+    if name.contains("mali-t") {
+        return true;
+    }
+    if let Some(n) = number_after("mali-g") {
+        return matches!(n, 31 | 51 | 52 | 57 | 71 | 72);
+    }
+    if let Some(n) = number_after("adreno (tm)").or_else(|| number_after("adreno")) {
+        return n < 630 || (700..710).contains(&n);
+    }
+    false
+}
+
+/// Every GPU taken for a weak one (see [`weak_gpu`]): for measuring what that saves on others.
+static WEAK: AtomicBool = AtomicBool::new(false);
+
+/// Takes every GPU for a weak one from now on (`on`), as [`Gpu::is_weak`] tells: for measuring.
+#[doc(hidden)]
+pub fn treat_as_weak(on: bool) {
+    WEAK.store(on, Ordering::Relaxed);
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -329,6 +367,9 @@ impl Gpu {
             UNCOMPRESSED.store(true, Ordering::Relaxed);
             log::info!("the canvas's textures kept uncompressed on this GPU");
         }
+        if weak_gpu(&info.name, info.device_type) {
+            log::info!("a weak GPU: the frosted glass is blurred from a smaller picture");
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
             // where the GPU has it: the pipelines' compiled form to keep between runs
@@ -488,6 +529,12 @@ impl Gpu {
         if self.is_gl() { gl_array_layers(n) } else { n.max(1) }
     }
 
+    /// Whether the GPU is a weak one (see [`weak_gpu`]).
+    pub fn is_weak(&self) -> bool {
+        let info = self.adapter.get_info();
+        WEAK.load(Ordering::Relaxed) || weak_gpu(&info.name, info.device_type)
+    }
+
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
@@ -518,6 +565,42 @@ mod tests {
         assert_eq!(super::backends_name(Backends::DX12), "Direct3D 12");
         assert_eq!(super::backends_name(Backends::VULKAN | Backends::GL), "Vulkan or OpenGL");
         assert_eq!(super::Gpu::backend_name(99), "backend 99");
+    }
+
+    #[test]
+    fn budget_gpus_are_told_from_their_names() {
+        use super::weak_gpu;
+        use wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu};
+        for weak in [
+            "PowerVR Rogue GE8320",
+            "PowerVR B-Series BXM-8-256",
+            "Mali-G52 MC2",
+            "Mali-G57 MC2",
+            "Mali-T830 MP2",
+            "Adreno (TM) 610",
+            "Adreno (TM) 619",
+            "Adreno (TM) 506",
+            "Adreno (TM) 702",
+        ] {
+            assert!(weak_gpu(weak, IntegratedGpu), "{weak}");
+        }
+        for strong in [
+            "Mali-G68 MC4",
+            "Mali-G610 MC6",
+            "Mali-G78 MP14",
+            "Adreno (TM) 642L",
+            "Adreno (TM) 710",
+            "Adreno (TM) 750",
+            "Adreno (TM) 830",
+            "Samsung Xclipse 940",
+            "Intel(R) Graphics",
+            "NVIDIA GeForce RTX 5060 Laptop GPU",
+            "Apple M2",
+        ] {
+            assert!(!weak_gpu(strong, IntegratedGpu), "{strong}");
+        }
+        assert!(!weak_gpu("NVIDIA GeForce RTX 5060 Laptop GPU", DiscreteGpu));
+        assert!(weak_gpu("Microsoft Basic Render Driver", Cpu));
     }
 
     #[test]
