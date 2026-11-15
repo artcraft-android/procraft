@@ -19,6 +19,7 @@ import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
 import io.github.artcraftandroid.procraft.canvas.PEN_DOUBLE_TAP_KEY
 import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
+import io.github.artcraftandroid.procraft.canvas.keyPress
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
@@ -190,7 +191,10 @@ class MainActivity : ComponentActivity() {
 
     private val penDoubleTaps = PenDoubleTaps()
 
-    /** A hardware keyboard's shortcuts on the canvas (keys no text field took). */
+    /**
+     * A hardware keyboard's shortcuts on the canvas, a tablet's express keys' too (keys no text
+     * field took). Ctrl and Meta are both the command key.
+     */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
         // a pen's double-tap that comes as a key of its own: as its first button, once for each
         if (keyCode == PEN_DOUBLE_TAP_KEY) {
@@ -200,10 +204,17 @@ class MainActivity : ComponentActivity() {
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true
+        // typing in a text field (a name, the text tool's words): what the field leaves (Ctrl+J,
+        // Alt) is still typing, not the canvas's
+        if (typing()) return super.onKeyDown(keyCode, event)
         if (isAltKey(keyCode) && event.repeatCount == 0 && !event.isCtrlPressed && vm.modifyKey(true)) return true
-        if (event.repeatCount == 0 && vm.keyShortcut(keyCode, event.isCtrlPressed || event.isMetaPressed, event.isShiftPressed, event.isAltPressed)) return true
+        val press = keyPress(keyCode, event.metaState)
+        if (event.repeatCount == 0 && press != null && vm.keyShortcut(press)) return true
         return super.onKeyDown(keyCode, event)
     }
+
+    /** Whether a text field has the keys: the view with focus edits text (Compose's, while one of its fields is focused). */
+    private fun typing() = currentFocus?.onCheckIsTextEditor() == true
 
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
         // a pen's side button that comes as a key, let go (held to erase, the eraser goes back)

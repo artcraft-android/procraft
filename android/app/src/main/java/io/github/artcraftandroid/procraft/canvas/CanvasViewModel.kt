@@ -3112,21 +3112,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * A key of a hardware keyboard on the canvas ([ctrl] the command key): true if it is a
-     * shortcut, done (as a plugin rebinding keys takes it), or the key a plugin's panel asked for.
-     * Typing in a text field never comes here.
+     * A [press] of a hardware keyboard on the canvas (its key as the shared shortcuts name it,
+     * crates/core keys.rs, which say what it does): true if it is a shortcut, done (as a plugin
+     * rebinding keys takes it), or the key a plugin's panel asked for. Typing in a text field never
+     * comes here.
      */
-    fun keyShortcut(keyCode: Int, ctrl: Boolean, shift: Boolean, alt: Boolean): Boolean {
+    internal fun keyShortcut(press: KeyPress): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
-        // the key as the shared shortcuts name it (crates/core keys.rs), which say what it does
-        val name = keyName(keyCode) ?: return false
+        val (name, command, shift, alt) = press
         if (pluginPanel?.keyPress == true) {
-            pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, ctrl, shift, alt))
+            pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, command, shift, alt))
             return true
         }
         // the arrows move what is transformed, or the strokes the selection takes
         val nudges = transforming || takenBox.isNotEmpty()
-        when (val shortcut = plugins.keyShortcut(name, ctrl, shift, alt, nudges) ?: return false) {
+        when (val shortcut = plugins.keyShortcut(name, command, shift, alt, nudges) ?: return false) {
             KeyShortcut.Undo -> undo()
             KeyShortcut.Redo -> redo()
             KeyShortcut.CopyLayer -> copyLayer()
