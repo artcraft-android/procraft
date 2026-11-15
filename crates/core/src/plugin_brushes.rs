@@ -935,6 +935,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// How long the bundled Krita plugin takes on a real file, in the interpreter: making its
+    /// brushes, reading each, and a stroke of each (`KRITA_FILE=x.bundle cargo test -p
+    /// procraft-core krita_timings -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn krita_timings() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("KRITA_FILE") else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-krita-timings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        let hooks = plugins.hooks();
+        let bytes = std::fs::read(&path).unwrap();
+        let t = Instant::now();
+        let made = make_brushes(&hooks, &path, &bytes);
+        println!("{} brushes made of {} bytes in {:?}", made.len(), bytes.len(), t.elapsed());
+        let mut brushes = Vec::new();
+        join_made(&mut brushes, made);
+        let (mut loading, mut drawing, mut dabs) = (std::time::Duration::ZERO, std::time::Duration::ZERO, 0);
+        for brush in &brushes {
+            let t = Instant::now();
+            let Some((look, id)) = look_of(&hooks, brush) else { continue };
+            loading += t.elapsed();
+            let starting = Starting {
+                colour: [0.0; 3],
+                secondary: [1.0; 3],
+                diameter: 1.0,
+                start_diameter: 1.0,
+                opacity: 1.0,
+                tool: 0,
+                pointer: 1,
+                seed: 7,
+                turn: 0.0,
+            };
+            let Some((mut first, _)) = begin_stroke(&hooks, brush, look, id, starting) else { continue };
+            let t = Instant::now();
+            // a second of a pen at 240 samples a second, 4 at a time as frames bring them
+            for batch in 0..60 {
+                let samples: Vec<Sample> = (0..4)
+                    .map(|i| {
+                        let k = (batch * 4 + i) as f32;
+                        Sample::at(Vec2::new(100.0 + k * 3.0, 300.0 + (k * 0.05).sin() * 40.0), 0.7, f64::from(k) * 4.0)
+                    })
+                    .collect();
+                dabs += first.add(&samples).len();
+            }
+            dabs += first.finish().len();
+            drawing += t.elapsed();
+        }
+        println!("{} read in {loading:?}; their strokes' {dabs} dabs in {drawing:?}", brushes.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_look_holds_its_tips_fitted_into_one_square_side() {
         let mut look = Record::default();
