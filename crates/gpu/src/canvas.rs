@@ -11256,6 +11256,158 @@ mod tests {
         assert_eq!(gpu.errors(), 0);
     }
 
+    /// What the shaders' `pooled_over` gives for each of `cs` on this GPU.
+    fn pooled_on_gpu(gpu: &Gpu, cs: &[f32]) -> Vec<f32> {
+        let device = &gpu.device;
+        let source = concat!(
+            include_str!("shaders/blend.wgsl"),
+            "@group(0) @binding(0) var<storage, read_write> values: array<f32>;
+",
+            "@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
+",
+            "    if (id.x < arrayLength(&values)) { values[id.x] = pooled_over(values[id.x]); }
+",
+            "}
+",
+        );
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pooled probe"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("pooled probe"),
+            layout: None,
+            module: &module,
+            entry_point: Some("probe"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let bytes: Vec<u8> = cs.iter().flat_map(|c| c.to_le_bytes()).collect();
+        let size = bytes.len() as u64;
+        let values = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pooled probe"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&values, 0, &bytes);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pooled probe read"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pooled probe"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: values.as_entire_binding() }],
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pooled probe") });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups((cs.len() as u32).div_ceil(64), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&values, 0, &read, 0, size);
+        gpu.queue.submit([encoder.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let mapped = read.slice(..).get_mapped_range().unwrap();
+        mapped.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+    }
+
+    #[test]
+    fn wet_edges_pool_thin_paint_as_far_as_it_goes_not_by_the_rounding_of_a_sine() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        // the scale wet edges give paint showing c: (1 - |sin(x) / x|) / c at x = 4.5c, worked out
+        // where it doesn't cancel away (the series for a thin layer)
+        let exact = |c: f64| {
+            let x = 4.5 * c;
+            if c <= 0.0 {
+                0.0
+            } else if x < 0.1 {
+                4.5 * x * (1.0 / 6.0 - x * x / 120.0 + x.powi(4) / 5040.0)
+            } else {
+                (1.0 - (x.sin() / x).abs()) / c
+            }
+        };
+        let mut cs =
+            vec![0.0, 1e-7, 1e-6, 1e-5, 1e-4, 4e-4, 1e-3, 0.004, 0.01, 0.05, 0.11, 0.112, 0.3, 0.698, 0.7, 0.9, 1.0];
+        cs.extend((0..=1000).map(|i| i as f32 / 1000.0));
+        let got = pooled_on_gpu(&gpu, &cs);
+        for (&c, &g) in cs.iter().zip(&got) {
+            let want = exact(f64::from(c));
+            // the paint's own scale, near enough, and the paint never past full for it
+            assert!((f64::from(g) - want).abs() <= 1e-6 + 1e-3 * want, "{c}: {g}, not {want}");
+            assert!(g * c <= 1.0 + 1e-5, "{c}: {g}");
+        }
+    }
+
+    #[test]
+    fn wet_edges_where_strokes_cross_stay_the_paint_s_own_colour() {
+        use procraft_engine::geom::Vec2;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let colour = [0.1, 0.5, 0.8];
+        let dry = StrokeStyle { wet_edges: 1.0, ..StrokeStyle::new(StrokeTool::Paint, colour, 1.0) };
+        // wet paint thinned by its water, as a brush with wet mix laid in place has it
+        let wet = StrokeStyle { wet_pull: Some(0.6), load: 0.4, dilution: 0.3, rendering: Rendering::Gradual, ..dry };
+        let line = |from: Vec2, to: Vec2, alpha: f32| -> Vec<Stamp> {
+            (0..40)
+                .map(|i| {
+                    let f = i as f32 / 39.0;
+                    Stamp {
+                        time_ms: 16.0 * f64::from(i),
+                        distance: from.distance(to) * f,
+                        ..Stamp::round(from.lerp(to, f), 9.0, alpha)
+                    }
+                })
+                .collect()
+        };
+        for (k, style) in [wet, StrokeStyle { rendering: Rendering::Strongest, ..wet }, dry].into_iter().enumerate() {
+            let mut doc = procraft_engine::document::Document::new(120, 120);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let id = doc.current();
+            // across at full, then down, corner to corner and across again lighter, each over the last
+            let strokes = [
+                (Vec2::new(10.0, 40.0), Vec2::new(110.0, 45.0), 1.0),
+                (Vec2::new(40.0, 10.0), Vec2::new(45.0, 110.0), 0.8),
+                (Vec2::new(10.0, 10.0), Vec2::new(110.0, 110.0), 0.5),
+                (Vec2::new(10.0, 70.0), Vec2::new(110.0, 60.0), 0.3),
+            ];
+            for (from, to, alpha) in strokes {
+                canvas.begin_stroke(id, style);
+                for lot in line(from, to, alpha).chunks(5) {
+                    canvas.add_stamps(lot);
+                    canvas.render(&gpu, &mut doc, None);
+                }
+                canvas.end_stroke();
+                canvas.render(&gpu, &mut doc, None);
+            }
+            assert_eq!(gpu.errors(), 0);
+            // one colour laid over itself: every pixel is it, as far as it shows (premultiplied,
+            // give or take the rounding of each laying)
+            let pixels = canvas.read_layer(&gpu, id).unwrap();
+            let mut painted = 0;
+            for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
+                let a = f32::from(px[3]) / 255.0;
+                painted += usize::from(a > 0.5);
+                for c in 0..3 {
+                    let want = colour[c] * a;
+                    let got = f32::from(px[c]) / 255.0;
+                    assert!(
+                        (got - want).abs() <= 6.0 / 255.0,
+                        "style {k}: pixel ({}, {}) is {px:?}, not the paint's colour at {a}",
+                        i % 120,
+                        i / 120,
+                    );
+                }
+            }
+            assert!(painted > 400, "style {k}: {painted}");
+        }
+    }
+
     #[test]
     fn a_smudge_that_runs_out_of_memory_part_way_stops_and_undoes_whole() {
         use procraft_engine::geom::Vec2;

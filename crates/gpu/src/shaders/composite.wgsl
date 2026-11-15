@@ -116,12 +116,8 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let wet_a = min(s.a * (1.0 - lu.wet * 0.1 * edge), 1.0);
         s = s * (wet_a / s.a);
     } else if (lu.wet > 0.0 && s.a > 0.0) {
-        // on the canvas the paint pools: the coverage taken through a damped wave, which rises to
-        // full where the stroke is about 0.7 (a ring where it fades out) and settles back to
-        // about 0.78 where it is full; faint paint fades
-        let x = 4.5 * s.a;
-        let pooled = 1.0 - abs(sin(x) / x);
-        s = s * (mix(s.a, pooled, lu.wet) / s.a);
+        // on the canvas the paint pools (see pooled_over)
+        s = s * mix(1.0, pooled_over(s.a), lu.wet);
     }
     let built = s.a;
     if (lu.grain >= 0) {

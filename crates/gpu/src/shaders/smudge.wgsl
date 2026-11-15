@@ -558,18 +558,16 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let built = select(laid, min(amount[k], laid), st.rule != 0u);
     var a = built;
     if (st.wet_edges > 0.0 && built > 0.0) {
-        // the paint pools, settling back to about 0.78 where it is full and rising to full where
-        // it shows about 0.7 (a rim where it thins out). By how much of it shows: wet paint
-        // thinned by its water shows less than it touched (what it took of the room the layer
-        // had; over a full layer, as far as it touched)
+        // the paint pools (see pooled_over), by how much of it shows: wet paint thinned by its
+        // water shows less than it touched (what it took of the room the layer had; over a full
+        // layer, as far as it touched). Where it took none (over paint as strong as itself) it
+        // pools to nothing, as the thinnest paint does
         var shown = built;
         if (st.laid_apart == 2u && was.a < 0.999) {
             let now = unpack4x8unorm(grained[k]).a;
             shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0) * built / max(laid, 1e-6);
         }
-        let x = 4.5 * max(shown, 1e-4);
-        let pooled = 1.0 - abs(sin(x) / x);
-        a = built * mix(1.0, pooled / max(shown, 1e-4), st.wet_edges);
+        a = built * mix(1.0, pooled_over(shown), st.wet_edges);
     }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
