@@ -11,7 +11,7 @@ import math
 import os
 import re
 
-from shapely.affinity import rotate, translate
+from shapely.affinity import rotate, scale, translate
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
@@ -159,10 +159,25 @@ def contributed(who, name, weight=0.0, soft_by=0.15):
     return unary_union(drawn)
 
 
-# The contributed icons and who drew each. Their lines already weigh what the bar's glyphs' do where
-# they are shown (1.7 and 1.9 pt across; the glyphs they replaced 1.4 and 1.9, the rest of the bar
-# 2.9 to 4.4), so they get no weight.
-CONTRIBUTED_ICONS = {'adjustments': 'lork', 'selection': 'lork'}
+def lork_arrow():
+    """Transform: lork's arrow (the corners of assets/icons/contributed/lork/transform.svg) with its head
+    shortened along its line and its tail drawn out to meet it."""
+    tip, barb_l, barb_r = (19.41, 4.56), (5.78, 10.62), (13.43, 18.27)
+    notch_l, notch_r = (10.77, 11.67), (12.33, 13.27)
+    tail_end, tail_join, tail_r = (6.17, 17.85), (11.55, 12.47), 1.12
+    length = math.hypot(tip[0] - tail_end[0], tip[1] - tail_end[1])
+    u = ((tip[0] - tail_end[0]) / length, (tip[1] - tail_end[1]) / length)
+    ang = math.degrees(math.atan2(u[1], u[0]))
+    head = rotate(Polygon([tip, barb_r, notch_r, notch_l, barb_l]), -ang, origin=tip)
+    head = rotate(scale(head, 0.73, 1.0, origin=tip), ang, origin=tip)
+    tail = capsule(tail_end, (tail_join[0] + u[0] * 3.0, tail_join[1] + u[1] * 3.0), tail_r)
+    return soft(unary_union([soft(head, 0.3), tail]), 0.15)
+
+
+# The contributed icons and who drew each, and those adjusted here (with what was done). Their lines
+# weigh about what the bar's glyphs' do where they are shown, so they get no weight.
+CONTRIBUTED_ICONS = {'adjustments': 'lork', 'selection': 'lork', 'brush': 'lork', 'transform': 'lork'}
+ADJUSTED = {'transform': (lork_arrow, 'its head shortened and its tail drawn out')}
 
 
 def wrench():
@@ -178,14 +193,6 @@ def wand():
     """Automatic: a wand with a banded tip and three sparkles."""
     shaft = capsule((4.5, 19.5), (15.0, 9.0), 1.5).difference(gap_across((12.6, 11.4), (SQ2, -SQ2), 6))
     return unary_union([shaft, star(18.6, 5.2, 3.3), star(11.2, 4.0, 2.0), star(20.2, 11.8, 1.8)])
-
-
-def arrow():
-    """Transform: a solid arrow pointing up and to the right."""
-    shaft = capsule((0, 0), (9.0, 0), 1.3)
-    head = soft(Polygon([(7.0, -5.0), (15.6, 0), (7.0, 5.0)]), 0.6)
-    shape = unary_union([shaft, head])
-    return along_diagonal(translate(shape, -7.8, 0), (12.0, 12.0))
 
 
 def paintbrush():
@@ -1701,8 +1708,7 @@ BLENDS = {'multiply': overlap_dark, 'darken': darken, 'shade': sunset, 'color-bu
 # drawn smaller than the box they're placed in: a bare symbol filling a tile's box is too heavy
 SHRINK = {'blend-subtract': 0.75, 'blend-divide': 0.85}
 DRAWINGS = {
-    'actions': wrench, 'transform': arrow,
-    'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
+    'actions': wrench, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
     'undo': lambda: turning_arrow(False), 'redo': lambda: turning_arrow(True),
     'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabimport': import_tab, 'tabvideo': video_tab,
     'tabprefs': prefs_tab, 'tabhelp': help_tab,
@@ -1751,7 +1757,8 @@ DRAWINGS = {
     'recentset': hourglass, 'swipe-find': target, 'swipe-pin': upright_tack, 'swipe-unpin': struck_tack,
     'swipe-clear': broom, 'menuclear': broom, 'pinmark': upright_tack, 'alertquestion': question_disc,
 }
-DRAWINGS.update({name: (lambda who=who, name=name: contributed(who, name)) for name, who in CONTRIBUTED_ICONS.items()})
+DRAWINGS.update({name: ADJUSTED[name][0] if name in ADJUSTED else (lambda who=who, name=name: contributed(who, name))
+                 for name, who in CONTRIBUTED_ICONS.items()})
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})
 
@@ -1790,7 +1797,8 @@ def main():
         shape = draw().simplify(0.02)
         if name in CONTRIBUTED_ICONS:
             who = CONTRIBUTED_ICONS[name]
-            origin = (f'drawn by {CONTRIBUTORS[who]}, placed from assets/icons/contributed/{who}/{name}.svg '
+            how = f'{ADJUSTED[name][1]}, ' if name in ADJUSTED else ''
+            origin = (f'drawn by {CONTRIBUTORS[who]}, {how}placed from assets/icons/contributed/{who}/{name}.svg '
                       'by tools/icons/draw_icons.py')
         else:
             origin = 'original, drawn by tools/icons/draw_icons.py'

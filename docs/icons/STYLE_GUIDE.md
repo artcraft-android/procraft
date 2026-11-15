@@ -47,8 +47,8 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Actions | an open-end wrench with a hole in its handle |
 | Adjustments | a wand with a banded tip and three sparkles (lork's drawing) |
 | Selection | a dashed curve: a selection's marching path (lork's drawing) |
-| Transform | a solid arrow pointing up and to the right |
-| Paint | a round brush: handle, ferrule, bristles |
+| Transform | a notched arrowhead on a long tail, pointing up and to the right (lork's drawing, its head shortened) |
+| Paint | a long tapering handle and a curled tip (lork's drawing) |
 | Smudge | a fingertip pressing on a smear |
 | Erase | an eraser block with a band, on a line |
 | Layers | two stacked sheets, the top one solid |
@@ -164,7 +164,7 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Colour profile | a triangle of colours inside the ring of all colours |
 | Video settings | the Actions tab's camera |
 | Statistics | a pie chart with one slice pulled out |
-| New brush | the Paint brush with a plus beside it |
+| New brush | our round brush (handle, ferrule, bristles) with a plus beside it |
 | New set | a folder with a plus cut out of it |
 | New layer | a single sheet with a plus cut out of it |
 | Libraries | three volumes on a shelf, the last leaning |
@@ -236,7 +236,7 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Positional / Directional (Perspective Blur) | a dot with rays streaming out of it all round / the same rays fanning out one way only |
 | Artifact / Wave / Signal / Diverge (Glitch) | a mosaic of blocks / a square wave / a screen with broken lines / a line that splits in two |
 | Moving / Texturized (grain) | rows of grain with an arrow along under them / the pitted Grain tile |
-| Paint, painting an adjustment on | the Paint brush with an adjustment ring |
+| Paint, painting an adjustment on | our round brush with an adjustment ring |
 | Brush swipe: Share / Duplicate | the tray and rising arrow / the Duplicate sheets |
 | Recent set | an hourglass, its sand run down |
 | Recent swipe: Find / Pin / Unpin / Clear | a target / a thumbtack standing on its point / the tack struck through / a broom sweeping two specks |
@@ -249,7 +249,7 @@ Each of the 48 is the object its name says, drawn plainly in this guide's shapes
 `tools/icons/draw_icons.py`, in the picker's order). Where the name is a way of working, the icon is
 its tool: Sketching a pencil, Inking an ink bottle, Painting the palette, Airbrushing a spray can,
 Charcoals a stick of charcoal, Textures the pitted Grain tile. Brush, Wand and Checkmark are the
-bar's brush, the Automatic wand and Done's tick.
+round brush, the Automatic wand and Done's tick.
 
 ## Blend modes
 
