@@ -1650,7 +1650,13 @@ impl Interface {
     /// Brushes read from files meanwhile added to the library and told of (when asked to), the
     /// library kept. True while more are being read or wait to be added.
     fn brushes_added(&mut self, session: &CanvasSession) -> bool {
-        for (any, tell) in self.library.added(session, self.studio.open) {
+        let added = self.library.added(session, self.studio.open);
+        // brushes from a file are on disk once they show in the library, not later on a thread
+        // of its own: the app stopping right after (closed, or crashing) still has them
+        if added.iter().any(|&(any, _)| any) {
+            crate::files::keep_brushes(session);
+        }
+        for (any, tell) in added {
             if tell {
                 let said = if any { "Brushes added to the library." } else { "This file has no brushes in it." };
                 self.overlays.notice(said, false);

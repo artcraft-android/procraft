@@ -78,6 +78,7 @@ import io.github.artcraftandroid.procraft.core.brushBlendModes
 import io.github.artcraftandroid.procraft.core.grainBlendModes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.TextRange
@@ -5065,7 +5066,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session. */
     private fun keepChoices(s: CanvasSession) {
         viewModelScope.launch(Dispatchers.IO) {
-            val kept = brushLibraryWrites.withLock { runCatching { s.keepBrushChoices(brushesDir.path) }.getOrDefault(false) }
+            // (begun, it ends even if the canvas goes meanwhile)
+            val kept = withContext(NonCancellable) {
+                brushLibraryWrites.withLock { runCatching { s.keepBrushChoices(brushesDir.path) }.getOrDefault(false) }
+            }
             libraryKept(kept)
         }
     }
@@ -5579,9 +5583,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun keepBrushLibrary(s: CanvasSession) {
         if (libraryKeepWaiting.getAndSet(s) === s) return
         viewModelScope.launch(Dispatchers.IO) {
-            val kept = brushLibraryWrites.withLock {
-                libraryKeepWaiting.compareAndSet(s, null)
-                runCatching { s.keepBrushes(brushesDir.path) }.getOrDefault(false)
+            // begun, it ends even if the canvas goes meanwhile (the app closed with it open): a
+            // write waiting its turn isn't dropped, and brushes just brought in are kept
+            val kept = withContext(NonCancellable) {
+                brushLibraryWrites.withLock {
+                    libraryKeepWaiting.compareAndSet(s, null)
+                    runCatching { s.keepBrushes(brushesDir.path) }.getOrDefault(false)
+                }
             }
             libraryKept(kept)
         }

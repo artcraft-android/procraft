@@ -470,7 +470,20 @@ pub(crate) fn stamp(file: &std::path::Path) -> Option<(u64, std::time::SystemTim
 
 /// Holds `library` in `slot` as the file at `path` holds it now.
 fn remember(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Path, told: u64, library: Vec<LibrarySet>) {
-    let held = stamp(path).map(|stamp| LastLibrary { path: path.to_path_buf(), stamp, told, library });
+    remember_as(slot, path, stamp(path), told, library);
+}
+
+/// Holds `library` in `slot` as the file at `path` held it when it was `stamped`: read from the
+/// file, the stamp taken before reading, so that a write meanwhile leaves it held as out of date
+/// rather than as what the file holds now.
+fn remember_as(
+    slot: &std::sync::Mutex<Option<LastLibrary>>,
+    path: &std::path::Path,
+    stamped: Option<(u64, std::time::SystemTime)>,
+    told: u64,
+    library: Vec<LibrarySet>,
+) {
+    let held = stamped.map(|stamp| LastLibrary { path: path.to_path_buf(), stamp, told, library });
     *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = held;
 }
 
@@ -1360,12 +1373,14 @@ impl CanvasSession {
         if let Some((library, told)) = remembered(&LAST_LIBRARY, path) {
             return (empty || !library.is_empty()).then_some((library, told));
         }
+        // (its time before reading: kept again meanwhile, it is read again next time)
+        let stamped = stamp(path);
         let json = std::fs::read_to_string(path).ok()?;
         let folder = path.parent().map(|dir| dir.join(crate::brush_pictures::FOLDER));
         let library = read_library(self, &json, folder.as_deref(), empty)?;
         // the file holds this (or more, of what couldn't be read back): kept again once it changes
         let told = self.shared.lock().told_of(&library);
-        remember(&LAST_LIBRARY, path, told, library.clone());
+        remember_as(&LAST_LIBRARY, path, stamped, told, library.clone());
         Some((library, told))
     }
 
@@ -2009,6 +2024,52 @@ mod keeping {
         let next = CanvasSession::new(32, 32);
         assert!(next.open_brushes(path));
         assert_eq!(next.saved_brush_library(), first.saved_brush_library());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn brushes_brought_in_are_there_at_the_next_start_with_the_artwork_still_open() {
+        // a set and a library brought in from files, then the app gone with the artwork still
+        // open (no save, no gallery): the next start has both
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-brought-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        let path = dir.to_string_lossy().into_owned();
+        let files = CanvasSession::new(32, 32);
+        assert!(files.rename_brush_set(0, "Brought in".into()));
+        let set_file = files.brush_set_as_file(0).unwrap();
+        assert!(files.rename_brush_set(0, "From a library".into()));
+        let library_file = files.brush_library_as_file().unwrap();
+
+        let open = CanvasSession::new(32, 32);
+        open.open_brushes(path.clone());
+        let read = crate::brush_files::read_any_brushes(&set_file, Some("Brought in.brushset".into())).unwrap();
+        assert!(open.add_read_brushes(read, 0).is_some());
+        // as each app keeps the library once brushes from a file show in it
+        assert!(open.keep_brushes(path.clone()));
+        let read = crate::brush_files::read_any_brushes(&library_file, Some("Theirs.brushlibrary".into())).unwrap();
+        assert!(open.add_read_brushes(read, 0).is_some());
+        drop(open);
+        // the next start reads the files (not what this run holds in memory): written again as
+        // they are, they are as new to it
+        for entry in std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().is_file()) {
+            let text = std::fs::read(entry.path()).unwrap();
+            std::fs::write(entry.path(), text).unwrap();
+        }
+
+        let next = CanvasSession::new(32, 32);
+        assert!(next.open_brushes(path.clone()));
+        let names: Vec<String> = next.brush_library().iter().map(|s| s.name.clone()).collect();
+        assert!(names.iter().any(|n| n == "From a library"), "{names:?}");
+        let libraries = next.brush_libraries();
+        assert!(libraries.iter().any(|l| l.name == "Theirs" && l.current), "{:?}", libraries.len());
+        // and the one left for it, with the set brought in
+        let first = libraries.iter().position(|l| l.name != "Theirs").unwrap();
+        assert!(next.open_brush_library(first as u32));
+        let names: Vec<String> = next.brush_library().iter().map(|s| s.name.clone()).collect();
+        assert!(names.iter().any(|n| n == "Brought in"), "{names:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -224,6 +224,25 @@ pub fn exporting_since() -> Option<std::time::Instant> {
     writing.iter().filter(|(_, from_canvas, w)| *from_canvas && !w.is_finished()).map(|(since, ..)| *since).min()
 }
 
+/// Keeps `session`'s brushes on a thread of their own (a library with many brushes brought in is
+/// tens of megabytes), among the writes the app waits for as it ends: closed meanwhile, the
+/// library is written whole, not cut short and left as it was before.
+pub fn keep_brushes_meanwhile(session: &Arc<procraft_core::CanvasSession>) {
+    let kept = Arc::clone(session);
+    let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
+    match thread.spawn(move || keep_brushes(&kept)) {
+        Ok(started) => {
+            let mut writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+            writing.retain(|(.., w)| !w.is_finished());
+            writing.push((std::time::Instant::now(), false, started));
+        }
+        Err(e) => {
+            log::warn!("keeping the brushes on a thread of their own: {e}");
+            keep_brushes(session);
+        }
+    }
+}
+
 /// Waits for the files still being written.
 pub fn finish_writing() {
     let writing = std::mem::take(&mut *WRITING.lock().unwrap_or_else(|e| e.into_inner()));

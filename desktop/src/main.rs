@@ -550,6 +550,8 @@ impl ApplicationHandler for App {
         // before winit closes the connection the pen is read on
         pen::stop();
         if std::mem::replace(&mut self.closed, true) {
+            // (the brushes kept since, if any, written whole)
+            files::finish_writing();
             return;
         }
         self.hide_while_opening();
@@ -787,13 +789,9 @@ impl App {
         }
         if std::mem::take(&mut self.ui.keep_brushes) {
             // off the window's thread: a library with many brushes brought in is tens of megabytes
-            // when something in it changed (a brush chosen only writes the choices)
-            let kept = Arc::clone(&session);
-            let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
-            if let Err(e) = thread.spawn(move || files::keep_brushes(&kept)) {
-                log::warn!("keeping the brushes on a thread of their own: {e}");
-                files::keep_brushes(&session);
-            }
+            // when something in it changed (a brush chosen only writes the choices); waited for as
+            // the app ends
+            files::keep_brushes_meanwhile(&session);
         }
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);
