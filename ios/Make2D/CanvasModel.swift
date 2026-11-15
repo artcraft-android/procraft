@@ -413,6 +413,11 @@ final class CanvasModel {
         brightness = settings.brushColor[2]
         applyColor()
         tool = session.info().tool
+        // the light tool is an HDR canvas's: a standard one left on it opens on the brush
+        if tool == .light, !isHdr {
+            session.setTool(tool: .paint)
+            tool = .paint
+        }
         currentBrush = session.currentBrush()
         if let current = currentBrush {
             shownSet = Int(current.set)

@@ -1147,7 +1147,8 @@ enum ScreenCapture {
             let height = UInt32(min(bounds.width, bounds.height) * scale)
             let session = CanvasSession(width: width, height: height)
             // an HDR canvas, its light above white shown in the screen's extended range
-            if name.hasPrefix("hdr") {
+            // (the light tool's scene too: the tool is an HDR canvas's only)
+            if name.hasPrefix("hdr") || name == "light" {
                 session.setNewHdr(hdr: true)
             }
             let model = CanvasModel(session: session, dir: Gallery.store.newFolder(folder: nil))
