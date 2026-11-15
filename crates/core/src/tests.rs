@@ -13879,8 +13879,11 @@ fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
             _ if round == 0 => {}
             None => after_second = settled(None),
             Some(second) => {
-                let live = settled(Some(second));
-                assert_eq!(live, Some(second), "textures and buffers after artwork {round}, as after the second");
+                // a readback buffer kept for reuse may first be made in a later round (by when the
+                // autosave's thumbnail is read): one more buffer once is that, more would be a leak
+                let live = settled(Some(second)).expect("counted as before");
+                assert_eq!(live.0, second.0, "textures after artwork {round}, as after the second");
+                assert!(live.1 <= second.1 + 1, "buffers after artwork {round}: {} against {}", live.1, second.1);
             }
         }
     }
