@@ -868,7 +868,8 @@ fn gouache() -> Brush {
 
 fn oil_paint() -> Brush {
     with(
-        // building up, so its wet mix is laid (the Flat Brush's Light Glaze it comes from never mixes)
+        // building up, so its wet mix is laid as far as each stamp goes (the Flat Brush's Light
+        // Glaze it comes from would show no more than its strongest stamp)
         named("Oil Paint", Brush { flow: 1.0, max_size: 180.0, rendering: Rendering::BuildUp, ..bristle_brush() }),
         &[("wet_dilution", 0.1), ("wet_attack", 0.35), ("wet_pull", 0.6), ("wet_grade", 0.3)],
     )
@@ -2906,19 +2907,6 @@ mod tests {
             assert!(b.streamline <= 0.67, "{}: {}", b.name, b.streamline);
             assert!(b.pressure_smoothing == 0.0 || b.name == "Dry Ink", "{}: {}", b.name, b.pressure_smoothing);
         }
-    }
-
-    #[test]
-    fn a_brush_given_wet_paint_mixes_it() {
-        // a brush with water in its wet mix that keeps the strongest stamp (the Light Glaze) never
-        // mixes: its wet settings would do nothing
-        let dry: Vec<String> = library()
-            .into_iter()
-            .flat_map(|s| s.brushes)
-            .filter(|b| b.setting("wet_dilution") > 0.0 && !b.mixes_wet())
-            .map(|b| b.name)
-            .collect();
-        assert!(dry.is_empty(), "wet brushes that don't mix: {dry:?}");
     }
 
     #[test]

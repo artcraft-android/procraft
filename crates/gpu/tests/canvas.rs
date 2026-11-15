@@ -2784,6 +2784,46 @@ fn a_dual_brush_s_first_fades_into_its_second_s_colour() {
 }
 
 #[test]
+fn a_glaze_shows_its_wet_paint_only_as_far_as_its_own_build_up() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // twenty half-strong wet stamps over one spot, a frame apart, each laying fresh black paint:
+    // built up, the spot goes all but solid; the Light Glaze shows no more than its strongest
+    // stamp, the Uniform Glaze no more than its transfer
+    let spot = |rendering: Rendering, alpha: f32, transfer: f32| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.0),
+            load: 1.0,
+            grade: 1.0,
+            rendering,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(
+            &(0..20)
+                .map(|i| Stamp {
+                    time_ms: f64::from(i) * 20.0,
+                    transfer,
+                    ..Stamp::round(Vec2::new(32.0, 16.0), 10.0, alpha)
+                })
+                .collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 16)[3]
+    };
+    let built = spot(Rendering::BuildUp, 0.5, 1.0);
+    assert!(built > 245, "{built}");
+    let strongest = spot(Rendering::Strongest, 0.5, 1.0);
+    assert!((120..=136).contains(&strongest), "{strongest}");
+    let capped = spot(Rendering::Capped, 1.0, 0.4);
+    assert!((94..=110).contains(&capped), "{capped}");
+}
+
+#[test]
 fn modulated_wet_paint_lays_a_pixel_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

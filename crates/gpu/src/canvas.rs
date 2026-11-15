@@ -1250,10 +1250,10 @@ fn smudge_uniform(
         bbox: [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
         size: [width, height],
         grid: SMUDGE_GRID,
-        uniform_glaze: u32::from(style.rendering == Rendering::Strongest),
+        rule: wet_rule(style),
         paint: [style.color[0], style.color[1], style.color[2], 1.0],
         mode: 0,
-        mixture: 0.0,
+        transfer: if s.more[2].is_finite() { s.more[2].clamp(0.0, 1.0) } else { 1.0 },
         final_mixture: 1.0,
         grade: style.grade,
         blur: 0.0,
@@ -1322,14 +1322,15 @@ struct SmudgeUniform {
     bbox: [i32; 4],
     size: [u32; 2],
     grid: u32,
-    /// 1 when stamps don't build up past the strongest over a pixel (the uniform glaze).
-    uniform_glaze: u32,
+    /// How much of wet paint shows at a pixel, by its glaze (see [`wet_rule`]).
+    rule: u32,
     /// Wet mix: the paint (straight sRGB), how much of it the brush mixes into what it carries at
     /// this stamp, and how much of what it carries it lays down.
     paint: [f32; 4],
     /// 0 smudges; 1 paints wet.
     mode: u32,
-    mixture: f32,
+    /// What light pressure lets the stamp through to, for wet paint building up towards it.
+    transfer: f32,
     final_mixture: f32,
     grade: f32,
     blur: f32,
@@ -1451,6 +1452,18 @@ struct Smudge {
     pending: Vec<(StampInstance, [f32; 8], Paced)>,
     passes: u32,
     plot: u32,
+}
+
+/// How much of a wet stroke's paint shows at a pixel, by its glaze: as far as its stamps took it
+/// (0), only as far as the strongest stamp over it (1, the Light Glaze), or towards each stamp's
+/// transfer and never back (2, the Uniform Glaze). The paint itself is mixed stamp by stamp all
+/// the same; the last two are laid apart and shown as far as their own rule built up.
+fn wet_rule(style: &StrokeStyle) -> u32 {
+    match (style.wet_pull.is_some(), style.rendering) {
+        (true, Rendering::Strongest) => 1,
+        (true, Rendering::Capped) => 2,
+        _ => 0,
+    }
 }
 
 /// Whether a stroke's texturized grain is laid over its wet paint once, as it ends up, rather
@@ -5422,11 +5435,12 @@ impl Canvas {
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
-            // paint laid in place with a second, a texturized grain, wet or burnt edges is laid
-            // apart, and put together with them
+            // paint laid in place with a second, a texturized grain, wet or burnt edges, or a
+            // glaze of its own over its wet paint is laid apart, and put together with them
             let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
+            let alone = grain_once(style) || style.wet_edges > 0.0 || style.burnt_edges > 0.0 || wet_rule(style) != 0;
             let apart = second
-                .or((grain_once(style) || style.wet_edges > 0.0 || style.burnt_edges > 0.0).then_some((0, -1.0)))
+                .or(alone.then_some((0, -1.0)))
                 .filter(|_| wet_paint)
                 .map(|(mode, threshold)| (*style, mode, threshold));
             // and keeps the stroke as it was laid, each stamp's colour in it (and wet paint to go on

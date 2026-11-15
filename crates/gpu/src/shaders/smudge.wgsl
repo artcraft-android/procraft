@@ -25,14 +25,17 @@ struct SmudgeStamp {
     bbox: vec4<i32>,
     size: vec2<u32>,
     grid: u32,
-    // 1: stamps over a pixel don't build up past the strongest of them (the uniform glaze)
-    uniform_glaze: u32,
+    // how much of wet paint shows at a pixel, by its glaze: as far as its stamps took it (0), as
+    // far as the strongest stamp over it (1), or towards each stamp's transfer, never back (2);
+    // the last two kept in `amount`'s first half
+    rule: u32,
     // wet mix: the paint (straight colour), how much of it the brush mixes into what it carries,
     // and how much of what it carries it lays down
     paint: vec4<f32>,
     // 0 smudges; 1 paints wet
     mode: u32,
-    mixture: f32,
+    // what light pressure lets the stamp through to (wet paint building up towards it)
+    transfer: f32,
     final_mixture: f32,
     // the mix's grade (-1..1, folded into the mixtures) and the stamp's blur (0..1, see cs_blur_down)
     grade: f32,
@@ -393,6 +396,16 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             laid = plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t);
         }
         var weight = wet_weight(vec2<f32>(p) + 0.5, t);
+        if (st.rule == 1u) {
+            // the paint shows as far as the strongest stamp over the pixel
+            amount[k] = max(amount[k], weight);
+        } else if (st.rule == 2u) {
+            // towards the stamp's transfer by its cover, never past it and never back; the paint
+            // mixed by the cover the transfer leaves
+            let held = amount[k];
+            amount[k] = max(held, held + weight * (st.transfer - held));
+            weight = weight * st.transfer;
+        }
         if (st.modulated == 1u) {
             // only as far as the pixel has room left, which fills as it takes paint
             let held = amount[k];
@@ -438,20 +451,23 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = u32(p.y) * st.stride + u32(p.x);
     let laid = amount[st.stride * st.size.y + k];
     let was = textureLoad(before_tex, p, 0);
-    var a = laid;
-    if (st.wet_edges > 0.0 && laid > 0.0) {
+    // how much shows: what the stamps laid, or as far as the stroke's glaze built up by its own
+    // rule (the paint kept as laid, shown only that far)
+    let built = select(laid, min(amount[k], laid), st.rule != 0u);
+    var a = built;
+    if (st.wet_edges > 0.0 && built > 0.0) {
         // the paint pools, settling back to about 0.78 where it is full and rising to full where
         // it shows about 0.7 (a rim where it thins out). By how much of it shows: wet paint
         // thinned by its water shows less than it touched (what it took of the room the layer
         // had; over a full layer, as far as it touched)
-        var shown = laid;
+        var shown = built;
         if (st.laid_apart == 2u && was.a < 0.999) {
             let now = unpack4x8unorm(grained[k]).a;
-            shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0);
+            shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0) * built / max(laid, 1e-6);
         }
         let x = 4.5 * max(shown, 1e-4);
         let pooled = 1.0 - abs(sin(x) / x);
-        a = laid * mix(1.0, pooled / max(shown, 1e-4), st.wet_edges);
+        a = built * mix(1.0, pooled / max(shown, 1e-4), st.wet_edges);
     }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
@@ -461,7 +477,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         if (st.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > st.dual_threshold);
         }
-        a = dual_rise(dual_combine(a, b, st.dual - 1u), laid, st.dual - 1u);
+        a = dual_rise(dual_combine(a, b, st.dual - 1u), built, st.dual - 1u);
     }
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
     if (st.laid_apart == 2u && laid > 0.0) {
@@ -472,7 +488,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             // burnt edges show where the stroke is thin: where its grain or its second took paint
             // away, or without either wherever it is less than full. The paint itself, blended
             // once more with what was under it (nothing shows where the layer was empty)
-            let full = select(1.0, laid, st.grain_once > 0.5 || st.dual != 0u);
+            let full = select(1.0, built, st.grain_once > 0.5 || st.dual != 0u);
             let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
             let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
             kept = over_layer(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
