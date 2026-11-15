@@ -2733,6 +2733,11 @@ impl Canvas {
         self.redo.last().map(|s| s.made)
     }
 
+    /// Whether step `made` (numbered as [`Canvas::steps_made`]) can still be undone or redone here.
+    pub fn keeps_step(&self, made: u64) -> bool {
+        self.undo.iter().chain(&self.redo).any(|s| s.made == made)
+    }
+
     /// Marks where the history is once the queued work is done, for [`Canvas::collapse_steps`].
     pub fn mark_steps(&mut self) {
         self.end_stroke();

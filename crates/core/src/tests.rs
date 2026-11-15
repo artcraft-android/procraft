@@ -12946,6 +12946,8 @@ fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_else
         let mut st = s.shared.lock();
         st.window_size = (side, side);
         st.view = Some(View::fit((200, 200), (side, side)));
+        // made in one frame (a slice at a time is tested on its own)
+        st.sharp.slice = Some(std::time::Duration::from_secs(60));
     }
     let settle = || std::thread::sleep(std::time::Duration::from_millis(160));
     // a pixel layer's stroke at the top, a vector layer's thin stroke below it
@@ -13215,5 +13217,185 @@ fn a_tap_of_the_selection_tool_on_a_vector_layer_takes_the_stroke_under_it_or_le
     tap(150.0, 10.0, 2000.0);
     assert_eq!(s.freehand_path().len(), 4, "two points of a path");
     s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A vector layer of `n` strokes on a `side` square canvas shown in a window twice as big (each
+/// canvas pixel two window pixels across, so it is drawn sharp once settled): the session, its
+/// plugins, the store's folder, the layer, and a window picture to draw frames into.
+fn zoomed_vector_strokes(
+    n: u32,
+    side: u32,
+    name: &str,
+) -> Option<(
+    std::sync::Arc<CanvasSession>,
+    std::sync::Arc<crate::Plugins>,
+    String,
+    u64,
+    procraft_gpu::wgpu::Texture,
+    procraft_gpu::Gpu,
+)> {
+    let (s, plugins, dir) = vector_session(side, name)?;
+    let window = side * 2;
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (window, window);
+        st.view = Some(View::fit((side, side), (window, window)));
+    }
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.1);
+    for k in 0..n {
+        let f = k as f32 / n.max(1) as f32;
+        let y = 20.0 + f * (window as f32 - 40.0);
+        stroke_line(&s, (20.0, y), (window as f32 - 20.0, window as f32 - y));
+    }
+    let (texture, gpu) = frame_target(&s, window);
+    Some((s, plugins, dir, vector, texture, gpu))
+}
+
+/// Frames drawn till the sharp picture shows (at most `most`): how many it took.
+fn frames_till_sharp(s: &CanvasSession, texture: &procraft_gpu::wgpu::Texture, gpu: &Gpu, side: u32, most: u32) -> u32 {
+    let mut frames = 0;
+    while !shows_sharp(s) && frames < most {
+        framed(s, texture, gpu, side);
+        frames += 1;
+    }
+    frames
+}
+
+#[test]
+fn a_vector_layer_of_many_strokes_is_made_sharp_a_slice_a_frame_as_it_would_be_at_once() {
+    let Some((s, _plugins, dir, _vector, texture, gpu)) = zoomed_vector_strokes(24, 160, "slices") else { return };
+    let side = 320;
+    let settle = || std::thread::sleep(std::time::Duration::from_millis(160));
+    framed(&s, &texture, &gpu, side);
+    settle();
+    // made whole in one frame: the picture to match
+    s.shared.lock().sharp.slice = Some(std::time::Duration::from_secs(60));
+    let frames = frames_till_sharp(&s, &texture, &gpu, side, 4);
+    assert_eq!(frames, 1);
+    let whole = framed(&s, &texture, &gpu, side);
+    // a slice of a stroke a frame: made over many frames, the canvas drawn meanwhile as it was, and
+    // the same picture at the end (the view moved, which takes it away, and put back)
+    let view = s.shared.lock().view;
+    s.view_gesture(160.0, 160.0, 7.0, 0.0, 1.0, 0.0);
+    framed(&s, &texture, &gpu, side);
+    assert!(!shows_sharp(&s));
+    s.shared.lock().view = view;
+    framed(&s, &texture, &gpu, side);
+    settle();
+    s.shared.lock().sharp.slice = Some(std::time::Duration::ZERO);
+    let made = s.shared.lock().sharp.made;
+    let frames = frames_till_sharp(&s, &texture, &gpu, side, 100);
+    assert!(frames >= 24, "a frame a stroke: {frames}");
+    assert_eq!(s.shared.lock().sharp.made, made + 1);
+    let sliced = framed(&s, &texture, &gpu, side);
+    assert_eq!(most_apart(&whole, &sliced), 0, "as made at once");
+    // a move of the view while it is made leaves it; settled again, it is made again
+    s.view_gesture(160.0, 160.0, 2.0, 0.0, 1.0, 0.0);
+    framed(&s, &texture, &gpu, side);
+    settle();
+    framed(&s, &texture, &gpu, side);
+    framed(&s, &texture, &gpu, side);
+    assert!(s.shared.lock().sharp.making(), "being made");
+    s.view_gesture(160.0, 160.0, 2.0, 0.0, 1.0, 0.0);
+    framed(&s, &texture, &gpu, side);
+    assert!(!s.shared.lock().sharp.making() && !shows_sharp(&s), "left at once");
+    settle();
+    assert!(frames_till_sharp(&s, &texture, &gpu, side, 100) < 100);
+    assert_eq!(s.shared.lock().sharp.made, made + 2);
+    assert_eq!(gpu.errors(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_vector_layer_s_items_are_asked_of_its_plugin_once_while_its_data_stays_as_it_is() {
+    let Some((s, plugins, dir, vector, texture, gpu)) = zoomed_vector_strokes(6, 160, "asked") else { return };
+    let side = 320;
+    let settle = || std::thread::sleep(std::time::Duration::from_millis(160));
+    let asked = || s.shared.lock().items_asked.get();
+    framed(&s, &texture, &gpu, side);
+    settle();
+    frames_till_sharp(&s, &texture, &gpu, side, 100);
+    let first = asked();
+    // zoomed again and again, each settled: made sharp each time from the items kept
+    for _ in 0..3 {
+        s.view_gesture(160.0, 160.0, 3.0, 0.0, 1.05, 0.0);
+        framed(&s, &texture, &gpu, side);
+        settle();
+        assert!(frames_till_sharp(&s, &texture, &gpu, side, 100) < 100);
+    }
+    assert_eq!(asked(), first, "not asked again");
+    // the transform tool on them takes them from there too
+    assert!(s.transform_begin().is_some());
+    s.transform_end(false);
+    assert_eq!(asked(), first);
+    // a new stroke is new data: asked again
+    stroke_line(&s, (40.0, 300.0), (280.0, 40.0));
+    framed(&s, &texture, &gpu, side);
+    settle();
+    frames_till_sharp(&s, &texture, &gpu, side, 100);
+    assert_eq!(asked(), first + 1);
+    // the plugin's controls changed: asked again (its items may draw otherwise now)
+    assert!(plugins.set_switch(format!("{VECTOR_ID}.nudge"), false));
+    s.view_gesture(160.0, 160.0, 3.0, 0.0, 1.0, 0.0);
+    framed(&s, &texture, &gpu, side);
+    settle();
+    frames_till_sharp(&s, &texture, &gpu, side, 100);
+    assert_eq!(asked(), first + 2);
+    assert_eq!(vector_items(&s, vector).len(), 7);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A vector layer of more strokes than the canvas keeps steps: the layer's data, a version a step,
+/// is kept only for the steps the canvas can still undo or redo, and what the versions share is
+/// kept once; undo and redo still put each back.
+#[test]
+fn a_vector_layer_keeps_its_data_for_undo_once_and_only_while_the_canvas_keeps_the_steps() {
+    let Some((s, _plugins, dir)) = vector_session(120, "steps") else { return };
+    let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
+    s.set_brush_size(0.05);
+    for k in 0..110u16 {
+        let y = 5.0 + f32::from(k);
+        stroke_across(&s, y, 10.0, 110.0);
+    }
+    {
+        let st = s.shared.lock();
+        let canvas = st.canvas.as_ref().unwrap();
+        let steps = st.layer_steps.len();
+        assert!(steps < 110, "{steps} kept");
+        assert!(st.layer_steps.iter().all(|step| canvas.keeps_step(step.made())));
+        // far less than a copy of the data for each
+        let whole = st.doc.layer(procraft_engine::document::LayerId(vector)).unwrap().plugin.as_ref().unwrap();
+        let whole = whole.data.as_ref().unwrap().len();
+        let held = crate::plugin_layers::steps_bytes(&st.layer_steps);
+        eprintln!("{steps} steps hold {held} bytes of a layer's data of {whole}");
+        assert!(held * 4 < steps * whole, "{held} bytes for {steps} versions of {whole}");
+    }
+    assert_eq!(vector_items(&s, vector).len(), 110);
+    s.undo();
+    assert_eq!(vector_items(&s, vector).len(), 109);
+    s.redo();
+    assert_eq!(vector_items(&s, vector).len(), 110);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn zoomed_in_and_out_a_vector_layer_is_drawn_sharp_on_one_canvas_kept_for_each_picture() {
+    let Some((s, _plugins, dir, _vector, texture, gpu)) = zoomed_vector_strokes(4, 160, "zooms") else { return };
+    let side = 320;
+    let settle = || std::thread::sleep(std::time::Duration::from_millis(160));
+    // from twice the canvas's size to a little over one and a half and to over three, each settled:
+    // pictures of the whole canvas smaller than the window and of part of it filling it
+    for scale in [1.0f32, 0.8, 1.1, 1.2, 1.5, 0.7] {
+        s.view_gesture(160.0, 160.0, 0.0, 0.0, scale, 0.0);
+        framed(&s, &texture, &gpu, side);
+        settle();
+        assert!(frames_till_sharp(&s, &texture, &gpu, side, 100) < 100, "made at {scale}");
+    }
+    let st = s.shared.lock();
+    assert_eq!((st.sharp.made, st.sharp.canvases), (6, 1));
+    drop(st);
+    assert_eq!(gpu.errors(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -468,13 +468,19 @@ pub(crate) struct State {
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// The stroke being drawn on a plugin's layer, recorded as it goes.
     pub(crate) recording: Option<plugin_layers::Recording>,
-    /// The changes strokes made to plugins' layers' data, by the step each made, for undo and redo.
+    /// The changes strokes made to plugins' layers' data, by the step each made, for undo and redo;
+    /// and the data last cut in pieces for them, and its pieces.
     pub(crate) layer_steps: Vec<plugin_layers::LayerStep>,
+    pub(crate) last_cut: Option<(procraft_engine::document::LayerId, Arc<Vec<u8>>, plugin_layers::Pieces)>,
     /// Plugins' layers as their items were last laid: where each item reached, so an edit lays
     /// again only what it changes.
     pub(crate) laid: std::collections::HashMap<procraft_engine::document::LayerId, plugin_layers::Laid>,
     /// How many times plugins' layers were laid again whole, and how many times only in part.
     pub(crate) lays: [u64; 2],
+    /// Plugins' layers' items as their plugins last gave them to draw, for asking again; and how
+    /// many times a plugin was asked.
+    pub(crate) drawn_items: std::cell::RefCell<Vec<plugin_layers::DrawnItems>>,
+    pub(crate) items_asked: std::cell::Cell<u64>,
     /// Plugins' layers drawn sharp over the canvas when zoomed in.
     pub(crate) sharp: sharp::Sharp,
     /// While items are laid on the sharp picture's canvas: canvas pixels to its pixels.
@@ -1459,8 +1465,11 @@ impl CanvasSession {
             text_steps: Vec::new(),
             recording: None,
             layer_steps: Vec::new(),
+            last_cut: None,
             laid: std::collections::HashMap::new(),
             lays: [0; 2],
+            drawn_items: std::cell::RefCell::new(Vec::new()),
+            items_asked: std::cell::Cell::new(0),
             sharp: sharp::Sharp::default(),
             lay_to: None,
             layer_data_unread: std::collections::HashSet::new(),

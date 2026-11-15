@@ -55,6 +55,8 @@ pub(crate) struct Hooks {
     store: Option<PathBuf>,
     /// The plugins' own artworks open, each by its plugin: told its controls as they change.
     canvases: Mutex<Vec<(String, std::sync::Weak<crate::PluginCanvas>)>>,
+    /// Counts the plugins coming on and off and their controls changing.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -80,10 +82,21 @@ impl Hooks {
         }
         working.stopped.push((id, stop));
         working.untold = Some(format!("A plugin stopped. {}", stop.text()));
+        self.changed();
     }
 
     fn has(&self, hook: Hook) -> bool {
         self.hooked.load(Ordering::Relaxed) & hook.bit() != 0
+    }
+
+    /// A number that changes whenever a plugin comes on or off or its controls change: what a
+    /// plugin answered before it changed may not be what it answers now.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The bits go by what is on now.
@@ -462,6 +475,7 @@ impl Hooks {
             OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
         );
         self.rehook(&working);
+        self.changed();
     }
 
     /// `id`'s copy of its code for its events (see [`OnHook::events`]).
@@ -590,10 +604,12 @@ impl Hooks {
         let mut working = self.working();
         working.on.retain(|p| p.id != id);
         self.rehook(&working);
+        self.changed();
     }
 
     /// Tells `id`, if it is on, control `index` has `value`.
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
+        self.changed();
         {
             let mut working = self.working();
             if let Some(at) = working.on.iter().position(|p| p.id == id) {
