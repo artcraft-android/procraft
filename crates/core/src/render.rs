@@ -126,6 +126,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
                     None => shared.wake.wait(&mut st),
                 }
             }
+            shared.took_back();
             if st.stop {
                 break;
             }

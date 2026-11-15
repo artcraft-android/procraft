@@ -37,6 +37,7 @@ mod gestures;
 mod gradients;
 mod grain_store;
 mod guide;
+mod held;
 mod history;
 mod hooks;
 mod host;
@@ -1210,11 +1211,49 @@ pub(crate) struct Shared {
     /// The brush studio's pad being drawn again off the caller's thread (see
     /// [`CanvasSession::sync_pad`]).
     pub(crate) pad_sync: Mutex<studio::PadSync>,
+    /// Where `state` was last taken, for the log when a wait on it is long.
+    holder: held::Holder,
 }
 
 impl Shared {
+    #[track_caller]
     pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, State> {
-        self.state.lock()
+        let at = std::panic::Location::caller();
+        let guard = self.state.try_lock().unwrap_or_else(|| self.wait_for(at));
+        self.holder.took(at);
+        guard
+    }
+
+    /// The lock, for a call at `at` that found it held: a wait past [`held::LONG_WAIT`] goes in
+    /// the log with what held it (the app's own thread waiting that long freezes the interface).
+    #[cold]
+    fn wait_for(&self, at: &'static std::panic::Location<'static>) -> parking_lot::MutexGuard<'_, State> {
+        if let Some(guard) = self.state.try_lock_for(held::LONG_WAIT) {
+            return guard;
+        }
+        let waiter = held::thread_name();
+        log::warn!(
+            "{waiter} has waited {} ms for the canvas at {}: {}",
+            held::LONG_WAIT.as_millis(),
+            held::place(at),
+            self.holder.said()
+        );
+        let started = std::time::Instant::now();
+        let guard = self.state.lock();
+        log::warn!(
+            "{waiter} had the canvas at {} {} ms later",
+            held::place(at),
+            (started.elapsed() + held::LONG_WAIT).as_millis()
+        );
+        guard
+    }
+
+    /// The render thread has the lock back after waiting for a frame to be asked for (`wake`
+    /// gives it back without [`Shared::lock`]): it holds it from here.
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+    #[track_caller]
+    pub(crate) fn took_back(&self) {
+        self.holder.took(std::panic::Location::caller());
     }
 
     /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
@@ -1240,6 +1279,7 @@ impl Shared {
     /// The lock, taken once the canvas has finished remaking its caches (made a render at a
     /// time, the lock let go between): what is read under it is the picture as it is, and
     /// nothing waits on a whole remake.
+    #[track_caller]
     pub(crate) fn lock_finished(&self) -> parking_lot::MutexGuard<'_, State> {
         for _ in 0..1000 {
             self.finish_caches();
@@ -1623,6 +1663,7 @@ impl CanvasSession {
                 save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
                 pad_sync: Mutex::new(studio::PadSync::default()),
+                holder: held::Holder::default(),
             }),
         })
     }

@@ -630,6 +630,30 @@ fn a_save_leaves_liquify_working_and_the_next_keeps_how_it_ended() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A call that waits on the canvas past the long wait still gets it once it is let go, and the
+/// lock says who took it last (what the log names when a wait is long).
+#[test]
+fn a_long_wait_on_the_canvas_ends_and_names_who_held_it() {
+    let s = CanvasSession::new(8, 8);
+    let held = {
+        let s = std::sync::Arc::clone(&s);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let guard = s.shared.lock();
+            tx.send(()).unwrap();
+            std::thread::sleep(crate::held::LONG_WAIT + std::time::Duration::from_millis(200));
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        t
+    };
+    assert!(s.shared.holder.said().starts_with("taken at tests.rs:"), "{}", s.shared.holder.said());
+    let started = std::time::Instant::now();
+    drop(s.shared.lock());
+    assert!(started.elapsed() > crate::held::LONG_WAIT);
+    held.join().unwrap();
+}
+
 #[test]
 fn a_pen_stroke_paints_and_undoes() {
     let Some(s) = session(100, 200) else { return };
