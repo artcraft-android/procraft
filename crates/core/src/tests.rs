@@ -14306,7 +14306,7 @@ fn a_timeline_exports_as_a_harmony_scene() {
     let dir = std::env::temp_dir().join(format!("make2d-harmony-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let zip_path = dir.join("Dots.zip");
-    let made = s.export_harmony(zip_path.to_string_lossy().into_owned()).unwrap();
+    let made = s.export_harmony(zip_path.to_string_lossy().into_owned(), Default::default()).unwrap();
     assert_eq!(s.export_progress(), 1.0);
     let bytes = std::fs::read(&zip_path).unwrap();
     let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
@@ -14366,7 +14366,8 @@ fn a_timeline_exports_as_a_harmony_scene() {
     // an Animation Assist canvas is put on a timeline for it, and stays as it was
     let Some(assist) = session(40, 40) else { return };
     three_frames(&assist);
-    let made = assist.export_harmony(dir.join("assist.zip").to_string_lossy().into_owned()).unwrap();
+    let made =
+        assist.export_harmony(dir.join("assist.zip").to_string_lossy().into_owned(), Default::default()).unwrap();
     assert_eq!((made.layers, made.drawings, made.frames), (2, 4, 5));
     assert!(assist.timeline_info().is_none());
     assert_eq!(assist.animation_sequence(), [0, 1, 1, 1, 2]);
