@@ -82,6 +82,8 @@ struct AdjustmentPanel: View {
             case .halftone: HalftonePanel(model: model, shown: shown)
             case .chromaticAberration: ChromaticPanel(model: model, shown: shown)
             case .perspectiveBlur: PerspectivePanel(model: model, shown: shown)
+            case .dither: DitherPanel(model: model, shown: shown, wide: wide)
+            case .vignette: VignettePanel(model: model, shown: shown, wide: wide)
             case .plugin: PluginFilterPanel(model: model, shown: shown)
             default: EmptyView()
             }
@@ -938,6 +940,119 @@ private struct HalftonePanel: View {
         )
         .padding(.top, 16)
         .plate(507, 66)
+    }
+}
+
+/// The dither toolbar: an ordered or noise pattern, its levels and pattern size, and colour or
+/// black and white.
+private struct DitherPanel: View {
+    let model: CanvasModel
+    let shown: AdjustShown
+    let wide: Bool
+
+    private static let kinds: [DitherKind] = [.ordered, .noise]
+
+    private var kindsSwitch: some View {
+        KindsSwitch(
+            width: 428,
+            kinds: [
+                Kind(icon: PcIcons.ditherOrdered, label: "Ordered", width: 204),
+                Kind(icon: PcIcons.ditherNoise, label: "Noise", width: 204),
+            ],
+            chosen: Self.kinds.firstIndex(of: shown.ditherKind) ?? 0,
+            onChoose: { i in model.adjust { $0.adjustmentDitherKind(kind: Self.kinds[i]) } }
+        )
+    }
+
+    private func slider(_ label: String, _ k: Int, width: CGFloat) -> some View {
+        let v = value(shown.dither, k)
+        // levels 2 to 16 a channel, dots 1 to 8 pixels, as the core works them out
+        let reads = k == 0 ? "\(Int((2 + v * 14).rounded()))" : "\(Int((1 + v * 7).rounded())) px"
+        return OptionSlider(
+            label: label, value: v, shown: reads, width: width, labelInk: modesText,
+            onChange: { n in model.adjust { $0.adjustmentDitherValue(index: UInt32(k), value: n) } }
+        )
+    }
+
+    private var colours: some View {
+        HStack(spacing: 7) {
+            ForEach([false, true], id: \.self) { mono in
+                let on = shown.ditherMono == mono
+                Text(verbatim: mono ? "Black & White" : "Color")
+                    .font(.system(size: 15))
+                    .foregroundStyle(on ? Color.white : modesText)
+                    .lineLimit(1)
+                    .frame(width: 140, height: 40)
+                    .background(Capsule().fill(on ? Pc.accent : noiseButton))
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.adjust { $0.adjustmentDitherMono(mono: mono) } }
+            }
+        }
+    }
+
+    var body: some View {
+        if wide {
+            VStack(spacing: 8) {
+                kindsSwitch
+                HStack(alignment: .top, spacing: 19) {
+                    slider("Levels", 0, width: 251)
+                    slider("Pattern Size", 1, width: 251)
+                    colours.padding(.top, 8)
+                }
+                .padding(.leading, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.top, 8)
+            .plate(903, 113)
+        } else {
+            VStack(spacing: 8.5) {
+                kindsSwitch
+                slider("Levels", 0, width: 500)
+                slider("Pattern Size", 1, width: 500)
+                colours
+            }
+            .padding(.top, 10)
+            .plate(532, 236)
+        }
+    }
+}
+
+/// The vignette toolbar: darkening or lightening, its size and softness.
+private struct VignettePanel: View {
+    let model: CanvasModel
+    let shown: AdjustShown
+    let wide: Bool
+
+    private static let kinds: [VignetteKind] = [.dark, .light]
+
+    private func slider(_ label: String, _ k: Int, width: CGFloat) -> some View {
+        let v = value(shown.vignette, k)
+        return OptionSlider(
+            label: label, value: v, shown: reading(v, max: true), width: width, labelInk: modesText,
+            onChange: { n in model.adjust { $0.adjustmentVignetteValue(index: UInt32(k), value: n) } }
+        )
+    }
+
+    var body: some View {
+        let kinds = KindsSwitch(
+            width: 428,
+            kinds: [
+                Kind(icon: PcIcons.vignetteDark, label: "Dark", width: 204),
+                Kind(icon: PcIcons.vignetteLight, label: "Light", width: 204),
+            ],
+            chosen: Self.kinds.firstIndex(of: shown.vignetteKind) ?? 0,
+            onChoose: { i in model.adjust { $0.adjustmentVignetteKind(kind: Self.kinds[i]) } }
+        )
+        VStack(spacing: 12) {
+            kinds
+            HStack(spacing: 20) {
+                slider("Size", 0, width: 300)
+                slider("Softness", 1, width: 300)
+            }
+            .frame(width: 620)
+        }
+        .padding(.top, 8)
+        .plate(668, 120)
     }
 }
 

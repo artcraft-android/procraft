@@ -38,6 +38,9 @@ private func icon(_ a: Adjustment) -> PcIcon {
     case .glitch: PcIcons.adjustGlitch
     case .halftone: PcIcons.adjustHalftone
     case .chromaticAberration: PcIcons.adjustChromatic
+    case .pixelate: PcIcons.adjustPixelate
+    case .dither: PcIcons.adjustDither
+    case .vignette: PcIcons.adjustVignette
     case .liquify: PcIcons.adjustLiquify
     case .clone: PcIcons.adjustClone
     case .plugin: PcIcons.adjustments
@@ -54,6 +57,8 @@ struct AdjustmentBar: View {
         if let a = model.adjustment {
             let amount = model.adjustShown?.amount ?? 0
             let swiped = adjustmentSwiped(adjustment: a)
+            // an adjustment layer's shows through its mask: it is never painted on
+            let paintable = adjustmentPaintable(adjustment: a) && model.adjustShown?.onLayer != true
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 0) {
                     // drawn in a 32 frame, shown as it is
@@ -70,8 +75,16 @@ struct AdjustmentBar: View {
                             .lineLimit(1)
                             .padding(.leading, 3)
                     }
+                    // an adjustment layer's: said so after its name
+                    if model.adjustShown?.onLayer == true {
+                        Text(verbatim: "Adjustment Layer")
+                            .font(.system(size: 14))
+                            .foregroundStyle(modeText)
+                            .lineLimit(1)
+                            .padding(.leading, 6)
+                    }
                     // Layer or Pencil, for the adjustments that can be painted on
-                    if adjustmentPaintable(adjustment: a) {
+                    if paintable {
                         PcIconView(PcIcons.disclose, size: 32, color: modeText)
                             .frame(width: 33, height: 32)
                     }
@@ -81,7 +94,7 @@ struct AdjustmentBar: View {
                 .background(modeBar)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if adjustmentPaintable(adjustment: a) {
+                    if paintable {
                         model.adjustModesOpen.toggle()
                     }
                 }

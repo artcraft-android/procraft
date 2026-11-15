@@ -46,6 +46,7 @@ mod keys;
 #[cfg(target_os = "ios")]
 mod layer;
 mod layer_ops;
+mod layer_style;
 mod layers;
 mod liquify;
 mod modes;
@@ -112,11 +113,12 @@ use make2d_engine::view::View;
 use make2d_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
 pub use adjust::{
-    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
+    ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind,
+    SwipeAdjustment, VignetteKind,
 };
 pub use adjust_menu::{
-    Adjustment, adjustment_groups, adjustment_label, adjustment_paintable, adjustment_pencil_amount, adjustment_swiped,
-    quick_action_adjustment,
+    Adjustment, adjustment_groups, adjustment_label, adjustment_live, adjustment_paintable, adjustment_pencil_amount,
+    adjustment_swiped, quick_action_adjustment,
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{
@@ -153,6 +155,7 @@ pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
+pub use layer_style::{LayerEffectInfo, layer_effect_names, style_size, style_size_slider};
 pub use layers::{
     BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_layer_budget, set_resident_budget,
@@ -687,6 +690,8 @@ pub(crate) struct State {
     adjusting: bool,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
+    /// The adjustment open is an adjustment layer's: what it changes goes into the layer.
+    adjust_layer: Option<adjusting::LayerEdit>,
     filters: plugin_filter::Filters,
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
@@ -1617,6 +1622,7 @@ impl CanvasSession {
             feather_base: None,
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
+            adjust_layer: None,
             filters: plugin_filter::Filters::default(),
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
@@ -1795,10 +1801,9 @@ impl CanvasSession {
         if st.doc.is_locked(current)
             || st.plugin_layer_off(current)
             || st.doc.unseen(current).is_some()
-            || st
-                .doc
-                .layer(current)
-                .is_none_or(|l| l.kind == make2d_engine::document::LayerKind::Group || l.text.is_some())
+            || st.doc.layer(current).is_none_or(|l| {
+                l.kind == make2d_engine::document::LayerKind::Group || l.text.is_some() || l.is_adjustment()
+            })
         {
             return;
         }

@@ -1341,7 +1341,12 @@ impl Layers {
         row_y: f32,
         backdrops: &mut Vec<f32>,
     ) {
-        let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
+        // adjustment layers' settings and layer styles have no desktop panels yet
+        let rows: Vec<LayerOptionRow> = session
+            .layer_options(l.id)
+            .into_iter()
+            .filter(|r| !matches!(r.option, LayerOption::AdjustmentSettings | LayerOption::LayerStyle))
+            .collect();
         // a vector layer's own rows: whether it is drawn again as fine as the screen when zoomed
         // in, and (with strokes or fills picked on it) what the brush as it is set can give them;
         // how the eraser works on it is chosen in the Eraser band
@@ -1444,6 +1449,7 @@ impl Layers {
             LayerOption::MergeDown => _ = session.merge_down(l.id),
             LayerOption::CombineDown => _ = session.combine_down(l.id),
             LayerOption::MergeMask => _ = session.merge_mask(l.id),
+            LayerOption::AdjustmentSettings | LayerOption::LayerStyle => {}
         }
     }
 

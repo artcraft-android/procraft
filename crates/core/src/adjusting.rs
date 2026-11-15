@@ -11,11 +11,15 @@ use make2d_engine::geom::Vec2;
 use make2d_engine::view::View;
 
 use crate::CanvasSession;
+use make2d_engine::document::{Document, LayerAdjustment, LayerId};
+
 use crate::adjust::{
-    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind, PerspectiveKind,
-    SwipeAdjustment,
+    ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind,
+    PerspectiveKind, SwipeAdjustment, VignetteKind,
 };
-use crate::adjust_menu::{Adjustment, adjustment_paintable, adjustment_pencil_amount};
+use crate::adjust_menu::{
+    Adjustment, adjustment_groups, adjustment_live, adjustment_paintable, adjustment_pencil_amount,
+};
 use crate::gradients::Gradients;
 
 /// Painted on, bloom starts smaller and burns more.
@@ -99,6 +103,86 @@ pub struct AdjustShown {
     pub changed: bool,
     /// A plugin's filter: its name, and its controls for one panel to draw.
     pub plugin: Option<crate::plugin_filter::PluginFilterShown>,
+    /// Dither: its pattern, its levels and pattern size sliders (0..1), and whether it is in black
+    /// and white.
+    pub dither_kind: DitherKind,
+    pub dither: Vec<f32>,
+    pub dither_mono: bool,
+    /// Vignette: darkening or lightening, and its size and softness sliders (0..1).
+    pub vignette_kind: VignetteKind,
+    pub vignette: Vec<f32>,
+    /// It is an adjustment layer's: it changes what is below that layer, and is never painted on.
+    pub on_layer: bool,
+}
+
+/// An adjustment layer open in the adjustment's panels: the layer, the document from before this
+/// time it was opened (to keep as one undo step, or go back to), and from when its values last
+/// started (undo and reset go back there); whether it was added just now, and whether it is shown
+/// doing nothing for a moment (Preview).
+pub(crate) struct LayerEdit {
+    pub(crate) layer: LayerId,
+    pub(crate) before: Document,
+    pub(crate) start: Document,
+    pub(crate) added: bool,
+    pub(crate) preview: bool,
+}
+
+/// An adjustment layer's settings as its file keeps them: the values its panels show.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct LayerSettings {
+    adjustment: String,
+    amount: f32,
+    hsb: Vec<f32>,
+    balance_tone: u32,
+    balance: Vec<f32>,
+    curve_channel: u32,
+    curves: Vec<Vec<f32>>,
+    gradient: u32,
+    noise_kind: u32,
+    noise: Vec<f32>,
+    noise_multi: bool,
+    noise_added: bool,
+    bloom: Vec<f32>,
+    halftone_kind: u32,
+    chroma_kind: u32,
+    chroma: Vec<Vec<f32>>,
+    chroma_offset: [f32; 2],
+    glitch_kind: u32,
+    glitch: Vec<Vec<f32>>,
+    perspective_kind: u32,
+    perspective_origin: Option<[f32; 2]>,
+    perspective_arrow: f32,
+    dither_kind: u32,
+    dither: Vec<f32>,
+    dither_mono: bool,
+    vignette_kind: u32,
+    vignette: Vec<f32>,
+}
+
+/// The `i`th of `all`, or `or`.
+fn nth<T: Copy>(all: &[T], i: u32, or: T) -> T {
+    all.get(i as usize).copied().unwrap_or(or)
+}
+
+/// `values` into `into`, as many as both have, each finite one within `lo`..1.
+fn fill<const N: usize>(into: &mut [f32; N], values: &[f32], lo: f32) {
+    for (v, &x) in into.iter_mut().zip(values) {
+        if x.is_finite() {
+            *v = x.clamp(lo, 1.0);
+        }
+    }
+}
+
+/// The adjustment an adjustment layer's `settings` are for.
+pub(crate) fn adjustment_of(settings: &serde_json::Value) -> Option<Adjustment> {
+    let name = settings.get("adjustment")?.as_str()?;
+    adjustment_named(name)
+}
+
+/// The adjustment named `name` (as `{:?}` writes it).
+fn adjustment_named(name: &str) -> Option<Adjustment> {
+    adjustment_groups().into_iter().flatten().find(|a| format!("{a:?}") == name)
 }
 
 pub(crate) struct Adjusting {
@@ -146,6 +230,14 @@ pub(crate) struct Adjusting {
     perspective: Perspective,
     perspective_before: Vec<Perspective>,
     perspective_after: Vec<Perspective>,
+    dither_kind: DitherKind,
+    dither: [f32; 2],
+    dither_mono: bool,
+    vignette_kind: VignetteKind,
+    vignette: [f32; 2],
+    /// The adjustment layer the adjustment open works on (kept through its undo and reset, which
+    /// open it again); none, the current layer.
+    layer: Option<LayerId>,
 }
 
 /// Perspective blur's puck: where it is (canvas pixels; none for the canvas's middle), and the way
@@ -202,6 +294,12 @@ impl Default for Adjusting {
             perspective: Perspective::default(),
             perspective_before: Vec::new(),
             perspective_after: Vec::new(),
+            dither_kind: DitherKind::Ordered,
+            dither: [0.0, 0.0],
+            dither_mono: false,
+            vignette_kind: VignetteKind::Dark,
+            vignette: [0.4, 0.6],
+            layer: None,
         }
     }
 }
@@ -334,7 +432,97 @@ impl Adjusting {
             perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
             plugin: None,
+            dither_kind: self.dither_kind,
+            dither: self.dither.to_vec(),
+            dither_mono: self.dither_mono,
+            vignette_kind: self.vignette_kind,
+            vignette: self.vignette.to_vec(),
+            on_layer: false,
         }
+    }
+
+    /// Its values as an adjustment layer keeps them.
+    pub(crate) fn layer_settings(&self) -> serde_json::Value {
+        let settings = LayerSettings {
+            adjustment: self.open.map(|a| format!("{a:?}")).unwrap_or_default(),
+            amount: self.amount,
+            hsb: self.hsb.to_vec(),
+            balance_tone: self.balance_tone as u32,
+            balance: self.balance.to_vec(),
+            curve_channel: self.curve_channel as u32,
+            curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
+            gradient: self.gradient as u32,
+            noise_kind: self.noise_kind as u32,
+            noise: self.noise.to_vec(),
+            noise_multi: self.noise_multi,
+            noise_added: self.noise_added,
+            bloom: self.bloom.to_vec(),
+            halftone_kind: self.halftone_kind as u32,
+            chroma_kind: self.chroma_kind as u32,
+            chroma: self.chroma.iter().map(|c| c.to_vec()).collect(),
+            chroma_offset: [self.chroma_offset.0, self.chroma_offset.1],
+            glitch_kind: self.glitch_kind as u32,
+            glitch: self.glitch.to_vec(),
+            perspective_kind: self.perspective_kind as u32,
+            perspective_origin: self.perspective.origin.map(|o| [o.x, o.y]),
+            perspective_arrow: self.perspective.arrow,
+            dither_kind: self.dither_kind as u32,
+            dither: self.dither.to_vec(),
+            dither_mono: self.dither_mono,
+            vignette_kind: self.vignette_kind as u32,
+            vignette: self.vignette.to_vec(),
+        };
+        serde_json::to_value(settings).unwrap_or_default()
+    }
+
+    /// Its values set from an adjustment layer's `settings`: the adjustment they are for, if any.
+    /// What they leave out stays as it is.
+    fn load_layer_settings(&mut self, settings: &serde_json::Value) -> Option<Adjustment> {
+        let s: LayerSettings = serde_json::from_value(settings.clone()).ok()?;
+        let adjustment = adjustment_named(&s.adjustment).filter(|a| adjustment_live(*a))?;
+        self.amount = if s.amount.is_finite() { s.amount.clamp(0.0, 1.0) } else { 0.0 };
+        fill(&mut self.hsb, &s.hsb, 0.0);
+        self.balance_tone = (s.balance_tone as usize).min(2);
+        fill(&mut self.balance, &s.balance, 0.0);
+        self.curve_channel = (s.curve_channel as usize).min(3);
+        for (curve, points) in self.curves.iter_mut().zip(&s.curves) {
+            let pts: Vec<(f32, f32)> = points.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
+            if pts.len() >= 2 && pts.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+                *curve = pts;
+            }
+        }
+        self.gradient = s.gradient as usize;
+        use {ChromaticKind as C, DitherKind as D, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
+        self.noise_kind = nth(&[N::Clouds, N::Billows, N::Ridges], s.noise_kind, N::Clouds);
+        fill(&mut self.noise, &s.noise, 0.0);
+        self.noise_multi = s.noise_multi;
+        self.noise_added = s.noise_added;
+        fill(&mut self.bloom, &s.bloom, 0.0);
+        self.halftone_kind = nth(&[H::FullColor, H::ScreenPrint, H::Newspaper], s.halftone_kind, H::FullColor);
+        self.chroma_kind = nth(&[C::Perspective, C::Displace], s.chroma_kind, C::Perspective);
+        for (c, v) in self.chroma.iter_mut().zip(&s.chroma) {
+            fill(c, v, 0.0);
+        }
+        let [dx, dy] = s.chroma_offset;
+        self.chroma_offset = if dx.is_finite() && dy.is_finite() { (dx, dy) } else { (0.0, 0.0) };
+        self.glitch_kind = nth(&[G::Artifact, G::Wave, G::Signal, G::Diverge], s.glitch_kind, G::Artifact);
+        for (g, v) in self.glitch.iter_mut().zip(&s.glitch) {
+            if v.len() == g.len() && v.iter().all(|x| x.is_finite()) {
+                g.clone_from(v);
+            }
+        }
+        let p = [PerspectiveKind::Positional, PerspectiveKind::Directional];
+        self.perspective_kind = nth(&p, s.perspective_kind, PerspectiveKind::Positional);
+        self.perspective = Perspective {
+            origin: s.perspective_origin.filter(|o| o.iter().all(|v| v.is_finite())).map(|[x, y]| Vec2::new(x, y)),
+            arrow: if s.perspective_arrow.is_finite() { s.perspective_arrow } else { ARROW_UP },
+        };
+        self.dither_kind = nth(&[D::Ordered, D::Noise], s.dither_kind, D::Ordered);
+        fill(&mut self.dither, &s.dither, 0.0);
+        self.dither_mono = s.dither_mono;
+        self.vignette_kind = nth(&[VignetteKind::Dark, VignetteKind::Light], s.vignette_kind, VignetteKind::Dark);
+        fill(&mut self.vignette, &s.vignette, 0.0);
+        Some(adjustment)
     }
 
     /// Perspective blur on the layer (not painted on): its puck and a point along its arrow in the
@@ -363,6 +551,9 @@ enum Redraw {
     Chroma(ChromaticKind, f32, (f32, f32), [f32; 2]),
     Glitch(GlitchKind, f32, Vec<f32>),
     Perspective(PerspectiveKind, f32, Option<[f32; 2]>, f32),
+    Pixelate(f32),
+    Dither(DitherKind, f32, [f32; 2], bool),
+    Vignette(VignetteKind, f32, [f32; 2]),
 }
 
 impl Adjusting {
@@ -405,6 +596,9 @@ impl Adjusting {
                 a,
                 self.glitch.get(self.glitch_kind as usize).cloned().unwrap_or_default(),
             ),
+            Some(Adjustment::Pixelate) => Redraw::Pixelate(a),
+            Some(Adjustment::Dither) => Redraw::Dither(self.dither_kind, a, self.dither, self.dither_mono),
+            Some(Adjustment::Vignette) => Redraw::Vignette(self.vignette_kind, a, self.vignette),
             _ => Redraw::None,
         }
     }
@@ -425,6 +619,19 @@ impl CanvasSession {
         if self.shared.lock().pencil {
             return None;
         }
+        // an adjustment layer: undo takes back what changed since its values last started; with
+        // nothing changed it is closed and the step made as any
+        if self.shared.lock().adjust_layer.is_some() {
+            if self.layer_changed() {
+                if !undo {
+                    return Some(None);
+                }
+                self.layer_back();
+                return Some(Some(crate::adjust_menu::adjustment_label(open)));
+            }
+            self.adjustment_end(true);
+            return None;
+        }
         // perspective blur's puck steps back (or on) a drag at a time
         if self.perspective_step(undo) {
             return Some(Some(crate::adjust_menu::adjustment_label(open)));
@@ -437,9 +644,9 @@ impl CanvasSession {
             return Some(Some(crate::adjust_menu::adjustment_label(open)));
         }
         let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(false);
+        self.adjustment_close(false);
         let name = step(self);
-        self.adjustment_start(open);
+        self.adjustment_open(open);
         self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
         Some(name)
     }
@@ -454,9 +661,18 @@ impl CanvasSession {
     /// Opens the adjustment open again from nothing, or (`commit`) keeping what it did as one undo
     /// step. Perspective blur keeps its way, and committed, its puck and arrow.
     fn adjustment_again(&self, open: Adjustment, commit: bool) {
+        // an adjustment layer goes on open, kept as it is or back to where its values started
+        if self.shared.lock().adjust_layer.is_some() {
+            if commit {
+                self.layer_keep();
+            } else {
+                self.layer_back();
+            }
+            return;
+        }
         let (kind, puck) = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(commit);
-        self.adjustment_start(open);
+        self.adjustment_close(commit);
+        self.adjustment_open(open);
         self.adjusting(|a, _| {
             a.perspective_kind = kind;
             if commit {
@@ -494,6 +710,11 @@ impl CanvasSession {
                 self.adjust_glitch(kind, amount, values, zoom);
             }
             Redraw::Perspective(kind, amount, origin, arrow) => self.adjust_perspective(kind, amount, origin, arrow),
+            Redraw::Pixelate(amount) => self.adjust_pixelate(amount),
+            Redraw::Dither(kind, amount, [levels, scale], mono) => {
+                self.adjust_dither(kind, amount, levels, scale, mono)
+            }
+            Redraw::Vignette(kind, amount, [size, softness]) => self.adjust_vignette(kind, amount, size, softness),
         }
     }
 
@@ -522,11 +743,191 @@ impl CanvasSession {
     /// can't be adjusted. The amount starts at none (a gradient map's at all of it), HSB, colour
     /// balance and curves as they were; the other adjustments keep their settings.
     pub fn adjustment_start(&self, adjustment: Adjustment) -> bool {
+        // from the menu: on the current layer, not an adjustment layer open
+        if self.adjusting(|a, _| a.layer.is_some()) {
+            self.adjustment_end(true);
+        }
+        self.adjustment_open(adjustment)
+    }
+
+    /// Adds an adjustment layer of `adjustment` above the current layer and opens it, as the
+    /// adjustment opens on a layer; false when it can't be one (Liquify, Clone, a plugin's
+    /// filter), or the canvas has no room for another layer. Ended without keeping it, the layer
+    /// goes again.
+    pub fn adjustment_layer_add(&self, adjustment: Adjustment) -> bool {
+        if !adjustment_live(adjustment) || !self.shared.lock().doc.has_room(1) {
+            return false;
+        }
+        self.adjustment_end(true);
+        let id = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            let before = st.doc.clone();
+            let name = crate::adjust_menu::adjustment_label(adjustment);
+            // nothing changed until its values are set (sharpening by none)
+            let blank = LayerAdjustment {
+                filter: make2d_gpu::Filter::Sharpen { amount: 0.0 },
+                table: Vec::new(),
+                settings: serde_json::Value::Null,
+            };
+            let id = st.doc.add_adjustment_layer(name, blank);
+            st.adjust_layer = Some(LayerEdit { layer: id, start: st.doc.clone(), before, added: true, preview: false });
+            st.revision += 1;
+            id
+        };
+        // its values start as a new adjustment's do
+        let up = self.shared.lock().canvas_angle(ARROW_UP);
+        self.adjusting(|a, _| {
+            a.layer = Some(id);
+            a.hsb = [0.5; 3];
+            a.balance = [0.5; 9];
+            a.curves = [straight(), straight(), straight(), straight()];
+            a.chroma_offset = (0.0, 0.0);
+            a.perspective_kind = PerspectiveKind::Positional;
+            a.perspective = Perspective { origin: None, arrow: up };
+            a.perspective_before.clear();
+            a.perspective_after.clear();
+        });
+        self.adjustment_open(adjustment)
+    }
+
+    /// Opens adjustment layer `layer`'s adjustment with its values as it keeps them, to change
+    /// them; the adjustment opened, or none when it isn't an adjustment layer (or is locked).
+    pub fn adjustment_layer_edit(&self, layer: u64) -> Option<Adjustment> {
+        let id = LayerId(layer);
+        let settings = {
+            let st = self.shared.lock();
+            let l = st.doc.layer(id).filter(|_| !st.doc.is_locked(id))?;
+            l.adjustment.as_ref()?.settings.clone()
+        };
+        self.adjustment_end(true);
+        let adjustment = self.adjusting(|a, _| {
+            let mut loaded = Adjusting { gradients: a.gradients.clone(), ..Adjusting::default() };
+            let adjustment = loaded.load_layer_settings(&settings)?;
+            *a = loaded;
+            Some(adjustment)
+        })?;
+        {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            st.doc.set_current(id);
+            let before = st.doc.clone();
+            st.adjust_layer =
+                Some(LayerEdit { layer: id, start: before.clone(), before, added: false, preview: false });
+            st.adjusting = true;
+            st.last_filter = st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.filter);
+            st.revision += 1;
+            self.shared.frame(st);
+        }
+        self.adjusting(|a, _| {
+            a.open = Some(adjustment);
+            a.layer = Some(id);
+        });
+        Some(adjustment)
+    }
+
+    /// Which adjustment layer `layer` is (none for any other layer).
+    pub fn layer_adjustment(&self, layer: u64) -> Option<Adjustment> {
+        let st = self.shared.lock();
+        adjustment_of(&st.doc.layer(LayerId(layer))?.adjustment.as_ref()?.settings)
+    }
+}
+
+impl CanvasSession {
+    /// Whether the adjustment layer open has changed since its values last started.
+    fn layer_changed(&self) -> bool {
+        let st = self.shared.lock();
+        st.adjust_layer.as_ref().is_some_and(|e| st.doc != e.start)
+    }
+
+    /// The adjustment layer open back to where its values last started, and its panel with it.
+    fn layer_back(&self) {
+        let settings = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some(edit) = st.adjust_layer.as_mut() else { return };
+            edit.preview = false;
+            let (start, id) = (edit.start.clone(), edit.layer);
+            st.doc = start;
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.invalidate();
+            }
+            st.last_filter = st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.filter);
+            self.shared.frame(st);
+            st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.settings.clone())
+        };
+        self.adjusting(|a, _| {
+            let open = a.open;
+            if let Some(s) = &settings
+                && !s.is_null()
+            {
+                a.load_layer_settings(s);
+            } else {
+                // just added: as it opened
+                *a = Adjusting { gradients: a.gradients.clone(), layer: a.layer, open, ..Adjusting::default() };
+            }
+            a.touched = false;
+        });
+    }
+
+    /// The adjustment layer open kept as it is, as one undo step, and goes on open from there.
+    fn layer_keep(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(edit) = st.adjust_layer.as_mut() else { return };
+        if st.doc == edit.before {
+            return;
+        }
+        let before = std::mem::replace(&mut edit.before, st.doc.clone());
+        edit.start = st.doc.clone();
+        let added = std::mem::replace(&mut edit.added, false);
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step(if added { "add adjustment layer" } else { "change adjustment layer" });
+            canvas.record_document(before);
+        }
+        st.revision += 1;
+        drop(guard);
+        self.adjusting(|a, _| a.touched = false);
+    }
+
+    /// Opens `adjustment` on what it works on: the adjustment layer open (as it was set), or the
+    /// current layer.
+    fn adjustment_open(&self, adjustment: Adjustment) -> bool {
+        if self.adjusting(|a, _| a.layer.is_some()) {
+            let open = self.shared.lock().adjust_layer.is_some();
+            if !open {
+                return false;
+            }
+            {
+                let mut st = self.shared.lock();
+                st.adjusting = true;
+            }
+            let redraw = self.adjusting(|a, _| {
+                a.open = Some(adjustment);
+                a.amount = if adjustment == Adjustment::GradientMap { 1.0 } else { 0.0 };
+                a.pencil = false;
+                a.preview = false;
+                a.touched = false;
+                a.redraw()
+            });
+            self.redraw_adjustment(redraw);
+            // its values as they start are where undo goes back to
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if let Some(edit) = st.adjust_layer.as_mut() {
+                edit.start = st.doc.clone();
+            }
+            return true;
+        }
         // Liquify leaves an alpha locked layer alone
         if self.why_not_adjusted(adjustment) == Some(crate::layers::Blocked::AlphaLocked) {
             return false;
         }
-        self.adjustment_end(true);
+        self.adjustment_close(true);
         let begun = match adjustment {
             Adjustment::Liquify => self.liquify_begin(),
             Adjustment::Clone => self.clone_begin(),
@@ -574,10 +975,12 @@ impl CanvasSession {
         }
         true
     }
+}
 
-    /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
-    /// Returns whether one was open.
-    pub fn adjustment_end(&self, commit: bool) -> bool {
+impl CanvasSession {
+    /// Ends the open adjustment as [`Self::adjustment_end`] does, keeping what it works on (an
+    /// adjustment layer) for it to open again.
+    fn adjustment_close(&self, commit: bool) -> bool {
         let open = self.adjusting(|a, _| {
             a.preview = false;
             a.pencil = false;
@@ -592,12 +995,23 @@ impl CanvasSession {
         }
         open
     }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
+    /// Returns whether one was open.
+    pub fn adjustment_end(&self, commit: bool) -> bool {
+        let open = self.adjustment_close(commit);
+        self.adjusting(|a, _| a.layer = None);
+        open
+    }
 
     /// What the open adjustment shows.
     pub fn adjustment_shown(&self) -> AdjustShown {
         let st = self.shared.lock();
         let shown = st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0));
-        AdjustShown { plugin: st.filters.shown(), ..shown }
+        AdjustShown { plugin: st.filters.shown(), on_layer: st.adjust_layer.is_some(), ..shown }
     }
 
     /// The amount moved by `step` (a swipe's), within 0..1.
@@ -763,6 +1177,37 @@ impl CanvasSession {
         });
     }
 
+    pub fn adjustment_dither_kind(&self, kind: DitherKind) {
+        self.change_adjustment(|a, _| a.dither_kind = kind);
+    }
+
+    /// Dither's slider `index` (0 levels, 1 pattern size) moved to `value` (0..1).
+    pub fn adjustment_dither_value(&self, index: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.dither.get_mut(index as usize) {
+                *v = value.clamp(0.0, 1.0);
+            }
+        });
+    }
+
+    /// Dither in black and white, or in colour.
+    pub fn adjustment_dither_mono(&self, mono: bool) {
+        self.change_adjustment(|a, _| a.dither_mono = mono);
+    }
+
+    pub fn adjustment_vignette_kind(&self, kind: VignetteKind) {
+        self.change_adjustment(|a, _| a.vignette_kind = kind);
+    }
+
+    /// Vignette's slider `index` (0 size, 1 softness) moved to `value` (0..1).
+    pub fn adjustment_vignette_value(&self, index: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.vignette.get_mut(index as usize) {
+                *v = value.clamp(0.0, 1.0);
+            }
+        });
+    }
+
     /// The layer shown as it was before the adjustment, or as adjusted.
     pub fn adjustment_preview(&self, original: bool) {
         if self.adjusting(|a, _| a.open.map(|_| a.preview = original)).is_some() {
@@ -772,10 +1217,18 @@ impl CanvasSession {
 
     /// Every value back to where the adjustment started.
     pub fn adjustment_reset(&self) {
-        if let Some(open) = self.adjusting(|a, _| a.open) {
-            self.adjustment_end(false);
-            self.adjustment_start(open);
+        let Some(open) = self.adjusting(|a, _| a.open) else { return };
+        // an adjustment layer: its values as a new one's
+        if self.shared.lock().adjust_layer.is_some() {
+            self.adjusting(|a, _| {
+                *a = Adjusting { gradients: a.gradients.clone(), layer: a.layer, ..Adjusting::default() };
+            });
+            self.adjustment_open(open);
+            self.adjusting(|a, _| a.touched = true);
+            return;
         }
+        self.adjustment_close(false);
+        self.adjustment_open(open);
     }
 
     /// Keeps what the adjustment did as one undo step and starts it again from there.
@@ -783,7 +1236,7 @@ impl CanvasSession {
         match self.adjusting(|a, _| a.open) {
             // it draws as it opens: opened again, it would go over what it did
             Some(Adjustment::Plugin) => {
-                self.adjustment_end(true);
+                self.adjustment_close(true);
             }
             Some(open) => self.adjustment_again(open, true),
             None => {}
@@ -797,14 +1250,25 @@ impl CanvasSession {
         if self.perspective_step(true) {
             return;
         }
+        // an adjustment layer: back to where its values started, or with nothing changed, closed and
+        // the last step undone
+        if self.shared.lock().adjust_layer.is_some() {
+            if self.layer_changed() {
+                self.layer_back();
+            } else {
+                self.adjustment_end(true);
+                self.undo();
+            }
+            return;
+        }
         if changed {
             self.adjustment_again(open, false);
             return;
         }
         let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(false);
+        self.adjustment_close(false);
         self.undo();
-        self.adjustment_start(open);
+        self.adjustment_open(open);
         self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
     }
 
@@ -812,7 +1276,8 @@ impl CanvasSession {
     /// brush goes shows it; back to the layer starts it again.
     pub fn adjustment_pencil(&self, pencil: bool) {
         let Some((open, was)) = self.adjusting(|a, _| a.open.map(|o| (o, a.pencil))) else { return };
-        if pencil == was || !adjustment_paintable(open) {
+        // an adjustment layer shows through its mask instead
+        if pencil == was || !adjustment_paintable(open) || self.shared.lock().adjust_layer.is_some() {
             return;
         }
         if !pencil {

@@ -311,6 +311,131 @@ pub struct Layer {
     /// its pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginLayer>,
+    /// An adjustment layer's adjustment: it has no pixels of its own to show, but redraws what is
+    /// below it in its group through this as the canvas composites (see [`LayerAdjustment`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<LayerAdjustment>,
+    /// Its outline, drop shadow and glows, drawn around (and inside) what it shows as it
+    /// composites; none, or none of them on, for a plain layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<LayerStyle>,
+}
+
+/// What an adjustment layer does: the adjustment it redraws what is below it through, with its
+/// table (curves and gradient map), and its settings as the app's panels show them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LayerAdjustment {
+    pub filter: crate::filter::Filter,
+    /// The 256 entries (RGBA8, 1024 bytes) curves and gradient map read; empty for the others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table: Vec<u8>,
+    /// The app's settings for it (its sliders and choices), kept as the app wrote them so its
+    /// panel opens on them again.
+    #[serde(default)]
+    pub settings: serde_json::Value,
+}
+
+/// The most a layer style's size or shadow distance can be (canvas pixels): what it reaches beyond
+/// the layer's own pixels.
+pub const STYLE_MOST_SIZE: f32 = 100.0;
+
+/// One of a layer's styles: on or off, its colour (sRGB 0..1), opacity (0..1), size (canvas
+/// pixels) and softness (0 a crisp edge, 1 fading all the way across it). A drop shadow also has a
+/// distance (canvas pixels) and angle (degrees, 0 to the right, 90 down).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LayerEffect {
+    pub on: bool,
+    pub color: [f32; 3],
+    pub opacity: f32,
+    pub size: f32,
+    pub softness: f32,
+    pub distance: f32,
+    pub angle: f32,
+}
+
+impl Default for LayerEffect {
+    fn default() -> LayerEffect {
+        LayerEffect { on: false, color: [0.0; 3], opacity: 1.0, size: 4.0, softness: 0.0, distance: 0.0, angle: 0.0 }
+    }
+}
+
+impl LayerEffect {
+    /// Whether it draws anything.
+    pub fn shows(&self) -> bool {
+        self.on && self.opacity > 0.0 && (self.size > 0.0 || self.distance > 0.0)
+    }
+
+    /// Its values kept to what they can be (a file's, say).
+    pub fn tidied(self) -> LayerEffect {
+        let unit = |v: f32, or: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { or };
+        let size = |v: f32| if v.is_finite() { v.clamp(0.0, STYLE_MOST_SIZE) } else { 0.0 };
+        LayerEffect {
+            on: self.on,
+            color: self.color.map(|c| unit(c, 0.0)),
+            opacity: unit(self.opacity, 1.0),
+            size: size(self.size),
+            softness: unit(self.softness, 0.0),
+            distance: size(self.distance),
+            angle: if self.angle.is_finite() { self.angle.rem_euclid(360.0) } else { 0.0 },
+        }
+    }
+}
+
+/// A layer's styles: an outline, a drop shadow, and glows outside and inside its edge. Each is off
+/// until turned on, with values that look right as soon as it is.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LayerStyle {
+    pub outline: LayerEffect,
+    pub shadow: LayerEffect,
+    pub outer_glow: LayerEffect,
+    pub inner_glow: LayerEffect,
+}
+
+impl Default for LayerStyle {
+    fn default() -> LayerStyle {
+        let effect = LayerEffect::default();
+        LayerStyle {
+            outline: LayerEffect { size: 4.0, ..effect },
+            shadow: LayerEffect { opacity: 0.6, size: 8.0, softness: 0.7, distance: 12.0, angle: 45.0, ..effect },
+            outer_glow: LayerEffect { color: [1.0, 0.92, 0.6], opacity: 0.8, size: 24.0, softness: 1.0, ..effect },
+            inner_glow: LayerEffect { color: [1.0, 1.0, 1.0], opacity: 0.75, size: 12.0, softness: 1.0, ..effect },
+        }
+    }
+}
+
+impl LayerStyle {
+    /// The four, in the order they are listed: outline, drop shadow, outer glow, inner glow.
+    pub fn effects(&self) -> [LayerEffect; 4] {
+        [self.outline, self.shadow, self.outer_glow, self.inner_glow]
+    }
+
+    /// The effect at `index` in [`Self::effects`]'s order.
+    pub fn effect_mut(&mut self, index: usize) -> Option<&mut LayerEffect> {
+        match index {
+            0 => Some(&mut self.outline),
+            1 => Some(&mut self.shadow),
+            2 => Some(&mut self.outer_glow),
+            3 => Some(&mut self.inner_glow),
+            _ => None,
+        }
+    }
+
+    /// Whether any of them draws anything.
+    pub fn shows(&self) -> bool {
+        self.effects().iter().any(LayerEffect::shows)
+    }
+
+    /// How far beyond the layer's own pixels they reach (canvas pixels, whole): what a change
+    /// to its pixels changes around it.
+    pub fn reach(&self) -> u32 {
+        let shadow = if self.shadow.shows() { self.shadow.size + self.shadow.distance } else { 0.0 };
+        let outline = if self.outline.shows() { self.outline.size } else { 0.0 };
+        let glow = if self.outer_glow.shows() { self.outer_glow.size } else { 0.0 };
+        let inner = if self.inner_glow.shows() { self.inner_glow.size } else { 0.0 };
+        (shadow.max(outline).max(glow).max(inner).ceil() as u32).saturating_add(2)
+    }
 }
 
 /// What makes a layer one of a kind a plugin adds: the kind, and the plugin's data for it. The app
@@ -348,6 +473,8 @@ impl Layer {
             assisted: false,
             vector: None,
             plugin: None,
+            adjustment: None,
+            style: None,
         }
     }
 
@@ -362,7 +489,17 @@ impl Layer {
     /// strokes, or a plugin's items): only that changes them, so edits to its pixels alone (a fill,
     /// an adjustment, a transform) wait until it is rasterized.
     pub fn drawn_from_data(&self) -> bool {
-        self.text.is_some() || self.vector.is_some() || self.plugin.is_some()
+        self.text.is_some() || self.vector.is_some() || self.plugin.is_some() || self.adjustment.is_some()
+    }
+
+    /// Whether it is an adjustment layer: no pixels of its own, it redraws what is below it.
+    pub fn is_adjustment(&self) -> bool {
+        self.adjustment.is_some()
+    }
+
+    /// Its styles, if any of them shows.
+    pub fn shown_style(&self) -> Option<&LayerStyle> {
+        self.style.as_ref().filter(|s| s.shows() && self.adjustment.is_none() && self.kind == LayerKind::Paint)
     }
 
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
@@ -1203,6 +1340,47 @@ impl Document {
         id
     }
 
+    /// A new adjustment layer above the current one (as [`Self::add_layer`] puts a layer), named
+    /// `name`, redrawing what is below it through `adjustment`; it becomes current.
+    pub fn add_adjustment_layer(&mut self, name: String, adjustment: LayerAdjustment) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.name = name;
+            l.adjustment = Some(adjustment);
+        }
+        id
+    }
+
+    /// Adjustment layer `id`'s adjustment set to `adjustment`; false if it is not one, or nothing
+    /// changed.
+    pub fn set_adjustment(&mut self, id: LayerId, adjustment: LayerAdjustment) -> bool {
+        match self.layer_mut(id) {
+            Some(l) if l.adjustment.is_some() && l.adjustment.as_ref() != Some(&adjustment) => {
+                l.adjustment = Some(adjustment);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Layer `id`'s styles set to `style` (each effect's values kept to what they can be); false
+    /// for a layer that takes none (a group, a mask, an adjustment layer), or when nothing changed.
+    pub fn set_style(&mut self, id: LayerId, style: Option<LayerStyle>) -> bool {
+        let style = style.map(|s| LayerStyle {
+            outline: s.outline.tidied(),
+            shadow: s.shadow.tidied(),
+            outer_glow: s.outer_glow.tidied(),
+            inner_glow: s.inner_glow.tidied(),
+        });
+        match self.layer_mut(id) {
+            Some(l) if l.kind == LayerKind::Paint && l.adjustment.is_none() && l.style != style => {
+                l.style = style;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The mask of layer `id`, if it has one.
     pub fn mask_of(&self, id: LayerId) -> Option<LayerId> {
         let at = self.index_of(id)?;
@@ -1527,7 +1705,11 @@ impl Document {
     /// and the one below's are each applied to its layer first.
     pub fn merge_target(&self, id: LayerId) -> Option<LayerId> {
         match self.layer(id)?.kind {
-            LayerKind::Paint => self.below(id).filter(|b| self.layer(*b).is_some_and(|l| l.kind == LayerKind::Paint)),
+            // an adjustment layer has no pixels to merge, nor takes any
+            LayerKind::Paint if self.layer(id)?.is_adjustment() => None,
+            LayerKind::Paint => self
+                .below(id)
+                .filter(|b| self.layer(*b).is_some_and(|l| l.kind == LayerKind::Paint && !l.is_adjustment())),
             LayerKind::Group => self.group_merge_pair(id).map(|(_, into)| into),
             LayerKind::Mask => None,
         }
@@ -1547,7 +1729,7 @@ impl Document {
                 LayerKind::Group => {}
             }
         };
-        if !self.is_inside(top, group) {
+        if !self.is_inside(top, group) || self.layer(top)?.is_adjustment() {
             return None;
         }
         let start = self.unit(top)?.start;
@@ -1588,7 +1770,10 @@ impl Document {
     /// Whether paint layer `id` can be clipped: a paint layer is just below it in its group.
     pub fn can_clip(&self, id: LayerId) -> bool {
         self.layer(id).is_some_and(|l| l.kind == LayerKind::Paint)
-            && self.below(id).and_then(|b| self.layer(b)).is_some_and(|b| b.kind == LayerKind::Paint)
+            && self
+                .below(id)
+                .and_then(|b| self.layer(b))
+                .is_some_and(|b| b.kind == LayerKind::Paint && !b.is_adjustment())
     }
 
     /// The layer `id` is clipped to: the nearest unclipped paint layer below it in its group.
@@ -1964,6 +2149,79 @@ mod tests {
         assert!(d.finish_merge_down(copy));
         assert!(d.layer(t).unwrap().text.is_none());
         assert!(!d.rasterize(t));
+    }
+
+    fn hsb_adjustment(hue: f32) -> LayerAdjustment {
+        LayerAdjustment {
+            filter: crate::filter::Filter::Hsb { hue, saturation: 1.0, brightness: 0.0 },
+            table: Vec::new(),
+            settings: serde_json::json!({ "hsb": [0.6, 0.5, 0.5] }),
+        }
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_kept_in_the_file_with_its_settings() {
+        let mut d = Document::new(100, 100);
+        let base = d.current();
+        let a = d.add_adjustment_layer("Hue, Saturation, Brightness".to_owned(), hsb_adjustment(0.5));
+        assert_eq!(d.current(), a);
+        assert_eq!(d.index_of(a), d.index_of(base).map(|i| i + 1), "above the current layer");
+        let l = d.layer(a).unwrap();
+        assert!(l.is_adjustment() && l.drawn_from_data() && l.kind == LayerKind::Paint);
+        // changed, then back from a file as it was
+        assert!(d.set_adjustment(a, hsb_adjustment(1.0)));
+        assert!(!d.set_adjustment(a, hsb_adjustment(1.0)), "nothing changed");
+        assert!(!d.set_adjustment(base, hsb_adjustment(1.0)), "an ordinary layer has none");
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.layer(a).unwrap().adjustment, Some(hsb_adjustment(1.0)));
+        // an ordinary layer writes none, and a file from before reads as none
+        let plain = serde_json::to_string(d.layer(base).unwrap()).unwrap();
+        assert!(!plain.contains("adjustment") && !plain.contains("style"));
+        let read: Layer = serde_json::from_str(&plain).unwrap();
+        assert!(read.adjustment.is_none() && read.style.is_none());
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_neither_merged_nor_clipped_to() {
+        let mut d = Document::new(100, 100);
+        let base = d.current();
+        let a = d.add_adjustment_layer("Curves".to_owned(), hsb_adjustment(0.5));
+        assert_eq!(d.merge_target(a), None, "no pixels to merge down");
+        let top = d.add_layer();
+        assert_eq!(d.merge_target(top), None, "nothing to merge into");
+        assert!(!d.can_clip(top), "an adjustment layer is no base");
+        assert!(d.can_clip(a), "but it may be clipped to the layer under it");
+        assert_eq!(d.merge_target(base), None);
+    }
+
+    #[test]
+    fn a_layer_s_style_is_kept_to_what_it_can_be() {
+        let mut d = Document::new(100, 100);
+        let l = d.current();
+        assert_eq!(d.layer(l).unwrap().shown_style(), None);
+        let mut style = LayerStyle::default();
+        assert!(!style.shows(), "every effect starts off");
+        style.outline.on = true;
+        style.outline.size = 1000.0;
+        style.shadow.angle = -90.0;
+        style.shadow.opacity = f32::NAN;
+        assert!(d.set_style(l, Some(style)));
+        let kept = d.layer(l).unwrap().style.unwrap();
+        assert_eq!(kept.outline.size, STYLE_MOST_SIZE);
+        assert_eq!(kept.shadow.angle, 270.0);
+        assert_eq!(kept.shadow.opacity, 1.0);
+        assert!(d.layer(l).unwrap().shown_style().is_some());
+        assert_eq!(kept.reach(), 102);
+        assert!(!d.set_style(l, Some(style)), "nothing changed");
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.layer(l).unwrap().style, Some(kept));
+        // groups and adjustment layers take none
+        let a = d.add_adjustment_layer("HSB".to_owned(), hsb_adjustment(0.5));
+        assert!(!d.set_style(a, Some(style)));
+        d.set_current(l);
+        let g = d.group_chosen().unwrap();
+        assert!(!d.set_style(g, Some(style)));
+        assert!(d.set_style(l, None));
     }
 
     #[test]

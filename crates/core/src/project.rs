@@ -1794,6 +1794,8 @@ pub fn import_pages(
             assisted: false,
             vector: None,
             plugin: None,
+            adjustment: None,
+            style: None,
         });
     }
     let mut doc = Document::from_layers(w, h, layers, LayerId(1));

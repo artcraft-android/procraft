@@ -1086,7 +1086,10 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are; empty (a locked group's or
             // mask's), as measured, a pill 64 tall with the frost alone, untinted
-            val rows = vm.layerOptions(l)
+            // adjustment layers' settings and layer styles have no Android panels yet
+            val rows = vm.layerOptions(l).filter {
+                it.option != LayerOption.ADJUSTMENT_SETTINGS && it.option != LayerOption.LAYER_STYLE
+            }
             // a plugin's actions for the layer, after the app's own
             val actions = remember { vm.plugins.actionsIn(com.make2d.app.core.PluginPlace.LAYER) }
             val tint = if (rows.isEmpty() && actions.isEmpty()) Color.Transparent else Pc.GlassMenu
@@ -1123,6 +1126,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
+                        LayerOption.ADJUSTMENT_SETTINGS, LayerOption.LAYER_STYLE -> { {} }
                     }
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
                 }

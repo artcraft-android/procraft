@@ -257,6 +257,8 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.GLITCH -> PcIcons.AdjustGlitch
     Adjustment.HALFTONE -> PcIcons.AdjustHalftone
     Adjustment.CHROMATIC_ABERRATION -> PcIcons.AdjustChromatic
+    // (Android's own glyphs for these come with their panels)
+    Adjustment.PIXELATE, Adjustment.DITHER, Adjustment.VIGNETTE -> PcIcons.Adjustments
     Adjustment.LIQUIFY -> PcIcons.AdjustLiquify
     Adjustment.CLONE -> PcIcons.AdjustClone
     Adjustment.PLUGIN -> PcIcons.Adjustments

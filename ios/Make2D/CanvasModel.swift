@@ -211,6 +211,8 @@ final class CanvasModel {
     /// during it (where, in points), and liquify's list (1) or adjust slider (2).
     private(set) var adjustment: Adjustment?
     private(set) var adjustShown: AdjustShown?
+    /// The Adjustments menu adds an adjustment layer rather than changing the current layer.
+    var adjustAsLayer = false
     var adjustMenuAt: CGPoint?
     var liquifyPopup = 0
     /// Layer or Pencil shows under the bar.
@@ -1359,6 +1361,39 @@ final class CanvasModel {
         if a == .clone {
             readSliders()
         }
+    }
+
+    /// Adds an adjustment layer of `a` over the current layer and opens its panels on it: what it
+    /// does changes what is below it, and stays editable.
+    func addAdjustmentLayer(_ a: Adjustment) {
+        _ = switchModes(.adjustment)
+        closeForAdjustment()
+        if a == .gradientMap {
+            _ = gradientMap
+        }
+        guard session.adjustmentLayerAdd(adjustment: a) else {
+            noRoomForLayers()
+            return
+        }
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
+    }
+
+    /// Opens adjustment layer `l`'s panels on the values it keeps.
+    func editAdjustmentLayer(_ l: LayerInfo) {
+        guard l.adjustment != nil, !l.locked else { return }
+        _ = switchModes(.adjustment)
+        closeForAdjustment()
+        if l.adjustment == .gradientMap {
+            _ = gradientMap
+        }
+        guard session.adjustmentLayerEdit(layer: l.id) != nil else { return }
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
     }
 
     /// Opens the plugin's filter on the current layer. The core saves the artwork ahead of the

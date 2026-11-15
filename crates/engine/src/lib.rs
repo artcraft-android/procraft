@@ -19,6 +19,7 @@ mod damaged;
 pub mod document;
 pub mod environment;
 pub mod fill;
+pub mod filter;
 pub mod formats;
 pub mod gbr;
 pub mod geom;

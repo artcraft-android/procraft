@@ -3481,6 +3481,7 @@ fn a_layer_s_options_follow_what_it_is() {
             O::AlphaLock,
             O::Mask,
             O::ClippingMask,
+            O::LayerStyle,
             O::DrawingAssist,
             O::Invert,
             O::Reference,
@@ -3526,6 +3527,7 @@ fn a_layer_s_options_follow_what_it_is() {
             O::Copy,
             O::Mask,
             O::ClippingMask,
+            O::LayerStyle,
             O::EditText,
             O::Rasterize,
             O::Reference,
@@ -13908,4 +13910,204 @@ fn the_camera_is_keyed_through_the_session() {
     assert_eq!(s.timeline_camera_keys(), [0]);
     s.set_timeline_camera_view(true);
     assert!(s.timeline_info().unwrap().camera_view);
+}
+
+/// Paints a red bar across the middle of a 64 square canvas, about four pixels high.
+fn red_bar(s: &CanvasSession) {
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.15);
+    s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 32.0, 0.0)]);
+    s.stroke_add((1..12).map(|i| sample(5.0 + i as f32 * 5.0, 32.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+}
+
+#[test]
+fn an_adjustment_layer_is_added_changed_kept_undone_and_opened_again() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let base = s.layers().iter().find(|l| l.current).unwrap().id;
+    let red = pixel(&s, 32, 32);
+    assert!(red[0] > 200 && red[1] < 40, "{red:?}");
+    // added above the current layer, its panel open on it
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    let shown = s.adjustment_shown();
+    assert_eq!((shown.adjustment, shown.on_layer), (Some(Adjustment::Hsb), true));
+    let layers = s.layers();
+    let adjust = layers.iter().find(|l| l.current).unwrap();
+    assert_eq!(adjust.adjustment, Some(Adjustment::Hsb));
+    assert_eq!(adjust.name, "Hue, Saturation, Brightness");
+    let id = adjust.id;
+    assert_eq!(pixel(&s, 32, 32), red, "nothing changed yet");
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    let grey = pixel(&s, 32, 32);
+    assert!(grey[0].abs_diff(grey[1]) <= 2 && grey[0] < 200, "{grey:?}");
+    // never painted on: a stroke leaves it as it is
+    s.adjustment_pencil(true);
+    assert!(!s.adjustment_shown().pencil);
+    assert!(s.adjustment_end(true));
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // the layer below keeps its own pixels
+    assert_eq!(s.layer_adjustment(base), None);
+    // one step: undone, it goes; redone, it is back as it was
+    assert_eq!(s.undo().as_deref(), Some("add adjustment layer"));
+    assert!(s.layers().iter().all(|l| l.adjustment.is_none()));
+    assert_eq!(pixel(&s, 32, 32), red);
+    assert!(s.redo().is_some());
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // opened again on its values; changed and put back, it is as it was
+    assert_eq!(s.adjustment_layer_edit(id), Some(Adjustment::Hsb));
+    assert_eq!(s.adjustment_shown().hsb, vec![0.5, 0.0, 0.5]);
+    s.adjustment_hsb(0.5, 1.0, 0.5);
+    assert_ne!(pixel(&s, 32, 32), grey);
+    assert!(s.adjustment_end(false));
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // hidden, the red shows again
+    assert!(s.set_layer_visible(id, false));
+    assert_eq!(pixel(&s, 32, 32), red);
+}
+
+#[test]
+fn an_adjustment_layer_let_go_unkept_goes_and_undo_inside_it_steps_its_values_back() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let count = s.layers().len();
+    assert!(s.adjustment_layer_add(Adjustment::Curves));
+    assert_eq!(s.layers().len(), count + 1);
+    assert!(s.adjustment_end(false));
+    assert_eq!(s.layers().len(), count, "not kept: gone");
+    // Liquify can't be one
+    assert!(!s.adjustment_layer_add(Adjustment::Liquify));
+    assert_eq!(s.layers().len(), count);
+    // undo with it open takes back its values, and it stays open
+    let column = |s: &CanvasSession| (24..40).map(|y| pixel(s, 32, y)).collect::<Vec<_>>();
+    let sharp = column(&s);
+    assert!(s.adjustment_layer_add(Adjustment::GaussianBlur));
+    s.adjustment_amount_by(0.5);
+    assert_ne!(column(&s), sharp);
+    assert!(s.undo().is_some());
+    assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::GaussianBlur));
+    assert_eq!(s.adjustment_shown().amount, 0.0);
+    assert_eq!(column(&s), sharp);
+    // Apply keeps it so far as a step and goes on
+    s.adjustment_amount_by(0.5);
+    s.adjustment_apply();
+    assert!(s.adjustment_shown().on_layer);
+    s.adjustment_amount_by(0.2);
+    assert!(s.adjustment_end(true));
+    assert_eq!(s.layers().len(), count + 1);
+}
+
+#[test]
+fn the_new_adjustments_keep_their_values_on_an_adjustment_layer() {
+    use crate::{Adjustment, DitherKind, VignetteKind};
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    assert!(s.adjustment_layer_add(Adjustment::Dither));
+    s.adjustment_amount_by(1.0);
+    s.adjustment_dither_kind(DitherKind::Noise);
+    s.adjustment_dither_value(0, 0.5);
+    s.adjustment_dither_mono(true);
+    assert!(s.adjustment_end(true));
+    let id = s.layers().iter().find(|l| l.current).unwrap().id;
+    // the file keeps them: read back, it opens on them
+    let saved = s.shared.lock().doc.clone();
+    let text = serde_json::to_string(&saved).unwrap();
+    let read: make2d_engine::document::Document = serde_json::from_str(&text).unwrap();
+    s.shared.lock().doc = read;
+    assert_eq!(s.adjustment_layer_edit(id), Some(Adjustment::Dither));
+    let shown = s.adjustment_shown();
+    assert_eq!((shown.amount, shown.dither_kind, shown.dither_mono), (1.0, DitherKind::Noise, true));
+    assert_eq!(shown.dither, vec![0.5, 0.0]);
+    assert!(s.adjustment_end(false));
+    // a vignette on the layer itself, as any adjustment
+    assert!(s.select_layer(s.layers().last().unwrap().id));
+    assert!(s.adjustment_start(Adjustment::Vignette));
+    s.adjustment_vignette_kind(VignetteKind::Light);
+    s.adjustment_vignette_value(0, 0.1);
+    s.adjustment_amount_by(1.0);
+    assert!(!s.adjustment_shown().on_layer);
+    assert!(s.adjustment_end(true));
+    assert_eq!(s.undo().as_deref(), Some("adjustment"));
+}
+
+#[test]
+fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
+    use crate::LayerEffectInfo;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let id = s.layers().iter().find(|l| l.current).unwrap().id;
+    let effects = s.layer_effects(id);
+    assert_eq!(effects.len(), 4);
+    assert!(effects.iter().all(|e| !e.on));
+    assert!(s.layer_options(id).iter().any(|r| r.option == crate::LayerOption::LayerStyle));
+    // a blue outline, its size dragged then let go
+    let outline = LayerEffectInfo { on: true, r: 0.0, g: 0.0, b: 1.0, size: 2.0, ..effects[0] };
+    assert!(s.set_layer_effect(id, 0, outline, false));
+    let bigger = LayerEffectInfo { size: 4.0, ..outline };
+    assert!(s.set_layer_effect(id, 0, bigger, true));
+    assert!(s.layers().iter().find(|l| l.id == id).unwrap().styled);
+    assert_eq!(s.layer_effects(id)[0], bigger);
+    // just above the bar, blue
+    let around = (20..30).map(|y| pixel(&s, 32, y)).filter(|p| p[2] > 200 && p[0] < 40).count();
+    assert!(around >= 2, "{around}");
+    assert_eq!(s.undo().as_deref(), Some("Layer Style"));
+    assert!(s.layer_effects(id).iter().all(|e| !e.on));
+    let around = (20..30).map(|y| pixel(&s, 32, y)).filter(|p| p[2] > 200 && p[0] < 40).count();
+    assert_eq!(around, 0);
+    // an adjustment layer takes none, and offers its settings instead
+    assert!(s.adjustment_layer_add(crate::Adjustment::Hsb));
+    assert!(s.adjustment_end(true));
+    let adjust = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.layer_effects(adjust).is_empty());
+    let options = s.layer_options(adjust);
+    assert!(options.iter().any(|r| r.option == crate::LayerOption::AdjustmentSettings));
+    assert!(
+        !options.iter().any(|r| r.option == crate::LayerOption::LayerStyle || r.option == crate::LayerOption::Fill)
+    );
+}
+
+#[test]
+fn picked_layers_with_an_adjustment_layer_among_them_stay_apart() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let base = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    assert!(s.adjustment_end(true));
+    let grey = pixel(&s, 32, 32);
+    assert!(s.pick_layer(base));
+    let count = s.layers().len();
+    assert!(!s.merge_picked(), "what it does would be lost");
+    assert_eq!(s.layers().len(), count);
+    assert_eq!(pixel(&s, 32, 32), grey);
+}
+
+#[test]
+fn changing_an_open_adjustment_layer_keeps_the_composite_caches() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    red_bar(&s);
+    let red = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    // a layer above it, kept in a cache while the adjustment layer is worked on
+    let adjust = s.layers().iter().find(|l| l.current).unwrap().id;
+    s.add_layer();
+    assert!(s.select_layer(adjust));
+    let _ = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_edit(adjust).is_some());
+    let _ = pixel(&s, 32, 32);
+    let cached = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().composites_cached();
+    assert!(cached(&s));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    let grey = pixel(&s, 32, 32);
+    assert!(grey[0].abs_diff(grey[1]) <= 2 && grey != red, "{grey:?}");
+    assert!(cached(&s), "a change to it shows at once, the caches kept");
+    s.adjustment_hsb(0.5, 1.0, 0.5);
+    assert_ne!(pixel(&s, 32, 32), grey);
+    assert!(cached(&s));
+    assert!(s.adjustment_end(false));
 }

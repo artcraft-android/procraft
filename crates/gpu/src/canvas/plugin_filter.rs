@@ -612,8 +612,13 @@ impl Canvas {
         let locked = if filter.alpha_locked { 1.0 } else { 0.0 };
         let [a @ .., _, _, _, _] = filter.values;
         let [_, _, _, _, b @ ..] = filter.values;
-        let uniform =
-            FilterUniform { a, b, size: [w, h, chosen, locked], c: [PROBE_SIZE as f32, PROBE_SIZE as f32, 0.0, 0.0] };
+        let uniform = FilterUniform {
+            a,
+            b,
+            size: [w, h, chosen, locked],
+            c: [PROBE_SIZE as f32, PROBE_SIZE as f32, 0.0, 0.0],
+            ..FilterUniform::ZERO
+        };
         let draw = |encoder: &mut wgpu::CommandEncoder,
                     uniforms: &mut UniformData,
                     target: &wgpu::TextureView,
