@@ -67,6 +67,292 @@ fn frames_are_spaced_by_the_screens_fastest_refresh() {
     assert_eq!(ms(s.shared.lock().frame_spacing), Some(10.0));
 }
 
+/// What a window's frame costs, as the render thread draws it into a window-sized picture: the
+/// canvas shown with its grid, the frosted bars over it, still, moved, and with a stroke being drawn
+/// (away from the bars, as most are). Each case is run for a few hundred frames
+/// (`FRAME_COST_FRAMES`, 240): the time each frame took to record and send, the time a frame takes
+/// with the GPU done (all of them sent, then waited for: the GPU's share), and one waited for
+/// alone. `FRAME_COST_WINDOW` (1340x800, a small tablet's), `FRAME_COST_SCALE` (pixels a point,
+/// 1.5), `FRAME_COST_SIDE` (the canvas, 2048 square) and `FRAME_COST_LAYERS` (6) set the scene;
+/// `FRAME_COST_BRUSHES` (names, `,` between), `FRAME_COST_SIZE` (0.3) and `FRAME_COST_TOOL`
+/// (`smudge`) the strokes; `FRAME_COST_WEAK=1` takes the GPU for a weak one. Run on a device with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn frame_cost() {
+    use procraft_gpu::wgpu;
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let (width, height) = env("FRAME_COST_WINDOW", "1340x800")
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .unwrap_or((1340, 800));
+    let scale: f32 = env("FRAME_COST_SCALE", "1.5").parse().unwrap_or(1.5);
+    let side: u32 = env("FRAME_COST_SIDE", "2048").parse().unwrap_or(2048);
+    let layers: usize = env("FRAME_COST_LAYERS", "6").parse().unwrap_or(6);
+    let frames: usize = env("FRAME_COST_FRAMES", "240").parse().unwrap_or(240);
+    // as the tablet keeps them: the layers not worked on composited once, kept
+    crate::layers::set_resident_budget(1 << 30);
+    // as on a weak GPU (FRAME_COST_WEAK=1)
+    procraft_gpu::treat_as_weak(env("FRAME_COST_WEAK", "0") == "1");
+    let Some(s) = session(side, width.max(height)) else { return };
+    s.resize_window(width, height);
+    s.set_display_scale(scale);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = {
+        let mut st = s.shared.lock();
+        st.view = Some(View::fit((side, side), (width, height)));
+        let Some(gpu) = st.gpu.as_ref() else { return };
+        let info = gpu.adapter.get_info();
+        println!(
+            "{} ({:?}), window {width}x{height} at {scale}, canvas {side} square, {layers} layers",
+            info.name, info.backend
+        );
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    };
+    let view = target.create_view(&Default::default());
+    // the bars as the tablet app frosts them: the top bar across, the side bar at the left and its
+    // two sliders' tracks (windows of thin glass)
+    let pt = scale;
+    let glass = |on: bool| {
+        let regions = [
+            [0.0, 0.0, width as f32, 32.0 * pt, 0.0, 1.0],
+            [8.0 * pt, 150.0 * pt, 52.0 * pt, 480.0 * pt, 14.0 * pt, 1.0],
+        ];
+        let windows = [
+            [14.0 * pt, 160.0 * pt, 46.0 * pt, 300.0 * pt, 10.0 * pt, 1.0],
+            [14.0 * pt, 330.0 * pt, 46.0 * pt, 470.0 * pt, 10.0 * pt, 1.0],
+        ];
+        let flat = |r: &[[f32; 6]]| if on { r.iter().flatten().copied().collect() } else { Vec::new() };
+        s.set_glass(flat(&regions), flat(&windows));
+    };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let started = std::time::Instant::now();
+    let draw = |s: &CanvasSession| {
+        let mut st = s.shared.lock();
+        st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, started);
+    };
+    let flush = |s: &CanvasSession| {
+        if let Some(g) = s.shared.lock().gpu.clone() {
+            g.flush();
+        }
+    };
+    // `each` changes what the next frame shows (or nothing)
+    let case = |name: &str, each: &dyn Fn(usize)| {
+        for i in 0..10 {
+            each(i);
+            draw(&s);
+        }
+        flush(&s);
+        let mut cpu = Vec::with_capacity(frames);
+        let whole = std::time::Instant::now();
+        for i in 0..frames {
+            each(10 + i);
+            let t = std::time::Instant::now();
+            draw(&s);
+            cpu.push(ms(t));
+        }
+        flush(&s);
+        let per = ms(whole) / frames as f64;
+        cpu.sort_by(f64::total_cmp);
+        // and each frame waited for alone
+        let mut alone = Vec::with_capacity(frames / 4);
+        for i in 0..frames / 4 {
+            each(10 + frames + i);
+            let t = std::time::Instant::now();
+            draw(&s);
+            flush(&s);
+            alone.push(ms(t));
+        }
+        alone.sort_by(f64::total_cmp);
+        println!(
+            "{name:<34} {per:6.2} ms a frame back to back | recorded in {:5.2} ms | alone {:6.2} ms",
+            cpu[frames / 2],
+            alone[alone.len() / 2]
+        );
+    };
+    // the layers, each with a stroke across
+    let library = s.brush_library();
+    let pick = |wanted: &str| {
+        library
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))
+    };
+    s.set_brush_size(0.3);
+    for layer in 0..layers {
+        if layer > 0 {
+            s.add_layer();
+        }
+        let y = 100.0 + (layer as f32 * 97.0) % (height as f32 - 200.0);
+        s.stroke_begin(PointerKind::Finger, vec![sample(100.0, y, 0.0)]);
+        s.stroke_add(
+            (1..40)
+                .map(|i| sample(100.0 + i as f32 * 28.0, y + (i as f32 * 0.4).sin() * 60.0, i as f64 * 8.0))
+                .collect(),
+        );
+        s.stroke_end(vec![]);
+    }
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render_finished(g, &mut st.doc);
+        }
+    }
+    flush(&s);
+    let still = |_: usize| s.shared.lock().needs_frame = true;
+    // the GPU brought up to speed first
+    case("(warming up)", &still);
+    // moved back and forth, a few pixels a frame
+    let pan = |i: usize| {
+        let mut st = s.shared.lock();
+        let step = if (i / 60).is_multiple_of(2) { 3.0 } else { -3.0 };
+        if let Some(v) = st.view.as_mut() {
+            v.gesture(procraft_engine::geom::Vec2::ZERO, procraft_engine::geom::Vec2::new(step, step / 3.0), 1.0, 0.0);
+        }
+    };
+    let fitted = |s: &CanvasSession| s.shared.lock().view = Some(View::fit((side, side), (width, height)));
+    for on in [false, true] {
+        glass(on);
+        let with = if on { "glass" } else { "no glass" };
+        case(&format!("still, {with}"), &still);
+        case(&format!("panning, {with}"), &pan);
+        fitted(&s);
+    }
+    // a stroke going on across the middle of the canvas: two pen events a frame (a 240 Hz pen, 120
+    // frames a second)
+    // (the square canvas fitted: as tall or as wide as the window)
+    let shown = width.min(height) as f32;
+    let (x0, y0) = ((width as f32 - shown) / 2.0, (height as f32 - shown) / 2.0);
+    let point = |k: usize| {
+        let t = k as f32 / 600.0;
+        PenSample {
+            x: x0 + shown * (0.15 + 0.7 * t.fract()),
+            y: y0 + shown * (0.55 + 0.25 * (t * 9.0).sin()),
+            pressure: 0.3 + 0.6 * (t * 40.0).sin().abs(),
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: k as f64 * 4.17,
+            roll: 0.0,
+        }
+    };
+    let brushes = env("FRAME_COST_BRUSHES", "Round Pen,Soft Airbrush,Gouache");
+    let size: f32 = env("FRAME_COST_SIZE", "0.3").parse().unwrap_or(0.3);
+    // the brushes as smudges (FRAME_COST_TOOL=smudge)
+    if env("FRAME_COST_TOOL", "paint") == "smudge" {
+        s.set_tool(ToolKind::Smudge);
+    }
+    for wanted in brushes.split(',') {
+        let Some((set, index)) = pick(wanted) else {
+            println!("no {wanted}");
+            continue;
+        };
+        s.select_brush(set, index);
+        s.set_brush_size(size);
+        for on in [false, true] {
+            glass(on);
+            let with = if on { "glass" } else { "no glass" };
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            let drawing = |i: usize| s.stroke_add(vec![point(2 * i + 1), point(2 * i + 2)]);
+            case(&format!("drawing {wanted}, {with}"), &drawing);
+            s.stroke_end(vec![]);
+            flush(&s);
+            s.undo();
+            flush(&s);
+        }
+    }
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+}
+
+/// What a long session on a large canvas holds as it goes: strokes across a 3000 square canvas of
+/// six layers (`MEMORY_COST_SIDE`, `MEMORY_COST_LAYERS`), saved every ten as the autosave does, with
+/// the canvas's textures, the undo history's share of them, the layers on the GPU and parked, and
+/// the process's resident memory (where the system says) after each ten. `MEMORY_COST_RAM` (GB)
+/// sets the budgets as the app sets them for a device of that much memory (4). Run on a device
+/// with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn memory_cost() {
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let side: u32 = env("MEMORY_COST_SIDE", "3000").parse().unwrap_or(3000);
+    let layers: usize = env("MEMORY_COST_LAYERS", "6").parse().unwrap_or(6);
+    let ram: f64 = env("MEMORY_COST_RAM", "4").parse().unwrap_or(4.0);
+    let strokes: usize = env("MEMORY_COST_STROKES", "120").parse().unwrap_or(120);
+    let ram = (ram * f64::from(1u32 << 30)) as u64;
+    crate::layers::set_layer_budget(ram / 2);
+    crate::layers::set_resident_budget(ram / 4);
+    let Some(s) = session(side, 1600) else { return };
+    let mb = |b: u64| b as f64 / f64::from(1u32 << 20);
+    // the process's resident memory, where the system tells it
+    let resident = || {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|t| {
+                t.lines().find(|l| l.starts_with("VmRSS:")).map(|l| l.split_whitespace().nth(1).map(str::to_owned))
+            })
+            .flatten()
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map_or_else(|| "?".to_owned(), |kb| format!("{:.0}", kb as f64 / 1024.0))
+    };
+    let report = |when: &str| {
+        let st = s.shared.lock();
+        if let Some(c) = st.canvas.as_ref() {
+            println!(
+                "{when:<22} textures {:7.0} MB | history {:6.0} MB | layers on the GPU {:2}, parked {:2} | resident {} MB",
+                mb(c.texture_bytes()),
+                mb(c.history_bytes()),
+                c.layer_texture_count(),
+                c.parked_layers(),
+                resident()
+            );
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-memory-cost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.set_brush_size(0.6);
+    for _ in 1..layers {
+        s.add_layer();
+    }
+    report("opened");
+    let window = 1600.0;
+    for k in 0..strokes {
+        // a long stroke across, on the layers in turn
+        let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+        if let Some(id) = ids.get(k % ids.len().max(1)) {
+            s.select_layer(*id);
+        }
+        let y = 100.0 + (k as f32 * 131.0) % (window - 200.0);
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, y, 0.0)]);
+        s.stroke_add(
+            (1..60)
+                .map(|i| sample(60.0 + i as f32 * 25.0, y + (i as f32 * 0.25 + k as f32).sin() * 400.0, i as f64 * 8.0))
+                .collect(),
+        );
+        s.stroke_end(vec![]);
+        if (k + 1) % 10 == 0 {
+            let t = std::time::Instant::now();
+            let saved = s.save(dir.to_string_lossy().into_owned());
+            report(&format!("{} strokes", k + 1));
+            if let Err(e) = saved {
+                println!("save: {e}");
+            } else {
+                println!("  saved in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
 /// event's work, each frame's (one every two events, as a 240 Hz pen at 120 frames a second), and
 /// the whole stroke with the GPU done, an event's share. Run on a device with `--ignored
