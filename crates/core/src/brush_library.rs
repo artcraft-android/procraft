@@ -725,7 +725,7 @@ impl State {
     fn restored_from(
         shipped: &[BrushSet],
         b: SavedBrush,
-        pictures: &std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>,
+        pictures: &std::collections::HashMap<String, crate::brush_pictures::Held>,
     ) -> Brush {
         let picture = |text: &str| crate::brush_pictures::bytes_of(text, pictures);
         let mut brush = origin_in(shipped, b.from);
@@ -776,11 +776,11 @@ impl State {
             metallic: stock(&b.metallic_stock),
             roughness: stock(&b.roughness_stock),
         };
-        let png = |text: &Option<String>| text.as_deref().and_then(picture).map(Into::into);
+        let png = |text: &Option<String>| text.as_deref().and_then(picture);
         brush.thumbnail = png(&b.thumbnail);
         brush.engine = b.engine.as_ref().and_then(|(engine, text)| {
             let data = picture(text)?;
-            Some(procraft_engine::brush::OutsideBrush { engine: engine.clone(), data: data.into() })
+            Some(procraft_engine::brush::OutsideBrush { engine: engine.clone(), data })
         });
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
@@ -1877,6 +1877,9 @@ mod keeping {
             assert_eq!(b.thumbnail.as_deref(), Some(&thumbnail[..]));
             let reset = b.reset_point.as_ref().map(|r| r.brush.shape.source.as_ref().map(|s| s.id));
             assert_eq!(reset, Some(Some(shape.id)));
+            // the reset point names the same picture: the very bytes the brush holds, not a copy
+            let held = b.reset_point.as_ref().and_then(|r| r.brush.thumbnail.as_ref());
+            assert!(b.thumbnail.as_ref().zip(held).is_some_and(|(a, r)| std::sync::Arc::ptr_eq(a, r)));
         }
         // a library from before, its pictures inside it: read as it is
         let other = CanvasSession::new(32, 32);
