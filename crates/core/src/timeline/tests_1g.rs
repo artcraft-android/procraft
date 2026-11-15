@@ -8,7 +8,7 @@ use super::{TimelineChannel, TimelineEasing, TimelineSettings};
 use crate::{CanvasSession, PenSample, PointerKind};
 
 /// A session on a headless GPU, or `None` without a GPU.
-fn session(side: u32) -> Option<std::sync::Arc<CanvasSession>> {
+pub(super) fn session(side: u32) -> Option<std::sync::Arc<CanvasSession>> {
     let gpu = match Gpu::headless() {
         Ok(g) => g,
         Err(e) => {
@@ -28,7 +28,7 @@ fn session(side: u32) -> Option<std::sync::Arc<CanvasSession>> {
 }
 
 /// A canvas on a timeline: one track of three one-frame drawings, a dot of its own colour on each.
-fn three_drawings() -> Option<std::sync::Arc<CanvasSession>> {
+pub(super) fn three_drawings() -> Option<std::sync::Arc<CanvasSession>> {
     let s = session(40)?;
     s.set_brush_size(0.4);
     for (i, colour) in [[1.0, 0.0, 0.0], [0.0, 0.7, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
@@ -49,7 +49,7 @@ fn three_drawings() -> Option<std::sync::Arc<CanvasSession>> {
 }
 
 /// The frame as it plays.
-fn played(s: &CanvasSession, frame: u32) -> Vec<u8> {
+pub(super) fn played(s: &CanvasSession, frame: u32) -> Vec<u8> {
     s.set_timeline_playing(Some(frame));
     let px = {
         let mut guard = s.shared.lock();
@@ -64,7 +64,7 @@ fn played(s: &CanvasSession, frame: u32) -> Vec<u8> {
     px
 }
 
-fn spans(s: &CanvasSession, t: usize) -> Vec<(u32, u32)> {
+pub(super) fn spans(s: &CanvasSession, t: usize) -> Vec<(u32, u32)> {
     s.timeline_tracks()[t].clips.iter().map(|c| (c.start, c.duration)).collect()
 }
 

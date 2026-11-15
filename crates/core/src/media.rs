@@ -104,6 +104,12 @@ pub struct TimelineMediaClip {
     pub muted: bool,
     /// A video's place on the canvas: left, top, width, height.
     pub rect: Vec<f32>,
+    /// A sound's level at the playhead: keyed, or its volume.
+    pub level: f32,
+    /// The timeline frames a sound's level is keyed on (none: it plays at its volume).
+    pub volume_keys: Vec<u32>,
+    /// Its level has a key at the playhead.
+    pub keyed_here: bool,
 }
 
 /// A sound to play, in timeline time.
@@ -120,6 +126,10 @@ pub struct TimelineSound {
     pub length: f64,
     /// How loud, 0..1 (0 when muted): its level, or at the playhead when it is keyed.
     pub gain: f32,
+    /// Keyed: its level on each timeline frame it plays through, from frame `levels_from` (the
+    /// frame it starts in) on; empty when it isn't (it plays at `gain` throughout).
+    pub levels: Vec<f32>,
+    pub levels_from: u32,
 }
 
 /// A hold the animatic detector found: a drawing's first frame in the video clip, and how many
@@ -284,6 +294,18 @@ fn bring_in(path: &Path, m: &Media, peaks: &[f32]) -> Result<(), MobileError> {
     Ok(())
 }
 
+/// Media `m`'s file at `file`, and its waveform at `peaks`, copied into the waiting folder (a
+/// sound or video pasted from another canvas), unless it is there already.
+pub(crate) fn bring_along(m: &Media, file: &Path, peaks: Option<&Path>) {
+    let peaks: Vec<f32> = peaks
+        .and_then(|p| fs::read(p).ok())
+        .map(|b| b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
+        .unwrap_or_default();
+    if let Err(e) = bring_in(file, m, &peaks) {
+        log::warn!("bringing along {}: {e:?}", m.name);
+    }
+}
+
 impl crate::State {
     /// The canvas gets its videos' pictures from the store, once there is a canvas and a video.
     pub(crate) fn attach_media(&mut self) {
@@ -374,6 +396,16 @@ impl CanvasSession {
         };
         let m = tl.media_of(media)?;
         let [width, height] = m.size;
+        let origin = i64::from(tl.origin(ClipId(id))?);
+        let local = i64::from(st.canvas.as_ref().map_or(0, |c| c.timeline_frame())) - origin;
+        let (level, volume_keys, keyed_here) = match &clip.content {
+            ClipContent::Audio(a) => (
+                a.volume_keys.value_at(local as f32).map_or(volume, |v| v.clamp(0.0, 1.0)),
+                a.volume_keys.keys.iter().filter_map(|k| u32::try_from(origin + i64::from(k.frame)).ok()).collect(),
+                a.volume_keys.keys.iter().any(|k| i64::from(k.frame) == local),
+            ),
+            _ => (1.0, Vec::new(), false),
+        };
         Some(TimelineMediaClip {
             clip: id,
             media: media.0,
@@ -388,6 +420,9 @@ impl CanvasSession {
             volume,
             muted,
             rect,
+            level,
+            volume_keys,
+            keyed_here,
         })
     }
 
@@ -413,6 +448,7 @@ impl CanvasSession {
             .filter_map(|s| {
                 let m = tl.media_of(s.media)?;
                 let path = st.media.find(&m.file_name())?;
+                let levels = s.levels(tl.fps);
                 Some(TimelineSound {
                     clip: s.clip.0,
                     path: path.to_string_lossy().into_owned(),
@@ -420,6 +456,8 @@ impl CanvasSession {
                     from: s.from,
                     length: s.length,
                     gain: s.gain_at(frame),
+                    levels: levels.as_ref().map_or_else(Vec::new, |(_, l)| l.clone()),
+                    levels_from: levels.map_or(0, |(f, _)| f),
                 })
             })
             .collect()

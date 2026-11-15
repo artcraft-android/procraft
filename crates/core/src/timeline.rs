@@ -16,11 +16,12 @@ use crate::animation::AnimationPlayback;
 use crate::{CanvasSession, State};
 
 mod clipboard;
+mod edits;
 #[cfg(test)]
 mod tests_1g;
+#[cfg(test)]
+mod tests_edits;
 mod timing;
-
-pub(crate) use clipboard::CopiedTimelineClips;
 
 /// The most frames a timeline lasts.
 const MOST_FRAMES: u32 = 100_000;
@@ -439,22 +440,27 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// Clip `id` cut at the playhead: its drawing is copied for the rest. False unless the
-    /// playhead is inside it (not on its first frame).
+    /// Clip `id` cut at the playhead: a drawing's is copied for the rest, a sound or video plays
+    /// on from there. False unless the playhead is inside it (not on its first frame).
     pub fn split_timeline_clip(&self, id: u64) -> bool {
-        let (frame, root) = {
+        let (frame, root, media) = {
             let st = self.shared.lock();
             let tl = st.doc.timeline.as_ref();
             let clip = tl.and_then(|t| t.clip(ClipId(id)));
             // the playhead on the clip's own level
             let level = tl.and_then(|t| t.origin(ClipId(id))).zip(clip).map(|(o, c)| o - c.start);
             let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame()).saturating_sub(level.unwrap_or(0));
-            let root = clip.filter(|c| frame > c.start && frame < c.end()).and_then(|c| match &c.content {
+            let inside = clip.filter(|c| frame > c.start && frame < c.end());
+            let root = inside.and_then(|c| match &c.content {
                 ClipContent::Drawing(d) => Some(d.root),
                 _ => None,
             });
-            (frame, root)
+            let media = inside.is_some_and(|c| matches!(c.content, ClipContent::Audio(_) | ClipContent::Video(_)));
+            (frame, root, media)
         };
+        if media {
+            return self.change("Split", |d| d.timeline.as_mut()?.split_media(ClipId(id), frame)).is_some();
+        }
         let Some(root) = root else { return false };
         self.duplicated(root.0, "Split", |d, copy| {
             if let Some(tl) = d.timeline.as_mut() {
@@ -464,16 +470,22 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// A copy of clip `id`'s drawing just after it, as long, the clips after it moving along;
-    /// returns the copy's clip, or 0.
+    /// A copy of clip `id` (a drawing's layers, or a sound or video) just after it, as long, the
+    /// clips after it moving along; returns the copy's clip, or 0.
     pub fn duplicate_timeline_clip(&self, id: u64) -> u64 {
-        let root = {
+        let (root, media) = {
             let st = self.shared.lock();
-            st.doc.timeline.as_ref().and_then(|t| t.clip(ClipId(id))).and_then(|c| match &c.content {
+            let clip = st.doc.timeline.as_ref().and_then(|t| t.clip(ClipId(id)));
+            let root = clip.and_then(|c| match &c.content {
                 ClipContent::Drawing(d) => Some(d.root),
                 _ => None,
-            })
+            });
+            (root, clip.is_some_and(|c| matches!(c.content, ClipContent::Audio(_) | ClipContent::Video(_))))
         };
+        if media {
+            let made = self.change("Duplicate", |d| d.timeline.as_mut()?.duplicate_media(ClipId(id)));
+            return made.map_or(0, |c| c.0);
+        }
         let Some(root) = root else { return 0 };
         let mut made = 0;
         self.duplicated(root.0, "Duplicate Drawing", |d, copy| {
@@ -484,14 +496,24 @@ impl CanvasSession {
         made
     }
 
-    /// Clip `id` taken off its track with its drawing's layers (the last layer stays), as an undo
-    /// step. `close`: the clips after it move back over its place.
+    /// Clip `id` taken off its track with its drawing's layers, or a group's with every drawing's
+    /// in it (the last layer stays), as an undo step. `close`: the clips after it move back over
+    /// its place.
     pub fn delete_timeline_clip(&self, id: u64, close: bool) -> bool {
+        let name = {
+            let st = self.shared.lock();
+            match st.doc.timeline.as_ref().and_then(|tl| tl.clip(ClipId(id))).map(|c| &c.content) {
+                Some(ClipContent::Group(_)) => "Delete Group",
+                Some(ClipContent::Audio(_)) => "Delete Sound",
+                Some(ClipContent::Video(_)) => "Delete Video",
+                _ => "Delete Drawing",
+            }
+        };
         let done = self
-            .change("Delete Drawing", |d| {
+            .change(name, |d| {
                 let clip = d.timeline.as_mut()?.remove(ClipId(id), close)?;
-                if let ClipContent::Drawing(dr) = &clip.content {
-                    d.delete_layer(dr.root);
+                for root in clip.roots() {
+                    d.delete_layer(root);
                 }
                 Some(())
             })
@@ -925,7 +947,16 @@ pub struct PathKey {
     pub handles: Option<Vec<f32>>,
 }
 
+use make2d_engine::geom::{Affine, Vec2};
 use make2d_engine::timeline::{Easing, FitMode, HandleMode, PathHandles, RepeatFit};
+
+/// An offset `d` on the canvas taken back through `pose`'s scale and turn (not its move); none
+/// if `pose` flattens everything.
+fn unturned(pose: Affine, d: [f32; 2]) -> Option<[f32; 2]> {
+    let back = Affine { e: 0.0, f: 0.0, ..pose }.inverse()?;
+    let v = back.apply(Vec2::new(d[0], d[1]));
+    Some([v.x, v.y])
+}
 
 /// The engine's easing for `s`.
 fn easing_of(s: &EasingSpec) -> Easing {
@@ -1062,7 +1093,8 @@ impl CanvasSession {
         changed
     }
 
-    /// Clip `id`'s motion path, if it has position keys.
+    /// Clip `id`'s motion path, if it has position keys: where it shows, through the poses of
+    /// the groups it is in.
     pub fn timeline_motion_path(&self, id: u64) -> Option<MotionPath> {
         let st = self.shared.lock();
         let tl = st.doc.timeline.as_ref()?;
@@ -1071,30 +1103,59 @@ impl CanvasSession {
         let keys = &clip.keys.position.keys;
         let (first, last) = (keys.first()?.frame, keys.last()?.frame);
         let [px, py] = clip.keys.pivot.unwrap_or([0.0; 2]);
+        // on the canvas, at the clip's frame `f`
+        let shown = |f: f32, x: f32, y: f32| match tl.groups_pose(ClipId(id), f) {
+            Some(pose) => {
+                let p = pose.apply(Vec2::new(x, y));
+                [p.x, p.y]
+            }
+            None => [x, y],
+        };
         let steps = ((last - first).max(1) * 4).min(4000);
         let mut points = Vec::with_capacity(steps as usize * 2 + 2);
         for i in 0..=steps {
             let f = first as f32 + (last - first) as f32 * i as f32 / steps as f32;
             if let Some([x, y]) = clip.keys.position.position_at(f) {
-                points.extend([px + x, py + y]);
+                points.extend(shown(f, px + x, py + y));
             }
         }
         let at = |frame: i32| u32::try_from(i64::from(origin) + i64::from(frame)).unwrap_or(0);
         let keys = keys
             .iter()
-            .map(|k| PathKey {
-                frame: at(k.frame),
-                x: px + k.value[0],
-                y: py + k.value[1],
-                handles: k.path.map(|h| vec![h.before[0], h.before[1], h.after[0], h.after[1]]),
+            .map(|k| {
+                let (x, y) = (px + k.value[0], py + k.value[1]);
+                let [kx, ky] = shown(k.frame as f32, x, y);
+                let arm = |h: [f32; 2]| {
+                    let [hx, hy] = shown(k.frame as f32, x + h[0], y + h[1]);
+                    [hx - kx, hy - ky]
+                };
+                PathKey {
+                    frame: at(k.frame),
+                    x: kx,
+                    y: ky,
+                    handles: k.path.map(|h| [arm(h.before), arm(h.after)].concat()),
+                }
             })
             .collect();
         Some(MotionPath { points, keys })
     }
 
+    /// A move of `dx`, `dy` on the canvas at timeline frame `frame` as clip `id`'s position keys
+    /// count it: through the groups it is in, which may scale and turn it (as it is, in none).
+    pub fn timeline_motion_delta(&self, id: u64, frame: u32, dx: f32, dy: f32) -> Vec<f32> {
+        let st = self.shared.lock();
+        let local = st.doc.timeline.as_ref().and_then(|tl| {
+            let at = i64::from(frame) - i64::from(tl.origin(ClipId(id))?);
+            let pose = tl.groups_pose(ClipId(id), at as f32)?;
+            let d = unturned(pose, [dx, dy])?;
+            Some(vec![d[0], d[1]])
+        });
+        local.unwrap_or_else(|| vec![dx, dy])
+    }
+
     /// Clip `id`'s position key at timeline frame `frame` gets handles `before` and `after`
-    /// (offsets, x y each), bending its motion path there; none takes them away (a corner).
-    /// Shown at once, one "Motion Path" undo step when `done`.
+    /// (offsets on the canvas, x y each, as the path shows them), bending its motion path there;
+    /// none takes them away (a corner). Shown at once, one "Motion Path" undo step when `done`.
     pub fn set_timeline_path_handles(&self, id: u64, frame: u32, handles: Option<Vec<f32>>, done: bool) -> bool {
         let handles = handles.and_then(|h| match h.as_slice() {
             [a, b, c, e] if [a, b, c, e].iter().all(|v| v.is_finite()) => {
@@ -1105,8 +1166,16 @@ impl CanvasSession {
         let changed = self.change_live("Motion Path", done, |d| {
             let Some(tl) = d.timeline.as_mut() else { return false };
             let Some(origin) = tl.origin(ClipId(id)) else { return false };
-            let Some(clip) = tl.clip_mut(ClipId(id)) else { return false };
             let Ok(local) = i32::try_from(i64::from(frame) - i64::from(origin)) else { return false };
+            // back through the groups' poses, onto the clip's own
+            let handles = match (handles, tl.groups_pose(ClipId(id), local as f32)) {
+                (Some(h), Some(pose)) => match (unturned(pose, h.before), unturned(pose, h.after)) {
+                    (Some(before), Some(after)) => Some(PathHandles { before, after, ..h }),
+                    _ => return false,
+                },
+                (h, _) => h,
+            };
+            let Some(clip) = tl.clip_mut(ClipId(id)) else { return false };
             match clip.keys.position.keys.iter_mut().find(|k| k.frame == local) {
                 Some(k) => {
                     k.path = handles;
@@ -1192,9 +1261,43 @@ impl CanvasSession {
         group.0
     }
 
-    /// Group clip `id` taken apart, its clips back on the level it is on, as an undo step.
+    /// Group clip `id` taken apart, its clips back on the level it is on with its keys folded
+    /// into them and its cycle laid out (each repeat of a drawing a copy of its layers, while
+    /// there is room for them), as an undo step.
     pub fn ungroup_timeline_clip(&self, id: u64) -> bool {
-        let done = self.change("Ungroup Clips", |d| d.timeline.as_mut()?.ungroup(ClipId(id)).then_some(())).is_some();
+        let done = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            let before = st.doc.clone();
+            let Some(mut tl) = st.doc.timeline.take() else { return false };
+            let mut pairs = Vec::new();
+            let doc = &mut st.doc;
+            let done = tl.ungroup_copying(ClipId(id), &mut |root| {
+                let layers = doc.unit_layers(root)?;
+                let units = layers.iter().filter(|l| l.kind != LayerKind::Group).count();
+                if !doc.has_room(units) {
+                    return None;
+                }
+                let (copy, p) = doc.insert_copy(&layers, root)?;
+                pairs.extend(p);
+                Some(copy)
+            });
+            st.doc.timeline = Some(tl);
+            if done && let Some(canvas) = st.canvas.as_mut() {
+                canvas.name_next_step("Ungroup Clips");
+                if pairs.is_empty() {
+                    canvas.record_document(before);
+                } else {
+                    canvas.duplicate_layers(pairs, before);
+                }
+            }
+            if done {
+                st.revision += 1;
+            }
+            done
+        };
         if done {
             self.redraw_timeline();
         }

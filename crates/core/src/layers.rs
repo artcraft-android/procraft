@@ -470,8 +470,10 @@ impl CanvasSession {
     /// A new empty layer above the current one; it becomes current.
     /// A new empty layer above the current one, made current; 0 when the canvas has no room for
     /// another (see [`Document::layer_cap`]).
+    /// On a timeline, it goes in the drawing at the playhead (see `add_timeline_layer`).
     pub fn add_layer(&self) -> u64 {
-        let id = self.add_layer_quietly();
+        let on_timeline = self.shared.lock().doc.timeline.is_some();
+        let id = if on_timeline { self.add_timeline_layer() } else { self.add_layer_quietly() };
         // a layer added by hand: plugins told
         if id != 0 {
             self.tell_plugins(crate::plugin_run::Hook::LayerAdded);
