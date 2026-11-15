@@ -18,9 +18,8 @@ use crate::transform::{
     menu_slider, menu_title, popover_frame,
 };
 
-/// The selection toolbar's buttons with room, and where the window is narrow.
+/// The selection toolbar's buttons with room (narrower where the window is).
 const BUTTON_ROOMY: f32 = 83.0;
-const BUTTON_NARROW: f32 = 70.0;
 const FEATHER_WIDTH: f32 = 250.0;
 const START_DOT: u32 = 0xFFC7C7C7;
 const MESSAGE_BAR: Themed = Themed(0xFF606060, 0xFFD0D0D0);
@@ -226,8 +225,7 @@ impl Selection {
             buttons.push(Button::new(&icons::X_RAY, "X-Ray", 44.0).active(session.selection_x_ray()));
         }
         buttons.push(Button::new(&icons::CLEAR_SELECTION, "Clear", 44.0).enabled(has || drawing));
-        let tapped =
-            floating_toolbar(ctx, look, "selection toolbar", (BUTTON_ROOMY, BUTTON_NARROW), &segments, &buttons, 41.0);
+        let tapped = floating_toolbar(ctx, look, "selection toolbar", BUTTON_ROOMY, &segments, &buttons, 41.0);
         match tapped {
             Some(Tapped::Background) => self.set_popup(session, Popup::None),
             Some(Tapped::Segment(k)) => {
@@ -312,7 +310,7 @@ impl Selection {
             return;
         }
         let index = if self.popup == Popup::Feather { 4 } else { 5 };
-        let (tip_x, tip_y) = button_tip(ctx, (BUTTON_ROOMY, BUTTON_NARROW), index, 8);
+        let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, 8);
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
         let height = if self.popup == Popup::Feather { 40.0 + 4.0 + 59.0 + 16.0 } else { 40.0 + 8.0 + 172.0 } + 20.0;
         let screen = ctx.content_rect();
