@@ -648,6 +648,31 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_a_tablet_s_express_keys_send_do_what_they_say() {
+        // what pen tablets' buttons send as their drivers come set up: undo, redo both ways, the
+        // brush's size, the brush and the eraser, the QuickMenu (Space), the interface (Ctrl+0)
+        for (k, command, shift, does) in [
+            ("z", true, false, Undo),
+            ("z", true, true, Redo),
+            ("[", false, false, BrushSize { by: -0.05 }),
+            ("]", false, false, BrushSize { by: 0.05 }),
+            ("[", true, false, BrushSize { by: -0.01 }),
+            ("]", false, true, BrushSize { by: 0.10 }),
+            ("e", false, false, Erase),
+            ("b", false, false, Paint),
+            ("space", false, false, QuickMenu),
+            ("0", true, false, Interface),
+        ] {
+            assert_eq!(key(k, command, shift, false), Some(does), "{k} {command} {shift}");
+        }
+        assert_eq!(key("y", true, false, false), (!MAC).then_some(Redo));
+        // another app's step back (Ctrl+Alt+Z) is AltGr typing a Z here: nothing, not an undo
+        assert_eq!(key("z", true, false, true), None);
+        // Ctrl+1 is no shortcut of the canvas's
+        assert_eq!(key("1", true, false, false), None);
+    }
+
+    #[test]
     fn clearing_a_layer_takes_the_command_key() {
         for k in ["delete", "backspace"] {
             assert_eq!(key(k, true, false, false), Some(ClearLayer));
