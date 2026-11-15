@@ -29,6 +29,19 @@ const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(if 
 /// How soon it looks again when something under way kept it from saving: fast painting leaves
 /// only short gaps between strokes, and what isn't saved is gone if the GPU's device goes.
 const AUTOSAVE_AGAIN: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 5 } else { 250 });
+/// After a save, the autosave waits this many times as long as it took before it looks again (or
+/// its usual time, if that is longer): each save reads the changed layers back from the GPU and
+/// makes PNGs of them on the CPU, which on a slow device can take a second or more, so saving
+/// takes at most a fifth of the time while painting goes on. Never longer apart than
+/// [`AUTOSAVE_LONGEST`], so little is ever left unsaved.
+const AUTOSAVE_SPACING: u32 = 4;
+const AUTOSAVE_LONGEST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the autosave waits, looking `every` so long, after a save that took `took` (see
+/// [`AUTOSAVE_SPACING`]).
+fn autosave_wait(every: std::time::Duration, took: std::time::Duration) -> std::time::Duration {
+    took.saturating_mul(AUTOSAVE_SPACING).min(AUTOSAVE_LONGEST).max(every)
+}
 /// A package's preview's longest side, pixels.
 const PACKAGE_PREVIEW_SIDE: u32 = 1024;
 const FORMAT: &str = "procraft-artwork";
@@ -490,6 +503,7 @@ impl CanvasSession {
                     wait = again;
                     continue;
                 }
+                let started = std::time::Instant::now();
                 let result = session.save_if_idle_with(&mut saved, &dir);
                 // lost during the save: that is what failed it, and it tells of itself
                 if result.is_err() && lost() {
@@ -500,6 +514,8 @@ impl CanvasSession {
                     Ok(true) => {
                         kept = now;
                         failure.1 = false;
+                        // a slow save, a longer wait before the next
+                        wait = autosave_wait(every, started.elapsed());
                     }
                     Ok(false) => wait = again,
                     Err(e) => {
@@ -1898,6 +1914,19 @@ fn thumbnail_row(rgba: &[u8], width: u32, height: u32, tw: u32, th: u32, ty: u32
 #[cfg(test)]
 mod signature_tests {
     use super::*;
+
+    #[test]
+    fn the_autosave_waits_longer_after_a_slow_save() {
+        use std::time::Duration;
+        let every = Duration::from_secs(3);
+        // a quick save: its usual time
+        assert_eq!(autosave_wait(every, Duration::from_millis(200)), every);
+        assert_eq!(autosave_wait(every, Duration::ZERO), every);
+        // a slow one: four times as long as it took, at most half a minute
+        assert_eq!(autosave_wait(every, Duration::from_millis(1500)), Duration::from_secs(6));
+        assert_eq!(autosave_wait(every, Duration::from_secs(20)), AUTOSAVE_LONGEST);
+        assert_eq!(autosave_wait(every, Duration::MAX), AUTOSAVE_LONGEST);
+    }
 
     #[test]
     fn a_layer_file_cut_short_keeps_the_rows_before_the_cut() {
