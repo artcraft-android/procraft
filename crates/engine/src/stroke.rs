@@ -1337,7 +1337,8 @@ impl StrokeBuilder {
         if self.roll_turns && self.roll_from.is_none() {
             self.roll_from = Some(roll);
         }
-        let curved = self.brush.pressures(pressure);
+        // a finger, which has no pressure, presses fully in every use, whatever the brush's curves
+        let curved = if pen { self.brush.pressures(pressure) } else { [1.0; 5] };
         let soft = match (self.last_sample, self.soft) {
             (Some(last), Some(before)) if !self.steady && !self.exact => {
                 self.soften(curved, before, frames, s.pos.distance(last.pos))
@@ -2000,14 +2001,9 @@ impl StrokeBuilder {
         let curves = &self.brush.pressure_curves;
         let by = |k: PressureCurve| curves.at(k, pressure);
         // the flow lets through as much as its pressure amount and curve say (an amount below 0
-        // the other way)
+        // lets it all through)
         let flowing = curves.through(PC::Flow, pressure);
-        let pressure_flow = if x.pressure_flow >= 0.0 {
-            1.0 - x.pressure_flow * (1.0 - flowing)
-        } else {
-            1.0 + x.pressure_flow * flowing
-        }
-        .clamp(0.0, 1.0);
+        let pressure_flow = (1.0 - x.pressure_flow * (1.0 - flowing)).clamp(0.0, 1.0);
         // flow, pressure, tilt and speed together through the opacity range, eased; then what
         // pressure lets through (the brush's pressure flow) and the fall off
         let b = &self.brush;
@@ -2686,6 +2682,37 @@ mod tests {
         let touch = finger.add(&samples);
         assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
+    }
+
+    #[test]
+    fn a_finger_presses_fully_whatever_the_brush_s_curves() {
+        use crate::curve::Curve;
+        // a pressure response and a bleed curve that never reach full: a pen pressed all the way
+        // reads them so, a finger (no pressure) as full
+        let mut brush = plain();
+        brush.pressure_curve = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.5)]);
+        brush.pressure_curves.set(PressureCurve::Bleed, Some(Curve::new(&[Vec2::ZERO, Vec2::new(1.0, 0.8)])));
+        brush.set_setting("pressure_bleed", 0.5);
+        let at = Sample::at(Vec2::new(0.0, 0.0), 1.0, 0.0);
+        let pen = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus).add(&[at]);
+        let finger = StrokeBuilder::new(brush, 10.0, Pointer::Finger).add(&[at]);
+        assert!((pen[0].grain_press - 0.4).abs() < 0.01, "{}", pen[0].grain_press);
+        assert_eq!(finger[0].grain_press, 1.0);
+    }
+
+    #[test]
+    fn a_pressure_transfer_below_none_lets_everything_through() {
+        // the transfer's amount takes away what the pressure's curve leaves; below 0 it would
+        // add past full, so everything goes through
+        let transfer = |amount: f32, pressure: f32| {
+            let mut brush = plain();
+            brush.set_setting("pressure_flow", amount);
+            let at = Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0);
+            StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&[at])[0].transfer
+        };
+        assert!((transfer(0.6, 0.25) - (1.0 - 0.6 * 0.75)).abs() < 1e-4);
+        assert_eq!(transfer(-0.6, 0.25), 1.0);
+        assert_eq!(transfer(-0.6, 1.0), 1.0);
     }
 
     #[test]
