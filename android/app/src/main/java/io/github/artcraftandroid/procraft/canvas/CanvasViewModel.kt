@@ -1416,7 +1416,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyFitInsets()
     }
 
-    /** The settings the canvas itself keeps: simplified undos, the speed distance and whether wide colour may be. */
+    /** The settings the canvas itself keeps: simplified undos, the speed distance and wide colour. */
     private fun applyAppSettings(s: CanvasSession) {
         s.setSimplifiedUndos(interfacePrefs.getBoolean(SIMPLIFIED_UNDOS, true))
         s.setSpeedDistance(interfacePrefs.getFloat(SPEED_DISTANCE, 1f))
@@ -1424,8 +1424,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshWideColor(s)
     }
 
-    /** Whether a canvas may show in wide colour: the screen takes it. */
-    private fun wideColorAllowed(): Boolean = getApplication<Application>().resources.configuration.isScreenWideColorGamut
+    /** Whether a canvas may show in wide colour: the screen takes it and Wide Color is on. */
+    private fun wideColorAllowed(): Boolean =
+        getApplication<Application>().resources.configuration.isScreenWideColorGamut &&
+            interfacePrefs.getBoolean(WIDE_COLOR, wideColorByDefault())
 
     /** The window follows [s]'s canvas into wide colour and out of it. */
     private fun refreshWideColor(s: CanvasSession) {
@@ -8073,6 +8075,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val FEEDBACK_SOUNDS = "feedback_sounds"
         const val SINGLE_TOUCH_COMPANION = "single_touch_companion"
         const val TAP_ASSISTANCE = "tap_assistance"
+
+        /** Wide Color: Display P3 canvases show in wide colour where the screen takes it (see [wideColorByDefault]). */
+        const val WIDE_COLOR = "wide_color"
 
         /** The version whose start last said the 32-bit build isn't the one for this tablet. */
         const val WRONG_BUILD_SAID = "wrong_build_said"
