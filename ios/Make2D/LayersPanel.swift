@@ -153,7 +153,9 @@ struct LayersPanel: View {
     @State private var ui = LayersUi()
 
     var body: some View {
-        let shown = model.layers.filter { !model.hidden($0) }
+        // on a timeline, only the drawing drawn on
+        let drawing = model.session.timelineDrawingShown()
+        let shown = model.layers.filter { !model.hidden($0) && model.listed($0, in: drawing) }
         let ids = shown.map(\.id)
         Popover(width: layersWidth, arrowX: arrowX) {
             PanelHeader(

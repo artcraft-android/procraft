@@ -670,6 +670,38 @@ enum ScreenCapture {
                 model.timeline.picked = group
                 model.timeline.clipOpen = true
             }
+        case "timeline-sync", "timeline-sync-keys", "timeline-sync-settings", "timeline-sync-layers":
+            // the keyed line on the tracks view with two more drawings, the camera keyed, two
+            // sync markers, and the line copied (its keys too)
+            guard let clip = timelineKeyed(model) else { break }
+            let s = model.session
+            for _ in 0 ..< 2 {
+                _ = s.addTimelineDrawing()
+            }
+            let size = s.info()
+            for (f, zoom) in [(UInt32(0), Float(1)), (5, 1.5)] {
+                s.setTimelineFrame(frame: f)
+                _ = s.setTimelineCameraKey(x: Float(size.width) / 2, y: Float(size.height) / 2, zoom: zoom, rotation: 0, easing: .smooth, done: true)
+            }
+            _ = s.addTimelineMarker(frame: 2)
+            _ = s.addTimelineMarker(frame: 7)
+            s.setTimelineFrame(frame: 3)
+            model.timeline.setSimple(false)
+            model.refresh()
+            model.timeline.picked = clip
+            switch name {
+            case "timeline-sync-keys":
+                model.timeline.copyKeys(clip, here: false)
+                model.timeline.keysOpen = true
+            case "timeline-sync-settings":
+                model.timeline.settingsOpen = true
+            case "timeline-sync-layers":
+                model.toggle(.layers)
+            default:
+                _ = s.copyTimelineClips(ids: [clip])
+                model.refresh()
+                model.timeline.clipOpen = true
+            }
         case "timeline", "timeline-tracks":
             model.animationAssist.setAssist(true, pages: false)
             for _ in 0 ..< 3 {

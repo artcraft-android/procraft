@@ -1627,6 +1627,49 @@ impl Document {
         Some((copy, pairs))
     }
 
+    /// Layer or group `id` as it is, with its mask or everything in it (bottom first), to put a
+    /// copy of back later with [`Document::insert_copy`].
+    pub fn unit_layers(&self, id: LayerId) -> Option<Vec<Layer>> {
+        if self.layer(id)?.kind == LayerKind::Mask {
+            return None;
+        }
+        Some(self.layers.get(self.unit(id)?)?.to_vec())
+    }
+
+    /// A copy of `layers` (layer or group `root` as [`Document::unit_layers`] gave it, though it
+    /// may be gone from the document since) on top of the others at the top level, with new ids;
+    /// returns the copy of `root` and each (original, copy) pair of layers whose pixels the
+    /// renderer copies.
+    pub fn insert_copy(&mut self, layers: &[Layer], root: LayerId) -> Option<(LayerId, Vec<(LayerId, LayerId)>)> {
+        if !layers.iter().any(|l| l.id == root && l.kind != LayerKind::Mask) {
+            return None;
+        }
+        let mut new_ids = std::collections::HashMap::new();
+        for l in layers {
+            let copy = self.new_id();
+            new_ids.insert(l.id, copy);
+        }
+        let renamed = |old: LayerId| new_ids.get(&old).copied().unwrap_or(old);
+        let copies: Vec<Layer> = layers
+            .iter()
+            .map(|l| {
+                let mut c = l.clone();
+                c.id = renamed(l.id);
+                c.reference = false;
+                if l.id == root {
+                    c.parent = None;
+                    c.clipped = false;
+                } else {
+                    c.parent = l.parent.map(renamed);
+                }
+                c
+            })
+            .collect();
+        let pairs = layers.iter().filter(|l| l.kind != LayerKind::Group).map(|l| (l.id, renamed(l.id))).collect();
+        self.layers.extend(copies);
+        Some((renamed(root), pairs))
+    }
+
     /// Removes a layer, with its mask, or a group with everything in it; the last paint layer
     /// can't be removed. The layer below (or above) becomes current.
     pub fn delete_layer(&mut self, id: LayerId) -> bool {

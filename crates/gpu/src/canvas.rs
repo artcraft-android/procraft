@@ -2240,6 +2240,9 @@ pub struct Canvas {
     /// are), and when each was last needed, counted in renders.
     resident_budget: u64,
     needed_at: HashMap<LayerId, u64>,
+    /// Layers whose textures are kept though neither the document nor the history refers to them
+    /// (a timeline clipboard's drawings, cut and gone).
+    clipboard_layers: HashSet<LayerId>,
     renders: u64,
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -2566,6 +2569,7 @@ impl Canvas {
             last_remake: None,
             resident_budget: 0,
             needed_at: HashMap::new(),
+            clipboard_layers: HashSet::new(),
             renders: 0,
             dirty: IRect::from_size(width, height),
             undo: Vec::new(),
@@ -3701,6 +3705,12 @@ impl Canvas {
         self.duplicate_layers(vec![(from, to)], before);
     }
 
+    /// Keeps the textures of `ids` (in place of those kept before) while the document and the
+    /// history no longer refer to them, for copies of them made later.
+    pub fn hold_layers(&mut self, ids: Vec<LayerId>) {
+        self.clipboard_layers = ids.into_iter().collect();
+    }
+
     /// Layers (already in the document) were made as copies, each pair (from, to), as one undo
     /// step; `before` is the document without them.
     pub fn duplicate_layers(&mut self, pairs: Vec<(LayerId, LayerId)>, before: Document) {
@@ -4520,6 +4530,7 @@ impl Canvas {
     /// Drops the textures of layers that neither the document nor the history refers to.
     fn collect_layers(&mut self, doc: &Document) {
         let mut keep: HashSet<LayerId> = doc.layer_ids().collect();
+        keep.extend(self.clipboard_layers.iter().copied());
         for step in self.undo.iter().chain(self.redo.iter()) {
             if let Some(d) = &step.doc {
                 keep.extend(d.layer_ids());

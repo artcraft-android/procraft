@@ -15,6 +15,13 @@ use make2d_engine::timeline::{
 use crate::animation::AnimationPlayback;
 use crate::{CanvasSession, State};
 
+mod clipboard;
+#[cfg(test)]
+mod tests_1g;
+mod timing;
+
+pub(crate) use clipboard::CopiedTimelineClips;
+
 /// The most frames a timeline lasts.
 const MOST_FRAMES: u32 = 100_000;
 
