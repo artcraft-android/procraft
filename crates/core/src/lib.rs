@@ -32,6 +32,7 @@ mod crop;
 mod crop_edit;
 mod device;
 mod frame;
+mod frame_exports;
 mod gallery;
 mod gestures;
 mod gradients;

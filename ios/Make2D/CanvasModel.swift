@@ -187,6 +187,8 @@ final class CanvasModel {
     }
     /// Share's animated export, while its screen is up.
     var animatedExport: AnimatedFormat?
+    /// Share's sprite sheet export, while its screen is up.
+    var spriteSheetExport = false
     /// A CMYK canvas's inks for the Value picker: the inks a canvas colour prints with, and back.
     private(set) var inks: Inks?
     /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.

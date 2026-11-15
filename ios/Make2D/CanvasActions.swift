@@ -132,6 +132,27 @@ extension CanvasModel {
         }
     }
 
+    /// The sprite sheet as `choices` ask, and its JSON, to share; `done` once it is made.
+    func shareSpriteSheet(_ choices: SpriteSheetChoices, done: @escaping () -> Void) {
+        exporting(failed: "The sprite sheet couldn't be made.") { session in
+            let files = Self.exportSpriteSheet(session, choices)?.0 ?? []
+            if !files.isEmpty {
+                DispatchQueue.main.async(execute: done)
+            }
+            return files
+        }
+    }
+
+    /// The animation as a Toon Boom Harmony scene folder, zipped, to share.
+    func shareHarmony() {
+        exporting(failed: "The Harmony scene couldn't be made.") { session in
+            let base = exportFileName(name: session.name(), package: false)
+            let out = Sharing.exportsDir.appendingPathComponent(base + " Harmony.zip")
+            let made = (try? session.exportHarmony(path: out.path)) != nil
+            return made ? [out] : []
+        }
+    }
+
     /// The file a plugin makes of the artwork's layers of a kind it adds (`e`), to share.
     func sharePlugin(_ e: PluginExport) {
         exporting(failed: "The artwork couldn't be exported.") { session in

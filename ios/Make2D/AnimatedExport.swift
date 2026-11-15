@@ -219,49 +219,16 @@ struct AnimatedExport: View {
 
     /// Max Resolution or Web Ready, side by side in a grey track, the chosen one blue.
     private var segments: some View {
-        HStack(spacing: 12) {
-            ForEach(["Max Resolution", "Web Ready"].indices, id: \.self) { i in
-                let on = choices.webReady == (i == 1)
-                Text(verbatim: i == 0 ? "Max Resolution" : "Web Ready")
-                    .font(.system(size: 15))
-                    .foregroundStyle(on ? Color.white : rowInk)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Capsule().fill(on ? Pc.accent : Color.clear))
-                    .contentShape(Capsule())
-                    .onTapGesture { choices.webReady = i == 1 }
-            }
-        }
-        .padding(2)
-        .frame(width: 384, height: 34)
-        .background(Capsule().fill(segmentTrack))
-        .padding(.leading, 7.5)
+        Segments(labels: ["Max Resolution", "Web Ready"], chosen: choices.webReady ? 1 : 0) { choices.webReady = $0 == 1 }
     }
 
     private var buttons: some View {
-        HStack(spacing: 13) {
-            Text(verbatim: "Cancel")
-                .font(.system(size: 17))
-                .foregroundStyle(Color(argb: 0xFFA5_A5A5))
-                .padding(.horizontal, 13)
-                .frame(height: 43)
-                .background(Capsule().fill(capsuleFill))
-                .overlay(Capsule().strokeBorder(capsuleEdge, lineWidth: 1))
-                .contentShape(Capsule())
-                .onTapGesture(perform: close)
-            PcIconView(PcIcons.doneTick, size: 40, color: .white)
-                .frame(width: 44, height: 45)
-                .background(Capsule().fill(doneBlue))
-                .contentShape(Capsule())
-                .onTapGesture {
-                    guard !exporting else { return }
-                    exporting = true
-                    model.shareAnimation(format, choices) { close() }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
-                }
+        ExportButtons(cancel: close) {
+            guard !exporting else { return }
+            exporting = true
+            model.shareAnimation(format, choices) { close() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
         }
-        .padding(.top, 16)
-        .padding(.trailing, 16)
     }
 
     var body: some View {
@@ -358,6 +325,60 @@ struct AnimatedExport: View {
     }
 }
 
+/// Choices side by side in a grey track, the chosen one blue.
+private struct Segments: View {
+    let labels: [String]
+    let chosen: Int
+    let pick: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(labels.indices, id: \.self) { i in
+                let on = chosen == i
+                Text(verbatim: labels[i])
+                    .font(.system(size: 15))
+                    .foregroundStyle(on ? Color.white : rowInk)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Capsule().fill(on ? Pc.accent : Color.clear))
+                    .contentShape(Capsule())
+                    .onTapGesture { pick(i) }
+            }
+        }
+        .padding(2)
+        .frame(width: 384, height: 34)
+        .background(Capsule().fill(segmentTrack))
+        .padding(.leading, 7.5)
+    }
+}
+
+/// An export screen's Cancel and its round blue Done.
+private struct ExportButtons: View {
+    let cancel: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        HStack(spacing: 13) {
+            Text(verbatim: "Cancel")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(argb: 0xFFA5_A5A5))
+                .padding(.horizontal, 13)
+                .frame(height: 43)
+                .background(Capsule().fill(capsuleFill))
+                .overlay(Capsule().strokeBorder(capsuleEdge, lineWidth: 1))
+                .contentShape(Capsule())
+                .onTapGesture(perform: cancel)
+            PcIconView(PcIcons.doneTick, size: 40, color: .white)
+                .frame(width: 44, height: 45)
+                .background(Capsule().fill(doneBlue))
+                .contentShape(Capsule())
+                .onTapGesture(perform: done)
+        }
+        .padding(.top, 16)
+        .padding(.trailing, 16)
+    }
+}
+
 /// A setting's name and its switch, 52 tall.
 private struct SettingLine: View {
     let label: String
@@ -434,5 +455,230 @@ private struct FpsSlider: View {
             .offset(y: 36)
         }
         .frame(height: 72.5, alignment: .topLeading)
+    }
+}
+
+/// The frames on one picture for a game engine: as the screen starts, a near-square grid of the
+/// frames full size, each held frame once, with its JSON and no background.
+extension SpriteSheetChoices {
+    static let start = SpriteSheetChoices(
+        layout: .grid, columns: 0, rows: 0, padding: 0, trim: false, heldOnce: true, json: true, maxSide: 0, transparent: true
+    )
+}
+
+extension CanvasModel {
+    /// The sprite sheet in the exports folder: its picture, then its JSON if asked for, and what
+    /// was made; none if it couldn't be. Slow: off the main thread.
+    static func exportSpriteSheet(_ session: CanvasSession, _ choices: SpriteSheetChoices) -> ([URL], SpriteSheetMade)? {
+        let base = exportFileName(name: session.name(), package: false)
+        let url = Sharing.exportsDir.appendingPathComponent(base + " Sprite Sheet.png")
+        guard let made = try? session.exportSpriteSheet(path: url.path, choices: choices) else { return nil }
+        return ([url] + (made.jsonPath.map { [URL(fileURLWithPath: $0)] } ?? []), made)
+    }
+
+    /// Share's sprite sheet export opens over everything, the panel fading away.
+    func openSpriteSheetExport() {
+        fadePanels()
+        withAnimation(Motion.studioIn) { spriteSheetExport = true }
+    }
+}
+
+/// Sharing the frames as a sprite sheet: the sheet as the settings make it, the settings (the
+/// size, the layout, padding, trimming, held frames, the JSON and the background), Cancel, and the
+/// round Done that shares the sheet and its JSON.
+struct SpriteSheetExport: View {
+    let model: CanvasModel
+
+    @State private var choices = SpriteSheetChoices.start
+    @State private var sheet: UIImage?
+    @State private var made: SpriteSheetMade?
+    @State private var settingsOpen = false
+    @State private var exporting = false
+
+    private var title: String {
+        let name = model.session.name().trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Untitled Artwork" : name
+    }
+
+    /// What the sheet is: its size and how many pictures are on it.
+    private var said: String {
+        guard let made else { return "" }
+        let pictures = made.cells == 1 ? "1 frame" : "\(made.cells) frames"
+        return "\(made.width) × \(made.height) px · \(pictures)"
+    }
+
+    private func close() {
+        withAnimation(Motion.studioOut) { model.spriteSheetExport = false }
+    }
+
+    /// The settings as a key, so the sheet is made again as they change.
+    private var asked: String {
+        let c = choices
+        return "\(c.layout)-\(c.columns)-\(c.rows)-\(c.padding)-\(c.trim)-\(c.heldOnce)-\(c.json)-\(c.maxSide)-\(c.transparent)"
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: "Sprite Sheet")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(titleInk)
+                .lineLimit(1)
+                .frame(height: 36)
+                .padding(.leading, 24)
+                .padding(.top, 19)
+                .padding(.bottom, 11.5)
+            Segments(labels: ["Max Resolution", "Web Ready"], chosen: choices.maxSide == 0 ? 0 : 1) {
+                choices.maxSide = $0 == 1 ? UInt32(webReadySide) : 0
+            }
+            Segments(labels: ["Grid", "Row", "Column"], chosen: [SheetLayout.grid, .across, .down].firstIndex(of: choices.layout) ?? 0) {
+                choices.layout = [SheetLayout.grid, .across, .down][$0]
+            }
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+            if choices.layout == .grid {
+                CountLine(label: "Columns", value: choices.columns, most: 64) { choices.columns = $0 }
+                CountLine(label: "Rows", value: choices.rows, most: 64) { choices.rows = $0 }
+            }
+            CountLine(label: "Padding", value: choices.padding, most: 64, none: "None") { choices.padding = $0 }
+            SettingLine(label: "Trim empty space", on: choices.trim) { choices.trim.toggle() }
+            SettingLine(label: "Held frames once", on: choices.heldOnce) { choices.heldOnce.toggle() }
+            SettingLine(label: "JSON data", on: choices.json) { choices.json.toggle() }
+            SettingLine(label: "Transparent background", on: choices.transparent) { choices.transparent.toggle() }
+            Spacer(minLength: 0)
+        }
+        .frame(width: panelWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(RoundedRectangle(cornerRadius: 20, style: .circular).fill(panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .circular).strokeBorder(panelEdge, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .padding(10)
+    }
+
+    var body: some View {
+        GeometryReader { place in
+            let screen = place.size
+            let wide = screen.width > screen.height
+            let left: CGFloat = wide ? panelWidth + 10 : 0
+            let inset: CGFloat = wide ? 41 : 24
+            let boxWidth = screen.width - left - inset * 2
+            let boxHeight = wide ? min(boxWidth, screen.height - 140) : boxWidth
+            ZStack(alignment: .topLeading) {
+                screenFill
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen = false }
+                // the sheet, fitted to the box, its edge drawn
+                ZStack {
+                    if let sheet {
+                        Image(uiImage: sheet)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                            .overlay(Rectangle().strokeBorder(panelEdge, lineWidth: 1))
+                    }
+                }
+                .frame(width: boxWidth, height: boxHeight)
+                .offset(x: left + inset, y: 110)
+                .allowsHitTesting(false)
+                if wide {
+                    VStack(spacing: 0) {
+                        Text(verbatim: title)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(titleInk)
+                            .lineLimit(1)
+                            .frame(height: 30)
+                        Text(verbatim: said)
+                            .font(.system(size: 13))
+                            .foregroundStyle(sizeInk)
+                            .lineLimit(1)
+                            .frame(height: 20)
+                    }
+                    .frame(width: max(screen.width - left - 24 - 224, 0))
+                    .offset(x: left + 24, y: 23)
+                } else {
+                    HStack(spacing: 0) {
+                        PcIconView(PcIcons.chevronLeft, size: 28, color: titleInk)
+                            .frame(width: 60)
+                        Text(verbatim: "Export\nSettings")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(titleInk)
+                    }
+                    .padding(.trailing, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen.toggle() }
+                    .offset(x: 14, y: 20)
+                }
+                ExportButtons(cancel: close) {
+                    guard !exporting else { return }
+                    exporting = true
+                    model.shareSpriteSheet(choices) { close() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
+                }
+                .frame(width: screen.width, alignment: .trailing)
+                if wide || settingsOpen {
+                    panel
+                }
+            }
+        }
+        .ignoresSafeArea()
+        // the sheet as the settings make it, a moment after they stop changing
+        .task(id: asked) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            let session = model.session
+            let wanted = choices
+            let result = await Task.detached(priority: .userInitiated) { () -> (UIImage?, SpriteSheetMade)? in
+                guard let done = CanvasModel.exportSpriteSheet(session, wanted), let png = done.0.first else { return nil }
+                return (UIImage(contentsOfFile: png.path), done.1)
+            }.value
+            if !Task.isCancelled, let result {
+                sheet = result.0
+                made = result.1
+            }
+        }
+    }
+}
+
+/// A setting that counts: its name, its value (0 is "Auto", or `none`), and − and + in a grey
+/// track, 52 tall.
+private struct CountLine: View {
+    let label: String
+    let value: UInt32
+    let most: UInt32
+    var none = "Auto"
+    let change: (UInt32) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: label)
+                .font(.system(size: 17))
+                .foregroundStyle(rowInk)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text(verbatim: value == 0 ? none : "\(value)")
+                .font(.system(size: 17))
+                .foregroundStyle(rowInk)
+                .monospacedDigit()
+                .padding(.trailing, 12)
+            HStack(spacing: 0) {
+                step("−", enabled: value > 0) { change(value - 1) }
+                Rectangle().fill(panelEdge).frame(width: 1, height: 18)
+                step("+", enabled: value < most) { change(value + 1) }
+            }
+            .frame(height: 32)
+            .background(Capsule().fill(segmentTrack))
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
+        .frame(height: 52)
+    }
+
+    private func step(_ sign: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
+        Text(verbatim: sign)
+            .font(.system(size: 20, weight: .medium))
+            .foregroundStyle(enabled ? rowInk : rowInk.opacity(0.35))
+            .frame(width: 44, height: 32)
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { action() } }
     }
 }

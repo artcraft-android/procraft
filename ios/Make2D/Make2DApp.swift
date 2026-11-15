@@ -680,6 +680,64 @@ enum ScreenCapture {
                 model.timeline.setSimple(false)
                 model.timeline.addTrack()
             }
+        case "export-sheet", "export-frames":
+            // a ball bouncing across in four drawings, the low one held, and a second track's
+            // drawing over frames 2 and 3; then the sprite sheet screen, or both exports made
+            let s = model.session
+            model.animationAssist.setAssist(true, pages: false)
+            let line = { (x: Float, y: Float, r: Float) in
+                let at = { (k: Int) -> PenSample in
+                    let t = Float(k) / 24 * 2 * .pi
+                    return PenSample(x: x + r * cos(t), y: y + r * sin(t), pressure: 0.8, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0)
+                }
+                s.strokeBegin(pointer: .stylus, samples: [at(0)])
+                s.strokeAdd(samples: (1 ... 24).map(at))
+                s.strokeEnd(samples: [])
+            }
+            s.setColor(r: 0.9, g: 0.2, b: 0.1)
+            for (i, y) in [Float(500), 900, 1300, 900].enumerated() {
+                if i > 0 {
+                    model.addLayer()
+                }
+                line(500 + Float(i) * 300, y, 120)
+            }
+            if let low = s.animationFrames().dropFirst(2).first {
+                s.setFrameHold(id: low, frames: 2)
+            }
+            model.timeline.setOn(true)
+            let track = s.addTimelineTrack()
+            _ = s.renameTimelineTrack(id: track, name: "Shadow")
+            s.setTimelineFrame(frame: 1)
+            let clip = s.addTimelineDrawing()
+            _ = s.setTimelineClipDuration(id: clip, duration: 2, push: false)
+            s.setColor(r: 0.2, g: 0.2, b: 0.3)
+            line(1100, 1500, 60)
+            s.setTimelineFrame(frame: 0)
+            _ = s.setName(name: "Bounce")
+            model.refresh()
+            if name == "export-sheet" {
+                model.spriteSheetExport = true
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var said: [String] = []
+                    var choices = SpriteSheetChoices.start
+                    choices.trim = true
+                    choices.padding = 4
+                    if let done = CanvasModel.exportSpriteSheet(s, choices) {
+                        let made = done.1
+                        said.append("Sheet: \(made.width) × \(made.height), \(made.cells) cells, \(made.frames) frames, \(done.0.map(\.lastPathComponent))")
+                    } else {
+                        said.append("Sheet: failed")
+                    }
+                    let zip = Sharing.exportsDir.appendingPathComponent("Bounce Harmony.zip")
+                    if let made = try? s.exportHarmony(path: zip.path) {
+                        said.append("Harmony: \(made.layers) layers, \(made.drawings) drawings, \(made.frames) frames")
+                    } else {
+                        said.append("Harmony: failed")
+                    }
+                    DispatchQueue.main.async { model.saying = ("Export check", said.joined(separator: "\n")) }
+                }
+            }
         case "export-gif", "export-mp4":
             model.animationAssist.setAssist(true, pages: false)
             for _ in 0 ..< 3 {
