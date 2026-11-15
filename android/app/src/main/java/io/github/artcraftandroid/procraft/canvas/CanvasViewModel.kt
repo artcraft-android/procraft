@@ -500,6 +500,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var tweensOn by mutableStateOf(false)
         private set
 
+    /**
+     * Whether a plugin makes the strokes' sound, as last asked: only then does a hovering pen tell
+     * the canvas where it is (each hover event would otherwise wait on the canvas for nothing).
+     */
+    var strokeSoundOn = false
+        private set
+
     // the interface's accent as the plugins give it
     init { followPluginLooks() }
 
@@ -531,7 +538,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // set up before the session is, the first time
         @Suppress("SENSELESS_COMPARISON")
         if (strokeSound == null) return
-        strokeSound.follow(session?.takeIf { inFront && screen == Screen.CANVAS }, plugins.makesStrokeSound())
+        strokeSoundOn = plugins.makesStrokeSound()
+        strokeSound.follow(session?.takeIf { inFront && screen == Screen.CANVAS }, strokeSoundOn)
     }
 
     /** The app came to the front ([front]) or went behind: the strokes' sound follows. */

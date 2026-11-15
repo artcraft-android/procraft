@@ -473,7 +473,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The pen is held over the canvas at [at]: hovering, or touching at no pressure before it presses. */
     private fun hovered(at: Offset) {
         // a spray can's sound (a plugin's) rattles shaken above the canvas
-        session?.soundHover(at.x, at.y)
+        if (vm.strokeSoundOn) session?.soundHover(at.x, at.y)
         penHovering = true
         // not over the bars, where the gaps between their buttons come here and the
         // buttons don't: it came and went as the pen crossed them
