@@ -545,7 +545,15 @@ impl CanvasSession {
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
             tip_attached,
+            tilt_known: st.input.tilt_known,
         };
+    }
+
+    /// Whether the pen drawing the strokes to come says how it leans (as each platform's input
+    /// tells it). One that doesn't draws as a finger does: no lean at all, the tilt switches of
+    /// its brushes out of the way.
+    pub fn set_pen_tilt_known(&self, known: bool) {
+        self.shared.lock().input.tilt_known = known;
     }
 
     /// How far input must move for the speed dynamics to count it as fast, as a part of the usual

@@ -386,6 +386,10 @@ impl Input {
         self.down.retain(|d| *d != id);
         self.down.push(id);
         self.canvas_pressed = true;
+        // a pen's stroke goes by its lean only if its driver says how it leans
+        if matches!(kind, PointerKind::Stylus | PointerKind::StylusEraser) {
+            session.set_pen_tilt_known(crate::pen::lean(id).is_some());
+        }
         let out = session.touch_down(id, kind, self.sample(id, at, pressure));
         self.take(out);
     }

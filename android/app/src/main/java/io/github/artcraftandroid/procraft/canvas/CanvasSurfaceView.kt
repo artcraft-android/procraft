@@ -188,7 +188,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     palms += e.getPointerId(i)
                     emptyList()
                 } else {
-                    s.touchDown(e.getPointerId(i).toULong(), kindOf(e, i), samples(e, i))
+                    val kind = kindOf(e, i)
+                    // a pen's stroke goes by its lean only if its device says how it leans
+                    if (kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER) s.setPenTiltKnown(tiltKnown(e))
+                    s.touchDown(e.getPointerId(i).toULong(), kind, samples(e, i))
                 }
             }
             MotionEvent.ACTION_MOVE -> {

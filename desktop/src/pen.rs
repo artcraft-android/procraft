@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Each pen pointer's last lean: radians from upright, and the direction it leans (radians
-/// clockwise from screen-up), as the strokes take them.
+/// clockwise from screen-up), as the strokes take them; none for a pen that doesn't say.
 static LEANS: Mutex<Option<HashMap<u64, (f32, f32)>>> = Mutex::new(None);
 
 /// Each pen pointer's last pressure (0..1), for a pen that gives one.
@@ -128,11 +128,16 @@ pub fn barrel() -> Option<f32> {
     roll(near()?)
 }
 
-/// Pointer `id`'s lean and roll as they now are; it is the pen last heard from.
+/// Pointer `id`'s lean (none: it doesn't say) and roll as they now are; it is the pen last heard
+/// from.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn keep_pose(id: u64, lean: (f32, f32), roll: Option<f32>) {
+fn keep_pose(id: u64, lean: Option<(f32, f32)>, roll: Option<f32>) {
     if let Ok(mut leans) = LEANS.lock() {
-        leans.get_or_insert_with(Default::default).insert(id, lean);
+        let leans = leans.get_or_insert_with(Default::default);
+        match lean {
+            Some(l) => leans.insert(id, l),
+            None => leans.remove(&id),
+        };
     }
     if let Ok(mut rolls) = ROLLS.lock() {
         let rolls = rolls.get_or_insert_with(Default::default);
@@ -270,9 +275,10 @@ fn keep_reading(reading: Reading) {
     }
 }
 
-/// What moves the mouse pointer now: a tablet's pen with its lean, or (none) something else.
+/// What moves the mouse pointer now: a tablet's pen with its lean (none: its tablet doesn't say),
+/// or (none) something else.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
+fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
     }
@@ -284,8 +290,8 @@ fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
     }
     if let Ok(mut leans) = LEANS.lock() {
         let leans = leans.get_or_insert_with(Default::default);
-        match pen {
-            Some((_, lean)) => leans.insert(MOUSE, lean),
+        match pen.and_then(|(_, lean)| lean) {
+            Some(lean) => leans.insert(MOUSE, lean),
             None => leans.remove(&MOUSE),
         };
     }
@@ -562,7 +568,7 @@ mod tablet_events {
             let tilt = event.tilt();
             let (x, y) = super::tablet_tilt((tilt.x, tilt.y));
             let pen = MousePen { pressure: event.pressure().clamp(0.0, 1.0), eraser: eraser.get() };
-            super::set_mouse_pen(Some((pen, super::lean_of(x, y))));
+            super::set_mouse_pen(Some((pen, Some(super::lean_of(x, y)))));
             // a side button held is the barrel's
             let sides = NSEventButtonMask::PenLowerSide | NSEventButtonMask::PenUpperSide;
             super::pen_flags(MOUSE, if event.buttonMask().intersects(sides) { FLAG_BARREL } else { 0 });
@@ -638,7 +644,9 @@ mod tablet {
                     let now = super::pen_reading(axes, &super::axis_values(&e.valuator_mask, &values), was);
                     last.insert(e.deviceid, now);
                     let pen = MousePen { pressure: now.pressure, eraser: axes.eraser };
-                    super::set_mouse_pen(Some((pen, super::lean_of(now.tilt_x, now.tilt_y))));
+                    let tilts = axes.tilt_x.is_some() || axes.tilt_y.is_some();
+                    let lean = tilts.then(|| super::lean_of(now.tilt_x, now.tilt_y));
+                    super::set_mouse_pen(Some((pen, lean)));
                     // where it put the pointer, as winit has it (fixed point, 16 bits of fraction)
                     let at = |v: xinput::Fp1616| (f64::from(v) / 65536.0) as f32;
                     super::keep_mouse_pen_at((at(e.event_x), at(e.event_y)), pen);
@@ -823,7 +831,7 @@ mod system {
             // SAFETY: `info` is a pen info to fill; a pointer that isn't a pen fails and is left
             if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
                 let tilted = info.penMask & (PEN_MASK_TILT_X | PEN_MASK_TILT_Y) != 0;
-                let lean = if tilted { super::lean_of(info.tiltX as f32, info.tiltY as f32) } else { (0.0, 0.0) };
+                let lean = tilted.then(|| super::lean_of(info.tiltX as f32, info.tiltY as f32));
                 // degrees clockwise
                 let roll = (info.penMask & PEN_MASK_ROTATION != 0).then(|| (info.rotation as f32).to_radians());
                 super::keep_pose(u64::from(id), lean, roll);
@@ -892,13 +900,13 @@ mod tests {
         let turned = |towards: f32| azimuth().is_some_and(|a| (a - towards.to_radians()).abs() < 1e-4);
         // the system's pen (Windows Ink on), leaning right, its barrel turned
         set_mouse_pen(None);
-        keep_pose(941, lean_of(30.0, 0.0), Some(0.5));
+        keep_pose(941, Some(lean_of(30.0, 0.0)), Some(0.5));
         assert!(turned(90.0), "{:?}", azimuth());
         assert_eq!(barrel(), Some(0.5));
         // a tablet's pen moving the mouse pointer (WinTab with Windows Ink off), leaning towards
         // the user: the cursor turns with it, as its stroke's stamps do; it gives no roll
         let pen = MousePen { pressure: 0.3, eraser: false };
-        set_mouse_pen(Some((pen, lean_of(0.0, 30.0))));
+        set_mouse_pen(Some((pen, Some(lean_of(0.0, 30.0)))));
         assert!(turned(180.0), "{:?}", azimuth());
         assert_eq!(lean(MOUSE).map(|(_, towards)| towards), azimuth());
         assert_eq!(barrel(), None);
@@ -918,12 +926,12 @@ mod tests {
         };
         // the system's pen (Windows Ink on), its first button held
         set_mouse_pen(None);
-        keep_pose(951, lean_of(0.0, 0.0), None);
+        keep_pose(951, Some(lean_of(0.0, 0.0)), None);
         hold(951, FLAG_BARREL);
         assert_eq!(buttons_held(), [true, false]);
         // a tablet's pen moving the mouse pointer (WinTab), its second button held: its own
         let pen = MousePen { pressure: 0.3, eraser: false };
-        set_mouse_pen(Some((pen, lean_of(0.0, 0.0))));
+        set_mouse_pen(Some((pen, None)));
         hold(MOUSE, FLAG_SECOND_BARREL);
         assert_eq!(buttons_held(), [false, true]);
         // gone from the tablet: the system's pen again
@@ -942,12 +950,12 @@ mod tests {
         set_mouse_pen(None);
         keep_mouse_pen_at((10.0, 20.0), pen(0.2));
         assert_eq!(mouse_pen_at((10.0, 20.0)), None, "the mouse moves it");
-        set_mouse_pen(Some((pen(0.2), (0.0, 0.0))));
+        set_mouse_pen(Some((pen(0.2), None)));
         keep_mouse_pen_at((10.0, 20.0), pen(0.2));
         // read on ahead of the mouse's moves: each move takes the reading where it is
         for (x, pressure) in [(11.0, 0.3), (12.5, 0.5), (14.0, 0.7)] {
             let read = pen(pressure);
-            set_mouse_pen(Some((read, (0.0, 0.0))));
+            set_mouse_pen(Some((read, None)));
             keep_mouse_pen_at((x, 20.0), read);
         }
         assert_eq!(mouse_pen_at((10.0, 20.0)), Some(pen(0.2)));
@@ -969,7 +977,7 @@ mod tests {
         // the system's pen messages starting: what WinTab said a moment before is let go
         #[cfg(windows)]
         {
-            set_mouse_pen(Some((pen(0.4), (0.0, 0.0))));
+            set_mouse_pen(Some((pen(0.4), None)));
             wintab::ink_pen();
             assert_eq!(mouse_pen(), None);
         }

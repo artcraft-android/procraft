@@ -1744,6 +1744,9 @@ impl Studio {
         if response.drag_started() {
             self.pad_menu = false;
             pad.begin_own_stroke();
+            if let Some((id, _)) = pen {
+                pad.set_pen_tilt_known(crate::pen::lean(id).is_some());
+            }
             pad.stroke_begin(kind, vec![sample(p, None)]);
             self.pad_stroke = true;
         } else if self.pad_stroke && response.dragged() {

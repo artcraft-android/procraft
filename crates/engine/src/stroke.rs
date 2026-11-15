@@ -1019,6 +1019,9 @@ pub struct InputSettings {
     /// Motion filtering keeps the stroke's end on the pen; off, the end falls short of it as much
     /// as the filter smooths.
     pub tip_attached: bool,
+    /// The pen says how it leans. One that doesn't draws as a finger does: no lean at all (not
+    /// even upright's least), and its brush's tilt switches out of the way.
+    pub tilt_known: bool,
 }
 
 impl Default for InputSettings {
@@ -1031,6 +1034,7 @@ impl Default for InputSettings {
             pressure_curve: Curve::linear(),
             speed_distance: 1.0,
             tip_attached: true,
+            tilt_known: true,
         }
     }
 }
@@ -2195,9 +2199,14 @@ impl StrokeBuilder {
     }
 
     /// How far the pen leans past where a tilt control at `theta` starts (see [`Tilt::reach`]);
-    /// nothing for a finger.
+    /// nothing for a finger, or a pen that doesn't say how it leans.
     fn leaning(&self, p: PathPoint, theta: f32) -> f32 {
-        if self.pointer.has_pressure() { Tilt::reach(p.tilt, theta) } else { 0.0 }
+        if self.lean_known() { Tilt::reach(p.tilt, theta) } else { 0.0 }
+    }
+
+    /// Whether the input says how it leans: a pen that does.
+    fn lean_known(&self) -> bool {
+        self.pointer.has_pressure() && self.input.tilt_known
     }
 
     /// What leaning adds to the stamp's diameter (canvas pixels): the tilt size, as far as the
@@ -2416,10 +2425,10 @@ impl StrokeBuilder {
         self.pressed_roundness(self.drawn_share(p), p.soft[3], size_left) * tilted
     }
 
-    /// The tilt switches act: on a pen's lean, and on the pad only if the brush previews tilt.
-    /// Otherwise they aren't there, so what they would hold back isn't.
+    /// The tilt switches act: on the lean of a pen that says it, and on the pad only if the brush
+    /// previews tilt. Otherwise they aren't there, so what they would hold back isn't.
     fn switches_act(&self) -> bool {
-        self.pointer.has_pressure() && self.pad != Some(false)
+        self.lean_known() && self.pad != Some(false)
     }
 
     /// How far a tilt switch at `theta` lets its control act: all of it when the switch is off or
@@ -2559,11 +2568,11 @@ impl StrokeBuilder {
                 *first = tilt;
             }
         }
-        // the wet attack follows the pressure, and the lean when its switch is on (a finger as a
-        // pen lying flat)
+        // the wet attack follows the pressure, and the lean when its switch is on (a finger, or a
+        // pen that doesn't say how it leans, as a pen lying flat)
         let attack_tilt = match sw.attack {
             None => 1.0,
-            Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
+            Some(theta) if self.lean_known() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
         let pressed = if self.pointer.has_pressure() { p.soft[1] } else { self.brush.touch_opacity };
@@ -4442,6 +4451,25 @@ mod tests {
     }
 
     #[test]
+    fn a_pen_that_doesnt_say_how_it_leans_has_no_lean_at_all() {
+        // fading fully as it leans: upright, a pen still fades by the root of the lean's floor
+        // (1/32, eased as the opacity is); one that doesn't say how it leans, not at all
+        let alpha = |known: bool| {
+            let mut b = Brush { pressure_size: 0.0, pressure_opacity: 0.0, ..plain() };
+            b.tilt.opacity = 1.0;
+            let input = InputSettings { tilt_known: known, ..InputSettings::default() };
+            let s = Sample::at(Vec2::new(50.0, 50.0), 1.0, 0.0);
+            StrokeBuilder::new(b, 10.0, Pointer::Stylus)
+                .with_input(input)
+                .preview(&[s])
+                .first()
+                .map_or(0.0, |s| s.alpha)
+        };
+        let (upright, unknown) = (alpha(true), alpha(false));
+        assert!((upright / unknown - (1.0f32 - 1.0 / 32.0).powf(FLOW_POWER)).abs() < 1e-3, "{upright} {unknown}");
+    }
+
+    #[test]
     fn tilt_switches_hold_their_controls_back_until_the_pen_leans() {
         let make = |tilt: f32, switches: bool| {
             let mut b = Brush { pressure_size: 0.0, ..plain() };
@@ -4469,8 +4497,8 @@ mod tests {
         assert!((upright[0].center.y - 50.0).abs() < 0.05);
         assert!(upright[0].grain_depth > 0.99, "{}", upright[0].grain_depth);
         // a finger has no lean to wait for, so the switches aren't there: all of it, and the pad
-        // without the brush's tilt preview likewise
-        let touched = |on_pad: bool| {
+        // without the brush's tilt preview likewise, and a pen that doesn't say how it leans
+        let touched = |how: usize| {
             let mut b = Brush { pressure_size: 0.0, ..plain() };
             b.shape.count = 8;
             b.set_setting("jitter_lateral", 1.0);
@@ -4479,13 +4507,14 @@ mod tests {
             b.set_setting("stamp_hue", 1.0);
             b.set_setting("stamp_hue_tilt", 1.0);
             let s = Sample::at(Vec2::new(50.0, 50.0), 1.0, 0.0);
-            if on_pad {
-                StrokeBuilder::new(b, 10.0, Pointer::Stylus).on_pad(false).preview(&[s])
-            } else {
-                StrokeBuilder::new(b, 10.0, Pointer::Finger).preview(&[s])
+            let unknown = InputSettings { tilt_known: false, ..InputSettings::default() };
+            match how {
+                0 => StrokeBuilder::new(b, 10.0, Pointer::Finger).preview(&[s]),
+                1 => StrokeBuilder::new(b, 10.0, Pointer::Stylus).on_pad(false).preview(&[s]),
+                _ => StrokeBuilder::new(b, 10.0, Pointer::Stylus).with_input(unknown).preview(&[s]),
             }
         };
-        for stamps in [touched(false), touched(true)] {
+        for stamps in [touched(0), touched(1), touched(2)] {
             assert_eq!(stamps.len(), 8);
             assert!(stamps.iter().any(|s| (s.center.y - 50.0).abs() > 0.5));
             assert!(stamps.iter().any(|s| s.tint.hue.abs() > 0.05));

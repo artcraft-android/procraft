@@ -911,6 +911,7 @@ fn input_of(bytes: &[u8]) -> Option<InputSettings> {
         pressure_curve: if points.len() >= 2 { Curve::new(&points) } else { Curve::linear() },
         speed_distance: speed_distance.clamp(0.25, 1.0),
         tip_attached,
+        tilt_known: true,
     })
 }
 

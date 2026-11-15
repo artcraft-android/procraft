@@ -367,19 +367,22 @@ fn button_flags(buttons: u32) -> u32 {
 }
 
 /// What a packet says: the pen's pressure (0..1 of the device's range), whether it is the eraser
-/// end, and its lean (from upright, and which way, clockwise from the tablet's top).
-fn reading(p: &Packet, (low, high): (i32, i32), leans: bool) -> (super::MousePen, (f32, f32)) {
+/// end, and its lean (from upright, and which way, clockwise from the tablet's top), if its device
+/// `leans` (gives an orientation).
+fn reading(p: &Packet, (low, high): (i32, i32), leans: bool) -> (super::MousePen, Option<(f32, f32)>) {
     let span = (high - low).max(1) as f32;
     let pressure = ((p.pressure as i64 - low as i64) as f32 / span).clamp(0.0, 1.0);
     // a tablet's cursors come in threes (puck, pen, eraser): the third of each is an eraser end
     let eraser = p.cursor % 3 == 2;
-    let lean = if leans && p.altitude > 0 {
-        let tilt = ((900 - p.altitude.clamp(0, 900)) as f32 / 10.0).to_radians();
-        let way = (p.azimuth.rem_euclid(3600) as f32 / 10.0).to_radians();
-        (tilt, way)
-    } else {
-        (0.0, 0.0)
-    };
+    let lean = leans.then(|| {
+        if p.altitude > 0 {
+            let tilt = ((900 - p.altitude.clamp(0, 900)) as f32 / 10.0).to_radians();
+            let way = (p.azimuth.rem_euclid(3600) as f32 / 10.0).to_radians();
+            (tilt, way)
+        } else {
+            (0.0, 0.0)
+        }
+    });
     (super::MousePen { pressure, eraser }, lean)
 }
 
@@ -454,16 +457,17 @@ mod tests {
         let p = Packet { cursor: 1, pressure: 512, altitude: 900, azimuth: 0, ..Packet::default() };
         let (pen, lean) = reading(&p, (0, 1023), true);
         assert!((pen.pressure - 0.5).abs() < 0.01 && !pen.eraser);
-        assert_eq!(lean, (0.0, 0.0), "upright");
+        assert_eq!(lean, Some((0.0, 0.0)), "upright");
         // the eraser end, leaning 45 degrees to the right
         let p = Packet { cursor: 2, pressure: 2047, altitude: 450, azimuth: 900, ..Packet::default() };
-        let (pen, (tilt, way)) = reading(&p, (0, 2047), true);
+        let (pen, lean) = reading(&p, (0, 2047), true);
+        let (tilt, way) = lean.unwrap_or_default();
         assert!(pen.eraser && (pen.pressure - 1.0).abs() < 1e-6);
         assert!((tilt - 45f32.to_radians()).abs() < 1e-4 && (way - 90f32.to_radians()).abs() < 1e-4);
-        // a device without orientation: upright; a pressure past the range: full
+        // a device without orientation: no lean known; a pressure past the range: full
         let (pen, lean) =
             reading(&Packet { cursor: 4, pressure: 5000, altitude: 300, ..Packet::default() }, (0, 1023), false);
-        assert_eq!((pen.pressure, lean), (1.0, (0.0, 0.0)));
+        assert_eq!((pen.pressure, lean), (1.0, None));
         assert!(!pen.eraser);
     }
 }
