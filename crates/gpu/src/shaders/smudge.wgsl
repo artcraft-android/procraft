@@ -624,8 +624,8 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         if (st.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > st.dual_threshold);
         }
-        a = dual_rise(dual_combine(a, b, st.dual - 1u), built, st.dual - 1u);
-        if (st.dual == 1u) {
+        a = dual_rise(dual_combine(a, b, dual_mode(st.dual)), built, dual_mode(st.dual));
+        if (dual_mode(st.dual) == 0u) {
             toward = clamp((1.0 - laid) * b, 0.0, 1.0);
         }
     }
@@ -652,7 +652,14 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             // a Normal second: the paint as laid turned toward the stroke's own colour as far as
             // the second shows where the first laid little, then shown as far as the two together
             // (where the first laid nothing, the second's colour over the layer)
-            let turned = mix(first, vec4<f32>(st.paint.rgb, 1.0), toward);
+            var turned = mix(first, vec4<f32>(st.paint.rgb, 1.0), toward);
+            if ((st.dual & DUAL_CLASSIC) != 0u && turned.a > 0.0) {
+                // the classic combine: the colours of the paint as laid, by how much was, and of
+                // the stroke, by the second's share, added up (as far as it shows, the same)
+                let own = first.rgb / max(first.a, 1e-6);
+                let colour = (own * laid + st.paint.rgb * toward) / (laid + toward);
+                turned = vec4<f32>(colour * turned.a, turned.a);
+            }
             let shown = toward + (1.0 - toward) * laid;
             out = over_layer(was, turned, min(a / max(shown, 1e-6), LAID_MOST_SCALE));
         }

@@ -982,7 +982,8 @@ impl State {
         }
         self.use_full_shape(&mut style, &second);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;
-        Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold }, diameter))
+        let classic = first.setting("classic_combine") >= 0.5;
+        Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold, classic }, diameter))
     }
 
     /// More input for the pad's last kept stroke, if it keeps them.

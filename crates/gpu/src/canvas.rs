@@ -956,7 +956,8 @@ struct LayerUniform {
     /// 1 when the grain is read unfiltered (sharp).
     grain_sharp: f32,
     /// A dual brush's second stroke: how its coverage combines with the first's (a blend mode's
-    /// number + 1; 0: no second), and where it is cut first (0..1; negative: not cut).
+    /// number + 1, with [`DUAL_CLASSIC`]; 0: no second), and where it is cut first (0..1;
+    /// negative: not cut).
     dual: u32,
     dual_threshold: f32,
     /// 1 when the clip base shows through its own mask, which clipping then follows.
@@ -1018,7 +1019,7 @@ impl LayerUniform {
     /// With the stroke's second, if it has one (a dual brush's).
     fn with_dual(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
         match stroke.and_then(|s| s.second) {
-            Some(d) => LayerUniform { dual: d.mode + 1, dual_threshold: d.threshold, ..self },
+            Some(d) => LayerUniform { dual: d.uniform_mode(), dual_threshold: d.threshold, ..self },
             None => self,
         }
     }
@@ -1594,12 +1595,24 @@ struct ActiveStroke {
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
 /// (in the stroke's colour): where the two meet, its coverage combines with the first's by `mode`
 /// (a blend mode's number: by that blend of the two amounts; Normal: the second shows where the
-/// first doesn't), cut at `threshold` first if that is 0..1.
+/// first doesn't), cut at `threshold` first if that is 0..1. `classic`: by Normal, the colours
+/// meet as the classic combine has them, the first's kept whole beside the second's share.
 #[derive(Clone, Copy, Debug)]
 pub struct SecondStroke {
     pub style: StrokeStyle,
     pub mode: u32,
     pub threshold: f32,
+    pub classic: bool,
+}
+
+/// Set in a uniform's `dual` (over the dual mode's number + 1): the classic Normal combine.
+const DUAL_CLASSIC: u32 = 1 << 16;
+
+impl SecondStroke {
+    /// The dual mode's number + 1, with [`DUAL_CLASSIC`] for the classic Normal combine.
+    fn uniform_mode(&self) -> u32 {
+        (self.mode + 1) | if self.classic { DUAL_CLASSIC } else { 0 }
+    }
 }
 
 /// A smudge's stamps as [`Op::Stamps`] holds them: each one, its wet paint, when it was laid and
@@ -5937,7 +5950,7 @@ impl Canvas {
             let wet_paint = style.paints_in_place();
             // paint laid in place with a second, a texturized grain, wet or burnt edges, or a
             // glaze of its own over its wet paint is laid apart, and put together with them
-            let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
+            let second = self.queued_second.map(|d| (d.uniform_mode(), d.threshold));
             let alone = grain_once(style) || style.wet_edges > 0.0 || style.burnt_edges > 0.0 || wet_rule(style) != 0;
             let apart = second
                 .or(alone.then_some((0, -1.0)))

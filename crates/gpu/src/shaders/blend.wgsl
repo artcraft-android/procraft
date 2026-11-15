@@ -304,6 +304,15 @@ fn sixth(x: f32) -> f32 {
     return x2 * x2 * x2;
 }
 
+// set in a dual mode (over its number + 1): the classic Normal combine, where the first's colour
+// is kept whole beside the second's share of it
+const DUAL_CLASSIC: u32 = 65536u;
+
+// a dual mode as set (its number + 1, perhaps with DUAL_CLASSIC): its number
+fn dual_mode(dual: u32) -> u32 {
+    return (dual & 0xffffu) - 1u;
+}
+
 // a dual brush's first stroke's coverage `a` and its second's `b` combined by the brush's dual
 // mode: Normal shows the second where the first isn't, the heights cut one by the other, the
 // rest blend the two as the layers' modes do

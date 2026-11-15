@@ -153,14 +153,20 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         if (lu.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
-        let mode = lu.dual - 1u;
+        let mode = dual_mode(lu.dual);
         let a = dual_rise(dual_combine(s.a, b, mode), built, mode);
         // the first's colour; by Normal turned toward the second's (drawn in the stroke's colour)
         // as far as the second shows where the first laid little, so where the first fades out
         // the two meet smoothly, not at a seam of whatever colour the first's faintest paint
         // holds; the second's wherever the first left nothing
         let toward = select(select(0.0, clamp((1.0 - laid) * b, 0.0, 1.0), mode == 0u), 1.0, s.a <= 0.0);
-        let colour = mix(s.rgb / max(s.a, 1e-6), t.rgb / max(t.a, 1e-6), toward);
+        let first_colour = s.rgb / max(s.a, 1e-6);
+        let second_colour = t.rgb / max(t.a, 1e-6);
+        var colour = mix(first_colour, second_colour, toward);
+        if ((lu.dual & DUAL_CLASSIC) != 0u && s.a > 0.0) {
+            // the classic combine: the first's colour whole and the second's share added up
+            colour = (first_colour + second_colour * toward) / (1.0 + toward);
+        }
         s = vec4<f32>(colour * a, a);
     }
     // burnt edges show where the stroke is thin: where its paper grain or its second took paint

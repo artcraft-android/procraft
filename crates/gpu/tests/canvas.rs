@@ -1207,7 +1207,7 @@ fn a_dual_brush_shows_no_tip_its_second_hasnt_reached() {
     canvas.begin_dual_stroke(
         doc.current(),
         paint,
-        procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0 },
+        procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false },
     );
     assert!(!canvas.shows_tip());
     canvas.end_stroke();
@@ -2067,7 +2067,7 @@ fn a_dual_brush_s_burnt_edges_burn_where_its_second_took_paint_away() {
         canvas.begin_stroke(doc.current(), orange);
         canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
         canvas.end_stroke();
-        let second = procraft_gpu::SecondStroke { style: orange, mode: 0, threshold: -1.0 };
+        let second = procraft_gpu::SecondStroke { style: orange, mode: 0, threshold: -1.0, classic: false };
         canvas.begin_dual_stroke(doc.current(), StrokeStyle { hardness: 0.3, burnt_edges, ..orange }, second);
         canvas.add_stamps(&[dot(Vec2::new(32.0, 32.0), 20.0)]);
         canvas.add_second_stamps(&[dot(Vec2::new(4.0, 4.0), 2.0)]);
@@ -2323,6 +2323,7 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
             style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
             mode,
             threshold: -1.0,
+            classic: false,
         };
         canvas.begin_dual_stroke(doc.current(), first, second);
         if second_first {
@@ -2864,6 +2865,7 @@ fn a_dual_brush_s_wet_paint_is_cut_by_its_second() {
         style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
         mode: 1,
         threshold: -1.0,
+        classic: false,
     };
     canvas.begin_dual_stroke(doc.current(), first, second);
     canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
@@ -2902,6 +2904,7 @@ fn a_dual_brush_in_a_height_mode_leaves_no_clear_pixel_where_both_painted() {
             style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
             mode,
             threshold: -1.0,
+            classic: false,
         };
         let at = |i: u32| (4 + (i % 16) * 8, 4 + (i / 16) * 8 + 16);
         canvas.begin_dual_stroke(doc.current(), first, second);
@@ -2940,6 +2943,7 @@ fn a_dual_brush_s_second_adds_nothing_where_the_first_is_not() {
             style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
             mode,
             threshold: -1.0,
+            classic: false,
         };
         let first = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0);
         canvas.begin_dual_stroke(doc.current(), first, second);
@@ -2971,6 +2975,7 @@ fn a_dual_brush_s_first_fades_into_its_second_s_colour() {
                 style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
                 mode: 0,
                 threshold: -1.0,
+                classic: false,
             };
             canvas.begin_dual_stroke(doc.current(), first, second);
             canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, 1.0)]);
@@ -3016,6 +3021,7 @@ fn a_wet_dual_brush_s_first_fades_into_its_second_s_colour() {
         style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
         mode: 0,
         threshold: -1.0,
+        classic: false,
     };
     canvas.begin_dual_stroke(doc.current(), first, second);
     canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, 1.0)]);
@@ -3030,6 +3036,83 @@ fn a_wet_dual_brush_s_first_fades_into_its_second_s_colour() {
     // (6 px out the first lays about 0.6: there the colour is about half the way to blue)
     let [r, _, b, a] = pixel(&layer, 64, 38, 16);
     assert!(a > 250 && r > 60 && b > 60, "red {r} blue {b} alpha {a}");
+}
+
+#[test]
+fn a_classic_normal_combine_keeps_the_first_s_colour_whole_beside_the_second_s_share() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a soft red first inside a wide blue second, by Normal, plain or as the classic combine has
+    // it: where the first fades out, the classic one adds the second's share of blue to all of
+    // the red, where the plain one gives up as much red for it
+    let laid = |classic: bool| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let first = StrokeStyle { hardness: 0.1, ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0) };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
+            mode: 0,
+            threshold: -1.0,
+            classic,
+        };
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, 1.0)]);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 12.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let (plain, classic) = (laid(false), laid(true));
+    // 6 px out the first lays about half: there the plain combine is about half red, half blue,
+    // the classic one two parts red to one blue
+    let ([r, _, b, a], [cr, _, cb, ca]) = (pixel(&plain, 64, 38, 16), pixel(&classic, 64, 38, 16));
+    assert!(a > 250 && ca > 250, "{a} {ca}");
+    assert!(cr > r + 20 && cb + 20 < b, "plain {r}/{b}, classic {cr}/{cb}");
+    // its middle and past it, the same
+    for x in [32, 60] {
+        assert_eq!(pixel(&classic, 64, x, 16), pixel(&plain, 64, x, 16), "at {x}");
+    }
+}
+
+#[test]
+fn a_wet_classic_normal_combine_adds_the_paint_as_laid_and_the_second_s_share() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // over red, a soft wet first that lays the red it picks up, the stroke blue, inside a wide
+    // second by Normal, plain or as the classic combine has it: the classic one adds up the paint
+    // as laid, by how much was, and the blue, by the second's share; where the second is whole
+    // that is the plain one's mix, where it is partial the blue counts for more
+    let laid = |classic: bool, second_alpha: f32| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&(0..32).map(|y| dot(Vec2::new(32.0, y as f32), 48.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let first = StrokeStyle {
+            hardness: 0.1,
+            wet_pull: Some(0.5),
+            dilution: 1.0,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0)
+        };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
+            mode: 0,
+            threshold: -1.0,
+            classic,
+        };
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, second_alpha)]);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 12.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 38, 16)
+    };
+    let (plain, classic) = (laid(false, 1.0), laid(true, 1.0));
+    assert!(plain.iter().zip(classic).all(|(p, c)| p.abs_diff(c) <= 1), "{plain:?} {classic:?}");
+    let (plain, classic) = (laid(false, 0.5), laid(true, 0.5));
+    assert!(classic[2] > plain[2] + 4 && classic[0] + 4 < plain[0], "{plain:?} {classic:?}");
 }
 
 #[test]

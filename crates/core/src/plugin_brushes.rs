@@ -1021,6 +1021,7 @@ fn look_styles(
         style: paint(s.build, 1.0).as_second(),
         mode: s.combine,
         threshold: -1.0,
+        classic: false,
     });
     canvas.use_tip_set(gpu, &mut style, look.tips.id, look.tips.side, &layers(&look.tips), look.tips.kind);
     // tips the GPU can't hold leave the brush as the app read it
