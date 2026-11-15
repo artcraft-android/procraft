@@ -1554,6 +1554,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn colordrop_by_all_layers_stops_at_a_light_line_as_at_a_dark_one() {
+        let Some(s) = session() else { return };
+        let dir = store("fill-all-light");
+        // a light blue ring on the first layer, over the white background
+        s.set_color(0.55, 0.8, 0.95);
+        s.set_brush_size(0.2);
+        let ring: Vec<PenSample> = (0..=120)
+            .map(|i| {
+                let a = i as f32 / 120.0 * std::f32::consts::TAU;
+                sample(100.0 + 50.0 * a.cos(), 100.0 + 50.0 * a.sin(), f64::from(i) * 8.0)
+            })
+            .collect();
+        s.stroke_begin(PointerKind::Finger, ring[..1].to_vec());
+        s.stroke_add(ring[1..].to_vec());
+        s.stroke_end(vec![]);
+        // seen over white, every pixel of it is nearer to white than a drop's first threshold
+        // reaches: a fill going by the canvas as it shows would pass it
+        let line = picture(&s);
+        let from_white =
+            line.as_chunks::<4>().0.iter().map(|p| (0..3).map(|c| p[3].saturating_sub(p[c])).max().unwrap_or(0));
+        assert!(from_white.max().unwrap() < 128);
+        s.add_layer();
+        let plugins = filling_by_all(&dir);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        // dropped inside it on the empty layer at the threshold a drop starts with: it fills up to
+        // the ring and no further, as it does at a black ring
+        assert!(s.pour_begin(100.0, 100.0, 0.0, 0.0, 1.0, 0.5));
+        s.pour_end(true, None);
+        s.await_pour();
+        let rgba = picture(&s);
+        let blue_at = |x: usize, y: usize| rgba[(y * 200 + x) * 4 + 2] > 200 && rgba[(y * 200 + x) * 4 + 3] > 200;
+        assert!(blue_at(100, 100) && blue_at(80, 120), "filled where it was dropped");
+        for (x, y) in [(100, 20), (20, 100), (180, 100), (100, 180), (5, 5), (195, 195)] {
+            assert!(!blue_at(x, y), "not past the ring at ({x}, {y})");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_interface_takes_a_plugin_s_colour_while_it_is_on() {
         let dir = store("interface-colour");
         // red for the accent, nothing said for any other role

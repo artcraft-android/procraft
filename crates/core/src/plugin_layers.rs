@@ -1714,7 +1714,7 @@ impl State {
     pub(crate) fn fill_plugin_layer(&mut self, layer: LayerId, at: Vec2, colour: [f32; 3], threshold: f32) -> bool {
         let (width, height) = (self.doc.width(), self.doc.height());
         let pixels = if self.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
-            self.composite_pixels()
+            self.seen_layers_pixels()
         } else {
             match self.doc.reference().filter(|&r| r != layer) {
                 Some(reference) => self.layer_pixels(reference),

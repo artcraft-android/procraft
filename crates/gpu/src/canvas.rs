@@ -8600,6 +8600,24 @@ impl Canvas {
         read
     }
 
+    /// The composite's pixels as they would be without the background (see-through where no
+    /// layer is painted): what the layers seen hold together. Made as
+    /// [`Canvas::read_composite_without`] makes its own.
+    pub fn read_composite_without_background(&mut self, gpu: &Gpu, doc: &mut Document) -> Result<Vec<u8>, GpuError> {
+        self.render_finished(gpu, doc);
+        if !doc.background_visible {
+            return self.read_composite(gpu);
+        }
+        let mut shown = doc.clone();
+        shown.background_visible = false;
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        let read = self.read_composite(gpu);
+        self.invalidate();
+        self.render(gpu, doc, None);
+        read
+    }
+
     /// Starts reading a layer's pixels back (premultiplied RGBA8): see [`Readback`].
     pub fn start_reading_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Readback, GpuError> {
         if self.parked.contains_key(&id) && !self.layers.contains_key(&id) {
