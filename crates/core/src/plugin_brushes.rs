@@ -1071,7 +1071,7 @@ pub(crate) fn engine_stroke(
                 let at = ((sy * side + sx) * 4) as usize;
                 // straight colours
                 let a = u32::from(p[3]);
-                let straight = |c: u8| if a == 0 { 0 } else { ((u32::from(c) * 255 + a / 2) / a).min(255) as u8 };
+                let straight = |c: u8| (u32::from(c) * 255 + a / 2).checked_div(a).map_or(0, |v| v.min(255) as u8);
                 if let Some(out) = square.get_mut(at..at + 4) {
                     out.copy_from_slice(&[straight(p[0]), straight(p[1]), straight(p[2]), p[3]]);
                 }
