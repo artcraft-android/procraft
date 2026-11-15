@@ -73,6 +73,7 @@ pub mod shape {
     pub const STOCK_HOOK: u32 = 55;
     pub const STOCK_GRAINY_SQUARE: u32 = 56;
     pub const STOCK_LINE: u32 = 57;
+    pub const DAISY: u32 = 58;
 }
 
 /// Grains, by index.
@@ -123,6 +124,10 @@ pub mod grain {
     pub const FINE_GRID: u32 = 43;
     pub const SOFT_DOTS: u32 = 44;
     pub const LABYRINTH: u32 = 45;
+    pub const CUBES: u32 = 46;
+    pub const SPOTS: u32 = 47;
+    pub const DISC: u32 = 48;
+    pub const SCROLLS: u32 = 49;
 }
 
 /// How many pixels wide the stock image our grain `index` is drawn to the proportions of is (a
@@ -132,8 +137,10 @@ pub mod grain {
 pub fn drawn_to_stock_width(index: u32) -> Option<f32> {
     match index {
         grain::GRAPH_PAPER | grain::DOT_GRID | grain::DOTTED_STAR | grain::LABYRINTH => Some(2048.0),
-        grain::DIAGONAL_STRIPES | grain::FINE_GRID => Some(1024.0),
+        grain::DIAGONAL_STRIPES | grain::FINE_GRID | grain::CUBES | grain::DISC => Some(1024.0),
         grain::SOFT_DOTS => Some(1792.0),
+        grain::SPOTS => Some(2048.0),
+        grain::SCROLLS => Some(1024.0),
         _ => None,
     }
 }
@@ -680,6 +687,21 @@ pub fn retoned(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
 pub fn prepare() {
     SHAPES.get_or_init(make_shapes);
     GRAINS.get_or_init(make_grains);
+}
+
+/// A daisy: eight long, narrow petals round a small dot, a ring of black between.
+fn daisy() -> Vec<u8> {
+    field(|x, y| {
+        let (u, v) = centred(x, y);
+        let (r, a) = ((u * u + v * v).sqrt(), v.atan2(u));
+        // the nearest petal's way, and how far along and across it the point lies
+        let gap = TAU / 8.0;
+        let off = a - (a / gap).round() * gap;
+        let (along, across) = (r * off.cos(), r * off.sin());
+        let petal = 1.0 - ((along - 0.56) / 0.4).powi(2) - (across / 0.085).powi(2);
+        let dot = 0.05 - r;
+        (petal * 12.0).max(dot * 120.0).clamp(0.0, 1.0)
+    })
 }
 
 fn make_shapes() -> Vec<GrayImage> {
@@ -1310,6 +1332,7 @@ fn make_shapes() -> Vec<GrayImage> {
             smooth(((thick - off) * TEXTURE_SIZE as f32 + 0.5).clamp(0.0, 1.0))
         }),
     });
+    shapes.push(GrayImage { name: "Daisy", pixels: daisy() });
     shapes
 }
 
@@ -1832,7 +1855,131 @@ fn make_grains() -> Vec<GrayImage> {
     grains.push(GrayImage { name: "Fine grid", pixels: fine_grid() });
     grains.push(GrayImage { name: "Soft dots", pixels: soft_dots() });
     grains.push(GrayImage { name: "Labyrinth", pixels: labyrinth() });
+    grains.push(GrayImage { name: "Cubes", pixels: cubes() });
+    grains.push(GrayImage { name: "Spots", pixels: spots() });
+    grains.push(GrayImage { name: "Disc", pixels: disc() });
+    grains.push(GrayImage { name: "Scrolls", pixels: scrolls() });
     grains
+}
+
+/// Scrolls: four white curls on black, one in each quarter of the tile, each turned a quarter from
+/// the one before: a band winding in about one and a quarter turns, thinning as it goes, ending in
+/// a dot, with two leaves on its outer curve; about a third of the tile white.
+fn scrolls() -> Vec<u8> {
+    // a curl's band as points along it (curl-sized units, its middle at 0), each with its half
+    // width; and its leaves, as (middle, way, half length, half width)
+    let turns = 1.25;
+    let steps = 120;
+    let band: Vec<(f32, f32, f32)> = (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            let angle = t * turns * TAU;
+            let r = 0.92 - 0.72 * t;
+            (r * angle.cos(), r * angle.sin(), 0.17 - 0.09 * t)
+        })
+        .collect();
+    let leaves = [(-0.66, -0.86, 0.5, 0.34, 0.16), (1.04, -0.42, -1.2, 0.32, 0.15)];
+    let curl = |u: f32, v: f32| -> f32 {
+        let mut ink = 0.0f32;
+        for pair in band.windows(2) {
+            if let [(ax, ay, aw), (bx, by, bw)] = *pair {
+                let (dx, dy) = (bx - ax, by - ay);
+                let t = (((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
+                let d = (u - ax - t * dx).hypot(v - ay - t * dy);
+                let w = aw + (bw - aw) * t;
+                ink = ink.max(((w - d) * 60.0 + 0.5).clamp(0.0, 1.0));
+            }
+        }
+        // the dot it ends in
+        if let Some(&(ex, ey, _)) = band.last() {
+            ink = ink.max(((0.13 - (u - ex).hypot(v - ey)) * 60.0 + 0.5).clamp(0.0, 1.0));
+        }
+        for &(lx, ly, way, long, wide) in &leaves {
+            let (c, s) = (f32::cos(way), f32::sin(way));
+            let (a, b) = ((u - lx) * c + (v - ly) * s, -(u - lx) * s + (v - ly) * c);
+            // a leaf: pointed at both ends
+            let e = (a / long).powi(2) + (b / (wide * (1.0 - (a / long).abs()).max(0.0).sqrt())).powi(2);
+            ink = ink.max(((1.0 - e) * 8.0).clamp(0.0, 1.0));
+        }
+        ink
+    };
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for (k, (cx, cy)) in [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)].into_iter().enumerate() {
+            let turn = k as f32 * FRAC_PI_2;
+            let (c, s) = (turn.cos(), turn.sin());
+            // the curl a quarter of the tile wide either way of its middle, read across the tile's
+            // wrap
+            for (ox, oy) in [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let (px, py) = ((x + ox - cx) / 0.215, (y + oy - cy) / 0.215);
+                if px.abs() > 1.4 || py.abs() > 1.4 {
+                    continue;
+                }
+                ink = ink.max(curl(px * c + py * s, -px * s + py * c));
+            }
+        }
+        ink
+    })
+}
+
+/// Stacked cubes seen from above at an angle: two to the tile across and two rows down (each row
+/// half a cube along), each cube's top black, its left face grey and its right face white, a third
+/// of the tile each. A cube's top is a rhombus as wide as the cube and a third of a row tall (so
+/// the cubes are a little taller than true isometric ones), its faces hanging a row's two thirds
+/// below it.
+fn cubes() -> Vec<u8> {
+    const TOP: f32 = 0.0;
+    const LEFT: f32 = 0.47;
+    const RIGHT: f32 = 0.97;
+    field(|x, y| {
+        // in cubes across (a cube 1 wide) and rows down (a top's half height a third of a row),
+        // a quarter cube along so that no edge lies on the tile's
+        let (u, v) = (x * 2.0 + 0.25, y * 2.0);
+        let row = v.floor();
+        // the cube whose top this row's line runs through, and the point from that top's middle
+        let shift = if (row as i32).rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+        let near = |r: f32, s: f32| {
+            let cx = (u - s).round() + s;
+            (u - cx, v - r)
+        };
+        let (dx, dy) = near(row, shift);
+        let (nx, ny) = near(row + 1.0, 0.5 - shift);
+        let h = 1.0 / 3.0;
+        // on a top: this row's or the next's
+        if dx.abs() * 2.0 + dy.abs() / h <= 1.0 || nx.abs() * 2.0 + ny.abs() / h <= 1.0 {
+            return TOP;
+        }
+        // below this row's top: the face on the side of its middle the point is
+        if dx < 0.0 { LEFT } else { RIGHT }
+    })
+}
+
+/// Spots: rounded white patches packed close, about forty to the tile each way, parted by black
+/// gaps of uneven width, a little over half of it white (a hide's spots).
+fn spots() -> Vec<u8> {
+    let raw: Vec<f32> = (0..TEXTURE_SIZE * TEXTURE_SIZE)
+        .map(|k| {
+            let (x, y) = (
+                ((k % TEXTURE_SIZE) as f32 + 0.5) / TEXTURE_SIZE as f32,
+                ((k / TEXTURE_SIZE) as f32 + 0.5) / TEXTURE_SIZE as f32,
+            );
+            // the gaps wander: where each texel is read from is moved a little by soft noise
+            let wx = x + 0.004 * (fbm(x * 16.0, y * 16.0, 16, 2, 4703) - 0.5);
+            let wy = y + 0.004 * (fbm(x * 16.0, y * 16.0, 16, 2, 4709) - 0.5);
+            let (f1, f2) = cells(wx.rem_euclid(1.0), wy.rem_euclid(1.0), 40, 4701);
+            // how far inside its patch, against the patch next to it, rounded off at its corners
+            (f2 - f1) - 0.25 * f1
+        })
+        .collect();
+    let mut sorted = raw.clone();
+    sorted.sort_by(f32::total_cmp);
+    let cut = sorted.get(((TEXTURE_SIZE * TEXTURE_SIZE) as f32 * 0.48) as usize).copied().unwrap_or(0.0);
+    raw.iter().map(|&v| if v > cut { 255 } else { 0 }).collect()
+}
+
+/// One hard white disc in the middle of the tile on black, four fifths of it across.
+fn disc() -> Vec<u8> {
+    field(|x, y| mark((x - 0.5).hypot(y - 0.5), 0.398))
 }
 
 /// Diagonal stripes, white on black, rising to the right: five of differing widths in each quarter

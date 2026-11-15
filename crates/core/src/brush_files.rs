@@ -2074,6 +2074,8 @@ fn stock_shape(n: &str) -> u32 {
         // drawn things of their own
         (&["scribble"], shape::SCRIBBLE),
         (&["lightning", "bolt"], shape::BOLT),
+        // a daisy's long narrow petals; any other flower's rounder ones
+        (&["artery-flower"], shape::DAISY),
         (&["flower", "petal", "blossom"], shape::FLOWER),
         (&["diamond", "crystal"], shape::DIAMOND),
         (&["reticle"], shape::RING),
@@ -2268,6 +2270,14 @@ fn named_grain(n: &str) -> Option<u32> {
         (&["brush-preset-grid"], grain::FINE_GRID),
         (&["dof-dots-light"], grain::SOFT_DOTS),
         (&["recycled"], grain::RECYCLED),
+        (&["brush-preset-cubes"], grain::CUBES),
+        (&["brush-preset-floral"], grain::SCROLLS),
+        (&["leopard"], grain::SPOTS),
+        // a round tip read as a grain: a disc a tile
+        (&["brush-preset-hard"], grain::DISC),
+        // a canvas painted over with oil, its weave hidden: smooth streaks and blotches, stood in
+        // as the noise of the stock image's own octaves
+        (&["oil-canvas"], grain::WASH),
         // a canvas painted on: rough, its weave showing through patches of paint
         (&["canvas"], grain::ROUGH_CANVAS),
         (&["weave", "burlap", "cloth", "fabric"], grain::WEAVE),
@@ -2473,6 +2483,23 @@ mod tests {
         assert_eq!(named_grain("brush-preset-diagonal.png"), Some(grain::DIAGONAL_STRIPES));
         assert_eq!(named_grain("tessellated.png"), Some(grain::LABYRINTH));
         assert_eq!(named_grain("stone_wall.png"), Some(grain::CONCRETE));
+        assert_eq!(named_grain("brush-preset-cubes.png"), Some(grain::CUBES));
+        assert_eq!(named_grain("leopard-print.png"), Some(grain::SPOTS));
+        assert_eq!(named_grain("brush-preset-hard.png"), Some(grain::DISC));
+        assert_eq!(named_grain("brush-preset-floral.png"), Some(grain::SCROLLS));
+    }
+
+    #[test]
+    fn an_oil_painted_canvas_stands_in_as_its_own_noise_not_a_weave() {
+        // painted over, its weave doesn't show: its own octaves of noise, measured, not our canvas
+        let stock = |name: &str| Texture::Stock { name: name.into(), inverted: false };
+        let (image, source) = grain_for(&stock("Oil-Canvas.jpg"), None);
+        assert_eq!(image, Some(grain::WASH));
+        assert!(textures::stock_grain_octaves("Oil-Canvas.jpg").is_some() && source.is_some());
+        // one whose weave shows keeps it
+        assert_eq!(grain_for(&stock("Raw-Canvas.jpg"), None).0, Some(grain::ROUGH_CANVAS));
+        // a daisy's long narrow petals, not our rounder flower's
+        assert_eq!(shape_for(&stock("Brush-Artery-Flower.jpg")).0, Some(shape::DAISY));
     }
 
     #[test]
