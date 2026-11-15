@@ -229,6 +229,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             TouchCommand.ShapeEnded -> vm.quickShapeEnded()
             TouchCommand.StrokeEnded -> vm.strokeEnded()
             TouchCommand.ViewMoved -> vm.refreshView()
+            TouchCommand.ViewSettles -> vm.followView()
             is TouchCommand.Cursor -> {
                 vm.showCursor(Offset(c.x, c.y))
                 // cloning, the source follows the brush

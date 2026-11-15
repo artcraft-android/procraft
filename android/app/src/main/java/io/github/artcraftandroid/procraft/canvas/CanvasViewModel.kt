@@ -7474,7 +7474,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** What is drawn over the canvas follows the view each frame while it moves into place. */
-    private fun followView() {
+    fun followView() {
         val s = session ?: return
         settling?.cancel()
         settling = viewModelScope.launch {

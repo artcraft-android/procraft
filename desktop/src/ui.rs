@@ -1303,7 +1303,8 @@ impl Interface {
                 // a stroke or a fill on a text layer: it takes them once rasterized
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
-                TouchCommand::ViewMoved | TouchCommand::BrushChanged => {}
+                // (the view moving on its own is drawn as it goes)
+                TouchCommand::ViewMoved | TouchCommand::ViewSettles | TouchCommand::BrushChanged => {}
                 // the guide editor: a touch on the canvas closes its options; the guide is read each frame
                 TouchCommand::GuideTouched => self.guide_editor.touched(),
                 TouchCommand::GuideChanged => {}

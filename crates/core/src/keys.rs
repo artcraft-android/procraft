@@ -230,9 +230,13 @@ impl CanvasSession {
         self.view_gesture(pivot.0, pivot.1, 0.0, 0.0, zoom, turn);
     }
 
-    /// The key drag ends (the mouse let go, or its key).
+    /// The key drag ends (the mouse let go, or its key): a turn let go within 5° of a right angle
+    /// goes on onto it, as one by fingers does.
     pub fn key_drag_end(&self) {
-        self.shared.lock().key_drag = None;
+        let ended = self.shared.lock().key_drag.take();
+        if ended.is_some_and(|d| d.how == KeyDrag::Turn) {
+            self.settle_turn();
+        }
     }
 }
 
@@ -843,6 +847,30 @@ mod tests {
         s.key_drag_move(x, y, false);
         assert!((degrees(&s) - 47.0).abs() < 1e-2, "{}", degrees(&s));
         s.key_drag_end();
+    }
+
+    #[test]
+    fn r_dragged_and_let_go_near_a_right_angle_turns_onto_it() {
+        let s = viewed();
+        let middle = view(&s).screen_to_canvas(Vec2::new(200.0, 200.0)).unwrap();
+        let (x, y) = round_middle(100.0, 0.0);
+        s.key_drag_begin(KeyDrag::Turn, x, y);
+        let (x, y) = round_middle(100.0, 93.0);
+        s.key_drag_move(x, y, false);
+        s.key_drag_end();
+        assert!(s.view_moving());
+        // within half a second it is on the right angle, turned about the middle
+        std::thread::sleep(std::time::Duration::from_secs_f32(0.5));
+        s.shared.lock().step_view_motion();
+        assert!((degrees(&s) - 90.0).abs() < 1e-3, "{}", degrees(&s));
+        let p = shown(&s, middle);
+        assert!((p.x - 200.0).abs() < 1e-2 && (p.y - 200.0).abs() < 1e-2, "{p:?}");
+        // a zoom let go leaves a turn as it is
+        s.view_gesture(200.0, 200.0, 0.0, 0.0, 1.0, 3f32.to_radians());
+        s.key_drag_begin(KeyDrag::Zoom, x, y);
+        s.key_drag_move(x + 10.0, y, false);
+        s.key_drag_end();
+        assert!(!s.view_moving() && (degrees(&s) - 93.0).abs() < 1e-3, "{}", degrees(&s));
     }
 
     #[test]

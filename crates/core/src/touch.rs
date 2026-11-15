@@ -259,6 +259,9 @@ pub enum TouchCommand {
     StrokeEnded,
     /// The view moved (two fingers).
     ViewMoved,
+    /// The view moves into place on its own for a moment (let go near a right angle, it turns onto
+    /// it): what is drawn over the canvas follows it.
+    ViewSettles,
     /// The brush's outline is at (x, y), or goes.
     Cursor {
         x: f32,
@@ -2100,6 +2103,19 @@ impl CanvasSession {
                         out.push(TouchCommand::Fit);
                     }
                 }
+                // let go turned within 5° of a right angle, the canvas turns onto it (a fit
+                // straightens it anyway)
+                if parted
+                    && !pinched
+                    && !cancelled
+                    && !tap
+                    && t.view_moving
+                    && t.gesture_pair.is_none()
+                    && !out.contains(&TouchCommand::Fit)
+                    && self.settle_turn()
+                {
+                    out.push(TouchCommand::ViewSettles);
+                }
                 // the first lift decides a tap, and it does what it does there: the fingers left
                 // down, wherever they go, do nothing more
                 if first && tap && !cancelled {
@@ -3424,6 +3440,108 @@ mod tests {
             let out = pinch(&shown(1.0), speed, ms, 0.0);
             assert!(!out.contains(&TouchCommand::Fit), "{speed}: {out:?}");
         }
+    }
+
+    /// The view turned by `deg` about the window's middle.
+    fn turned(s: &CanvasSession, deg: f32) {
+        let mut st = s.shared.lock();
+        if let Some(v) = st.view.as_mut() {
+            v.gesture(Vec2::new(400.0, 300.0), Vec2::ZERO, 1.0, deg.to_radians());
+        }
+    }
+
+    /// Two fingers 400 apart, about (400, 300), turned by `deg` over 200 ms and moved by `shift`,
+    /// held still a moment and lifted (or taken back, if `cancel`): what came of it.
+    fn two_fingers(s: &CanvasSession, deg: f32, shift: f32, cancel: bool) -> Vec<TouchCommand> {
+        let end = |a: f32, side: f32, x: f32| (400.0 + x + side * 200.0 * a.cos(), 300.0 + side * 200.0 * a.sin());
+        let mut out = s.touch_down(1, PointerKind::Finger, at(200.0, 300.0, 0.0));
+        out.extend(s.touch_down(2, PointerKind::Finger, at(600.0, 300.0, 0.0)));
+        let (mut a, mut b) = ((200.0, 300.0), (600.0, 300.0));
+        for i in 1..=20 {
+            let (k, ms) = (i as f32 / 20.0, f64::from(i) * 10.0);
+            let angle = (deg * k).to_radians();
+            (a, b) = (end(angle, -1.0, shift * k), end(angle, 1.0, shift * k));
+            out.extend(s.touch_move(1, at(a.0, a.1, ms)));
+            out.extend(s.touch_move(2, at(b.0, b.1, ms)));
+        }
+        if cancel {
+            out.extend(s.touch_cancel());
+            return out;
+        }
+        out.extend(s.touch_up(2, at(b.0, b.1, 400.0)));
+        out.extend(s.touch_up(1, at(a.0, a.1, 410.0)));
+        out
+    }
+
+    /// The view's turn once it has settled, degrees.
+    fn settled(s: &CanvasSession) -> f32 {
+        let mut st = s.shared.lock();
+        st.view = st.view_motion.take().map(|m| m.to).or(st.view);
+        st.view.map_or(f32::NAN, |v| v.rotation().to_degrees())
+    }
+
+    #[test]
+    fn a_canvas_let_go_near_a_right_angle_turns_onto_it() {
+        // turned a little by the fingers themselves: straight again
+        let s = shown(1.0);
+        let out = two_fingers(&s, 4.5, 0.0, false);
+        assert!(out.contains(&TouchCommand::ViewSettles), "{out:?}");
+        assert!(settled(&s).abs() < 1e-3, "{}", settled(&s));
+        // left near a right angle, and only moved this time: onto it, either side
+        for (from, onto) in [(3.0, 0.0), (-4.0, 0.0), (87.0, 90.0), (-93.0, -90.0), (182.0, 180.0)] {
+            let s = shown(2.0);
+            turned(&s, from);
+            let middle = s.shared.lock().view.and_then(|v| v.screen_to_canvas(Vec2::new(400.0, 300.0))).unwrap();
+            let out = two_fingers(&s, 0.0, 60.0, false);
+            assert!(out.contains(&TouchCommand::ViewSettles), "{from}: {out:?}");
+            // about the middle of the window, slowing to a stop along a quarter sine, quickly
+            let m = s.shared.lock().view_motion.unwrap();
+            let crate::ViewCurve::Turn { seconds, about } = m.curve else { panic!("{from}") };
+            assert!((0.134..0.2).contains(&seconds), "{from}: {seconds}");
+            let kept = m.from.to_screen().apply(about);
+            for along in [0.3, 0.7] {
+                let mid = procraft_engine::view::View::between(&m.from, &m.to, about, along);
+                assert!(mid.to_screen().apply(about).distance(kept) < 1e-2, "{from}");
+            }
+            assert!(about.distance(middle) > 1.0, "{from}: the fingers moved it");
+            let off = (settled(&s) - onto + 180.0).rem_euclid(360.0) - 180.0;
+            assert!(off.abs() < 1e-3, "{from}: {}", settled(&s));
+        }
+        // farther from one, it stays as it is
+        let s = shown(1.0);
+        turned(&s, 20.0);
+        let out = two_fingers(&s, 0.0, 60.0, false);
+        assert!(!out.contains(&TouchCommand::ViewSettles), "{out:?}");
+        assert!((settled(&s) - 20.0).abs() < 1e-3, "{}", settled(&s));
+    }
+
+    #[test]
+    fn a_canvas_taken_back_tapped_or_fitted_doesn_t_turn_onto_a_right_angle() {
+        // the platform took the fingers back
+        let s = shown(1.0);
+        turned(&s, 3.0);
+        let out = two_fingers(&s, 0.0, 60.0, true);
+        assert!(!out.contains(&TouchCommand::ViewSettles), "{out:?}");
+        assert!((settled(&s) - 3.0).abs() < 1e-3);
+        // two fingers tapped: undo, the canvas left alone
+        s.touch_down(1, PointerKind::Finger, at(200.0, 300.0, 1000.0));
+        s.touch_down(2, PointerKind::Finger, at(600.0, 300.0, 1000.0));
+        let mut out = s.touch_up(2, at(600.0, 300.0, 1080.0));
+        out.extend(s.touch_up(1, at(200.0, 300.0, 1090.0)));
+        assert!(out.contains(&TouchCommand::Undo) && !out.contains(&TouchCommand::ViewSettles), "{out:?}");
+        assert!((settled(&s) - 3.0).abs() < 1e-3);
+        // a quick pinch in fits it, straight, with no turn of its own
+        let s = shown(1.0);
+        turned(&s, 3.0);
+        let out = pinch(&s, -5.0, 120.0, 0.0);
+        assert!(out.contains(&TouchCommand::Fit) && !out.contains(&TouchCommand::ViewSettles), "{out:?}");
+        // with less motion asked for, it is there at once
+        let s = shown(1.0);
+        s.set_reduce_motion(true);
+        turned(&s, 3.0);
+        two_fingers(&s, 0.0, 60.0, false);
+        let m = s.shared.lock().view_motion.unwrap();
+        assert!(matches!(m.curve, crate::ViewCurve::Turn { seconds, .. } if seconds == 0.01));
     }
 
     #[test]

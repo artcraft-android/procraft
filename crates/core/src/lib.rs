@@ -374,6 +374,8 @@ const VIEW_SETTLE_SECONDS: f32 = 0.5;
 const VIEW_SETTLE_DAMPING: f32 = 0.8;
 /// How long the view takes to grow back to fit, slowing to a stop.
 const VIEW_EASE_SECONDS: f32 = 0.3;
+/// How long a turn onto a right angle takes with less motion asked for.
+const REDUCED_TURN_SECONDS: f32 = 0.01;
 
 /// The view settling from `from` to `to`, begun at `start`, along `curve`.
 #[derive(Clone, Copy)]
@@ -385,11 +387,14 @@ pub(crate) struct ViewMotion {
     pub(crate) curve: ViewCurve,
 }
 
-/// How a view moves into place: settling on a spring (fitting), or slowing to a stop (crop).
+/// How a view moves into place: settling on a spring (fitting), slowing to a stop (crop), or
+/// turning about the canvas point `about`, which keeps its place on the screen, slowing to a stop
+/// along a quarter sine (a canvas let go near a right angle).
 #[derive(Clone, Copy)]
 pub(crate) enum ViewCurve {
     Settle,
     EaseOut(f32),
+    Turn { seconds: f32, about: Vec2 },
 }
 
 impl ViewCurve {
@@ -401,6 +406,7 @@ impl ViewCurve {
                 (spring.at(t), spring.seconds())
             }
             ViewCurve::EaseOut(seconds) => (procraft_engine::motion::Bezier::ease_out(seconds).at(t), seconds),
+            ViewCurve::Turn { seconds, .. } => (procraft_engine::motion::sine_out(t, seconds), seconds),
         }
     }
 }
@@ -418,7 +424,10 @@ impl State {
             self.view_motion = None;
             return false;
         }
-        let centre = Vec2::new(self.doc.width() as f32 / 2.0, self.doc.height() as f32 / 2.0);
+        let centre = match m.curve {
+            ViewCurve::Turn { about, .. } => about,
+            _ => Vec2::new(self.doc.width() as f32 / 2.0, self.doc.height() as f32 / 2.0),
+        };
         self.view = Some(View::between(&m.from, &m.to, centre, along));
         true
     }
@@ -2180,6 +2189,27 @@ impl CanvasSession {
             return false;
         };
         st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
+        self.shared.frame(&mut st);
+        true
+    }
+
+    /// The canvas let go turned within 5° of a right angle turns the rest of the way onto it about
+    /// the middle of the window, slowing to a stop: the less it moves the quicker (see
+    /// [`View::move_seconds`]), and at once with less motion asked for. True if it turns.
+    pub fn settle_turn(&self) -> bool {
+        let mut st = self.shared.lock();
+        if st.scene_shown() || st.view_motion.is_some() {
+            return false;
+        }
+        let Some(from) = st.view else { return false };
+        let middle = Vec2::new(st.window_size.0 as f32 / 2.0, st.window_size.1 as f32 / 2.0);
+        let (Some(to), Some(about)) = (from.snapped_turn(middle), from.screen_to_canvas(middle)) else {
+            return false;
+        };
+        let Some(seconds) = from.move_seconds(&to) else { return false };
+        let seconds = if st.reduce_motion { REDUCED_TURN_SECONDS } else { seconds };
+        st.view_motion =
+            Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Turn { seconds, about } });
         self.shared.frame(&mut st);
         true
     }
