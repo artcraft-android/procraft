@@ -143,7 +143,24 @@ impl CropEdit {
                 b = t + h;
             }
         }
+        // unturned and not resampled, the sides are whole canvas pixels: what is kept is a plain
+        // copy (moved, the frame keeps its size)
+        if self.whole_pixels() {
+            if grab == Grab::Move {
+                let (w, h) = ((r - l).round(), (b - t).round());
+                (l, t) = (l.round(), t.round());
+                (r, b) = (l + w, t + h);
+            } else {
+                (l, t, r, b) = (l.round(), t.round(), r.round(), b.round());
+            }
+        }
         (r - l >= 1.0 && b - t >= 1.0).then_some([l, t, r, b])
+    }
+
+    /// Whether the frame's sides are kept to whole canvas pixels: while it is unturned and what
+    /// it keeps isn't resampled.
+    fn whole_pixels(&self) -> bool {
+        self.angle == 0.0 && !self.resample
     }
 
     fn set_rect(&mut self, [l, t, r, b]: [f32; 4]) {
@@ -331,6 +348,10 @@ impl CanvasSession {
         };
         let [l, t, r, b] = rect;
         let (w, h) = (r - l, b - t);
+        // unturned and not resampled: a plain copy of whole pixels (turned back or resampled
+        // and back since the last drag)
+        let (l, t, w, h) =
+            if angle == 0.0 && !resample { (l.round(), t.round(), w.round(), h.round()) } else { (l, t, w, h) };
         // nothing to crop: the whole canvas, unturned, at its size
         let same = l == 0.0
             && t == 0.0
@@ -365,6 +386,22 @@ mod tests {
         // never inside out
         let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Right, (500.0, 250.0));
         assert_eq!(e.dragged(Vec2::new(50.0, 250.0), canvas), None);
+    }
+
+    #[test]
+    fn unturned_the_frame_keeps_to_whole_pixels() {
+        let canvas = (1000.0, 800.0);
+        let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.0, 100.0, 500.0, 400.0]));
+        let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Move, (300.0, 250.0));
+        assert_eq!(e.dragged(Vec2::new(310.6, 249.3), canvas), Some([111.0, 99.0, 511.0, 399.0]));
+        // turned, or resampled, it follows the drag as it is
+        let mut e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        e.angle = 0.1;
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.4, 100.0, 500.0, 400.0]));
+        let mut e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        e.resample = true;
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.4, 100.0, 500.0, 400.0]));
     }
 
     #[test]

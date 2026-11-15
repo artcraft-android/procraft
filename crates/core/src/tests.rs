@@ -9068,6 +9068,53 @@ fn the_selections_bands_go_while_transforming() {
 }
 
 #[test]
+fn a_dragged_crop_frame_keeps_whole_pixels() {
+    let Some(s) = session(100, 200) else { return };
+    let whole = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        (st.doc.width(), canvas.read_composite(gpu).unwrap())
+    };
+    // a pattern that a shift of part of a pixel would blur
+    let rgba: Vec<u8> = (0..100u32 * 100)
+        .flat_map(|i| {
+            let (x, y) = (i % 100, i / 100);
+            [(x * 2) as u8, (y * 2) as u8, ((x * 7 + y * 13) % 256) as u8, 255]
+        })
+        .collect();
+    assert!(s.paste(crate::ThumbnailImage { width: 100, height: 100, rgba }).is_some());
+    let (_, before) = whole(&s);
+    s.crop_begin();
+    s.crop_set_aspect_locked(false);
+    s.crop_set_snapping(false);
+    let to_window = |x: f32, y: f32| {
+        let v = s.shared.lock().view.unwrap();
+        v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y))
+    };
+    // the left side's middle taken and dragged 10.4 canvas pixels in, the top's 3.6 down
+    let (a, b) = (to_window(0.0, 50.0), to_window(10.4, 50.0));
+    s.crop_press(a.x, a.y);
+    s.crop_drag(b.x, b.y);
+    s.crop_release();
+    let (a, b) = (to_window(50.0, 0.0), to_window(50.0, 3.6));
+    s.crop_press(a.x, a.y);
+    s.crop_drag(b.x, b.y);
+    s.crop_release();
+    let c = s.crop_shown().unwrap();
+    assert_eq!((c.x, c.y, c.width, c.height, c.size_width, c.size_height), (10.0, 4.0, 90.0, 96.0, 90, 96));
+    assert!(s.crop_end(true));
+    assert_eq!((s.info().width, s.info().height), (90, 96));
+    // a plain copy of what was there
+    let (w, after) = whole(&s);
+    let expected: Vec<u8> =
+        (4..100usize).flat_map(|y| before[(y * 100 + 10) * 4..(y * 100 + 100) * 4].to_vec()).collect();
+    assert_eq!(w, 90);
+    assert!(after == expected, "the crop shifted or blurred what it kept");
+}
+
+#[test]
 fn a_crop_drops_what_was_undone_before_it() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
