@@ -24,6 +24,8 @@ use wgpu::util::DeviceExt;
 use crate::{Gpu, GpuError};
 pub use frame_cache::{FrameCacheStats, frame_cache_budget, set_frame_cache_budget};
 
+#[cfg(test)]
+mod effects_tests;
 pub(crate) mod frame_cache;
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
@@ -1021,10 +1023,13 @@ struct Look {
     pose: Option<Affine>,
     /// Blended this way instead of by its own mode.
     blend: Option<BlendMode>,
+    /// An adjustment layer's adjustment as its timeline clip's keys have it here, instead of its
+    /// own (when of the same kind).
+    filter: Option<Filter>,
 }
 
 impl Look {
-    const PLAIN: Look = Look { tint: [0.0; 4], opacity: 1.0, pose: None, blend: None };
+    const PLAIN: Look = Look { tint: [0.0; 4], opacity: 1.0, pose: None, blend: None, filter: None };
 }
 
 impl LayerUniform {
@@ -2099,6 +2104,12 @@ pub struct Canvas {
     /// An adjustment layer of a blend mode other than Normal: what is below it redrawn through its
     /// adjustment, before that is blended onto it (made the first time one is).
     adjusted: OnDemand,
+    /// An adjustment layer's mask with the stroke being painted on it, while one is (made the
+    /// first time one is).
+    live_mask: OnDemand,
+    /// The composite round what an adjustment layer that reads its neighbours redraws, kept
+    /// while it is drawn again a little wider than it changes (see `composited_rects`).
+    band: OnDemand,
     /// Layer styles: how far each pixel is from what the layer shows, along its row and then as
     /// the crow flies (made the first time a layer has a style).
     style_rows: OnDemand,
@@ -2527,6 +2538,8 @@ impl Canvas {
             videos: video::Videos::default(),
             camera_view: false,
             adjusted: OnDemand::new("adjusted", width, height, format),
+            live_mask: OnDemand::new("live mask", width, height, format),
+            band: OnDemand::new("band", width, height, format),
             style_rows: OnDemand::new("style rows", width, height, format),
             style_distances: OnDemand::new("style distances", width, height, format),
             adjust_tables: Mutex::new(HashMap::new()),
@@ -5577,16 +5590,19 @@ impl Canvas {
                 }
                 Op::MergeDown { upper, lower, before, within, masks, drop_lower } => {
                     let opacity = before.layer(lower).map_or(1.0, |l| l.opacity);
-                    let pixels = self.before_merge(
+                    // an adjustment or styles change the layer below beyond what is painted
+                    let within = within.filter(|_| !bakes(&before, &[upper, lower]));
+                    let mut pixels = self.before_merge(
                         device,
                         &mut encoder,
                         &mut uniforms,
-                        (lower, opacity),
+                        (lower, opacity, before.layer(lower).and_then(|l| l.shown_style().copied())),
                         &masks,
                         drop_lower,
                         within,
                     );
-                    self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                    pixels.extend(self.bake_styles(device, &mut encoder, &mut uniforms, &before, &[upper], &masks));
+                    self.merge_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -5600,21 +5616,20 @@ impl Canvas {
                 }
                 Op::MergeMany { uppers, lower, before, within, masks, drop_lower } => {
                     let opacity = before.layer(lower).map_or(1.0, |l| l.opacity);
-                    let pixels = self.before_merge(
+                    let all: Vec<LayerId> = uppers.iter().copied().chain([lower]).collect();
+                    let within = within.filter(|_| !bakes(&before, &all));
+                    let mut pixels = self.before_merge(
                         device,
                         &mut encoder,
                         &mut uniforms,
-                        (lower, opacity),
+                        (lower, opacity, before.layer(lower).and_then(|l| l.shown_style().copied())),
                         &masks,
                         drop_lower,
                         within,
                     );
+                    pixels.extend(self.bake_styles(device, &mut encoder, &mut uniforms, &before, &uppers, &masks));
                     for upper in uppers {
-                        if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
-                            self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
-                        } else {
-                            self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
-                        }
+                        self.merge_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
                     }
                     self.push_step(Step {
                         made: 0,
@@ -5676,7 +5691,7 @@ impl Canvas {
         self.make_reels(doc);
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
         // after the caches: caches just made want the whole picture composited again
-        let dirty = composited_rect(doc, self.dirty, self.full());
+        let (dirty, outer) = composited_rects(doc, self.dirty, self.full());
         let device = &gpu.device;
         // while caches are remade the composite stays as it was, what changed kept for after
         if self.remake.is_none() {
@@ -5687,7 +5702,26 @@ impl Canvas {
             {
                 self.composites = self.composites.wrapping_add(1);
             } else if !dirty.is_empty() {
-                self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
+                // composited wider than it changes (an adjustment layer reading its neighbours
+                // reads them there): the band round what changes put back as it was after
+                let band = (outer != dirty).then(|| self.band.get(device).0);
+                if let Some(band) = band {
+                    encoder.copy_texture_to_texture(
+                        copy_at(&self.composite, outer.x0, outer.y0),
+                        copy_at(band, outer.x0, outer.y0),
+                        extent(outer.width(), outer.height()),
+                    );
+                }
+                self.composite(device, doc, &mut encoder, &mut uniforms, outer);
+                if let Some(band) = band {
+                    for strip in band_strips(outer, dirty) {
+                        encoder.copy_texture_to_texture(
+                            copy_at(band, strip.x0, strip.y0),
+                            copy_at(&self.composite, strip.x0, strip.y0),
+                            extent(strip.width(), strip.height()),
+                        );
+                    }
+                }
                 self.composites = self.composites.wrapping_add(1);
                 if let Some(w) = wanted {
                     self.frames.keep(device, &mut encoder, w, &self.composite);
@@ -6392,7 +6426,7 @@ impl Canvas {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
-        (lower, opacity): (LayerId, f32),
+        (lower, opacity, style): (LayerId, f32, Option<LayerStyle>),
         masks: &[(LayerId, LayerId)],
         drop_lower: bool,
         within: Option<IRect>,
@@ -6404,12 +6438,21 @@ impl Canvas {
             .collect();
         let lower_mask = masks.iter().find(|&&(layer, _)| layer == lower).map(|&(_, mask)| mask);
         let opacity = opacity.clamp(0.0, 1.0);
-        if drop_lower || lower_mask.is_some() || opacity < 1.0 {
+        if drop_lower || lower_mask.is_some() || opacity < 1.0 || style.is_some() {
             pixels.extend(self.snapshot(device, encoder, lower, self.full()));
             if drop_lower {
                 if let Some(layer) = self.layers.get(&lower) {
                     let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
                     drop(render_pass(encoder, "hidden let go", &layer.view, clear));
+                }
+            } else if let Some(style) = style {
+                // through its mask, its styles round what shows, then its opacity: as it composites
+                if lower_mask.is_some() {
+                    self.redraw_in_place(device, encoder, uniforms, lower, lower_mask, 1.0);
+                }
+                self.bake_style(device, encoder, uniforms, lower, &style);
+                if opacity < 1.0 {
+                    self.redraw_in_place(device, encoder, uniforms, lower, None, opacity);
                 }
             } else {
                 self.redraw_in_place(device, encoder, uniforms, lower, lower_mask, opacity);
@@ -6418,6 +6461,114 @@ impl Canvas {
             pixels.extend(self.snapshot(device, encoder, lower, within.unwrap_or(self.full())));
         }
         pixels
+    }
+
+    /// Merged, the styles of each of `uppers` (of `doc`) that shows any drawn into its pixels, as
+    /// they show round it (after its mask, applied already if it is among `masks`); returns what
+    /// each was, unless its mask's step keeps that already.
+    #[allow(clippy::too_many_arguments)]
+    fn bake_styles(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        doc: &Document,
+        uppers: &[LayerId],
+        masks: &[(LayerId, LayerId)],
+    ) -> Vec<Snapshot> {
+        let mut kept = Vec::new();
+        for &id in uppers {
+            let Some(style) = doc.layer(id).and_then(|l| l.shown_style().copied()) else { continue };
+            if !masks.iter().any(|&(l, _)| l == id) {
+                kept.extend(self.snapshot(device, encoder, id, self.full()));
+            }
+            self.bake_style(device, encoder, uniforms, id, &style);
+        }
+        kept
+    }
+
+    /// Layer `id`'s `style` drawn into its pixels, round (and inside) what it shows, as it
+    /// composites with them.
+    fn bake_style(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        id: LayerId,
+        style: &LayerStyle,
+    ) -> Option<()> {
+        let target = self.layers.get(&id)?;
+        let (alone, alone_view) = self.adjusted.get(device);
+        let (styled, styled_view) = self.band.get(device);
+        let full = extent(self.width, self.height);
+        encoder.copy_texture_to_texture(copy_at(&target.texture, 0, 0), copy_at(alone, 0, 0), full);
+        // the passes draw only within the canvas: clear first, the rest is drawn
+        drop(render_pass(encoder, "styled clear", styled_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        let views = [alone_view.clone(), styled_view.clone()];
+        self.styled(device, encoder, uniforms, self.full(), style, &views, 0)?;
+        encoder.copy_texture_to_texture(copy_at(styled, 0, 0), copy_at(&target.texture, 0, 0), full);
+        Some(())
+    }
+
+    /// `upper` of `doc` laid into layer `lower` as it composites onto it: a group composited
+    /// whole, an adjustment layer redrawing it through its adjustment, a layer blended in.
+    fn merge_into(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        doc: &Document,
+        upper: LayerId,
+        lower: LayerId,
+    ) {
+        match doc.layer(upper) {
+            Some(l) if l.kind == LayerKind::Group => {
+                self.draw_group_onto(device, encoder, uniforms, doc, upper, lower);
+            }
+            Some(l) if l.is_adjustment() => {
+                self.adjust_layer_into(device, encoder, uniforms, doc, upper, lower);
+            }
+            Some(_) => {
+                self.blend_layer_into(device, encoder, uniforms, doc, upper, lower);
+            }
+            None => {}
+        }
+    }
+
+    /// Layer `lower` redrawn through adjustment layer `adjustment` of `doc`, as far as its opacity
+    /// and mask let it (in its mode): what it does, kept in the pixels.
+    fn adjust_layer_into(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        doc: &Document,
+        adjustment: LayerId,
+        lower: LayerId,
+    ) -> Option<()> {
+        let layer = doc.layer(adjustment)?;
+        let low = self.layers.get(&lower)?;
+        let stack = Stack { first: (&low.texture, &low.view), second: Second::OnDemand(&self.scratch, device) };
+        let mut current = 0;
+        self.composite_adjustment(
+            device,
+            doc,
+            encoder,
+            uniforms,
+            self.full(),
+            layer,
+            Look::PLAIN,
+            &stack,
+            &mut current,
+        );
+        if current == 1 {
+            encoder.copy_texture_to_texture(
+                copy_at(stack.second().0, 0, 0),
+                copy_at(&low.texture, 0, 0),
+                extent(self.width, self.height),
+            );
+        }
+        Some(())
     }
 
     /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping.
@@ -6751,7 +6902,7 @@ impl Canvas {
         let (pass, uniform) = self.filter_pass(filter, full);
         let blurred = match filter {
             Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => {
-                self.blur_copy(&gpu.device, encoder, uniforms, sigma, &t.bind, &t.before_bind)
+                self.blur_copy(&gpu.device, encoder, uniforms, sigma, &t.bind, &t.before_bind, None)
             }
             _ => None,
         };
@@ -6996,6 +7147,7 @@ impl Canvas {
         sigma: f32,
         copy: &wgpu::BindGroup,
         before: &wgpu::BindGroup,
+        within: Option<IRect>,
     ) -> Option<wgpu::TextureView> {
         let (w, h) = (self.width, self.height);
         let mut scale = 1u32;
@@ -7003,6 +7155,10 @@ impl Canvas {
             scale *= 2;
         }
         let small = |s: u32| (w.div_ceil(s).max(1), h.div_ceil(s).max(1));
+        // only as much as is read where it is wanted (`within`): that, as far round as the blur and
+        // its halvings reach
+        let grow = (sigma * 3.0).ceil() as i32 + 4 * scale as i32 + 2;
+        let region = within.map(|r| IRect::new(r.x0 - grow, r.y0 - grow, r.x1 + grow, r.y1 + grow));
         let mut pass = |encoder: &mut wgpu::CommandEncoder,
                         target: &wgpu::TextureView,
                         fs: &str,
@@ -7011,6 +7167,22 @@ impl Canvas {
             let Some(pipeline) = self.pipelines.filters.get(fs) else { return };
             let offset = uniforms.push(&uniform);
             let mut p = render_pass(encoder, "adjustment", target, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+            // the region at this texture's scale (its size is the canvas's over the level's)
+            if let Some(r) = region {
+                let [tw, th] = [uniform.size[0] as i32, uniform.size[1] as i32];
+                let level = ((w as f32 / tw.max(1) as f32).round() as i32).max(1);
+                let at = IRect::new(
+                    r.x0.div_euclid(level) - 1,
+                    r.y0.div_euclid(level) - 1,
+                    r.x1.div_euclid(level) + 2,
+                    r.y1.div_euclid(level) + 2,
+                )
+                .intersect(IRect::new(0, 0, tw, th));
+                if at.is_empty() {
+                    return;
+                }
+                scissor(&mut p, at);
+            }
             p.set_pipeline(pipeline);
             p.set_bind_group(0, source, &[]);
             p.set_bind_group(1, &self.uniform_bind, &[offset]);
@@ -8135,6 +8307,7 @@ impl Canvas {
             opacity: opacity * s.opacity,
             pose: s.pose,
             blend: (s.blend != BlendMode::Normal).then_some(s.blend),
+            filter: None,
         };
         let Some(layer) = doc.layer(s.root) else { return };
         if doc.soloed_out(s.root) || look.opacity <= 0.0 {
@@ -8166,6 +8339,7 @@ impl Canvas {
             opacity: item.opacity,
             pose: item.pose,
             blend: (item.blend != BlendMode::Normal).then_some(item.blend),
+            filter: item.adjustment,
             ..Look::PLAIN
         };
         let is_matte = items.get(i + 1).and_then(|above| above.mask).is_some_and(|(_, source)| source == i);
@@ -8443,18 +8617,7 @@ impl Canvas {
         let uniform = LayerUniform {
             opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
             tint: look.tint,
-            stroke_mode: match stroke.map(|s| s.style.tool) {
-                None => STROKE_NONE,
-                // the stroke changes the layer itself
-                _ if stroke.is_some_and(|s| s.style.in_place()) => STROKE_NONE,
-                Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
-                Some(StrokeTool::Paint) => STROKE_PAINT,
-                Some(StrokeTool::Erase) => STROKE_ERASE,
-                Some(StrokeTool::Laid) => STROKE_LAID,
-                Some(StrokeTool::Light) => STROKE_LIGHT,
-                // the smudge changes the layer itself
-                Some(StrokeTool::Smudge) => STROKE_NONE,
-            },
+            stroke_mode: stroke_mode(stroke.as_ref()),
             stroke_opacity: stroke.map_or(0.0, |s| s.style.opacity.clamp(0.0, 1.0)),
             blend: layer.blend.id(),
             clipped: match clip {
@@ -8548,7 +8711,8 @@ impl Canvas {
         current: &mut usize,
     ) {
         let Some(adjustment) = &layer.adjustment else { return };
-        let filter = adjustment.filter;
+        // a timeline clip's keys have it as they ease it there
+        let filter = look.filter.filter(|f| f.same_kind(&adjustment.filter)).unwrap_or(adjustment.filter);
         let opacity = layer.opacity.clamp(0.0, 1.0) * look.opacity;
         if !layer.visible
             || opacity <= 0.0
@@ -8558,7 +8722,9 @@ impl Canvas {
             return;
         }
         let mask = doc.mask_of(layer.id).filter(|m| doc.layer(*m).is_some_and(|l| l.visible));
-        let mask_view = mask.and_then(|m| self.layers.get(&m)).map(|m| &m.view);
+        // the stroke being painted on its mask shows as it goes
+        let live = mask.and_then(|m| self.live_mask(device, encoder, uniforms, rect, m));
+        let mask_view = live.or_else(|| mask.and_then(|m| self.layers.get(&m)).map(|m| &m.view));
         let below = if *current == 0 { stack.first.1 } else { stack.second().1 };
         let table = self.adjust_table(device, encoder, layer.id, &adjustment.table);
         let normal = layer.blend == BlendMode::Normal;
@@ -8585,7 +8751,7 @@ impl Canvas {
         }
         let blurred = match filter {
             Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => {
-                self.blur_copy(device, encoder, uniforms, sigma, &source, &before)
+                self.blur_copy(device, encoder, uniforms, sigma, &source, &before, Some(rect))
             }
             _ => None,
         };
@@ -8620,6 +8786,41 @@ impl Canvas {
         };
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(device, encoder, uniforms, rect, target, None, mask_view, uniform, layer.blend, stack, current);
+    }
+
+    /// Mask `mask` with the stroke being painted on it laid in, as it will be when the stroke ends
+    /// (drawn into the live mask texture over `rect`); none unless one is being painted on it.
+    fn live_mask(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        mask: LayerId,
+    ) -> Option<&wgpu::TextureView> {
+        let stroke = self.active.filter(|s| s.layer == mask && !s.pencil && !s.style.in_place())?;
+        let gpu_mask = self.layers.get(&mask)?;
+        let uniform = LayerUniform {
+            opacity: 1.0,
+            tint: Look::PLAIN.tint,
+            stroke_mode: stroke_mode(Some(&stroke)),
+            stroke_opacity: stroke.style.opacity.clamp(0.0, 1.0),
+            blend: BlendMode::Normal.id(),
+            ..Default::default()
+        }
+        .with_grain(Some(&stroke.style))
+        .with_dual(Some(&stroke));
+        let offset = uniforms.push(&uniform);
+        let none = &self.stroke_view;
+        let bind = self.quad_masked(device, [&gpu_mask.view, none, none, none], none, none);
+        let (_, view) = self.live_mask.get(device);
+        let mut pass = render_pass(encoder, "live mask", view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+        scissor(&mut pass, rect);
+        pass.set_pipeline(&self.pipelines.layer);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+        pass.draw(0..3, 0..1);
+        Some(view)
     }
 
     /// `view` bound as a filter pass's source, showing through `chosen`.
@@ -9774,6 +9975,21 @@ impl Canvas {
         read
     }
 
+    /// What adjustment layer `id` draws, alone and at its full strength, unmasked (premultiplied
+    /// RGBA8; see [`Document::adjustment_alone`]): a layer of these pixels, at its opacity and
+    /// through its mask, shows as it does. The canvas's own composite is made again after.
+    pub fn read_adjustment_alone(&mut self, gpu: &Gpu, doc: &mut Document, id: LayerId) -> Result<Vec<u8>, GpuError> {
+        let Some(mut shown) = doc.adjustment_alone(id) else {
+            return Err(GpuError::Readback(format!("no adjustment layer {id:?}")));
+        };
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        let read = self.read_composite(gpu);
+        self.invalidate();
+        self.render(gpu, doc, None);
+        read
+    }
+
     /// Starts reading a layer's pixels back (premultiplied RGBA8): see [`Readback`].
     pub fn start_reading_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Readback, GpuError> {
         if self.parked.contains_key(&id) && !self.layers.contains_key(&id) {
@@ -10051,6 +10267,8 @@ impl Canvas {
         all.extend(self.posed.made());
         all.extend(self.reels.iter().flat_map(Reel::made));
         all.extend(self.adjusted.made());
+        all.extend(self.live_mask.made());
+        all.extend(self.band.made());
         all.extend(self.style_rows.made());
         all.extend(self.style_distances.made());
         let tables = self.adjust_tables.lock().unwrap_or_else(PoisonError::into_inner);
@@ -11429,28 +11647,80 @@ fn clipped_to<'a>(doc: &Document, base: LayerId, above: &'a [LayerId]) -> &'a [L
     above.get(..run).unwrap_or_default()
 }
 
-/// Whether item `id` composited over transparency, then over what is below, shows as it does
-/// composited straight onto it: normal, and if a group passing through, only of such items.
-/// What compositing `dirty` takes, of `full`: as far round as any layer's styles reach, and all
-/// of it when an adjustment layer that reads round each pixel (a blur, say) is to be drawn.
-fn composited_rect(doc: &Document, dirty: IRect, full: IRect) -> IRect {
+/// What a change over `dirty` takes compositing again, of `full`: what it changes (`.0`), as far
+/// round as any layer's styles reach and every adjustment layer that reads round each pixel (a
+/// blur, say) spreads it; and what is composited for that (`.1`), as far round again, so each of
+/// those reads what is below it composited afresh. The band between is drawn from below that
+/// isn't, so it is put back as it was. All of it for an adjustment that can reach anywhere.
+fn composited_rects(doc: &Document, dirty: IRect, full: IRect) -> (IRect, IRect) {
     let dirty = dirty.intersect(full);
     if dirty.is_empty() {
-        return dirty;
+        return (dirty, dirty);
     }
     let shown = |l: &&Layer| l.visible && doc.unseen(l.id).is_none();
     let layers = doc.layers().iter().filter(shown);
-    let mut reach = 0u32;
+    let (mut reach, mut spread) = (0u32, 0u32);
     for l in layers {
-        if l.adjustment.as_ref().is_some_and(|a| !a.filter.pointwise() && !a.filter.changes_nothing()) {
-            return full;
+        // an adjustment layer that reads its neighbours spreads a change as far as it reads (on a
+        // timeline its keys can change it frame to frame: as far as it reaches at its most)
+        if let Some(a) = &l.adjustment {
+            match a.filter.reach() {
+                _ if doc.timeline.is_some() && !a.filter.pointwise() => return (full, full),
+                Some(r) => spread = spread.saturating_add(r),
+                None => return (full, full),
+            }
         }
         if let Some(style) = l.shown_style() {
             reach = reach.max(style.reach());
         }
     }
-    let r = i32::try_from(reach).unwrap_or(i32::MAX);
-    IRect::new(dirty.x0 - r, dirty.y0 - r, dirty.x1 + r, dirty.y1 + r).intersect(full)
+    let grown = |by: u32| {
+        let r = i32::try_from(by).unwrap_or(i32::MAX);
+        IRect::new(
+            dirty.x0.saturating_sub(r),
+            dirty.y0.saturating_sub(r),
+            dirty.x1.saturating_add(r),
+            dirty.y1.saturating_add(r),
+        )
+        .intersect(full)
+    };
+    (grown(reach.saturating_add(spread)), grown(reach.saturating_add(spread.saturating_mul(2))))
+}
+
+/// Whether merging `layers` of `doc` draws more than their painted pixels: an adjustment layer
+/// among them, or styles.
+fn bakes(doc: &Document, layers: &[LayerId]) -> bool {
+    layers.iter().filter_map(|l| doc.layer(*l)).any(|l| l.is_adjustment() || l.shown_style().is_some())
+}
+
+/// What is in `outer` but not `inner` (which it holds), as up to four strips: above, below, left
+/// and right of it.
+fn band_strips(outer: IRect, inner: IRect) -> Vec<IRect> {
+    [
+        IRect::new(outer.x0, outer.y0, outer.x1, inner.y0),
+        IRect::new(outer.x0, inner.y1, outer.x1, outer.y1),
+        IRect::new(outer.x0, inner.y0, inner.x0, inner.y1),
+        IRect::new(inner.x1, inner.y0, outer.x1, inner.y1),
+    ]
+    .into_iter()
+    .filter(|r| !r.is_empty())
+    .collect()
+}
+
+/// How the layer shader lays in the stroke `stroke` (none: no stroke) as it draws its layer.
+fn stroke_mode(stroke: Option<&ActiveStroke>) -> u32 {
+    match stroke.map(|s| s.style.tool) {
+        None => STROKE_NONE,
+        // the stroke changes the layer itself
+        _ if stroke.is_some_and(|s| s.style.in_place()) => STROKE_NONE,
+        Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
+        Some(StrokeTool::Paint) => STROKE_PAINT,
+        Some(StrokeTool::Erase) => STROKE_ERASE,
+        Some(StrokeTool::Laid) => STROKE_LAID,
+        Some(StrokeTool::Light) => STROKE_LIGHT,
+        // the smudge changes the layer itself
+        Some(StrokeTool::Smudge) => STROKE_NONE,
+    }
 }
 
 /// How far a style's drop shadow falls (canvas pixels, x and y); none while it is off.
@@ -11462,6 +11732,8 @@ fn shadow_offset(style: &LayerStyle) -> [f32; 2] {
     [cos * style.shadow.distance, sin * style.shadow.distance]
 }
 
+/// Whether item `id` composited over transparency, then over what is below, shows as it does
+/// composited straight onto it: normal, and if a group passing through, only of such items.
 fn plain(doc: &Document, id: LayerId) -> bool {
     match doc.layer(id) {
         Some(l) if l.kind == LayerKind::Mask => true,

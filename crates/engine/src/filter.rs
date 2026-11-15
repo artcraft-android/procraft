@@ -118,6 +118,237 @@ impl Filter {
     }
 }
 
+/// How a filter's value reads on a panel's row: as it is, canvas pixels, a share shown as a
+/// percentage, or an angle kept in radians shown in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamUnit {
+    Plain,
+    Pixels,
+    Percent,
+    Degrees,
+}
+
+/// One of a filter's values that can change smoothly (and so be keyed on a timeline): its name,
+/// its value, the range a slider gives it, and how it reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterParam {
+    pub name: &'static str,
+    pub value: f32,
+    pub low: f32,
+    pub high: f32,
+    pub unit: ParamUnit,
+}
+
+/// The values that can change smoothly of each kind of filter, in [`Filter::values`]'s order:
+/// name, low, high and unit. Kinds and on/off choices are left out: they change in steps.
+fn param_specs(f: &Filter) -> &'static [(&'static str, f32, f32, ParamUnit)] {
+    use ParamUnit::{Degrees, Percent, Pixels, Plain};
+    match f {
+        Filter::Hsb { .. } => &[
+            ("Hue", -std::f32::consts::PI, std::f32::consts::PI, Degrees),
+            ("Saturation", 0.0, 2.0, Percent),
+            ("Brightness", -1.0, 1.0, Percent),
+        ],
+        Filter::Blur { .. } => &[("Blur", 0.0, 683.0, Pixels)],
+        Filter::Sharpen { .. } => &[("Amount", 0.0, 1.0, Percent)],
+        Filter::Noise { .. } => {
+            &[("Amount", 0.0, 1.8, Percent), ("Frequency", 0.0, 0.46, Plain), ("Turbulence", 0.0, 0.32, Percent)]
+        }
+        Filter::Motion { .. } => &[("Across", -256.0, 256.0, Pixels), ("Down", -256.0, 256.0, Pixels)],
+        Filter::Zoom { .. } => &[
+            ("Centre across", 0.0, 4096.0, Pixels),
+            ("Centre down", 0.0, 4096.0, Pixels),
+            ("Amount", 0.0, 0.32, Percent),
+        ],
+        Filter::Chromatic { .. } => &[
+            ("Centre across", 0.0, 4096.0, Pixels),
+            ("Centre down", 0.0, 4096.0, Pixels),
+            ("Amount", 0.0, 0.05, Percent),
+            ("Offset across", -256.0, 256.0, Pixels),
+            ("Offset down", -256.0, 256.0, Pixels),
+            ("Blur", 0.0, 1.0, Percent),
+            ("Fall off", 0.0, 1.0, Percent),
+            ("Transparency", 0.0, 1.0, Percent),
+        ],
+        Filter::Halftone { .. } => &[("Size", 2.0, 98.0, Pixels)],
+        Filter::Bloom { .. } => &[
+            ("Size", 0.0, 683.0, Pixels),
+            ("Amount", 0.0, 1.0, Percent),
+            ("Threshold", 0.0, 1.0, Percent),
+            ("Transition", 0.0, 1.0, Percent),
+            ("Burn", -0.3, 1.0, Percent),
+        ],
+        Filter::GradientMap { .. } => &[("Amount", 0.0, 1.0, Percent)],
+        Filter::ColorBalance { .. } => &[
+            ("Shadows red", -1.0, 1.0, Percent),
+            ("Shadows green", -1.0, 1.0, Percent),
+            ("Shadows blue", -1.0, 1.0, Percent),
+            ("Midtones red", -1.0, 1.0, Percent),
+            ("Midtones green", -1.0, 1.0, Percent),
+            ("Midtones blue", -1.0, 1.0, Percent),
+            ("Highlights red", -1.0, 1.0, Percent),
+            ("Highlights green", -1.0, 1.0, Percent),
+            ("Highlights blue", -1.0, 1.0, Percent),
+        ],
+        Filter::Glitch { .. } => &[
+            ("Amount", 0.0, 1.0, Percent),
+            ("First", -1.0, 1.0, Percent),
+            ("Second", -1.0, 1.0, Percent),
+            ("Third", -1.0, 1.0, Percent),
+            ("Zoom", 0.0, 1.0, Percent),
+            ("Seed", 0.0, 1.0, Plain),
+        ],
+        Filter::Pixelate { .. } => &[("Size", 1.0, 128.0, Pixels)],
+        Filter::Dither { .. } => {
+            &[("Amount", 0.0, 1.0, Percent), ("Levels", 2.0, 16.0, Plain), ("Pattern size", 1.0, 8.0, Pixels)]
+        }
+        Filter::Vignette { .. } => {
+            &[("Amount", 0.0, 1.0, Percent), ("Size", 0.0, 1.0, Percent), ("Softness", 0.0, 1.0, Percent)]
+        }
+        Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => &[],
+    }
+}
+
+impl Filter {
+    /// Its values that change smoothly, in a fixed order for its kind (see [`Self::params`]).
+    pub fn values(&self) -> Vec<f32> {
+        match *self {
+            Filter::Hsb { hue, saturation, brightness } => vec![hue, saturation, brightness],
+            Filter::Blur { sigma } => vec![sigma],
+            Filter::Sharpen { amount } | Filter::GradientMap { amount } => vec![amount],
+            Filter::Noise { amount, frequency, turbulence, .. } => vec![amount, frequency, turbulence],
+            Filter::Motion { along: [x, y] } => vec![x, y],
+            Filter::Zoom { centre: [x, y], amount, .. } => vec![x, y, amount],
+            Filter::Chromatic { centre: [x, y], amount, offset: [ox, oy], blur, falloff, transparency, .. } => {
+                vec![x, y, amount, ox, oy, blur, falloff, transparency]
+            }
+            Filter::Halftone { pitch, .. } => vec![pitch],
+            Filter::Bloom { sigma, amount, threshold, transition, burn } => {
+                vec![sigma, amount, threshold, transition, burn]
+            }
+            Filter::ColorBalance { shadows, midtones, highlights } => {
+                shadows.iter().chain(&midtones).chain(&highlights).copied().collect()
+            }
+            Filter::Glitch { amount, values: [a, b, c], zoom, seed, .. } => vec![amount, a, b, c, zoom, seed],
+            Filter::Pixelate { size } => vec![size],
+            Filter::Dither { amount, levels, scale, .. } => vec![amount, levels, scale],
+            Filter::Vignette { amount, size, softness, .. } => vec![amount, size, softness],
+            Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => Vec::new(),
+        }
+    }
+
+    /// The same kind with its smooth values `v` (in [`Self::values`]'s order; one missing or not
+    /// a number keeps its own), its other choices kept.
+    pub fn with_values(self, v: &[f32]) -> Filter {
+        let mut own = self.values();
+        for (o, n) in own.iter_mut().zip(v) {
+            if n.is_finite() {
+                *o = *n;
+            }
+        }
+        let g = |i: usize| own.get(i).copied().unwrap_or(0.0);
+        match self {
+            Filter::Hsb { .. } => Filter::Hsb { hue: g(0), saturation: g(1), brightness: g(2) },
+            Filter::Blur { .. } => Filter::Blur { sigma: g(0) },
+            Filter::Sharpen { .. } => Filter::Sharpen { amount: g(0) },
+            Filter::GradientMap { .. } => Filter::GradientMap { amount: g(0) },
+            Filter::Noise { octaves, kind, multi, added, .. } => {
+                Filter::Noise { amount: g(0), frequency: g(1), octaves, turbulence: g(2), kind, multi, added }
+            }
+            Filter::Motion { .. } => Filter::Motion { along: [g(0), g(1)] },
+            Filter::Zoom { toward, .. } => Filter::Zoom { centre: [g(0), g(1)], amount: g(2), toward },
+            Filter::Chromatic { displace, .. } => Filter::Chromatic {
+                centre: [g(0), g(1)],
+                amount: g(2),
+                displace,
+                offset: [g(3), g(4)],
+                blur: g(5),
+                falloff: g(6),
+                transparency: g(7),
+            },
+            Filter::Halftone { kind, .. } => Filter::Halftone { pitch: g(0), kind },
+            Filter::Bloom { .. } => {
+                Filter::Bloom { sigma: g(0), amount: g(1), threshold: g(2), transition: g(3), burn: g(4) }
+            }
+            Filter::ColorBalance { .. } => Filter::ColorBalance {
+                shadows: [g(0), g(1), g(2)],
+                midtones: [g(3), g(4), g(5)],
+                highlights: [g(6), g(7), g(8)],
+            },
+            Filter::Glitch { kind, .. } => {
+                Filter::Glitch { kind, amount: g(0), values: [g(1), g(2), g(3)], zoom: g(4), seed: g(5) }
+            }
+            Filter::Pixelate { .. } => Filter::Pixelate { size: g(0) },
+            Filter::Dither { kind, mono, .. } => Filter::Dither { amount: g(0), levels: g(1), scale: g(2), kind, mono },
+            Filter::Vignette { light, .. } => Filter::Vignette { amount: g(0), size: g(1), softness: g(2), light },
+            Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => self,
+        }
+    }
+
+    /// Its smooth values as a panel lists them, each with its name, range and unit.
+    pub fn params(&self) -> Vec<FilterParam> {
+        param_specs(self)
+            .iter()
+            .zip(self.values())
+            .map(|(&(name, low, high, unit), value)| FilterParam { name, value, low, high, unit })
+            .collect()
+    }
+
+    /// The same with smooth value `index` set to `value` (kept within its range).
+    pub fn with_param(self, index: usize, value: f32) -> Filter {
+        let Some(&(_, low, high, _)) = param_specs(&self).get(index) else { return self };
+        if !value.is_finite() {
+            return self;
+        }
+        let mut v = self.values();
+        if let Some(slot) = v.get_mut(index) {
+            *slot = value.clamp(low.min(high), high.max(low));
+        }
+        self.with_values(&v)
+    }
+
+    /// Whether `other` is the same kind of filter (whatever its values).
+    pub fn same_kind(&self, other: &Filter) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// How far (canvas pixels) a change below an adjustment layer of it reaches in what it draws:
+    /// none for a pointwise one, none at all (`None`) when it can reach anywhere (a zoom from its
+    /// centre, a glitch's blocks), so the whole canvas is drawn again.
+    pub fn reach(&self) -> Option<u32> {
+        if self.pointwise() || self.changes_nothing() {
+            return Some(0);
+        }
+        let px = |v: f32| if v.is_finite() { Some(v.max(0.0).ceil() as u32) } else { None };
+        match *self {
+            // three sigmas, and the halvings a big blur is made through
+            Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => px(sigma * 3.0 + 64.0),
+            Filter::Sharpen { .. } => Some(1),
+            Filter::Motion { along: [x, y] } => px(x.hypot(y) / 2.0 + 2.0),
+            Filter::Pixelate { size } => px(size + 1.0),
+            Filter::Chromatic { displace: true, offset: [x, y], blur, .. } => px(x.hypot(y) * (1.0 + blur) + 2.0),
+            _ => None,
+        }
+    }
+}
+
+/// Keyed on a timeline, a filter eases value by value from one key to the next; its kind and
+/// choices are the first key's. Keys of another kind (the layer changed since) don't mix: the
+/// first one's are kept.
+impl crate::timeline::Keyed for Filter {
+    fn plus(self, other: Filter) -> Filter {
+        if !self.same_kind(&other) {
+            return self;
+        }
+        let sum: Vec<f32> = self.values().iter().zip(other.values()).map(|(a, b)| a + b).collect();
+        self.with_values(&sum)
+    }
+    fn times(self, s: f32) -> Filter {
+        let v: Vec<f32> = self.values().iter().map(|a| a * s).collect();
+        self.with_values(&v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

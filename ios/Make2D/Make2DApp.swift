@@ -933,6 +933,8 @@ enum ScreenCapture {
             effects(name, model)
         case "layers-vector-merge":
             VectorMergeScene.show(model)
+        case _ where EffectsFixesScene.names.contains(name):
+            EffectsFixesScene.show(name, model)
         case "adjustments-layer":
             adjustAsLayer = true
             model.toggle(.adjustments)

@@ -1718,6 +1718,8 @@ private struct KeysPage: View {
                 }
             }
             .padding(.top, 10)
+            // an adjustment clip's own values
+            AdjustmentKeyRows(model: model, tool: tool, clip: clip, frame: frame)
             if keyedHere {
                 let moveHere = (tool.keys[clip] ?? []).contains { $0.frame == frame && $0.channel == .position }
                 let bent = tool.path?.keys.first { $0.frame == frame }?.handles != nil
@@ -1770,6 +1772,7 @@ private struct KeysPage: View {
         case .scale: [p.scaleX, p.scaleY]
         case .rotation: [p.rotation]
         case .opacity: [p.opacity]
+        case .adjustment: []
         }
     }
 
