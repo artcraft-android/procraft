@@ -207,9 +207,10 @@ pub(crate) fn pen_on_screen(id: u64, on_screen: bool) {
     }
 }
 
-/// Whether the first and second barrel buttons of the pen near the window are held now.
+/// Whether the first and second barrel buttons of the pen near the window are held now: the
+/// tablet pen moving the mouse pointer's (WinTab) while there is one, else the system's.
 pub fn buttons_held() -> [bool; 2] {
-    let Some(id) = LATEST.lock().ok().and_then(|l| *l) else { return [false; 2] };
+    let Some(id) = near() else { return [false; 2] };
     let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
     [flags & FLAG_BARREL != 0, flags & FLAG_SECOND_BARREL != 0]
 }
@@ -906,6 +907,32 @@ mod tests {
         assert!(turned(90.0), "{:?}", azimuth());
         pen_gone();
         assert_eq!((azimuth(), barrel()), (None, None));
+    }
+
+    #[test]
+    fn the_buttons_held_are_the_tablet_pens_while_it_moves_the_mouse_pointer() {
+        let _one = mouse_pointer_tests();
+        // set as they are, not pressed: the presses another test counts stay as they are
+        let hold = |id: u64, flags: u32| {
+            FLAGS.lock().unwrap().get_or_insert_with(Default::default).insert(id, flags);
+        };
+        // the system's pen (Windows Ink on), its first button held
+        set_mouse_pen(None);
+        keep_pose(951, lean_of(0.0, 0.0), None);
+        hold(951, FLAG_BARREL);
+        assert_eq!(buttons_held(), [true, false]);
+        // a tablet's pen moving the mouse pointer (WinTab), its second button held: its own
+        let pen = MousePen { pressure: 0.3, eraser: false };
+        set_mouse_pen(Some((pen, lean_of(0.0, 0.0))));
+        hold(MOUSE, FLAG_SECOND_BARREL);
+        assert_eq!(buttons_held(), [false, true]);
+        // gone from the tablet: the system's pen again
+        set_mouse_pen(None);
+        hold(MOUSE, 0);
+        assert_eq!(buttons_held(), [true, false]);
+        hold(951, 0);
+        pen_gone();
+        assert_eq!(buttons_held(), [false, false]);
     }
 
     #[test]
