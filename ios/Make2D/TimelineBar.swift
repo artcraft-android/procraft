@@ -68,6 +68,9 @@ final class TimelineTool {
     /// The camera at the playhead, and the frames it has keys on.
     private(set) var camera: TimelineCamera?
     private(set) var cameraKeys: [UInt32] = []
+    /// The sync markers' frames, in order, and what the timeline clipboard holds.
+    private(set) var markers: [UInt32] = []
+    private(set) var clipboard = TimelineClipboardInfo(clips: 0, keys: false)
     /// Counts reads from the session, for what is read through it rather than kept here (a pose).
     private(set) var revision = 0
 
@@ -123,10 +126,13 @@ final class TimelineTool {
         }
         if picked == nil {
             keysOpen = false
-            clipOpen = false
+            // with clips copied, the Clip page stays open to paste them
+            clipOpen = clipOpen && session.timelineClipboard().clips > 0
         }
         camera = session.timelineCamera()
         cameraKeys = session.timelineCameraKeys()
+        markers = session.timelineMarkers()
+        clipboard = session.timelineClipboard()
         var read: [UInt64: [TimelineKeyInfo]] = [:]
         for t in tracks {
             for c in t.clips {
@@ -444,6 +450,84 @@ final class TimelineTool {
         model.refresh()
     }
 
+    /// Clip `id` copied with its keys, to paste at the playhead.
+    func copyClip(_ id: UInt64) {
+        _ = model.session.copyTimelineClips(ids: [id])
+        clipOpen = false
+        model.showNotice("Copied. Paste puts it at the playhead on the chosen track.", warning: false)
+        model.refresh()
+    }
+
+    /// Clip `id` copied, then taken off with its drawing.
+    func cutClip(_ id: UInt64) {
+        stopPlaying()
+        clipOpen = false
+        picked = nil
+        if !model.session.cutTimelineClips(ids: [id]) {
+            model.showNotice("The track is locked.", warning: true)
+        }
+        model.refresh()
+    }
+
+    /// The clips copied, at the playhead on the track drawn on (those above on the tracks above);
+    /// the first pasted is picked.
+    func pasteClips() {
+        stopPlaying()
+        clipOpen = false
+        let made = model.session.pasteTimelineClips()
+        if made.isEmpty {
+            model.showNotice(track?.locked == true ? "The track is locked." : "There's no room for more layers.", warning: true)
+        } else {
+            picked = made.first
+        }
+        model.refresh()
+    }
+
+    /// Clip `id`'s keys on the playhead's frame (`here`) or all of them, copied.
+    func copyKeys(_ id: UInt64, here: Bool) {
+        if model.session.copyTimelineKeys(id: id, here: here) {
+            model.showNotice("Keys copied. Paste lays them on the clip at the playhead.")
+        }
+        model.refresh()
+    }
+
+    /// The keys copied, onto the clip at the playhead on the track drawn on, from the playhead on.
+    func pasteKeys() {
+        stopPlaying()
+        if !model.session.pasteTimelineKeys() {
+            model.showNotice("Move the playhead onto a clip to paste keys onto it.", warning: true)
+        }
+        model.refresh()
+    }
+
+    /// Plays at `fps` with its timing kept: every clip, key and marker moves to match.
+    func retime(_ fps: UInt32) {
+        stopPlaying()
+        _ = model.session.retimeTimeline(fps: fps)
+        model.refresh()
+    }
+
+    /// A sync marker at the frame showing (playing, the one playing).
+    func dropMarker() {
+        _ = model.session.addTimelineMarker(frame: frame)
+        model.refresh()
+    }
+
+    func moveMarker(_ from: UInt32, to: UInt32) {
+        _ = model.session.moveTimelineMarker(from: from, to: to)
+        model.refresh()
+    }
+
+    func removeMarker(_ at: UInt32) {
+        _ = model.session.removeTimelineMarker(frame: at)
+        model.refresh()
+    }
+
+    func clearMarkers() {
+        _ = model.session.clearTimelineMarkers()
+        model.refresh()
+    }
+
     /// Played frames show through the camera, or the canvas as it is.
     func setCameraView(_ on: Bool) {
         model.session.setTimelineCameraView(on: on)
@@ -728,7 +812,7 @@ private struct TracksTimeline: View {
     var body: some View {
         let width = min(screen.width - 32, 1180)
         let rows = min(max(tool.tracks.count, 1), mostRowsShown)
-        let bodyHeight = rulerHeight + CGFloat(rows) * rowHeight
+        let bodyHeight = rulerHeight + cameraLaneHeight + CGFloat(rows) * rowHeight
         VStack(alignment: .leading, spacing: 0) {
             if tool.settingsOpen {
                 TlPopover(width: 300, arrowX: 150) { TimelineSettingsPage(tool: tool, info: info) }
@@ -736,8 +820,8 @@ private struct TracksTimeline: View {
             } else if tool.keysOpen, let id = tool.picked {
                 TlPopover(width: 320, arrowX: 160) { KeysPage(model: model, tool: tool, clip: id, frame: tool.frame) }
                     .offset(x: max(width / 2 - 160, 0))
-            } else if tool.clipOpen, let id = tool.picked, let (_, clip) = tool.clip(id) {
-                TlPopover(width: 300, arrowX: 150) { ClipPage(tool: tool, clip: clip, frame: tool.frame) }
+            } else if tool.clipOpen {
+                TlPopover(width: 300, arrowX: 150) { ClipPage(tool: tool, clip: tool.picked.flatMap { tool.clip($0)?.1 }, frame: tool.frame) }
                     .offset(x: max(width / 2 - 150, 0))
             } else if tool.cameraOpen, let camera = tool.camera {
                 TlPopover(width: 300, arrowX: 150) { CameraPage(model: model, tool: tool, camera: camera, info: info) }
@@ -751,6 +835,7 @@ private struct TracksTimeline: View {
                     HStack(alignment: .top, spacing: 0) {
                         VStack(spacing: 0) {
                             Color.clear.frame(height: rulerHeight)
+                            CameraLaneHeader(tool: tool)
                             ForEach(tool.tracks.reversed(), id: \.id) { t in
                                 TrackHeader(tool: tool, track: t, chosen: t.id == info.track)
                             }
@@ -785,6 +870,10 @@ private struct TracksTimeline: View {
                 Rectangle().fill(inkDim).frame(width: 1, height: 18)
             }
             BarWord(label: tool.isPlaying ? "Pause" : "Play", bold: true) { tool.togglePlaying() }
+            if tool.isPlaying {
+                // a sync marker where it plays now
+                BarWord(label: "Mark", bold: true, tint: markerFill) { tool.dropMarker() }
+            }
             Text(verbatim: "\(tool.frame + 1) / \(info.duration)")
                 .font(.system(size: 15).monospacedDigit())
                 .foregroundStyle(inkDim)
@@ -796,12 +885,16 @@ private struct TracksTimeline: View {
                 BarWord(label: "Cancel") { tool.grouping = nil }
                 BarWord(label: "Make Group", bold: true, dim: gathered.isEmpty) { tool.makeGroup() }
             } else {
-                if let id = tool.picked, tool.clip(id) != nil {
-                    BarWord(label: "Keys", bold: tool.keysOpen) {
-                        tool.keysOpen.toggle()
-                        tool.clipOpen = false
-                        tool.settingsOpen = false
-                        tool.cameraOpen = false
+                let pickedOne = tool.picked.flatMap { tool.clip($0) } != nil
+                // the clipboard's clips paste from the Clip page, a clip picked or not
+                if pickedOne || tool.clipboard.clips > 0 {
+                    if pickedOne {
+                        BarWord(label: "Keys", bold: tool.keysOpen) {
+                            tool.keysOpen.toggle()
+                            tool.clipOpen = false
+                            tool.settingsOpen = false
+                            tool.cameraOpen = false
+                        }
                     }
                     BarWord(label: "Clip", bold: tool.clipOpen) {
                         tool.clipOpen.toggle()
@@ -844,10 +937,12 @@ private func maskTag(_ mask: TimelineMask) -> String? {
 }
 
 /// The picked clip's options: how the clip on the track below masks it; a group's cycle, and
-/// opening or ungrouping it; grouping it with others, splitting, duplicating and deleting it.
+/// opening or ungrouping it; grouping it with others, splitting, duplicating and deleting it;
+/// copying or cutting it, and pasting what was copied at the playhead. With no clip picked, only
+/// the paste.
 private struct ClipPage: View {
     let tool: TimelineTool
-    let clip: TimelineClipInfo
+    let clip: TimelineClipInfo?
     let frame: UInt32
 
     /// The cycle's length as its slider moves, before it is let go.
@@ -857,6 +952,24 @@ private struct ClipPage: View {
         [(.none, "No Mask"), (.clipping, "Clipping Mask"), (.alpha, "Alpha Matte"), (.luminance, "Luma Matte")]
 
     var body: some View {
+        if let clip {
+            options(clip)
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                PanelTitle(text: "Clipboard", bottom: 14)
+                TlGroup { paste }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var paste: some View {
+        let n = tool.clipboard.clips
+        TlAction(label: n == 1 ? "Paste Clip at Playhead" : "Paste \(n) Clips at Playhead") { tool.pasteClips() }
+    }
+
+    @ViewBuilder
+    private func options(_ clip: TimelineClipInfo) -> some View {
         let group = clip.kind == .group
         let drawing = clip.kind == .drawing
         let inside = frame > clip.start && frame < clip.start + clip.duration
@@ -925,6 +1038,16 @@ private struct ClipPage: View {
                 }
                 TlRowLine()
                 TlAction(label: "Delete") { tool.delete(clip.id, close: false) }
+            }
+            .padding(.top, 10)
+            TlGroup {
+                TlAction(label: "Copy") { tool.copyClip(clip.id) }
+                TlRowLine()
+                TlAction(label: "Cut") { tool.cutClip(clip.id) }
+                if tool.clipboard.clips > 0 {
+                    TlRowLine()
+                    paste
+                }
             }
             .padding(.top, 10)
         }
@@ -1028,14 +1151,20 @@ private struct TracksArea: View {
             ZStack(alignment: .topLeading) {
                 VStack(spacing: 0) {
                     ruler(frames: frames, width: width)
+                    CameraLane(tool: tool, width: width, pitch: framePitch, frames: frames)
                     ForEach(Array(shown.enumerated()), id: \.element.id) { row, t in
                         lane(t, row: row, rows: shown, width: width)
                     }
                 }
+                // the sync markers: a line down through the lanes from each one's flag
+                let below = cameraLaneHeight + CGFloat(shown.count) * rowHeight
+                TimelineMarkerLines(markers: tool.markers, pitch: framePitch, height: below)
+                    .offset(y: rulerHeight)
+                TimelineMarkerFlags(tool: tool, frames: frames, pitch: framePitch, height: rulerHeight)
                 // the playhead
                 let x = (CGFloat(tool.frame) + 0.5) * framePitch
                 Pc.accent
-                    .frame(width: 2, height: rulerHeight + CGFloat(shown.count) * rowHeight)
+                    .frame(width: 2, height: rulerHeight + below)
                     .offset(x: x - 1)
                     .allowsHitTesting(false)
             }
@@ -1553,6 +1682,29 @@ private struct KeysPage: View {
                 }
                 .padding(.top, 10)
             }
+            // the keys copied, and pasted onto the clip at the playhead from its frame on
+            let hasKeys = !(tool.keys[clip] ?? []).isEmpty
+            if hasKeys || tool.clipboard.keys {
+                TlGroup {
+                    if keyedHere {
+                        TlAction(label: "Copy Keys Here") { tool.copyKeys(clip, here: true) }
+                        TlRowLine()
+                    }
+                    if hasKeys {
+                        TlAction(label: "Copy All Keys") { tool.copyKeys(clip, here: false) }
+                    }
+                    if tool.clipboard.keys {
+                        if hasKeys {
+                            TlRowLine()
+                        }
+                        TlAction(label: "Paste Keys Here") {
+                            live = nil
+                            tool.pasteKeys()
+                        }
+                    }
+                }
+                .padding(.top, 10)
+            }
         }
         .onChange(of: frame) { live = nil }
     }
@@ -1764,6 +1916,11 @@ private struct TimelineSettingsPage: View {
     let tool: TimelineTool
     let info: TimelineInfo
 
+    /// A new frame rate keeps the animation's timing (every clip and key moved to match) rather
+    /// than its frames; the rate as its slider moves, before it is let go.
+    @AppStorage("timelineKeepTiming") private var keepTiming = true
+    @State private var fps: UInt32?
+
     var body: some View {
         let ways: [(AnimationPlayback, String)] = [(.loop, "Loop"), (.pingPong, "Ping-Pong"), (.oneShot, "One Shot")]
         let onion = Int(info.onionFrames)
@@ -1794,8 +1951,22 @@ private struct TimelineSettingsPage: View {
                 }
             }
             TlSliderGroup {
-                TlSlider(label: "Frames Per Second", value: "\(info.fps)", share: Float(Int(info.fps) - 1) / Float(mostFps - 1)) { v in
-                    tool.change { $0.fps = UInt32(1 + wholeNumber(v * Float(mostFps - 1))) }
+                let shownFps = fps ?? info.fps
+                TlSlider(
+                    label: "Frames Per Second", value: "\(shownFps)", share: Float(Int(shownFps) - 1) / Float(mostFps - 1),
+                    onEnd: {
+                        if let f = fps {
+                            tool.retime(f)
+                        }
+                        fps = nil
+                    }
+                ) { v in
+                    let f = UInt32(1 + wholeNumber(v * Float(mostFps - 1)))
+                    if keepTiming {
+                        fps = f
+                    } else {
+                        tool.change { $0.fps = f }
+                    }
                 }
                 TlSlider(label: "Length", value: "\(info.duration) frames", share: Float(Int(info.duration) - 1) / Float(longest - 1)) { v in
                     tool.change { $0.duration = UInt32(1 + wholeNumber(v * Float(longest - 1))) }
@@ -1817,6 +1988,28 @@ private struct TimelineSettingsPage: View {
                 }
             }
             .padding(.top, 10)
+            TlGroup {
+                HStack(spacing: 0) {
+                    Text(verbatim: "Keep Timing When FPS Changes")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.panelTitle)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Spacer(minLength: 8)
+                    CheckBox(checked: keepTiming, fill: Pc.accent)
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+                .onTapGesture { keepTiming.toggle() }
+                if !tool.markers.isEmpty {
+                    TlRowLine()
+                    TlAction(label: tool.markers.count == 1 ? "Clear the Marker" : "Clear \(tool.markers.count) Markers") {
+                        tool.clearMarkers()
+                    }
+                }
+            }
+            .padding(.top, 10)
         }
     }
 }
@@ -1827,12 +2020,13 @@ private struct BarWord: View {
     let label: String
     var bold = false
     var dim = false
+    var tint: Color?
     let action: () -> Void
 
     var body: some View {
         Text(verbatim: label)
             .font(.system(size: 17, weight: bold ? .bold : .regular))
-            .foregroundStyle(dim ? inkDim : ink)
+            .foregroundStyle(tint ?? (dim ? inkDim : ink))
             .lineLimit(1)
             .frame(height: 30)
             .contentShape(Rectangle())
