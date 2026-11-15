@@ -15,7 +15,7 @@ const CROP_SHRINK_SECONDS: f32 = 0.3;
 const LOST_SAID: &str =
     "The graphics stopped working. Go back to the gallery and open the artwork again: it comes back as last saved.";
 
-/// What the apps tell when a smudge stroke couldn't be begun.
+/// What the apps tell when a smudge stroke couldn't be begun, or couldn't go on.
 const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this canvas.";
 
 /// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
