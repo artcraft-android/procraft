@@ -373,6 +373,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cursorShape by mutableStateOf<List<List<Float>>>(emptyList())
         private set
 
+    /** How far the cursor's shape is turned on the screen past its own rotation (radians, clockwise), as the stamps are: with the canvas. */
+    var cursorTurn by mutableStateOf(0f)
+        private set
+
+    /** The cursor shows where the pen hovers (not where it paints). */
+    var cursorHovering by mutableStateOf(false)
+        private set
+
+    /** The brush's stamp the cursor fills while the pen hovers (its Hover fill: none, or the shape it paints), as a coverage mask. */
+    var cursorFill by mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+        private set
+
+    /** The stamp [cursorFill] was made from, and its side, to make it again only when it changes. */
+    private var cursorFillMade: Pair<Int, ByteArray>? = null
+
     /** When the brush cursor shows: while the pen hovers, while painting, or both. */
     enum class CursorShows { HOVERING, PAINTING, BOTH }
 
@@ -466,9 +481,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
             cursorOutline = s.currentBrushSetting("cursor_outline").roundToInt()
             cursorShape = s.brushOutline()
+            // turned with the canvas, as its stamps are (unless the brush keeps to the screen)
+            cursorTurn = if (s.currentBrushSetting("orient_to_screen") < 0.5f) s.viewMatrix().let { m -> kotlin.math.atan2(m[1], m[0]) } else 0f
+            cursorFill = if (hovering && s.currentBrushSetting("hover_fill").roundToInt() > 0) fillStamp(s) else null
             cursorReadAt = now
         }
+        cursorHovering = hovering
         cursorAt = p
+    }
+
+    /** The brush's stamp at the cursor's size on the screen, white with its coverage as alpha; made again only when it changes. */
+    private fun fillStamp(s: CanvasSession): androidx.compose.ui.graphics.ImageBitmap? {
+        val n = (cursorRadius * 2f).roundToInt().coerceIn(2, CURSOR_FILL_MOST)
+        val alpha = s.brushStamp(n.toUInt())
+        if (alpha.size < n * n) return null
+        cursorFillMade?.let { (side, made) -> if (side == n && made.contentEquals(alpha)) return cursorFill }
+        cursorFillMade = n to alpha
+        val colors = IntArray(n * n) { i -> (alpha[i].toInt() and 0xFF shl 24) or 0xFFFFFF }
+        return android.graphics.Bitmap.createBitmap(colors, n, n, android.graphics.Bitmap.Config.ARGB_8888).asImageBitmap()
     }
 
     /** When the cursor's size was last read (uptime ms). */
@@ -8143,6 +8173,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How often a hovering brush cursor reads its size again, ms. */
         const val CURSOR_REREAD_MS = 100L
+
+        /** The hover fill's stamp is made at most this many pixels across (larger, it is drawn bigger). */
+        const val CURSOR_FILL_MOST = 256
         const val ACTIONS_TAB = "actions_tab"
         const val STUDIO_TAB = "studio_tab"
         const val PAD_3D = "pad_3d_preview"
