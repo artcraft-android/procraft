@@ -40,6 +40,8 @@ mod gestures;
 mod gradients;
 mod grain_store;
 mod guide;
+#[cfg(test)]
+mod harmony_tests;
 mod hdr;
 mod history;
 mod hooks;
