@@ -84,6 +84,7 @@ mod studio;
 mod tests;
 mod text;
 mod text_draw;
+mod text_runs;
 mod timelapse;
 mod touch;
 mod transform;
@@ -199,12 +200,13 @@ pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     small_source, source_from_copy, source_from_picture, source_library, source_size,
 };
-pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
+pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextRunInfo, TextSide};
 pub use text_draw::{
     TextPicture, TextTypeface, add_system_text_fonts, add_text_font, add_text_font_file, draw_chosen_text, draw_text,
     import_text_font, set_text_family_alias, set_text_font_folder, text_box, text_caret, text_families,
     text_index_from_utf16, text_index_to_utf16, text_styles, text_typefaces,
 };
+pub use text_runs::TextStyleChange;
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_setting_names, time_lapse_side,
@@ -2218,10 +2220,15 @@ impl CanvasSession {
         }
     }
 
-    /// The paint colour, sRGB 0..1.
+    /// The paint colour, sRGB 0..1. While text is edited, a colour chosen is also what is typed
+    /// from then on, and the characters chosen (if any are) change to it: the app reads the text
+    /// again ([`CanvasSession::layer_text`]) and draws it.
     pub fn set_color(&self, r: f32, g: f32, b: f32) {
         let c = [r, g, b].map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
-        self.shared.lock().color = c;
+        let changed = std::mem::replace(&mut self.shared.lock().color, c) != c;
+        if changed {
+            self.text_colour_chosen(c);
+        }
     }
 
     /// The app's colour history: each paint stroke's colour is added to it as the stroke ends.

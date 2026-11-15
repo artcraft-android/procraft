@@ -58,7 +58,10 @@ import io.github.artcraftandroid.procraft.core.Interpolation
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.TextAlignment
 import io.github.artcraftandroid.procraft.core.TextInfo
+import io.github.artcraftandroid.procraft.core.TextRunInfo
 import io.github.artcraftandroid.procraft.core.TextSide
+import io.github.artcraftandroid.procraft.core.TextStyleChange
+import io.github.artcraftandroid.procraft.core.textIndexFromUtf16
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.SelectionDisplay
@@ -4225,6 +4228,34 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The style sheet (fonts, styles, design, attributes) is open over the keyboard. */
     var textStyleOpen by mutableStateOf(false)
 
+    /**
+     * The look the style sheet shows for the letters chosen (the first one's; underline and outline
+     * on only when all of them have it), or for what is typed next at the caret.
+     */
+    var textLook by mutableStateOf<TextRunInfo?>(null)
+        private set
+
+    /** The letters chosen in the text field as the core counts them (not UTF-16): first and last. */
+    private fun textChosen(v: TextFieldValue = textField): Pair<UInt, UInt> =
+        textIndexFromUtf16(v.text, v.selection.min.toUInt()) to textIndexFromUtf16(v.text, v.selection.max.toUInt())
+
+    private fun refreshTextLook() {
+        val (start, end) = textChosen()
+        textLook = session?.textLook(start, end)
+    }
+
+    /**
+     * The look of the letters chosen changed by [change] (theirs alone); with only a caret, the look
+     * of what is typed there next.
+     */
+    fun restyleText(change: TextStyleChange) {
+        val (start, end) = textChosen()
+        val now = session?.textRestyle(start, end, change) ?: return
+        textInfo = now
+        renderText()
+        refreshTextLook()
+    }
+
     /** The text as it was when the style sheet opened, for its Cancel. */
     private var textBeforeStyle: TextInfo? = null
 
@@ -4267,7 +4298,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val families = withContext(Dispatchers.IO) { uris.mapNotNull { importFont(it) } }
             val family = families.firstOrNull() ?: return@launch
-            changeText { it.copy(font = family) }
+            restyleText(TextStyleChange.Font(family))
             showNotice(if (families.size > 1) "Fonts imported" else "Font imported")
         }
     }
@@ -4303,7 +4334,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             kerning = 0f, tracking = 0f, leading = 0f, baseline = 0f, opacity = 1f,
             align = TextAlignment.CENTER, underline = false, outline = false, vertical = false, allCaps = false,
             r = ((rgb shr 16) and 255) / 255f, g = ((rgb shr 8) and 255) / 255f, b = (rgb and 255) / 255f,
-            x = 0f, y = 0f, width = 0f,
+            x = 0f, y = 0f, width = 0f, runs = emptyList(),
         )
         info = s.newTextPlaced(info, windowSize.x, windowSize.y, screenDensity)
         if (s.textBegin(null, info) == null) {
@@ -4339,19 +4370,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         textInfo = info
         textField = TextFieldValue(info.text, TextRange(0, info.text.length))
         textStyleOpen = false
+        refreshTextLook()
         renderText()
         refresh()
     }
 
     fun changeTextField(v: TextFieldValue) {
+        val before = textField
         textField = v
+        // what was typed is found against where the letters chosen were; then where they now are
         if (v.text != textInfo?.text) changeText { it.copy(text = v.text) }
+        if (v.text != before.text || v.selection != before.selection) {
+            val (start, end) = textChosen(v)
+            session?.textSelect(start, end)
+            refreshTextLook()
+        }
     }
 
     fun changeText(f: (TextInfo) -> TextInfo) {
         val info = textInfo?.let(f) ?: return
-        textInfo = info
-        session?.setText(info)
+        textInfo = session?.setText(info) ?: info
         renderText()
     }
 
@@ -6150,6 +6188,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val c = colorRgb()
         val (r, g, b) = Triple(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
         session?.setColor(r, g, b)
+        // editing text, the letters chosen take it (and what is typed next): drawn again
+        if (textInfo != null) session?.let { s ->
+            s.editingText()?.let(s::layerText)?.let { now ->
+                if (now != textInfo) {
+                    textInfo = now
+                    renderText()
+                }
+            }
+        }
         if (colorNames) nameColorSoon()
         // recoloring, the area under the reticle takes the new colour
         val s = session

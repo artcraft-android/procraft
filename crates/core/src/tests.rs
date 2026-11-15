@@ -3698,12 +3698,13 @@ fn text_is_edited_as_one_step_and_rasterized() {
         x: 2.0,
         y: 2.0,
         width: 0.0,
+        runs: Vec::new(),
     };
     let red = [255u8, 0, 0, 255].repeat(40 * 40);
     let id = s.text_begin(None, info.clone()).unwrap();
     assert_eq!(s.editing_text(), Some(id));
     s.put_text_pixels(red.clone());
-    assert!(s.set_text(TextInfo { text: "Hello".to_owned(), ..info.clone() }));
+    assert!(s.set_text(TextInfo { text: "Hello".to_owned(), ..info.clone() }).is_some());
     s.put_text_pixels(red.clone());
     assert_eq!(pixel(&s, 5, 5), [255, 0, 0, 255]);
     s.text_end(true);
@@ -7387,6 +7388,7 @@ fn text_info(text: &str) -> crate::TextInfo {
         x: 10.0,
         y: 10.0,
         width: 0.0,
+        runs: Vec::new(),
     }
 }
 
@@ -7432,7 +7434,7 @@ fn text_drawn_into_its_layer_a_part_at_a_time_is_as_drawn_whole() {
     assert!(s.draw_text_into_layer());
     assert!(layer_now(&s, id) == crate::draw_text(first.clone(), 300, 300));
     for info in edits {
-        assert!(s.set_text(info.clone()));
+        assert!(s.set_text(info.clone()).is_some());
         assert!(s.draw_text_into_layer());
         assert!(
             layer_now(&s, id) == crate::draw_text(info.clone(), 300, 300),
@@ -7445,7 +7447,7 @@ fn text_drawn_into_its_layer_a_part_at_a_time_is_as_drawn_whole() {
     // a drawing begun before the text changed again is dropped; the next one draws it
     let job = s.text_draw_start().unwrap();
     let last = crate::TextInfo { text: "Bye".to_owned(), ..first.clone() };
-    assert!(s.set_text(last.clone()));
+    assert!(s.set_text(last.clone()).is_some());
     assert!(!s.text_draw_put(job.draw()));
     assert!(s.draw_text_into_layer());
     assert!(layer_now(&s, id) == crate::draw_text(last.clone(), 300, 300));
@@ -7454,7 +7456,7 @@ fn text_drawn_into_its_layer_a_part_at_a_time_is_as_drawn_whole() {
     // edited again later, moved far off where it was: the first drawing takes the whole layer
     assert_eq!(s.text_begin(Some(id), last.clone()), Some(id));
     let moved = crate::TextInfo { text: "Again".to_owned(), x: 150.0, y: 200.0, ..first.clone() };
-    assert!(s.set_text(moved.clone()));
+    assert!(s.set_text(moved.clone()).is_some());
     assert!(s.draw_text_into_layer());
     assert!(layer_now(&s, id) == crate::draw_text(moved, 300, 300));
     s.text_end(true);
@@ -7567,7 +7569,10 @@ fn text_typed_keeps_the_pictures_of_the_layers_below_it() {
     // each letter put into the text layer leaves the picture of those below it as it was, and
     // the canvas shows as it would composited whole
     for (i, text) in ["Hi t", "Hi the", "Hi there", "Hey"].into_iter().enumerate() {
-        assert!(s.set_text(crate::TextInfo { text: text.to_owned(), y: 100.0 + i as f32 * 20.0, ..first.clone() }));
+        assert!(
+            s.set_text(crate::TextInfo { text: text.to_owned(), y: 100.0 + i as f32 * 20.0, ..first.clone() })
+                .is_some()
+        );
         assert!(s.draw_text_into_layer());
         assert!(s.shared.lock().canvas.as_ref().unwrap().composites_cached(), "{text}");
         let cached = composite(&s, true);
@@ -10493,7 +10498,7 @@ fn new_text_is_sized_and_placed_as_it_looks_on_screen() {
     // a text kept in another typeface: new text starts in it (its size still the screen's)
     let id = s.text_begin(None, t.clone()).unwrap();
     let serif = crate::TextInfo { font: "serif".to_owned(), style: "Bold".to_owned(), ..t.clone() };
-    assert!(s.set_text(serif));
+    assert!(s.set_text(serif).is_some());
     s.text_end(true);
     assert!(s.layer_text(id).is_some());
     let next = s.new_text_placed(text_info("Text"), 2266.0, 1488.0, 2.0);
