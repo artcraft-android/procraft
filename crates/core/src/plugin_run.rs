@@ -257,6 +257,9 @@ const KEEP: &str = "procraft_keep";
 /// The most bytes a plugin keeps, and of the presses a key answer writes.
 pub(crate) const MOST_KEPT: usize = 64 << 10;
 const MOST_KEY_TEXT: usize = 4 << 10;
+/// What a key press may spend, handed to it and answered: a touch's (presses come far apart, not a
+/// sample at a time), so a plugin may look through the app's shortcuts for each.
+const KEY_FUEL: u64 = TOUCH_FUEL;
 /// What being told what it keeps, or the app's shortcuts, may spend, and how long it may take.
 const TOLD_FUEL: u64 = 20_000_000;
 const MOST_TOLD_TIME: Duration = Duration::from_secs(2);
@@ -970,7 +973,7 @@ impl Running {
         let (Some(buffer), Some(memory)) = (key_buffer.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
         let len = i32::try_from(text.len()).map_err(|_| Stop::Nonsense)?;
         guarded(|| {
-            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            store.set_fuel(KEY_FUEL).map_err(|_| Stop::Damaged)?;
             let at = buffer.call(&mut *store, len).map_err(|e| stop_of(&e))?;
             let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
             memory.write(&mut *store, place, text.as_bytes()).map_err(|_| Stop::Nonsense)?;
@@ -986,7 +989,7 @@ impl Running {
         let len = self.hand_key_text(&press.text())?;
         let store = &mut self.store;
         let packed = guarded(|| {
-            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            store.set_fuel(KEY_FUEL).map_err(|_| Stop::Damaged)?;
             func.call(&mut *store, len).map_err(|e| stop_of(&e))
         })?;
         key_answer(store, &memory, packed)?.map(|text| presses(&text)).transpose()
@@ -2384,5 +2387,59 @@ pub(crate) mod tests {
         for _ in 0..4 {
             assert_eq!(running.position(0.0, 0.0), Ok((0.0, 0.0)));
         }
+    }
+
+    /// The bundled Keyboard shortcuts plugin's code, hooks and permissions.
+    fn keyboard_plugin() -> (Vec<u8>, Vec<Hook>, Vec<PluginPermission>) {
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "keyboard-shortcuts").unwrap();
+        let package = crate::plugin_file::read_package(file).unwrap();
+        (package.file(MODULE).unwrap().to_vec(), package.manifest.hooks.clone(), package.manifest.permissions.clone())
+    }
+
+    #[test]
+    fn the_keyboard_plugin_answers_presses_with_many_keys_bound() {
+        // the desktop's shortcuts, the first `n` that can be bound each bound to a key of its own
+        // (as the plugin keeps them): every press answered, on far less than a press's budget
+        let (code, hooks, permissions) = keyboard_plugin();
+        let told = crate::keys::shortcuts_told(true);
+        let firsts: Vec<&str> = told
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split('\t').collect();
+                (fields.get(3) == Some(&"0")).then(|| fields.get(2)?.split(' ').next()).flatten()
+            })
+            .filter(|first| !first.is_empty())
+            .collect();
+        assert!(firsts.len() >= 30, "{} shortcuts to bind", firsts.len());
+        let combo = |text: &str| crate::KeyCombo::read(text).unwrap();
+        let new_key = |i: usize| format!("command+shift+alt+{}", char::from(b'a' + i as u8));
+        let mut spent = Vec::new();
+        for n in [0, 5, 20] {
+            let kept: Vec<String> =
+                firsts.iter().take(n).enumerate().map(|(i, f)| format!("{f}\t{}", new_key(i))).collect();
+            let kept = kept.join("\n");
+            let mut running = Running::start_told(&code, &[], &hooks, &permissions, Some(kept.as_bytes())).unwrap();
+            let mut presses: Vec<String> =
+                ["command+z", "q", "shift+b", "command+shift+alt+z"].map(String::from).to_vec();
+            presses.extend(firsts.iter().take(n).map(|f| (*f).to_owned()));
+            presses.extend((0..n).map(new_key));
+            let mut most = 0;
+            for press in &presses {
+                let answer = running.key_shortcut(&combo(press));
+                assert!(answer.is_ok(), "{n} bound, {press}: {answer:?}");
+                most = most.max(KEY_FUEL - running.store.get_fuel().unwrap());
+                let answer = running.key_shortcut_keys(&combo(press));
+                assert!(answer.is_ok(), "{n} bound, {press}: {answer:?}");
+                most = most.max(KEY_FUEL - running.store.get_fuel().unwrap());
+            }
+            spent.push((n, most));
+            // a key bound anew is its shortcut's first key, and that key does nothing now
+            if n > 0 {
+                assert_eq!(running.key_shortcut(&combo(&new_key(0))), Ok(Some(vec![combo(firsts[0])])));
+                assert_eq!(running.key_shortcut(&combo(firsts[0])), Ok(Some(Vec::new())));
+            }
+        }
+        eprintln!("the most a press spent, by keys bound: {spent:?}");
+        assert!(spent.iter().all(|&(_, most)| most < SAMPLE_FUEL), "{spent:?}");
     }
 }
