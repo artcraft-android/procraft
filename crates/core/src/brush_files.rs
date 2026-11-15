@@ -4,8 +4,7 @@
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
 use procraft_engine::brush::{
-    Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, GrainMode, MaterialSource, ShapeFile, Source, StockImage,
-    StockImages,
+    Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ShapeFile, Source, StockImage, StockImages,
 };
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
 use procraft_engine::brushlibrary;
@@ -1785,16 +1784,8 @@ fn brush_from(file: &BrushFile) -> Brush {
     for (key, value) in &file.settings {
         b.set_setting(key, *value);
     }
-    // a file from before a control was kept doesn't name it: it draws as such a brush did then,
-    // not as our own pen starts: its grain at full depth, travelling with each stamp (as far as
-    // its movement says)
-    let names = |key: &str| file.settings.iter().any(|(k, _)| k == key);
-    if !names("grain_depth") {
-        b.grain.depth = 1.0;
-    }
-    if !names("grain_behavior") && names("grain_movement") {
-        b.grain.mode = GrainMode::Moving;
-    }
+    // (a file from before a control was kept is read with the value such a brush had then, so
+    // every control is set here, none left as our own pen has it)
     brushfile::set_sizes(&mut b, file.max_size, file.min_size);
     b.shape.rotation = file.shape_angle;
     for (points, curve) in [(&file.size_curve, &mut b.size_curve), (&file.opacity_curve, &mut b.opacity_curve)] {
@@ -2407,6 +2398,7 @@ pub(crate) fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use procraft_engine::brush::GrainMode;
 
     #[test]
     fn a_stock_tip_of_one_curved_stroke_stands_in_as_our_hook() {

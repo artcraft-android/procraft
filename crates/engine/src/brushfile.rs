@@ -338,6 +338,57 @@ const RENDERING: [(bool, bool, bool); 6] = [
 /// Behind as brush files number their blend modes (between Soft Light and Shade).
 const BEHIND_NUMBER: i64 = 18;
 
+/// Darken as files number it, and as older files did (where Shade is now); Add, which a dual
+/// brush's two strokes once combined by.
+const DARKEN: i64 = 34;
+const OLD_DARKEN: i64 = 19;
+const OLD_ADD: i64 = 3;
+
+/// What a file means by the keys it may not have that aren't 0 then (a file from before the
+/// control was kept draws as such a brush did): the shape whole, the grain at full depth and
+/// offset each stroke, the tip shown live, the roundness unchanged by pressure and tilt, a lean's
+/// growth across the stroke only, the tilt angle a tenth of a turn's quarter, the flow full, the
+/// smudge pulling half, the preview's size and pressure, the hover, the materials' amounts and
+/// scales. Any other key a file doesn't have is 0.
+const ABSENT: &[(&str, f64)] = &[
+    ("shapeRoundness", 1.0),
+    ("grainDepth", 1.0),
+    ("textureOffsetJitter", 1.0),
+    ("texturizedGrainFollowsCamera", 1.0),
+    ("pencilTipAnimation", 1.0),
+    ("dynamicsPressureShapeRoundness", 1.0),
+    ("dynamicsPressureShapeRoundnessMinimum", 1.0),
+    ("dynamicsTiltShapeRoundness", 1.0),
+    ("dynamicsTiltShapeRoundnessMinimum", 1.0),
+    ("dynamicsTiltCompression", 1.0),
+    ("dynamicsTiltAngle", 0.1),
+    ("dynamicsGlazedFlow", 1.0),
+    ("dynamicsSmudgeAccumulation", 0.5),
+    ("previewSize", 0.3),
+    ("previewPressureScale", 1.0),
+    ("hoverPressure", 0.1),
+    ("hoverFill", 1.0),
+    ("hoverOutline", 1.0),
+    ("metallicScale", 0.16),
+    ("roughnessAmount", 0.5),
+    ("roughnessScale", 0.16),
+    ("heightAmount", 0.5),
+    ("heightScale", 0.16),
+];
+
+/// The value a file without `key` has for it; none for a key whose control then follows another
+/// (each tilt control's own angle the tilt angle's, the linear jitter's tilt the lateral's) and
+/// for the most opacity (a brush that paints nothing helps no one).
+fn absent(f: &Fields<'_>, key: &str) -> Option<f64> {
+    match key {
+        k if k.ends_with("TiltAngle") && k != "dynamicsTiltAngle" => None,
+        "plotJitterLongitudinalTilt" | "maxOpacity" => None,
+        // the wet mix's pull, as far as the smudge's
+        "dynamicsWetAccumulation" => Some(f.num("dynamicsSmudgeAccumulation").unwrap_or(0.5)),
+        _ => Some(ABSENT.iter().find(|(k, _)| *k == key).map_or(0.0, |&(_, v)| v)),
+    }
+}
+
 /// The number of stamps a place for the count a file stores: one more than fifteen times it,
 /// whole (so a sixteenth for each stamp, as files are written, reads back the same).
 fn stamp_count(stored: f64) -> f32 {
@@ -486,8 +537,19 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         }
     };
     for &(control, key, kept) in PLAIN {
-        if let Some(v) = f.num(key) {
+        if let Some(v) = f.num(key).or_else(|| absent(&f, key)) {
             set(control, to_control(kept, v));
+        }
+    }
+    // a file from before each use of the pressure followed it at its own speed has one for all
+    if let Some(v) = f.num("dynamicsPressureSpeed") {
+        for control in [
+            "pressure_size_response",
+            "pressure_opacity_response",
+            "pressure_bleed_response",
+            "pressure_roundness_response",
+        ] {
+            set(control, v as f32);
         }
     }
     // a file without the pen's own taper keys tapers a pen as it does touch
@@ -601,9 +663,13 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if let Some(m) = blend(&["extendedBlend2", "extendedBlend", "blendMode"]) {
         set("blend_mode", m as f32);
     }
-    // a grain also blends by its own two modes, numbered past the layers'
+    // a grain also blends by its own two modes, numbered past the layers' (a file from before
+    // Darken was renumbered has it as 19)
     if let Some(n) = ["grainBlendModeExtended", "grainBlendMode"].iter().find_map(|k| f.num(k)) {
-        let n = n.round() as i64;
+        let n = match n.round() as i64 {
+            OLD_DARKEN => DARKEN,
+            n => n,
+        };
         let own = [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT].into_iter().find(|&m| i64::from(m) == n);
         set("grain_blend", own.unwrap_or_else(|| crate::native::blend_from(n).id()) as f32);
     }
@@ -614,7 +680,22 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     // quarter turn one way and the other; the grain's two quarter turns the other way round from
     // the shape's): the grain's kept (half turns, -1..1), the shape's added to its angle
     let orientation = |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map_or(1, |n| n.round() as i64);
-    let grain_turns = match orientation(&["textureOrientation", "grainOrientation"]) {
+    // the grain's own key first; a file with only the older one and a grain fixed to the canvas
+    // had that grain drawn a quarter turn round and not inverted, as it is read again here
+    let older_grain = f.num("grainOrientation").is_none()
+        && f.num("textureOrientation").is_some()
+        && f.num("textureApplication").is_some_and(|v| v.round() as i64 == 1);
+    let grain_orientation = if older_grain {
+        match orientation(&["textureOrientation"]) {
+            1 => 3,
+            2 => 4,
+            3 => 2,
+            _ => 1,
+        }
+    } else {
+        orientation(&["grainOrientation", "textureOrientation"])
+    };
+    let grain_turns = match grain_orientation {
         2 => 1.0,
         3 => -0.5,
         4 => 0.5,
@@ -630,26 +711,28 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         _ => 0.0,
     };
     // how a dual brush's two strokes combine: as the layers' modes number, or by the grain's own
+    // (Add, which a second no longer combines by, as Normal; an older Darken renumbered)
     if let Some(n) = ["dualBlendModeExtended", "dualBlendMode"].iter().find_map(|k| f.num(k)) {
-        let n = n.round() as i64;
+        let n = match n.round() as i64 {
+            OLD_ADD => 0,
+            OLD_DARKEN => DARKEN,
+            n => n,
+        };
         let own = [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT].into_iter().find(|&m| i64::from(m) == n);
         set("dual_blend", own.unwrap_or_else(|| crate::native::blend_from(n).id()) as f32);
     }
     // an image of the brush's own is in the file by a name of its own (its path then null), or
     // by the name its path gives; else the path names a stock image
-    let texture = |path: &str, own: &str, inverted: &str| {
-        let inverted = f.flag(inverted);
-        match f.text(path) {
-            None => match zip.read(&format!("{prefix}{own}")) {
+    let texture = |path: &str, own: &str, inverted: bool| match f.text(path) {
+        None => match zip.read(&format!("{prefix}{own}")) {
+            Some(bytes) => Texture::Image { bytes, inverted },
+            None => Texture::None,
+        },
+        Some(name) => {
+            let file = name.rsplit('/').next().unwrap_or(&name);
+            match zip.read(&format!("{prefix}{name}")).or_else(|| zip.read(&format!("{prefix}{file}"))) {
                 Some(bytes) => Texture::Image { bytes, inverted },
-                None => Texture::None,
-            },
-            Some(name) => {
-                let file = name.rsplit('/').next().unwrap_or(&name);
-                match zip.read(&format!("{prefix}{name}")).or_else(|| zip.read(&format!("{prefix}{file}"))) {
-                    Some(bytes) => Texture::Image { bytes, inverted },
-                    None => Texture::Stock { name, inverted },
-                }
+                None => Texture::Stock { name, inverted },
             }
         }
     };
@@ -680,10 +763,10 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         size_curve: f.curve("dynamicsPressureSizeCurve").filter(|c| !is_straight(c)),
         opacity_curve: f.curve("dynamicsPressureOpacityCurve").filter(|c| !is_straight(c)),
         pressure_curves,
-        shape: texture("bundledShapePath", "Shape.png", "shapeInverted"),
-        grain: texture("bundledGrainPath", "Grain.png", "textureInverted"),
-        metallic: texture("bundledMetallicPath", "Metallic.png", "metallicGrainInverted"),
-        roughness: texture("bundledRoughnessPath", "Roughness.png", "roughnessGrainInverted"),
+        shape: texture("bundledShapePath", "Shape.png", f.flag("shapeInverted")),
+        grain: texture("bundledGrainPath", "Grain.png", f.flag("textureInverted") && !older_grain),
+        metallic: texture("bundledMetallicPath", "Metallic.png", f.flag("metallicGrainInverted")),
+        roughness: texture("bundledRoughnessPath", "Roughness.png", f.flag("roughnessGrainInverted")),
         sliders: SLIDERS.map(|(size, opacity)| {
             let (size, opacity) = (f.num(size)?, f.num(opacity)?);
             (size.is_finite() && opacity.is_finite())
@@ -1360,6 +1443,90 @@ mod tests {
         assert_eq!(mode_and_dilution(vec![("dynamicsGlaze", Value::Bool(true))]), (Some(2.0), Some(0.0)));
         // none of them: as its switches say
         assert_eq!(mode_and_dilution(Vec::new()), (Some(2.0), Some(0.8)));
+    }
+
+    #[test]
+    fn an_old_file_s_missing_keys_take_the_values_brushes_had_then() {
+        let read_with = |fields: Vec<(&str, Value)>| {
+            let mut b = Builder::new();
+            let root = b.reserve();
+            let name = b.string("Old");
+            let mut all = vec![("name", name)];
+            all.extend(fields);
+            b.fill(&root, &["SilicaBrush", "NSObject"], all);
+            let mut zip = ZipWriter::new();
+            zip.add("Brush.archive", &b.finish(root));
+            read(&zip.finish()).unwrap()
+        };
+        let back = read_with(vec![
+            ("dynamicsSmudgeAccumulation", Value::Real(0.2)),
+            ("dynamicsPressureSpeed", Value::Real(0.4)),
+            ("grainBlendMode", Value::Int(19)),
+            ("dualBlendMode", Value::Int(3)),
+        ]);
+        let get = |k: &str| back.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+        // none where the file has none, not our own pen's: streamline, size by pressure, taper
+        for key in ["streamline", "pressure_size", "pen_taper_start", "touch_taper_size", "spacing_jitter"] {
+            assert_eq!(get(key), Some(0.0), "{key}");
+        }
+        // the grain moving with each stamp, at full depth and offset each stroke; the shape whole
+        assert_eq!(get("grain_behavior"), Some(0.0));
+        assert_eq!(
+            (get("grain_depth"), get("grain_offset_jitter"), get("roundness")),
+            (Some(1.0), Some(1.0), Some(1.0))
+        );
+        // the tilt angle a tenth (each tilt control following it), the flow full
+        assert!((get("tilt_angle").unwrap() - 0.1).abs() < 1e-6);
+        assert_eq!((get("size_tilt_angle"), get("flow")), (None, Some(1.0)));
+        // the wet mix pulls as the smudge does
+        assert!((get("wet_pull").unwrap() - 0.2).abs() < 1e-6 && (get("smudge_pull").unwrap() - 0.2).abs() < 1e-6);
+        // one response for all four of the pressure's uses
+        for key in ["pressure_size_response", "pressure_opacity_response", "pressure_bleed_response"] {
+            assert!((get(key).unwrap() - 0.4).abs() < 1e-6, "{key}");
+        }
+        assert!((get("pressure_roundness_response").unwrap() - 0.4).abs() < 1e-6);
+        // Darken as it was numbered, and a second once added on combining normally
+        assert_eq!(get("grain_blend"), Some(BlendMode::Darken.id() as f32));
+        assert_eq!(get("dual_blend"), Some(BlendMode::Normal.id() as f32));
+        // a smudge pull missing too: half, and the wet mix's with it
+        let none = read_with(vec![]);
+        let get = |k: &str| none.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+        assert_eq!((get("smudge_pull"), get("wet_pull")), (Some(0.5), Some(0.5)));
+    }
+
+    #[test]
+    fn an_old_file_s_canvas_grain_turns_a_quarter_round_and_isnt_inverted() {
+        let read_with = |fields: Vec<(&str, Value)>| {
+            let mut b = Builder::new();
+            let root = b.reserve();
+            let name = b.string("Old");
+            let mut all = vec![("name", name), ("textureInverted", Value::Bool(true))];
+            all.extend(fields);
+            b.fill(&root, &["SilicaBrush", "NSObject"], all);
+            let mut zip = ZipWriter::new();
+            zip.add("Brush.archive", &b.finish(root));
+            zip.add("Grain.png", b"grain");
+            let back = read(&zip.finish()).unwrap();
+            let turn = back.settings.iter().rev().find(|(key, _)| key == "grain_turn").map_or(0.0, |(_, v)| *v);
+            (turn, back.grain)
+        };
+        let inverted = |yes| Texture::Image { bytes: b"grain".to_vec(), inverted: yes };
+        // fixed to the canvas, with only the older key: 1 as 3 (a quarter turn back), 2 as 4,
+        // 3 as 2, anything else none; never inverted
+        let older = |o| vec![("textureApplication", Value::Int(1)), ("textureOrientation", Value::Int(o))];
+        assert_eq!(read_with(older(1)), (-0.5, inverted(false)));
+        assert_eq!(read_with(older(2)), (0.5, inverted(false)));
+        assert_eq!(read_with(older(3)), (1.0, inverted(false)));
+        assert_eq!(read_with(older(4)), (0.0, inverted(false)));
+        // moving, or with the newer key (which wins over the older): as it says
+        let moving = vec![("textureApplication", Value::Int(0)), ("textureOrientation", Value::Int(3))];
+        assert_eq!(read_with(moving), (-0.5, inverted(true)));
+        let both = vec![
+            ("textureApplication", Value::Int(1)),
+            ("textureOrientation", Value::Int(3)),
+            ("grainOrientation", Value::Int(2)),
+        ];
+        assert_eq!(read_with(both), (1.0, inverted(true)));
     }
 
     #[test]
