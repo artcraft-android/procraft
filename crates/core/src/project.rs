@@ -1160,7 +1160,8 @@ impl CanvasSession {
     /// The artwork as a layered PSD (groups, masks, clipping, blend modes kept) at `path`.
     pub fn export_psd(&self, path: String) -> Result<(), MobileError> {
         let p = self.pictures(true)?;
-        let layers = psd_layers(&p);
+        let flattened = self.flattened_adjustments(&p.doc)?;
+        let layers = psd_layers(&p, &flattened);
         let (icc, inks) = file_colours(&p.doc);
         let bytes = formats::psd(p.width, p.height, p.doc.dpi, &icc, &layers, &p.composite, inks.as_ref());
         self.exported(0.95);
@@ -1402,7 +1403,7 @@ impl CanvasSession {
 
 /// The PSD's layers, top first: groups as a start, their layers and an end; masks with their
 /// layers; the background colour, when shown, at the bottom.
-fn psd_layers(p: &Pictures) -> Vec<PsdLayer<'_>> {
+fn psd_layers<'a>(p: &'a Pictures, flattened: &'a crate::psd_adjustments::Flattened) -> Vec<PsdLayer<'a>> {
     let doc = &p.doc;
     let end = || PsdLayer {
         name: "",
@@ -1436,7 +1437,11 @@ fn psd_layers(p: &Pictures) -> Vec<PsdLayer<'_>> {
                     .mask_of(l.id)
                     .filter(|m| doc.layer(*m).is_some_and(|m| m.visible))
                     .and_then(|m| p.masks.get(&m));
-                PsdKind::Pixels { rgba, mask: mask.map(Vec::as_slice) }
+                // an adjustment layer as a PSD's own kind, or else flattened into pixels
+                match crate::psd_adjustments::psd_kind(l, mask.map(Vec::as_slice), flattened) {
+                    Some(kind) => kind,
+                    None => PsdKind::Pixels { rgba, mask: mask.map(Vec::as_slice) },
+                }
             }
         };
         out.push(PsdLayer {

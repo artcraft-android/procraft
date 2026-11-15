@@ -648,6 +648,8 @@ pub enum TimelineChannel {
     Rotation,
     /// 0 to 1.
     Opacity,
+    /// An adjustment clip's adjustment values (keyed by `set_timeline_adjustment_value`).
+    Adjustment,
 }
 
 /// How a key eases into the next.
@@ -662,7 +664,7 @@ pub enum TimelineEasing {
 }
 
 impl TimelineEasing {
-    fn easing(self) -> make2d_engine::timeline::Easing {
+    pub(crate) fn easing(self) -> make2d_engine::timeline::Easing {
         use make2d_engine::timeline::Easing;
         match self {
             TimelineEasing::Linear => Easing::Linear,
@@ -748,6 +750,7 @@ impl CanvasSession {
         add(TimelineChannel::Scale, k.scale.keys.iter().map(|k| (k.frame, &k.easing)).collect());
         add(TimelineChannel::Rotation, k.rotation.keys.iter().map(|k| (k.frame, &k.easing)).collect());
         add(TimelineChannel::Opacity, k.opacity.keys.iter().map(|k| (k.frame, &k.easing)).collect());
+        add(TimelineChannel::Adjustment, k.adjustment.keys.iter().map(|k| (k.frame, &k.easing)).collect());
         keys.sort_by_key(|k| k.frame);
         keys
     }
@@ -788,6 +791,7 @@ impl CanvasSession {
                 TimelineChannel::Scale => easing_at(&k.scale.keys, local),
                 TimelineChannel::Rotation => easing_at(&k.rotation.keys, local),
                 TimelineChannel::Opacity => easing_at(&k.opacity.keys, local),
+                TimelineChannel::Adjustment => easing_at(&k.adjustment.keys, local),
             }
             .unwrap_or(asked);
             match channel {
@@ -807,6 +811,8 @@ impl CanvasSession {
                     Some(o) => k.opacity.set(local, o.clamp(0.0, 1.0), easing),
                     None => return false,
                 },
+                // keyed a value at a time, knowing its layer (see `set_timeline_adjustment_value`)
+                TimelineChannel::Adjustment => return false,
             }
             if k.posed() && k.pivot.is_none() {
                 k.pivot = Some(middle.unwrap_or(centre));
@@ -838,6 +844,7 @@ impl CanvasSession {
                     k.scale.remove(local),
                     k.rotation.remove(local),
                     k.opacity.remove(local),
+                    k.adjustment.remove(local),
                 ];
                 if !k.posed() {
                     k.pivot = None;
@@ -1032,6 +1039,7 @@ impl CanvasSession {
             .or_else(|| at(k.scale.keys.iter().find(|x| x.frame == local).map(|x| &x.easing)))
             .or_else(|| at(k.rotation.keys.iter().find(|x| x.frame == local).map(|x| &x.easing)))
             .or_else(|| at(k.opacity.keys.iter().find(|x| x.frame == local).map(|x| &x.easing)))
+            .or_else(|| at(k.adjustment.keys.iter().find(|x| x.frame == local).map(|x| &x.easing)))
             .map(|e| spec_of(&e))
     }
 
@@ -1051,6 +1059,10 @@ impl CanvasSession {
                 any = true;
             }
             for key in k.rotation.keys.iter_mut().chain(k.opacity.keys.iter_mut()).filter(|x| x.frame == local) {
+                key.easing = easing.clone();
+                any = true;
+            }
+            for key in k.adjustment.keys.iter_mut().filter(|x| x.frame == local) {
                 key.easing = easing.clone();
                 any = true;
             }
@@ -1124,7 +1136,7 @@ impl CanvasSession {
 
 impl CanvasSession {
     /// The canvas drawn again after a timeline change.
-    fn redraw_timeline(&self) {
+    pub(crate) fn redraw_timeline(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let Some(c) = st.canvas.as_mut() {

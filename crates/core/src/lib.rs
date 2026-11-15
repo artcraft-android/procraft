@@ -15,6 +15,7 @@ uniffi::setup_scaffolding!();
 mod adjust;
 mod adjust_menu;
 mod adjusting;
+mod adjustment_keys;
 mod animation;
 mod brush_files;
 mod brush_libraries;
@@ -31,6 +32,8 @@ mod crisp;
 mod crop;
 mod crop_edit;
 mod device;
+#[cfg(test)]
+mod effects_tests;
 mod frame;
 #[cfg(test)]
 mod frame_cache_tests;
@@ -71,6 +74,7 @@ mod pour;
 mod presets;
 mod project;
 mod projection;
+mod psd_adjustments;
 mod quick_menu;
 mod quickshape;
 mod recolor;

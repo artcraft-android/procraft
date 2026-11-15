@@ -813,7 +813,11 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             // each mask applied to its layer first, as one step; a hidden layer below gives up
             // what it holds (the merge keeps what showed)
-            let masks = [upper, lower].into_iter().filter_map(|l| st.doc.mask_of(l).map(|m| (l, m))).collect();
+            let masks = [upper, lower]
+                .into_iter()
+                .filter(|l| st.doc.layer(*l).is_some_and(|l| !l.is_adjustment()))
+                .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
+                .collect();
             let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);
             canvas.name_next_step("merge down");
             canvas.merge_down_with_masks(upper, lower, masks, drop_lower, before, Some(within));
@@ -1117,15 +1121,6 @@ impl CanvasSession {
             st.doc = chosen_before;
             return false;
         };
-        // an adjustment layer has no pixels to merge: what it does would be lost, so they stay
-        // apart (merged in a group, it is drawn with the group)
-        if std::iter::once(lower)
-            .chain(uppers.iter().copied())
-            .any(|l| st.doc.layer(l).is_some_and(|l| l.is_adjustment()))
-        {
-            st.doc = chosen_before;
-            return false;
-        }
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
         if let Some(merged) = st.vector_merged(lower, &uppers) {
@@ -1154,9 +1149,11 @@ impl CanvasSession {
                 }),
             _ => None,
         };
-        // each layer's mask applied to it first, as one step
+        // each layer's mask applied to it first, as one step (an adjustment layer's mask says where
+        // its adjustment is laid into the layers below it)
         let masks = std::iter::once(lower)
             .chain(uppers.iter().copied())
+            .filter(|l| st.doc.layer(*l).is_some_and(|l| !l.is_adjustment()))
             .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
             .collect();
         let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);

@@ -14135,7 +14135,7 @@ fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
 }
 
 #[test]
-fn picked_layers_with_an_adjustment_layer_among_them_stay_apart() {
+fn picked_layers_with_an_adjustment_layer_among_them_merge_with_it_baked_in() {
     use crate::Adjustment;
     let Some(s) = session(64, 64) else { return };
     red_bar(&s);
@@ -14146,8 +14146,8 @@ fn picked_layers_with_an_adjustment_layer_among_them_stay_apart() {
     let grey = pixel(&s, 32, 32);
     assert!(s.pick_layer(base));
     let count = s.layers().len();
-    assert!(!s.merge_picked(), "what it does would be lost");
-    assert_eq!(s.layers().len(), count);
+    assert!(s.merge_picked(), "what it does goes into the pixels");
+    assert_eq!(s.layers().len(), count - 1);
     assert_eq!(pixel(&s, 32, 32), grey);
 }
 
