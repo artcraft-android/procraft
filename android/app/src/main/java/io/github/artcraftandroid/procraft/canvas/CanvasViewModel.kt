@@ -3743,11 +3743,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         frameJob = viewModelScope.launch {
             do {
                 frameStale = false
-                withContext(Dispatchers.Default) {
-                    // frames as large as the video they make, private layers left out
-                    val shot = s.timeLapseFrame(t.settings.side.toUInt()) ?: return@withContext
-                    t.record(shot.rgba, shot.width.toInt(), shot.height.toInt())
-                }
+                // read back at the size frames are kept, private layers left out, and kept by the
+                // core without the picture coming here: a frame after each stroke
+                withContext(Dispatchers.Default) { t.recordFrom(s) }
                 // one that couldn't be kept (the storage full) is told once
                 t.takeProblem()?.let { message = it }
             } while (frameStale)

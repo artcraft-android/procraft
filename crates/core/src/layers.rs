@@ -951,6 +951,18 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
+    /// Records the canvas as `lapse`'s next frame, read back at the size frames are kept (not the
+    /// video's): the picture stays in the core, never crossing to the app and back, so a frame
+    /// after each stroke moves a few MB, not dozens. Whether one was kept (none before the canvas
+    /// exists, while it doesn't record, or when nothing changed since the last).
+    pub fn record_time_lapse(&self, lapse: std::sync::Arc<crate::timelapse::TimeLapse>) -> bool {
+        if !lapse.recording() {
+            return false;
+        }
+        let Some(t) = self.time_lapse_frame(crate::timelapse::FRAME_SIDE) else { return false };
+        lapse.record(t.rgba, t.width, t.height)
+    }
+
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
     /// need only be read again when its layer's is new.
     pub fn layer_versions(&self) -> Vec<LayerVersion> {

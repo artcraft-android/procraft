@@ -134,11 +134,8 @@ It can't be brought back."
         let (tx, rx) = channel();
         let (session, lapse) = (Arc::clone(session), Arc::clone(lapse));
         std::thread::spawn(move || {
-            // frames as large as the video they make, private layers left out
-            let side = time_lapse_side(lapse.settings());
-            if let Some(shot) = session.time_lapse_frame(side) {
-                lapse.record(shot.rgba, shot.width, shot.height);
-            }
+            // read back at the size frames are kept, private layers left out
+            session.record_time_lapse(Arc::clone(&lapse));
             // one that couldn't be kept is told once, from the window's thread
             if let Some(text) = lapse.take_problem() {
                 crate::files::tell_later("Can't keep the time-lapse", &text);

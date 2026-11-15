@@ -3125,6 +3125,35 @@ fn a_private_picture_shows_on_the_canvas_but_not_in_the_thumbnail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A time-lapse frame is read back at the size frames are kept, whatever the video's, and kept by
+/// the core itself: after each stroke it moves a few MB, not dozens (a frame the video's size
+/// went to the app and back, and had the page faults of a tablet's drawing at 60 000 a second).
+#[test]
+fn a_time_lapse_frame_is_read_at_the_size_it_is_kept() {
+    let Some(s) = session(2048, 512) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-size-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    // the largest video: frames would have been read at its 3840
+    lapse.set_settings(crate::TimeLapseSettings { resolution: 2, quality: 1, hevc: false });
+    s.stroke_begin(PointerKind::Finger, vec![sample(100.0, 100.0, 0.0)]);
+    s.stroke_add(vec![sample(400.0, 300.0, 40.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    let frame = lapse.frame(0).unwrap();
+    assert_eq!((frame.width, frame.height), (crate::timelapse::FRAME_SIDE, crate::timelapse::FRAME_SIDE));
+    // nothing new: no frame
+    assert!(!s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    assert_eq!(lapse.count(), 1);
+    // not recording: none
+    lapse.set_recording(false);
+    s.stroke_begin(PointerKind::Finger, vec![sample(100.0, 400.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(!s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    assert_eq!(lapse.count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_private_picture_stays_out_of_the_time_lapse() {
     let Some(s) = session(100, 100) else { return };

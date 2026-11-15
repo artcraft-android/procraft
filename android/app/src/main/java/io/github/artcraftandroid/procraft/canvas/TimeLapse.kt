@@ -56,9 +56,9 @@ class TimeLapse(artwork: File) {
         get() = core.recording()
         set(on) = core.setRecording(on)
 
-    /** Keeps a frame (premultiplied RGBA, [width] × [height]) unless it is the same as the last. */
-    fun record(rgba: ByteArray, width: Int, height: Int) {
-        core.record(rgba, width.toUInt(), height.toUInt())
+    /** Keeps [session]'s canvas as the next frame, unless it is the same as the last; the picture never leaves the core. */
+    fun recordFrom(session: io.github.artcraftandroid.procraft.core.CanvasSession) {
+        session.recordTimeLapse(core)
     }
 
     /** What to tell, once, when the time-lapse couldn't be written (the storage full, say); null otherwise. */
