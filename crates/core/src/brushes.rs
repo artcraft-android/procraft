@@ -447,11 +447,16 @@ impl CanvasSession {
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
-                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady();
+                let tilts = brush.setting("preview_tilt") >= 0.5;
+                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts);
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }
-            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady();
+            // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
+            // no stamps
+            let tilts = brush.setting("preview_tilt") >= 0.5;
+            let mut stroke =
+                StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady().on_pad(tilts);
             canvas.add_stamps(&stroke.add(&samples));
             canvas.replace_stamps(&stroke.finish());
         }

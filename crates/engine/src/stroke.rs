@@ -2100,7 +2100,13 @@ impl StrokeBuilder {
     fn roundness_at(&self, p: PathPoint) -> f32 {
         let x = &self.extras;
         let leant = self.leaning(p, x.tilt_angles.roundness);
-        let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
+        // (the tilt's roundness, even upright, only where the tilt acts: not on the pad or in a
+        // preview unless the brush previews tilt)
+        let tilted = if self.pad == Some(false) {
+            1.0
+        } else {
+            x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant
+        };
         let size_left = self.pressed(p).0 * self.speed_size(p);
         self.pressed_roundness(self.drawn_share(p), p.soft[3], size_left) * tilted
     }
@@ -4112,6 +4118,20 @@ mod tests {
         assert!((shaded[0].gradation - (0.6 * reach).sqrt()).abs() < 1e-4, "{}", shaded[0].gradation);
         let rounded = stamps(&[("tilt_roundness", 0.5), ("tilt_size", 0.0)], 0.0);
         assert!((rounded[0].roundness - (1.0 - 0.5 * reach)).abs() < 1e-4, "{}", rounded[0].roundness);
+    }
+
+    #[test]
+    fn the_tilt_s_roundness_holds_only_where_the_tilt_acts() {
+        // a brush squeezed to 0.4 of its height until it leans: so drawn upright with a pen, as
+        // a finger draws it; on the pad (and in a preview) only if the brush previews tilt
+        let mut b = plain();
+        b.set_setting("tilt_roundness_max", 0.4);
+        let s = Sample::at(Vec2::new(50.0, 50.0), 1.0, 0.0);
+        let roundness = |mut builder: StrokeBuilder| builder.preview(&[s])[0].roundness;
+        assert!((roundness(StrokeBuilder::new(b.clone(), 10.0, Pointer::Stylus)) - 0.4).abs() < 0.01);
+        assert!((roundness(StrokeBuilder::new(b.clone(), 10.0, Pointer::Finger)) - 0.4).abs() < 0.01);
+        assert!((roundness(StrokeBuilder::new(b.clone(), 10.0, Pointer::Stylus).on_pad(true)) - 0.4).abs() < 0.01);
+        assert_eq!(roundness(StrokeBuilder::new(b, 10.0, Pointer::Stylus).on_pad(false)), 1.0);
     }
 
     #[test]
