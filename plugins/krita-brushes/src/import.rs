@@ -23,13 +23,14 @@ pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
     let mut made = Record::new();
     if let Some(zip) = Zip::read(bytes) {
         let names: Vec<String> = zip.names().map(str::to_owned).collect();
-        // the bundle's pictures, by their file names
+        // the bundle's pictures, by their file names, each unpacked once
+        let unpacked = std::cell::RefCell::new(std::collections::HashMap::<String, Option<Vec<u8>>>::new());
         let find = |file: &str| -> Option<Vec<u8>> {
             let plain = file.rsplit(['/', '\\']).next().unwrap_or(file);
             let found = names.iter().find(|n| {
                 (n.starts_with("brushes/") || n.starts_with("patterns/")) && n.rsplit('/').next() == Some(plain)
             })?;
-            zip.file(found)
+            unpacked.borrow_mut().entry(found.clone()).or_insert_with(|| zip.file(found)).clone()
         };
         for n in names.iter().filter(|n| n.starts_with("paintoppresets/") && n.ends_with(".kpp")) {
             if let Some(kpp) = zip.file(n) {

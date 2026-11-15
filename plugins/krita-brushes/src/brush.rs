@@ -228,13 +228,14 @@ fn read_tip(brush: &Element, find: &dyn Fn(&str) -> Option<Vec<u8>>, softness: O
     if brush.attribute("type") == Some("auto_brush") {
         let tip = AutoTip::read(brush)?;
         let (w, h) = tip.size();
-        let variants = if tip.speckled() { 8 } else { 1 };
-        let levels = if softness.is_some_and(CurveOption::varies) { 8 } else { 1 };
-        // drawn at its own size (holes and noise as fine as Krita's), else large enough to scale
+        let variants = if tip.speckled() { 4 } else { 1 };
+        let levels = if softness.is_some_and(CurveOption::varies) { 4 } else { 1 };
+        // drawn at its own size (holes and noise as fine as Krita's), else large enough to scale (the GPU
+        // draws it smaller through its mip levels)
         let side = if tip.speckled() {
-            tip.diameter.round().clamp(8.0, 512.0)
+            tip.diameter.round().clamp(8.0, 256.0)
         } else {
-            tip.diameter.round().clamp(64.0, 512.0)
+            tip.diameter.round().clamp(64.0, 256.0)
         };
         let mut seed = 0x2545_f491_u32;
         let mut random = move || {
