@@ -149,6 +149,17 @@ internal fun brushFileName(name: String, single: Boolean): String {
     return base + if (single) ".${CanvasViewModel.BRUSH_EXTENSION}" else ".${CanvasViewModel.BRUSH_SET_EXTENSION}"
 }
 
+/**
+ * The file another app's brushes from a file called [name] wait in for a canvas to open: [stamp]
+ * (to keep them in order), `-`, then the name's letters and digits in any script, its spaces, `_`,
+ * `-` and `.` (anything else made `_`). Read again by that name, its ending still says what the
+ * file is, to the brush engines plugins bring (a Krita bundle or preset) as when it came.
+ */
+internal fun pendingBrushFileName(stamp: Long, name: String): String {
+    val kept = name.map { if (it.isLetterOrDigit() || it in " _-.") it else '_' }.joinToString("").trim()
+    return "$stamp-${kept.ifEmpty { "Imported" }}"
+}
+
 /** The gallery, the open artwork and the state of the controls around it; outlives configuration changes. */
 class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var session: CanvasSession? = null
@@ -4950,7 +4961,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (!any) return false
             withContext(Dispatchers.IO) {
                 pendingBrushDir.mkdirs()
-                File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.other").writeBytes(bytes)
+                File(pendingBrushDir, pendingBrushFileName(System.nanoTime(), name)).writeBytes(bytes)
             }
             message = "Brushes will be added to the library when a canvas opens."
             return true
