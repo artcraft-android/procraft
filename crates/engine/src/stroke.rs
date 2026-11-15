@@ -886,7 +886,7 @@ pub struct StrokeBuilder {
     brush: Brush,
     diameter: f32,
     pointer: Pointer,
-    /// The pressure (smoothed) and where the input was at the last point streamline settled.
+    /// The pressure (smoothed) and where the path was at the last point all smoothing settled.
     pressure: Option<f32>,
     pressed_from: Option<Vec2>,
     smoothed: Option<PathPoint>,
@@ -929,7 +929,8 @@ pub struct StrokeBuilder {
     speed: f32,
     /// Whether the speed has been measured (the first move is taken as it is).
     speed_known: bool,
-    /// The pressure as each use follows it, at the last sample; and how many samples so far.
+    /// The pressure as each use follows it, at the last point all smoothing settled; and how many
+    /// such points so far.
     soft: Option<[f32; 5]>,
     segments: u32,
     /// A sample stroke drawn for show: no speed, and the pressure taken as it comes.
@@ -1606,7 +1607,7 @@ impl StrokeBuilder {
             self.averaged.mirrored = !self.input.tip_attached && !weights.is_empty();
             self.weights = Some(weights.into());
         }
-        // (each use's pressure follows once streamline has settled it, see `pressed_on`)
+        // (each use's pressure follows once all smoothing has settled it, see `pressed_on`)
         let target = PathPoint { pos: s.pos, pressure, soft: [1.0; 5], tilt, azimuth, roll, speed: self.speed };
         // (none for the first sample; nothing of its own for one in a batch with the last)
         let dt = self.last_sample.map(|last| if batched { 0.0 } else { (s.time_ms - last.time_ms).clamp(0.5, 50.0) });
@@ -1646,8 +1647,7 @@ impl StrokeBuilder {
         let streams = self.brush.streamline > 0.0 || self.pressure_streams();
         let Some(dt) = dt.filter(|_| !self.exact && !self.steady && streams) else {
             self.smoothed = Some(target);
-            let pressed = self.pressed_on(target, target.pos, dt);
-            self.stabilise_to(pressed, samples, out);
+            self.stabilise_to(target, dt, samples, out);
             return;
         };
         self.streaming.push_back((target, dt));
@@ -1712,8 +1712,7 @@ impl StrokeBuilder {
             None => to,
         };
         self.smoothed = Some(smoothed);
-        let pressed = self.pressed_on(smoothed, to.pos, Some(dt));
-        self.stabilise_to(pressed, (dt / self.tuned_interval()).min(MOST_STEPS), out);
+        self.stabilise_to(smoothed, Some(dt), (dt / self.tuned_interval()).min(MOST_STEPS), out);
     }
 
     /// Takes the path and pressure on through streamline's window to the input, as if no more
@@ -1748,23 +1747,24 @@ impl StrokeBuilder {
         self.pointer.has_pressure() && self.pressure_smoothing() > 0.0
     }
 
-    /// `p`, a point streamline has settled (its input was `at`, `dt` milliseconds after the last's;
-    /// none: the first), with each use's pressure as the brush's curves take its pressure (a
-    /// finger's full, whatever they say): followed as they lag and even out (see
-    /// [`StrokeBuilder::soften`]), unless the stroke is drawn for show or is an exact path.
-    fn pressed_on(&mut self, p: PathPoint, at: Vec2, dt: Option<f64>) -> PathPoint {
+    /// `p`, a point motion filtering, streamline and stabilisation have all settled (`dt`
+    /// milliseconds after the last; none: the first), with each use's pressure as the brush's
+    /// curves take its pressure (a finger's full, whatever they say): followed as they lag and
+    /// even out over the way the path went from the last (see [`StrokeBuilder::soften`]), unless
+    /// the stroke is drawn for show or is an exact path.
+    fn pressed_on(&mut self, p: PathPoint, dt: Option<f64>) -> PathPoint {
         let pen = self.pointer.has_pressure();
         let curved = if pen { self.brush.pressures(p.pressure) } else { [1.0; 5] };
         let soft = match (self.pressed_from, self.soft, dt) {
             (Some(from), Some(before), Some(dt)) if !self.steady && !self.exact => {
                 let frames = if dt > 0.0 { (dt * 0.06) as f32 } else { sample_frames(pen) };
-                self.soften(curved, before, frames, at.distance(from))
+                self.soften(curved, before, frames, p.pos.distance(from))
             }
             _ => curved,
         };
         self.soft = Some(soft);
         self.pressure = Some(p.pressure);
-        self.pressed_from = Some(at);
+        self.pressed_from = Some(p.pos);
         self.segments = self.segments.saturating_add(1);
         PathPoint { soft, ..p }
     }
@@ -1793,13 +1793,14 @@ impl StrokeBuilder {
         self.averaged.settled = i;
     }
 
-    /// Takes the path on to `to`, a point streamline settled `samples` samples (at the tuned rate)
-    /// after the last, through stabilisation: each point waits until those after it within reach
-    /// of its average are known.
-    fn stabilise_to(&mut self, to: PathPoint, samples: f64, out: &mut Vec<Stamp>) {
+    /// Takes the path on to `to`, a point streamline settled `dt` milliseconds (`samples` samples
+    /// at the tuned rate) after the last, through stabilisation: each point waits until those
+    /// after it within reach of its average are known.
+    fn stabilise_to(&mut self, to: PathPoint, dt: Option<f64>, samples: f64, out: &mut Vec<Stamp>) {
         let half = self.stabilised();
         if half == 0 {
-            self.path_to(to, out);
+            let pressed = self.pressed_on(to, dt);
+            self.path_to(pressed, out);
             return;
         }
         self.stable.add(to, samples);
@@ -1820,8 +1821,11 @@ impl StrokeBuilder {
             self.stable.slide(&mut sum, i, half);
             i += 1;
             if let Some(next) = next {
+                // (its points a sample apart at the tuned rate)
                 let next = self.still_where_it_was(&self.stable, next);
-                self.path_to(next, out);
+                let dt = self.pressed_from.map(|_| self.tuned_interval());
+                let pressed = self.pressed_on(next, dt);
+                self.path_to(pressed, out);
             }
         }
         self.stable.settled = i;
@@ -3019,6 +3023,27 @@ mod tests {
         assert!(held > plain_settled, "{held} {plain_settled}");
         // as it ends, near what the pen pressed (left behind, it would be half as wide again)
         assert!(end < plain_end * 1.2, "{end} {plain_end}");
+    }
+
+    #[test]
+    fn the_brushs_pressure_curves_take_the_pressure_stabilisation_has_averaged() {
+        // a pen pressing fully and lightly by turns, stabilised: its pressure averages to a half
+        // before the size curve takes it (a tenth there), rather than the curve's ends averaging
+        // to a half
+        let samples: Vec<Sample> = (0..200)
+            .map(|i| {
+                let pressure = if i % 2 == 0 { 1.0 } else { 0.0 };
+                Sample::at(Vec2::new(i as f32 * 2.0, 50.0), pressure, f64::from(i) * 1000.0 / 240.0)
+            })
+            .collect();
+        let mut b = Brush { pressure_size: 1.0, ..plain() };
+        b.size_curve = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.1), Vec2::new(1.0, 1.0)]);
+        b.set_setting("stabilization", 0.5);
+        let mut s = StrokeBuilder::new(b, 20.0, Pointer::Stylus);
+        s.add(&samples);
+        let stamps = s.finish();
+        let middle = stamps.get(stamps.len() / 2).map_or(0.0, |st| st.radius);
+        assert!(middle < 10.0 * 0.2, "{middle}");
     }
 
     #[test]
