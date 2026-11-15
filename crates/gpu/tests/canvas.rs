@@ -467,6 +467,107 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
     assert_eq!(red(41, 11), 255);
 }
 
+/// The glass's blurred scene is drawn again only when what it shows could have changed: kept
+/// while the canvas stays put and changes only far from the glass, drawn again when the view
+/// moves or the canvas changes near it, and then as a canvas that never kept one shows it.
+#[test]
+fn the_glass_is_blurred_again_only_when_what_it_shows_changes() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (400u32, 100u32);
+    let make_target = || {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glass kept"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let target = make_target();
+    let view = target.create_view(&Default::default());
+    // a 300 square canvas a pixel to a pixel at the left of the window; the glass over its top
+    // right corner (x 250 to 300, y 0 to 30) and the surround past it
+    let regions = [[250.0, 0.0, 390.0, 30.0, 8.0, 1.0]];
+    let backdrop = Some(Backdrop { regions: &regions, windows: &[], sigma: 24.0 });
+    let fitted = View::centred(Vec2::new(150.0, 150.0), 1.0, 0.0, (300, 300)).unwrap().to_screen();
+    let show = |canvas: &mut Canvas, doc: &mut Document, view: &wgpu::TextureView, to_screen| {
+        canvas.render(
+            &gpu,
+            doc,
+            Some(Target {
+                view,
+                format,
+                size: (w, h),
+                to_screen,
+                surround: [0.0, 0.0, 0.0],
+                grid: None,
+                selection: None,
+                backdrop,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                grey: false,
+            }),
+        );
+    };
+    let mut doc = Document::new(300, 300);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    show(&mut canvas, &mut doc, &view, fitted);
+    assert_eq!(canvas.frosts(), 1);
+    // nothing changed: kept
+    show(&mut canvas, &mut doc, &view, fitted);
+    assert_eq!(canvas.frosts(), 1);
+    // a stroke at the bottom left, far from the glass: the canvas drawn again, the glass kept
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(40.0, 260.0), 10.0)]);
+    let composites = canvas.composites();
+    show(&mut canvas, &mut doc, &view, fitted);
+    canvas.end_stroke();
+    show(&mut canvas, &mut doc, &view, fitted);
+    assert!(canvas.composites() > composites);
+    assert_eq!(canvas.frosts(), 1, "a change far from the glass");
+    // one under it: blurred again
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(280.0, 20.0), 10.0)]);
+    show(&mut canvas, &mut doc, &view, fitted);
+    canvas.end_stroke();
+    show(&mut canvas, &mut doc, &view, fitted);
+    let after = canvas.frosts();
+    assert!(after > 1, "a change under the glass");
+    // the view moved: blurred again
+    let moved = View::centred(Vec2::new(152.0, 150.0), 1.0, 0.0, (300, 300)).unwrap().to_screen();
+    show(&mut canvas, &mut doc, &view, moved);
+    assert_eq!(canvas.frosts(), after + 1);
+    show(&mut canvas, &mut doc, &view, fitted);
+    assert_eq!(canvas.frosts(), after + 2);
+    // another far away, kept: what shows is as a canvas that drew its glass afresh shows it
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(60.0, 240.0), 10.0)]);
+    canvas.end_stroke();
+    show(&mut canvas, &mut doc, &view, fitted);
+    assert_eq!(canvas.frosts(), after + 2);
+    let kept = read(&gpu, &target, w, h);
+    let fresh_target = make_target();
+    let fresh_view = fresh_target.create_view(&Default::default());
+    let mut fresh = Canvas::new(&gpu, &doc).unwrap();
+    for (at, r) in [(Vec2::new(40.0, 260.0), 10.0), (Vec2::new(280.0, 20.0), 10.0), (Vec2::new(60.0, 240.0), 10.0)] {
+        fresh.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+        fresh.add_stamps(&[dot(at, r)]);
+        fresh.end_stroke();
+    }
+    show(&mut fresh, &mut doc, &fresh_view, fitted);
+    let drawn = read(&gpu, &fresh_target, w, h);
+    assert_eq!(kept, drawn);
+    // and the glass shows the stroke under it, blurred: darker than the white canvas there
+    assert!(pixel(&kept, w, 280, 20)[0] < 250, "{:?}", pixel(&kept, w, 280, 20));
+}
+
 /// A canvas with a hard edge at x = 100 shown in a 400 x 100 target, under `backdrop`.
 fn frosted_edge(gpu: &Gpu, regions: &[[f32; 6]], windows: &[[f32; 6]]) -> Vec<u8> {
     let mut doc = Document::new(100, 100);
