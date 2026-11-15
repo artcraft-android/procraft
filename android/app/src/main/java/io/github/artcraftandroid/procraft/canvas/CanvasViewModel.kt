@@ -155,6 +155,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     var screen by mutableStateOf(Screen.GALLERY)
         private set
+
+    /**
+     * Whether the app's window is in wide colour: only while the open canvas shows in it (a Display
+     * P3, CMYK or imported-profile canvas, Wide Color on), so its window and the canvas's surface
+     * always agree. MainActivity follows.
+     */
+    var wideColorWindow by mutableStateOf(false)
+        private set
+
     val store = ArtworkStore(File(app.filesDir, "artworks"))
     var artworks by mutableStateOf<List<Artwork>>(emptyList())
         private set
@@ -1046,6 +1055,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** How the colour panel and swatches show the canvas's colours: its space, its press. */
     private fun refreshCanvasSpace(s: CanvasSession) {
+        // a canvas put in another profile may go into wide colour or out of it
+        refreshWideColor(s)
         val name = s.profile()
         val space = io.github.artcraftandroid.procraft.ui.CanvasSpace
         val p3 = io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3
@@ -1405,10 +1416,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyFitInsets()
     }
 
-    /** The settings the canvas itself keeps: simplified undos and the speed distance. */
+    /** The settings the canvas itself keeps: simplified undos, the speed distance and whether wide colour may be. */
     private fun applyAppSettings(s: CanvasSession) {
         s.setSimplifiedUndos(interfacePrefs.getBoolean(SIMPLIFIED_UNDOS, true))
         s.setSpeedDistance(interfacePrefs.getFloat(SPEED_DISTANCE, 1f))
+        s.setWideColour(wideColorAllowed())
+        refreshWideColor(s)
+    }
+
+    /** Whether a canvas may show in wide colour: the screen takes it. */
+    private fun wideColorAllowed(): Boolean = getApplication<Application>().resources.configuration.isScreenWideColorGamut
+
+    /** The window follows [s]'s canvas into wide colour and out of it. */
+    private fun refreshWideColor(s: CanvasSession) {
+        wideColorWindow = s.showsWideColour()
     }
 
     /** What fitting the canvas keeps clear of: the top bar and the sidebar, with Fit Canvas Inside Interface. */
@@ -2463,6 +2484,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closePluginPanel()
         val lapse = timeLapse
         session = null
+        wideColorWindow = false
         artworkDir = null
         panel = Panel.NONE
         screen = Screen.GALLERY

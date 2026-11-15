@@ -52,8 +52,6 @@ class MainActivity : ComponentActivity() {
         // text's fonts given to the core, off the main thread
         io.github.artcraftandroid.procraft.canvas.TextRenderer.prepare(assets, java.io.File(filesDir, "fonts"))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
-        // wide colour, so a Display P3 canvas's colours show as they are around it too
-        if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
         // a colour dragged down from the top bar puts back the bars the drag showed
         vm.hideSystemBars = barsHider
@@ -71,6 +69,14 @@ class MainActivity : ComponentActivity() {
             ) { AppRoot(model) }
         }
         lifecycleScope.launch { snapshotFlow { model.projectCanvas }.collect { showProjection() } }
+        // wide colour while a Display P3 canvas is open, so its colours show as they are around it
+        // too; else the default, as the canvas's surface then is: a wide window has had the
+        // interface over the canvas blurred away, or the canvas dulled, on some tablets' screens
+        lifecycleScope.launch {
+            snapshotFlow { model.wideColorWindow }.collect { wide ->
+                window.colorMode = if (wide) android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT else android.content.pm.ActivityInfo.COLOR_MODE_DEFAULT
+            }
+        }
         importOpened(intent)
     }
 

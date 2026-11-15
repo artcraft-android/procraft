@@ -4911,6 +4911,23 @@ fn changing_the_profile_keeps_the_numbers_and_undoes() {
 }
 
 #[test]
+fn only_a_canvas_past_srgb_puts_the_window_in_wide_colour() {
+    let Some(s) = session(40, 40) else { return };
+    // an sRGB canvas shows the same either way: its window stays plain sRGB
+    assert!(!s.shows_wide_colour());
+    assert!(s.change_profile("Display P3".to_owned()));
+    assert!(s.shows_wide_colour());
+    // Wide Color off: a Display P3 canvas shows in sRGB too
+    s.set_wide_colour(false);
+    assert!(!s.shows_wide_colour());
+    s.set_wide_colour(true);
+    assert!(s.shows_wide_colour());
+    // undone back to sRGB, out of it again
+    assert_eq!(s.undo().as_deref(), Some("Set color profile \"Display P3\""));
+    assert!(!s.shows_wide_colour());
+}
+
+#[test]
 fn an_artwork_never_shown_exports_offscreen() {
     let Some(s) = session(40, 40) else { return };
     s.set_brush_size(0.4);

@@ -427,6 +427,9 @@ pub(crate) struct State {
     pub(crate) key_drag: Option<keys::KeyDragging>,
     pub(crate) window_size: (u32, u32),
     pub(crate) reconfigure: bool,
+    /// Whether the window's surface may be wide colour (Display P3) at all: the app turns it off
+    /// for a screen that shows it wrongly. On until told.
+    pub(crate) wide_colour_allowed: bool,
     tool: ToolKind,
     /// The tool chosen before this one (not one a stroke only borrowed).
     previous_tool: Option<ToolKind>,
@@ -1448,6 +1451,7 @@ impl CanvasSession {
             key_drag: None,
             window_size: (1, 1),
             reconfigure: false,
+            wide_colour_allowed: true,
             tool: ToolKind::Paint,
             previous_tool: None,
             text_edit: None,
@@ -2028,6 +2032,23 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         st.light = on;
         self.shared.frame(&mut st);
+    }
+
+    /// Whether the window may show the canvas in wide colour (Display P3) where the screen takes
+    /// it. Off, every canvas shows in sRGB (a Display P3 one clipped to it): for a screen whose
+    /// compositor blurs or dulls a wide-colour window.
+    pub fn set_wide_colour(&self, allowed: bool) {
+        let mut st = self.shared.lock();
+        if st.wide_colour_allowed != allowed {
+            st.wide_colour_allowed = allowed;
+            self.shared.frame(&mut st);
+        }
+    }
+
+    /// Whether the canvas shows in wide colour now (see [`State::wide_colour`]): the app's window
+    /// follows, so it is wide only while the canvas is.
+    pub fn shows_wide_colour(&self) -> bool {
+        self.shared.lock().wide_colour()
     }
 
     /// Fits the whole canvas in the window again, at once.
