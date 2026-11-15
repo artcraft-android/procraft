@@ -20,6 +20,9 @@ use crate::input::{Pointer, Sample};
 use crate::stroke::{InputSettings, PathSpot, Stamp, StrokeBuilder};
 use crate::vector_fill::{self, Wall};
 
+mod merge;
+pub use merge::Merging;
+
 /// A kept stroke's name in its layer: never reused there, so what refers to a stroke (a fill's
 /// walls, an eraser's marks) still means it after others come and go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
