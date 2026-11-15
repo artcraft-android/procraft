@@ -791,6 +791,15 @@ impl CanvasSession {
             return false;
         }
         let before = st.doc.clone();
+        // plain vector layers merge as vector layers, their strokes kept as strokes
+        if let Some(merged) = st.vector_merged(lower, &[upper]) {
+            st.keep_vector_merge("merge down", lower, merged, before, |d| {
+                d.finish_merge_down(id);
+            });
+            st.revision += 1;
+            self.shared.frame(st);
+            return true;
+        }
         // a layer changes the one below only where it is painted: only that much is kept for undo
         // (none at all for an empty one), not a copy of the whole of it
         let within = st.painted_box(upper).unwrap_or(make2d_engine::geom::IRect::new(0, 0, 0, 0));
@@ -1112,6 +1121,14 @@ impl CanvasSession {
         }
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
+        if let Some(merged) = st.vector_merged(lower, &uppers) {
+            st.keep_vector_merge("merge layers", lower, merged, before, |d| {
+                d.finish_merge_chosen(lower, &uppers);
+            });
+            st.revision += 1;
+            self.shared.frame(st);
+            return true;
+        }
         // the layer below changes only where they (a group's layers within it) are painted: only
         // that much is kept for undo, where the GPU can tell
         st.flush();

@@ -93,6 +93,7 @@ mod turn;
 mod tween;
 mod vector_file;
 mod vector_layer;
+mod vector_merge;
 mod vector_share;
 #[cfg(target_os = "android")]
 mod window;

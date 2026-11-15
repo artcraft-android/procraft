@@ -302,7 +302,7 @@ impl State {
 
     /// Vector layer `layer`'s pixels brought up to what it holds now from what it held (`before`),
     /// as steps of whatever undo step is being made: only where the two differ is drawn again.
-    fn redraw_vector_changed(&mut self, layer: LayerId, before: &VectorContent) {
+    pub(crate) fn redraw_vector_changed(&mut self, layer: LayerId, before: &VectorContent) {
         let Some(content) = self.doc.layer(layer).and_then(|l| l.vector.clone()) else { return };
         let changed = content.changed_from(before);
         self.draw_vector(layer, &content, Some(changed));

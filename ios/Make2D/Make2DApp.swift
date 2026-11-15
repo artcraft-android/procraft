@@ -101,7 +101,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "layers-vector", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -884,6 +884,8 @@ enum ScreenCapture {
         case "effect-pixelate", "effect-dither", "effect-vignette", "effect-layer", "effect-layer-dither",
              "layers-adjustment", "layers-style":
             effects(name, model)
+        case "layers-vector-merge":
+            VectorMergeScene.show(model)
         case "adjustments-layer":
             adjustAsLayer = true
             model.toggle(.adjustments)
