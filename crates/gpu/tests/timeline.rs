@@ -193,3 +193,124 @@ fn a_drawing_moves_turns_and_fades_by_its_keys() {
 fn first_clip(doc: &mut Document) -> &mut make2d_engine::timeline::Clip {
     &mut doc.timeline.as_mut().unwrap().tracks[0].clips[0]
 }
+
+/// Paint, row after row: a pixel per column (premultiplied rgba, or none for transparent).
+fn columns(cols: [Option<[u8; 4]>; SIDE as usize]) -> Vec<u8> {
+    let mut px = vec![0_u8; (SIDE * SIDE * 4) as usize];
+    for y in 0..SIDE {
+        for (x, c) in cols.iter().enumerate() {
+            if let Some(c) = c {
+                let at = ((y * SIDE + x as u32) * 4) as usize;
+                px[at..at + 4].copy_from_slice(c);
+            }
+        }
+    }
+    px
+}
+
+const WHITE: [u8; 3] = [255, 255, 255];
+const BLACK: [u8; 3] = [0, 0, 0];
+const RED: [u8; 3] = [220, 40, 40];
+
+/// A canvas of two layers each on a track of its own, the lower a matte's source (white in
+/// columns 0 to 3, black in 4 and 5, nothing in 6 and 7) and the upper red but in column 4;
+/// played, on frame 0.
+fn matte_canvas(gpu: &Gpu) -> (Document, Canvas) {
+    let mut doc = Document::new(SIDE, SIDE);
+    let source = doc.current();
+    let above = doc.add_layer();
+    assert!(doc.start_timeline());
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let (w, k, r) = (Some([255, 255, 255, 255]), Some([0, 0, 0, 255]), Some([220, 40, 40, 255]));
+    canvas.upload_layer(gpu, source, &columns([w, w, w, w, k, k, None, None])).unwrap();
+    canvas.upload_layer(gpu, above, &columns([r, r, r, r, None, r, r, r])).unwrap();
+    canvas.set_play_frame(Some(0));
+    (doc, canvas)
+}
+
+/// Columns 0 to 7 of row 2.
+fn row(p: &[u8]) -> Vec<[u8; 3]> {
+    (0..SIDE).map(|x| p[((2 * SIDE + x) * 4) as usize..((2 * SIDE + x) * 4 + 3) as usize].try_into().unwrap()).collect()
+}
+
+#[test]
+fn mattes_mask_the_clip_above() {
+    use make2d_engine::timeline::MaskMode;
+    let Some(gpu) = gpu() else { return };
+    let (mut doc, mut canvas) = matte_canvas(&gpu);
+    let mask = |doc: &mut Document, m| doc.timeline.as_mut().unwrap().tracks[1].clips[0].mask = m;
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), [RED, RED, RED, RED, BLACK, RED, RED, RED], "no mask");
+    // the source's alpha: red only where it is painted, the source not drawn
+    mask(&mut doc, MaskMode::Alpha);
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), [RED, RED, RED, RED, WHITE, RED, WHITE, WHITE], "alpha");
+    // its lightness: red only where it is white
+    mask(&mut doc, MaskMode::Luminance);
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), [RED, RED, RED, RED, WHITE, WHITE, WHITE, WHITE], "luma");
+    // clipping: as the alpha matte, but the source draws too
+    mask(&mut doc, MaskMode::Clipping);
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), [RED, RED, RED, RED, BLACK, RED, WHITE, WHITE], "clipping");
+    // a matte's own opacity thins what it shows
+    doc.timeline.as_mut().unwrap().tracks[0].clips[0].opacity = 0.5;
+    mask(&mut doc, MaskMode::Alpha);
+    let thin = row(&render(&mut canvas, &gpu, &mut doc))[0];
+    assert!((thin[1] as i32 - 147).abs() <= 2, "half the red over white: {thin:?}");
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+}
+
+#[test]
+fn a_group_clip_composites_as_one() {
+    use make2d_engine::timeline::{ClipId, MaskMode};
+    let Some(gpu) = gpu() else { return };
+    let (mut doc, mut canvas) = matte_canvas(&gpu);
+    let tl = doc.timeline.as_mut().unwrap();
+    let ids: Vec<ClipId> = tl.tracks.iter().map(|t| t.clips[0].id).collect();
+    tl.tracks[1].clips[0].mask = MaskMode::Alpha;
+    let alpha = row(&render(&mut canvas, &gpu, &mut doc));
+    // grouped, a matte inside the group still masks
+    let tl = doc.timeline.as_mut().unwrap();
+    let g = tl.group(&ids, "Group").unwrap();
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), alpha);
+    // the group at half opacity fades as one: the source drawn under the red doesn't show
+    doc.timeline.as_mut().unwrap().clip_mut(g).unwrap().opacity = 0.5;
+    doc.timeline.as_mut().unwrap().clip_mut(ids[1]).unwrap().mask = MaskMode::None;
+    let faded = row(&render(&mut canvas, &gpu, &mut doc));
+    assert!((faded[0][1] as i32 - 147).abs() <= 2 && (faded[0][2] as i32 - 147).abs() <= 2, "{:?}", faded[0]);
+    assert!((faded[4][0] as i32 - 128).abs() <= 2, "half the black: {:?}", faded[4]);
+    assert_eq!(faded[7], faded[0]);
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+}
+
+#[test]
+fn played_frames_show_through_the_camera() {
+    use make2d_engine::timeline::{CameraPose, Easing};
+    let Some(gpu) = gpu() else { return };
+    let mut doc = Document::new(SIDE, SIDE);
+    let layer = doc.current();
+    assert!(doc.start_timeline());
+    let mut canvas = canvas_for(&gpu, &doc, &[layer]);
+    canvas.set_play_frame(Some(0));
+    canvas.set_camera_view(true);
+    let still = row(&render(&mut canvas, &gpu, &mut doc));
+    assert_eq!(still[0], RED, "no camera keys: as it is");
+    // looking 3 to the left of the middle: column 0 shows in column 3, and what is left of it
+    // comes from beyond the canvas (the background)
+    let side = SIDE as f32;
+    let looking = CameraPose { center: [side / 2.0 - 3.0, side / 2.0], zoom: 1.0, rotation: 0.0 };
+    doc.timeline.as_mut().unwrap().camera.set(0, looking, Easing::Linear);
+    let moved = row(&render(&mut canvas, &gpu, &mut doc));
+    assert_eq!(moved[3], RED, "{moved:?}");
+    assert_eq!(moved[0], WHITE);
+    // not playing, or the camera view off: the canvas as it is
+    canvas.set_camera_view(false);
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), still);
+    canvas.set_camera_view(true);
+    canvas.set_play_frame(None);
+    assert_eq!(row(&render(&mut canvas, &gpu, &mut doc)), still);
+    // a half turn: column 0 shows in column 7
+    canvas.set_play_frame(Some(0));
+    let turned = CameraPose { rotation: std::f32::consts::PI, ..CameraPose::still(side, side) };
+    doc.timeline.as_mut().unwrap().camera.set(0, turned, Easing::Linear);
+    let row_turned = row(&render(&mut canvas, &gpu, &mut doc));
+    assert_eq!(row_turned[7], RED, "{row_turned:?}");
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+}

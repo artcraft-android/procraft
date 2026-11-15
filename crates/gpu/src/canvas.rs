@@ -15,6 +15,7 @@ use make2d_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use make2d_engine::geom::{Affine, IRect};
 use make2d_engine::stroke::{MOST_ROUNDNESS, Stamp};
 use make2d_engine::textures::{self, GrayImage, TEXTURE_SIZE};
+use make2d_engine::timeline::{MaskMode, PlanItem, Showing, Shows, Timeline};
 
 use wgpu::util::DeviceExt;
 
@@ -1970,6 +1971,11 @@ pub struct Canvas {
     /// A timeline drawing moved, scaled or turned by its keys, drawn there before it is laid onto
     /// the canvas (made the first time one is).
     posed: OnDemand,
+    /// Where a timeline frame's group clips, mattes and camera are composited, a reel for each
+    /// depth of group clip (made as wanted).
+    reels: Vec<Reel>,
+    /// Playing, the frame is shown through the timeline's camera (exports always are).
+    camera_view: bool,
     /// Where a group's layers are composited before the group goes onto the stack below: a pair
     /// for each depth of group (made when first needed).
     groups: Vec<([wgpu::Texture; 2], [wgpu::TextureView; 2])>,
@@ -2376,6 +2382,8 @@ impl Canvas {
             composite_view,
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
             posed: OnDemand::new("posed drawing", width, height, LAYER_FORMAT),
+            reels: Vec::new(),
+            camera_view: false,
             groups: Vec::new(),
             play_frame: None,
             timeline_frame: 0,
@@ -2532,6 +2540,7 @@ impl Canvas {
         self.uploads.kept.lock().unwrap_or_else(PoisonError::into_inner).clear();
         // made again when a group composites on its own
         self.groups.clear();
+        self.reels.clear();
     }
 
     /// Lets go of the shape and grain images until something wants them again (a canvas left
@@ -3920,6 +3929,19 @@ impl Canvas {
     pub fn set_timeline_frame(&mut self, frame: u32) {
         if self.timeline_frame != frame {
             self.timeline_frame = frame;
+            self.invalidate();
+        }
+    }
+
+    /// Whether a timeline frame played shows through the timeline's camera.
+    pub fn camera_view(&self) -> bool {
+        self.camera_view
+    }
+
+    /// Playing, the frame shows through the timeline's camera (or not): what an export shows.
+    pub fn set_camera_view(&mut self, on: bool) {
+        if self.camera_view != on {
+            self.camera_view = on;
             self.invalidate();
         }
     }
@@ -5360,6 +5382,7 @@ impl Canvas {
             gpu.queue.write_buffer(&self.wet_params, 0, &wet_uniforms.data);
         }
         self.make_groups(device, group_levels(doc));
+        self.make_reels(doc);
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
         // after the caches: caches just made want the whole picture composited again
         let dirty = self.dirty.intersect(self.full());
@@ -6239,6 +6262,15 @@ impl Canvas {
         self.blend_down(device, encoder, uniforms, view, None, uniform, into)
     }
 
+    /// Makes sure there is a reel for each depth of `doc`'s timeline's group clips, and the top
+    /// level's (its textures made only when wanted).
+    fn make_reels(&mut self, doc: &Document) {
+        let depth = doc.timeline.as_ref().map_or(0, |t| t.group_depth() + 1);
+        while self.reels.len() < depth {
+            self.reels.push(Reel::new(self.width, self.height));
+        }
+    }
+
     /// Makes sure there is a pair of group textures for each of `depth` levels.
     fn make_groups(&mut self, device: &wgpu::Device, depth: usize) {
         while self.groups.len() < depth {
@@ -7079,7 +7111,7 @@ impl Canvas {
         }
         if let Some(tl) = &doc.timeline {
             let (frame, playing) = self.timeline_at();
-            return Some(tl.showing(frame, playing).iter().flat_map(|s| item_layers(doc, s.root)).collect());
+            return Some(tl.drawn(frame, playing).iter().flat_map(|r| item_layers(doc, *r)).collect());
         }
         let a = doc.animation.as_ref()?;
         let frames = animation::frames(doc);
@@ -7442,27 +7474,9 @@ impl Canvas {
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
-        // a timeline: the drawings its frame shows (with onion skins while drawing), each as one
+        // a timeline: its frame
         if top && let Some(tl) = &doc.timeline {
-            let (frame, playing) = self.timeline_at();
-            for s in tl.showing(frame, playing) {
-                let blend = (s.blend != BlendMode::Normal).then_some(s.blend);
-                let look = match s.look {
-                    FrameLook::Shown => Look { opacity: s.opacity, pose: s.pose, blend, ..Look::PLAIN },
-                    FrameLook::Onion { color, opacity } => Look {
-                        tint: [color[0], color[1], color[2], 1.0],
-                        opacity: opacity * s.opacity,
-                        pose: s.pose,
-                        blend,
-                    },
-                    FrameLook::Hidden => continue,
-                };
-                let Some(layer) = doc.layer(s.root) else { continue };
-                if doc.soloed_out(s.root) || look.opacity <= 0.0 {
-                    continue;
-                }
-                self.composite_unit(device, doc, encoder, uniforms, rect, layer, look, stack, current);
-            }
+            self.composite_timeline(device, doc, tl, encoder, uniforms, rect, stack, current);
             return;
         }
         // Animation Assist: the top level's frames show around the current (or played) one
@@ -7591,14 +7605,67 @@ impl Canvas {
                 None => return,
             },
         };
-        let pose = look.pose.unwrap_or(Affine::IDENTITY);
+        let blend = look.blend.unwrap_or(layer.blend);
+        let uniform = LayerUniform {
+            opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
+            blend: blend.id(),
+            tint: look.tint,
+            ..Default::default()
+        };
+        self.lay(
+            device,
+            encoder,
+            uniforms,
+            rect,
+            source,
+            Some(look.pose.unwrap_or(Affine::IDENTITY)),
+            uniform,
+            blend,
+            stack,
+            current,
+        );
+    }
+
+    /// `view` (a picture the canvas's size) onto `stack` as `uniform` and `blend` say, first
+    /// redrawn through `pose` (each pixel of it carried where the pose takes it, bilinear) onto
+    /// the posed texture when there is one.
+    #[allow(clippy::too_many_arguments)]
+    fn lay(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        view: &wgpu::TextureView,
+        pose: Option<Affine>,
+        uniform: LayerUniform,
+        blend: BlendMode,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let Some(pose) = pose else {
+            self.draw_onto(
+                device,
+                encoder,
+                uniforms,
+                rect,
+                view,
+                None,
+                &self.stroke_view,
+                uniform,
+                blend,
+                stack,
+                current,
+            );
+            return;
+        };
         let Some(back) = pose.inverse() else { return };
         let (_, posed) = self.posed.get(device);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("posed"),
             layout: &self.pipelines.transform_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(source) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.everything) },
             ],
@@ -7618,14 +7685,279 @@ impl Canvas {
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
         }
-        let blend = look.blend.unwrap_or(layer.blend);
-        let uniform = LayerUniform {
-            opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
-            blend: blend.id(),
-            tint: look.tint,
-            ..Default::default()
-        };
         self.draw_onto(device, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
+    }
+
+    /// Timeline `tl`'s frame (the one played, or drawn on with its onion skins) onto `stack`:
+    /// each track's clip there bottom up, through the camera while it shows through it.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_timeline(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        tl: &Timeline,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let (frame, playing) = self.timeline_at();
+        let camera = tl
+            .camera_at(frame as f32)
+            .filter(|_| playing && self.camera_view)
+            .map(|c| c.to_frame(self.width as f32, self.height as f32));
+        // through the camera: the whole frame on the top level's reel first (the camera brings in
+        // pixels from anywhere), then that onto the stack
+        if let (Some(camera), Some(reel)) = (camera, self.reels.first()) {
+            let full = self.full();
+            let inner = reel.stack(device);
+            drop(render_pass(encoder, "camera clear", inner.first.1, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+            let mut at = 0;
+            self.composite_frame(device, doc, tl, encoder, uniforms, full, &inner, &mut at);
+            inner.settle(encoder, full, at);
+            let uniform = LayerUniform { opacity: 1.0, tint: Look::PLAIN.tint, ..Default::default() };
+            self.lay(
+                device,
+                encoder,
+                uniforms,
+                rect,
+                inner.first.1,
+                Some(camera),
+                uniform,
+                BlendMode::Normal,
+                stack,
+                current,
+            );
+            return;
+        }
+        self.composite_frame(device, doc, tl, encoder, uniforms, rect, stack, current);
+    }
+
+    /// Timeline `tl`'s frame onto `stack` as it is: each track's clip, the onion skins about it
+    /// on the simple-mode track while drawing.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_frame(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        tl: &Timeline,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let (frame, playing) = self.timeline_at();
+        let plan = tl.plan(frame);
+        for track in &tl.tracks {
+            let (before, after) = tl.onions_on(track, frame, playing);
+            for s in &before {
+                self.composite_skin(device, doc, encoder, uniforms, rect, s, stack, current);
+            }
+            for (i, _) in plan.items.iter().enumerate().filter(|(_, item)| item.track == track.id) {
+                self.composite_item(device, doc, encoder, uniforms, rect, &plan.items, i, 0, stack, current);
+            }
+            for s in &after {
+                self.composite_skin(device, doc, encoder, uniforms, rect, s, stack, current);
+            }
+        }
+    }
+
+    /// An onion skin onto `stack`: its drawing tinted and faded, posed as its clip is.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_skin(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        s: &Showing,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let FrameLook::Onion { color, opacity } = s.look else { return };
+        let look = Look {
+            tint: [color[0], color[1], color[2], 1.0],
+            opacity: opacity * s.opacity,
+            pose: s.pose,
+            blend: (s.blend != BlendMode::Normal).then_some(s.blend),
+        };
+        let Some(layer) = doc.layer(s.root) else { return };
+        if doc.soloed_out(s.root) || look.opacity <= 0.0 {
+            return;
+        }
+        self.composite_unit(device, doc, encoder, uniforms, rect, layer, look, stack, current);
+    }
+
+    /// Item `i` of `items` (a level of a frame plan, `depth` groups down) onto `stack`. Masked by
+    /// the item below it, it is drawn alone and then through that one's matte; the matte of the
+    /// item above, it is drawn alone onto this depth's matte texture (and from there onto the
+    /// stack, unless it is only a matte).
+    #[allow(clippy::too_many_arguments)]
+    fn composite_item(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        items: &[PlanItem],
+        i: usize,
+        depth: usize,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let Some(item) = items.get(i) else { return };
+        let look = Look {
+            opacity: item.opacity,
+            pose: item.pose,
+            blend: (item.blend != BlendMode::Normal).then_some(item.blend),
+            ..Look::PLAIN
+        };
+        let is_matte = items.get(i + 1).and_then(|above| above.mask).is_some_and(|(_, source)| source == i);
+        let reel = self.reels.get(depth);
+        let (masked, reel) = match (item.mask, reel) {
+            (_, None) | (None, _) if !is_matte => {
+                if !item.matte_only {
+                    self.composite_clip(device, doc, encoder, uniforms, rect, item, look, depth, stack, current);
+                }
+                return;
+            }
+            (m, Some(r)) => (m, r),
+            (_, None) => return,
+        };
+        // drawn alone, at its opacity and pose, over nothing
+        let alone_look = Look { blend: Some(BlendMode::Normal), ..look };
+        let mine = reel.matte(device, i);
+        let alone = match masked {
+            Some(_) => reel.alone(device),
+            None => reel.matte(device, i),
+        };
+        drop(render_pass(encoder, "alone clear", alone.first.1, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        let mut at = 0;
+        self.composite_clip(device, doc, encoder, uniforms, rect, item, alone_look, depth, &alone, &mut at);
+        alone.settle(encoder, rect, at);
+        if let Some((mode, source)) = masked {
+            // through the matte: its alpha (clipping too), or its lightness
+            let matte = reel.matte(device, source);
+            let luminance = mode == MaskMode::Luminance;
+            let blend = if is_matte { BlendMode::Normal } else { item.blend };
+            let uniform = LayerUniform {
+                opacity: 1.0,
+                blend: blend.id(),
+                clipped: if luminance { CLIP_NONE } else { CLIP_ALPHA },
+                masked: if luminance { 1.0 } else { 0.0 },
+                tint: Look::PLAIN.tint,
+                ..Default::default()
+            };
+            let clip = (!luminance).then_some((matte.first.1, &self.stroke_view));
+            let mask = if luminance { matte.first.1 } else { &self.stroke_view };
+            if is_matte {
+                drop(render_pass(encoder, "matte clear", mine.first.1, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+                let mut at = 0;
+                self.draw_onto(
+                    device,
+                    encoder,
+                    uniforms,
+                    rect,
+                    alone.first.1,
+                    clip,
+                    mask,
+                    uniform,
+                    blend,
+                    &mine,
+                    &mut at,
+                );
+                mine.settle(encoder, rect, at);
+            } else {
+                self.draw_onto(
+                    device,
+                    encoder,
+                    uniforms,
+                    rect,
+                    alone.first.1,
+                    clip,
+                    mask,
+                    uniform,
+                    blend,
+                    stack,
+                    current,
+                );
+                return;
+            }
+        }
+        // a matte that also draws (clipping keeps its source)
+        if !item.matte_only {
+            let uniform =
+                LayerUniform { opacity: 1.0, blend: item.blend.id(), tint: Look::PLAIN.tint, ..Default::default() };
+            self.draw_onto(
+                device,
+                encoder,
+                uniforms,
+                rect,
+                mine.first.1,
+                None,
+                &self.stroke_view,
+                uniform,
+                item.blend,
+                stack,
+                current,
+            );
+        }
+    }
+
+    /// What plan item `item` shows onto `stack` with `look`: its drawing, or a group's own items
+    /// composited together on the next depth's reel and then laid on as one.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_clip(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        item: &PlanItem,
+        look: Look,
+        depth: usize,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        if look.opacity <= 0.0 {
+            return;
+        }
+        match &item.shows {
+            Shows::Drawing(root) => {
+                let Some(layer) = doc.layer(*root) else { return };
+                if doc.soloed_out(*root) {
+                    return;
+                }
+                self.composite_unit(device, doc, encoder, uniforms, rect, layer, look, stack, current);
+            }
+            Shows::Group(inner) => {
+                let Some(reel) = self.reels.get(depth + 1) else { return };
+                // posed, all of it: a pose brings in pixels from outside what is redrawn
+                let area = if look.pose.is_some() { self.full() } else { rect };
+                let group = reel.stack(device);
+                drop(render_pass(
+                    encoder,
+                    "group clip clear",
+                    group.first.1,
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                ));
+                let mut at = 0;
+                for j in 0..inner.len() {
+                    self.composite_item(device, doc, encoder, uniforms, area, inner, j, depth + 1, &group, &mut at);
+                }
+                group.settle(encoder, area, at);
+                let blend = look.blend.unwrap_or(BlendMode::Normal);
+                let uniform =
+                    LayerUniform { opacity: look.opacity, blend: blend.id(), tint: look.tint, ..Default::default() };
+                self.lay(device, encoder, uniforms, rect, group.first.1, look.pose, uniform, blend, stack, current);
+            }
+            Shows::Video { .. } => {}
+        }
     }
 
     /// Group `id`'s members composited over transparency on the textures for its depth; returns
@@ -9027,6 +9359,7 @@ impl Canvas {
         all.extend(self.tip_backup.as_ref());
         all.extend(self.composite_second.made());
         all.extend(self.posed.made());
+        all.extend(self.reels.iter().flat_map(Reel::made));
         all.extend(self.scratch.made());
         all.extend(self.second_stroke.made());
         all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
@@ -10199,6 +10532,53 @@ impl OnDemand {
     /// Lets the texture go, to be made again when next wanted.
     fn let_go(&mut self) {
         self.made.take();
+    }
+}
+
+/// Where one depth of a timeline frame is composited apart from the stack it goes onto: a group
+/// clip's own tracks (at the top level, the whole frame going through the camera), a masked clip
+/// alone before it goes through its matte, and mattes. Each texture is made the first time it is
+/// wanted.
+struct Reel {
+    pair: [OnDemand; 2],
+    alone: [OnDemand; 2],
+    /// Two, by the item's place: a masked clip can be the matte of the one above too.
+    mattes: [[OnDemand; 2]; 2],
+}
+
+impl Reel {
+    fn new(width: u32, height: u32) -> Reel {
+        let made = |label| OnDemand::new(label, width, height, LAYER_FORMAT);
+        Reel {
+            pair: [made("reel"), made("reel 2")],
+            alone: [made("alone"), made("alone 2")],
+            mattes: [[made("matte"), made("matte 2")], [made("matte b"), made("matte b 2")]],
+        }
+    }
+
+    fn stack_of<'a>(pair: &'a [OnDemand; 2], device: &'a wgpu::Device) -> Stack<'a> {
+        let [first, second] = pair;
+        Stack { first: first.get(device), second: Second::OnDemand(second, device) }
+    }
+
+    /// Where a group clip's tracks are composited.
+    fn stack<'a>(&'a self, device: &'a wgpu::Device) -> Stack<'a> {
+        Reel::stack_of(&self.pair, device)
+    }
+
+    /// Where a masked clip is drawn alone.
+    fn alone<'a>(&'a self, device: &'a wgpu::Device) -> Stack<'a> {
+        Reel::stack_of(&self.alone, device)
+    }
+
+    /// Where the item at place `i` of its level is drawn as a matte.
+    fn matte<'a>(&'a self, device: &'a wgpu::Device, i: usize) -> Stack<'a> {
+        let pair = if i.is_multiple_of(2) { &self.mattes[0] } else { &self.mattes[1] };
+        Reel::stack_of(pair, device)
+    }
+
+    fn made(&self) -> impl Iterator<Item = &wgpu::Texture> {
+        self.pair.iter().chain(&self.alone).chain(self.mattes.iter().flatten()).filter_map(OnDemand::made)
     }
 }
 

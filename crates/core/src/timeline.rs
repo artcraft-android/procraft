@@ -8,7 +8,9 @@
 
 use make2d_engine::animation::Playback;
 use make2d_engine::document::{Document, LayerId, LayerKind};
-use make2d_engine::timeline::{ClipContent, ClipId, MAX_EXPOSURE, MAX_FPS, TrackId};
+use make2d_engine::timeline::{
+    CameraPose, Clip, ClipContent, ClipId, Cycle, CycleKeys, MAX_EXPOSURE, MAX_FPS, MaskMode, Timeline, TrackId,
+};
 
 use crate::animation::AnimationPlayback;
 use crate::{CanvasSession, State};
@@ -35,6 +37,11 @@ pub struct TimelineInfo {
     pub frame: u32,
     /// The track drawn on.
     pub track: Option<u64>,
+    /// Played frames show through the camera.
+    pub camera_view: bool,
+    /// The group clips opened, outermost first: the tracks shown are the last one's own (none,
+    /// the timeline's).
+    pub open_groups: Vec<TimelineClipInfo>,
 }
 
 /// The settings of a timeline the apps change.
@@ -66,6 +73,69 @@ pub struct TimelineClipInfo {
     pub kind: TimelineClipKind,
     /// A drawing's layer (its picture is `frame_thumbnail` of it); 0 for other clips.
     pub root: u64,
+    /// How the clip on the track below masks it.
+    pub mask: TimelineMask,
+    /// A group's: how many frames it plays over and over (0: it doesn't), and whether its own
+    /// keys run on across the repeats rather than playing again each time.
+    pub cycle: u32,
+    pub continue_across: bool,
+}
+
+/// How a clip is masked by the clip under it on the track below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TimelineMask {
+    None,
+    /// Shows only where that one is painted, which still draws.
+    Clipping,
+    /// That one's alpha is a matte, and it no longer draws.
+    Alpha,
+    /// That one's lightness is a matte, and it no longer draws.
+    Luminance,
+}
+
+impl TimelineMask {
+    fn of(m: MaskMode) -> TimelineMask {
+        match m {
+            MaskMode::None => TimelineMask::None,
+            MaskMode::Clipping => TimelineMask::Clipping,
+            MaskMode::Alpha => TimelineMask::Alpha,
+            MaskMode::Luminance => TimelineMask::Luminance,
+        }
+    }
+
+    fn mode(self) -> MaskMode {
+        match self {
+            TimelineMask::None => MaskMode::None,
+            TimelineMask::Clipping => MaskMode::Clipping,
+            TimelineMask::Alpha => MaskMode::Alpha,
+            TimelineMask::Luminance => MaskMode::Luminance,
+        }
+    }
+}
+
+/// Clip `c` as the apps show it, its start moved on by `offset` (where its level starts).
+fn clip_info(c: &Clip, offset: u32) -> TimelineClipInfo {
+    let (kind, root) = match &c.content {
+        ClipContent::Drawing(d) => (TimelineClipKind::Drawing, d.root.0),
+        ClipContent::Group(_) => (TimelineClipKind::Group, 0),
+        ClipContent::Video(_) => (TimelineClipKind::Video, 0),
+        ClipContent::Audio(_) => (TimelineClipKind::Audio, 0),
+    };
+    let cycle = match &c.content {
+        ClipContent::Group(g) => g.cycle,
+        _ => None,
+    };
+    TimelineClipInfo {
+        id: c.id.0,
+        name: c.name.clone(),
+        start: c.start + offset,
+        duration: c.duration,
+        kind,
+        root,
+        mask: TimelineMask::of(c.mask),
+        cycle: cycle.map_or(0, |c| c.length),
+        continue_across: cycle.is_some_and(|c| c.keys == CycleKeys::ContinueAcross),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -136,40 +206,33 @@ impl CanvasSession {
             simple: tl.simple.is_some(),
             frame: st.canvas.as_ref().map_or(0, |c| c.timeline_frame()),
             track: st.drawn_track().map(|t| t.0),
+            camera_view: st.canvas.as_ref().is_some_and(|c| c.camera_view()),
+            open_groups: st
+                .open_groups()
+                .iter()
+                .filter_map(|g| Some(clip_info(tl.clip(*g)?, tl.origin(*g)? - tl.clip(*g)?.start)))
+                .collect(),
         })
     }
 
-    /// The tracks, bottom first, with their clips.
+    /// The tracks shown, bottom first, with their clips: the open group's own (their frames as
+    /// they are on the timeline, from the group's first frame), or the timeline's.
     pub fn timeline_tracks(&self) -> Vec<TimelineTrackInfo> {
         let st = self.shared.lock();
         let Some(tl) = st.doc.timeline.as_ref() else { return Vec::new() };
-        tl.tracks
+        let open = st.open_groups().last().copied();
+        let (tracks, offset) = match open.and_then(|g| Some((tl.clip(g)?, tl.origin(g)?))) {
+            Some((Clip { content: ClipContent::Group(g), .. }, at)) => (&g.tracks, at),
+            _ => (&tl.tracks, 0),
+        };
+        tracks
             .iter()
             .map(|t| TimelineTrackInfo {
                 id: t.id.0,
                 name: t.name.clone(),
                 hidden: t.hidden,
                 locked: t.locked,
-                clips: t
-                    .clips
-                    .iter()
-                    .map(|c| {
-                        let (kind, root) = match &c.content {
-                            ClipContent::Drawing(d) => (TimelineClipKind::Drawing, d.root.0),
-                            ClipContent::Group(_) => (TimelineClipKind::Group, 0),
-                            ClipContent::Video(_) => (TimelineClipKind::Video, 0),
-                            ClipContent::Audio(_) => (TimelineClipKind::Audio, 0),
-                        };
-                        TimelineClipInfo {
-                            id: c.id.0,
-                            name: c.name.clone(),
-                            start: c.start,
-                            duration: c.duration,
-                            kind,
-                            root,
-                        }
-                    })
-                    .collect(),
+                clips: t.clips.iter().map(|c| clip_info(c, offset)).collect(),
             })
             .collect()
     }
@@ -230,10 +293,10 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(tl) = st.doc.timeline.as_mut() else { return };
-        if tl.track_index(TrackId(id)).is_none() {
+        if tl.track(TrackId(id)).is_none() {
             return;
         }
-        if tl.simple.is_some() {
+        if tl.simple.is_some() && tl.track_index(TrackId(id)).is_some() {
             tl.simple = Some(TrackId(id));
         }
         st.timeline_track = Some(TrackId(id));
@@ -259,12 +322,25 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// A new empty track on top, drawn on; returns its id (0 if there is no timeline).
+    /// A new empty track on top (of the open group's, if one is open), drawn on; returns its id
+    /// (0 if there is no timeline).
     pub fn add_timeline_track(&self) -> u64 {
+        let open = self.shared.lock().open_groups().last().copied();
         let id = self.change("Add Track", |d| {
             let tl = d.timeline.as_mut()?;
-            let name = format!("Track {}", tl.tracks.len() + 1);
-            Some(tl.add_track(&name))
+            match open {
+                Some(g) => {
+                    let n = match &tl.clip(g)?.content {
+                        ClipContent::Group(gr) => gr.tracks.len(),
+                        _ => 0,
+                    };
+                    tl.add_group_track(g, &format!("Track {}", n + 1))
+                }
+                None => {
+                    let name = format!("Track {}", tl.tracks.len() + 1);
+                    Some(tl.add_track(&name))
+                }
+            }
         });
         let Some(id) = id else { return 0 };
         self.select_timeline_track(id.0);
@@ -288,9 +364,7 @@ impl CanvasSession {
     /// Hides or shows track `id`, or locks or unlocks it, as an undo step.
     pub fn set_timeline_track(&self, id: u64, hidden: bool, locked: bool) -> bool {
         self.change(if hidden { "Hide Track" } else { "Track" }, |d| {
-            let tl = d.timeline.as_mut()?;
-            let at = tl.track_index(TrackId(id))?;
-            let track = tl.tracks.get_mut(at)?;
+            let track = d.timeline.as_mut()?.track_mut(TrackId(id))?;
             (track.hidden != hidden || track.locked != locked).then(|| {
                 track.hidden = hidden;
                 track.locked = locked;
@@ -306,9 +380,7 @@ impl CanvasSession {
             return false;
         }
         self.change("Rename Track", |d| {
-            let tl = d.timeline.as_mut()?;
-            let at = tl.track_index(TrackId(id))?;
-            tl.tracks.get_mut(at)?.name = name;
+            d.timeline.as_mut()?.track_mut(TrackId(id))?.name = name;
             Some(())
         })
         .is_some()
@@ -345,13 +417,14 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// Clip `id` moved to track `track`, as near frame `start` as it fits, as an undo step.
+    /// Clip `id` moved to track `track` (of the same level), as near timeline frame `start` as
+    /// it fits, as an undo step.
     pub fn move_timeline_clip(&self, id: u64, track: u64, start: u32) -> bool {
         self.change("Move Clip", |d| {
             let tl = d.timeline.as_mut()?;
-            let (t, _) = tl.find(ClipId(id))?;
-            let before = tl.clip(ClipId(id)).map(|c| (tl.tracks.get(t).map(|t| t.id), c.start));
-            if before == Some((Some(TrackId(track)), start)) {
+            let start = start.saturating_sub(tl.level_start(TrackId(track))?);
+            let before = (tl.track_of_clip(ClipId(id))?, tl.clip(ClipId(id))?.start);
+            if before == (TrackId(track), start) {
                 return None;
             }
             tl.move_clip(ClipId(id), TrackId(track), start).then_some(())
@@ -364,8 +437,11 @@ impl CanvasSession {
     pub fn split_timeline_clip(&self, id: u64) -> bool {
         let (frame, root) = {
             let st = self.shared.lock();
-            let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame());
-            let clip = st.doc.timeline.as_ref().and_then(|t| t.clip(ClipId(id)));
+            let tl = st.doc.timeline.as_ref();
+            let clip = tl.and_then(|t| t.clip(ClipId(id)));
+            // the playhead on the clip's own level
+            let level = tl.and_then(|t| t.origin(ClipId(id))).zip(clip).map(|(o, c)| o - c.start);
+            let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame()).saturating_sub(level.unwrap_or(0));
             let root = clip.filter(|c| frame > c.start && frame < c.end()).and_then(|c| match &c.content {
                 ClipContent::Drawing(d) => Some(d.root),
                 _ => None,
@@ -430,16 +506,19 @@ fn add_drawing(d: &mut Document, track: Option<TrackId>, frame: u32) -> Option<(
         return None;
     }
     let tl = d.timeline.as_mut()?;
-    let track = match track.filter(|t| tl.track_index(*t).is_some()) {
+    let track = match track.filter(|t| tl.track(*t).is_some()) {
         Some(t) => t,
         None => match tl.tracks.first() {
             Some(t) => t.id,
             None => tl.add_track("Track 1"),
         },
     };
-    if tl.tracks.get(tl.track_index(track)?)?.locked {
+    if tl.track(track)?.locked {
         return None;
     }
+    // on the track's own level
+    let level = tl.level_start(track)?;
+    let frame = frame.saturating_sub(level);
     let n = tl.drawing_roots().len() + 1;
     // a top-level layer, above the drawing current now
     if let Some(top) = d.top_of(d.current()) {
@@ -450,7 +529,7 @@ fn add_drawing(d: &mut Document, track: Option<TrackId>, frame: u32) -> Option<(
     d.rename(layer, &name);
     let tl = d.timeline.as_mut()?;
     let clip = tl.add_drawing(track, frame, layer, &name)?;
-    let start = tl.clip(clip)?.start;
+    let start = tl.clip(clip)?.start + level;
     Some((track, clip, start))
 }
 
@@ -483,7 +562,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(tl) = st.doc.timeline.as_ref() else { return };
         let Some((track, clip)) = st.doc.top_of(st.doc.current()).and_then(|top| tl.drawing_of(top)) else { return };
-        let Some(start) = tl.clip(clip).map(|c| (c.start, c.end())) else { return };
+        let Some(start) = tl.clip(clip).zip(tl.origin(clip)).map(|(c, o)| (o, o + c.duration)) else { return };
         st.timeline_track = Some(track);
         if let Some(c) = st.canvas.as_mut() {
             let at = c.timeline_frame();
@@ -500,10 +579,7 @@ impl State {
     /// The track drawn on: the one chosen, or simple mode's, or the first.
     pub(crate) fn drawn_track(&self) -> Option<TrackId> {
         let tl = self.doc.timeline.as_ref()?;
-        self.timeline_track
-            .filter(|t| tl.track_index(*t).is_some())
-            .or(tl.simple)
-            .or_else(|| tl.tracks.first().map(|t| t.id))
+        self.timeline_track.filter(|t| tl.track(*t).is_some()).or(tl.simple).or_else(|| tl.tracks.first().map(|t| t.id))
     }
 
     /// Whether the current layer is in the drawing at the playhead on the track drawn on.
@@ -511,8 +587,8 @@ impl State {
         let Some(tl) = self.doc.timeline.as_ref() else { return true };
         let frame = self.canvas.as_ref().map_or(0, |c| c.timeline_frame());
         let Some(top) = self.doc.top_of(self.doc.current()) else { return false };
-        let track = self.drawn_track().and_then(|t| tl.track_index(t)).and_then(|t| tl.tracks.get(t));
-        matches!(track.and_then(|t| t.clip_at(frame)).map(|c| &c.content), Some(ClipContent::Drawing(d)) if d.root == top)
+        let Some(t) = self.drawn_track() else { return false };
+        matches!(clip_on(tl, t, frame).map(|c| &c.content), Some(ClipContent::Drawing(d)) if d.root == top)
     }
 
     /// The current layer goes to the drawing at the playhead on the track drawn on (unless it is
@@ -520,8 +596,8 @@ impl State {
     pub(crate) fn follow_playhead(&mut self) {
         let Some(tl) = self.doc.timeline.as_ref() else { return };
         let frame = self.canvas.as_ref().map_or(0, |c| c.timeline_frame());
-        let Some(t) = self.drawn_track().and_then(|t| tl.track_index(t)) else { return };
-        let Some(ClipContent::Drawing(d)) = tl.tracks.get(t).and_then(|t| t.clip_at(frame)).map(|c| &c.content) else {
+        let Some(t) = self.drawn_track() else { return };
+        let Some(ClipContent::Drawing(d)) = clip_on(tl, t, frame).map(|c| &c.content) else {
             return;
         };
         let root = d.root;
@@ -536,6 +612,12 @@ impl State {
             }
         }
     }
+}
+
+/// The clip on track `track` (at any depth) when the timeline is at `frame`.
+fn clip_on(tl: &Timeline, track: TrackId, frame: u32) -> Option<&Clip> {
+    let at = u32::try_from(tl.track_frame(track, frame)?).ok()?;
+    tl.track(track)?.clip_at(at)
 }
 
 /// The topmost paint layer in `id` (itself, if it is one).
@@ -624,8 +706,9 @@ impl CanvasSession {
     /// Where clip `id` is at the playhead (inside it or not: its keys before and after hold).
     pub fn timeline_pose(&self, id: u64) -> Option<TimelinePose> {
         let st = self.shared.lock();
-        let clip = st.doc.timeline.as_ref()?.clip(ClipId(id))?;
-        let local = st.canvas.as_ref().map_or(0, |c| c.timeline_frame()) as f32 - clip.start as f32;
+        let tl = st.doc.timeline.as_ref()?;
+        let clip = tl.clip(ClipId(id))?;
+        let local = tl.local_frame(ClipId(id), st.canvas.as_ref().map_or(0, |c| c.timeline_frame()))? as f32;
         let k = &clip.keys;
         let [x, y] = k.position.value_at(local).unwrap_or([0.0; 2]);
         let [scale_x, scale_y] = k.scale.value_at(local).unwrap_or([1.0; 2]);
@@ -642,8 +725,9 @@ impl CanvasSession {
     /// Clip `id`'s keys, in frame order.
     pub fn timeline_keys(&self, id: u64) -> Vec<TimelineKeyInfo> {
         let st = self.shared.lock();
-        let Some(clip) = st.doc.timeline.as_ref().and_then(|t| t.clip(ClipId(id))) else { return Vec::new() };
-        let at = |frame: i32| u32::try_from(i64::from(clip.start) + i64::from(frame)).unwrap_or(0);
+        let Some(tl) = st.doc.timeline.as_ref() else { return Vec::new() };
+        let (Some(clip), Some(origin)) = (tl.clip(ClipId(id)), tl.origin(ClipId(id))) else { return Vec::new() };
+        let at = |frame: i32| u32::try_from(i64::from(origin) + i64::from(frame)).unwrap_or(0);
         let k = &clip.keys;
         let mut keys: Vec<TimelineKeyInfo> = Vec::new();
         let mut add = |channel, frames: Vec<(i32, &make2d_engine::timeline::Easing)>| {
@@ -673,22 +757,22 @@ impl CanvasSession {
         easing: TimelineEasing,
         done: bool,
     ) -> bool {
-        let (frame, middle) = {
+        let (local, middle) = {
             let st = self.shared.lock();
             let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame());
-            let root = st.doc.timeline.as_ref().and_then(|t| t.clip(ClipId(id))).and_then(|c| match &c.content {
+            let tl = st.doc.timeline.as_ref();
+            let root = tl.and_then(|t| t.clip(ClipId(id))).and_then(|c| match &c.content {
                 ClipContent::Drawing(d) => Some(d.root),
                 _ => None,
             });
-            (frame, root.and_then(|r| st.painted_middle(r)))
+            let local = tl.and_then(|t| t.local_frame(ClipId(id), frame)).and_then(|l| i32::try_from(l).ok());
+            (local, root.and_then(|r| st.painted_middle(r)))
         };
+        let Some(local) = local else { return false };
         let value = |i: usize| values.get(i).copied().filter(|v| v.is_finite());
         let changed = self.change_live("Key", done, |d| {
             let centre = [d.width() as f32 / 2.0, d.height() as f32 / 2.0];
-            let Some(tl) = d.timeline.as_mut() else { return false };
-            let Some((t, c)) = tl.find(ClipId(id)) else { return false };
-            let Some(clip) = tl.tracks.get_mut(t).and_then(|t| t.clips.get_mut(c)) else { return false };
-            let local = i32::try_from(i64::from(frame) - i64::from(clip.start)).unwrap_or(0);
+            let Some(clip) = d.timeline.as_mut().and_then(|tl| tl.clip_mut(ClipId(id))) else { return false };
             let k = &mut clip.keys;
             // a key already there keeps how it eases; a new one eases as asked
             let asked = easing.easing();
@@ -739,9 +823,8 @@ impl CanvasSession {
         let removed = self
             .change("Remove Keys", |d| {
                 let tl = d.timeline.as_mut()?;
-                let (t, c) = tl.find(ClipId(id))?;
-                let clip = tl.tracks.get_mut(t)?.clips.get_mut(c)?;
-                let local = i32::try_from(i64::from(frame) - i64::from(clip.start)).ok()?;
+                let local = i32::try_from(tl.local_frame(ClipId(id), frame)?).ok()?;
+                let clip = tl.clip_mut(ClipId(id))?;
                 let k = &mut clip.keys;
                 let any = [
                     k.position.remove(local),
@@ -933,8 +1016,9 @@ impl CanvasSession {
     /// key there (position, scale, rotation, opacity).
     pub fn timeline_key_easing(&self, id: u64, frame: u32) -> Option<EasingSpec> {
         let st = self.shared.lock();
-        let clip = st.doc.timeline.as_ref()?.clip(ClipId(id))?;
-        let local = i32::try_from(i64::from(frame) - i64::from(clip.start)).ok()?;
+        let tl = st.doc.timeline.as_ref()?;
+        let clip = tl.clip(ClipId(id))?;
+        let local = i32::try_from(i64::from(frame) - i64::from(tl.origin(ClipId(id))?)).ok()?;
         let k = &clip.keys;
         let at = |e: Option<&Easing>| e.cloned();
         at(k.position.keys.iter().find(|x| x.frame == local).map(|x| &x.easing))
@@ -950,9 +1034,9 @@ impl CanvasSession {
         let easing = easing_of(&s);
         let changed = self.change_live("Easing", done, |d| {
             let Some(tl) = d.timeline.as_mut() else { return false };
-            let Some((t, c)) = tl.find(ClipId(id)) else { return false };
-            let Some(clip) = tl.tracks.get_mut(t).and_then(|t| t.clips.get_mut(c)) else { return false };
-            let Ok(local) = i32::try_from(i64::from(frame) - i64::from(clip.start)) else { return false };
+            let Some(origin) = tl.origin(ClipId(id)) else { return false };
+            let Some(clip) = tl.clip_mut(ClipId(id)) else { return false };
+            let Ok(local) = i32::try_from(i64::from(frame) - i64::from(origin)) else { return false };
             let k = &mut clip.keys;
             let mut any = false;
             for key in k.position.keys.iter_mut().chain(k.scale.keys.iter_mut()).filter(|x| x.frame == local) {
@@ -974,7 +1058,9 @@ impl CanvasSession {
     /// Clip `id`'s motion path, if it has position keys.
     pub fn timeline_motion_path(&self, id: u64) -> Option<MotionPath> {
         let st = self.shared.lock();
-        let clip = st.doc.timeline.as_ref()?.clip(ClipId(id))?;
+        let tl = st.doc.timeline.as_ref()?;
+        let clip = tl.clip(ClipId(id))?;
+        let origin = tl.origin(ClipId(id))?;
         let keys = &clip.keys.position.keys;
         let (first, last) = (keys.first()?.frame, keys.last()?.frame);
         let [px, py] = clip.keys.pivot.unwrap_or([0.0; 2]);
@@ -986,7 +1072,7 @@ impl CanvasSession {
                 points.extend([px + x, py + y]);
             }
         }
-        let at = |frame: i32| u32::try_from(i64::from(clip.start) + i64::from(frame)).unwrap_or(0);
+        let at = |frame: i32| u32::try_from(i64::from(origin) + i64::from(frame)).unwrap_or(0);
         let keys = keys
             .iter()
             .map(|k| PathKey {
@@ -1011,9 +1097,9 @@ impl CanvasSession {
         });
         let changed = self.change_live("Motion Path", done, |d| {
             let Some(tl) = d.timeline.as_mut() else { return false };
-            let Some((t, c)) = tl.find(ClipId(id)) else { return false };
-            let Some(clip) = tl.tracks.get_mut(t).and_then(|t| t.clips.get_mut(c)) else { return false };
-            let Ok(local) = i32::try_from(i64::from(frame) - i64::from(clip.start)) else { return false };
+            let Some(origin) = tl.origin(ClipId(id)) else { return false };
+            let Some(clip) = tl.clip_mut(ClipId(id)) else { return false };
+            let Ok(local) = i32::try_from(i64::from(frame) - i64::from(origin)) else { return false };
             match clip.keys.position.keys.iter_mut().find(|k| k.frame == local) {
                 Some(k) => {
                     k.path = handles;
@@ -1044,4 +1130,226 @@ impl CanvasSession {
 /// How the key at `frame` among `keys` eases, if there is one.
 fn easing_at<T>(keys: &[make2d_engine::timeline::Key<T>], frame: i32) -> Option<Easing> {
     keys.iter().find(|k| k.frame == frame).map(|k| k.easing.clone())
+}
+
+/// The camera at the playhead, as the apps show and change it.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TimelineCamera {
+    /// The canvas point in the middle of the frame, canvas pixels.
+    pub x: f32,
+    pub y: f32,
+    /// 2: twice as close.
+    pub zoom: f32,
+    /// How far the canvas seems turned in the frame, degrees clockwise.
+    pub rotation: f32,
+    /// Whether the camera has a key at the playhead.
+    pub keyed: bool,
+    /// Where it looks on the canvas: the frame's corners (top left, top right, bottom right,
+    /// bottom left), x y each, canvas pixels.
+    pub corners: Vec<f32>,
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Clip `id` masked by the clip under it on the track below as `mask`, as an undo step.
+    pub fn set_timeline_clip_mask(&self, id: u64, mask: TimelineMask) -> bool {
+        let changed = self
+            .change("Mask", |d| {
+                let clip = d.timeline.as_mut()?.clip_mut(ClipId(id))?;
+                (clip.mask != mask.mode()).then(|| clip.mask = mask.mode())
+            })
+            .is_some();
+        if changed {
+            self.redraw_timeline();
+        }
+        changed
+    }
+
+    /// Clips `ids` (on tracks of one level) made into a group clip spanning them, as an undo
+    /// step: their tracks become its own. Returns the group, or 0 if they can't be grouped.
+    pub fn group_timeline_clips(&self, ids: Vec<u64>) -> u64 {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        let made = self.change("Group Clips", |d| {
+            let tl = d.timeline.as_mut()?;
+            let n = count_groups(&tl.tracks) + 1;
+            tl.group(&ids, &format!("Group {n}"))
+        });
+        let Some(group) = made else { return 0 };
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.timeline_track = st.doc.timeline.as_ref().and_then(|t| t.track_of_clip(group)).or(st.timeline_track);
+        if let Some(c) = st.canvas.as_mut() {
+            c.invalidate();
+        }
+        self.shared.frame(st);
+        group.0
+    }
+
+    /// Group clip `id` taken apart, its clips back on the level it is on, as an undo step.
+    pub fn ungroup_timeline_clip(&self, id: u64) -> bool {
+        let done = self.change("Ungroup Clips", |d| d.timeline.as_mut()?.ungroup(ClipId(id)).then_some(())).is_some();
+        if done {
+            self.redraw_timeline();
+        }
+        done
+    }
+
+    /// Opens group clip `id` in the panel (its tracks shown and drawn on), or with none, goes
+    /// back to the timeline's own tracks. False if `id` isn't a group.
+    pub fn open_timeline_group(&self, id: Option<u64>) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(tl) = st.doc.timeline.as_ref() else { return false };
+        let open = match id.map(ClipId) {
+            Some(g) => match tl.clip(g).map(|c| &c.content) {
+                Some(ClipContent::Group(gr)) => {
+                    st.timeline_track = gr.tracks.first().map(|t| t.id).or(st.timeline_track);
+                    Some(g)
+                }
+                _ => return false,
+            },
+            None => {
+                // drawn on: the track the group was on
+                st.timeline_track = st.timeline_open.and_then(|g| tl.track_of_clip(g)).or(st.timeline_track);
+                None
+            }
+        };
+        st.timeline_open = open;
+        st.follow_playhead();
+        if let Some(c) = st.canvas.as_mut() {
+            c.invalidate();
+        }
+        self.shared.frame(st);
+        true
+    }
+
+    /// Group clip `id` plays its first `length` frames over and over (0: once, as it is), its own
+    /// keys running on across the repeats when `continue_across` (else playing again each time),
+    /// as an undo step.
+    pub fn set_timeline_cycle(&self, id: u64, length: u32, continue_across: bool) -> bool {
+        let keys = if continue_across { CycleKeys::ContinueAcross } else { CycleKeys::Repeat };
+        let cycle = (length > 0).then(|| Cycle { length: length.min(MOST_FRAMES), keys });
+        let changed = self
+            .change("Cycle", |d| match &mut d.timeline.as_mut()?.clip_mut(ClipId(id))?.content {
+                ClipContent::Group(g) if g.cycle != cycle => {
+                    g.cycle = cycle;
+                    Some(())
+                }
+                _ => None,
+            })
+            .is_some();
+        if changed {
+            self.redraw_timeline();
+        }
+        changed
+    }
+
+    /// The camera at the playhead: as its keys put it, or the whole canvas without keys.
+    pub fn timeline_camera(&self) -> Option<TimelineCamera> {
+        let st = self.shared.lock();
+        let tl = st.doc.timeline.as_ref()?;
+        let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame());
+        let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
+        let pose = tl.camera_at(frame as f32).unwrap_or(CameraPose::still(w, h));
+        let keyed = tl.camera.keys.iter().any(|k| i64::from(k.frame) == i64::from(frame));
+        Some(TimelineCamera {
+            x: pose.center[0],
+            y: pose.center[1],
+            zoom: pose.zoom,
+            rotation: pose.rotation.to_degrees(),
+            keyed,
+            corners: pose.corners(w, h).into_iter().flatten().collect(),
+        })
+    }
+
+    /// The frames the camera has keys on, in order.
+    pub fn timeline_camera_keys(&self) -> Vec<u32> {
+        let st = self.shared.lock();
+        let Some(tl) = st.doc.timeline.as_ref() else { return Vec::new() };
+        tl.camera.keys.iter().filter_map(|k| u32::try_from(k.frame).ok()).collect()
+    }
+
+    /// A camera key at the playhead: looking at canvas point (`x`, `y`), `zoom` close, the canvas
+    /// turned `rotation` degrees, easing into the next as `easing` (a key there keeps its own).
+    /// Shown at once, one "Camera Key" undo step when `done`.
+    pub fn set_timeline_camera_key(
+        &self,
+        x: f32,
+        y: f32,
+        zoom: f32,
+        rotation: f32,
+        easing: TimelineEasing,
+        done: bool,
+    ) -> bool {
+        if ![x, y, zoom, rotation].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let frame = self.shared.lock().canvas.as_ref().map_or(0, |c| c.timeline_frame());
+        let Ok(frame) = i32::try_from(frame) else { return false };
+        let pose = CameraPose {
+            center: [x, y],
+            zoom: zoom.clamp(make2d_engine::timeline::CAMERA_ZOOM.0, make2d_engine::timeline::CAMERA_ZOOM.1),
+            rotation: rotation.to_radians(),
+        };
+        let changed = self.change_live("Camera Key", done, |d| {
+            let Some(tl) = d.timeline.as_mut() else { return false };
+            let easing = easing_at(&tl.camera.keys, frame).unwrap_or(easing.easing());
+            tl.camera.set(frame, pose, easing);
+            true
+        });
+        if changed {
+            self.redraw_timeline();
+        }
+        changed
+    }
+
+    /// Takes away the camera key at the playhead, as an undo step.
+    pub fn remove_timeline_camera_key(&self) -> bool {
+        let frame = self.shared.lock().canvas.as_ref().map_or(0, |c| c.timeline_frame());
+        let Ok(frame) = i32::try_from(frame) else { return false };
+        let removed =
+            self.change("Remove Camera Key", |d| d.timeline.as_mut()?.camera.remove(frame).then_some(())).is_some();
+        if removed {
+            self.redraw_timeline();
+        }
+        removed
+    }
+
+    /// Played frames show through the camera (or the canvas as it is). Exports always do.
+    pub fn set_timeline_camera_view(&self, on: bool) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(c) = st.canvas.as_mut() {
+            c.set_camera_view(on);
+        }
+        self.shared.frame(st);
+    }
+}
+
+impl State {
+    /// The group clips open in the panel, outermost first (none if the one opened has gone).
+    pub(crate) fn open_groups(&self) -> Vec<ClipId> {
+        let (Some(tl), Some(open)) = (self.doc.timeline.as_ref(), self.timeline_open) else { return Vec::new() };
+        if !matches!(tl.clip(open).map(|c| &c.content), Some(ClipContent::Group(_))) {
+            return Vec::new();
+        }
+        let mut path = vec![open];
+        while let Some(g) = path.last().and_then(|g| tl.group_of(*g)) {
+            path.push(g);
+        }
+        path.reverse();
+        path
+    }
+}
+
+/// How many group clips `tracks` hold, at any depth.
+fn count_groups(tracks: &[make2d_engine::timeline::Track]) -> usize {
+    tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .map(|c| match &c.content {
+            ClipContent::Group(g) => 1 + count_groups(&g.tracks),
+            _ => 0,
+        })
+        .sum()
 }

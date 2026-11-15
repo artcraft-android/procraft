@@ -608,6 +608,8 @@ pub(crate) struct State {
     pub(crate) grey_view: bool,
     /// On a timeline, the track drawn on (and that new drawings go on).
     pub(crate) timeline_track: Option<make2d_engine::timeline::TrackId>,
+    /// On a timeline, the group clip opened in the timeline panel (its tracks shown), if one is.
+    pub(crate) timeline_open: Option<make2d_engine::timeline::ClipId>,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
@@ -1585,6 +1587,7 @@ impl CanvasSession {
             interface_size: 1.0,
             grey_view: false,
             timeline_track: None,
+            timeline_open: None,
             grid_origin: None,
             light: false,
             pending_doc: None,

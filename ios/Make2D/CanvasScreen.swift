@@ -65,6 +65,10 @@ struct CanvasScreen: View {
                 if model.selecting || model.lassoToolOn {
                     SelectionOverlay(model: model)
                 }
+                // the picked clip's motion path and the camera's frame, over the canvas but under the
+                // bars and the timeline's panels (beside the vector nodes in what they are)
+                MotionPathOverlay(model: model)
+                CameraFrameOverlay(model: model)
                 ColorDropBand(drop: model.drop, width: screen.size.width)
                 EraserBand(model: model, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade

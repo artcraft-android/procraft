@@ -404,6 +404,36 @@ pub struct CameraPose {
     pub rotation: f32,
 }
 
+/// The least and most a camera zooms.
+pub const CAMERA_ZOOM: (f32, f32) = (0.05, 20.0);
+
+impl CameraPose {
+    /// The whole of a `width` × `height` canvas, as it is.
+    pub fn still(width: f32, height: f32) -> CameraPose {
+        CameraPose { center: [width / 2.0, height / 2.0], zoom: 1.0, rotation: 0.0 }
+    }
+
+    /// Canvas pixels to the output frame's (the size of the `width` × `height` canvas): the
+    /// center to the frame's middle, zoomed and turned about it.
+    pub fn to_frame(&self, width: f32, height: f32) -> Affine {
+        let [cx, cy] = self.center;
+        Affine::translate(Vec2::new(-cx, -cy))
+            .then(Affine::scale(self.zoom.clamp(CAMERA_ZOOM.0, CAMERA_ZOOM.1)))
+            .then(Affine::rotate(self.rotation))
+            .then(Affine::translate(Vec2::new(width / 2.0, height / 2.0)))
+    }
+
+    /// The output frame's corners on the canvas (top left, top right, bottom right, bottom left),
+    /// for showing where the camera looks.
+    pub fn corners(&self, width: f32, height: f32) -> [[f32; 2]; 4] {
+        let back = self.to_frame(width, height).inverse().unwrap_or(Affine::IDENTITY);
+        [[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]].map(|[x, y]| {
+            let p = back.apply(Vec2::new(x, y));
+            [p.x, p.y]
+        })
+    }
+}
+
 /// How the drawings around the current one show while drawing.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OnionSkins {
@@ -758,10 +788,12 @@ impl Document {
     }
 }
 
-/// Editing a timeline's top-level tracks and clips. Each keeps the rules: clips in time order with
-/// none overlapping, and the timeline as long as its clips at least.
+/// Editing a timeline's tracks and clips, at the top level or inside group clips (a track or clip
+/// is found by its id at any depth; ids are never shared). Each keeps the rules: clips in time
+/// order with none overlapping, and the timeline as long as its clips at least. Frames given to
+/// these are on the level of the track or clip named (a group's own, counted from its start).
 impl Timeline {
-    /// Where clip `id` is: its track's index and its own.
+    /// Where top-level clip `id` is: its track's index and its own.
     pub fn find(&self, id: ClipId) -> Option<(usize, usize)> {
         self.tracks
             .iter()
@@ -769,23 +801,104 @@ impl Timeline {
             .find_map(|(t, track)| track.clips.iter().position(|c| c.id == id).map(|c| (t, c)))
     }
 
+    /// Clip `id`, at any depth.
     pub fn clip(&self, id: ClipId) -> Option<&Clip> {
-        let (t, c) = self.find(id)?;
-        self.tracks.get(t)?.clips.get(c)
+        let mut path = Vec::new();
+        clip_path(&self.tracks, id, &mut path).then(|| path.last().copied()).flatten()
     }
 
+    pub fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        level.get_mut(t)?.clips.get_mut(c)
+    }
+
+    /// The index of top-level track `id`.
     pub fn track_index(&self, id: TrackId) -> Option<usize> {
         self.tracks.iter().position(|t| t.id == id)
     }
 
-    /// The drawing clip of top-level layer `root`, and its track.
+    /// Track `id`, at any depth.
+    pub fn track(&self, id: TrackId) -> Option<&Track> {
+        let groups = self.groups_of_track(id)?;
+        let tracks = match groups.last().map(|g| &g.content) {
+            Some(ClipContent::Group(g)) => &g.tracks,
+            _ => &self.tracks,
+        };
+        tracks.iter().find(|t| t.id == id)
+    }
+
+    pub fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
+        level_of_track(&mut self.tracks, id)?.iter_mut().find(|t| t.id == id)
+    }
+
+    /// The group clips track `id` is inside, outermost first (none at the top level).
+    pub fn groups_of_track(&self, id: TrackId) -> Option<Vec<&Clip>> {
+        let mut path = Vec::new();
+        track_path(&self.tracks, id, &mut path).then_some(path)
+    }
+
+    /// The track clip `id` is on, at any depth.
+    pub fn track_of_clip(&self, id: ClipId) -> Option<TrackId> {
+        fn walk(tracks: &[Track], id: ClipId) -> Option<TrackId> {
+            tracks.iter().find_map(|t| {
+                t.clips.iter().find_map(|c| match &c.content {
+                    _ if c.id == id => Some(t.id),
+                    ClipContent::Group(g) => walk(&g.tracks, id),
+                    _ => None,
+                })
+            })
+        }
+        walk(&self.tracks, id)
+    }
+
+    /// The group clip clip `id` is directly inside, if it is in one.
+    pub fn group_of(&self, id: ClipId) -> Option<ClipId> {
+        let mut path = Vec::new();
+        clip_path(&self.tracks, id, &mut path);
+        path.iter().rev().nth(1).map(|g| g.id)
+    }
+
+    /// Where the level of track `id` starts on the timeline: its groups' starts added up (their
+    /// first cycle).
+    pub fn level_start(&self, id: TrackId) -> Option<u32> {
+        Some(self.groups_of_track(id)?.iter().map(|g| g.start).sum())
+    }
+
+    /// The timeline frame clip `id` starts on (in its groups' first cycle).
+    pub fn origin(&self, id: ClipId) -> Option<u32> {
+        let mut path = Vec::new();
+        clip_path(&self.tracks, id, &mut path).then(|| path.iter().map(|c| c.start).sum())
+    }
+
+    /// The frame on track `id`'s own level when the timeline is at `frame`: through each group's
+    /// start and cycle. Before a group's start it is negative.
+    pub fn track_frame(&self, id: TrackId, frame: u32) -> Option<i64> {
+        Some(into_groups(&self.groups_of_track(id)?, i64::from(frame)))
+    }
+
+    /// Clip `id`'s own frame (counted from its start) when the timeline is at `frame`, through
+    /// its groups' starts and cycles.
+    pub fn local_frame(&self, id: ClipId, frame: u32) -> Option<i64> {
+        let mut path = Vec::new();
+        if !clip_path(&self.tracks, id, &mut path) {
+            return None;
+        }
+        let clip = path.pop()?;
+        Some(into_groups(&path, i64::from(frame)) - i64::from(clip.start))
+    }
+
+    /// The drawing clip of top-level layer `root` (at any depth), and its track.
     pub fn drawing_of(&self, root: LayerId) -> Option<(TrackId, ClipId)> {
-        self.tracks.iter().find_map(|t| {
-            t.clips
-                .iter()
-                .find(|c| matches!(&c.content, ClipContent::Drawing(d) if d.root == root))
-                .map(|c| (t.id, c.id))
-        })
+        fn walk(tracks: &[Track], root: LayerId) -> Option<(TrackId, ClipId)> {
+            tracks.iter().find_map(|t| {
+                t.clips.iter().find_map(|c| match &c.content {
+                    ClipContent::Drawing(d) if d.root == root => Some((t.id, c.id)),
+                    ClipContent::Group(g) => walk(&g.tracks, root),
+                    _ => None,
+                })
+            })
+        }
+        walk(&self.tracks, root)
     }
 
     /// A new empty track on top of the others.
@@ -796,29 +909,43 @@ impl Timeline {
         id
     }
 
+    /// A new empty track on top of group clip `group`'s own.
+    pub fn add_group_track(&mut self, group: ClipId, name: &str) -> Option<TrackId> {
+        let track = self.track_of(name, false, Vec::new());
+        let id = track.id;
+        match &mut self.clip_mut(group)?.content {
+            ClipContent::Group(g) => g.tracks.push(track),
+            _ => return None,
+        }
+        Some(id)
+    }
+
     /// Takes track `id` out, with its clips.
     pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
-        let at = self.track_index(id)?;
+        let level = level_of_track(&mut self.tracks, id)?;
+        let at = level.iter().position(|t| t.id == id)?;
+        let track = level.remove(at);
         if self.simple == Some(id) {
             self.simple = None;
         }
-        Some(self.tracks.remove(at))
+        Some(track)
     }
 
     /// A drawing of `root` on track `track` at frame `at` (just after the clip there, if one is),
     /// held for the document's exposure; the clips after it move along to make room. Returns its
     /// clip.
     pub fn add_drawing(&mut self, track: TrackId, at: u32, root: LayerId, name: &str) -> Option<ClipId> {
-        let t = self.track_index(track)?;
-        let start = self.tracks.get(t)?.clip_at(at).map_or(at, Clip::end);
-        let mut clip = Clip::drawing(name, root, start, self.exposure);
+        let mut clip = Clip::drawing(name, root, 0, self.exposure);
         clip.id = ClipId(self.next_clip);
-        self.next_clip += 1;
+        let level = level_of_track(&mut self.tracks, track)?;
+        let track = level.iter_mut().find(|t| t.id == track)?;
+        let start = track.clip_at(at).map_or(at, Clip::end);
+        clip.start = start;
         let id = clip.id;
-        let track = self.tracks.get_mut(t)?;
         make_room(track, start, clip.end());
         let at = track.clips.partition_point(|c| c.start < start);
         track.clips.insert(at, clip);
+        self.next_clip += 1;
         self.fit();
         Some(id)
     }
@@ -826,8 +953,8 @@ impl Timeline {
     /// Clip `id` held for `duration` frames (at least 1). `push`: the clips after it move along
     /// (back, for a shorter hold), keeping the gaps between them; else it stops at the next one.
     pub fn set_duration(&mut self, id: ClipId, duration: u32, push: bool) -> bool {
-        let Some((t, c)) = self.find(id) else { return false };
-        let Some(track) = self.tracks.get_mut(t) else { return false };
+        let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
+        let Some(track) = level.get_mut(t) else { return false };
         let Some(clip) = track.clips.get(c) else { return false };
         let (start, old_end) = (clip.start, clip.end());
         let next = track.clips.get(c + 1).map(|n| n.start);
@@ -846,12 +973,13 @@ impl Timeline {
         true
     }
 
-    /// Clip `id` moved to track `track`, as near frame `start` as it fits without covering another
-    /// clip. False if it can't go there.
+    /// Clip `id` moved to track `track` (on the same level), as near frame `start` as it fits
+    /// without covering another clip. False if it can't go there.
     pub fn move_clip(&mut self, id: ClipId, track: TrackId, start: u32) -> bool {
-        let (Some((t, c)), Some(to)) = (self.find(id), self.track_index(track)) else { return false };
-        let Some(clip) = self.tracks.get_mut(t).map(|tr| tr.clips.remove(c)) else { return false };
-        let Some(dest) = self.tracks.get_mut(to) else { return false };
+        let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
+        let Some(to) = level.iter().position(|x| x.id == track) else { return false };
+        let Some(clip) = level.get_mut(t).map(|tr| tr.clips.remove(c)) else { return false };
+        let Some(dest) = level.get_mut(to) else { return false };
         let start = nearest_room(dest, start, clip.duration);
         let at = dest.clips.partition_point(|x| x.start < start);
         dest.clips.insert(at, Clip { start, ..clip });
@@ -862,9 +990,9 @@ impl Timeline {
     /// Clip `id` cut at frame `at` (inside it): it ends there, and a clip of `root` (a copy of its
     /// drawing) takes the rest. Returns the new clip.
     pub fn split(&mut self, id: ClipId, at: u32, root: LayerId) -> Option<ClipId> {
-        let (t, c) = self.find(id)?;
         let next = self.next_clip;
-        let track = self.tracks.get_mut(t)?;
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        let track = level.get_mut(t)?;
         let clip = track.clips.get_mut(c)?;
         if at <= clip.start || at >= clip.end() {
             return None;
@@ -885,9 +1013,9 @@ impl Timeline {
     /// A clip of `root` (a copy of clip `id`'s drawing) just after it, as long; the clips after
     /// it move along. Returns the copy.
     pub fn duplicate(&mut self, id: ClipId, root: LayerId) -> Option<ClipId> {
-        let (t, c) = self.find(id)?;
         let next = self.next_clip;
-        let track = self.tracks.get_mut(t)?;
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        let track = level.get_mut(t)?;
         let mut copy = track.clips.get(c)?.clone();
         copy.id = ClipId(next);
         copy.start = copy.end();
@@ -901,8 +1029,8 @@ impl Timeline {
 
     /// Takes clip `id` off its track. `close`: the clips after it move back over its place.
     pub fn remove(&mut self, id: ClipId, close: bool) -> Option<Clip> {
-        let (t, c) = self.find(id)?;
-        let track = self.tracks.get_mut(t)?;
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        let track = level.get_mut(t)?;
         let clip = track.clips.remove(c);
         if close {
             let gap = clip.duration;
@@ -913,11 +1041,250 @@ impl Timeline {
         Some(clip)
     }
 
+    /// Clips `ids`, all on tracks of one level, made into a group clip named `name` spanning them:
+    /// each of their tracks becomes a track of the group's own (in the same order, named as it
+    /// was), their frames counted from the group's start. The group goes on the topmost of their
+    /// tracks, or on a new track just above it when it doesn't fit there. Returns the group.
+    pub fn group(&mut self, ids: &[ClipId], name: &str) -> Option<ClipId> {
+        let first = *ids.first()?;
+        let group_id = ClipId(self.next_clip);
+        let mut next_track = self.next_track;
+        let (level, ..) = level_of_clip(&mut self.tracks, first)?;
+        let found = level.iter().flat_map(|t| &t.clips).filter(|c| ids.contains(&c.id)).count();
+        if found != ids.iter().collect::<std::collections::HashSet<_>>().len() {
+            return None;
+        }
+        let members = || level.iter().flat_map(|t| &t.clips).filter(|c| ids.contains(&c.id));
+        let start = members().map(|c| c.start).min()?;
+        let end = members().map(Clip::end).max()?;
+        let mut inner = Vec::new();
+        let mut home = 0;
+        for (t, track) in level.iter_mut().enumerate() {
+            let (taken, kept): (Vec<Clip>, Vec<Clip>) =
+                std::mem::take(&mut track.clips).into_iter().partition(|c| ids.contains(&c.id));
+            track.clips = kept;
+            if taken.is_empty() {
+                continue;
+            }
+            home = t;
+            let clips = taken.into_iter().map(|c| Clip { start: c.start - start, ..c }).collect();
+            let id = TrackId(next_track);
+            next_track += 1;
+            inner.push(Track { id, name: track.name.clone(), hidden: false, locked: false, opacity: 1.0, clips });
+        }
+        let group = Clip {
+            id: group_id,
+            name: name.to_owned(),
+            start,
+            duration: end - start,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            mask: MaskMode::None,
+            adjustment: false,
+            disabled: false,
+            label: None,
+            keys: ClipKeys::default(),
+            content: ClipContent::Group(Group { tracks: inner, collapsed: false, cycle: None }),
+        };
+        let fits = level.get(home).is_some_and(|t| t.clips.iter().all(|c| c.end() <= start || c.start >= end));
+        if !fits {
+            let id = TrackId(next_track);
+            next_track += 1;
+            home += 1;
+            let track = Track { id, name: name.to_owned(), hidden: false, locked: false, opacity: 1.0, clips: vec![] };
+            level.insert(home.min(level.len()), track);
+        }
+        let track = level.get_mut(home)?;
+        let at = track.clips.partition_point(|c| c.start < start);
+        track.clips.insert(at, group);
+        self.next_track = next_track;
+        self.next_clip += 1;
+        Some(group_id)
+    }
+
+    /// Group clip `id` taken apart: its bottom track's clips go back onto its own track (where it
+    /// was), and each of its other tracks goes just above that, their frames back on this level.
+    /// Its own keys and cycle are let go. False if it isn't a group.
+    pub fn ungroup(&mut self, id: ClipId) -> bool {
+        let next = self.next_track;
+        let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
+        let Some(track) = level.get_mut(t) else { return false };
+        if !matches!(track.clips.get(c).map(|x| &x.content), Some(ClipContent::Group(_))) {
+            return false;
+        }
+        let group = track.clips.remove(c);
+        let ClipContent::Group(g) = group.content else { return false };
+        let mut above = t + 1;
+        let mut made = 0;
+        for (k, mut inner) in g.tracks.into_iter().enumerate() {
+            inner.clips.iter_mut().for_each(|x| x.start += group.start);
+            let onto = level.get_mut(t).filter(|_| k == 0);
+            let fits = onto.as_ref().is_some_and(|own| {
+                inner.clips.iter().all(|x| own.clips.iter().all(|o| o.end() <= x.start || o.start >= x.end()))
+            });
+            match onto {
+                Some(own) if fits => {
+                    own.clips.extend(inner.clips);
+                    own.clips.sort_by_key(|x| x.start);
+                }
+                _ => {
+                    if k == 0 {
+                        // the bottom track no longer fits where it was: a track of its own
+                        inner.id = TrackId(next + made);
+                        made += 1;
+                    }
+                    level.insert(above.min(level.len()), inner);
+                    above += 1;
+                }
+            }
+        }
+        self.next_track += made;
+        self.fit();
+        true
+    }
+
     /// As long as its clips at least.
     fn fit(&mut self) {
         let end = self.tracks.iter().flat_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(1);
         self.duration = self.duration.max(end);
     }
+
+    /// The camera at frame `frame` (between frames too), its rotation eased the short way round
+    /// from key to key; none without camera keys.
+    pub fn camera_at(&self, frame: f32) -> Option<CameraPose> {
+        let mut unwound = self.camera.clone();
+        let mut before: Option<f32> = None;
+        for key in &mut unwound.keys {
+            if let Some(b) = before {
+                let tau = std::f32::consts::TAU;
+                key.value.rotation =
+                    b + (key.value.rotation - b + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+            }
+            before = Some(key.value.rotation);
+        }
+        unwound.value_at(frame).map(|p| CameraPose {
+            zoom: p.zoom.clamp(CAMERA_ZOOM.0, CAMERA_ZOOM.1),
+            rotation: p.rotation.rem_euclid(std::f32::consts::TAU),
+            ..p
+        })
+    }
+
+    /// Every drawing a frame draws from, bottom first: the plan's (mattes too) and, while drawing
+    /// rather than `playing`, the onion skins about it. What has to be on the GPU to draw it.
+    pub fn drawn(&self, frame: u32, playing: bool) -> Vec<LayerId> {
+        let mut out = self.plan(frame).roots();
+        for track in &self.tracks {
+            let (before, after) = self.onions_on(track, frame, playing);
+            out.extend(before.iter().chain(&after).map(|s| s.root));
+        }
+        out
+    }
+
+    /// The onion skins about `frame` on top-level `track`, before it and after it: only on the
+    /// simple-mode track, shown, while drawing rather than `playing`.
+    pub fn onions_on(&self, track: &Track, frame: u32, playing: bool) -> (Vec<Showing>, Vec<Showing>) {
+        if playing || track.hidden || self.simple != Some(track.id) {
+            return (Vec::new(), Vec::new());
+        }
+        self.onions(track, frame)
+    }
+
+    /// How many levels of group clips deep it goes (0 with none).
+    pub fn group_depth(&self) -> usize {
+        fn depth(tracks: &[Track]) -> usize {
+            tracks
+                .iter()
+                .flat_map(|t| &t.clips)
+                .map(|c| match &c.content {
+                    ClipContent::Group(g) => 1 + depth(&g.tracks),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        depth(&self.tracks)
+    }
+}
+
+/// `frame` of the level `groups` (outermost first) are on, on the level inside the last of them:
+/// through each one's start and cycle.
+fn into_groups(groups: &[&Clip], frame: i64) -> i64 {
+    groups.iter().fold(frame, |f, g| {
+        let local = f - i64::from(g.start);
+        match &g.content {
+            ClipContent::Group(Group { cycle: Some(c), .. }) if local >= 0 => local % i64::from(c.length.max(1)),
+            _ => local,
+        }
+    })
+}
+
+/// The clips from the top of `tracks` down to clip `id` (the groups it is in, then itself), into
+/// `path`; false, `path` as it was, if it isn't there.
+fn clip_path<'a>(tracks: &'a [Track], id: ClipId, path: &mut Vec<&'a Clip>) -> bool {
+    for clip in tracks.iter().flat_map(|t| &t.clips) {
+        path.push(clip);
+        if clip.id == id {
+            return true;
+        }
+        if let ClipContent::Group(g) = &clip.content
+            && clip_path(&g.tracks, id, path)
+        {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+/// The group clips from the top of `tracks` down to track `id`, into `path`; false if it isn't
+/// there.
+fn track_path<'a>(tracks: &'a [Track], id: TrackId, path: &mut Vec<&'a Clip>) -> bool {
+    if tracks.iter().any(|t| t.id == id) {
+        return true;
+    }
+    for clip in tracks.iter().flat_map(|t| &t.clips) {
+        if let ClipContent::Group(g) = &clip.content {
+            path.push(clip);
+            if track_path(&g.tracks, id, path) {
+                return true;
+            }
+            path.pop();
+        }
+    }
+    false
+}
+
+/// The tracks holding track `id`, among `tracks` or inside a group clip on them.
+fn level_of_track(tracks: &mut Vec<Track>, id: TrackId) -> Option<&mut Vec<Track>> {
+    if tracks.iter().any(|t| t.id == id) {
+        return Some(tracks);
+    }
+    for clip in tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+        if let ClipContent::Group(g) = &mut clip.content
+            && let Some(level) = level_of_track(&mut g.tracks, id)
+        {
+            return Some(level);
+        }
+    }
+    None
+}
+
+/// The tracks holding clip `id` (among `tracks` or inside a group clip on them), its track's
+/// index in them and its own.
+fn level_of_clip(tracks: &mut Vec<Track>, id: ClipId) -> Option<(&mut Vec<Track>, usize, usize)> {
+    let here =
+        tracks.iter().enumerate().find_map(|(t, track)| track.clips.iter().position(|c| c.id == id).map(|c| (t, c)));
+    if let Some((t, c)) = here {
+        return Some((tracks, t, c));
+    }
+    for clip in tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+        if let ClipContent::Group(g) = &mut clip.content
+            && let Some(found) = level_of_clip(&mut g.tracks, id)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// The clips of `track` from frame `start` on move along, gaps kept, so that none starts before
@@ -1005,6 +1372,24 @@ impl FramePlan {
     }
 }
 
+impl FramePlan {
+    /// Every drawing it draws from, bottom first: those shown and those only a matte.
+    pub fn roots(&self) -> Vec<LayerId> {
+        fn walk(items: &[PlanItem], out: &mut Vec<LayerId>) {
+            for item in items {
+                match &item.shows {
+                    Shows::Drawing(id) => out.push(*id),
+                    Shows::Group(inner) => walk(inner, out),
+                    Shows::Video { .. } => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.items, &mut out);
+        out
+    }
+}
+
 /// One clip as a frame shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlanItem {
@@ -1048,6 +1433,11 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
         };
         // covering `frame`, it starts at or before it
         let local = frame - clip.start;
+        // a repeating group's own keys play again each cycle, unless they run on across
+        let keyed = match &clip.content {
+            ClipContent::Group(Group { cycle: Some(c), .. }) if c.keys == CycleKeys::Repeat => local % c.length.max(1),
+            _ => local,
+        };
         let shows = match &clip.content {
             ClipContent::Drawing(d) => Shows::Drawing(d.root),
             ClipContent::Group(g) => {
@@ -1080,8 +1470,8 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
             track: track.id,
             shows,
             local,
-            pose: clip.keys.pose_at(local as f32),
-            opacity: clip.keys.opacity_at(local as f32).unwrap_or(clip.opacity) * track.opacity,
+            pose: clip.keys.pose_at(keyed as f32),
+            opacity: clip.keys.opacity_at(keyed as f32).unwrap_or(clip.opacity) * track.opacity,
             blend: clip.blend,
             mask,
             matte_only: false,
@@ -1170,6 +1560,19 @@ impl Keyed for [f32; 2] {
     }
     fn times(self, s: f32) -> [f32; 2] {
         [self[0] * s, self[1] * s]
+    }
+}
+
+impl Keyed for CameraPose {
+    fn plus(self, other: CameraPose) -> CameraPose {
+        CameraPose {
+            center: self.center.plus(other.center),
+            zoom: self.zoom + other.zoom,
+            rotation: self.rotation + other.rotation,
+        }
+    }
+    fn times(self, s: f32) -> CameraPose {
+        CameraPose { center: self.center.times(s), zoom: self.zoom * s, rotation: self.rotation * s }
     }
 }
 
@@ -2208,5 +2611,148 @@ mod tests {
         let pose = tl.showing(0, true)[0].pose.unwrap();
         let moved = pose.apply(Vec2::new(0.0, 0.0));
         assert!(near(moved.x, 1.0) && near(moved.y, 2.0), "its own move, then the group's: {moved:?}");
+    }
+
+    #[test]
+    fn the_camera_frames_the_canvas_and_turns_the_short_way() {
+        let still = CameraPose::still(100.0, 50.0);
+        let m = still.to_frame(100.0, 50.0);
+        let p = m.apply(Vec2::new(10.0, 20.0));
+        assert!(near(p.x, 10.0) && near(p.y, 20.0), "the whole canvas as it is: {p:?}");
+        // looking at (70, 25) twice as close: that point in the middle, the rest spread about it
+        let pushed = CameraPose { center: [70.0, 25.0], zoom: 2.0, rotation: 0.0 };
+        let m = pushed.to_frame(100.0, 50.0);
+        let mid = m.apply(Vec2::new(70.0, 25.0));
+        let right = m.apply(Vec2::new(75.0, 25.0));
+        assert!(near(mid.x, 50.0) && near(mid.y, 25.0) && near(right.x, 60.0), "{mid:?} {right:?}");
+        let c = pushed.corners(100.0, 50.0);
+        assert!(near(c[0][0], 45.0) && near(c[0][1], 12.5) && near(c[2][0], 95.0) && near(c[2][1], 37.5), "{c:?}");
+        // no keys: no camera
+        let mut tl = Timeline::new(12, 20);
+        assert_eq!(tl.camera_at(3.0), None);
+        // from just short of a whole turn to just past it: through 0, not back round
+        let at = |rotation: f32| CameraPose { center: [0.0, 0.0], zoom: 1.0, rotation };
+        tl.camera.set(0, at(350_f32.to_radians()), Easing::Linear);
+        tl.camera.set(10, CameraPose { center: [10.0, 0.0], zoom: 3.0, ..at(10_f32.to_radians()) }, Easing::Linear);
+        let half = tl.camera_at(5.0).unwrap();
+        assert!(half.rotation < 0.01 || half.rotation > std::f32::consts::TAU - 0.01, "{}", half.rotation.to_degrees());
+        assert!(near(half.zoom, 2.0) && near(half.center[0], 5.0));
+        let quarter = tl.camera_at(2.5).unwrap().rotation.to_degrees();
+        assert!((quarter - 355.0).abs() < 0.01, "{quarter}");
+    }
+
+    /// Clips 1 and 2 on track 1 and clip 3 on track 2 (layers 10, 11, 12), then clip 4 (layer 13)
+    /// on track 1 after them.
+    fn three_to_group() -> Timeline {
+        let mut tl = Timeline::new(12, 20);
+        tl.tracks = vec![
+            Track { id: TrackId(1), ..track(vec![drawing(1, 2, 2, 10), drawing(2, 4, 3, 11), drawing(4, 9, 2, 13)]) },
+            Track { id: TrackId(2), ..track(vec![drawing(3, 3, 5, 12)]) },
+        ];
+        tl.next_clip = 5;
+        tl.next_track = 3;
+        tl
+    }
+
+    #[test]
+    fn clips_group_and_ungroup() {
+        let mut tl = three_to_group();
+        let before: Vec<Vec<LayerId>> = (0..12).map(|f| tl.plan(f).drawings()).collect();
+        let g = tl.group(&[ClipId(1), ClipId(2), ClipId(3)], "Group").unwrap();
+        // on the topmost member's track, from the first's start to the last's end
+        assert_eq!(tl.tracks[1].clips.iter().map(|c| c.id).collect::<Vec<_>>(), [g]);
+        let group = tl.clip(g).unwrap();
+        assert_eq!((group.start, group.duration), (2, 6));
+        let ClipContent::Group(inner) = &group.content else { panic!() };
+        assert_eq!(inner.tracks.len(), 2);
+        assert_eq!(inner.tracks[0].clips.iter().map(|c| (c.id.0, c.start)).collect::<Vec<_>>(), [(1, 0), (2, 2)]);
+        assert_eq!(inner.tracks[1].clips.iter().map(|c| (c.id.0, c.start)).collect::<Vec<_>>(), [(3, 1)]);
+        // every frame shows what it did
+        assert_eq!((0..12).map(|f| tl.plan(f).drawings()).collect::<Vec<_>>(), before);
+        // found inside it, and where it is on the timeline
+        assert_eq!(tl.clip(ClipId(3)).map(|c| c.start), Some(1));
+        assert_eq!(tl.origin(ClipId(3)), Some(3));
+        assert_eq!(tl.group_of(ClipId(3)), Some(g));
+        let inner_track = inner.tracks[1].id;
+        assert_eq!(tl.level_start(inner_track), Some(2));
+        assert_eq!(tl.track(inner_track).map(|t| t.clips.len()), Some(1));
+        assert_eq!(tl.drawing_of(LayerId(12)), Some((inner_track, ClipId(3))));
+        assert_eq!(tl.group_depth(), 1);
+        // and apart again: the same frames, its bottom track back on its own
+        assert!(tl.ungroup(g));
+        assert_eq!((0..12).map(|f| tl.plan(f).drawings()).collect::<Vec<_>>(), before);
+        assert_eq!(spans(&tl, 1), [(10, 2, 2), (11, 4, 3)]);
+        assert!(tl.tracks.iter().all(Track::is_ordered));
+        // a group that doesn't fit on its track goes on a new one just above
+        let mut tl = three_to_group();
+        let g = tl.group(&[ClipId(1), ClipId(4)], "Run").unwrap();
+        assert_eq!(tl.tracks.len(), 3);
+        assert_eq!(tl.tracks[1].clips[0].id, g);
+        assert_eq!(tl.tracks[2].clips[0].id, ClipId(3));
+        // members on another level, or none, make no group
+        assert_eq!(tl.group(&[ClipId(2), ClipId(4)], "Mixed"), None);
+        assert_eq!(tl.group(&[], "Empty"), None);
+    }
+
+    #[test]
+    fn clips_inside_a_group_are_edited_on_its_own_frames() {
+        let mut tl = three_to_group();
+        let g = tl.group(&[ClipId(1), ClipId(2), ClipId(3)], "Group").unwrap();
+        let inner = match &tl.clip(g).unwrap().content {
+            ClipContent::Group(gr) => gr.tracks[0].id,
+            _ => panic!(),
+        };
+        assert!(tl.set_duration(ClipId(1), 3, true));
+        assert_eq!(tl.clip(ClipId(2)).map(|c| c.start), Some(3), "pushed along inside the group");
+        assert!(tl.move_clip(ClipId(2), inner, 6));
+        assert_eq!(tl.clip(ClipId(2)).map(|c| c.start), Some(6));
+        let added = tl.add_drawing(inner, 0, LayerId(20), "New").unwrap();
+        assert_eq!(tl.origin(added), Some(5), "after the first drawing, on the timeline at 2 + 3");
+        let cut = tl.split(ClipId(2), 7, LayerId(21)).unwrap();
+        assert_eq!(tl.clip(cut).map(|c| (c.start, c.duration)), Some((7, 2)));
+        assert!(tl.remove(cut, false).is_some());
+        assert!(tl.add_group_track(g, "More").is_some());
+        assert!(tl.add_group_track(ClipId(4), "Not a group").is_none());
+        let made = tl.track_mut(inner).map(|t| t.clips.len());
+        assert_eq!(made, Some(3));
+        assert!(tl.remove_track(inner).is_some());
+        assert!(tl.track(inner).is_none());
+    }
+
+    #[test]
+    fn a_cycling_group_s_keys_repeat_or_run_on() {
+        let mut tl = Timeline::new(12, 12);
+        let mut group = Clip {
+            content: ClipContent::Group(Group {
+                tracks: vec![Track { id: TrackId(5), ..track(vec![drawing(1, 0, 3, 10)]) }],
+                collapsed: false,
+                cycle: Some(Cycle { length: 3, keys: CycleKeys::Repeat }),
+            }),
+            ..drawing(2, 2, 9, 0)
+        };
+        group.keys.opacity = keys(&[(0, 0.0, Easing::Linear), (6, 1.0, Easing::Linear)]);
+        tl.tracks.push(track(vec![group]));
+        // frame 2 + 4 is the second cycle's frame 1: repeated, at 1/6; run on, at 4/6
+        assert!(near(tl.plan(6).items[0].opacity, 1.0 / 6.0));
+        assert_eq!(tl.local_frame(ClipId(1), 6), Some(1));
+        assert_eq!(tl.track_frame(TrackId(5), 6), Some(1));
+        assert_eq!(tl.track_frame(TrackId(1), 6), Some(6));
+        if let Some(ClipContent::Group(g)) = tl.clip_mut(ClipId(2)).map(|c| &mut c.content) {
+            g.cycle = Some(Cycle { length: 3, keys: CycleKeys::ContinueAcross });
+        }
+        assert!(near(tl.plan(6).items[0].opacity, 4.0 / 6.0));
+    }
+
+    #[test]
+    fn mattes_are_drawn_from_though_they_are_not_shown() {
+        let mut tl = Timeline::new(12, 4);
+        let mut matte = drawing(2, 0, 4, 11);
+        matte.mask = MaskMode::Luminance;
+        tl.tracks = vec![
+            Track { id: TrackId(1), ..track(vec![drawing(1, 0, 4, 10)]) },
+            Track { id: TrackId(2), ..track(vec![matte]) },
+        ];
+        assert_eq!(tl.plan(0).drawings(), [LayerId(11)]);
+        assert_eq!(tl.drawn(0, true), [LayerId(10), LayerId(11)]);
     }
 }
