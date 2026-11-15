@@ -382,14 +382,16 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // let go, whatever is open: one held to erase gives the eraser back (before this event's
         // touch, so a stroke that begins as it is let go paints)
         session?.let { s ->
-            if (letGo and MotionEvent.BUTTON_STYLUS_PRIMARY != 0) penLetGo(s, second = false)
-            if (letGo and MotionEvent.BUTTON_STYLUS_SECONDARY != 0) penLetGo(s, second = true)
+            if (letGo and FIRST_BUTTON != 0) penLetGo(s, second = false)
+            if (letGo and SECOND_BUTTON != 0) penLetGo(s, second = true)
         }
-        if (pressed == 0) return own && (e.actionButton and PEN_BUTTONS) != 0
+        if (pressed == 0) return own && penIn && (e.actionButton and PEN_BUTTONS) != 0
         // under the brush studio the tool would change unseen
         if (vm.studioOpen) return own
         val s = session ?: return own
-        penPressed(s, pressed and MotionEvent.BUTTON_STYLUS_PRIMARY == 0, e.x, e.y)
+        // both at once (one event for the two): each does what it is set to
+        if (pressed and FIRST_BUTTON != 0) penPressed(s, second = false, e.x, e.y)
+        if (pressed and SECOND_BUTTON != 0) penPressed(s, second = true, e.x, e.y)
         return own
     }
 
