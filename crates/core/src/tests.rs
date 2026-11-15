@@ -4932,6 +4932,41 @@ fn a_shaped_brush_outlines_its_shape_and_the_round_tip_none() {
 }
 
 #[test]
+fn a_tip_of_its_own_outlines_however_fine_its_lines() {
+    use procraft_engine::brush::Source;
+    use procraft_engine::textures::TEXTURE_SIZE;
+    let s = CanvasSession::new(64, 64);
+    // a brought-in brush's tip drawn in lines a pixel and a half wide: a square's edges, half the
+    // tip across (softened, its lines never reach the level a filled shape is traced at)
+    let n = TEXTURE_SIZE;
+    let lines: Vec<u8> = (0..n * n)
+        .map(|i| {
+            let (x, y) = ((i % n) as f32 + 0.5, (i / n) as f32 + 0.5);
+            let (a, b) = (n as f32 / 4.0, n as f32 * 3.0 / 4.0);
+            let edge = |v: f32| (v - a).abs() < 0.75 || (v - b).abs() < 0.75;
+            let along = |v: f32| (a..=b).contains(&v);
+            if (edge(x) && along(y)) || (edge(y) && along(x)) { 255 } else { 0 }
+        })
+        .collect();
+    {
+        let mut st = s.shared.lock();
+        let (set, index) = st.brush_ref(st.tool);
+        let shape = &mut st.library[set].brushes[index].shape;
+        shape.image = None;
+        shape.source = Source::new(lines);
+        shape.roundness = 1.0;
+        shape.rotation = 0.0;
+    }
+    let loops = s.brush_outline();
+    assert!(!loops.is_empty(), "no outline: the cursor would be a circle");
+    // round the square's edges, a quarter of the brush from its middle
+    for p in loops.iter().flat_map(|ring| ring.chunks(2)) {
+        let far = p[0].abs().max(p[1].abs());
+        assert!((far - 0.25).abs() < 0.05, "{p:?}");
+    }
+}
+
+#[test]
 fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
     use procraft_engine::plist::Value;
     // a file from before grain depth and behaviour were kept: a named grain, its movement only
@@ -7488,6 +7523,10 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
                 s.brush_preview(set, i, 200, 60).is_some_and(|p| p.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
             if !drawn {
                 failures.push(format!("{at}: draws nothing"));
+            }
+            // a tip of its own shows as the cursor's outline
+            if tip && s.select_brush(set, i) && s.brush_outline().is_empty() {
+                failures.push(format!("{at}: no outline of its tip"));
             }
             // to look at beside another app's: each preview as a picture, if asked for
             if let (Ok(out), Some(p)) = (std::env::var("BRUSH_CORPUS_PREVIEWS"), s.brush_preview(set, i, 600, 180)) {
