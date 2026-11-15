@@ -227,6 +227,17 @@ procraft_interface_scale(width: f32, height: f32) -> f32
 An answer outside .5 to 2 stops the plugin. The app may show less than the answer, so that every page
 stays in reach on a small window.
 
+### `keep_clear`
+
+Whether the interface keeps clear of the status bar and the screen's cutouts, such as a phone's camera
+(not 0). The app then lays everything out inside them, the canvas too, and leaves the rest black. The
+status bar's room is kept even while the bar is hidden, so a swipe that shows it for a moment moves
+nothing. Where there is neither, as on a desktop, it changes nothing.
+
+```
+procraft_keep_clear() -> i32
+```
+
 ### `paste_mask`
 
 Whether a picture pasted with a mask current goes into the mask. If it does, the picture goes through

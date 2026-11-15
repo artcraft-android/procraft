@@ -11,6 +11,9 @@
 //!   current layer (not 0) or the canvas as it is composited (0).
 //! - `procraft_interface_scale(width: f32, height: f32) -> f32`: for the hook `interface_scale`, how
 //!   big the interface shows (1: as measured) in a window of that size, in points at 1.
+//! - `procraft_keep_clear() -> i32`: for the hook `keep_clear`, whether the interface keeps clear of
+//!   the system's status bar and the screen's cutouts, a camera's (not 0), rather than taking the
+//!   whole window.
 //! - `procraft_paste_mask() -> i32`: for the hook `paste_mask`, whether a picture pasted with a mask
 //!   current goes into the mask (not 0). If it does, the picture goes through the module a row at a
 //!   time: `procraft_row_buffer(bytes: i32) -> i32` says where in its exported `memory` a row of that
@@ -168,6 +171,7 @@ const SCALES: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 const POSITION: &str = "procraft_position";
 const PICK_LAYER: &str = "procraft_pick_layer";
 const INTERFACE_SCALE: &str = "procraft_interface_scale";
+const KEEP_CLEAR: &str = "procraft_keep_clear";
 const PASTE_MASK: &str = "procraft_paste_mask";
 const ROW_BUFFER: &str = "procraft_row_buffer";
 const PASTE_ROW: &str = "procraft_paste_row";
@@ -290,6 +294,8 @@ pub(crate) enum Hook {
     LayerAdded,
     /// A hardware keyboard's presses taken as others before the app's shortcuts see them.
     KeyShortcut,
+    /// The interface kept clear of the status bar and the screen's cutouts.
+    KeepClear,
     /// Kinds of layer of its own (interface 3): not named in `hooks`, but on it whenever its
     /// manifest lists `layer_kinds`.
     Layers,
@@ -318,6 +324,7 @@ impl Hook {
             "stroke_kept" => Some(Hook::StrokeKept),
             "layer_added" => Some(Hook::LayerAdded),
             "key_shortcut" => Some(Hook::KeyShortcut),
+            "keep_clear" => Some(Hook::KeepClear),
             _ => None,
         }
     }
@@ -345,6 +352,7 @@ impl Hook {
             Hook::StrokeKept => "This plugin can act on your artwork each time you finish a stroke.",
             Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
             Hook::KeyShortcut => "This plugin can change what your keyboard's keys do.",
+            Hook::KeepClear => "This plugin can keep the interface clear of the status bar and the camera.",
             Hook::Layers => "This plugin can add kinds of layer whose strokes it keeps, and draw them again.",
         }
     }
@@ -364,6 +372,7 @@ impl Hook {
             Hook::HideUndoNotice => exports(module, HIDE_UNDO_NOTICE, &[], &[ValType::I32]),
             Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
             Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
+            Hook::KeepClear => exports(module, KEEP_CLEAR, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -689,6 +698,7 @@ pub(crate) struct Running {
     hide_undo_notice: Option<TypedFunc<(), i32>>,
     interface_colour: Option<TypedFunc<i32, i32>>,
     pin_panels: Option<TypedFunc<(), i32>>,
+    keep_clear: Option<TypedFunc<(), i32>>,
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
@@ -828,6 +838,7 @@ impl Running {
             let hide_undo_notice = instance.get_typed_func(&store, HIDE_UNDO_NOTICE).ok();
             let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
             let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
+            let keep_clear = instance.get_typed_func(&store, KEEP_CLEAR).ok();
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
@@ -909,6 +920,7 @@ impl Running {
                 hide_undo_notice,
                 interface_colour,
                 pin_panels,
+                keep_clear,
                 opacity_together,
                 randomise,
                 colour_triangle,
@@ -1658,6 +1670,17 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             pin_panels.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says the interface keeps clear of the status bar and the screen's cutouts.
+    pub(crate) fn keep_clear(&mut self) -> Result<bool, Stop> {
+        let Running { store, keep_clear, .. } = self;
+        let Some(keep_clear) = keep_clear else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            keep_clear.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
     }

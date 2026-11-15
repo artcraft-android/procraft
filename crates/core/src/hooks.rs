@@ -303,6 +303,13 @@ impl Hooks {
             && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
     }
 
+    /// The clear hook: whether the interface keeps clear of the status bar and the screen's cutouts
+    /// (a camera's), rather than taking the whole window.
+    pub(crate) fn keep_clear(&self) -> bool {
+        self.has(Hook::KeepClear)
+            && self.through(Hook::KeepClear, false, |running, said| Ok(said | running.keep_clear()?))
+    }
+
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
@@ -750,6 +757,12 @@ pub(crate) mod tests {
         (global $size (mut f32) (f32.const 1))
         (func (export "procraft_control") (param i32 f32) (global.set $size (local.get 1)))
         (func (export "procraft_interface_scale") (param f32 f32) (result f32) (global.get $size)))"#;
+    /// Answers the clear hook by its one switch.
+    const CLEARS: &str = r#"(module
+        (global $clear (mut i32) (i32.const 0))
+        (func (export "procraft_control") (param i32 f32)
+            (global.set $clear (f32.ne (local.get 1) (f32.const 0))))
+        (func (export "procraft_keep_clear") (result i32) (global.get $clear)))"#;
     /// Answers the pick hook by its one switch.
     const PICKS: &str = r#"(module
         (global $layer (mut i32) (i32.const 0))
@@ -2070,6 +2083,31 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), true));
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_interface_keeps_clear_of_the_system_while_a_plugin_s_switch_says() {
+        let dir = store("clear");
+        let module = wat::parse_str(CLEARS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["keep_clear"]);
+        manifest["controls"] = json!([{ "key": "clear", "type": "switch", "label": "Keep clear" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(!plugins.keep_clear(), "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(!plugins.keep_clear(), "its switch starts off");
+        let key = format!("{ID}.clear");
+        assert!(plugins.set_switch(key.clone(), true));
+        assert!(plugins.keep_clear());
+        // kept through a restart
+        let next = restarted(&dir, &plugins);
+        assert!(next.keep_clear());
+        assert!(plugins.set_switch(key, false));
+        assert!(!plugins.keep_clear());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.keep_clear());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

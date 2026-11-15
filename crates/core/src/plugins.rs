@@ -1291,6 +1291,13 @@ impl Plugins {
         self.hooks().interface_scale(width, height)
     }
 
+    /// Whether a plugin keeps the interface clear of the status bar and the screen's cutouts, a
+    /// camera's: the app then lays it out inside them. Where there are none, as on a desktop, it
+    /// changes nothing.
+    pub fn keep_clear(&self) -> bool {
+        self.hooks().keep_clear()
+    }
+
     /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
     /// ([`crate::CanvasSession::add_inbetween`]).
     pub fn tweens(&self) -> bool {
@@ -2254,6 +2261,10 @@ mod tests {
         assert_eq!(landing(&plugins), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
         assert!(plugins.set_slider("interface_size".to_owned(), 0.9).is_some());
         assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6);
+        assert!(!plugins.keep_clear());
+        assert!(plugins.set_switch(format!("{SIZE}.clear"), true));
+        assert!(plugins.keep_clear());
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6, "the slider is its own");
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
         assert!(plugins.hooks().pick_layer());
         assert!(plugins.set_switch("paste_into_mask".to_owned(), true));

@@ -104,17 +104,22 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /**
      * The surround's grid is fixed to the glass as the canvas is: its 1 pt lines lie every 16 pt
      * from the panel's own top-left corner in its natural orientation, so in the window a line's
-     * middle is half a point in from whichever corner that is.
+     * middle is half a point in from whichever corner that is. The canvas moved in from the window's
+     * corner (the interface keeping clear of a camera) has it that much further up and left.
      */
     private fun placeGrid(s: CanvasSession, width: Int, height: Int, rotation: Int) {
         val half = 0.5f * resources.displayMetrics.density
-        val (nw, nh) = if (rotation % 2 == 0) width.toFloat() to height.toFloat() else height.toFloat() to width.toFloat()
-        val (x, y) = when (rotation) {
+        val at = IntArray(2).also(::getLocationInWindow)
+        val moved = at[0] != 0 || at[1] != 0
+        val (w, h) = if (moved && rootView.width > 0 && rootView.height > 0) rootView.width to rootView.height else width to height
+        val (nw, nh) = if (rotation % 2 == 0) w.toFloat() to h.toFloat() else h.toFloat() to w.toFloat()
+        val (wx, wy) = when (rotation) {
             Surface.ROTATION_90 -> half to nw - half
             Surface.ROTATION_180 -> nw - half to nh - half
             Surface.ROTATION_270 -> nh - half to half
             else -> half to half
         }
+        val (x, y) = wx - at[0] to wy - at[1]
         s.setGridOrigin(x, y)
         vm.gridOrigin = Offset(x, y)
     }
