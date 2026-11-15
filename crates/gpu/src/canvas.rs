@@ -1081,6 +1081,15 @@ const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
 const STROKE_LAID: u32 = 4;
 
+/// How a paint layer is clipped as it composites (a layer uniform's `clipped`): not at all;
+/// through the alpha of the base it is clipped to, drawn without that base (shown alone, or the
+/// base not shown); in its clipping group, onto the base (the backdrop) as if that were opaque,
+/// shown as much as the base is; or as that group's base, written as it is.
+const CLIP_NONE: u32 = 0;
+const CLIP_BY_BASE: u32 = 1;
+const CLIP_ATOP: u32 = 2;
+const CLIP_BASE: u32 = 3;
+
 /// How much of what it carries a smudge brush keeps at each stamp.
 const DEFAULT_PULL: f32 = 0.93;
 /// A number in 0..1 that looks random, from `n`.
@@ -1891,6 +1900,8 @@ pub(crate) struct Pipelines {
     stamp_rule: wgpu::ComputePipeline,
     rule_layout: wgpu::BindGroupLayout,
     layer: wgpu::RenderPipeline,
+    /// A normal layer clipped to its base, drawn onto it in their clipping group.
+    layer_atop: wgpu::RenderPipeline,
     blend: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
     commit_paint: wgpu::RenderPipeline,
@@ -1991,6 +2002,11 @@ pub struct Canvas {
     /// Where a group's layers are composited before the group goes onto the stack below: a pair
     /// for each depth of group (made when first needed).
     groups: Vec<([wgpu::Texture; 2], [wgpu::TextureView; 2])>,
+    /// Where a clipping group (a layer and those clipped to it) is composited before it goes onto
+    /// the stack, and the other half of its pair, for a layer of a blend mode in it; each made the
+    /// first time it is wanted. One pair serves every depth: a clipping group holds no group.
+    clip_group: OnDemand,
+    clip_group_second: OnDemand,
     /// Animation Assist playing: the frame shown (alone, no onion skins).
     play_frame: Option<usize>,
     /// Where a stroke of a blend mode, or one on a locked layer, and a merge are drawn before
@@ -2198,6 +2214,21 @@ const MAXIMUM: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// `src · dst.a + dst · (1 − src.a)`, the target's alpha kept: what is drawn shows only where the
+/// target is, and as much as it is.
+const ATOP: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::DstAlpha,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
 /// `dst · (1 − src.a)`: erasing.
 const DESTINATION_OUT: wgpu::BlendState = wgpu::BlendState {
     color: wgpu::BlendComponent {
@@ -2360,6 +2391,8 @@ impl Canvas {
             composite_view,
             composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
             groups: Vec::new(),
+            clip_group: OnDemand::new("clip group", width, height, LAYER_FORMAT),
+            clip_group_second: OnDemand::new("clip group 2", width, height, LAYER_FORMAT),
             play_frame: None,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
@@ -2510,8 +2543,10 @@ impl Canvas {
             self.second_stroke.let_go();
         }
         self.uploads.kept.lock().unwrap_or_else(PoisonError::into_inner).clear();
-        // made again when a group composites on its own
+        // made again when a group composites on its own, or a clipping group
         self.groups.clear();
+        self.clip_group.let_go();
+        self.clip_group_second.let_go();
     }
 
     /// Lets go of the shape and grain images until something wants them again (a canvas left
@@ -5223,11 +5258,27 @@ impl Canvas {
                         drop_lower,
                         within,
                     );
-                    for upper in uppers {
+                    let mut rest = uppers.as_slice();
+                    while let Some((&upper, after)) = rest.split_first() {
+                        rest = after;
+                        // a layer with those clipped to it just above (and merged with it): their
+                        // clipping group
+                        let clipped = clipped_run(&before, rest, upper);
                         if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
                             self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
-                        } else {
+                        } else if clipped.is_empty() {
                             self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                        } else {
+                            rest = rest.get(clipped.len()..).unwrap_or_default();
+                            self.draw_clip_group_onto(
+                                device,
+                                &mut encoder,
+                                &mut uniforms,
+                                &before,
+                                upper,
+                                clipped,
+                                lower,
+                            );
                         }
                     }
                     self.push_step(Step {
@@ -5869,7 +5920,10 @@ impl Canvas {
         pixels
     }
 
-    /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping.
+    /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping: a
+    /// layer clipped to `lower` as in their clipping group (onto it as if it were opaque, its
+    /// alpha kept), one clipped to the same base as `lower` as it is (clipped with `lower` after),
+    /// one clipped elsewhere through its base's alpha.
     fn blend_layer_into(
         &self,
         device: &wgpu::Device,
@@ -5880,15 +5934,91 @@ impl Canvas {
         lower: LayerId,
     ) -> Option<()> {
         let settings = doc.layer(upper)?;
-        let clip = doc.clip_base(upper).and_then(|id| self.layers.get(&id));
+        let base = doc.clip_base(upper);
+        let clipped = match base {
+            None => CLIP_NONE,
+            Some(b) if b == lower => CLIP_ATOP,
+            Some(b) if doc.clip_base(lower) == Some(b) => CLIP_NONE,
+            Some(_) => CLIP_BY_BASE,
+        };
+        let clip = base.filter(|_| clipped == CLIP_BY_BASE).and_then(|id| self.layers.get(&id));
         let up = self.layers.get(&upper)?;
         let uniform = LayerUniform {
             opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
             blend: settings.blend.id(),
-            clipped: u32::from(clip.is_some()),
+            clipped,
             ..Default::default()
         };
         self.blend_down(device, encoder, uniforms, &up.view, clip.map(|c| &c.view), uniform, lower)
+    }
+
+    /// The clipping group of `base` of `doc` and the layers clipped to it (`clipped`, their masks
+    /// applied already) composited as they show, and blended into layer `into` with the base's
+    /// opacity and mode.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_clip_group_onto(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        doc: &Document,
+        base: LayerId,
+        clipped: &[LayerId],
+        into: LayerId,
+    ) -> Option<()> {
+        let settings = doc.layer(base)?;
+        let base_view = &self.layers.get(&base)?.view;
+        let full = self.full();
+        let none = &self.stroke_view;
+        let (texture, view) = self.clip_group.get(device);
+        let inner = Stack { first: (texture, view), second: Second::OnDemand(&self.clip_group_second, device) };
+        let mut at = 0;
+        let written = LayerUniform { clipped: CLIP_BASE, ..Default::default() };
+        self.draw_onto(
+            device,
+            encoder,
+            uniforms,
+            full,
+            base_view,
+            None,
+            none,
+            written,
+            BlendMode::Normal,
+            &inner,
+            &mut at,
+        );
+        for &id in clipped {
+            let Some((layer, gpu_layer)) = doc.layer(id).zip(self.layers.get(&id)) else { continue };
+            if !layer.visible {
+                continue;
+            }
+            let uniform = LayerUniform {
+                opacity: layer.opacity.clamp(0.0, 1.0),
+                blend: layer.blend.id(),
+                clipped: CLIP_ATOP,
+                ..Default::default()
+            };
+            self.draw_onto(
+                device,
+                encoder,
+                uniforms,
+                full,
+                &gpu_layer.view,
+                None,
+                none,
+                uniform,
+                layer.blend,
+                &inner,
+                &mut at,
+            );
+        }
+        let view = if at == 0 { view } else { inner.second().1 };
+        let uniform = LayerUniform {
+            opacity: if settings.visible { settings.opacity.clamp(0.0, 1.0) } else { 0.0 },
+            blend: settings.blend.id(),
+            ..Default::default()
+        };
+        self.blend_down(device, encoder, uniforms, view, None, uniform, into)
     }
 
     /// `upper` blended into layer `lower` (through `clip`, as `uniform` says), by way of the
@@ -6621,7 +6751,11 @@ impl Canvas {
                 None => break,
             }
         }
-        let start = tops.iter().position(|t| *t == top)?;
+        let mut start = tops.iter().position(|t| *t == top)?;
+        // a layer clipped to another composites with it, in their clipping group
+        if let Some(base) = doc.clip_base(top).filter(|_| doc.layer(top).is_some_and(|l| l.kind == LayerKind::Paint)) {
+            start = tops.iter().position(|t| *t == base).unwrap_or(start);
+        }
         let layer = |i: usize| tops.get(i).and_then(|t| doc.layer(*t));
         let mut end = tops.len();
         while end > start + 1 && tops.get(end - 1).is_some_and(|t| plain(doc, *t)) {
@@ -7026,15 +7160,18 @@ impl Canvas {
             let (textures, views) =
                 if below { (&r.caches.below, &r.caches.below_views) } else { (&r.caches.above, &r.caches.above_views) };
             let stack = Stack::pair(textures, views);
-            // as many whole items as fit and the slice's time allows (at least one), each with what
-            // it is clipped to; an item painted nowhere is passed over, a normal one composites only
-            // where it is painted
+            // as many whole items as fit and the slice's time allows (at least one), a layer with
+            // those clipped to it (their clipping group) as one, each with what it is clipped to; an
+            // item painted nowhere is passed over, a normal one composites only where it is painted
             let room = self.most_resident().saturating_sub(self.layers.len()).max(1);
             let mut part = Vec::new();
             let mut layers = Vec::new();
             let mut staged = 0;
             while let Some(&item) = items.get(at) {
-                let mut more = item_layers(doc, item);
+                let n = 1 + clipped_run(doc, items.get(at + 1..).unwrap_or_default(), item).len();
+                let unit = at..at + n;
+                let mut more: Vec<LayerId> =
+                    items.get(unit.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
                 more.extend(clip_base_and_mask(doc, item));
                 // the time counts bringing layers back, not the compositing after: the count
                 // keeps a part whose layers come back quickly from compositing too long
@@ -7043,7 +7180,7 @@ impl Canvas {
                 if !part.is_empty() && (late || full_part) {
                     break;
                 }
-                at += 1;
+                at += n;
                 let painted = self.painted(&more).intersect(full);
                 if painted.is_empty() {
                     continue;
@@ -7064,20 +7201,20 @@ impl Canvas {
                     staged = 0;
                 }
                 layers.extend(more);
-                part.push((item, rect));
+                part.push((unit, rect));
             }
             largest = largest.max(part.len());
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
             let mut uniforms = UniformData::default();
-            for (item, rect) in &part {
+            for (unit, rect) in &part {
                 self.composite_items(
                     device,
                     doc,
                     &mut encoder,
                     &mut uniforms,
                     *rect,
-                    &[*item],
+                    items.get(unit.clone()).unwrap_or_default(),
                     true,
                     &stack,
                     &mut current,
@@ -7278,32 +7415,45 @@ impl Canvas {
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
-        // Animation Assist: the top level's frames show around the current (or played) one
+        // Animation Assist: the top level's frames show around the current (or played) one; none
+        // for a frame not shown
         let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
         let focus = animation.and_then(|_| self.play_frame.or_else(|| animation::current_frame(doc)));
-        for &id in items {
+        let look_of = |id: LayerId| match (animation, focus, frames.iter().position(|f| *f == id)) {
+            (Some(a), Some(c), Some(i)) => match animation::look(a, i, frames.len(), c, self.play_frame.is_some()) {
+                FrameLook::Shown => Some(Look::PLAIN),
+                FrameLook::Onion { color, opacity } => {
+                    Some(Look { tint: [color[0], color[1], color[2], 1.0], opacity })
+                }
+                FrameLook::Hidden => None,
+            },
+            _ => Some(Look::PLAIN),
+        };
+        let mut at = 0;
+        while let Some(&id) = items.get(at) {
+            at += 1;
             let Some(layer) = doc.layer(id) else { continue };
             // another layer shown alone
             if doc.soloed_out(id) {
                 continue;
             }
-            let look = match (animation, focus, frames.iter().position(|f| *f == id)) {
-                (Some(a), Some(c), Some(i)) => {
-                    match animation::look(a, i, frames.len(), c, self.play_frame.is_some()) {
-                        FrameLook::Shown => Look::PLAIN,
-                        FrameLook::Onion { color, opacity } => {
-                            Look { tint: [color[0], color[1], color[2], 1.0], opacity }
-                        }
-                        FrameLook::Hidden => continue,
-                    }
-                }
-                _ => Look::PLAIN,
-            };
+            let Some(look) = look_of(id) else { continue };
             match layer.kind {
                 LayerKind::Mask => {}
                 LayerKind::Paint => {
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current)
+                    // with the layers clipped to it just above, a clipping group (a layer clipped
+                    // to one not shown goes through that one's alpha on its own)
+                    let clipped = clipped_run(doc, items.get(at..).unwrap_or_default(), id);
+                    if clipped.is_empty() {
+                        self.composite_layer(
+                            device, doc, encoder, uniforms, rect, layer, look, CLIP_NONE, stack, current,
+                        );
+                    } else {
+                        at += clipped.len();
+                        let group = ClipGroup { base: layer, look, clipped, looks: &look_of };
+                        self.composite_clip_group(device, doc, encoder, uniforms, rect, group, stack, current);
+                    }
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
@@ -7360,8 +7510,64 @@ impl Canvas {
         Some(&views[0])
     }
 
+    /// A clipping group onto a stack: its base (as its look shows it) and the layers clipped to it
+    /// composited on their own, each of those blended onto the base by its mode as if the base
+    /// were opaque and shown as much as the base is (as alpha lock paints: no colour of the base
+    /// shows at its soft edges), then the group onto the stack by the base's mode and opacity.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_clip_group(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        group: ClipGroup<'_>,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
+        let ClipGroup { base, look, clipped, looks } = group;
+        // a hidden base hides what is clipped to it
+        let opacity = base.opacity.clamp(0.0, 1.0) * look.opacity;
+        if !base.visible || opacity <= 0.0 || !self.layers.contains_key(&base.id) {
+            return;
+        }
+        let (texture, view) = self.clip_group.get(device);
+        let inner = Stack { first: (texture, view), second: Second::OnDemand(&self.clip_group_second, device) };
+        let mut at = 0;
+        // the base at full, with the stroke being drawn on it (or its mask), written over what was
+        // there
+        self.composite_layer(device, doc, encoder, uniforms, rect, base, Look::PLAIN, CLIP_BASE, &inner, &mut at);
+        for &id in clipped {
+            let Some(layer) = doc.layer(id) else { continue };
+            if doc.soloed_out(id) {
+                continue;
+            }
+            let Some(look) = looks(id) else { continue };
+            self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, CLIP_ATOP, &inner, &mut at);
+        }
+        let view = if at == 0 { view } else { inner.second().1 };
+        let uniform = LayerUniform { opacity, blend: base.blend.id(), tint: look.tint, ..Default::default() };
+        self.draw_onto(
+            device,
+            encoder,
+            uniforms,
+            rect,
+            view,
+            None,
+            &self.stroke_view,
+            uniform,
+            base.blend,
+            stack,
+            current,
+        );
+    }
+
     /// One paint layer (through its mask, with the stroke being drawn on it or its mask) onto a
-    /// stack whose result is in its first texture (`current` 0) or its second (1).
+    /// stack whose result is in its first texture (`current` 0) or its second (1). `role`: in a
+    /// clipping group, its base (CLIP_BASE: at full, the group taking its opacity and mode) or a
+    /// layer clipped to it (CLIP_ATOP); else CLIP_NONE, and then a layer clipped to a base not
+    /// shown goes through that base's alpha.
     #[allow(clippy::too_many_arguments)]
     fn composite_layer(
         &self,
@@ -7372,12 +7578,15 @@ impl Canvas {
         rect: IRect,
         layer: &Layer,
         look: Look,
+        role: u32,
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
-        let clip = doc.clip_base(layer.id);
+        let clip = doc.clip_base(layer.id).filter(|_| role == CLIP_NONE);
         let clip_visible = clip.is_none_or(|id| doc.layer(id).is_some_and(|l| l.visible));
-        if !layer.visible || !clip_visible || layer.opacity <= 0.0 {
+        let (opacity, blend) =
+            if role == CLIP_BASE { (1.0, BlendMode::Normal) } else { (layer.opacity.clamp(0.0, 1.0), layer.blend) };
+        if !layer.visible || !clip_visible || opacity <= 0.0 {
             return;
         }
         let Some(gpu_layer) = self.layers.get(&layer.id) else { return };
@@ -7393,7 +7602,7 @@ impl Canvas {
         // the stroke being drawn shows on its layer, or through the mask it is painting
         let stroke = self.active.filter(|s| (s.layer == layer.id || Some(s.layer) == mask) && !s.pencil);
         let uniform = LayerUniform {
-            opacity: layer.opacity.clamp(0.0, 1.0) * look.opacity,
+            opacity: opacity * look.opacity,
             tint: look.tint,
             stroke_mode: match stroke.map(|s| s.style.tool) {
                 None => STROKE_NONE,
@@ -7407,8 +7616,8 @@ impl Canvas {
                 Some(StrokeTool::Smudge) => STROKE_NONE,
             },
             stroke_opacity: stroke.map_or(0.0, |s| s.style.opacity.clamp(0.0, 1.0)),
-            blend: layer.blend.id(),
-            clipped: u32::from(clip.is_some()),
+            blend: blend.id(),
+            clipped: if clip.is_some() { CLIP_BY_BASE } else { role },
             clip_masked: if clip_mask_view.is_some() { 1.0 } else { 0.0 },
             masked: if mask_view.is_some() { 1.0 } else { 0.0 },
             stroke_on_mask: if stroke.is_some_and(|s| Some(s.layer) == mask) { 1.0 } else { 0.0 },
@@ -7426,14 +7635,15 @@ impl Canvas {
             Some((clip_view, clip_mask_view.unwrap_or(&self.stroke_view))),
             mask_view,
             uniform,
-            layer.blend,
+            blend,
             stack,
             current,
         );
     }
 
-    /// `view` (a layer or a group's result) drawn onto a stack: "over" for normal, else blended
-    /// with what is below into the stack's other texture.
+    /// `view` (a layer or a group's result) drawn onto a stack: "over" for normal (atop for a
+    /// layer in a clipping group, written as it is for the group's base), else blended with what
+    /// is below into the stack's other texture.
     #[allow(clippy::too_many_arguments)]
     fn draw_onto(
         &self,
@@ -7453,12 +7663,17 @@ impl Canvas {
         // the base clipped to and its mask
         let (clip, clip_mask) = clip.unwrap_or((&self.stroke_view, &self.stroke_view));
         let first = stack.first.1;
-        if blend == BlendMode::Normal {
+        if blend == BlendMode::Normal || uniform.clipped == CLIP_BASE {
             let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask, clip_mask);
             let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
-            pass.set_pipeline(&self.pipelines.layer);
+            pass.set_pipeline(match uniform.clipped {
+                // nothing below read (the backdrop bound is any)
+                CLIP_BASE => &self.pipelines.blend,
+                CLIP_ATOP => &self.pipelines.layer_atop,
+                _ => &self.pipelines.layer,
+            });
             pass.set_bind_group(0, &bind, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
@@ -8664,6 +8879,7 @@ impl Canvas {
         all.extend(self.scratch.made());
         all.extend(self.second_stroke.made());
         all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
+        all.extend(self.clip_group.made().into_iter().chain(self.clip_group_second.made()));
         all.push(self.everything.texture());
         all.extend(self.pencil.as_ref().map(|p| p.view.texture()));
         all.extend(self.liquify.as_ref().map(|l| l.view.texture()));
@@ -9178,6 +9394,7 @@ impl Pipelines {
         };
         Pipelines {
             layer: full("layer", "fs_layer", Some(PREMULTIPLIED_OVER)),
+            layer_atop: full("layer atop", "fs_layer", Some(ATOP)),
             blend: full("blend", "fs_blend", None),
             solid: full("solid", "fs_solid", None),
             commit_paint: full("commit paint", "fs_commit", Some(PREMULTIPLIED_OVER)),
@@ -10069,6 +10286,24 @@ fn quad_bind(
 fn clip_base_and_mask(doc: &Document, first: LayerId) -> impl Iterator<Item = LayerId> {
     let base = doc.clip_base(first);
     base.into_iter().chain(base.and_then(|b| doc.mask_of(b)))
+}
+
+/// The layers at the start of `rest` (items of a level, bottom up, from just above `base`)
+/// clipped to `base`: with it, a clipping group.
+fn clipped_run<'a>(doc: &Document, rest: &'a [LayerId], base: LayerId) -> &'a [LayerId] {
+    let clipped =
+        |id: LayerId| doc.layer(id).is_some_and(|l| l.kind == LayerKind::Paint) && doc.clip_base(id) == Some(base);
+    let n = rest.iter().take_while(|id| clipped(**id)).count();
+    rest.get(..n).unwrap_or_default()
+}
+
+/// A clipping group as it composites: its base and how that shows, the layers clipped to it (just
+/// above it), and how each of those shows (none: not at all).
+struct ClipGroup<'a> {
+    base: &'a Layer,
+    look: Look,
+    clipped: &'a [LayerId],
+    looks: &'a dyn Fn(LayerId) -> Option<Look>,
 }
 
 /// How many images of the user's own each of the shape and grain arrays holds at once.

@@ -10,7 +10,7 @@ struct LayerUniform {
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
-    // 1: multiply by the clip base's alpha
+    // how the layer is clipped: CLIP_NONE, CLIP_BY_BASE, CLIP_ATOP or CLIP_BASE
     clipped: u32,
     // the stroke's texturized grain: -1 for none, else a layer of `grains`
     grain: i32,
@@ -56,6 +56,14 @@ struct LayerUniform {
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
 const STROKE_LUMINANCE: u32 = 256u;
+
+// in clipped: not clipped; multiplied by the alpha of the base it is clipped to (clip_tex), drawn
+// without it; blended onto its base (the backdrop) in their clipping group; the group's base,
+// written as it is (fs_blend, nothing read below)
+const CLIP_NONE: u32 = 0u;
+const CLIP_BY_BASE: u32 = 1u;
+const CLIP_ATOP: u32 = 2u;
+const CLIP_BASE: u32 = 3u;
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
 @group(0) @binding(1) var stroke_tex: texture_2d<f32>;
@@ -232,7 +240,7 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
         // the mask shows the layer as much as it is light (and opaque)
         c = c * clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
     }
-    if (lu.clipped != 0u) {
+    if (lu.clipped == CLIP_BY_BASE) {
         var base = textureLoad(clip_tex, p, 0).a;
         if (lu.clip_masked > 0.5) {
             // the base as its mask shows it
@@ -253,11 +261,20 @@ fn fs_layer(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return layer_color(vec2<i32>(pos.xy));
 }
 
-// other modes: read what is below and write the result
+// other modes: read what is below and write the result. In a clipping group a layer blends onto
+// the base as if that were opaque and shows as much as the base does, the base's alpha kept (as
+// alpha lock paints); the base itself is written as it is.
 @fragment
 fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
-    return blend(textureLoad(backdrop_tex, p, 0), layer_color(p), lu.blend);
+    let c = layer_color(p);
+    let b = textureLoad(backdrop_tex, p, 0);
+    let atop = lu.clipped == CLIP_ATOP;
+    var r = blend(select(b, vec4<f32>(unpremultiply(b), 1.0), atop), c, lu.blend);
+    if (atop) {
+        r = vec4<f32>(r.rgb * b.a, b.a);
+    }
+    return select(r, c, lu.clipped == CLIP_BASE);
 }
 
 // the background colour (written, not blended)
