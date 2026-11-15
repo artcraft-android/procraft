@@ -2177,14 +2177,14 @@ impl StrokeBuilder {
             .clamp(0.0, 1.0);
             // a moving grain: from its least to its depth, as far as the pressure's curve, the
             // jitter (shallower from stamp to stamp) and the depth tilt (leaning takes it down to
-            // its least) leave it
+            // its least) leave it; a least above the depth draws it up towards that the same way
             let base = self.brush.grain.depth.max(1e-3);
             let jitter = if x.grain_depth_jitter > 0.0 {
                 x.grain_depth_jitter * depth_jitter_by * self.random.next()
             } else {
                 0.0
             };
-            let least = x.grain_depth_min.clamp(0.0, base);
+            let least = x.grain_depth_min.clamp(0.0, 1.0);
             let tilted = sw.grain_depth.filter(|_| self.switches_act()).map_or(0.0, |theta| self.leaning(p, theta));
             let depth = (least + (base - least) * (1.0 - jitter) * depth_by * (1.0 - tilted)).clamp(0.0, 1.0);
             let grain_press = p.soft[2].clamp(0.0, 1.0);
@@ -3819,6 +3819,24 @@ mod tests {
         let lean = flat - 1.0;
         assert!(lean > 0.5, "{flat}");
         assert!((press - (0.3 + lean) / (1.0 + lean)).abs() < 0.05, "{press} {lean}");
+    }
+
+    #[test]
+    fn a_grain_s_least_depth_above_its_depth_draws_it_up() {
+        use crate::curve::Curve;
+        // depth 0.5, least 0.8, the depth following the pressure straight: pressed fully, the
+        // depth; lightly, from it towards the least as far as the pressure leaves it
+        let depth_at = |pressure: f32| {
+            let mut b = plain();
+            b.grain.depth = 0.5;
+            b.set_setting("grain_depth_min", 0.8);
+            b.pressure_curves.set(PressureCurve::GrainDepth, Some(Curve::linear()));
+            let at = Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0);
+            // (a stamp's depth is a share of the brush's)
+            StrokeBuilder::new(b, 10.0, Pointer::Stylus).add(&[at])[0].grain_depth * 0.5
+        };
+        assert!((depth_at(1.0) - 0.5).abs() < 1e-4, "{}", depth_at(1.0));
+        assert!((depth_at(0.25) - (0.8 - 0.3 * 0.25)).abs() < 1e-3, "{}", depth_at(0.25));
     }
 
     #[test]
