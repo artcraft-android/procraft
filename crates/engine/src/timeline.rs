@@ -77,6 +77,10 @@ pub struct Timeline {
     /// The media its audio and video clips play, in the canvas's package.
     #[serde(default)]
     pub media: Vec<Media>,
+    /// Sync markers on the ruler, frames in order (dropped while playing, to time drawings to a
+    /// beat or a line of dialogue).
+    #[serde(default)]
+    pub markers: Vec<u32>,
     /// The ids the next track and clip take.
     pub next_track: u64,
     pub next_clip: u64,
@@ -510,6 +514,7 @@ impl Timeline {
             loop_range: None,
             onion: OnionSkins::default(),
             media: Vec::new(),
+            markers: Vec::new(),
             next_track: 1,
             next_clip: 1,
         }
@@ -2038,6 +2043,413 @@ impl ClipKeys {
         self.opacity.value_at(frame).map(|o| if o.is_finite() { o.clamp(0.0, 1.0) } else { 1.0 })
     }
 }
+
+/// Clips copied off a timeline to be pasted elsewhere, with their keys: each with its track's
+/// place above the lowest track copied from (`row`), and its start counted from the earliest
+/// one's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CopiedClips {
+    pub clips: Vec<CopiedClip>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopiedClip {
+    pub row: u32,
+    /// Its `start` from the earliest clip copied.
+    pub clip: Clip,
+}
+
+impl CopiedClips {
+    /// Every drawing's root layer in them, at any depth.
+    pub fn roots(&self) -> Vec<LayerId> {
+        self.clips.iter().flat_map(|c| c.clip.roots()).collect()
+    }
+}
+
+impl Clip {
+    /// Its drawing's root layer, or a group's drawings' (at any depth).
+    pub fn roots(&self) -> Vec<LayerId> {
+        match &self.content {
+            ClipContent::Drawing(d) => vec![d.root],
+            ClipContent::Group(g) => g.tracks.iter().flat_map(|t| &t.clips).flat_map(Clip::roots).collect(),
+            ClipContent::Video(_) | ClipContent::Audio(_) => Vec::new(),
+        }
+    }
+}
+
+impl<T> Channel<T> {
+    /// Each key's frame times `ratio`, rounded; keys landing on one frame leave the later one.
+    pub fn scale_keys(&mut self, ratio: f64) {
+        let mut scaled: Vec<Key<T>> = Vec::with_capacity(self.keys.len());
+        for mut key in std::mem::take(&mut self.keys) {
+            key.frame = scaled_i32(key.frame, ratio);
+            match scaled.last_mut() {
+                Some(last) if last.frame == key.frame => *last = key,
+                _ => scaled.push(key),
+            }
+        }
+        self.keys = scaled;
+    }
+}
+
+impl ClipKeys {
+    /// Every channel's keys scaled (see [`Channel::scale_keys`]).
+    pub fn scale_keys(&mut self, ratio: f64) {
+        self.position.scale_keys(ratio);
+        self.scale.scale_keys(ratio);
+        self.rotation.scale_keys(ratio);
+        self.opacity.scale_keys(ratio);
+        self.effects.values_mut().for_each(|c| c.scale_keys(ratio));
+    }
+
+    /// Whether no channel has keys.
+    pub fn is_empty(&self) -> bool {
+        !self.posed() && self.opacity.keys.is_empty() && self.effects.values().all(|c| c.keys.is_empty())
+    }
+
+    /// The earliest key's frame on any channel.
+    fn first_frame(&self) -> Option<i32> {
+        let first = |frames: &mut dyn Iterator<Item = i32>| frames.min();
+        [
+            first(&mut self.position.keys.iter().map(|k| k.frame)),
+            first(&mut self.scale.keys.iter().map(|k| k.frame)),
+            first(&mut self.rotation.keys.iter().map(|k| k.frame)),
+            first(&mut self.opacity.keys.iter().map(|k| k.frame)),
+        ]
+        .into_iter()
+        .chain(self.effects.values().map(|c| c.keys.first().map(|k| k.frame)))
+        .flatten()
+        .min()
+    }
+
+    /// Just the keys on frame `frame`, every channel's.
+    fn at(&self, frame: i32) -> ClipKeys {
+        fn only<T: Clone>(c: &Channel<T>, frame: i32) -> Channel<T> {
+            Channel { keys: c.keys.iter().filter(|k| k.frame == frame).cloned().collect() }
+        }
+        ClipKeys {
+            position: only(&self.position, frame),
+            scale: only(&self.scale, frame),
+            rotation: only(&self.rotation, frame),
+            opacity: only(&self.opacity, frame),
+            pivot: self.pivot,
+            effects: self
+                .effects
+                .iter()
+                .map(|(id, c)| (*id, only(c, frame)))
+                .filter(|(_, c)| !c.keys.is_empty())
+                .collect(),
+        }
+    }
+
+    /// `keys` laid over these, `at` frames on: a key of theirs replaces one here on its frame.
+    fn lay(&mut self, keys: &ClipKeys, at: i32) {
+        fn lay<T: Clone>(into: &mut Channel<T>, from: &Channel<T>, at: i32) {
+            for k in &from.keys {
+                let frame = k.frame.saturating_add(at);
+                let i = into.keys.partition_point(|x| x.frame < frame);
+                let key = Key { frame, ..k.clone() };
+                match into.keys.get_mut(i) {
+                    Some(x) if x.frame == frame => *x = key,
+                    _ => into.keys.insert(i, key),
+                }
+            }
+        }
+        lay(&mut self.position, &keys.position, at);
+        lay(&mut self.scale, &keys.scale, at);
+        lay(&mut self.rotation, &keys.rotation, at);
+        lay(&mut self.opacity, &keys.opacity, at);
+        for (id, c) in &keys.effects {
+            lay(self.effects.entry(*id).or_default(), c, at);
+        }
+        if self.pivot.is_none() && keys.posed() {
+            self.pivot = keys.pivot;
+        }
+    }
+}
+
+/// `frame` times `ratio`, rounded half away from zero.
+fn scaled_i32(frame: i32, ratio: f64) -> i32 {
+    let f = (f64::from(frame) * ratio).round();
+    if f >= f64::from(i32::MAX) {
+        i32::MAX
+    } else if f <= f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        f as i32
+    }
+}
+
+/// `frame` times `ratio`, rounded half away from zero.
+fn scaled_u32(frame: u32, ratio: f64) -> u32 {
+    let f = (f64::from(frame) * ratio).round();
+    if f >= f64::from(u32::MAX) { u32::MAX } else { f.max(0.0) as u32 }
+}
+
+/// Retiming, sync markers and the track clipboard (timeline step 1g).
+impl Timeline {
+    /// Played at `fps` frames a second with its timing kept: every clip's start and length, every
+    /// key (clips', the camera's, sounds' volume), the groups' cycles, the length, the loop and
+    /// the markers scaled by the change, as Koi Studio's "Keep Timing". Whole ratios (12 to 24)
+    /// are exact; others round to the nearest frame, and a clip rounded onto the one before it
+    /// starts where that one ends. A sound keeps its start in seconds: what rounding loses is
+    /// carried in its offset. False if the rate stays as it is.
+    pub fn retime(&mut self, fps: u32) -> bool {
+        let fps = fps.clamp(1, MAX_FPS);
+        let old = self.fps.max(1);
+        if fps == old {
+            return false;
+        }
+        let ratio = f64::from(fps) / f64::from(old);
+        retime_tracks(&mut self.tracks, ratio, old, fps);
+        self.camera.scale_keys(ratio);
+        self.duration = scaled_u32(self.duration, ratio).max(1);
+        self.loop_range = self.loop_range.map(|(a, b)| {
+            let a = scaled_u32(a, ratio);
+            (a, scaled_u32(b, ratio).max(a + 1))
+        });
+        let mut markers: Vec<u32> = self.markers.iter().map(|m| scaled_u32(*m, ratio)).collect();
+        markers.dedup();
+        self.markers = markers;
+        self.fps = fps;
+        self.fit();
+        self.markers.retain(|m| *m < self.duration);
+        true
+    }
+
+    /// A marker on frame `frame` (within the timeline); false if there is one there already.
+    pub fn add_marker(&mut self, frame: u32) -> bool {
+        let frame = frame.min(self.duration.saturating_sub(1));
+        match self.markers.binary_search(&frame) {
+            Ok(_) => false,
+            Err(at) => {
+                self.markers.insert(at, frame);
+                true
+            }
+        }
+    }
+
+    /// The marker on frame `from` moved to `to` (within the timeline; onto another, the two become
+    /// one). False if there is none on `from`, or it stays.
+    pub fn move_marker(&mut self, from: u32, to: u32) -> bool {
+        let to = to.min(self.duration.saturating_sub(1));
+        if from == to || !self.remove_marker(from) {
+            return false;
+        }
+        self.add_marker(to);
+        true
+    }
+
+    /// Takes away the marker on frame `frame`; false if there is none.
+    pub fn remove_marker(&mut self, frame: u32) -> bool {
+        match self.markers.binary_search(&frame) {
+            Ok(at) => {
+                self.markers.remove(at);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Clips `ids` (on tracks of one level), copied with their keys. None if one isn't there or
+    /// they aren't all on one level.
+    pub fn copy_clips(&self, ids: &[ClipId]) -> Option<CopiedClips> {
+        let first = *ids.first()?;
+        let level = self.level_tracks(first)?;
+        let mut found: Vec<(usize, &Clip)> = Vec::new();
+        for (t, track) in level.iter().enumerate() {
+            found.extend(track.clips.iter().filter(|c| ids.contains(&c.id)).map(|c| (t, c)));
+        }
+        let wanted: std::collections::HashSet<_> = ids.iter().collect();
+        if found.len() != wanted.len() {
+            return None;
+        }
+        let low = found.iter().map(|(t, _)| *t).min()?;
+        let start = found.iter().map(|(_, c)| c.start).min()?;
+        let clips = found
+            .into_iter()
+            .map(|(t, c)| CopiedClip {
+                row: u32::try_from(t - low).unwrap_or(0),
+                clip: Clip { start: c.start - start, ..c.clone() },
+            })
+            .collect();
+        Some(CopiedClips { clips })
+    }
+
+    /// `copied` put down from frame `at` of track `track`'s level, the lowest row on `track` and
+    /// each row on the track above the last (made, if there is none). The clips there from `at`
+    /// on move along to make room, every track together so they stay in step (from just after a
+    /// clip `at` falls inside, if it does). Each pasted clip and every clip and track inside a
+    /// pasted group takes a new id, and each drawing the root `roots` gives for its own (a copy of
+    /// its layers). Returns the pasted clips, or none if a track it goes on is locked.
+    pub fn paste_clips(
+        &mut self,
+        copied: &CopiedClips,
+        track: TrackId,
+        at: u32,
+        roots: &std::collections::HashMap<LayerId, LayerId>,
+    ) -> Option<Vec<ClipId>> {
+        let rows = copied.clips.iter().map(|c| c.row).max()? as usize + 1;
+        let mut next_track = self.next_track;
+        let mut next_clip = self.next_clip;
+        let level = level_of_track(&mut self.tracks, track)?;
+        let base = level.iter().position(|t| t.id == track)?;
+        // tracks for the rows above the top one
+        while level.len() < base + rows {
+            let name = format!("Track {}", level.len() + 1);
+            level.push(Track {
+                id: TrackId(next_track),
+                name,
+                hidden: false,
+                locked: false,
+                opacity: 1.0,
+                clips: Vec::new(),
+            });
+            next_track += 1;
+        }
+        let onto = level.get(base..base + rows)?;
+        if onto.iter().any(|t| t.locked) {
+            return None;
+        }
+        // from just after any clip `at` falls inside on the tracks pasted onto
+        let mut from = at;
+        while let Some(end) = onto
+            .iter()
+            .enumerate()
+            .filter(|(r, _)| copied.clips.iter().any(|c| c.row as usize == *r))
+            .filter_map(|(_, t)| t.clip_at(from).filter(|c| c.start < from).map(Clip::end))
+            .max()
+        {
+            from = end;
+        }
+        let mut made = Vec::new();
+        for (r, t) in level.iter_mut().skip(base).take(rows).enumerate() {
+            let mut mine: Vec<&CopiedClip> = copied.clips.iter().filter(|c| c.row as usize == r).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            mine.sort_by_key(|c| c.clip.start);
+            let end = mine.iter().map(|c| from + c.clip.end()).max().unwrap_or(from);
+            make_room(t, from, end);
+            for c in mine {
+                let mut clip = c.clip.clone();
+                clip.start += from;
+                renumber(&mut clip, &mut next_track, &mut next_clip, roots);
+                made.push(clip.id);
+                let i = t.clips.partition_point(|x| x.start < clip.start);
+                t.clips.insert(i, clip);
+            }
+        }
+        self.next_track = next_track;
+        self.next_clip = next_clip;
+        self.fit();
+        Some(made)
+    }
+
+    /// Clip `id`'s keys (on its own frame `frame` only, if given), counted from the earliest of
+    /// them. None if it has none there.
+    pub fn copy_keys(&self, id: ClipId, frame: Option<i32>) -> Option<ClipKeys> {
+        let keys = &self.clip(id)?.keys;
+        let mut keys = match frame {
+            Some(f) => keys.at(f),
+            None => keys.clone(),
+        };
+        let first = keys.first_frame()?;
+        keys = shifted_keys(&keys, i64::from(first));
+        Some(keys)
+    }
+
+    /// `keys` laid on clip `id` from its own frame `at` on (one already on a frame replaced); it
+    /// takes their pivot if it has none and they move it.
+    pub fn paste_keys(&mut self, id: ClipId, keys: &ClipKeys, at: i32) -> bool {
+        let Some(clip) = self.clip_mut(id) else { return false };
+        if keys.is_empty() {
+            return false;
+        }
+        clip.keys.lay(keys, at);
+        true
+    }
+
+    /// The tracks of the level clip `id` is on.
+    fn level_tracks(&self, id: ClipId) -> Option<&[Track]> {
+        let mut path = Vec::new();
+        if !clip_path(&self.tracks, id, &mut path) {
+            return None;
+        }
+        path.pop();
+        Some(match path.last().map(|g| &g.content) {
+            Some(ClipContent::Group(g)) => &g.tracks,
+            _ => &self.tracks,
+        })
+    }
+}
+
+/// Every clip on `tracks` retimed by `ratio` (from `old` frames a second to `new`), groups' own
+/// tracks too.
+fn retime_tracks(tracks: &mut [Track], ratio: f64, old: u32, new: u32) {
+    for track in tracks {
+        let mut before_end = 0;
+        for clip in &mut track.clips {
+            let end = scaled_u32(clip.end(), ratio);
+            let start = match &mut clip.content {
+                ClipContent::Audio(a) => {
+                    // its start kept in seconds: the frame it falls in, and the rest as offset
+                    let seconds = f64::from(clip.start) / f64::from(old) + a.offset;
+                    let floor = (seconds * f64::from(new)).floor();
+                    let start =
+                        (if floor >= f64::from(u32::MAX) { u32::MAX } else { floor.max(0.0) as u32 }).max(before_end);
+                    a.offset = (seconds - f64::from(start) / f64::from(new)).max(0.0);
+                    a.volume_keys.scale_keys(ratio);
+                    start
+                }
+                _ => scaled_u32(clip.start, ratio).max(before_end),
+            };
+            clip.start = start;
+            clip.duration = end.saturating_sub(start).max(1);
+            clip.keys.scale_keys(ratio);
+            if let ClipContent::Group(g) = &mut clip.content {
+                if let Some(c) = g.cycle.as_mut() {
+                    c.length = scaled_u32(c.length, ratio).max(1);
+                }
+                retime_tracks(&mut g.tracks, ratio, old, new);
+            }
+            before_end = clip.end();
+        }
+    }
+}
+
+/// `clip` with a new id (and new ids for every clip and track inside it), its drawings' roots
+/// swapped for the ones `roots` gives.
+fn renumber(
+    clip: &mut Clip,
+    next_track: &mut u64,
+    next_clip: &mut u64,
+    roots: &std::collections::HashMap<LayerId, LayerId>,
+) {
+    clip.id = ClipId(*next_clip);
+    *next_clip += 1;
+    match &mut clip.content {
+        ClipContent::Drawing(d) => {
+            if let Some(r) = roots.get(&d.root) {
+                d.root = *r;
+            }
+        }
+        ClipContent::Group(g) => {
+            for t in &mut g.tracks {
+                t.id = TrackId(*next_track);
+                *next_track += 1;
+                for c in &mut t.clips {
+                    renumber(c, next_track, next_clip, roots);
+                }
+            }
+        }
+        ClipContent::Video(_) | ClipContent::Audio(_) => {}
+    }
+}
+
+#[cfg(test)]
+#[path = "timeline_1g_tests.rs"]
+mod tests_1g;
 
 #[cfg(test)]
 mod tests {
