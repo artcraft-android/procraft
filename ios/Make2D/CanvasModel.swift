@@ -69,6 +69,8 @@ final class CanvasModel {
     private(set) var light = LightSettings(kind: .brighten, strength: 0.5)
     /// How far above white (stops) the light tool brightens an HDR canvas (see `HDR.swift`).
     var lightLimit: Float = 2
+    /// How many stops above white an HDR artwork's paint colour is lit (see `HDR.swift`).
+    var colorStops: Float = 0
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
     /// The colour panel's mode, kept from one session to the next.
@@ -2495,7 +2497,9 @@ final class CanvasModel {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let now = self.picking {
-                    self.picking = PickState(x: x, y: y, image: image ?? now.image, rgb: seen?.rgb ?? now.rgb)
+                    self.picking = PickState(
+                        x: x, y: y, image: image ?? now.image, rgb: seen?.rgb ?? now.rgb, stops: seen?.stops ?? now.stops
+                    )
                 }
                 self.readPick()
             }
@@ -2524,6 +2528,10 @@ final class CanvasModel {
         pendingPick = nil
         if let rgb = picking?.rgb {
             setRgb(rgb)
+            // and as bright as it was there, light above white and all
+            if isHdr {
+                setColorStops(picking?.stops ?? 0)
+            }
         }
         picking = nil
     }

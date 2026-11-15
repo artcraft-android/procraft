@@ -12,6 +12,8 @@ struct PickState {
     let y: Float
     let image: UIImage?
     let rgb: UInt32?
+    /// On an HDR canvas, how many stops above white the colour under it is lit.
+    var stops: Float = 0
     var fromReference = false
 }
 
