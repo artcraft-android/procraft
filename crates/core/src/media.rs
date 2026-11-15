@@ -285,9 +285,11 @@ fn bring_in(path: &Path, m: &Media, peaks: &[f32]) -> Result<(), MobileError> {
 }
 
 impl crate::State {
-    /// The canvas gets its videos' pictures from the store, once there is a canvas.
+    /// The canvas gets its videos' pictures from the store, once there is a canvas and a video.
     pub(crate) fn attach_media(&mut self) {
-        if let Some(c) = self.canvas.as_mut()
+        let videos = self.doc.timeline.as_ref().is_some_and(|tl| tl.media.iter().any(|m| m.kind == MediaKind::Video));
+        if videos
+            && let Some(c) = self.canvas.as_mut()
             && !c.has_video_source()
         {
             self.media.know(&self.doc);
@@ -502,7 +504,7 @@ impl CanvasSession {
                 layers.push(layer);
             }
             let tl = d.timeline.as_mut()?;
-            timing_track(tl, video_track, &format!("{name} Timing"), start, duration, &holds, &layers)
+            timing_track(tl, video_track, &format!("{name} Timing"), &name, start, duration, &holds, &layers)
         });
         let Some(track) = made else { return 0 };
         let mut guard = self.shared.lock();
@@ -515,11 +517,13 @@ impl CanvasSession {
 }
 
 /// A track named `name` just above `below` (on its level) holding a drawing of each of `layers`
-/// for each of `holds` (frames from `start`, cut off at `duration`). Returns the track.
+/// (named `drawing` 1, 2...) for each of `holds` (frames from `start`, cut off at `duration`).
+/// Returns the track.
 fn timing_track(
     tl: &mut Timeline,
     below: TrackId,
     name: &str,
+    drawing: &str,
     start: u32,
     duration: u32,
     holds: &[AnimaticHold],
@@ -531,12 +535,12 @@ fn timing_track(
     let to = tl.tracks.iter().position(|t| t.id == below)? + 1;
     let moved = tl.tracks.remove(from);
     tl.tracks.insert(to.min(tl.tracks.len()), moved);
-    for (hold, layer) in holds.iter().zip(layers) {
+    for (n, (hold, layer)) in holds.iter().zip(layers).enumerate() {
         if hold.start >= duration || hold.length == 0 {
             continue;
         }
         let at = start + hold.start;
-        let clip = tl.add_drawing(track, at, *layer, &format!("{name} {}", hold.start + 1))?;
+        let clip = tl.add_drawing(track, at, *layer, &format!("{drawing} {}", n + 1))?;
         tl.set_duration(clip, hold.length.min(duration - hold.start), false);
     }
     Some(track)

@@ -51,8 +51,11 @@ impl Canvas {
     /// Where videos' pictures come from; none, video clips draw nothing.
     pub fn set_video_source(&mut self, source: Option<Arc<dyn VideoSource>>) {
         self.videos.source = source;
-        self.videos.held.clear();
-        self.invalidate();
+        // (pictures shown come from the new source)
+        if !self.videos.held.is_empty() {
+            self.videos.held.clear();
+            self.invalidate();
+        }
     }
 
     /// Whether it has somewhere to get videos' pictures from.
@@ -92,7 +95,7 @@ impl Canvas {
             };
             // a picture with see-through parts is premultiplied as the layers are
             let rgba =
-                if p.rgba.chunks_exact(4).all(|px| px.get(3) == Some(&255)) { p.rgba } else { premultiplied(&p.rgba) };
+                if p.rgba.as_chunks::<4>().0.iter().all(|&[.., a]| a == 255) { p.rgba } else { premultiplied(&p.rgba) };
             gpu.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &tex,
@@ -163,18 +166,14 @@ impl Canvas {
         let uniform = LayerUniform { opacity: look.opacity, blend: blend.id(), tint: look.tint, ..Default::default() };
         self.draw_onto(device, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
     }
-
-    /// The videos with a picture held, for tests.
-    #[cfg(test)]
-    pub(super) fn videos_held(&self) -> usize {
-        self.videos.held.len()
-    }
 }
 
 fn premultiplied(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
-        .flat_map(|px| {
-            let [r, g, b, a] = [0, 1, 2, 3].map(|i| u16::from(px.get(i).copied().unwrap_or(0)));
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, a]| {
+            let [r, g, b, a] = [r, g, b, a].map(u16::from);
             [r * a / 255, g * a / 255, b * a / 255, a].map(|v| v as u8)
         })
         .collect()
