@@ -99,7 +99,8 @@ extension CanvasModel {
                     context.draw(picture, in: CGRect(x: 0, y: 0, width: width, height: height))
                     return true
                 }
-                if !made {
+                // the timeline's sounds under it
+                if !made || !MediaExport.addSounds(to: url, session: session, fps: choices.fps, hevc: format == .hevc) {
                     return nil
                 }
             }
