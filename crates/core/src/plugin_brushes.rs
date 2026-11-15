@@ -860,13 +860,14 @@ mod tests {
         png
     }
 
-    /// The packed Krita plugin at `KRITA_PLUGIN`, drawing a preset's squares where Krita lays
-    /// them; with it off, the brush draws as read.
-    /// `KRITA_PLUGIN=x.procraft-plugin cargo test -p procraft-core krita_squares -- --ignored`
+    /// The Krita plugin the app comes with (or the one at `KRITA_PLUGIN`) drawing a preset's squares
+    /// where Krita lays them, its studio changing their size; with it off, the brush draws as read.
     #[test]
-    #[ignore]
     fn krita_squares_lie_where_the_engine_spaces_them() {
-        let Ok(path) = std::env::var("KRITA_PLUGIN") else { return };
+        let packed = match std::env::var("KRITA_PLUGIN") {
+            Ok(path) => std::fs::read(path).unwrap(),
+            Err(_) => crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1.to_vec(),
+        };
         let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
         let s = crate::CanvasSession::new(200, 120);
         {
@@ -879,7 +880,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-krita-plugin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-        assert_eq!(plugins.install(std::fs::read(path).unwrap()), None);
+        assert_eq!(plugins.install(packed), None);
         let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
         assert!(plugins.set_on(id.clone(), true));
         s.use_plugins(Arc::clone(&plugins));
