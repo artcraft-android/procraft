@@ -620,6 +620,17 @@ pub struct Brush {
     /// A dual brush's second: its own stroke along the same path, whose coverage combines with
     /// this one's by `dual_blend` (the colour this one's).
     pub secondary: Option<Box<Brush>>,
+    /// What a brush engine outside the app keeps of it, if one made it (see [`OutsideBrush`]).
+    pub engine: Option<OutsideBrush>,
+}
+
+/// What a brush engine outside the app's own (a plugin's) keeps of a brush it draws: the engine's
+/// name (its plugin's id, a dot, its key) and its own data, kept as it is. While that engine is on
+/// it draws the brush's strokes; without it the brush draws as the rest of its settings say.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutsideBrush {
+    pub engine: String,
+    pub data: std::sync::Arc<[u8]>,
 }
 
 /// The stock images a brush's file names for its shape, grain, metalness and roughness (drawn with
@@ -769,6 +780,7 @@ impl Brush {
             reset_point: None,
             stock: StockImages::default(),
             secondary: None,
+            engine: None,
         }
     }
 

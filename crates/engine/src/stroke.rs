@@ -75,6 +75,9 @@ pub struct Stamp {
     /// squared), how many stamps go over a point of its path in one pass; 0 for any other. Each
     /// pixel builds up by how much of it the stamp covers (see [`Stamp::over_alpha`]).
     pub overlap: f32,
+    /// Which of its stroke's shape images it is, counted from the stroke's own (0): a brush
+    /// engine outside the app picks one for each stamp from the set its brush has.
+    pub tip: u32,
 }
 
 impl Stamp {
@@ -103,6 +106,7 @@ impl Stamp {
             time_ms: 0.0,
             distance: 0.0,
             overlap: 0.0,
+            tip: 0,
         }
     }
 
@@ -768,6 +772,37 @@ impl Random {
     }
 }
 
+/// A brush engine outside the app's own (a plugin's): it lays a stroke's stamps from its input
+/// itself, in place of the brush's settings (see [`StrokeBuilder::with_engine`]).
+pub trait OutsideEngine: Send + std::fmt::Debug {
+    /// The stamps `samples` add (canvas pixels, each finite; a pen's pressure through the app's
+    /// pressure curve, a finger's 1 with no lean).
+    fn add(&mut self, samples: &[Sample]) -> Vec<Stamp>;
+    /// The stroke's last stamps, as it ends.
+    fn finish(&mut self) -> Vec<Stamp>;
+}
+
+/// A stroke's outside engine and the stamps it has laid. A copy of the builder (to see how the
+/// stroke would go on, or to draw it again as a shape) has none, and lays as the brush says.
+#[derive(Debug, Default)]
+struct OutsideSlot(Option<Outside>);
+
+#[derive(Debug)]
+struct Outside {
+    engine: Box<dyn OutsideEngine>,
+    stamps: Vec<Stamp>,
+    /// The path's length so far (canvas pixels), and its last point.
+    length: f32,
+    last: Option<Vec2>,
+    ended: bool,
+}
+
+impl Clone for OutsideSlot {
+    fn clone(&self) -> Self {
+        OutsideSlot(None)
+    }
+}
+
 /// Builds one stroke. Feed it samples in canvas pixels as they arrive ([`StrokeBuilder::add`]
 /// returns the stamps to draw now), then [`StrokeBuilder::finish`] for the final stamps, which
 /// include the end taper and the catch-up to where the pen lifted.
@@ -871,6 +906,8 @@ pub struct StrokeBuilder {
     /// How far along the path each point it has walked through lies (canvas pixels, rising): the
     /// tapers are worked out at them and eased between them (see [`StrokeBuilder::eased`]).
     knots: Vec<f32>,
+    /// The engine laying its stamps in place of the brush's settings, if one does.
+    outside: OutsideSlot,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -986,6 +1023,62 @@ impl StrokeBuilder {
         self
     }
 
+    /// The stroke's stamps laid by `engine` from its input, in place of the brush's settings: it
+    /// is handed the samples as they come, and nothing predicts or previews ahead of them.
+    pub fn with_engine(mut self, engine: Box<dyn OutsideEngine>) -> StrokeBuilder {
+        let outside = Outside { engine, stamps: Vec::new(), length: 0.0, last: None, ended: false };
+        self.outside = OutsideSlot(Some(outside));
+        self
+    }
+
+    /// Whether an outside engine lays its stamps (see [`StrokeBuilder::with_engine`]).
+    pub fn is_outside(&self) -> bool {
+        self.outside.0.is_some()
+    }
+
+    /// `samples` handed to the outside engine as it takes them, and the stamps it answers; none
+    /// without one.
+    fn add_outside(&mut self, samples: &[Sample]) -> Option<Vec<Stamp>> {
+        let pen = self.pointer.has_pressure();
+        let curve = &self.input.pressure_curve;
+        let outside = self.outside.0.as_mut()?;
+        if outside.ended {
+            return Some(Vec::new());
+        }
+        let taken: Vec<Sample> = samples
+            .iter()
+            .filter(|s| s.is_finite())
+            .map(|s| {
+                let mut s = *s;
+                if pen {
+                    s.pressure = curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                    for v in [&mut s.tilt, &mut s.azimuth, &mut s.roll] {
+                        if !v.is_finite() {
+                            *v = 0.0;
+                        }
+                    }
+                } else {
+                    (s.pressure, s.tilt, s.azimuth, s.roll) = (1.0, 0.0, 0.0, 0.0);
+                }
+                s
+            })
+            .collect();
+        for s in &taken {
+            if let Some(last) = outside.last {
+                outside.length += s.pos.distance(last);
+            }
+            outside.last = Some(s.pos);
+        }
+        if taken.is_empty() {
+            return Some(Vec::new());
+        }
+        let stamps = outside.engine.add(&taken);
+        outside.stamps.extend_from_slice(&stamps);
+        self.length = outside.length;
+        self.bounds = stamps.iter().fold(self.bounds, |b, s| b.union(s.bounds()));
+        Some(stamps)
+    }
+
     /// A stroke with `brush` at `diameter` canvas pixels (the size slider's value).
     pub fn new(brush: Brush, diameter: f32, pointer: Pointer) -> StrokeBuilder {
         StrokeBuilder::with_seed(brush, diameter, pointer, 0x9e37_79b9)
@@ -1050,6 +1143,7 @@ impl StrokeBuilder {
             left_out: 0,
             start_settled: None,
             knots: Vec::new(),
+            outside: OutsideSlot(None),
         }
         .reading_extras()
     }
@@ -1116,11 +1210,17 @@ impl StrokeBuilder {
     }
 
     pub fn stamp_count(&self) -> usize {
+        if let Some(outside) = &self.outside.0 {
+            return outside.stamps.len();
+        }
         self.placed.len()
     }
 
     /// Adds samples (canvas pixels) and returns the stamps they add. Non-finite samples are skipped.
     pub fn add(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        if let Some(stamps) = self.add_outside(samples) {
+            return stamps;
+        }
         let mut out = Vec::new();
         for s in samples.iter().filter(|s| s.is_finite()) {
             self.push(*s, &mut out);
@@ -1131,6 +1231,9 @@ impl StrokeBuilder {
     /// The stamps `samples` would add, without adding them (for drawing predicted input): the
     /// path walked on to the last of them.
     pub fn preview(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        if self.is_outside() {
+            return Vec::new();
+        }
         // none of the stamps so far are needed
         let mut ahead = self.open_copy(self.placed.len());
         let mut out = ahead.add(samples);
@@ -1143,6 +1246,9 @@ impl StrokeBuilder {
     /// As [`StrokeBuilder::preview`], and on from the path to the input itself: all the stroke
     /// shows ahead of what is drawn for good.
     pub fn preview_to_input(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        if self.is_outside() {
+            return Vec::new();
+        }
         let mut ahead = self.open_copy(self.placed.len());
         let mut out = ahead.add(samples);
         ahead.reach_input(&mut out);
@@ -1187,7 +1293,7 @@ impl StrokeBuilder {
     /// that lasts a time at its start (until that time has passed), and at its end with the tip
     /// animation on.
     pub fn shows_tip(&self) -> bool {
-        !self.classic() && (self.taper().start > 0.0 || self.end_shows())
+        !self.is_outside() && !self.classic() && (self.taper().start > 0.0 || self.end_shows())
     }
 
     /// Adds samples to a stroke shown with its tip (see [`StrokeBuilder::shows_tip`]): returns
@@ -1220,6 +1326,9 @@ impl StrokeBuilder {
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
     /// left as it is.
     pub fn preview_tip(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        if self.is_outside() {
+            return Vec::new();
+        }
         let mut ahead = self.open_copy(self.kept);
         ahead.add(samples);
         ahead.reach_input(&mut Vec::new());
@@ -1252,6 +1361,9 @@ impl StrokeBuilder {
 
     /// Every stamp so far as currently drawn (no end taper yet).
     pub fn stamps(&self) -> Vec<Stamp> {
+        if let Some(outside) = &self.outside.0 {
+            return outside.stamps.clone();
+        }
         let start = self.start_span();
         self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
@@ -1259,6 +1371,9 @@ impl StrokeBuilder {
     /// The stamps drawn for good so far, of a stroke drawn stamp by stamp (with a tip, where it
     /// shows one) and not yet ended: if ending it leaves them as they are, only the rest are to draw.
     pub fn drawn_for_good(&self) -> Option<Vec<Stamp>> {
+        if let Some(outside) = &self.outside.0 {
+            return (!outside.ended).then(|| outside.stamps.clone());
+        }
         if self.ran_on.is_some() {
             return None;
         }
@@ -1273,6 +1388,7 @@ impl StrokeBuilder {
     /// stamp's place on the path, before any jitter threw it.
     pub fn shape_line(&self, samples: &[Sample]) -> Vec<Vec2> {
         let mut line = self.clone();
+        line.outside = OutsideSlot(None);
         line.brush.streamline = 0.0;
         line.brush.pen_taper = Taper::NONE;
         line.brush.touch_taper = Taper::NONE;
@@ -1284,6 +1400,15 @@ impl StrokeBuilder {
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
+        if let Some(outside) = self.outside.0.as_mut() {
+            if !outside.ended {
+                outside.ended = true;
+                let last = outside.engine.finish();
+                outside.stamps.extend(last);
+            }
+            self.bounds = outside.stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
+            return outside.stamps.clone();
+        }
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
         self.average_on(&mut ignored);
@@ -2402,6 +2527,7 @@ impl StrokeBuilder {
             time_ms: p.time_ms,
             distance: p.distance,
             overlap: p.overlap,
+            tip: 0,
         }
     }
 }
