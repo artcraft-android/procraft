@@ -169,7 +169,8 @@ pub(crate) struct SaveSnapshot {
     reading: Vec<(LayerId, procraft_gpu::Readback)>,
     /// Layers still the PNG files they were opened from (not shown yet), written as they are.
     files: Vec<(LayerId, Vec<u8>)>,
-    composite: Option<procraft_gpu::Readback>,
+    /// The picture for the gallery, made small on the GPU (only it comes back, not the canvas).
+    composite: Option<procraft_gpu::PendingThumbnail>,
     /// Not shown yet, with no thumbnail in the folder: one made from its top picture, for the
     /// gallery until the canvas draws its own.
     unshown: Option<(u32, u32, Vec<u8>)>,
@@ -369,9 +370,12 @@ impl crate::State {
                 canvas.mark_changed(changed_ids);
                 return Err(e);
             }
-            // for the gallery's thumbnail: private layers left out
+            // for the gallery's thumbnail: private layers left out, the picture made small on the
+            // GPU, so only that comes back (the whole canvas, read each save, was most of an
+            // autosave's memory traffic on a large canvas)
             let private = self.doc.private_layers();
-            composite = Some(canvas.start_reading_composite_without(gpu, &mut self.doc, &private));
+            canvas.render_finished(gpu, &mut self.doc);
+            composite = Some(canvas.start_composite_thumbnail_without(gpu, &mut self.doc, THUMBNAIL_SIDE, &private));
         } else {
             // not shown yet: what was opened is still what there is. A layer still its file's
             // bytes isn't decoded: it is written as they are, or not at all if that file is there
@@ -556,8 +560,10 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             layers.push((id, hash, rgba));
         }
     }
-    let composite =
-        composite.map(procraft_gpu::Readback::pixels).transpose().map_err(|e| file_error("reading the picture", e))?;
+    let composite = composite
+        .map(procraft_gpu::PendingThumbnail::pixels)
+        .transpose()
+        .map_err(|e| file_error("reading the picture", e))?;
     // a device lost meanwhile read back nothing true: the last save is kept as it is
     if gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost) {
         return Err(file_error("reading the layers", "the graphics device was lost"));
@@ -614,7 +620,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             let (tw, th, small) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
             stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &[])), thumb, &mut staged)?;
         } else if let Some((tw, th, mut small)) =
-            composite.map(|rgba| thumbnail(&rgba, w, h, THUMBNAIL_SIDE)).or(unshown)
+            composite.map(|t| (t.width, t.height, straight_alpha(&t.rgba))).or(unshown)
         {
             // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
             if let Some(table) = proof_table(&file.document) {
