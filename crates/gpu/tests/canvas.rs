@@ -4044,3 +4044,71 @@ fn a_hard_round_tip_s_thinnest_line_keeps_close_to_its_size() {
     let wide = ink(4.0, 1.35);
     assert!((wide - 9.5).abs() < 0.3, "{wide}");
 }
+
+#[test]
+fn each_stamp_draws_with_its_own_tip_from_the_stroke_s_set() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // two tips: a whole square, and its left half only
+    let side = 32_usize;
+    let whole = vec![255_u8; side * side];
+    let half: Vec<u8> = (0..side * side).map(|i| if i % side < side / 2 { 255 } else { 0 }).collect();
+    for rule in [None, Some(Rendering::Capped)] {
+        let mut style = style(StrokeTool::Paint, 1.0);
+        if let Some(r) = rule {
+            style.rendering = r;
+        }
+        canvas.use_tip_set(&gpu, &mut style, 0x5e7, side as u32, &[&whole, &half]);
+        assert_eq!(style.full_shape, Some(0x5e7));
+        let layer = doc.add_layer();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.begin_stroke(layer, style);
+        let first = Stamp { tip: 0, ..Stamp::round(Vec2::new(32.0, 32.0), 16.0, 1.0) };
+        let second = Stamp { tip: 1, ..Stamp::round(Vec2::new(96.0, 32.0), 16.0, 1.0) };
+        canvas.add_stamps(&[first, second]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let px = canvas.read_layer(&gpu, layer).unwrap();
+        let a = |x: u32| pixel(&px, 128, x, 32)[3];
+        // the first whole, the second its left half (a tip past the set's last is its last)
+        assert!(a(24) > 240 && a(40) > 240, "{rule:?}: {} {}", a(24), a(40));
+        assert!(a(88) > 240 && a(104) < 16, "{rule:?}: {} {}", a(88), a(104));
+    }
+}
+
+#[test]
+fn a_texture_rule_takes_a_dab_s_paint_by_its_strength() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // a texture half there, laid over the whole stamp: multiplied by strength (32), subtracted (33)
+    let side = 64_usize;
+    let grey = vec![128_u8; side * side];
+    let laid = |canvas: &mut Canvas, doc: &mut Document, rule: u32, strength: f32| {
+        let mut s = style(StrokeTool::Paint, 1.0);
+        canvas.use_full_grain(&gpu, &mut s, 0x7e7 + u64::from(rule), side as u32, &grey);
+        s.grain_mode = procraft_engine::brush::GrainMode::Moving;
+        s.grain_scale = 64.0;
+        s.grain_depth = 1.0;
+        s.grain_blend = rule;
+        let layer = doc.add_layer();
+        canvas.render(&gpu, doc, None);
+        canvas.begin_stroke(layer, s);
+        let stamp = Stamp { grain_depth: strength, ..Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0) };
+        canvas.add_stamps(&[Stamp { grain_offset: stamp.center, ..stamp }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, doc, None);
+        pixel(&canvas.read_layer(&gpu, layer).unwrap(), 64, 32, 32)[3]
+    };
+    // a half: multiplied at full strength, half the paint; at half strength a quarter
+    assert!(laid(&mut canvas, &mut doc, 32, 1.0).abs_diff(128) <= 4);
+    assert!(laid(&mut canvas, &mut doc, 32, 0.5).abs_diff(64) <= 4);
+    // subtracted at full strength: half left; at half strength, the strength's shortfall too
+    assert!(laid(&mut canvas, &mut doc, 33, 1.0).abs_diff(127) <= 4);
+    assert!(laid(&mut canvas, &mut doc, 33, 0.5) <= 4);
+    // softly, half strength takes half the texture: all but a quarter left
+    assert!(laid(&mut canvas, &mut doc, 33 + 16, 0.5).abs_diff(191) <= 4);
+}
