@@ -14,6 +14,9 @@ struct Make2DApp: App {
         let available = os_proc_available_memory()
         if available > 0 {
             setResidentBudget(bytes: UInt64(available / 4))
+            // and timeline frames kept for scrubbing and playing an eighth (the core's own
+            // default where none is said)
+            setFrameCacheBudget(bytes: UInt64(available / 8))
         }
         TextFonts.prepare()
         // the GPU device and the canvases' pipelines made ahead of the first artwork

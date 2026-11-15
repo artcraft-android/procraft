@@ -288,6 +288,13 @@ pub(crate) fn resident_budget() -> u64 {
     RESIDENT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Sets what each canvas's kept timeline frames may take on this device, bytes: scrubbing back
+/// to a frame, or playing it again, copies it instead of compositing it. 0 keeps none.
+#[uniffi::export]
+pub fn set_frame_cache_budget(bytes: u64) {
+    make2d_gpu::set_frame_cache_budget(bytes);
+}
+
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {
