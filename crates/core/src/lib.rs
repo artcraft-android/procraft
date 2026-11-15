@@ -18,6 +18,8 @@ mod adjusting;
 mod adjustment_keys;
 mod animation;
 mod brush_files;
+#[cfg(test)]
+mod brush_import_tests;
 mod brush_libraries;
 mod brush_library;
 mod brush_pictures;
@@ -1582,9 +1584,50 @@ impl CanvasSession {
 /// What a new artwork is called.
 pub(crate) const DEFAULT_NAME: &str = "Untitled Artwork";
 
+/// The stack a session is built on (see [`CanvasSession::with_document`]), and what work as deep
+/// as reading a library ahead of the canvas runs on.
+pub(crate) const ROOMY_STACK: usize = 8 << 20;
+
+/// `work` on a thread of its own with [`ROOMY_STACK`] of stack, waited for: a background queue's
+/// thread on an iPad has 512 KB, which an unoptimised build's copies of a session's state (some
+/// 130 KB, moved several times on the way into its lock) can run past. Run here if no thread can
+/// be made.
+pub(crate) fn on_roomy_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    let mut work = Some(work);
+    let done = std::thread::scope(|scope| {
+        let made = std::thread::Builder::new()
+            .name("make2d roomy".to_owned())
+            .stack_size(ROOMY_STACK)
+            .spawn_scoped(scope, || work.take().map(|work| work()));
+        match made.map(|thread| thread.join()) {
+            Ok(Ok(done)) => done,
+            // its panic goes on here, as it would have
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            // no thread could be made: the work is still here
+            Err(_) => None,
+        }
+    });
+    match (done, work) {
+        (Some(done), _) => done,
+        (None, Some(work)) => work(),
+        // the thread takes the work only to do it, so it is here whenever it wasn't done
+        #[allow(clippy::unreachable)]
+        (None, None) => unreachable!("the work was taken and not done"),
+    }
+}
+
 impl CanvasSession {
-    /// A session on `doc`, with saved pixels for its layers.
+    /// A session on `doc`, with saved pixels for its layers; built on a stack with room (see
+    /// [`on_roomy_stack`]), whatever thread asks.
     pub(crate) fn with_document(
+        doc: Document,
+        name: String,
+        pixels: Vec<(make2d_engine::document::LayerId, Vec<u8>)>,
+    ) -> Arc<CanvasSession> {
+        on_roomy_stack(move || CanvasSession::with_document_here(doc, name, pixels))
+    }
+
+    fn with_document_here(
         doc: Document,
         name: String,
         pixels: Vec<(make2d_engine::document::LayerId, Vec<u8>)>,

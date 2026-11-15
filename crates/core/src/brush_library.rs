@@ -415,6 +415,11 @@ struct LastLibrary {
 /// is held already or there is none. Slow with many brushes brought in: call it off the main thread.
 #[uniffi::export]
 pub fn prepare_brushes(dir: String) {
+    // (called on a background queue, whose stack is small: see `on_roomy_stack`)
+    crate::on_roomy_stack(move || prepare_brushes_here(&dir));
+}
+
+fn prepare_brushes_here(dir: &str) {
     let (library, first) = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
     if holds(&LAST_LIBRARY, &library) || !library.is_file() {
         return;

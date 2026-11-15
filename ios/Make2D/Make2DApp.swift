@@ -1177,6 +1177,11 @@ enum ScreenCapture {
     static func start(open: @escaping (CanvasModel?) -> Void) {
         opener = open
         let arguments = ProcessInfo.processInfo.arguments
+        // `-import PATH`: the file brought in as one opened with the app is
+        if let at = arguments.firstIndex(of: "-import"), at + 1 < arguments.count {
+            let url = URL(fileURLWithPath: arguments[at + 1])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { GalleryModel.shared.importOpened(url) }
+        }
         guard let at = arguments.firstIndex(of: "-screen"), at + 1 < arguments.count else { return }
         let name = arguments[at + 1]
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
