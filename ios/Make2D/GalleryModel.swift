@@ -260,6 +260,7 @@ final class GalleryModel {
             backgroundVisible: !p.backgroundHidden, name: "Untitled Artwork"
         )
         _ = session.setNewProfile(name: p.profile)
+        session.setNewHdr(hdr: p.hdr)
         let dir = Gallery.store.newFolder(folder: folder)
         ArtworkTimeLapse(dir: dir).settings = TimeLapseSettings(
             resolution: p.timeLapseResolution, quality: p.timeLapseQuality, hevc: p.timeLapseHevc

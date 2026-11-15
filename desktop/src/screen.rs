@@ -159,7 +159,7 @@ impl Screen {
         make2d_core::keep_device(&gpu);
         let size = window.inner_size();
         let configured = Instant::now();
-        let config = configure(&gpu, &surface, (size.width, size.height), INTERFACE_WIDE);
+        let config = configure(&gpu, &surface, (size.width, size.height), INTERFACE_WIDE, false);
         log::info!("the window's surface set up in {} ms", ms(configured));
         if !last && config.is_none() {
             return Err("the window's surface couldn't be set up".to_owned());
@@ -241,7 +241,7 @@ impl Screen {
             self.config = None;
             return;
         }
-        self.config = configure(&self.gpu, &self.surface, (width, height), INTERFACE_WIDE);
+        self.config = configure(&self.gpu, &self.surface, (width, height), INTERFACE_WIDE, false);
         if let Some(format) = self.config.as_ref().map(|c| c.format).filter(|f| *f != self.format) {
             self.format = format;
             self.renderer = egui_wgpu::Renderer::new(&self.gpu.device, format, egui_wgpu::RendererOptions::default());

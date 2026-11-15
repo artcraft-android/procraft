@@ -67,6 +67,8 @@ final class CanvasModel {
     private(set) var tool: ToolKind = .paint
     /// What the light tool does to the paint under the brush, and how strongly.
     private(set) var light = LightSettings(kind: .brighten, strength: 0.5)
+    /// How far above white (stops) the light tool brightens an HDR canvas (see `HDR.swift`).
+    var lightLimit: Float = 2
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
     /// The colour panel's mode, kept from one session to the next.
@@ -374,6 +376,7 @@ final class CanvasModel {
             _ = session.openPluginArtwork(plugins: PluginsModel.shared.store)
         }
         _ = session.openBrushes(dir: Self.brushesDir)
+        startHdr()
         addPendingBrushes()
         brushSets = session.brushLibrary()
         readLibraries()

@@ -212,6 +212,10 @@ struct ActionsPanel: View {
                     .act("PNG", action: { model.share(.png) }),
                     .act("TIFF", action: { model.share(.tiff) }),
                 ]
+                // an HDR artwork's light above white kept (JPEG and PNG have it rolled off)
+                + (model.isHdr
+                    ? [.act("HDR HEIC", action: { model.shareHdr(exr: false) }), .act("OpenEXR", action: { model.shareHdr(exr: true) })]
+                    : [])
                 // a plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes
                 + (model.session.exportsSvg() ? [.act("SVG", action: { model.share(.svg) })] : [])
                 + (model.session.exportsVectors() ? [.act("Vector PDF", action: { model.share(.vectorPdf) })] : []),

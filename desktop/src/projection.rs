@@ -33,13 +33,14 @@ impl Projection {
         let surface = gpu.instance.create_surface(Arc::clone(&window)).ok()?;
         let size = window.inner_size();
         // only the canvas is shown there: in wide colour where the display takes it
-        let config = configure(gpu, &surface, (size.width, size.height), true);
+        let config = configure(gpu, &surface, (size.width, size.height), true, false);
         Some(Projection { window, monitor, surface, config, drawn: None })
     }
 
     /// The window is `width` × `height` pixels now.
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        self.config = if width > 0 && height > 0 { configure(gpu, &self.surface, (width, height), true) } else { None };
+        self.config =
+            if width > 0 && height > 0 { configure(gpu, &self.surface, (width, height), true, false) } else { None };
         self.drawn = None;
     }
 

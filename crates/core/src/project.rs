@@ -341,6 +341,8 @@ impl crate::State {
         let mut composite = None;
         let mut unshown = None;
         let mut changed_ids = Vec::new();
+        // an HDR artwork's layers are saved with their light above white (see `crate::hdr`)
+        let hdr = self.doc.range.is_high();
         // shown but its canvas still being made (on another thread): made now, so the save has its
         // picture for the gallery
         if self.gpu.is_some() && self.canvas.is_none() {
@@ -374,7 +376,8 @@ impl crate::State {
                     if after + read.bytes() <= READ_AFTER_LOCK {
                         reading.push((id, read));
                     } else {
-                        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+                        let rgba = crate::hdr::layer_pixels(read, hdr, (self.doc.width(), self.doc.height()))
+                            .map_err(|e| file_error("reading a layer", e))?;
                         layers.extend(changed(id, rgba));
                     }
                 }
@@ -398,7 +401,8 @@ impl crate::State {
                             files.push((*id, bytes.clone()));
                         }
                     }
-                    Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
+                    Opened::Pixels(rgba) => layers
+                        .extend(changed(*id, crate::hdr::as_saved(rgba, hdr, (self.doc.width(), self.doc.height())))),
                 }
             }
             // a picture made into an artwork and saved before it is shown (the app may be closed
@@ -569,8 +573,10 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
+    let hdr = file.document.range.is_high();
+    let size = (file.document.width(), file.document.height());
     for (id, read) in reading {
-        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+        let rgba = crate::hdr::layer_pixels(read, hdr, size).map_err(|e| file_error("reading a layer", e))?;
         let hash = pixels_hash(&rgba);
         let there = saved.dir == dir && saved.layers.get(&id) == Some(&hash) && layer_path(dir, id).exists();
         if !there {
@@ -606,7 +612,9 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         // layer's PNG made in memory before it is written
         let each = w as usize * h as usize * 4;
         let results = make2d_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
-            write_beside(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
+            write_beside(&layer_path(dir, *id), |p| {
+                if hdr { crate::hdr::write_half_png(p, w, h, rgba) } else { write_png(p, w, h, rgba, &[]) }
+            })
         });
         // every one written kept track of, so a failure among them leaves none of them beside
         let mut failed = None;
@@ -1613,6 +1621,10 @@ fn decode_png_into(
     let (color, depth) = reader.output_color_type();
     let (w, h, interlaced) = (reader.info().width, reader.info().height, reader.info().interlaced);
     let sized = w == width && h == height;
+    // an HDR artwork's layer: its half floats as they are
+    if sized && color == png::ColorType::Rgba && depth == png::BitDepth::Sixteen && !interlaced {
+        return crate::hdr::read_half_png(reader, width, height);
+    }
     if (!sized && !fit) || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
         return Err(file_error("opening a layer", format!("{w}×{h} {color:?}")));
     }
@@ -1670,7 +1682,13 @@ impl CanvasSession {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
             canvas.render_finished(gpu, &mut st.doc);
-            let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
+            // an HDR canvas's light above white rolled off into the standard picture
+            let rgba = if canvas.is_hdr() {
+                canvas.read_composite_wide(gpu).map(|half| make2d_engine::hdr::tone_mapped(&half))
+            } else {
+                canvas.read_composite(gpu)
+            };
+            let rgba = rgba.map_err(|e| file_error("reading the picture", e))?;
             (w, h, rgba, (icc, proof))
         };
         let (icc, proof) = icc;

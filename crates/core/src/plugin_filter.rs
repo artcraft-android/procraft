@@ -25,6 +25,7 @@ const FOLLOWS_A_FINGER: Duration = Duration::from_millis(150);
 const STOPPED_SLOW: &str = "Switched off: it took too long.";
 const STOPPED_DEVICE: &str = "Switched off: it can't run on this device.";
 const TOO_BIG: &str = "This filter takes too long on a canvas this big.";
+const NOT_HDR: &str = "Plugin filters don't run on HDR canvases yet.";
 const NO_DEVICE: &str = "The canvas isn't ready for a filter yet.";
 
 /// What a filter's panel shows.
@@ -105,6 +106,7 @@ impl State {
             FilterRun::Spent => (Some(STOPPED_SLOW), STOPPED_SLOW),
             FilterRun::Cut | FilterRun::Lost => (Some(STOPPED_DRIVER), STOPPED_DRIVER),
             FilterRun::TooLong => (None, TOO_BIG),
+            FilterRun::NotHdr => (None, NOT_HDR),
         };
         log::warn!("a plugin filter stopped: {}: {run:?}", open.id);
         if let Some(why) = stopped {
