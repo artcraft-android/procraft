@@ -27,6 +27,17 @@ const PENCIL_BLOOM_SIZE: f32 = 0.335;
 const PENCIL_BLOOM_BURN: f32 = 0.57;
 /// How close (0..1) a curve's point may come to its neighbours.
 const CURVE_GAP: f32 = 0.01;
+
+/// Curves' channels: all, red, green, blue, and its exposure.
+const CURVE_CHANNELS: usize = 5;
+
+/// Curves' exposure untouched: no stops, from the darkest, half soft.
+const NO_EXPOSURE: [f32; 3] = [0.0, 0.0, 0.5];
+
+/// Curves' exposure kept to its ranges.
+fn exposure_kept([stops, above, soft]: [f32; 3]) -> [f32; 3] {
+    [stops.clamp(-5.0, 5.0), above.clamp(0.0, 1.0), soft.clamp(0.0, 1.0)]
+}
 /// The clone source's ring (points from its centre), and how far off it a touch still takes it.
 pub const CLONE_PUCK_RADIUS: f32 = 30.0;
 pub(crate) const CLONE_PUCK_SLOP: f32 = 8.0;
@@ -67,10 +78,13 @@ pub struct AdjustShown {
     /// red, green and blue for each tone (0..1, 0.5 none).
     pub balance_tone: u32,
     pub balance: Vec<f32>,
-    /// Curves: the channel shown (0 all, 1 red, 2 green, 3 blue) and each channel's points as
-    /// x, y pairs (0..1).
+    /// Curves: the channel shown (0 all, 1 red, 2 green, 3 blue, 4 exposure) and each channel's
+    /// points as x, y pairs (0..1).
     pub curve_channel: u32,
     pub curves: Vec<Vec<f32>>,
+    /// Curves' exposure: its stops (−5..5), and the brightness it starts above and how softly
+    /// (0..1).
+    pub exposure: Vec<f32>,
     /// The gradient mapped by (its place in the library).
     pub gradient: u32,
     pub noise_kind: NoiseKind,
@@ -138,6 +152,7 @@ struct LayerSettings {
     balance: Vec<f32>,
     curve_channel: u32,
     curves: Vec<Vec<f32>>,
+    exposure: Vec<f32>,
     gradient: u32,
     noise_kind: u32,
     noise: Vec<f32>,
@@ -195,6 +210,7 @@ pub(crate) struct Adjusting {
     balance: [f32; 9],
     curve_channel: usize,
     curves: [Vec<(f32, f32)>; 4],
+    exposure: [f32; 3],
     gradient: usize,
     gradients: Option<Arc<Gradients>>,
     noise_kind: NoiseKind,
@@ -266,6 +282,7 @@ impl Default for Adjusting {
             balance: [0.5; 9],
             curve_channel: 0,
             curves: [straight(), straight(), straight(), straight()],
+            exposure: NO_EXPOSURE,
             gradient: 0,
             gradients: None,
             noise_kind: NoiseKind::Clouds,
@@ -391,7 +408,7 @@ impl Adjusting {
         match self.open {
             Some(Adjustment::Hsb) => self.hsb.iter().any(|&v| v != 0.5),
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
-            Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()),
+            Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()) || self.exposure[0] != 0.0,
             Some(Adjustment::GradientMap | Adjustment::Plugin) => true,
             Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
@@ -409,6 +426,7 @@ impl Adjusting {
             balance: self.balance.to_vec(),
             curve_channel: self.curve_channel as u32,
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
+            exposure: self.exposure.to_vec(),
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind,
             noise: self.noise.to_vec(),
@@ -451,6 +469,7 @@ impl Adjusting {
             balance: self.balance.to_vec(),
             curve_channel: self.curve_channel as u32,
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
+            exposure: self.exposure.to_vec(),
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind as u32,
             noise: self.noise.to_vec(),
@@ -484,13 +503,21 @@ impl Adjusting {
         fill(&mut self.hsb, &s.hsb, 0.0);
         self.balance_tone = (s.balance_tone as usize).min(2);
         fill(&mut self.balance, &s.balance, 0.0);
-        self.curve_channel = (s.curve_channel as usize).min(3);
+        self.curve_channel = (s.curve_channel as usize).min(CURVE_CHANNELS - 1);
         for (curve, points) in self.curves.iter_mut().zip(&s.curves) {
             let pts: Vec<(f32, f32)> = points.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
             if pts.len() >= 2 && pts.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
                 *curve = pts;
             }
         }
+        // (a layer from before Curves had its exposure: none)
+        self.exposure = NO_EXPOSURE;
+        for (v, &x) in self.exposure.iter_mut().zip(&s.exposure) {
+            if x.is_finite() {
+                *v = x;
+            }
+        }
+        self.exposure = exposure_kept(self.exposure);
         self.gradient = s.gradient as usize;
         use {ChromaticKind as C, DitherKind as D, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
         self.noise_kind = nth(&[N::Clouds, N::Billows, N::Ridges], s.noise_kind, N::Clouds);
@@ -543,7 +570,7 @@ enum Redraw {
     Swipe(SwipeAdjustment, f32),
     Hsb([f32; 3]),
     Balance([f32; 9]),
-    Curves([Vec<f32>; 4]),
+    Curves([Vec<f32>; 4], [f32; 3]),
     Gradient(Vec<f32>, f32),
     Noise(NoiseKind, f32, [f32; 3], bool, bool),
     Bloom(f32, [f32; 3]),
@@ -571,9 +598,10 @@ impl Adjusting {
             ),
             Some(Adjustment::Hsb) => Redraw::Hsb(self.hsb),
             Some(Adjustment::ColorBalance) => Redraw::Balance(self.balance),
-            Some(Adjustment::Curves) => {
-                Redraw::Curves(self.curves.clone().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()))
-            }
+            Some(Adjustment::Curves) => Redraw::Curves(
+                self.curves.clone().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()),
+                self.exposure,
+            ),
             Some(Adjustment::GradientMap) => {
                 let list = self.gradients.as_ref().map(|g| g.list()).unwrap_or_default();
                 match list.get(self.gradient) {
@@ -697,7 +725,9 @@ impl CanvasSession {
                 let tone = |k: usize| v.get(k * 3..k * 3 + 3).map(<[f32]>::to_vec).unwrap_or_default();
                 self.adjust_color_balance(tone(0), tone(1), tone(2));
             }
-            Redraw::Curves([all, red, green, blue]) => self.adjust_curves(all, red, green, blue),
+            Redraw::Curves([all, red, green, blue], exposure) => {
+                self.adjust_curves(all, red, green, blue, exposure.to_vec())
+            }
             Redraw::Gradient(stops, amount) => self.adjust_gradient_map(stops, amount),
             Redraw::Noise(kind, amount, [scale, octaves, turbulence], multi, added) => {
                 self.adjust_noise(kind, amount, scale, octaves, turbulence, multi, added);
@@ -784,6 +814,7 @@ impl CanvasSession {
             a.hsb = [0.5; 3];
             a.balance = [0.5; 9];
             a.curves = [straight(), straight(), straight(), straight()];
+            a.exposure = NO_EXPOSURE;
             a.chroma_offset = (0.0, 0.0);
             a.perspective_kind = PerspectiveKind::Positional;
             a.perspective = Perspective { origin: None, arrow: up };
@@ -952,6 +983,7 @@ impl CanvasSession {
             a.hsb = [0.5; 3];
             a.balance = [0.5; 9];
             a.curves = [straight(), straight(), straight(), straight()];
+            a.exposure = NO_EXPOSURE;
             a.chroma_offset = (0.0, 0.0);
             a.liquified = false;
             a.touched = false;
@@ -1047,9 +1079,23 @@ impl CanvasSession {
         });
     }
 
-    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue.
+    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue, 4 exposure (its sliders in place of a
+    /// curve).
     pub fn adjustment_curve_channel(&self, channel: u32) {
-        self.adjusting(|a, _| a.curve_channel = (channel as usize).min(3));
+        self.adjusting(|a, _| a.curve_channel = (channel as usize).min(CURVE_CHANNELS - 1));
+    }
+
+    /// Curves' exposure slider `k` (0 its stops, −5..5; 1 the brightness it starts above, 2 how
+    /// softly, 0..1) moved to `value`.
+    pub fn adjustment_exposure(&self, k: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.exposure.get_mut(k as usize)
+                && value.is_finite()
+            {
+                *v = value;
+            }
+            a.exposure = exposure_kept(a.exposure);
+        });
     }
 
     /// Adds a point to the channel shown; returns its index.

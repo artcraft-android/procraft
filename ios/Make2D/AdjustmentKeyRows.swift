@@ -14,7 +14,9 @@ struct AdjustmentKeyRows: View {
     var body: some View {
         // read again whenever the timeline is
         let _ = tool.revision
-        let values = model.session.timelineAdjustmentValues(id: clip)
+        let all = model.session.timelineAdjustmentValues(id: clip)
+        // curves' keyed values are its exposure's, an HDR canvas's only
+        let values = model.isHdr || all.first?.unit != .stops ? all : []
         if !values.isEmpty {
             TlSliderGroup {
                 ForEach(Array(values.enumerated()), id: \.offset) { index, v in
@@ -54,6 +56,7 @@ struct AdjustmentKeyRows: View {
         case .pixels: "\(Int(value.rounded())) px"
         case .percent: "\(Int((value * 100).rounded())) %"
         case .degrees: "\(Int((value * 180 / .pi).rounded()))°"
+        case .stops: String(format: "%+.1f stops", value)
         }
     }
 }

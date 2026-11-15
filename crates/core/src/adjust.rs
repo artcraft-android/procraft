@@ -305,7 +305,7 @@ impl State {
             // perspective blur's step goes unnamed
             let name = match self.last_filter {
                 Some(Filter::Hsb { .. }) => Some("adjust HSB"),
-                Some(Filter::Curves) => Some("adjust Curves"),
+                Some(Filter::Curves { .. }) => Some("adjust Curves"),
                 Some(Filter::ColorBalance { .. }) => Some("change Color Balance"),
                 Some(Filter::GradientMap { .. }) => Some("change Gradient Map"),
                 Some(Filter::Zoom { .. }) => None,
@@ -367,7 +367,7 @@ impl State {
         adjustment.filter = filter;
         match table {
             Some(t) => adjustment.table = t,
-            None if !matches!(filter, Filter::Curves | Filter::GradientMap { .. }) => adjustment.table.clear(),
+            None if !matches!(filter, Filter::Curves { .. } | Filter::GradientMap { .. }) => adjustment.table.clear(),
             None => {}
         }
         adjustment.settings = self.adjust.layer_settings();
@@ -506,14 +506,22 @@ impl CanvasSession {
     }
 
     /// Curves: the points (x, y pairs in 0..1) of the curve for all three channels and of the red,
-    /// green and blue curves; each runs through its points as a smooth spline.
-    pub fn adjust_curves(&self, all: Vec<f32>, red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>) {
+    /// green and blue curves; each runs through its points as a smooth spline. `exposure` is the
+    /// exposure before them: its stops (−5..5), and the brightness it starts above and how softly
+    /// (0..1); none when left out.
+    pub fn adjust_curves(&self, all: Vec<f32>, red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>, exposure: Vec<f32>) {
         let points = |v: &[f32]| v.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect::<Vec<_>>();
         let [a, r, g, b] = [&all, &red, &green, &blue].map(|v| tone::curve_table(&points(v)));
         let entries: Vec<u8> = r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        st.adjust_with_table(Filter::Curves, entries);
+        let at = |i: usize, or: f32| exposure.get(i).copied().filter(|v| v.is_finite()).unwrap_or(or);
+        let filter = Filter::Curves {
+            exposure: at(0, 0.0).clamp(-5.0, 5.0),
+            above: at(1, 0.0).clamp(0.0, 1.0),
+            soft: at(2, 0.5).clamp(0.0, 1.0),
+        };
+        st.adjust_with_table(filter, entries);
         self.shared.frame(st);
     }
 

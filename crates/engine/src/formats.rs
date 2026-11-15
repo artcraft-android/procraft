@@ -315,7 +315,8 @@ pub fn psd_adjustment(filter: &crate::filter::Filter, table: &[u8]) -> Option<([
             }
             Some((*b"hue2", d))
         }
-        Filter::Curves if table.len() == 1024 => {
+        // (with an exposure, which Photoshop's curves have no way to say: flattened)
+        Filter::Curves { exposure, .. } if table.len() == 1024 && exposure == 0.0 => {
             let mut d = vec![0];
             // version 1; curves for all three (bit 0), red, green and blue
             put16(&mut d, 1);

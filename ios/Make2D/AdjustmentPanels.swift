@@ -190,6 +190,7 @@ private struct TrackRow: View {
     let value: Float
     let track: [Color]
     let knob: Color
+    var height: CGFloat = 55
     let onChange: (Float) -> Void
 
     var body: some View {
@@ -223,7 +224,7 @@ private struct TrackRow: View {
             .frame(height: 24)
             Spacer(minLength: 0)
         }
-        .frame(height: 55)
+        .frame(height: height)
     }
 }
 
@@ -337,7 +338,8 @@ private struct BalancePanel: View {
 }
 
 /// The curves panel: the chosen channel's curve over a grid (drag its points; touch elsewhere to add
-/// one; tap a point for Delete over it), and the channels.
+/// one; tap a point for Delete over it), and the channels. An HDR canvas's has Exposure among
+/// them: its stops, and the brightness it starts above and how softly, in place of a curve.
 private struct CurvesPanel: View {
     let model: CanvasModel
     let shown: AdjustShown
@@ -349,8 +351,45 @@ private struct CurvesPanel: View {
     @State private var added = false
     @State private var moved = false
 
+    /// The channels listed: Exposure an HDR canvas's only.
+    private var channels: [String] {
+        ["Gamma", "Red", "Green", "Blue"] + (model.isHdr ? ["Exposure"] : [])
+    }
+
     private var channel: Int {
-        Int(shown.curveChannel)
+        min(Int(shown.curveChannel), channels.count - 1)
+    }
+
+    private var exposing: Bool {
+        channel == 4
+    }
+
+    /// Exposure's sliders: −5 to +5 stops, then Above and Soft (0..1), as the session keeps them.
+    private var exposureRows: some View {
+        let stops = shown.exposure.indices.contains(0) ? shown.exposure[0] : 0
+        let above = shown.exposure.indices.contains(1) ? shown.exposure[1] : 0
+        let soft = shown.exposure.indices.contains(2) ? shown.exposure[2] : 0.5
+        let set = { (k: UInt32, v: Float) in model.adjust { $0.adjustmentExposure(k: k, value: v) } }
+        let shownStops = stops == 0 ? "None" : String(format: "%+.1f stops", stops)
+        return VStack(spacing: 0) {
+            TrackRow(
+                left: "Exposure", right: shownStops, leftInk: hsbLabel, value: (stops + 5) / 10,
+                track: [.black, Color(white: 0.5), .white], knob: Color(white: Double((stops + 5) / 10)), height: 50
+            ) { v in
+                // whole tenths of a stop, and none caught near the middle
+                let s = ((v * 10 - 5) * 10).rounded() / 10
+                set(0, abs(s) < 0.15 ? 0 : s)
+            }
+            TrackRow(
+                left: "Above", right: above <= 0 ? "All" : "\(wholeNumber(above * 100))%", leftInk: hsbLabel,
+                value: above, track: [.black, .white], knob: Color(white: Double(above)), height: 50
+            ) { set(1, $0) }
+            TrackRow(
+                left: "Soft", right: "\(wholeNumber(soft * 100))%", leftInk: hsbLabel, value: soft,
+                track: [sliderTick, sliderTrack], knob: .white, height: 50
+            ) { set(2, $0) }
+        }
+        .padding(.horizontal, 10)
     }
 
     private var points: [CGPoint] {
@@ -437,6 +476,9 @@ private struct CurvesPanel: View {
 
     var body: some View {
         HStack(spacing: 16) {
+            if exposing {
+                exposureRows
+            } else {
             GeometryReader { g in
                 ZStack(alignment: .topLeading) {
                     graph(g.size)
@@ -458,8 +500,9 @@ private struct CurvesPanel: View {
                 }
             }
             .padding(8)
+            }
             VStack(spacing: 1) {
-                ForEach(Array(["Gamma", "Red", "Green", "Blue"].enumerated()), id: \.offset) { i, name in
+                ForEach(Array(channels.enumerated()), id: \.offset) { i, name in
                     let chosen = channel == i
                     Text(verbatim: name)
                         .font(.system(size: 16))

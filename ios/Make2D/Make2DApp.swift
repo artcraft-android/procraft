@@ -624,6 +624,17 @@ enum ScreenCapture {
             // brightened past white: the bands' middles glow on a screen with extended range
             model.setLightLimit(3)
             lit(model)
+        case "hdr-exposure":
+            // the bands lit, then Curves open on its exposure, a stop and a half up
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                model.toggle(.light)
+                model.startAdjustment(.curves)
+                model.adjust {
+                    $0.adjustmentCurveChannel(channel: 4)
+                    $0.adjustmentExposure(k: 0, value: 1.5)
+                }
+            }
         case "hdr-export-check":
             // what only a run can show: the HDR HEIC, the OpenEXR and the HLG video made, as
             // hdr-check.* in the exports folder, for a look from outside

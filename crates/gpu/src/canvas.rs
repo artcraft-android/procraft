@@ -6991,7 +6991,7 @@ impl Canvas {
             Filter::Bloom { sigma, amount, threshold, transition, burn } => {
                 ("fs_bloom", values([amount, threshold, transition, burn], [sigma, 0.0, 0.0, 0.0]))
             }
-            Filter::Curves => ("fs_curves", values([0.0; 4], [0.0; 4])),
+            Filter::Curves { exposure, above, soft } => ("fs_curves", values([exposure, above, soft, 0.0], [0.0; 4])),
             Filter::Liquify { amount } => {
                 let [across, down] = self.liquify.as_ref().map_or([1.0; 2], |l| l.scale);
                 ("fs_liquified", values([amount, across, down, 0.0], [0.0; 4]))

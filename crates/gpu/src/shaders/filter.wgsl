@@ -352,7 +352,41 @@ fn look(v: f32) -> vec4<f32> {
     return textureLoad(table, vec2<i32>(i32(clamp(v, 0.0, 1.0) * 255.0 + 0.5), 0), 0);
 }
 
-// curves: each channel through the curve for all three, then its own
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+// an exposure of a.x stops: the light (linear) multiplied as one value, so hue holds. Above a.y
+// (the brightest channel, 0..1) only what is that bright takes all of it, fading in from a.z of
+// the way below. What would pass white is scaled back to it, as one value, on a standard canvas.
+fn exposed(rgb: vec3<f32>) -> vec3<f32> {
+    if (fu.a.x == 0.0) {
+        return rgb;
+    }
+    var weight = 1.0;
+    let threshold = fu.a.y;
+    if (threshold > 0.0001) {
+        let peak = max(max(rgb.r, rgb.g), rgb.b);
+        let start = threshold * (1.0 - clamp(fu.a.z, 0.0, 1.0));
+        weight = select(smoothstep(start, threshold, peak), step(threshold, peak), start >= threshold);
+    }
+    var light = srgb_to_linear(rgb) * exp2(fu.a.x * weight);
+    let top = max(max(light.r, light.g), light.b);
+    if (CEILING <= 1.0 && top > 1.0) {
+        light = light / top;
+    }
+    return linear_to_srgb(light);
+}
+
+// curves: the exposure, then each channel through the curve for all three, then its own
 @fragment
 fn fs_curves(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = vec2<i32>(pos.xy);
@@ -360,7 +394,7 @@ fn fs_curves(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (c.a <= 0.0) {
         return kept(i, c);
     }
-    let rgb = c.rgb / c.a;
+    let rgb = exposed(c.rgb / c.a);
     let r = look(look(rgb.r).a).r;
     let g = look(look(rgb.g).a).g;
     let b = look(look(rgb.b).a).b;

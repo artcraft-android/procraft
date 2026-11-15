@@ -18,6 +18,8 @@ pub enum AdjustmentUnit {
     Percent,
     /// An angle in radians, shown in degrees.
     Degrees,
+    /// Photographic stops (each one doubles the light).
+    Stops,
 }
 
 /// One value of an adjustment clip's adjustment at the playhead, as a row shows it.
@@ -55,6 +57,7 @@ impl CanvasSession {
                     ParamUnit::Pixels => AdjustmentUnit::Pixels,
                     ParamUnit::Percent => AdjustmentUnit::Percent,
                     ParamUnit::Degrees => AdjustmentUnit::Degrees,
+                    ParamUnit::Stops => AdjustmentUnit::Stops,
                 },
             })
             .collect()

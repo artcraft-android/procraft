@@ -2422,7 +2422,7 @@ fn adjustments_change_the_layer_as_one_undo_step() {
         s.adjust_swipe(kind, 0.5);
     }
     assert!((s.adjust_motion(100.0, 0.0) - 0.1).abs() < 1e-3);
-    s.adjust_curves(vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0], vec![], vec![], vec![]);
+    s.adjust_curves(vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0], vec![], vec![], vec![], vec![]);
     s.adjust_color_balance(vec![0.5, 0.0, 0.0], vec![], vec![0.0, 0.0, -0.5]);
     s.adjust_gradient_map(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0], 1.0);
     s.adjust_noise(crate::adjust::NoiseKind::Ridges, 0.5, 0.3, 0.5, 0.7, true, false);

@@ -271,3 +271,42 @@ fn a_standard_canvas_takes_no_wide_pixels() {
     let wide = vec![0u8; (W * W) as usize * hdr::HDR_PIXEL];
     assert!(canvas.upload_layer_wide(&gpu, doc.current(), &wide).is_err());
 }
+
+/// An adjustment layer of curves (straight) with an exposure of `stops`, starting `above`.
+fn exposure_scene(gpu: &Gpu, range: DynamicRange, stops: f32, above: f32) -> (Canvas, Document) {
+    let mut doc = document(range);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let base = doc.current();
+    fill(&mut canvas, base, [0.8, 0.4, 0.2]);
+    let table: Vec<u8> = (0..=255u8).flat_map(|v| [v, v, v, v]).collect();
+    let filter = Filter::Curves { exposure: stops, above, soft: 0.0 };
+    doc.add_adjustment_layer("Curves".to_owned(), LayerAdjustment { filter, table, settings: serde_json::Value::Null });
+    canvas.render(gpu, &mut doc, None);
+    (canvas, doc)
+}
+
+#[test]
+fn curves_exposure_lifts_light_past_white_on_an_hdr_canvas_keeping_its_hue() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (canvas, _doc) = exposure_scene(&gpu, DynamicRange::High, 2.0, 0.0);
+    let [r, g, b, a] = wide_at(&canvas.read_composite_wide(&gpu).unwrap(), 16, 16);
+    // 0.8 is 0.604 of white's light; four times that is 2.42, encoded 1.47
+    assert!((r - 1.468).abs() < 0.03 && a > 0.99, "{r} {g} {b} {a}");
+    // each channel's light four times what it was: the hue holds
+    assert!((g - 0.73).abs() < 0.03 && (b - 0.39).abs() < 0.03, "{r} {g} {b}");
+}
+
+#[test]
+fn curves_exposure_on_a_standard_canvas_stops_at_white_keeping_its_hue() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (canvas, _doc) = exposure_scene(&gpu, DynamicRange::Standard, 2.0, 0.0);
+    let [r, g, _, _] = at(&canvas.read_composite(&gpu).unwrap(), 16, 16);
+    // scaled back as one value: red at white, green as far below it as it was
+    assert!(r >= 254 && (125..=134).contains(&g), "{r} {g}");
+    // only what is brighter than 0.9 is lifted: this colour is not
+    let (canvas, _doc) = exposure_scene(&gpu, DynamicRange::Standard, 2.0, 0.9);
+    let [r, g, b, _] = at(&canvas.read_composite(&gpu).unwrap(), 16, 16);
+    assert!(r.abs_diff(204) <= 1 && g.abs_diff(102) <= 1 && b.abs_diff(51) <= 1, "{r} {g} {b}");
+}

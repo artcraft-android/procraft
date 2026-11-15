@@ -4,7 +4,10 @@
 
 /// An adjustment: drawn into the layer being edited (begun as a transform is) from its copy, or by
 /// an adjustment layer onto what is below it.
+// derived as `Filter::serialize`/`Filter::deserialize`, with the traits below: a file from before
+// Curves had its exposure wrote it as a bare "Curves"
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(remote = "Self")]
 pub enum Filter {
     /// In luma and chroma: the chroma turned by `hue` (radians) and scaled by `saturation`, and
     /// `brightness` added to the luma.
@@ -42,8 +45,18 @@ pub enum Filter {
     /// The light of a blur (`sigma`) screened over the layer: `amount`, from `threshold` up over
     /// a ramp `transition` (0..1) long, strengthened by `burn` (−0.3..1).
     Bloom { sigma: f32, amount: f32, threshold: f32, transition: f32, burn: f32 },
-    /// Each channel through the curves the canvas is given (its table).
-    Curves,
+    /// Each channel through the curves the canvas is given (its table), after an exposure: the
+    /// light multiplied by 2^`exposure` (stops, −5..5) as one value per pixel, so hue holds. With
+    /// `above` (0..1 of white) only what is at least that bright takes all of it, fading in from
+    /// `soft` (0..1) of the way below; past white on an HDR canvas, scaled back to it on another.
+    Curves {
+        #[serde(default)]
+        exposure: f32,
+        #[serde(default)]
+        above: f32,
+        #[serde(default = "half")]
+        soft: f32,
+    },
     /// The gradient the canvas is given (its table) by brightness, `amount` of the way.
     GradientMap { amount: f32 },
     /// Each channel (red, green, blue) shifted in its shadows, midtones and highlights (−1..1).
@@ -80,7 +93,7 @@ impl Filter {
             Filter::Hsb { .. }
                 | Filter::Noise { .. }
                 | Filter::Halftone { .. }
-                | Filter::Curves
+                | Filter::Curves { .. }
                 | Filter::GradientMap { .. }
                 | Filter::ColorBalance { .. }
                 | Filter::Dither { .. }
@@ -113,19 +126,20 @@ impl Filter {
             Filter::Glitch { amount, .. } => amount <= 0.0,
             Filter::Pixelate { size } => size < 1.5,
             Filter::Dither { amount, .. } | Filter::Vignette { amount, .. } => amount <= 0.0,
-            Filter::Halftone { .. } | Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => false,
+            Filter::Halftone { .. } | Filter::Curves { .. } | Filter::Liquify { .. } | Filter::Clone { .. } => false,
         }
     }
 }
 
 /// How a filter's value reads on a panel's row: as it is, canvas pixels, a share shown as a
-/// percentage, or an angle kept in radians shown in degrees.
+/// percentage, an angle kept in radians shown in degrees, or photographic stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamUnit {
     Plain,
     Pixels,
     Percent,
     Degrees,
+    Stops,
 }
 
 /// One of a filter's values that can change smoothly (and so be keyed on a timeline): its name,
@@ -142,7 +156,7 @@ pub struct FilterParam {
 /// The values that can change smoothly of each kind of filter, in [`Filter::values`]'s order:
 /// name, low, high and unit. Kinds and on/off choices are left out: they change in steps.
 fn param_specs(f: &Filter) -> &'static [(&'static str, f32, f32, ParamUnit)] {
-    use ParamUnit::{Degrees, Percent, Pixels, Plain};
+    use ParamUnit::{Degrees, Percent, Pixels, Plain, Stops};
     match f {
         Filter::Hsb { .. } => &[
             ("Hue", -std::f32::consts::PI, std::f32::consts::PI, Degrees),
@@ -205,7 +219,10 @@ fn param_specs(f: &Filter) -> &'static [(&'static str, f32, f32, ParamUnit)] {
         Filter::Vignette { .. } => {
             &[("Amount", 0.0, 1.0, Percent), ("Size", 0.0, 1.0, Percent), ("Softness", 0.0, 1.0, Percent)]
         }
-        Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => &[],
+        Filter::Curves { .. } => {
+            &[("Exposure", -5.0, 5.0, Stops), ("Above", 0.0, 1.0, Percent), ("Soft", 0.0, 1.0, Percent)]
+        }
+        Filter::Liquify { .. } | Filter::Clone { .. } => &[],
     }
 }
 
@@ -233,7 +250,8 @@ impl Filter {
             Filter::Pixelate { size } => vec![size],
             Filter::Dither { amount, levels, scale, .. } => vec![amount, levels, scale],
             Filter::Vignette { amount, size, softness, .. } => vec![amount, size, softness],
-            Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => Vec::new(),
+            Filter::Curves { exposure, above, soft } => vec![exposure, above, soft],
+            Filter::Liquify { .. } | Filter::Clone { .. } => Vec::new(),
         }
     }
 
@@ -281,7 +299,8 @@ impl Filter {
             Filter::Pixelate { .. } => Filter::Pixelate { size: g(0) },
             Filter::Dither { kind, mono, .. } => Filter::Dither { amount: g(0), levels: g(1), scale: g(2), kind, mono },
             Filter::Vignette { light, .. } => Filter::Vignette { amount: g(0), size: g(1), softness: g(2), light },
-            Filter::Curves | Filter::Liquify { .. } | Filter::Clone { .. } => self,
+            Filter::Curves { .. } => Filter::Curves { exposure: g(0), above: g(1), soft: g(2) },
+            Filter::Liquify { .. } | Filter::Clone { .. } => self,
         }
     }
 
@@ -332,6 +351,32 @@ impl Filter {
     }
 }
 
+impl Filter {
+    /// Curves with no exposure (the curves alone).
+    pub const CURVES: Filter = Filter::Curves { exposure: 0.0, above: 0.0, soft: 0.5 };
+}
+
+fn half() -> f32 {
+    0.5
+}
+
+impl serde::Serialize for Filter {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        Filter::serialize(self, s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Filter {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Filter, D::Error> {
+        let mut v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+        // Curves as it was written before it had its exposure: none
+        if v == "Curves" {
+            v = serde_json::json!({ "Curves": {} });
+        }
+        Filter::deserialize(v).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Keyed on a timeline, a filter eases value by value from one key to the next; its kind and
 /// choices are the first key's. Keys of another kind (the layer changed since) don't mix: the
 /// first one's are kept.
@@ -359,6 +404,19 @@ mod tests {
         let text = serde_json::to_string(&f).ok();
         let back: Option<Filter> = text.as_deref().and_then(|t| serde_json::from_str(t).ok());
         assert_eq!(back, Some(f));
+    }
+
+    #[test]
+    fn curves_written_before_their_exposure_read_with_none() {
+        let back: Option<Filter> = serde_json::from_str("\"Curves\"").ok();
+        assert_eq!(back, Some(Filter::CURVES));
+        let f = Filter::Curves { exposure: 1.5, above: 0.6, soft: 0.25 };
+        let text = serde_json::to_string(&f).ok();
+        let back: Option<Filter> = text.as_deref().and_then(|t| serde_json::from_str(t).ok());
+        assert_eq!(back, Some(f));
+        // keyed, the exposure eases
+        assert_eq!(f.values(), vec![1.5, 0.6, 0.25]);
+        assert_eq!(Filter::CURVES.with_param(0, 9.0), Filter::Curves { exposure: 5.0, above: 0.0, soft: 0.5 });
     }
 
     #[test]

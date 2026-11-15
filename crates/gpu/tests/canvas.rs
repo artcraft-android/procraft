@@ -1416,7 +1416,7 @@ fn curves_gradient_maps_and_colour_balance_draw() {
     let table: Vec<u8> = (0..256).flat_map(|_| [255u8, 255, 255, 255]).collect();
     canvas.set_table(&gpu, &table);
     canvas.begin_transform(layer);
-    canvas.set_filter(Filter::Curves);
+    canvas.set_filter(Filter::CURVES);
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(pixel(&canvas.read_layer(&gpu, layer).unwrap(), 32, 16, 16), [255, 255, 255, 255]);
     // a red gradient, all the way

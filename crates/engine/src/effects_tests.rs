@@ -47,7 +47,8 @@ fn every_kind_lists_a_name_and_range_for_each_smooth_value() {
         // given its own values back it is itself, choices and all
         assert_eq!(f.with_values(&f.values()), f);
     }
-    assert!(Filter::Curves.params().is_empty());
+    // curves' own keyed values are its exposure's; its curves are its table
+    assert_eq!(Filter::CURVES.params()[0].unit, ParamUnit::Stops);
     assert_eq!(GREY.params()[0].unit, ParamUnit::Degrees);
     // a value set is kept in its range, and the others stay
     let d = Filter::Dither { amount: 1.0, levels: 4.0, scale: 2.0, kind: 1, mono: true };
@@ -151,7 +152,9 @@ fn a_psd_keeps_the_adjustments_it_has_kinds_for() {
     let word = |i: usize| i16::from_be_bytes([data[i], data[i + 1]]);
     assert_eq!((word(0), word(10), word(12), word(14)), (2, 90, -50, 25));
     let table: Vec<u8> = (0..=255u8).flat_map(|v| [255 - v, v, v, v / 2]).collect();
-    let (key, data) = formats::psd_adjustment(&Filter::Curves, &table).unwrap();
+    // with an exposure, which Photoshop's curves can't say, it is flattened
+    assert!(formats::psd_adjustment(&Filter::Curves { exposure: 1.0, above: 0.0, soft: 0.5 }, &table).is_none());
+    let (key, data) = formats::psd_adjustment(&Filter::CURVES, &table).unwrap();
     assert_eq!(&key, b"curv");
     assert_eq!(data.len() % 2, 0);
     // all four curves; the one for all three first, its last point (output, input) at 255
