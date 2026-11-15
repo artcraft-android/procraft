@@ -200,6 +200,7 @@ mod tests {
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
             crate::canvas::liquify_format(&gpu.adapter),
+            wgpu::TextureFormat::Rgba8Unorm,
             Some(first.cache.clone()),
         );
         first.made();
@@ -212,6 +213,7 @@ mod tests {
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
             crate::canvas::liquify_format(&gpu.adapter),
+            wgpu::TextureFormat::Rgba8Unorm,
             Some(second.cache.clone()),
         );
         second.made();

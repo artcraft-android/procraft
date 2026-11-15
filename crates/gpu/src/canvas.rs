@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 
 use make2d_engine::animation::{self, FrameLook};
 use make2d_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
-use make2d_engine::document::{BlendMode, Document, Layer, LayerEffect, LayerId, LayerKind, LayerStyle};
+use make2d_engine::document::{BlendMode, Document, DynamicRange, Layer, LayerEffect, LayerId, LayerKind, LayerStyle};
 pub use make2d_engine::filter::Filter;
 use make2d_engine::geom::{Affine, IRect};
 use make2d_engine::ribbon::{Piece, Ribbon};
@@ -26,7 +26,21 @@ use crate::{Gpu, GpuError};
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
 
+/// A standard canvas's layers: 8 bits a channel.
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// An HDR canvas's layers (see [`DynamicRange::High`]): half floats, keeping light above white.
+pub(crate) const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The `CEILING` the shaders are written with, and an HDR canvas's (as far as half floats go).
+const CEILING_STANDARD: &str = "const CEILING: f32 = 1.0;";
+const CEILING_HIGH: &str = "const CEILING: f32 = 65504.0;";
+
+/// The layer format a document's canvas takes.
+pub(crate) fn layer_format(range: DynamicRange) -> wgpu::TextureFormat {
+    match range {
+        DynamicRange::Standard => LAYER_FORMAT,
+        DynamicRange::High => HDR_FORMAT,
+    }
+}
 
 /// The id the next canvas made takes (see [`Canvas::id`]).
 static NEXT_CANVAS: AtomicU64 = AtomicU64::new(1);
@@ -1072,6 +1086,14 @@ impl DisplayUniform {
         }
     }
 
+    /// Drawn for a screen that shows light up to `peak` (linear light, 1: white): an HDR canvas's
+    /// light above white is rolled off to it (see `display.wgsl`'s `toned`).
+    fn peaked(mut self, peak: f32) -> DisplayUniform {
+        let peak = if peak.is_finite() { peak.max(1.0) } else { 1.0 };
+        self.edge[3] = 1.055 * peak.powf(1.0 / 2.4) - 0.055;
+        self
+    }
+
     /// With the canvas's edge smoothed, for the map `m` (the unit square to clip space) onto a
     /// target `size` pixels: the quad reaches a target pixel past each side, and each pixel along
     /// the edge shows as much of the canvas as covers it, not all or none (steps along a turned
@@ -2042,6 +2064,12 @@ pub struct Canvas {
     id: u64,
     width: u32,
     height: u32,
+    /// Its layers' pixel format, as its document's range has it when it is made (see
+    /// [`DynamicRange`]).
+    format: wgpu::TextureFormat,
+    /// An HDR canvas's: the brightest the screen shows now, linear light (1: white), what light
+    /// above white is rolled off to as it is drawn there.
+    display_peak: f32,
     pipelines: std::sync::Arc<Pipelines>,
     screen: ScreenPipelines,
     layers: HashMap<LayerId, LayerGpu>,
@@ -2401,7 +2429,8 @@ impl Canvas {
             return Err(GpuError::TooLarge(width, height, max));
         }
         let device = &gpu.device;
-        let pipelines = gpu.canvas_pipelines();
+        let format = layer_format(doc.range);
+        let pipelines = gpu.canvas_pipelines_for(format);
         let fits = stroke.filter(|s| (s.texture.width(), s.texture.height()) == (width, height));
         let (stroke_texture, stroke_view) = match fits {
             Some(s) => (s.texture.clone(), s.view.clone()),
@@ -2411,7 +2440,7 @@ impl Canvas {
                 (t, v)
             }
         };
-        let composite = texture(device, "composite", width, height, LAYER_FORMAT);
+        let composite = texture(device, "composite", width, height, format);
         let composite_view = composite.create_view(&wgpu::TextureViewDescriptor::default());
         let (shape_images, grain_images) =
             if images { (textures::shapes(), textures::grains()) } else { (Vec::new(), Vec::new()) };
@@ -2471,6 +2500,8 @@ impl Canvas {
             id: NEXT_CANVAS.fetch_add(1, Ordering::Relaxed),
             width,
             height,
+            format,
+            display_peak: 1.0,
             pipelines,
             screen: ScreenPipelines::default(),
             layers: HashMap::new(),
@@ -2480,13 +2511,13 @@ impl Canvas {
             tip_backup: None,
             composite,
             composite_view,
-            composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
-            posed: OnDemand::new("posed drawing", width, height, LAYER_FORMAT),
+            composite_second: OnDemand::new("composite 2", width, height, format),
+            posed: OnDemand::new("posed drawing", width, height, format),
             reels: Vec::new(),
             camera_view: false,
-            adjusted: OnDemand::new("adjusted", width, height, LAYER_FORMAT),
-            style_rows: OnDemand::new("style rows", width, height, LAYER_FORMAT),
-            style_distances: OnDemand::new("style distances", width, height, LAYER_FORMAT),
+            adjusted: OnDemand::new("adjusted", width, height, format),
+            style_rows: OnDemand::new("style rows", width, height, format),
+            style_distances: OnDemand::new("style distances", width, height, format),
             adjust_tables: Mutex::new(HashMap::new()),
             groups: Vec::new(),
             play_frame: None,
@@ -2494,7 +2525,7 @@ impl Canvas {
             echo: None,
             artwork_pixel: 1.0,
             over: false,
-            scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
+            scratch: OnDemand::new("scratch", width, height, format),
             second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
             queued_second: None,
             blur_textures: Mutex::new(HashMap::new()),
@@ -3337,7 +3368,7 @@ impl Canvas {
             return;
         }
         let device = &gpu.device;
-        let texture = texture(device, "sharp", w, h, LAYER_FORMAT);
+        let texture = texture(device, "sharp", w, h, self.format);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sharp") });
         encoder.copy_texture_to_texture(copy_at(source, 0, 0), copy_at(&texture, 0, 0), extent(w, h));
         gpu.queue.submit([encoder.finish()]);
@@ -3528,7 +3559,7 @@ impl Canvas {
         let (rw, rh) = (rect.width(), rect.height());
         let fit = |side: u32| ((side as f32 * scale).ceil() as u32).clamp(1, side);
         let (w, h) = (fit(rw), fit(rh));
-        let texture = texture(device, "veil", w, h, LAYER_FORMAT);
+        let texture = texture(device, "veil", w, h, self.format);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("veil") });
         if (w, h) == (rw, rh) {
             encoder.copy_texture_to_texture(
@@ -3897,7 +3928,7 @@ impl Canvas {
         let Some((painted, rows)) = self.parked.get(&id).and_then(|p| Some((p.rect, p.rows()?))) else {
             return false;
         };
-        let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+        let texture = texture(&gpu.device, "layer", self.width, self.height, self.format);
         // only where it is painted (a new texture is clear): nothing at all for an empty layer
         if let Some(b) = painted {
             self.upload_now(gpu, &texture, b, &rows, 0, b.width() as usize * 4);
@@ -3995,6 +4026,10 @@ impl Canvas {
     /// worked on (and what they are clipped to); none while the composite isn't made around
     /// pictures of the others.
     fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
+        // (see `has_room`)
+        if self.format == HDR_FORMAT {
+            return;
+        }
         self.parking_left = false;
         let most = self.most_resident();
         if self.resident_budget == 0 || self.layers.len() <= most {
@@ -4327,7 +4362,7 @@ impl Canvas {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: LAYER_FORMAT,
+                format: self.format,
                 usage: wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -4500,7 +4535,7 @@ impl Canvas {
             // a kept texture, cleared, else a new one (new textures are zeroed: transparent)
             let spare = self.take_spare();
             let reused = spare.is_some();
-            let texture = spare.unwrap_or_else(|| texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT));
+            let texture = spare.unwrap_or_else(|| texture(&gpu.device, "layer", self.width, self.height, self.format));
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             if reused {
                 let encoder = clears.get_or_insert_with(|| gpu.device.create_command_encoder(&Default::default()));
@@ -5008,16 +5043,22 @@ impl Canvas {
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
-                            format: LAYER_FORMAT,
+                            format: self.format,
                             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                             view_formats: &[],
                         });
+                        // an HDR canvas's taken as they are, widened
+                        let (pixels, across) = if self.format == HDR_FORMAT {
+                            (make2d_engine::hdr::widen(&pixels), w * make2d_engine::hdr::HDR_PIXEL as u32)
+                        } else {
+                            (pixels, w * 4)
+                        };
                         gpu.queue.write_texture(
                             source.as_image_copy(),
                             &pixels,
                             wgpu::TexelCopyBufferLayout {
                                 offset: 0,
-                                bytes_per_row: Some(w * 4),
+                                bytes_per_row: Some(across),
                                 rows_per_image: Some(h),
                             },
                             extent(w, h),
@@ -5698,6 +5739,12 @@ impl Canvas {
             if self.smudge_refused {
                 return;
             }
+            // the smudge works on 8-bit pixels: an HDR canvas's would lose their light above white
+            if self.format == HDR_FORMAT {
+                self.smudge_refused = true;
+                self.smudge_untold = true;
+                return;
+            }
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
@@ -5738,7 +5785,7 @@ impl Canvas {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
-            let before = texture(device, "smudge before", self.width, self.height, LAYER_FORMAT);
+            let before = texture(device, "smudge before", self.width, self.height, self.format);
             let grained = grain.then(|| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("smudge grained"),
@@ -6144,7 +6191,7 @@ impl Canvas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: LAYER_FORMAT,
+            format: self.format,
             usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -6463,7 +6510,7 @@ impl Canvas {
     fn make_reels(&mut self, doc: &Document) {
         let depth = doc.timeline.as_ref().map_or(0, |t| t.group_depth() + 1);
         while self.reels.len() < depth {
-            self.reels.push(Reel::new(self.width, self.height));
+            self.reels.push(Reel::new(self.width, self.height, self.format));
         }
     }
 
@@ -6471,8 +6518,8 @@ impl Canvas {
     fn make_groups(&mut self, device: &wgpu::Device, depth: usize) {
         while self.groups.len() < depth {
             let textures = [
-                texture(device, "group", self.width, self.height, LAYER_FORMAT),
-                texture(device, "group 2", self.width, self.height, LAYER_FORMAT),
+                texture(device, "group", self.width, self.height, self.format),
+                texture(device, "group 2", self.width, self.height, self.format),
             ];
             let views = [
                 textures[0].create_view(&wgpu::TextureViewDescriptor::default()),
@@ -6499,7 +6546,7 @@ impl Canvas {
         // this step is let go in turn
         if rect == self.full() {
             let texture =
-                self.take_spare().unwrap_or_else(|| texture(device, "undo", self.width, self.height, LAYER_FORMAT));
+                self.take_spare().unwrap_or_else(|| texture(device, "undo", self.width, self.height, self.format));
             encoder.copy_texture_to_texture(
                 copy_at(&layer.texture, 0, 0),
                 copy_at(&texture, 0, 0),
@@ -6957,7 +7004,7 @@ impl Canvas {
         let mut kept = self.blur_textures.lock().unwrap_or_else(PoisonError::into_inner);
         kept.entry((width, height, part))
             .or_insert_with(|| {
-                texture(device, label, width, height, LAYER_FORMAT).create_view(&wgpu::TextureViewDescriptor::default())
+                texture(device, label, width, height, self.format).create_view(&wgpu::TextureViewDescriptor::default())
             })
             .clone()
     }
@@ -7008,7 +7055,7 @@ impl Canvas {
             | wgpu::TextureUsages::COPY_DST;
         let mut spares = self.spares.lock().unwrap_or_else(PoisonError::into_inner);
         if (texture.width(), texture.height()) == (self.width, self.height)
-            && texture.format() == LAYER_FORMAT
+            && texture.format() == self.format
             && texture.usage().contains(layer_like)
             && spares.len() < SPARES_KEPT
         {
@@ -7193,8 +7240,8 @@ impl Canvas {
         let mut caches = self.caches.take().or(stale).unwrap_or_else(|| {
             let pair = |label| {
                 let textures = [
-                    texture(device, label, self.width, self.height, LAYER_FORMAT),
-                    texture(device, label, self.width, self.height, LAYER_FORMAT),
+                    texture(device, label, self.width, self.height, self.format),
+                    texture(device, label, self.width, self.height, self.format),
                 ];
                 let views = textures.each_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
                 (textures, views)
@@ -7555,7 +7602,8 @@ impl Canvas {
 
     /// Whether another layer's texture fits the budget.
     pub fn has_room(&self) -> bool {
-        self.layers.len() < self.most_resident()
+        // an HDR canvas's layers are never parked: their compressed copies are 8-bit
+        self.format == HDR_FORMAT || self.layers.len() < self.most_resident()
     }
 
     /// Keeps layer `id`'s pixels (premultiplied RGBA, the canvas's size) compressed, without a
@@ -8709,7 +8757,8 @@ impl Canvas {
                 target.convert,
                 target.lut.is_some(),
             )
-            .smoothed(&m, (w, h)),
+            .smoothed(&m, (w, h))
+            .peaked(self.display_peak),
         );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
@@ -8755,12 +8804,15 @@ impl Canvas {
             let [x, y, w, h] = sharp.rect;
             let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
             let m = unit_to_rect.then(target.to_screen).then(to_clip);
-            let offset = uniforms.push(&DisplayUniform::new(
-                [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-                target.convert,
-                target.lut.is_some(),
-            ));
+            let offset = uniforms.push(
+                &DisplayUniform::new(
+                    [m.a, m.b, m.c, m.d],
+                    [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                    target.convert,
+                    target.lut.is_some(),
+                )
+                .peaked(self.display_peak),
+            );
             pass.set_bind_group(0, &sharp.bind, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..6, 0..1);
@@ -8784,12 +8836,15 @@ impl Canvas {
             let (x, y, w, h) = (r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32);
             let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
             let m = unit_to_rect.then(target.to_screen).then(to_clip);
-            let offset = uniforms.push(&DisplayUniform::new(
-                [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-                target.convert,
-                target.lut.is_some(),
-            ));
+            let offset = uniforms.push(
+                &DisplayUniform::new(
+                    [m.a, m.b, m.c, m.d],
+                    [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                    target.convert,
+                    target.lut.is_some(),
+                )
+                .peaked(self.display_peak),
+            );
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, if crisp { &veil.crisp } else { &veil.bind }, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
@@ -9052,7 +9107,8 @@ impl Canvas {
                 target.convert,
                 target.lut.is_some(),
             )
-            .smoothed(&m, (w, h)),
+            .smoothed(&m, (w, h))
+            .peaked(self.display_peak),
         );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
@@ -9333,7 +9389,7 @@ impl Canvas {
         let (rw, rh) = (rect.width().max(1) as f32, rect.height().max(1) as f32);
         let scale = (side / rw).min(side / rh).min(1.0);
         let (w, h) = (((rw * scale).round() as u32).max(1), ((rh * scale).round() as u32).max(1));
-        let small = texture(&gpu.device, "thumbnail", w, h, LAYER_FORMAT);
+        let small = texture(&gpu.device, "thumbnail", w, h, self.format);
         let view = small.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = sampled_bind(&gpu.device, &self.pipelines.sampled_layout, source, &self.sampler);
         let mut data = UniformData::default();
@@ -9364,9 +9420,10 @@ impl Canvas {
     /// where that is off `from`. Copied on the GPU; false (nothing done) if `from` has no texture
     /// for it (a parked layer). Not an undo step.
     pub fn copy_layer_from(&mut self, gpu: &Gpu, from: &Canvas, id: LayerId, offset: (i64, i64)) -> bool {
-        let Some(source) = from.layers.get(&id) else { return false };
+        // (copied as it is: only between canvases of one format)
+        let Some(source) = from.layers.get(&id).filter(|_| from.format == self.format) else { return false };
         if !self.layers.contains_key(&id) {
-            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            let texture = texture(&gpu.device, "layer", self.width, self.height, self.format);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.layers.insert(id, LayerGpu { texture, view });
         }
@@ -9417,7 +9474,7 @@ impl Canvas {
     ) -> bool {
         let Some(source) = from.layers.get(&id) else { return false };
         if !self.layers.contains_key(&id) {
-            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            let texture = texture(&gpu.device, "layer", self.width, self.height, self.format);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.layers.insert(id, LayerGpu { texture, view });
         }
@@ -9495,7 +9552,7 @@ impl Canvas {
     /// copy and the caches let go.
     fn put_layer_pixels(&mut self, gpu: &Gpu, id: LayerId, rect: Option<IRect>, data: &[u8], offset: u64, row: u32) {
         if !self.layers.contains_key(&id) {
-            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            let texture = texture(&gpu.device, "layer", self.width, self.height, self.format);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.layers.insert(id, LayerGpu { texture, view });
         }
@@ -9524,14 +9581,31 @@ impl Canvas {
         offset: usize,
         row: usize,
     ) -> Option<wgpu::Buffer> {
+        self.upload_as(device, encoder, texture, rect, (data, offset, row), false)
+    }
+
+    /// [`Canvas::upload`], `data` half floats (`wide`, for an HDR texture) or 8-bit pixels (which an
+    /// HDR texture takes as they are, widened).
+    fn upload_as(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        rect: IRect,
+        (data, offset, row): (&[u8], usize, usize),
+        wide: bool,
+    ) -> Option<wgpu::Buffer> {
         let (w, h) = (rect.width(), rect.height());
-        let last = offset + (h as usize).saturating_sub(1) * row + w as usize * 4;
-        if w == 0 || h == 0 || data.len() < last {
+        let high = texture.format() == HDR_FORMAT;
+        let given = if wide { make2d_engine::hdr::HDR_PIXEL } else { 4 };
+        let last = offset + (h as usize).saturating_sub(1) * row + w as usize * given;
+        if w == 0 || h == 0 || data.len() < last || (wide && !high) {
             log::error!("an upload of {w} x {h} given {} bytes", data.len());
             return None;
         }
+        let taken = if high { make2d_engine::hdr::HDR_PIXEL as u32 } else { 4 };
         // copies from a buffer take rows 256 bytes apart
-        let stride = (w * 4).div_ceil(256) * 256;
+        let stride = (w * taken).div_ceil(256) * 256;
         let size = u64::from(stride) * u64::from(h);
         let buffer = self.uploads.take(device, size);
         {
@@ -9539,11 +9613,16 @@ impl Canvas {
                 log::error!("an upload buffer wasn't mapped");
                 return None;
             };
-            let (wide, stride) = (w as usize * 4, stride as usize);
+            let (across, stride) = (w as usize * given, stride as usize);
+            let into = w as usize * taken as usize;
             for y in 0..h as usize {
                 let from = offset + y * row;
-                if let Some(src) = data.get(from..from + wide) {
-                    view.slice(y * stride..y * stride + wide).copy_from_slice(src);
+                if let Some(src) = data.get(from..from + across) {
+                    if high && !wide {
+                        view.slice(y * stride..y * stride + into).copy_from_slice(&make2d_engine::hdr::widen(src));
+                    } else {
+                        view.slice(y * stride..y * stride + into).copy_from_slice(src);
+                    }
                 }
             }
         }
@@ -9736,7 +9815,7 @@ impl Canvas {
             .map(|source| {
                 source.map(|bind| {
                     [(rows_pass, (h, across)), (columns_pass, (w, down))].map(|(pipeline, size)| {
-                        let target = texture(&gpu.device, "bounds", size.0, size.1, LAYER_FORMAT);
+                        let target = texture(&gpu.device, "bounds", size.0, size.1, self.format);
                         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
                         let mut pass =
                             render_pass(&mut encoder, "bounds", &view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
@@ -9789,6 +9868,56 @@ impl Canvas {
         }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
         start_reading_part(gpu, &layer.texture, rect).pixels()
+    }
+
+    /// Whether its layers keep light above white (made for an HDR document: see
+    /// [`DynamicRange`]). Its pixels read back as RGBA8 all the same (light above white cut off at
+    /// white), but for the `wide` reads and uploads.
+    pub fn is_hdr(&self) -> bool {
+        self.format == HDR_FORMAT
+    }
+
+    /// Sets the brightest light the screen shows now (linear light, 1: white; an iPad's extended
+    /// range reaches a few times white), what an HDR canvas's light above white is rolled off to
+    /// as it is drawn. A standard canvas has none.
+    pub fn set_display_peak(&mut self, peak: f32) {
+        self.display_peak = if peak.is_finite() { peak.max(1.0) } else { 1.0 };
+    }
+
+    /// A layer's pixels as its texture holds them: an HDR canvas's as half floats (see
+    /// [`make2d_engine::hdr`]), a standard one's RGBA8. Waits for the GPU.
+    pub fn read_layer_wide(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
+        if !self.layers.contains_key(&id) {
+            return self.read_layer(gpu, id);
+        }
+        self.start_reading_layer(gpu, id)?.wide_pixels()
+    }
+
+    /// The composite as its texture holds it, as [`Canvas::read_layer_wide`] has a layer: an HDR
+    /// canvas's picture with its light above white. Waits for the GPU.
+    pub fn read_composite_wide(&self, gpu: &Gpu) -> Result<Vec<u8>, GpuError> {
+        start_reading(gpu, &self.composite, self.width, self.height).wide_pixels()
+    }
+
+    /// An HDR canvas's layer `id` given its pixels as half floats (premultiplied RGBA, the canvas's
+    /// size, as [`Canvas::read_layer_wide`] gives them), the layer made if it wasn't. Not an undo
+    /// step.
+    pub fn upload_layer_wide(&mut self, gpu: &Gpu, id: LayerId, half: &[u8]) -> Result<(), GpuError> {
+        let row = self.width as usize * make2d_engine::hdr::HDR_PIXEL;
+        let expected = row * self.height as usize;
+        if !self.is_hdr() || half.len() != expected {
+            return Err(GpuError::Readback(format!("layer {id:?}: {} wide bytes, expected {expected}", half.len())));
+        }
+        // made, and its copies and caches let go, with nothing written yet
+        self.put_layer_pixels(gpu, id, None, &[], 0, 0);
+        let Some(layer) = self.layers.get(&id) else { return Err(GpuError::Readback(format!("no layer {id:?}"))) };
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("upload") });
+        let used = self.upload_as(&gpu.device, &mut encoder, &layer.texture, self.full(), (half, 0, row), true);
+        gpu.queue.submit([encoder.finish()]);
+        if let Some(buffer) = used {
+            self.uploads.give_back(buffer);
+        }
+        Ok(())
     }
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
@@ -9906,11 +10035,15 @@ pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
 }
 
 impl Pipelines {
+    /// The pipelines for canvases whose layers are `layer_format`: an HDR canvas's are made from
+    /// the same shaders with their `CEILING` raised, so light above white is kept.
     pub(crate) fn new(
         device: &wgpu::Device,
         liquify_format: wgpu::TextureFormat,
+        layer_format: wgpu::TextureFormat,
         cache: Option<wgpu::PipelineCache>,
     ) -> Pipelines {
+        let high = layer_format == HDR_FORMAT;
         let kept = cache.as_ref();
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -10007,9 +10140,10 @@ impl Pipelines {
             }],
         });
         let module = |label, src: &str| {
+            let src = if high { src.replace(CEILING_STANDARD, CEILING_HIGH).into() } else { src.into() };
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
+                source: wgpu::ShaderSource::Wgsl(src),
             })
         };
         let stamp_module =
@@ -10106,7 +10240,7 @@ impl Pipelines {
         });
         let bounds_pipeline = |group: &wgpu::BindGroupLayout, fs| {
             let pipeline_layout = layout("bounds", &[Some(group)]);
-            blended_pipeline(device, kept, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), LAYER_FORMAT, None)
+            blended_pipeline(device, kept, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), layer_format, None)
         };
         let (bounds_rows, bounds_columns) =
             (bounds_pipeline(&bounds_layout, "fs_rows"), bounds_pipeline(&bounds_layout, "fs_columns"));
@@ -10117,7 +10251,7 @@ impl Pipelines {
         let flip_module = module("flip", include_str!("shaders/flip.wgsl"));
         let flip_layout = layout("flip", &[Some(&bounds_layout)]);
         let flip_pipeline =
-            |fs| blended_pipeline(device, kept, &flip_layout, &flip_module, fs, ("vs_full", fs), LAYER_FORMAT, None);
+            |fs| blended_pipeline(device, kept, &flip_layout, &flip_module, fs, ("vs_full", fs), layer_format, None);
         let (flip_across, flip_down) = (flip_pipeline("fs_across"), flip_pipeline("fs_down"));
         let invert = flip_pipeline("fs_invert");
         let crop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -10144,7 +10278,7 @@ impl Pipelines {
             &crop_module,
             "crop",
             ("vs_full", "fs_crop"),
-            LAYER_FORMAT,
+            layer_format,
             None,
         );
         let filter_module = module("filter", include_str!("shaders/filter.wgsl"));
@@ -10158,7 +10292,7 @@ impl Pipelines {
                     &filter_module,
                     fs,
                     ("vs_filter", fs),
-                    LAYER_FORMAT,
+                    layer_format,
                     None,
                 );
                 (fs, pipeline)
@@ -10343,7 +10477,7 @@ impl Pipelines {
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: LAYER_FORMAT,
+                        format: layer_format,
                         blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -10367,7 +10501,7 @@ impl Pipelines {
                 &transform_module,
                 "transform",
                 ("vs_transform", "fs_transform"),
-                LAYER_FORMAT,
+                layer_format,
                 Some(PREMULTIPLIED_OVER),
             ),
             transform_static: sampled_pipeline(
@@ -10378,7 +10512,7 @@ impl Pipelines {
                 "transform static",
                 "vs_transform",
                 "fs_static",
-                LAYER_FORMAT,
+                layer_format,
             ),
             transform_layout,
             bounds_layout,
@@ -10420,7 +10554,7 @@ impl Pipelines {
                     entry_point: Some("fs_mesh"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: LAYER_FORMAT,
+                        format: layer_format,
                         blend: Some(PREMULTIPLIED_OVER),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -10436,7 +10570,7 @@ impl Pipelines {
                 "thumbnail",
                 "vs_thumb",
                 "fs_thumb",
-                LAYER_FORMAT,
+                layer_format,
             ),
             stamp,
             stamp_max,
@@ -10490,7 +10624,7 @@ fn region_copy(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: LAYER_FORMAT,
+        format: source.format(),
         usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -11041,8 +11175,8 @@ struct Reel {
 }
 
 impl Reel {
-    fn new(width: u32, height: u32) -> Reel {
-        let made = |label| OnDemand::new(label, width, height, LAYER_FORMAT);
+    fn new(width: u32, height: u32, format: wgpu::TextureFormat) -> Reel {
+        let made = |label| OnDemand::new(label, width, height, format);
         Reel {
             pair: [made("reel"), made("reel 2")],
             alone: [made("alone"), made("alone 2")],
@@ -11759,6 +11893,9 @@ pub enum Readback {
         row: usize,
         padded: usize,
         mapped: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+        /// Half floats (an HDR canvas's texture), made 8-bit as they are read unless asked for
+        /// as they are ([`Readback::wide_pixels`]).
+        wide: bool,
     },
 }
 
@@ -11776,12 +11913,20 @@ impl Readback {
     }
 
     /// The pixels (4 bytes each, rows top to bottom without padding), once the GPU has copied
-    /// them.
+    /// them. An HDR canvas's are made 8-bit, light above white cut off at white.
     pub fn pixels(self) -> Result<Vec<u8>, GpuError> {
+        let wide = matches!(self, Readback::Copying { wide: true, .. });
+        let pixels = self.wide_pixels()?;
+        Ok(if wide { make2d_engine::hdr::narrow(&pixels) } else { pixels })
+    }
+
+    /// The pixels as the texture holds them: an HDR canvas's as half floats (8 bytes each, see
+    /// [`make2d_engine::hdr`]), a standard one's 4 bytes each.
+    pub fn wide_pixels(self) -> Result<Vec<u8>, GpuError> {
         let (device, buffer, size, kept, row, padded, mapped) = match self {
             Readback::Ready(p) => return Ok(p),
             Readback::Failed(why) => return Err(GpuError::Readback(why)),
-            Readback::Copying { device, buffer, size, kept, row, padded, mapped } => {
+            Readback::Copying { device, buffer, size, kept, row, padded, mapped, .. } => {
                 (device, buffer, size, kept, row, padded, mapped)
             }
         };
@@ -11818,7 +11963,8 @@ pub fn start_reading(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32
 /// [`start_reading`] for the pixels inside `rect` (on the texture, not empty) only.
 fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readback {
     let (width, height) = (rect.width(), rect.height());
-    let row = width as usize * 4;
+    let wide = texture.format() == HDR_FORMAT;
+    let row = width as usize * if wide { make2d_engine::hdr::HDR_PIXEL } else { 4 };
     let padded = row.div_ceil(256) * 256;
     let size = (padded * height as usize) as u64;
     let buffer = gpu.readback_buffer(size);
@@ -11847,7 +11993,7 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
         let _ = tx.send(r);
     });
     let kept = gpu.readbacks.clone();
-    Readback::Copying { device: gpu.device.clone(), buffer, size, kept, row, padded, mapped: rx }
+    Readback::Copying { device: gpu.device.clone(), buffer, size, kept, row, padded, mapped: rx, wide }
 }
 
 #[cfg(test)]

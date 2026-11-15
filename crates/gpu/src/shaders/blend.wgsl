@@ -2,6 +2,10 @@
 // the separable and non-separable modes as usually defined for compositing, numbered as the
 // layers' blend modes are.
 
+// The most a channel holds: 1 (white) on a standard canvas; an HDR canvas's pipelines are made
+// with this raised, so light above white is blended rather than cut off.
+const CEILING: f32 = 1.0;
+
 // How much of a grain the paint takes when pressed into it at `press` (0..1): what stands above
 // a level that sinks as the pen presses harder, nothing at no pressure and all of it at full,
 // the grain's highest parts first.
@@ -30,13 +34,13 @@ fn blend_rgb(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
         case 6u: { return max(cb, cs); }
         case 7u: { return cb + cs - cb * cs; }
         case 8u: { return vec3<f32>(dodge(cb.x, cs.x), dodge(cb.y, cs.y), dodge(cb.z, cs.z)); }
-        case 9u: { return min(cb + cs, vec3<f32>(1.0)); }
+        case 9u: { return min(cb + cs, vec3<f32>(CEILING)); }
         case 10u: { return select(cb, cs, lum(cs) > lum(cb)); }
         case 11u: { return vec3<f32>(hard(cs.x, cb.x), hard(cs.y, cb.y), hard(cs.z, cb.z)); }
         case 12u: { return vec3<f32>(soft(cb.x, cs.x), soft(cb.y, cs.y), soft(cb.z, cs.z)); }
         case 13u: { return vec3<f32>(hard(cb.x, cs.x), hard(cb.y, cs.y), hard(cb.z, cs.z)); }
         case 14u: { return vec3<f32>(vivid(cb.x, cs.x), vivid(cb.y, cs.y), vivid(cb.z, cs.z)); }
-        case 15u: { return clamp(cb + 2.0 * cs - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)); }
+        case 15u: { return clamp(cb + 2.0 * cs - 1.0, vec3<f32>(0.0), vec3<f32>(CEILING)); }
         case 16u: { return vec3<f32>(pin(cb.x, cs.x), pin(cb.y, cs.y), pin(cb.z, cs.z)); }
         case 17u: { return select(vec3<f32>(0.0), vec3<f32>(1.0), cb + cs >= vec3<f32>(1.0)); }
         case 18u: { return abs(cb - cs); }
@@ -216,7 +220,7 @@ fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
     if (c.a <= 0.0) {
         return vec3<f32>(0.0);
     }
-    return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(CEILING));
 }
 
 // source `s` over backdrop `b` (both premultiplied) with blend function `mode`
@@ -231,7 +235,7 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);
-    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(CEILING));
     let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
     return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
 }
@@ -240,6 +244,6 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
 // the backdrop is: the backdrop's colour changes as far as the source covers it and its alpha
 // stays, so where it is thin the source is as thin and none of what it covers shows through
 fn blend_atop(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
-    let mixed = clamp(blend_rgb(unpremultiply(b), unpremultiply(s), mode), vec3<f32>(0.0), vec3<f32>(1.0));
+    let mixed = clamp(blend_rgb(unpremultiply(b), unpremultiply(s), mode), vec3<f32>(0.0), vec3<f32>(CEILING));
     return vec4<f32>((1.0 - s.a) * b.rgb + s.a * b.a * mixed, b.a);
 }

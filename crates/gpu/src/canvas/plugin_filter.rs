@@ -510,6 +510,9 @@ pub enum FilterRun {
     TooLong,
     /// The device was lost: nothing it held can be read.
     Lost,
+    /// Not drawn: plugin filters draw 8-bit pixels, and this canvas is an HDR one. The layer is
+    /// as it was.
+    NotHdr,
 }
 
 impl Gpu {
@@ -606,6 +609,10 @@ impl Canvas {
         filter: &FilterValues,
     ) {
         let Some(t) = &self.transforming else { return };
+        if self.format == super::HDR_FORMAT {
+            self.filter_run = Some(FilterRun::NotHdr);
+            return;
+        }
         let Some(layer) = self.layers.get(&t.layer) else { return };
         let (w, h) = (self.width as f32, self.height as f32);
         let chosen = if t.masked { 1.0 } else { 0.0 };

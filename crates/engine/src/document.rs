@@ -619,6 +619,40 @@ pub struct Document {
     /// The look of the text last edited (see [`LayerText::look`]), which new text starts with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_style: Option<LayerText>,
+    /// How much light its pixels keep: standard (nothing past white) or high (HDR, light above
+    /// white kept). Chosen as the canvas is made; its canvas's pixel format follows it.
+    #[serde(default, skip_serializing_if = "DynamicRange::is_standard")]
+    pub range: DynamicRange,
+}
+
+/// How much light a document's pixels keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DynamicRange {
+    /// Nothing past white: 8 bits a channel.
+    #[default]
+    Standard,
+    /// HDR: light above white kept (half floats a channel), shown with the screen's extended range
+    /// where it has one.
+    High,
+}
+
+impl DynamicRange {
+    pub fn is_standard(&self) -> bool {
+        *self == DynamicRange::Standard
+    }
+
+    pub fn is_high(self) -> bool {
+        self == DynamicRange::High
+    }
+
+    /// Bytes a pixel of a layer takes on the GPU.
+    pub fn bytes_per_pixel(self) -> u64 {
+        match self {
+            DynamicRange::Standard => 4,
+            DynamicRange::High => 8,
+        }
+    }
 }
 
 /// The layers a file lists, as many as can be read: in a damaged file a layer with fields that
@@ -703,6 +737,7 @@ impl Document {
             icc: None,
             solo: None,
             text_style: None,
+            range: DynamicRange::Standard,
         };
         doc.add_layer();
         doc
@@ -740,7 +775,9 @@ impl Document {
 
     /// How many layers with pixels (paint layers and masks) a canvas this size holds.
     pub fn layer_cap(&self) -> usize {
-        layer_cap_for(self.width, self.height)
+        // an HDR layer takes twice the memory
+        let cap = layer_cap_for(self.width, self.height);
+        if self.range.is_high() { cap.div_ceil(2) } else { cap }
     }
 
     /// Whether `more` more layers with pixels fit under [`Document::layer_cap`].

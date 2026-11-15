@@ -27,6 +27,7 @@ pub mod gif;
 pub mod gltf;
 pub mod guide;
 pub mod harmony;
+pub mod hdr;
 pub mod icc;
 pub mod input;
 pub mod jpeg;

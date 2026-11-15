@@ -2,6 +2,9 @@
 // pass of each mixes the filtered colour with the copy by how much the selection takes.
 // Premultiplied throughout.
 
+// The most a channel holds: 1 (white) on a standard canvas, raised in an HDR canvas's pipelines.
+const CEILING: f32 = 1.0;
+
 struct FilterUniform {
     // the filter's own values
     a: vec4<f32>,
@@ -87,7 +90,7 @@ fn fs_hsb(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let cs = cos(fu.a.x);
     let sn = sin(fu.a.x);
     let uv = vec2<f32>(yuv.y * cs - yuv.z * sn, yuv.y * sn + yuv.z * cs) * fu.a.y;
-    let rgb = clamp(from_yuv(vec3<f32>(yuv.x + fu.a.z, uv)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let rgb = clamp(from_yuv(vec3<f32>(yuv.x + fu.a.z, uv)), vec3<f32>(0.0), vec3<f32>(CEILING));
     return kept(i, vec4<f32>(rgb * c.a, c.a));
 }
 
@@ -134,7 +137,7 @@ fn near(i: vec2<i32>, o: vec2<i32>) -> vec4<f32> {
 // a premultiplied colour kept valid
 fn valid(c: vec4<f32>) -> vec4<f32> {
     let a = clamp(c.a, 0.0, 1.0);
-    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(a)), a);
+    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(a * CEILING)), a);
 }
 
 // a Laplacian sharpen: the pixel pushed away from its four neighbours by a.x
@@ -361,7 +364,9 @@ fn fs_curves(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let r = look(look(rgb.r).a).r;
     let g = look(look(rgb.g).a).g;
     let b = look(look(rgb.b).a).b;
-    return kept(i, vec4<f32>(vec3<f32>(r, g, b) * c.a, c.a));
+    // light above white (an HDR canvas's) keeps how far past white it is, scaled as white is
+    let past = select(vec3<f32>(1.0), max(rgb, vec3<f32>(1.0)), CEILING > 1.0);
+    return kept(i, vec4<f32>(vec3<f32>(r, g, b) * past * c.a, c.a));
 }
 
 // gradient map: the gradient's colour at the pixel's brightness, a.x of the way
@@ -398,11 +403,11 @@ fn fs_balance(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var shifted = vec3<f32>(0.0);
     for (var k = 0; k < 3; k++) {
         let w = tones(rgb[k]);
-        shifted[k] = clamp(rgb[k] + 0.7 * (w.x * fu.a[k] + w.y * fu.b[k] + w.z * fu.c[k]), 0.0, 1.0);
+        shifted[k] = clamp(rgb[k] + 0.7 * (w.x * fu.a[k] + w.y * fu.b[k] + w.z * fu.c[k]), 0.0, CEILING);
     }
     let kept_y = to_yuv(rgb).x;
     let moved = to_yuv(shifted);
-    let out = clamp(from_yuv(vec3<f32>(kept_y, moved.y, moved.z)), vec3<f32>(0.0), vec3<f32>(1.0));
+    let out = clamp(from_yuv(vec3<f32>(kept_y, moved.y, moved.z)), vec3<f32>(0.0), vec3<f32>(CEILING));
     return kept(i, vec4<f32>(out * c.a, c.a));
 }
 
