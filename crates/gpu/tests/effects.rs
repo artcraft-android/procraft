@@ -376,3 +376,207 @@ fn styles_go_with_what_is_clipped_to_the_layer() {
     assert_eq!(at(&px, 16, 16), [0, 255, 0, 255], "clipped paint over the base");
     assert_eq!(at(&px, 16, 24), [0, 0, 255, 255], "the base's outline round both");
 }
+
+/// The composite as the canvas shows it now, then with everything composited afresh.
+fn as_shown_and_afresh(gpu: &Gpu, doc: &mut Document, canvas: &mut Canvas) -> (Vec<u8>, Vec<u8>) {
+    let shown = composite(gpu, doc, canvas);
+    canvas.invalidate();
+    (shown, composite(gpu, doc, canvas))
+}
+
+fn close(a: &[u8], b: &[u8], by: u8) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.abs_diff(*y) <= by)
+}
+
+#[test]
+fn merging_bakes_an_adjustment_layer_into_the_merged_pixels() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, base, [255, 0, 0]);
+    let a = doc.add_adjustment_layer("HSB".to_owned(), adjustment(GREY));
+    let mask = doc.add_mask(a).unwrap();
+    paint(&mut canvas, mask, [255, 255, 255], Vec2::new(32.0, 16.0), 12.0);
+    let top = doc.add_layer();
+    paint(&mut canvas, top, [0, 0, 255], Vec2::new(16.0, 4.0), 3.0);
+    let before_px = composite(&gpu, &mut doc, &mut canvas);
+    // the three picked: the adjustment goes into the red through its mask, the blue over that
+    doc.set_current(base);
+    doc.toggle_pick(a);
+    doc.toggle_pick(top);
+    let (lower, uppers) = doc.merge_chosen_plan().unwrap();
+    assert_eq!((lower, uppers.clone()), (base, vec![a, top]));
+    let before = doc.clone();
+    canvas.merge_layers(uppers.clone(), lower, before, None);
+    doc.finish_merge_chosen(lower, &uppers);
+    assert!(doc.layer(a).is_none() && doc.layer(mask).is_none());
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert!(close(&px, &before_px, 2), "looks as it did");
+    let layer = canvas.read_layer(&gpu, base).unwrap();
+    assert_eq!(at(&layer, 2, 16), [255, 0, 0, 255], "kept out by the mask");
+    assert!(is_grey(at(&layer, 30, 16)), "{:?}", at(&layer, 30, 16));
+    // undone, all of it back
+    canvas.undo();
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert!(doc.layer(a).is_some());
+    assert!(close(&px, &before_px, 2));
+    assert_eq!(at(&canvas.read_layer(&gpu, base).unwrap(), 30, 16), [255, 0, 0, 255]);
+}
+
+#[test]
+fn merge_down_bakes_an_adjustment_layer_and_styles() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, base, [255, 0, 0]);
+    // an adjustment merged down into the layer below
+    let a = doc.add_adjustment_layer("Blur".to_owned(), adjustment(Filter::Blur { sigma: 2.0 }));
+    paint(&mut canvas, base, [0, 0, 255], Vec2::new(16.0, 16.0), 4.0);
+    let before_px = composite(&gpu, &mut doc, &mut canvas);
+    assert_eq!(doc.merge_target(a), Some(base));
+    canvas.merge_down(a, base, doc.clone(), None);
+    doc.finish_merge_down(a);
+    assert!(close(&composite(&gpu, &mut doc, &mut canvas), &before_px, 2));
+    // a styled layer merged down: its outline goes into the pixels, and the styles of the one
+    // below go too
+    let top = doc.add_layer();
+    paint(&mut canvas, top, [0, 255, 0], Vec2::new(8.0, 8.0), 3.0);
+    let outline = styled(|s| {
+        s.outline.on = true;
+        s.outline.color = [1.0, 1.0, 0.0];
+        s.outline.size = 2.0;
+    });
+    doc.set_style(top, Some(outline));
+    canvas.invalidate();
+    let before_px = composite(&gpu, &mut doc, &mut canvas);
+    assert_eq!(at(&before_px, 8, 12), [255, 255, 0, 255], "the outline");
+    canvas.merge_down(top, base, doc.clone(), Some(make2d_engine::geom::IRect::new(5, 5, 11, 11)));
+    doc.finish_merge_down(top);
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert!(close(&px, &before_px, 2), "looks as it did");
+    assert_eq!(at(&canvas.read_layer(&gpu, base).unwrap(), 8, 12), [255, 255, 0, 255], "in the pixels");
+    assert!(doc.layer(base).unwrap().style.is_none());
+}
+
+#[test]
+fn a_styled_layer_below_keeps_its_look_when_merged_into() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    doc.background = [0.0, 0.0, 0.0];
+    let base = doc.current();
+    paint(&mut canvas, base, [255, 255, 255], Vec2::new(12.0, 12.0), 4.0);
+    let shadow = styled(|s| {
+        s.shadow.on = true;
+        s.shadow.opacity = 1.0;
+        s.shadow.color = [0.0, 0.0, 1.0];
+        s.shadow.size = 1.0;
+        s.shadow.distance = 6.0;
+    });
+    doc.set_style(base, Some(shadow));
+    let top = doc.add_layer();
+    paint(&mut canvas, top, [255, 0, 0], Vec2::new(26.0, 26.0), 2.0);
+    let before_px = composite(&gpu, &mut doc, &mut canvas);
+    canvas.merge_down(top, base, doc.clone(), Some(make2d_engine::geom::IRect::new(23, 23, 29, 29)));
+    doc.finish_merge_down(top);
+    assert!(close(&composite(&gpu, &mut doc, &mut canvas), &before_px, 2));
+}
+
+#[test]
+fn painting_an_adjustment_layers_mask_shows_as_it_goes() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, base, [255, 0, 0]);
+    let a = doc.add_adjustment_layer("HSB".to_owned(), adjustment(GREY));
+    let mask = doc.add_mask(a).unwrap();
+    // a black mask: nothing of it shows
+    paint(&mut canvas, mask, [0, 0, 0], Vec2::new(16.0, 16.0), 100.0);
+    assert_eq!(at(&composite(&gpu, &mut doc, &mut canvas), 24, 16), [255, 0, 0, 255]);
+    let mut style = StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0);
+    style.hardness = 1.0;
+    canvas.begin_stroke(mask, style);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 5.0, 1.0)]);
+    // (the caches round what is worked on made first)
+    canvas.render_finished(&gpu, &mut doc);
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert!(is_grey(at(&px, 24, 16)), "before the stroke ends: {:?}", at(&px, 24, 16));
+    assert_eq!(at(&px, 4, 16), [255, 0, 0, 255]);
+    canvas.end_stroke();
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert!(is_grey(at(&px, 24, 16)));
+}
+
+#[test]
+fn a_blur_layer_redraws_only_round_a_stroke_and_matches_a_whole_redraw() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(256, 256);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let base = doc.current();
+    let mut style = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0);
+    style.hardness = 1.0;
+    canvas.begin_stroke(base, style);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 40.0), 20.0, 1.0)]);
+    canvas.end_stroke();
+    doc.add_adjustment_layer("Blur".to_owned(), adjustment(Filter::Blur { sigma: 2.0 }));
+    composite(&gpu, &mut doc, &mut canvas);
+    // a dot far off, then another overlapping the first's blur
+    for (x, y) in [(200.0, 200.0), (60.0, 40.0)] {
+        canvas.begin_stroke(base, style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(x, y), 6.0, 1.0)]);
+        canvas.end_stroke();
+        let (shown, afresh) = as_shown_and_afresh(&gpu, &mut doc, &mut canvas);
+        assert!(close(&shown, &afresh, 1), "a stroke at {x},{y} drawn as a whole redraw would");
+    }
+}
+
+#[test]
+fn an_adjustment_clips_keys_ease_its_values_frame_to_frame() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, base, [255, 0, 0]);
+    let a = doc.add_adjustment_layer("HSB".to_owned(), adjustment(GREY));
+    assert!(doc.start_timeline());
+    let tl = doc.timeline.as_mut().unwrap();
+    tl.duration = 3;
+    for track in &mut tl.tracks {
+        for clip in &mut track.clips {
+            clip.duration = 3;
+        }
+    }
+    let clip = tl
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .find(|c| matches!(&c.content, make2d_engine::timeline::ClipContent::Drawing(d) if d.root == a))
+        .map(|c| c.id)
+        .unwrap();
+    doc.mark_adjustment_clips();
+    let keys = &mut doc.timeline.as_mut().unwrap().clip_mut(clip).unwrap().keys.adjustment;
+    let linear = make2d_engine::timeline::Easing::Linear;
+    keys.set(0, Filter::Hsb { hue: 0.0, saturation: 1.0, brightness: 0.0 }, linear.clone());
+    keys.set(2, GREY, linear);
+    canvas.invalidate();
+    let mut reds = Vec::new();
+    for frame in 0..3 {
+        canvas.set_timeline_frame(frame);
+        canvas.invalidate();
+        reds.push(at(&composite(&gpu, &mut doc, &mut canvas), 16, 16));
+    }
+    assert_eq!(reds[0], [255, 0, 0, 255], "as it was at the first key");
+    assert!(is_grey(reds[2]), "grey at the last: {:?}", reds[2]);
+    assert!(reds[1][1] > reds[0][1] && reds[1][1] < reds[2][1] && !is_grey(reds[1]), "half way: {:?}", reds[1]);
+}
+
+#[test]
+fn an_adjustment_layer_drawn_alone_is_what_it_redraws() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let base = doc.current();
+    fill(&mut canvas, base, [255, 0, 0]);
+    let a = doc.add_adjustment_layer("HSB".to_owned(), adjustment(GREY));
+    let mask = doc.add_mask(a).unwrap();
+    paint(&mut canvas, mask, [0, 0, 0], Vec2::new(16.0, 16.0), 100.0);
+    let top = doc.add_layer();
+    fill(&mut canvas, top, [0, 0, 255]);
+    let shown = composite(&gpu, &mut doc, &mut canvas);
+    let alone = canvas.read_adjustment_alone(&gpu, &mut doc, a).unwrap();
+    // at its full strength, unmasked, with nothing above it
+    assert!(is_grey(at(&alone, 16, 16)), "{:?}", at(&alone, 16, 16));
+    // and the canvas shows as it did
+    assert_eq!(composite(&gpu, &mut doc, &mut canvas), shown);
+}
