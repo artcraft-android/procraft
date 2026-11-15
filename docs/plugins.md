@@ -1091,7 +1091,8 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   (fields 2 and 3, three f32, sRGB 0..1), the size the slider asks for (field 4, canvas pixels) and
   where it starts for the brush (field 10), the opacity slider (field 5), the tool (field 6, u8: 0
   paint, 1 erase, 2 smudge), the pointer (field 7, u8: 0 finger, 1 pen, 2 mouse), a seed (field 8,
-  u32) and how far the canvas is turned on screen (field 9, f32 radians); and, if its look asks
+  u32), how far the canvas is turned on screen (field 9, f32 radians) and the canvas's width and
+  height (field 12, f32 canvas pixels); and, if its look asks
   (field 11 above), the colours under where it starts (field 11: the square's left and top, i32
   canvas pixels, its side, u32, then its pixels, RGBA8 straight, rows from the top, clear off the
   canvas).

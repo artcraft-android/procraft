@@ -420,6 +420,26 @@ mod tests {
         assert!(dabs.iter().any(|d| (d.y - 50.0).abs() >= 3.5), "spread");
     }
 
+    /// Krita 3's chalk brush: its speckled round tip at every pixel; its dyna brush: circles a
+    /// weight on a spring lays as the pen pulls it.
+    #[test]
+    fn a_chalk_and_a_dyna_brush_lay_as_krita_3_laid_them() {
+        let chalk = drawn("chalkbrush", r#"<param name="Chalk/radius"><![CDATA[3]]></param>"#, 10.0);
+        // a dab at every pixel of the path (30 samples 3 apart), each 7 across
+        assert!(chalk.len() >= 80, "{}", chalk.len());
+        assert!(chalk.iter().all(|d| (d.diameter - 7.0).abs() < 0.01));
+        let dots = r#"<param name="Dyna/action"><![CDATA[0]]></param><param name="Dyna/diameter"><![CDATA[3]]></param><param name="Dyna/mass"><![CDATA[0]]></param><param name="Dyna/drag"><![CDATA[0.65]]></param><param name="Dyna/width"><![CDATA[0.1]]></param>"#;
+        let dyna = drawn("dynabrush", dots, 10.0);
+        // a circle for each move after the first two (the weight starting where the pen first was)
+        assert!(
+            dyna.len() >= 20 && dyna.iter().all(|d| d.tip == 0 && d.diameter >= 2.0 && d.diameter <= 8.0),
+            "{}",
+            dyna.len()
+        );
+        // following the pen, behind it
+        assert!(dyna.iter().all(|d| (d.y - 50.0).abs() < 1.0 && d.x >= 50.0 && d.x <= 137.0));
+    }
+
     /// A bristle brush's ink runs out pixel by pixel along its lines, and soaking it up its bristles
     /// take the colours where the stroke starts.
     #[test]

@@ -243,6 +243,8 @@ pub struct Brush {
     pub curves: Option<crate::others::Curves>,
     pub particles: Option<crate::others::Particles>,
     pub grid: Option<crate::others::Grid>,
+    pub chalk: Option<crate::others::Chalk>,
+    pub dyna: Option<crate::others::Dyna>,
     pub sketch_radius: f32,
     /// How strongly a lightness tip's grey shows, and its sharpness.
     pub lightness: CurveOption,
@@ -260,8 +262,9 @@ pub struct Brush {
 }
 
 /// Krita's engines this one draws: its pixel brush, colour smudge, quick brush, tangent normal,
-/// sketch, spray, bristle, hatching, curve, particle and grid brushes.
-pub const ENGINES: [&str; 11] = [
+/// sketch, spray, bristle, hatching, curve, particle and grid brushes, and Krita 3's chalk and dyna
+/// brushes.
+pub const ENGINES: [&str; 13] = [
     "paintbrush",
     "colorsmudge",
     "roundmarker",
@@ -273,10 +276,13 @@ pub const ENGINES: [&str; 11] = [
     "curvebrush",
     "particlebrush",
     "gridbrush",
+    "chalkbrush",
+    "dynabrush",
 ];
 
 /// The engines that lay lines, dots and shapes rather than their tip, each over the last.
-const SHAPES: [&str; 6] = ["sketchbrush", "spraybrush", "hairybrush", "curvebrush", "particlebrush", "gridbrush"];
+const SHAPES: [&str; 7] =
+    ["sketchbrush", "spraybrush", "hairybrush", "curvebrush", "particlebrush", "gridbrush", "dynabrush"];
 
 /// Krita's composite ops as the app's blend modes number them.
 pub fn blend_number(op: &str) -> Option<u32> {
@@ -750,8 +756,8 @@ impl Brush {
             "roundmarker" => Some(&["size", "spacing"]),
             "sketchbrush" | "spraybrush" | "hairybrush" => Some(&["size", "opacity", "rotation"]),
             "hatchingbrush" => Some(&["size", "opacity"]),
-            "curvebrush" => Some(&["opacity"]),
-            "particlebrush" | "gridbrush" => Some(&[]),
+            "curvebrush" | "chalkbrush" => Some(&["opacity"]),
+            "particlebrush" | "gridbrush" | "dynabrush" => Some(&[]),
             _ => None,
         };
         if let Some(only) = only {
@@ -787,6 +793,8 @@ impl Brush {
                 p.number("autoSpacingCoeff", 1.0),
                 p.number("diameter", 30.0),
             )),
+            // the chalk brush: a speckled round tip at every pixel
+            "chalkbrush" => crate::xml::parse(&crate::others::Chalk::read(p).tip()),
             _ => p.element("brush_definition"),
         };
         let mut tip = definition
@@ -809,6 +817,8 @@ impl Brush {
         let curves = (engine == "curvebrush").then(|| crate::others::Curves::read(p));
         let particles = (engine == "particlebrush").then(|| crate::others::Particles::read(p));
         let grid = (engine == "gridbrush").then(|| crate::others::Grid::read(p));
+        let chalk = (engine == "chalkbrush").then(|| crate::others::Chalk::read(p));
+        let dyna = (engine == "dynabrush").then(|| crate::others::Dyna::read(p));
         // a hatching's lines are laid inside each dab of its tip: the tip drawn, to be read where
         // they lie
         let hatch_tip = hatching
@@ -858,6 +868,8 @@ impl Brush {
             curves,
             particles,
             grid,
+            chalk,
+            dyna,
             sketch_radius,
             lightness: colour("LightnessStrength"),
             sharpness,

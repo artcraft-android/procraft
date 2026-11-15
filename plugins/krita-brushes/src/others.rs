@@ -5,8 +5,9 @@
 //! normal), the bristle brush (a line for each bristle at each move), the hatching brush (the lines
 //! of a hatching laid inside each dab of its tip), the curve brush (lines and curves through the
 //! points it passed), the particle brush (particles pulled towards the pen, each a dot) and the
-//! grid brush (the cells of a grid around the pen, each a shape). The rest (shape, filter, deform,
-//! clone, dyna and chalk brushes) come in as the app reads them.
+//! grid brush (the cells of a grid around the pen, each a shape); and Krita 3's chalk brush (a
+//! speckled round tip at every pixel) and dyna brush (circles, a ribbon or lines drawn by a weight the
+//! pen pulls). The rest (shape, filter, deform and clone brushes) come in as the app reads them.
 
 use crate::curve::Curve;
 use crate::options::{CurveOption, Info};
@@ -473,5 +474,111 @@ impl Grid {
             random_opacity: p.flag("ColorOption/useRandomOpacity", false),
             per_cell: p.flag("ColorOption/colorPerParticle", false),
         }
+    }
+}
+
+/// Krita 3's chalk brush (gone from Krita since): at every pixel of the path, half the pixels within
+/// its radius at random, in the colour, its ink running out (opacity and saturation falling by the
+/// log of its dabs) if it says.
+#[derive(Clone, Debug)]
+pub struct Chalk {
+    pub radius: f32,
+    pub depletion: bool,
+    pub opacity: bool,
+    pub saturation: bool,
+}
+
+impl Chalk {
+    pub fn read(p: &Preset) -> Chalk {
+        Chalk {
+            radius: p.number("Chalk/radius", 5.0).trunc().max(0.0),
+            depletion: p.flag("Chalk/inkDepletion", false),
+            opacity: p.flag("Chalk/opacity", false),
+            saturation: p.flag("Chalk/saturation", false),
+        }
+    }
+
+    /// Its tip: a hard circle its radius across each way, half its pixels gone at random.
+    pub fn tip(&self) -> String {
+        let diameter = 2.0 * self.radius + 1.0;
+        format!(
+            r#"<Brush type="auto_brush" spacing="{}" useAutoSpacing="0" density="0.5" randomness="0" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="{diameter}" ratio="1" hfade="1" vfade="1" antialiasEdges="0"/></Brush>"#,
+            1.0 / diameter
+        )
+    }
+}
+
+/// Krita 3's dyna brush (Paul Haeberli's "dynadraw", gone from Krita since): the pen pulls a weight
+/// on a spring (its mass and drag), and at each move the weight draws: circles growing with its
+/// speed, a ribbon (filled or its outline) as wide as it is slow, or lines.
+#[derive(Clone, Debug)]
+pub struct Dyna {
+    /// 0 circles, 1 a filled ribbon, 2 its outline, 3 lines.
+    pub action: u32,
+    pub width: f32,
+    pub width_range: f32,
+    pub mass: f32,
+    pub drag: f32,
+    pub fixed_angle: Option<(f32, f32)>,
+    pub diameter: f32,
+    pub line_count: usize,
+    pub line_spacing: f32,
+    pub line: bool,
+    pub two_circles: bool,
+}
+
+impl Dyna {
+    pub fn read(p: &Preset) -> Dyna {
+        let n = |k: &str, otherwise: f32| p.number(k, otherwise);
+        let angle = n("Dyna/angle", 0.0).to_radians();
+        Dyna {
+            action: n("Dyna/action", 0.0) as u32,
+            width: n("Dyna/width", 1.0),
+            width_range: n("Dyna/widthRange", 0.0),
+            mass: n("Dyna/mass", 0.5),
+            drag: n("Dyna/drag", 0.5),
+            fixed_angle: p.flag("Dyna/useFixedAngle", false).then(|| (angle.cos(), angle.sin())),
+            diameter: n("Dyna/diameter", 6.0).trunc(),
+            line_count: (n("Dyna/lineCount", 10.0) as usize).min(200),
+            line_spacing: n("Dyna/lineSpacing", 1.0),
+            line: p.flag("Dyna/enableLine", false),
+            two_circles: p.flag("Dyna/useTwoCirles", false),
+        }
+    }
+}
+
+/// The weight a dyna brush's pen pulls (in the canvas's size as 1 each way): where it is and was,
+/// its speed and the way it is drawn across.
+#[derive(Clone, Debug, Default)]
+pub struct DynaWeight {
+    pub at: (f32, f32),
+    pub was: (f32, f32),
+    pub velocity: (f32, f32),
+    pub speed: f32,
+    pub pull: f32,
+    pub across: (f32, f32),
+}
+
+impl DynaWeight {
+    /// The weight pulled towards `to` once; false where it doesn't move.
+    pub fn pull(&mut self, dyna: &Dyna, to: (f32, f32)) -> bool {
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let mass = lerp(5.0, 160.0, dyna.mass);
+        let drag = lerp(0.0, 1.0, dyna.drag * dyna.drag);
+        let force = (to.0 - self.at.0, to.1 - self.at.1);
+        self.pull = force.0.hypot(force.1);
+        if self.pull < 0.000_001 {
+            return false;
+        }
+        self.velocity = (self.velocity.0 + force.0 / mass, self.velocity.1 + force.1 / mass);
+        self.speed = self.velocity.0.hypot(self.velocity.1);
+        if self.speed < 0.000_001 {
+            return false;
+        }
+        self.across = dyna.fixed_angle.unwrap_or((-self.velocity.1 / self.speed, self.velocity.0 / self.speed));
+        self.velocity = (self.velocity.0 * (1.0 - drag), self.velocity.1 * (1.0 - drag));
+        self.was = self.at;
+        self.at = (self.at.0 + self.velocity.0, self.at.1 + self.velocity.1);
+        true
     }
 }

@@ -402,6 +402,12 @@ pub struct Stroke {
     pub out: Vec<Dab>,
     /// The colours under where it starts, if the app handed them.
     pub under: Option<Under>,
+    /// The canvas's size (canvas pixels), if the app said.
+    pub canvas: Option<(f32, f32)>,
+    /// A dyna brush's weight, the way it was drawn across last, and its lines' ends.
+    dyna: Option<crate::others::DynaWeight>,
+    dyna_across: (f32, f32),
+    dyna_lines: Vec<(f32, f32)>,
 }
 
 impl Stroke {
@@ -451,6 +457,10 @@ impl Stroke {
             speed: 0.0,
             out: Vec::new(),
             under: None,
+            canvas: None,
+            dyna: None,
+            dyna_across: (0.0, 0.0),
+            dyna_lines: Vec::new(),
         }
     }
 
@@ -509,6 +519,13 @@ impl Stroke {
                 let from = self.last.unwrap_or(p);
                 self.sketch_move(&from, &p);
                 self.length += ((p.x - from.x).powi(2) + (p.y - from.y).powi(2)).sqrt();
+                self.last = Some(p);
+                continue;
+            }
+            // a dyna brush's weight is pulled towards where the pen was at each move
+            if self.brush.dyna.is_some() {
+                let at = self.last.unwrap_or(p);
+                self.dyna_move(&at);
                 self.last = Some(p);
                 continue;
             }
@@ -859,6 +876,94 @@ impl Stroke {
             if d.rotation.checked { (1.0 - d.rotation.rotation_like(&info, &mut fuzz, 0.0, -1.0)) * PI } else { 0.0 };
         let opacity = if d.opacity.checked { d.opacity.size_like(&info, &mut fuzz, true) } else { d.opacity.strength };
         (size, turn, opacity.clamp(0.0, 1.0))
+    }
+
+    /// A dyna brush's weight pulled towards `p` (where the pen was), drawing as it goes: circles
+    /// growing with its speed, a ribbon (or its outline) as wide as it is slow, or lines.
+    fn dyna_move(&mut self, p: &Point) {
+        let brush = Rc::clone(&self.brush);
+        let Some(d) = &brush.dyna else { return };
+        // where the pen was, in the canvas as 1 each way
+        let (w, h) = self.canvas.filter(|(w, h)| *w > 0.0 && *h > 0.0).unwrap_or((1000.0, 1000.0));
+        let to = (p.x / w, p.y / h);
+        let Some(weight) = self.dyna.as_mut() else {
+            self.dyna = Some(crate::others::DynaWeight { at: to, was: to, ..Default::default() });
+            self.dyna_lines = vec![(p.x, p.y); d.line_count];
+            return;
+        };
+        if !weight.pull(d, to) {
+            return;
+        }
+        let weight = weight.clone();
+        let opacity = brush.dynamics.opacity.strength.clamp(0.0, 1.0);
+        let wide = ((d.width_range - weight.speed) * d.width).max(0.000_01);
+        let across = (weight.across.0 * wide, weight.across.1 * wide);
+        let before = self.dyna_across;
+        let px = |q: (f32, f32)| (q.0 * w, q.1 * h);
+        let (was, now) = (px(weight.was), px(weight.at));
+        let was_right = px((weight.was.0 + before.0, weight.was.1 + before.1));
+        let was_left = px((weight.was.0 - before.0, weight.was.1 - before.1));
+        let now_left = px((weight.at.0 - across.0, weight.at.1 - across.1));
+        let now_right = px((weight.at.0 + across.0, weight.at.1 + across.1));
+        if d.line {
+            self.line(was, now, 1.0, opacity, None);
+        }
+        match d.action {
+            0 => {
+                // a circle as big as the weight is fast (and one where it got to)
+                let speed = (weight.velocity.0 * w).hypot(weight.velocity.1 * h).clamp(0.0, d.diameter.max(0.0));
+                let radius = (d.diameter * 0.5 + speed).trunc().max(0.5);
+                let circles: &[(f32, f32)] = if d.two_circles { &[was, now] } else { &[was] };
+                for &(x, y) in circles {
+                    if self.out.len() < MOST_DABS {
+                        self.out.push(Dab {
+                            x,
+                            y,
+                            diameter: 2.0 * radius,
+                            opacity,
+                            flow: 1.0,
+                            tip: 0,
+                            strength: 1.0,
+                            texture_offset: self.texture_offset,
+                            ..Dab::default()
+                        });
+                    }
+                }
+            }
+            1 => {
+                // the ribbon filled: lines along it, side by side across it
+                let span = (was_right.0 - was_left.0)
+                    .hypot(was_right.1 - was_left.1)
+                    .max((now_right.0 - now_left.0).hypot(now_right.1 - now_left.1));
+                let n = (span.ceil() as usize).clamp(1, 512);
+                for k in 0..=n {
+                    let t = k as f32 / n as f32;
+                    let a = (was_left.0 + (was_right.0 - was_left.0) * t, was_left.1 + (was_right.1 - was_left.1) * t);
+                    let b = (now_left.0 + (now_right.0 - now_left.0) * t, now_left.1 + (now_right.1 - now_left.1) * t);
+                    self.line(a, b, 1.5, opacity, None);
+                }
+            }
+            2 => {
+                for (a, b) in
+                    [(was_right, was_left), (was_left, now_left), (now_left, now_right), (now_right, was_right)]
+                {
+                    self.line(a, b, 1.0, opacity, None);
+                }
+            }
+            3 => {
+                let half = (d.line_count / 2) as f32;
+                for i in 0..self.dyna_lines.len() {
+                    let k = (i as f32 - half) * d.line_spacing * weight.pull;
+                    let to = (now.0 + weight.across.0 * k, now.1 + weight.across.1 * k);
+                    let from = self.dyna_lines[i];
+                    self.line(from, to, 1.0, opacity, None);
+                    self.dyna_lines[i] = to;
+                }
+            }
+            _ => {}
+        }
+        self.dyna_across = across;
+        self.dabs += 1;
     }
 
     /// A bristle brush's move from `a` to `b`: each bristle a line from where it was to where it is
@@ -1513,6 +1618,21 @@ impl Stroke {
             if let Some(t) = &brush.tangent {
                 dab.colour = t.colour(&info, self.begin.turn);
                 dab.flags |= OWN_COLOUR;
+            }
+            // a chalk brush's ink running out with the log of its dabs
+            if let Some(c) = brush.chalk.as_ref().filter(|c| c.depletion) {
+                let less = -(((self.main.dabs + 1) as f32).ln() * 10.0) / 100.0;
+                if c.opacity {
+                    dab.opacity *= (1.0 + less).clamp(0.0, 1.0);
+                }
+                if c.saturation {
+                    let from = if dab.flags & OWN_COLOUR != 0 { dab.colour } else { self.begin.colour };
+                    let [ch, cs, cv] = hsv(from);
+                    let s = 1.0 + less;
+                    let cs = if s < 0.0 { cs * (1.0 + s) } else { cs + (1.0 - cs) * s };
+                    dab.colour = rgb([ch, cs.clamp(0.0, 1.0), cv]);
+                    dab.flags |= OWN_COLOUR;
+                }
             }
         }
         if scale > 0.0 && dab.diameter.is_finite() {

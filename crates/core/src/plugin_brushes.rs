@@ -109,6 +109,8 @@ mod field {
     /// The colours under where the stroke starts, if its look asks: the square's left and top
     /// (i32, canvas pixels), its side (u32), then its pixels (RGBA8, straight, rows from the top).
     pub const BEGIN_UNDER: u16 = 11;
+    /// The canvas's width and height (f32, canvas pixels).
+    pub const BEGIN_CANVAS: u16 = 12;
 }
 
 /// A dab's flags.
@@ -688,6 +690,7 @@ pub(crate) fn begin_stroke(
     id: u64,
     starting: Starting,
     under: Option<(i32, i32, u32, Vec<u8>)>,
+    (width, height): (u32, u32),
 ) -> Option<(EngineHalf, EngineHalf)> {
     let outside = brush.engine.as_ref()?;
     let (plugin, running, index) = hooks.engine(&outside.engine)?;
@@ -703,7 +706,8 @@ pub(crate) fn begin_stroke(
         .field(field::BEGIN_TOOL, &[starting.tool])
         .field(field::BEGIN_POINTER, &[starting.pointer])
         .field(field::BEGIN_SEED, &starting.seed.to_le_bytes())
-        .field(field::BEGIN_TURN, &floats(&[starting.turn]));
+        .field(field::BEGIN_TURN, &floats(&[starting.turn]))
+        .field(field::BEGIN_CANVAS, &floats(&[width as f32, height as f32]));
     if let Some((x0, y0, side, pixels)) = under {
         let mut bytes = Vec::with_capacity(12 + pixels.len());
         bytes.extend_from_slice(&x0.to_le_bytes());
@@ -1075,7 +1079,8 @@ pub(crate) fn engine_stroke(
         }
         Some((x0, y0, side as u32, square))
     });
-    let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting, under)?;
+    let (width, height) = canvas.size();
+    let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting, under, (width, height))?;
     Some(OutsideStroke { airbrush, style, second, first, second_half })
 }
 
@@ -1577,7 +1582,7 @@ mod tests {
             turn: 0.0,
             under_at: None,
         };
-        let (mut first, _) = begin_stroke(&hooks, brush, again, data, starting, None).expect("a stroke");
+        let (mut first, _) = begin_stroke(&hooks, brush, again, data, starting, None, (200, 120)).expect("a stroke");
         let samples: Vec<Sample> =
             (0..100).map(|i| Sample::at(Vec2::new(20.0 + i as f32, 60.0), 1.0, f64::from(i))).collect();
         let stamps = first.add(&samples);
@@ -1627,7 +1632,9 @@ mod tests {
                 turn: 0.0,
                 under_at: None,
             };
-            let Some((mut first, _)) = begin_stroke(&hooks, brush, look, id, starting, None) else { continue };
+            let Some((mut first, _)) = begin_stroke(&hooks, brush, look, id, starting, None, (200, 120)) else {
+                continue;
+            };
             let t = Instant::now();
             // a second of a pen at 240 samples a second, 4 at a time as frames bring them
             for batch in 0..60 {
@@ -1665,7 +1672,7 @@ mod tests {
                 turn: 0.0,
                 under_at: None,
             };
-            begun += usize::from(begin_stroke(&hooks, brush, look, id, starting, None).is_some());
+            begun += usize::from(begin_stroke(&hooks, brush, look, id, starting, None, (200, 120)).is_some());
         }
         println!("the next start: {begun} looks kept and strokes begun in {:?} (the looks {looking:?})", t.elapsed());
         let _ = std::fs::remove_dir_all(&dir);

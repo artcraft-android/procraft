@@ -66,6 +66,11 @@ with the app, off.
   takes only its size and spacing options; the sketch, spray and bristle brushes their size,
   opacity and rotation; the hatching brush its size and opacity besides its own; the curve brush its
   opacity besides its own; the particle and grid brushes none.
+- Krita 3's chalk and dyna brushes (Krita dropped them in version 4): the chalk brush's speckled round
+  tip at every pixel of the path, its ink running out with the log of its dabs if it says; the dyna
+  brush's weight on a spring (its mass and drag, in the canvas as 1 each way) pulled towards where
+  the pen was, drawing circles growing with its speed, a ribbon as wide as it is slow (filled or its
+  outline) or lines.
 
 The app draws each brush's preview with the plugin, and QuickShape, layers of a plugin's own laying
 their strokes again and painting on a 3D model go through it too; brush files the app writes keep
@@ -76,7 +81,8 @@ a brush's Krita settings a page at a time, the pages its engine has: a pixel bru
 size, opacity and flow, turn and squash, scatter and mirror, colour and texture; a colour smudge
 brush's smudge length and mode, smudge radius, colour rate and gradient; a tangent normal brush's
 tilt; a sketch brush's lines; a spray brush's area, particles, their dynamics and colours; a quick
-brush's diameter and spacing. Each option comes with the sensor it follows and its curve.
+brush's diameter and spacing; a bristle, hatching, curve, particle, grid, chalk or dyna brush's own.
+Each option comes with the sensor it follows and its curve.
 
 The app keeps how each brush looks (its tips drawn, its texture's mask) with the plugin, so only a
 brush's first stroke ever waits for them; after that the plugin only reads the brush's settings.
@@ -88,8 +94,9 @@ readers (which its tests use) run in it.
 - Krita's other engines come in as the app reads them. Some lay no dabs at all, so a brush engine
   of dabs can't draw them: the shape brush (it fills the outline the stroke makes), the filter brush
   (it filters what is under it), the deform brush (it moves the pixels under it) and the clone brush
-  (it copies pixels from elsewhere). The dyna and chalk brushes could be drawn as dabs and aren't
-  yet.
+  (it copies pixels from elsewhere). The chalk brush picks among a few speckled tips (Krita speckles
+  each dab afresh). The dyna brush's weight is pulled at each sample the app hands it (Krita at each
+  of the tablet's events), so the more samples, the smaller and closer its circles.
 - The bristle brush keeps at most 4,096 bristles, draws its lines smooth whatever its antialiasing
   and compositing say, and takes its ink as it runs out in pieces within a 64th of it (Krita at
   each pixel). The hatching brush keeps its lines inside each dab's tip in

@@ -101,6 +101,8 @@ enum Shows {
     Particles2,
     Grid,
     GridColour,
+    Chalk,
+    Dyna,
 }
 
 /// A pixel brush's pages, as the page row offers them.
@@ -173,6 +175,8 @@ fn pages(paintop: &str) -> &'static [(Shows, &'static str)] {
         "curvebrush" => &[(Shows::Curves, "Curves"), (Shows::CurveOptions, "Options")],
         "particlebrush" => &[(Shows::Particles2, "Particles")],
         "gridbrush" => &[(Shows::Grid, "Grid"), (Shows::GridColour, "Colour")],
+        "chalkbrush" => &[(Shows::Chalk, "Chalk")],
+        "dynabrush" => &[(Shows::Dyna, "Dyna")],
         _ => &PIXEL_PAGES,
     }
 }
@@ -407,6 +411,14 @@ impl Studio {
             Shows::Particles2 => particle_page(p, &mut page),
             Shows::Grid => grid_page(p, &mut page),
             Shows::GridColour => grid_colour_page(p, &mut page),
+            Shows::Chalk => {
+                page.setting(p, "Chalk/radius", "Radius", (0.0, 100.0), 1.0, 5.0, " px");
+                page.flag(p, "Chalk/inkDepletion", "Ink runs out", false);
+                page.flag(p, "Chalk/opacity", "Opacity falls", false);
+                page.flag(p, "Chalk/saturation", "Saturation falls", false);
+                option_rows(p, &mut page, "Opacity", "Opacity", false);
+            }
+            Shows::Dyna => dyna_page(p, &mut page),
             Shows::ScatterMirror => {
                 option_rows(p, &mut page, "Scatter", "Scatter", true);
                 let (x, y) = (p.flag("Scattering/AxisX", true), p.flag("Scattering/AxisY", true));
@@ -936,6 +948,22 @@ fn grid_page(p: &Preset, page: &mut Page) {
     );
 }
 
+/// A dyna brush's weight and what it draws.
+fn dyna_page(p: &Preset, page: &mut Page) {
+    page.chosen(p, "Dyna/action", "Draws", &["Circles", "A ribbon", "Its outline", "Lines"], &["0", "1", "2", "3"], 0);
+    page.setting(p, "Dyna/mass", "Mass", (0.0, 100.0), 0.01, 0.5, "%");
+    page.setting(p, "Dyna/drag", "Drag", (0.0, 100.0), 0.01, 0.5, "%");
+    page.setting(p, "Dyna/width", "Width", (0.0, 1000.0), 0.01, 1.0, "%");
+    page.setting(p, "Dyna/widthRange", "Width range", (0.0, 100.0), 0.01, 0.0, "%");
+    page.setting(p, "Dyna/diameter", "Circles' diameter", (1.0, 100.0), 1.0, 6.0, " px");
+    page.flag(p, "Dyna/useTwoCirles", "Two circles", false);
+    page.flag(p, "Dyna/useFixedAngle", "Fixed angle", false);
+    page.setting(p, "Dyna/angle", "Angle", (0.0, 360.0), 1.0, 0.0, "°");
+    page.setting(p, "Dyna/lineCount", "Lines", (1.0, 200.0), 1.0, 10.0, "");
+    page.setting(p, "Dyna/lineSpacing", "Lines' spacing", (0.0, 100.0), 1.0, 1.0, "");
+    page.flag(p, "Dyna/enableLine", "A line along it", false);
+}
+
 /// A grid brush's cells' colours.
 fn grid_colour_page(p: &Preset, page: &mut Page) {
     page.flag(p, "ColorOption/sampleInputColor", "The colour under each cell", false);
@@ -1300,6 +1328,18 @@ mod tests {
             1.0,
         );
         assert_eq!(p.get("GridShape/shape"), Some("1"));
+        // chalk's radius, dyna's mass
+        let p = set_on_page(
+            "chalkbrush",
+            "",
+            "Chalk",
+            |d| matches!(d, Does::Number { key, .. } if key == "Chalk/radius"),
+            8.0,
+        );
+        assert_eq!(p.number("Chalk/radius", 0.0), 8.0);
+        let p =
+            set_on_page("dynabrush", "", "Dyna", |d| matches!(d, Does::Number { key, .. } if key == "Dyna/mass"), 40.0);
+        assert!((p.number("Dyna/mass", 0.0) - 0.4).abs() < 1e-5);
         // the quick brush: its diameter
         let p = set_on_page(
             "roundmarker",
