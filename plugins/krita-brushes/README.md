@@ -54,8 +54,11 @@ their strokes again and painting on a 3D model go through it too; brush files th
 the plugin's data.
 
 The Krita brush studio (the plugin's action, opened by the app's brush studio for its brushes) shows
-a brush's Krita settings a page at a time: tip, spacing, size, opacity and flow, turn and squash,
-scatter and mirror, colour and texture, each option with the sensor it follows and its curve.
+a brush's Krita settings a page at a time, the pages its engine has: a pixel brush's tip, spacing,
+size, opacity and flow, turn and squash, scatter and mirror, colour and texture; a colour smudge
+brush's smudge length and mode, smudge radius, colour rate and gradient; a tangent normal brush's
+tilt; a sketch brush's lines; a spray brush's area, particles, their dynamics and colours; a quick
+brush's diameter and spacing. Each option comes with the sensor it follows and its curve.
 
 The app keeps how each brush looks (its tips drawn, its texture's mask) with the plugin, so only a
 brush's first stroke ever waits for them; after that the plugin only reads the brush's settings.
@@ -80,8 +83,6 @@ readers (which its tests use) run in it.
   (as smearing alpha does, whatever the preset says).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
   tip of one is drawn round, a masking brush or texture of one left out.
-- The Krita brush studio's pages are the pixel brush's: a colour smudge, sketch, spray or tangent
-  normal brush's own settings aren't on them.
 - The 1-pixel brush's sharp lines, drawn as dabs.
 - Perspective counts as 1 (the app has no perspective assistant), as in Krita without one; a
   gradient map takes the gradient from the colour to the secondary colour (the app has no current
