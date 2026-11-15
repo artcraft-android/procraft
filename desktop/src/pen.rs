@@ -97,18 +97,26 @@ pub fn roll(id: u64) -> Option<f32> {
     ROLLS.lock().ok()?.as_ref()?.get(&id).copied()
 }
 
+/// The pointer of the pen near the window, if one is: a tablet's pen moving the mouse pointer
+/// (Windows Ink off, read through WinTab; X11; a Mac), whose lean the mouse's samples carry, or
+/// else the pen pointer last heard from.
+fn near() -> Option<u64> {
+    if mouse_pen().is_some() {
+        return Some(MOUSE);
+    }
+    *LATEST.lock().ok()?
+}
+
 /// The direction the pen near the window leans (radians clockwise from screen-up), if a pen is
-/// near.
+/// near: the brush cursor turns with it as the stamps do.
 pub fn azimuth() -> Option<f32> {
-    let id = (*LATEST.lock().ok()?)?;
-    Some(lean(id).map_or(0.0, |(_, towards)| towards))
+    Some(lean(near()?).map_or(0.0, |(_, towards)| towards))
 }
 
 /// How far the barrel of the pen near the window is turned (radians clockwise), if a pen that
 /// gives it is near.
 pub fn barrel() -> Option<f32> {
-    let id = (*LATEST.lock().ok()?)?;
-    roll(id)
+    roll(near()?)
 }
 
 /// Pointer `id`'s lean and roll as they now are; it is the pen last heard from.
@@ -838,8 +846,38 @@ mod tests {
         assert_eq!(pressure(921), None);
     }
 
+    /// The tests of what moves the mouse pointer, one at a time: it is the app's, not a test's.
+    fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
+        static ONE: Mutex<()> = Mutex::new(());
+        ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn the_brush_cursor_turns_with_a_tablets_pen_moving_the_mouse_pointer_as_with_the_systems_pen() {
+        let _one = mouse_pointer_tests();
+        let turned = |towards: f32| azimuth().is_some_and(|a| (a - towards.to_radians()).abs() < 1e-4);
+        // the system's pen (Windows Ink on), leaning right, its barrel turned
+        set_mouse_pen(None);
+        keep_pose(941, lean_of(30.0, 0.0), Some(0.5));
+        assert!(turned(90.0), "{:?}", azimuth());
+        assert_eq!(barrel(), Some(0.5));
+        // a tablet's pen moving the mouse pointer (WinTab with Windows Ink off), leaning towards
+        // the user: the cursor turns with it, as its stroke's stamps do; it gives no roll
+        let pen = MousePen { pressure: 0.3, eraser: false };
+        set_mouse_pen(Some((pen, lean_of(0.0, 30.0))));
+        assert!(turned(180.0), "{:?}", azimuth());
+        assert_eq!(lean(MOUSE).map(|(_, towards)| towards), azimuth());
+        assert_eq!(barrel(), None);
+        // the pen gone from the tablet: the pen last heard from before it
+        set_mouse_pen(None);
+        assert!(turned(90.0), "{:?}", azimuth());
+        pen_gone();
+        assert_eq!((azimuth(), barrel()), (None, None));
+    }
+
     #[test]
     fn the_mouse_pointer_takes_the_pens_reading_made_where_it_is() {
+        let _one = mouse_pointer_tests();
         let pen = |pressure| MousePen { pressure, eraser: false };
         set_mouse_pen(None);
         keep_mouse_pen_at((10.0, 20.0), pen(0.2));
