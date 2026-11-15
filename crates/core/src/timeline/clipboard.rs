@@ -340,6 +340,8 @@ impl State {
                         }
                     }
                 }
+                // the frame as cached went before the pixels came: composited again
+                canvas.invalidate();
             }
         }
         if !here {
