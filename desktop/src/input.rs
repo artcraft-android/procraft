@@ -344,8 +344,11 @@ impl Input {
         read.or(self.pen_pressure).unwrap_or(1.0)
     }
 
-    /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
-    fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
+    /// A sample of pointer `id` at `at`: a pen's with its lean, if the system gave one, and a
+    /// tablet's pen moving the mouse pointer where its tablet says it was, finer than the pointer's
+    /// whole pixels (with no smoothing a slow line through them goes in steps).
+    fn sample(&self, id: u64, at: (f32, f32), pressure: f32) -> Vec<PenSample> {
+        let (x, y) = if id == MOUSE { crate::pen::mouse_pen_fine_at(at).unwrap_or(at) } else { at };
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
         let roll = crate::pen::roll(id).unwrap_or(0.0);
         vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }]

@@ -561,6 +561,11 @@ impl Extras {
 /// this many to a stretch: input this close together walks straight, as it comes.
 const CURVE_STEP: f32 = 4.0;
 const MOST_PIECES: usize = 64;
+/// How close (screen points) a path point's neighbours come for it to be evened out with them in
+/// full, and how far for it not to be at all (see [`StrokeBuilder::blended`]): a slow hand's
+/// points, a pixel or so apart, even out; a quick stroke's, far apart, keep its curve.
+const BLEND_NEAR: f32 = 2.0;
+const BLEND_FAR: f32 = 4.0;
 
 /// The point at `t` (0 at `p1`, 1 at `p2`) of the centripetal Catmull–Rom curve through four
 /// points: through each of them, with no loops or cusps where they bunch up. With no point
@@ -773,6 +778,8 @@ pub struct StrokeBuilder {
     /// through them, each stretch walked once the point after it is known.
     behind: Option<PathPoint>,
     ahead: Option<PathPoint>,
+    /// Where the point before the newest was, as it came (see [`StrokeBuilder::blended`]).
+    before_ahead: Option<Vec2>,
     direction: f32,
     /// The direction a dab has, the path not having gone anywhere (see
     /// [`StrokeBuilder::dab_way`]).
@@ -993,6 +1000,7 @@ impl StrokeBuilder {
             last_seg: 0.0,
             behind: None,
             ahead: None,
+            before_ahead: None,
             scale: 1.0,
             carry: 0.0,
             length: 0.0,
@@ -1546,9 +1554,26 @@ impl StrokeBuilder {
             }
             return;
         }
-        let Some(next) = self.ahead.replace(to) else { return };
-        self.walk_curve(self.behind, head, next, Some(to), out);
+        let Some(next) = self.ahead.replace(to) else {
+            self.before_ahead = Some(head.pos);
+            return;
+        };
+        let at = self.blended(self.before_ahead, next.pos, to.pos);
+        self.before_ahead = Some(next.pos);
+        self.walk_curve(self.behind, head, PathPoint { pos: at, ..next }, Some(to), out);
         self.behind = Some(head);
+    }
+
+    /// Where the path goes through the point at `at`, the one before it at `before` and the one
+    /// after it at `after`: evened out with them, a quarter each to its half, where they are close
+    /// (see [`BLEND_NEAR`]), so a slow line read in whole pixels or points goes on smoothly rather
+    /// than through every step; where they are far apart, at it, so a quick stroke read sparsely
+    /// keeps its curve. The first and last points are where they came.
+    fn blended(&self, before: Option<Vec2>, at: Vec2, after: Vec2) -> Vec2 {
+        let Some(before) = before else { return at };
+        let apart = before.distance(at).max(after.distance(at)) * self.points_per_pixel;
+        let share = ((BLEND_FAR - apart) / (BLEND_FAR - BLEND_NEAR)).clamp(0.0, 1.0);
+        at + ((before + after) * 0.25 - at * 0.5) * share
     }
 
     /// Walks from the head `b` to `c` along the centripetal Catmull–Rom curve through `a`, `b`,
@@ -2867,6 +2892,62 @@ mod tests {
                 let off = stamps.iter().map(|s| s.center.distance(*p)).fold(f32::MAX, f32::min);
                 assert!(off < 1.5, "{pointer:?}: {p:?} is {off} from the stroke");
             }
+        }
+    }
+
+    #[test]
+    fn with_no_smoothing_a_slow_line_read_in_whole_pixels_evens_its_steps_out_and_read_finer_goes_straight() {
+        // a pen drawn slowly across at 30 degrees, 100 px a second, read at 240 Hz and handed over
+        // four a frame, each frame's with one time
+        let (start, way) = (Vec2::new(100.3, 100.6), Vec2::new(30f32.to_radians().cos(), 30f32.to_radians().sin()));
+        let read = |whole: bool| -> Vec<Sample> {
+            (0..=240)
+                .map(|i| {
+                    let p = start + way * (100.0 * i as f32 / 240.0);
+                    let p = if whole { Vec2::new(p.x.round(), p.y.round()) } else { p };
+                    Sample::at(p, 0.6, (i / 4) as f64 * 1000.0 / 60.0 + 0.01 * (i % 4) as f64)
+                })
+                .collect()
+        };
+        // how far the stroke strays across the line, its ends left out
+        let strays = |samples: &[Sample]| {
+            let stamps = drawn_in_batches(plain(), Pointer::Stylus, samples, 4);
+            let across: Vec<f32> = stamps.iter().map(|s| (s.center - start).dot(Vec2::new(-way.y, way.x))).collect();
+            let middle = &across[across.len() / 10..across.len() * 9 / 10];
+            let mean = middle.iter().sum::<f32>() / middle.len() as f32;
+            middle.iter().map(|a| (a - mean).abs()).fold(0.0, f32::max)
+        };
+        // StreamLine off, read finer than a pixel: straight
+        let straight = strays(&read(false));
+        assert!(straight < 0.05, "{straight}");
+        // read in whole pixels, a staircase: through every step the stroke strayed 0.59 px; its
+        // points evened out with their neighbours, 0.25, though still more than read finer
+        let stepped = strays(&read(true));
+        assert!(stepped < 0.3 && stepped > straight, "{stepped}");
+    }
+
+    #[test]
+    fn with_no_smoothing_quick_circles_read_in_whole_pixels_stay_round() {
+        // circles drawn quickly with a pen read at 240 Hz in whole pixels, handed over four a frame,
+        // each frame's with one time: their radius, how many samples go round and in how long
+        for (radius, count, ms) in
+            [(100.0f32, 36usize, 150.0f64), (60.0, 80, 333.0), (10.0, 24, 100.0), (5.0, 12, 50.0)]
+        {
+            let centre = Vec2::new(200.3, 200.6);
+            let samples: Vec<Sample> = (0..=count)
+                .map(|i| {
+                    let a = TAU as f32 * i as f32 / count as f32;
+                    let p = centre + Vec2::new(a.cos(), a.sin()) * radius;
+                    let frame = (i / 4) as f64 * ms * 4.0 / count as f64;
+                    Sample::at(Vec2::new(p.x.round(), p.y.round()), 0.6, frame + 0.01 * (i % 4) as f64)
+                })
+                .collect();
+            let stamps = drawn_in_batches(plain(), Pointer::Stylus, &samples, 4);
+            // as round as whole pixels let them be: no point of the stroke further in or out than
+            // the input's rounding (a little over half a pixel), the small ones too, whose points
+            // are close enough to be evened out with their neighbours
+            let off = stamps.iter().map(|s| (s.center.distance(centre) - radius).abs()).fold(0.0, f32::max);
+            assert!(off < 0.75, "{radius}: {off} px off round");
         }
     }
 
