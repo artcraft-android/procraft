@@ -329,6 +329,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var timeLapse = TimeLapseTool(model: self)
     @ObservationIgnored private(set) lazy var animationAssist = AnimationAssist(model: self)
     @ObservationIgnored private(set) lazy var timeline = TimelineTool(model: self)
+    @ObservationIgnored private(set) lazy var media = TimelineMediaTool(model: self)
     @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
@@ -371,6 +372,8 @@ final class CanvasModel {
     init(session: CanvasSession, dir: String) {
         self.session = session
         self.dir = dir
+        // video clips' pictures, read here
+        session.setVideoFrames(frames: VideoFrameReader.shared)
         // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
         if session.pluginKind() != nil {
             _ = session.openPluginArtwork(plugins: PluginsModel.shared.store)

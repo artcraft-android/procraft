@@ -3,6 +3,7 @@
 //! feeds it input.
 
 pub mod abr;
+pub mod animatic;
 pub mod animation;
 pub mod applz4;
 pub mod base64;
@@ -35,6 +36,7 @@ pub mod keyed;
 pub mod krita;
 pub mod library;
 pub mod lzo;
+pub mod media;
 pub mod mesh;
 pub mod motion;
 pub mod native;

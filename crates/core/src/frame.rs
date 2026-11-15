@@ -94,6 +94,7 @@ impl State {
             let extended = format == wgpu::TextureFormat::Rgba16Float;
             canvas.set_display_peak(if extended { self.display_peak } else { 1.0 });
         }
+        self.attach_media();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;

@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture};
+pub use canvas::video::{VideoPicture, VideoSource};
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, FrameCacheStats, LayerThumbnailStep, LightMode, LightTool,
     LiquifyMode, LiquifyStamp, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke,

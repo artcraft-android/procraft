@@ -506,6 +506,10 @@ enum ScreenCapture {
 
     /// Opens what capture `name` shows, if it is one of these.
     private static func open(_ name: String, in model: CanvasModel) {
+        if MediaDebug.scenes.contains(name) {
+            MediaDebug.open(name, in: model)
+            return
+        }
         if let page = pages[name] {
             studio(model, page: page)
             return

@@ -194,6 +194,8 @@ pub(crate) struct SaveSnapshot {
     /// The data of each plugin's layer (empty while it has none yet), for its file beside the
     /// layer's pixels; those whose data couldn't be read left out.
     layer_data: Vec<(LayerId, Arc<Vec<u8>>)>,
+    /// The timeline's sound and video files, to copy in.
+    media: crate::media::MediaToSave,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -456,6 +458,7 @@ impl crate::State {
             plugin_data,
             vectors,
             layer_data,
+            media: crate::media::MediaToSave::of(&self.media, &self.doc),
         })
     }
 }
@@ -570,6 +573,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         plugin_data,
         vectors,
         layer_data,
+        media,
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
@@ -689,6 +693,8 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, path, &mut staged)?;
         }
+        // the sounds and videos it plays that the folder hasn't got yet
+        media.write(dir, &mut staged)?;
         // a plugin's artwork's own data, whole, before the document that names its kind
         if let Some(data) = plugin_data.as_deref() {
             let path = dir.join(PLUGIN_DATA);
@@ -732,6 +738,8 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     for (id, data) in &layer_data {
         saved.layer_data.insert(*id, pixels_hash(data));
     }
+    // media files it no longer plays go, now that the document without them is in place
+    media.tidy(dir);
     // a picture taken away goes once the document without it is in place
     saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
     if reference_picture.is_none() {
@@ -913,6 +921,10 @@ impl CanvasSession {
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
+            // its sounds and videos from its media folder
+            st.media.look_in(&dir);
+            let store = st.media.clone();
+            store.know(&st.doc);
             // a plugin's artwork: its kind and data, for the app to open it with its plugin
             st.plugin_opened = file.plugin.map(|kind| crate::plugin_artwork::PluginOpened {
                 kind,

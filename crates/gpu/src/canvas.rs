@@ -27,6 +27,7 @@ pub use frame_cache::{FrameCacheStats, frame_cache_budget, set_frame_cache_budge
 pub(crate) mod frame_cache;
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
+pub(crate) mod video;
 
 /// A standard canvas's layers: 8 bits a channel.
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -2091,6 +2092,8 @@ pub struct Canvas {
     /// Where a timeline frame's group clips, mattes and camera are composited, a reel for each
     /// depth of group clip (made as wanted).
     reels: Vec<Reel>,
+    /// Video clips' pictures, and where they come from.
+    videos: video::Videos,
     /// Playing, the frame is shown through the timeline's camera (exports always are).
     camera_view: bool,
     /// An adjustment layer of a blend mode other than Normal: what is below it redrawn through its
@@ -2521,6 +2524,7 @@ impl Canvas {
             composite_second: OnDemand::new("composite 2", width, height, format),
             posed: OnDemand::new("posed drawing", width, height, format),
             reels: Vec::new(),
+            videos: video::Videos::default(),
             camera_view: false,
             adjusted: OnDemand::new("adjusted", width, height, format),
             style_rows: OnDemand::new("style rows", width, height, format),
@@ -4645,6 +4649,7 @@ impl Canvas {
     /// Undoing a structural step puts the earlier document into `doc`.
     pub fn render(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) {
         self.sync_layers(gpu, doc);
+        self.feed_videos(gpu, doc);
         // the stroke's bind goes with the open stroke's grain
         let full_grain = self.active.as_ref().and_then(|a| a.style.full_grain);
         if full_grain != self.bound_full_grain {
@@ -8303,7 +8308,9 @@ impl Canvas {
                     LayerUniform { opacity: look.opacity, blend: blend.id(), tint: look.tint, ..Default::default() };
                 self.lay(device, encoder, uniforms, rect, group.first.1, look.pose, uniform, blend, stack, current);
             }
-            Shows::Video { .. } => {}
+            Shows::Video { media, rect: into, .. } => {
+                self.composite_video(device, encoder, uniforms, rect, *media, *into, look, stack, current);
+            }
         }
     }
 

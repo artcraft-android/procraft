@@ -82,6 +82,9 @@ final class TimelineTool {
         self.model = model
     }
 
+    /// Its sounds and videos.
+    var media: TimelineMediaTool { model.media }
+
     var on: Bool { info != nil }
 
     /// The frame in the middle: the one played or scrubbed past, else the playhead.
@@ -284,6 +287,9 @@ final class TimelineTool {
         if shownFrame == nil {
             stopPlaying()
             optionsOpen = false
+        }
+        if shownFrame != frame {
+            media.blip(frame)
         }
         shownFrame = frame
         model.session.setTimelinePlaying(frame: frame)
@@ -548,15 +554,20 @@ final class TimelineTool {
         playing = Task { @MainActor [weak self] in
             var at = first.frame < first.duration ? first.frame : 0
             var step: Int32 = 1
+            // each frame on time by the clock, so the sounds stay with the pictures
+            var due = ContinuousClock.now + .seconds(self?.media.play(from: at) ?? 0)
             while !Task.isCancelled {
                 guard let self, let info = self.info else { return }
                 self.shownFrame = at
                 session.setTimelinePlaying(frame: at)
-                try? await Task.sleep(for: .milliseconds(1000 / max(Int(info.fps), 1)))
+                due += .seconds(1 / Double(max(info.fps, 1)))
+                try? await Task.sleep(until: due, clock: .continuous)
                 guard let next = animationNextStep(playback: info.playback, len: info.duration, at: at, step: step) else {
                     self.isPlaying = false
+                    self.media.stop()
                     return
                 }
+                due += .seconds(self.media.follow(from: at, to: next.at, step: next.step))
                 at = next.at
                 step = next.step
             }
@@ -567,6 +578,7 @@ final class TimelineTool {
         playing?.cancel()
         playing = nil
         isPlaying = false
+        media.stop()
         if shownFrame != nil {
             shownFrame = nil
             model.session.setTimelinePlaying(frame: nil)
@@ -821,8 +833,15 @@ private struct TracksTimeline: View {
                 TlPopover(width: 320, arrowX: 160) { KeysPage(model: model, tool: tool, clip: id, frame: tool.frame) }
                     .offset(x: max(width / 2 - 160, 0))
             } else if tool.clipOpen {
-                TlPopover(width: 300, arrowX: 150) { ClipPage(tool: tool, clip: tool.picked.flatMap { tool.clip($0)?.1 }, frame: tool.frame) }
-                    .offset(x: max(width / 2 - 150, 0))
+                let clip = tool.picked.flatMap { tool.clip($0)?.1 }
+                TlPopover(width: 300, arrowX: 150) {
+                    if let clip, clip.kind == .audio || clip.kind == .video {
+                        MediaClipPage(model: model, clip: clip, fps: info.fps)
+                    } else {
+                        ClipPage(tool: tool, clip: clip, frame: tool.frame)
+                    }
+                }
+                .offset(x: max(width / 2 - 150, 0))
             } else if tool.cameraOpen, let camera = tool.camera {
                 TlPopover(width: 300, arrowX: 150) { CameraPage(model: model, tool: tool, camera: camera, info: info) }
                     .offset(x: max(width - 300 - 220, 0))
@@ -920,6 +939,7 @@ private struct TracksTimeline: View {
                     BarWord(label: "Simple") { tool.setSimple(true) }
                 }
                 BarWord(label: "+ Track") { tool.addTrack() }
+                MediaAddWord(model: model)
                 BarWord(label: "Add Drawing") { tool.addDrawing() }
             }
         }
@@ -1242,6 +1262,9 @@ private struct TracksArea: View {
                 // a group: an inner edge, as of the clips inside it
                 shape.inset(by: 3).strokeBorder(picked ? Color.white.opacity(0.6) : clipEdge, lineWidth: 1)
             }
+            if c.kind == .audio || c.kind == .video {
+                MediaClipFace(media: tool.media, clip: c, picked: picked, fps: info.fps, pitch: framePitch, height: rowHeight - 6)
+            }
             HStack(spacing: 6) {
                 if c.root != 0, w > 26 {
                     ZStack {
@@ -1253,7 +1276,7 @@ private struct TracksArea: View {
                     .frame(width: min(30, w - 10), height: rowHeight - 14)
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .circular))
                 }
-                if w > 80 {
+                if w > 80, c.kind != .audio, c.kind != .video {
                     Text(verbatim: c.name)
                         .font(.system(size: 13))
                         .foregroundStyle(picked ? Color.white : ink)
@@ -2016,7 +2039,7 @@ private struct TimelineSettingsPage: View {
 
 // MARK: - Pieces
 
-private struct BarWord: View {
+struct BarWord: View {
     let label: String
     var bold = false
     var dim = false
@@ -2035,7 +2058,7 @@ private struct BarWord: View {
 }
 
 /// A panel standing on the bar, its arrow pointing down at `arrowX` from its left edge.
-private struct TlPopover<Content: View>: View {
+struct TlPopover<Content: View>: View {
     let width: CGFloat
     let arrowX: CGFloat
     @ViewBuilder let content: () -> Content
@@ -2065,7 +2088,7 @@ private struct TlPopover<Content: View>: View {
     }
 }
 
-private struct PanelTitle: View {
+struct PanelTitle: View {
     let text: String
     let bottom: CGFloat
 
@@ -2080,13 +2103,13 @@ private struct PanelTitle: View {
     }
 }
 
-private struct TlRowLine: View {
+struct TlRowLine: View {
     var body: some View {
         rowLineFill.frame(height: 2)
     }
 }
 
-private struct TlGroup<Rows: View>: View {
+struct TlGroup<Rows: View>: View {
     @ViewBuilder let rows: () -> Rows
 
     var body: some View {
@@ -2099,7 +2122,7 @@ private struct TlGroup<Rows: View>: View {
     }
 }
 
-private struct TlSliderGroup<Rows: View>: View {
+struct TlSliderGroup<Rows: View>: View {
     var top: CGFloat = 8
     @ViewBuilder let rows: () -> Rows
 
@@ -2115,7 +2138,7 @@ private struct TlSliderGroup<Rows: View>: View {
 }
 
 /// A row of a choice, filled with the accent colour and ticked when it is the one chosen.
-private struct TlChoice: View {
+struct TlChoice: View {
     let label: String
     let chosen: Bool
     let action: () -> Void
@@ -2139,7 +2162,7 @@ private struct TlChoice: View {
     }
 }
 
-private struct TlAction: View {
+struct TlAction: View {
     let label: String
     let action: () -> Void
 
@@ -2156,7 +2179,7 @@ private struct TlAction: View {
 }
 
 /// A setting's name and value over a bar dragged or tapped along.
-private struct TlSlider: View {
+struct TlSlider: View {
     let label: String
     let value: String
     let share: Float
