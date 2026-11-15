@@ -1577,9 +1577,6 @@ impl StrokeBuilder {
         let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
         let batched = self.last_sample.is_some() && since < BATCHED_MS;
         let steps = if batched || since <= 0.0 { 1.0 } else { (since / interval).min(MOST_STEPS) as f32 };
-        // frames of a 60 Hz display since the last sample (a sample's worth at the tuned rate, if
-        // it came with it)
-        let frames = if batched || since <= 0.0 { sample_frames(pen) } else { (since * 0.06) as f32 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
         // the pressure is smoothed with the path by streamline; a stroke drawn for show or an
         // exact path, which no streamline holds back, smooths it as it comes
@@ -1596,23 +1593,14 @@ impl StrokeBuilder {
         if self.roll_turns && self.roll_from.is_none() {
             self.roll_from = Some(roll);
         }
-        if let Some(last) = self.last_sample {
-            let moved = s.pos.distance(last.pos) * self.points_per_pixel / frames;
-            let scale = self.input.speed_distance.clamp(0.25, 1.0);
-            let over = (moved - SLOW * scale) / (SPAN * scale);
-            let now = if over > 0.0 && !self.steady { over.sqrt().min(1.0) } else { 0.0 };
-            // the first move as it is; later ones smoothed over a few frames
-            let held = if self.speed_known { SPEED_FRAMES / frames } else { 0.0 };
-            self.speed = ((now + held * self.speed) / (held + 1.0)).clamp(0.0, 1.0);
-            self.speed_known = true;
-        }
         if self.weights.is_none() {
             let weights = self.made_weights();
             self.averaged.mirrored = !self.input.tip_attached && !weights.is_empty();
             self.weights = Some(weights.into());
         }
-        // (each use's pressure follows once all smoothing has settled it, see `pressed_on`)
-        let target = PathPoint { pos: s.pos, pressure, soft: [1.0; 5], tilt, azimuth, roll, speed: self.speed };
+        // (each use's pressure, and the speed, follow once all smoothing has settled it, see
+        // `pressed_on`)
+        let target = PathPoint { pos: s.pos, pressure, soft: [1.0; 5], tilt, azimuth, roll, speed: 0.0 };
         // (none for the first sample; nothing of its own for one in a batch with the last)
         let dt = self.last_sample.map(|last| if batched { 0.0 } else { (s.time_ms - last.time_ms).clamp(0.5, 50.0) });
         self.keep_time(s);
@@ -1755,14 +1743,29 @@ impl StrokeBuilder {
     /// milliseconds after the last; none: the first), with each use's pressure as the brush's
     /// curves take its pressure (a finger's full, whatever they say): followed as they lag and
     /// even out over the way the path went from the last (see [`StrokeBuilder::soften`]), unless
-    /// the stroke is drawn for show or is an exact path.
+    /// the stroke is drawn for show or is an exact path; and the speed the path went there at.
     fn pressed_on(&mut self, p: PathPoint, dt: Option<f64>) -> PathPoint {
         let pen = self.pointer.has_pressure();
         let curved = if pen { self.brush.pressures(p.pressure) } else { [1.0; 5] };
-        let soft = match (self.pressed_from, self.soft, dt) {
-            (Some(from), Some(before), Some(dt)) if !self.steady && !self.exact => {
-                let frames = if dt > 0.0 { (dt * 0.06) as f32 } else { sample_frames(pen) };
-                self.soften(curved, before, frames, p.pos.distance(from))
+        // frames of a 60 Hz display since the last point (a sample's worth at the input's rate,
+        // if it came with it)
+        let gone = self.pressed_from.zip(dt).map(|(from, dt)| {
+            let frames = if dt > 0.0 { (dt * 0.06) as f32 } else { sample_frames(pen) };
+            (p.pos.distance(from), frames)
+        });
+        if let Some((moved, frames)) = gone {
+            let moved = moved * self.points_per_pixel / frames;
+            let scale = self.input.speed_distance.clamp(0.25, 1.0);
+            let over = (moved - SLOW * scale) / (SPAN * scale);
+            let now = if over > 0.0 && !self.steady { over.sqrt().min(1.0) } else { 0.0 };
+            // the first move as it is; later ones smoothed over a few frames
+            let held = if self.speed_known { SPEED_FRAMES / frames } else { 0.0 };
+            self.speed = ((now + held * self.speed) / (held + 1.0)).clamp(0.0, 1.0);
+            self.speed_known = true;
+        }
+        let soft = match (gone, self.soft) {
+            (Some((moved, frames)), Some(before)) if !self.steady && !self.exact => {
+                self.soften(curved, before, frames, moved)
             }
             _ => curved,
         };
@@ -1770,7 +1773,7 @@ impl StrokeBuilder {
         self.pressure = Some(p.pressure);
         self.pressed_from = Some(p.pos);
         self.segments = self.segments.saturating_add(1);
-        PathPoint { soft, ..p }
+        PathPoint { soft, speed: self.speed, ..p }
     }
 
     /// Takes the input on along motion filtering's points up to the `to`th, each filtered with
