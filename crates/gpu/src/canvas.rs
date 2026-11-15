@@ -5707,13 +5707,25 @@ impl Canvas {
     /// `cs_synthesize`), and shown.
     fn synthesize(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, params: &mut UniformData, rect: IRect) {
         let device = &gpu.device;
-        let rect = rect.intersect(IRect::from_size(self.width, self.height));
-        let Some(&(style, dual, dual_threshold)) = self.smudge.as_ref().and_then(|s| s.apart.as_ref()) else { return };
+        let Some(&(style, dual, _)) = self.smudge.as_ref().and_then(|s| s.apart.as_ref()) else { return };
         let brush = self.full_grain_bind(device, &style).unwrap_or_else(|| self.brush_bind.clone());
-        if rect.is_empty() {
+        let pieces = self.synthesis(rect);
+        if pieces.is_empty() {
             return;
         }
         let second = (dual != 0).then(|| self.second_stroke.get(device).1.clone());
+        self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
+    }
+
+    /// The pieces of [`Canvas::synthesize`] over `rect`: none without paint laid apart.
+    fn synthesis(&self, rect: IRect) -> Vec<smudge::Piece> {
+        let rect = rect.intersect(IRect::from_size(self.width, self.height));
+        let Some(&(style, dual, dual_threshold)) = self.smudge.as_ref().and_then(|s| s.apart.as_ref()) else {
+            return Vec::new();
+        };
+        if rect.is_empty() {
+            return Vec::new();
+        }
         let uniform = SmudgeUniform {
             mode: 1,
             dual,
@@ -5722,8 +5734,7 @@ impl Canvas {
             laid_apart: 2,
             ..smudge_uniform(&bytemuck::Zeroable::zeroed(), &style, rect, (self.width, self.height))
         };
-        let pieces = self.bands(smudge::Pipe::Synthesize, uniform, rect, (true, false), 0);
-        self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
+        self.bands(smudge::Pipe::Synthesize, uniform, rect, (true, false), 0)
     }
 
     /// Lays wet paint, a pass a display frame (see [`wet_pass`]; at most [`WET_PASS_MOST`] stamps):
@@ -5782,10 +5793,12 @@ impl Canvas {
                 };
                 pieces.extend(self.bands(smudge::Pipe::Deposit, uniform, bbox, changes, 0));
             }
-            self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
+            // paint laid apart put together right after, in the same window where it fits (the
+            // layer, the paint as laid and the layer as it was are then copied in once a frame)
             if laid_apart == 1 {
-                self.synthesize(gpu, encoder, params, changed);
+                pieces.extend(self.synthesis(changed));
             }
+            self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
             return;
         }
         // what a pass of `group` reads and writes
@@ -5899,10 +5912,10 @@ impl Canvas {
                 pieces.extend(self.wet_stamp_pieces(&head.0, piece, changes));
             }
         }
-        self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
         if laid_apart == 1 {
-            self.synthesize(gpu, encoder, params, changed);
+            pieces.extend(self.synthesis(changed));
         }
+        self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
     }
 
     /// Ends a smudge stroke: one undo step with the pixels it changed, or (`cancel`) puts the
