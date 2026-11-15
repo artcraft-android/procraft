@@ -552,8 +552,10 @@ impl StrokeCore {
                 (true, Some(s)) => (s.tips.layers.len(), s.build),
                 (true, None) => continue,
             };
-            if let Some(stamp) = stamp_of(dab, self.colour, tips, build, first_ms) {
-                self.laid[usize::from(second)].push_back(stamp);
+            if let (Some(stamp), Some(laid)) =
+                (stamp_of(dab, self.colour, tips, build, first_ms), self.laid.get_mut(usize::from(second)))
+            {
+                laid.push_back(stamp);
             }
         }
     }
@@ -930,7 +932,7 @@ mod tests {
         assert_eq!(s.brush_studio_action(), None, "with its plugin off, the brush studio as ever");
         // as the app read it: paint, the app's own way
         let off = draw(&s);
-        assert!(off.chunks_exact(4).any(|p| p[3] > 0));
+        assert!(off.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
         assert_ne!(off, bigger);
         let _ = std::fs::remove_dir_all(&dir);
     }
