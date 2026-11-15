@@ -506,6 +506,10 @@ enum ScreenCapture {
 
     /// Opens what capture `name` shows, if it is one of these.
     private static func open(_ name: String, in model: CanvasModel) {
+        if ExportDebug.scenes.contains(name) {
+            ExportDebug.open(name, in: model)
+            return
+        }
         if MediaDebug.scenes.contains(name) {
             MediaDebug.open(name, in: model)
             return
@@ -773,7 +777,7 @@ enum ScreenCapture {
                         said.append("Sheet: failed")
                     }
                     let zip = Sharing.exportsDir.appendingPathComponent("Bounce Harmony.zip")
-                    if let made = try? s.exportHarmony(path: zip.path) {
+                    if let made = try? HarmonyExport.export(s, to: zip) {
                         said.append("Harmony: \(made.layers) layers, \(made.drawings) drawings, \(made.frames) frames")
                     } else {
                         said.append("Harmony: failed")

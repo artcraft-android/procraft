@@ -148,7 +148,7 @@ extension CanvasModel {
         exporting(failed: "The Harmony scene couldn't be made.") { session in
             let base = exportFileName(name: session.name(), package: false)
             let out = Sharing.exportsDir.appendingPathComponent(base + " Harmony.zip")
-            let made = (try? session.exportHarmony(path: out.path)) != nil
+            let made = (try? HarmonyExport.export(session, to: out)) != nil
             return made ? [out] : []
         }
     }
