@@ -3210,11 +3210,17 @@ mod tests {
             assert_eq!(w.steps(), (false, true), "{size:?}");
             w.click(redo);
             assert_eq!(w.steps(), (true, false), "{size:?}");
-            // the keys, from a keyboard or a pen's button; Ctrl+Y isn't one of them
+            // the keys, from a keyboard or a pen's button; Ctrl+Y redoes too off a Mac, as Windows
+            // and Linux have it and tablets' express keys send it (a Mac keeps ⇧⌘Z alone)
             w.ctrl_key(Key::Z, false);
             assert_eq!(w.steps(), (false, true), "{size:?}");
             w.ctrl_key(Key::Y, false);
-            assert_eq!(w.steps(), (false, true), "{size:?}");
+            let mac = cfg!(target_os = "macos");
+            assert_eq!(w.steps(), (!mac, mac), "{size:?}");
+            if !mac {
+                w.ctrl_key(Key::Z, false);
+                assert_eq!(w.steps(), (false, true), "{size:?}");
+            }
             w.ctrl_key(Key::Z, true);
             assert_eq!(w.steps(), (true, false), "{size:?}");
         }

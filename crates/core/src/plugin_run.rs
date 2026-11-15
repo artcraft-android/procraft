@@ -1042,7 +1042,7 @@ impl Running {
             running.give_kept(kept)?;
         }
         if hooks.contains(&Hook::KeyShortcut) {
-            running.tell_shortcuts(&crate::keys::shortcuts_told(crate::keys::DESKTOP))?;
+            running.tell_shortcuts(&crate::keys::shortcuts_told(crate::keys::DESKTOP, crate::keys::MAC))?;
         }
         Ok(running)
     }
@@ -2605,7 +2605,7 @@ pub(crate) mod tests {
         // the desktop's shortcuts, the first `n` that can be bound each bound to a key of its own
         // (as the plugin keeps them): every press answered, on far less than a press's budget
         let (code, hooks, permissions) = keyboard_plugin();
-        let told = crate::keys::shortcuts_told(true);
+        let told = crate::keys::shortcuts_told(true, false);
         let firsts: Vec<&str> = told
             .lines()
             .filter_map(|line| {

@@ -452,13 +452,16 @@ impl TextEditor {
             self.draw(session);
         }
         // undo and redo are the app's, not the field's: undoing undoes the whole edit (with Shift
-        // first: the shortcut without it would take it too)
-        let shortcut =
-            |modifiers: Modifiers| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, Key::Z)));
-        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT) {
+        // first: the shortcut without it would take it too); off a Mac Ctrl+Y redoes as well
+        let shortcut = |modifiers: Modifiers, key: Key| {
+            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
+        };
+        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+            || (!cfg!(target_os = "macos") && shortcut(Modifiers::COMMAND, Key::Y))
+        {
             return Some(Said::Redo);
         }
-        if shortcut(Modifiers::COMMAND) {
+        if shortcut(Modifiers::COMMAND, Key::Z) {
             return Some(Said::Undo);
         }
         if let Some(drawn) = self.drawer.take() {

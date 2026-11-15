@@ -184,13 +184,16 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         }
     })
     TextBox(vm, info)
-    // undo and redo are the app's, not the field's (a width change goes back a step at a time)
+    // undo and redo are the app's, not the field's (a width change goes back a step at a time);
+    // Ctrl+Y redoes too, as on the canvas
     BasicTextField(
         vm.textField, vm::changeTextField,
         Modifier.size(1.dp).alpha(0f).focusRequester(focus).onPreviewKeyEvent { e ->
-            val z = e.type == KeyEventType.KeyDown && e.key == Key.Z && (e.isCtrlPressed || e.isMetaPressed)
-            if (z) { if (e.isShiftPressed) vm.redo() else vm.undo() }
-            z
+            val command = e.type == KeyEventType.KeyDown && (e.isCtrlPressed || e.isMetaPressed)
+            val z = command && e.key == Key.Z
+            val y = command && e.key == Key.Y && !e.isShiftPressed
+            if (z && !e.isShiftPressed) vm.undo() else if (z || y) vm.redo()
+            z || y
         },
     )
     LaunchedEffect(vm.textStyleOpen, vm.textKeyboard) {
