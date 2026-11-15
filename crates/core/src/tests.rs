@@ -13220,21 +13220,20 @@ fn a_tap_of_the_selection_tool_on_a_vector_layer_takes_the_stroke_under_it_or_le
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A vector layer of `n` strokes on a `side` square canvas shown in a window twice as big (each
-/// canvas pixel two window pixels across, so it is drawn sharp once settled): the session, its
-/// plugins, the store's folder, the layer, and a window picture to draw frames into.
-fn zoomed_vector_strokes(
-    n: u32,
-    side: u32,
-    name: &str,
-) -> Option<(
+/// A session with a vector layer: the session, its plugins, the store's folder, the layer, and a
+/// window picture to draw frames into (and the GPU).
+type ZoomedVectors = (
     std::sync::Arc<CanvasSession>,
     std::sync::Arc<crate::Plugins>,
     String,
     u64,
     procraft_gpu::wgpu::Texture,
     procraft_gpu::Gpu,
-)> {
+);
+
+/// A vector layer of `n` strokes on a `side` square canvas shown in a window twice as big (each
+/// canvas pixel two window pixels across, so it is drawn sharp once settled).
+fn zoomed_vector_strokes(n: u32, side: u32, name: &str) -> Option<ZoomedVectors> {
     let (s, plugins, dir) = vector_session(side, name)?;
     let window = side * 2;
     {
