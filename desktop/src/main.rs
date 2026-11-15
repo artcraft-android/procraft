@@ -740,7 +740,7 @@ impl App {
         screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
         // the strokes heard while a plugin makes their sound
         self.stroke_sound.follow(Some(&session), self.ui.plugins().makes_stroke_sound());
-        let raw = screen.egui.take_egui_input(&screen.window);
+        let raw = screen.take_input();
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
             // opening: the gallery over it, growing from the artwork's picture
@@ -806,7 +806,7 @@ impl App {
         self.last_frame = Instant::now();
         screen.size_interface(self.ui.plugins(), None);
         self.stroke_sound.follow(None, false);
-        let raw = screen.egui.take_egui_input(&screen.window);
+        let raw = screen.take_input();
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
         let closing = self.zoom.as_ref().filter(|z| !z.opening);

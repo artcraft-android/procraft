@@ -77,6 +77,78 @@ impl InterfaceTouches {
     }
 }
 
+/// Whether the interface has been told it is on a touch screen, for a tablet's pen that moves the
+/// mouse pointer. egui scrolls a list by dragging its contents only on a touch screen, which it
+/// takes one to be once it has had a touch: the system's pen comes as touches, but a tablet's pen
+/// that moves the mouse pointer (Windows Ink off, read through WinTab; X11; a Mac) makes none, so
+/// the lists stayed still under it. The first time such a pen is seen the interface is told of a
+/// touch of its own, cancelled as it comes, so it presses nothing: the lists then drag with that
+/// pen as with the system's.
+#[derive(Default)]
+pub struct PenTouchScreen {
+    told: bool,
+}
+
+impl PenTouchScreen {
+    /// A touch no finger or pen makes: a device and an id of its own.
+    const TOUCH: u64 = u64::MAX;
+
+    /// The interface's input for a frame, `pen_moves_mouse` while a tablet's pen moves the mouse
+    /// pointer: the first time one does, with the touch that tells it it is on a touch screen.
+    pub fn tell(&mut self, raw: &mut egui::RawInput, pen_moves_mouse: bool) {
+        if pen_moves_mouse && !std::mem::replace(&mut self.told, true) {
+            raw.events.push(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(Self::TOUCH),
+                id: egui::TouchId(Self::TOUCH),
+                phase: egui::TouchPhase::Cancel,
+                pos: egui::Pos2::ZERO,
+                force: None,
+            });
+        }
+    }
+}
+
+/// The interface's input, frame by frame, for a pen that comes to `from`, is pressed, dragged `by`
+/// in ten steps and lifted: as the system's pen gives it (`touches`: its touches, which egui-winit
+/// also makes its pointer's), or as a tablet's pen moving the mouse pointer does (the pointer
+/// alone).
+#[cfg(test)]
+pub fn pen_drag(from: egui::Pos2, by: egui::Vec2, touches: bool) -> Vec<Vec<egui::Event>> {
+    use egui::{Event, PointerButton, TouchPhase};
+    let touch = |phase, pos| Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase,
+        pos,
+        force: Some(0.5),
+    };
+    let button = |pos, pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut frames = Vec::new();
+    if touches {
+        frames.push(vec![touch(TouchPhase::Start, from), Event::PointerMoved(from), button(from, true)]);
+    } else {
+        frames.push(vec![Event::PointerMoved(from)]);
+        frames.push(vec![button(from, true)]);
+    }
+    let mut at = from;
+    for _ in 0..10 {
+        at += by / 10.0;
+        let moved = Event::PointerMoved(at);
+        frames.push(if touches { vec![touch(TouchPhase::Move, at), moved] } else { vec![moved] });
+    }
+    frames.push(if touches {
+        vec![touch(TouchPhase::End, at), button(at, false), Event::PointerGone]
+    } else {
+        vec![button(at, false)]
+    });
+    frames
+}
+
 pub struct Input {
     clock: Instant,
     /// What the touches asked, for the app to do at the next frame.
@@ -703,6 +775,24 @@ mod tests {
         // and a finger on the interface first keeps it
         assert_eq!(route(finger(5, TouchPhase::Started, 40.0, 300.0)), [(5, TouchPhase::Started)]);
         assert_eq!(route(finger(6, TouchPhase::Started, 60.0, 300.0)), [(6, TouchPhase::Started)]);
+    }
+
+    #[test]
+    fn a_pen_moving_the_mouse_pointer_tells_the_interface_once_that_it_is_on_a_touch_screen() {
+        let (ctx, mut told) = (egui::Context::default(), PenTouchScreen::default());
+        let mut frame = |pen_moves_mouse: bool| {
+            let mut raw = egui::RawInput::default();
+            told.tell(&mut raw, pen_moves_mouse);
+            let touches = raw.events.iter().filter(|e| matches!(e, egui::Event::Touch { .. })).count();
+            ctx.run_ui(raw, |_| {}).textures_delta.clear();
+            (touches, ctx.input(|i| (i.has_touch_screen(), i.any_touches())))
+        };
+        // the mouse alone: no touch screen
+        assert_eq!(frame(false), (0, (false, false)));
+        // a tablet's pen moves the pointer: told once, with no touch left down
+        assert_eq!(frame(true), (1, (true, false)));
+        assert_eq!(frame(true), (0, (true, false)));
+        assert_eq!(frame(false), (0, (true, false)));
     }
 
     #[test]

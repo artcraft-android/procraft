@@ -1890,6 +1890,11 @@ mod tests {
 
         /// A frame, and what it asked of the app.
         fn asked(&mut self, events: Vec<Event>) -> Option<Act> {
+            self.run(events).0
+        }
+
+        /// A frame: what it asked of the app, and what it drew.
+        fn run(&mut self, events: Vec<Event>) -> (Option<Act>, Vec<egui::epaint::ClippedShape>) {
             self.time += 1.0 / 60.0;
             let raw = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1600.0))),
@@ -1908,7 +1913,7 @@ mod tests {
                 }
             });
             output.textures_delta.clear();
-            asked
+            (asked, output.shapes)
         }
 
         /// A frame: whether it said a value changed.
@@ -2124,6 +2129,54 @@ mod tests {
         assert!(gone(&next));
         assert_eq!(next.plugins().len(), list.len() - 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where `words` were drawn among a frame's `shapes` (their top left), if they were.
+    fn drawn(shapes: &[egui::epaint::ClippedShape], words: &str) -> Option<Pos2> {
+        fn find(shape: &egui::Shape, words: &str) -> Option<Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == words => Some(t.pos),
+                egui::Shape::Vec(all) => all.iter().find_map(|s| find(s, words)),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|c| find(&c.shape, words))
+    }
+
+    #[test]
+    fn the_plugins_page_scrolls_with_a_pen_dragged_up_it_as_a_touch_or_as_the_mouse_pointer() {
+        // how far up a pen dragged 200 points up the first card takes the second card's name, the
+        // interface told it is on a touch screen first if `told` (egui drags a list only once it
+        // has had a touch, from the frame after)
+        let scrolled = |touches: bool, told: bool| {
+            let (mut page, dir) = with_store(&format!("scroll-{touches}-{told}"));
+            page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+            page.frame(Vec::new());
+            page.frame(Vec::new());
+            assert!(page.cards().last().is_some_and(|c| c.1 > body().bottom()), "the cards fit the page");
+            if told {
+                let mut raw = RawInput::default();
+                crate::input::PenTouchScreen::default().tell(&mut raw, true);
+                page.frame(raw.events);
+            }
+            let name = page.list()[1].name.clone();
+            let before = drawn(&page.run(Vec::new()).1, &name).unwrap();
+            // on the first card's words, under its name
+            let from = pos2(body().center().x, page.cards()[0].0 + 40.0);
+            let mut last = Vec::new();
+            for events in crate::input::pen_drag(from, vec2(0.0, -200.0), touches) {
+                last = page.run(events).1;
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            before.y - drawn(&last, &name).unwrap().y
+        };
+        // the system's pen, which has touched before: its touches drag the list
+        let by_touch = scrolled(true, true);
+        assert!(by_touch > 150.0, "{by_touch}");
+        // a tablet's pen moving the mouse pointer: egui drags a list only on a touch screen
+        assert_eq!(scrolled(false, false), 0.0, "the mouse pointer alone");
+        let by_pointer = scrolled(false, true);
+        assert!(by_pointer > 150.0, "{by_pointer}");
     }
 
     /// A card for a plugin the app has no code for: it shows, and a tap on it changes nothing.

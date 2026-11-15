@@ -35,6 +35,9 @@ pub struct Screen {
     pub last: bool,
     /// The system's on-screen keyboard, for a field focused by a finger or a pen.
     pub touch_keyboard: crate::touch_keyboard::TouchKeyboard,
+    /// Whether the interface was told it is on a touch screen, for a tablet's pen that moves the
+    /// mouse pointer.
+    pen_touch_screen: crate::input::PenTouchScreen,
 }
 
 /// A canvas drawn into a picture of its own (the surface's format), its size, and the
@@ -197,7 +200,16 @@ impl Screen {
             tried: 0,
             last,
             touch_keyboard: crate::touch_keyboard::TouchKeyboard::default(),
+            pen_touch_screen: crate::input::PenTouchScreen::default(),
         })
+    }
+
+    /// What the window's events gave the interface since its last frame; once a tablet's pen moves
+    /// the mouse pointer, it is told it is on a touch screen (see [`crate::input::PenTouchScreen`]).
+    pub fn take_input(&mut self) -> egui::RawInput {
+        let mut raw = self.egui.take_egui_input(&self.window);
+        self.pen_touch_screen.tell(&mut raw, crate::pen::mouse_pen().is_some());
+        raw
     }
 
     /// Whether the canvases' pipelines were made without a GPU error, once they are made (told
