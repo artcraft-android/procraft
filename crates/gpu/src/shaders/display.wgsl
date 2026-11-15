@@ -94,7 +94,13 @@ fn shown(c: vec4<f32>) -> vec4<f32> {
     if (du.c0.w > 0.5) {
         let lin = srgb_to_linear(rgb);
         let moved = vec3<f32>(dot(du.c0.xyz, lin), dot(du.c1.xyz, lin), dot(du.c2.xyz, lin));
-        rgb = linear_to_srgb(clamp(moved, vec3<f32>(0.0), vec3<f32>(CEILING)));
+        if (CEILING > 1.0) {
+            // an extended-range target takes colours past its own primaries as they are: below 0
+            // and past 1, the curve mirrored through 0
+            rgb = sign(moved) * linear_to_srgb(min(abs(moved), vec3<f32>(CEILING)));
+        } else {
+            rgb = linear_to_srgb(clamp(moved, vec3<f32>(0.0), vec3<f32>(CEILING)));
+        }
     }
     if (du.c1.w > 0.5) {
         // between the table's first and last points' centres

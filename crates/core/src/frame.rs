@@ -266,7 +266,7 @@ pub fn configure(
     hdr: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
     let caps = surface.get_capabilities(&gpu.adapter);
-    if hdr && let Some(config) = configure_extended(gpu, surface, &caps, size, wide) {
+    if hdr && let Some(config) = configure_extended(gpu, surface, &caps, size) {
         return Some(config);
     }
     // an 8-bit one first: a float surface (Rgba16Float, offered first on some Linux drivers) is
@@ -322,25 +322,24 @@ pub fn configure(
     Some(config)
 }
 
-/// [`configure`] for an HDR canvas: half floats in the screen's extended range (Display P3's
-/// where `wide` and the screen takes it, else sRGB's), sRGB-encoded as the canvas draws, with
-/// light past white shown brighter than it. None where the surface has no extended range.
+/// [`configure`] for an HDR canvas: half floats in the screen's extended range (extended sRGB, which
+/// also carries Display P3's colours), sRGB-encoded as the canvas draws, with light past white
+/// shown brighter than it. None where the surface has no extended range.
 fn configure_extended(
     gpu: &Gpu,
     surface: &wgpu::Surface<'_>,
     caps: &wgpu::SurfaceCapabilities,
     size: (u32, u32),
-    wide: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
     let format = wgpu::TextureFormat::Rgba16Float;
     let spaces = caps.format_capabilities.iter().find(|f| f.format == format)?.color_spaces;
-    let color_space = if wide && spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_DISPLAY_P3) {
-        wgpu::SurfaceColorSpace::ExtendedDisplayP3
-    } else if spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB) {
-        wgpu::SurfaceColorSpace::ExtendedSrgb
-    } else {
+    // extended sRGB only: wgpu's extended Display P3 looks its colour space up in a way that
+    // crashes on the iPad simulator. A Display P3 canvas's colours past sRGB go out as values below
+    // 0 and past 1, which extended sRGB carries (see `display.wgsl`).
+    if !spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB) {
         return None;
-    };
+    }
+    let color_space = wgpu::SurfaceColorSpace::ExtendedSrgb;
     let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
     config.format = format;
     config.color_space = color_space;
