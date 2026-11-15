@@ -17,7 +17,7 @@
 const RULE_TILE: u32 = 16u;
 const RULE_ROW: u32 = 1024u;
 // floats a stamp instance takes (see the canvas's StampInstance)
-const RULE_STAMP_FLOATS: u32 = 24u;
+const RULE_STAMP_FLOATS: u32 = 28u;
 
 // what the fragment shader is given for stamp `k` at canvas point `p`, if its quad reaches it
 fn rule_stamp(k: u32, p: vec2<f32>, out: ptr<function, StampOut>) -> bool {
@@ -56,6 +56,7 @@ fn rule_stamp(k: u32, p: vec2<f32>, out: ptr<function, StampOut>) -> bool {
     (*out).grain_press = more.x;
     (*out).grain_bleed = more.y;
     (*out).transfer = more.z;
+    (*out).layer = su.shape + i32(rule_stamps[b + 24u]);
     return true;
 }
 

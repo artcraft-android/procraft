@@ -81,9 +81,9 @@ fn scaled_radius(style: &StrokeStyle, radius: f32, k: f32) -> f32 {
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 13] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32, 12 => Float32
 ];
 
 #[repr(C)]
@@ -657,10 +657,13 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
+    /// Which shape image it is, counted on from the stroke's (see `Stamp::tip`), and room for more.
+    tip: f32,
+    spare: [f32; 3],
 }
 
-// (read as 24 floats a stamp by the shader laying stamps by their stroke's rule)
-const _: () = assert!(size_of::<StampInstance>() == 24 * 4);
+// (read as 28 floats a stamp by the shader laying stamps by their stroke's rule)
+const _: () = assert!(size_of::<StampInstance>() == 28 * 4);
 
 /// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
 /// painted `in_place` (see [`WORK_AT_ONCE`]).
@@ -2583,6 +2586,16 @@ impl Canvas {
         }
     }
 
+    /// `style` reads its shapes from the set `id` (`tips`, each `side` square, in order) in place of
+    /// the brush images, each stamp the one its `tip` says: kept on the GPU while it is among the
+    /// last few used. Nothing if they don't fit (see [`MOST_TIPS`]).
+    pub fn use_tip_set(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, tips: &[&[u8]]) {
+        if self.full_shapes.hold_set(gpu, id, side, tips) {
+            style.shape = Some(0);
+            style.full_shape = Some(id);
+        }
+    }
+
     /// The open stroke's grain fixed to the canvas is read from `grain` from now on, in place of a
     /// brush image: a picture the canvas's size (square), one grey per pixel, viewed as an array
     /// of one, such as 3D painting reads along a model's three axes. How the grain shows (its
@@ -3003,6 +3016,8 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    tip: s.tip.min(MOST_TIPS - 1) as f32,
+                    spare: [0.0; 3],
                 }
             })
             .collect();
@@ -3059,6 +3074,8 @@ impl Canvas {
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
+                    tip: s.tip.min(MOST_TIPS - 1) as f32,
+                    spare: [0.0; 3],
                 }
             }),
         );
@@ -10312,6 +10329,9 @@ const SOURCE_SLOTS: usize = 8;
 /// How many brush files' grains stay on the GPU at their own size.
 const FULL_GRAINS_HELD: usize = 3;
 
+/// The most shape images a stroke's own set holds (see [`Canvas::use_tip_set`]).
+pub const MOST_TIPS: u32 = 255;
+
 /// Brush files' grains or shapes at their own size, each an array with its mip levels, the image in its first
 /// layer: only the last few used, so that their memory doesn't grow with the brushes.
 #[derive(Default)]
@@ -10323,18 +10343,31 @@ struct FullGrains {
 impl FullGrains {
     /// Has the image `id` ready; false if `pixels` aren't `side` square.
     fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
+        self.hold_set(gpu, id, side, &[pixels])
+    }
+
+    /// Has the images `id` ready, one to a layer in their order; false if any isn't `side` square,
+    /// there are none or more than [`MOST_TIPS`].
+    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]]) -> bool {
         self.clock += 1;
         let clock = self.clock;
         if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
             slot.2 = clock;
             return true;
         }
-        if !side.is_power_of_two() || pixels.len() != (side as usize).pow(2) {
+        let square = (side as usize).pow(2);
+        let most = MOST_TIPS.min(gpu.device.limits().max_texture_array_layers.saturating_sub(1)) as usize;
+        if !side.is_power_of_two()
+            || images.is_empty()
+            || images.len() > most
+            || images.iter().any(|i| i.len() != square)
+        {
             return false;
         }
+        let layers = gpu.array_layers(images.len() as u32).max(gpu.array_layers_least());
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("full grain"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: gpu.array_layers_least() },
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
             mip_level_count: side.ilog2() + 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -10342,7 +10375,9 @@ impl FullGrains {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        write_image_levels(gpu, &texture, 0, side, pixels);
+        for (layer, pixels) in images.iter().enumerate() {
+            write_image_levels(gpu, &texture, layer as u32, side, pixels);
+        }
         if self.held.len() >= FULL_GRAINS_HELD
             && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
         {

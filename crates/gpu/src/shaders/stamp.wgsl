@@ -60,6 +60,8 @@ struct StampIn {
     @location(10) brightness_add: f32,
     // how far the grain's patch under the stamp turns, where it is read from staying put
     @location(11) grain_turn: f32,
+    // which shape image it is, counted on from the stroke's
+    @location(12) tip: f32,
 }
 
 struct StampOut {
@@ -81,6 +83,8 @@ struct StampOut {
     @location(6) look: vec4<f32>,
     // what light pressure lets through: the most a capped stroke builds up to
     @location(7) transfer: f32,
+    // the layer of `shapes` it is drawn with
+    @location(9) @interpolate(flat) layer: i32,
 }
 
 @vertex
@@ -113,6 +117,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
     o.transfer = inst.more.z;
+    o.layer = su.shape + i32(inst.tip);
     return o;
 }
 
@@ -181,9 +186,9 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let side = f32(textureDimensions(shapes).x);
         let lod = clamp(log2(0.5 * side / (r + QUAD_REACH)), 0.0, su.shape_lod_cap + log2(side / 256.0));
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
-        var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
+        var s = textureSampleLevel(shapes, shape_smp, uv, i.layer, lod).r;
         if (su.shape_sharp == 1u) {
-            s = shape_texel(uv, su.shape);
+            s = shape_texel(uv, i.layer);
         }
         a = select(0.0, s, inside);
     }

@@ -162,6 +162,9 @@ fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
 // the same or as much again over the grain's light), normal laying the coverage over the grain,
 // and every other mode by the blend mode's own rule
 fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
+    if (mode >= TEXTURE_RULES) {
+        return texture_rule(a, g, depth, mode);
+    }
     let h = 12.0 * a * depth;
     var r = 0.0;
     if (mode == 27u) {
@@ -185,6 +188,84 @@ fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
 
 // The coverage from which a grain raises it fully (a sixty-fourth, as 1/63.75).
 const GRAIN_RISE_FULL: f32 = 0.015686275;
+
+// Texture rules (a plugin's brush engine names them for its dabs' texture): from 32, the texture's
+// value `m` combined with a dab's coverage `a` at a strength `s` by one of fourteen ways (multiply,
+// subtract, darken, overlay, dodge, burn, linear dodge, linear burn, hard mix, softer hard mix,
+// height, linear height, and the last two weighed as image editors weigh them); from 48 the same,
+// softly: the strength taking the texture away rather than the paint.
+const TEXTURE_RULES: u32 = 32u;
+const TEXTURE_SOFT: u32 = 48u;
+
+fn union_of(a: f32, b: f32) -> f32 {
+    return a + b - a * b;
+}
+
+fn dodge_alpha(src: f32, dst: f32) -> f32 {
+    if (src >= 0.9999) {
+        return select(1.0, 0.0, dst <= 0.0);
+    }
+    return clamp(dst / (1.0 - src), 0.0, 1.0);
+}
+
+fn burn_alpha(src: f32, dst: f32) -> f32 {
+    if (dst >= 0.9999) {
+        return 1.0;
+    }
+    if (src < 1.0 - dst) {
+        return 0.0;
+    }
+    return clamp(1.0 - (1.0 - dst) / max(src, 1e-6), 0.0, 1.0);
+}
+
+fn overlay_alpha(src: f32, dst: f32) -> f32 {
+    if (dst > 0.5) {
+        return 1.0 - (1.0 - src) * (1.0 - (2.0 * dst - 1.0));
+    }
+    return 2.0 * src * dst;
+}
+
+fn texture_rule(a: f32, m: f32, strength: f32, mode: u32) -> f32 {
+    let soft = mode >= TEXTURE_SOFT;
+    let rule = select(mode - TEXTURE_RULES, mode - TEXTURE_SOFT, soft);
+    let s = clamp(strength, 0.0, 1.0);
+    // the texture kept where the strength falls short, or the paint taken down by it
+    let ms = select(m, union_of(m, 1.0 - s), soft);
+    let ad = select(a * s, a, soft);
+    // the heights' strength, kept short of whole
+    let h = 0.99 * s;
+    let keep = 1.0 - h;
+    var r = 0.0;
+    switch (rule) {
+        case 0u: { r = ms * ad; }
+        case 1u: { r = select(a - (m + 1.0 - s), a - m * s, soft); }
+        case 2u: { r = min(ms, ad); }
+        case 3u: { r = overlay_alpha(ms, ad); }
+        case 4u: { r = dodge_alpha(select(m, m * s, soft), select(a * s, a, soft)); }
+        case 5u: { r = burn_alpha(ms, ad); }
+        case 6u: { r = select(m + a * s, m * s + a, soft); }
+        case 7u: { r = ms + ad - 1.0; }
+        case 8u: {
+            let mixed = select(0.0, 1.0, ms + ad > 1.0);
+            r = select(mixed, mixed * union_of(a, s), soft);
+        }
+        case 9u: { r = 3.0 * ad - 2.0 * (1.0 - select(m, m * s, soft)); }
+        case 10u: { r = select(a / keep - (m + keep), a / keep - m * h, soft); }
+        case 11u: {
+            let raised = select(a / keep - keep, a / keep, soft);
+            let taken = select(m, m * h, soft);
+            r = max(raised * (1.0 - taken), raised - taken);
+        }
+        case 12u: { r = select(a * 10.0 * s - m, a + a * 9.0 * s - m * s, soft); }
+        case 13u: {
+            let raised = select(a * 10.0 * s, a + a * 9.0 * s, soft);
+            let taken = select(m, m * s, soft);
+            r = max((1.0 - taken) * raised, raised - taken);
+        }
+        default: { r = a; }
+    }
+    return clamp(r, 0.0, 1.0);
+}
 
 // a dual brush's two strokes' own modes (the grain's numbers)
 const DUAL_HEIGHT: u32 = 27u;
