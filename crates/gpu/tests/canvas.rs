@@ -969,6 +969,35 @@ fn a_round_tip_under_a_pixel_across_lays_only_its_area_of_one() {
 }
 
 #[test]
+fn a_leaning_pen_shades_a_stamp_down_its_shape_cubed() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a stamp 24 pixels in radius, whole and fully shaded by the lean: read down and across its
+    // middle
+    let laid = |gradation: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+        canvas.add_stamps(&[Stamp { gradation, ..dot(Vec2::new(32.5, 32.5), 24.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        [(32, 22), (32, 32), (32, 42), (22, 32), (42, 32)].map(|(x, y)| f32::from(pixel(&layer, 64, x, y)[3]))
+    };
+    let (whole, shaded) = (laid(0.0), laid(1.0));
+    // the shading runs from none at the shape's top to all of it at its bottom, cubed: the
+    // shape spans its quad less the quad's reach past it
+    let fill = 24.0 / (24.0 + std::f32::consts::FRAC_1_SQRT_2);
+    for (k, dy) in [(0, -10.0f32), (1, 0.0), (2, 10.0)] {
+        let down = 0.5 + 0.5 * dy / 24.0 * fill;
+        let wanted = whole[k] * down.powi(3);
+        assert!((shaded[k] - wanted).abs() <= 3.0, "{dy}: {} against {wanted} ({whole:?} {shaded:?})", shaded[k]);
+    }
+    // the same across it
+    assert!((shaded[3] - shaded[4]).abs() <= 1.0 && (shaded[3] - shaded[1]).abs() <= 1.0, "{shaded:?}");
+}
+
+#[test]
 fn paint_laid_in_place_shows_no_predicted_tail_over_the_canvas() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

@@ -50,7 +50,7 @@ pub struct Stamp {
     /// A moving grain's depth and tile size here, as multiples of the brush's.
     pub grain_depth: f32,
     pub grain_size: f32,
-    /// How far it fades across its width from its leading edge (a leaning pen's shading), 0..1.
+    /// How far it fades down its shape's height, from the top (a leaning pen's shading), 0..1.
     pub gradation: f32,
     /// How far a taper has thinned it (its size multiplier, 1 = not at all): a round tip's rim
     /// thins with it, so a tapered stamp is drawn as the whole stamp scaled down.

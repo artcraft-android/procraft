@@ -648,7 +648,7 @@ struct StampInstance {
     /// brightness's keep.
     tint: [f32; 4],
     /// A moving grain's depth and tile size as multiples of the brush's, the share of the
-    /// secondary colour, and how far it fades across its width (tilt gradation).
+    /// secondary colour, and how far it fades down its shape's height (tilt gradation).
     look: [f32; 4],
     /// How hard the paint is pressed into a moving grain and how much that counts, and room for
     /// more.

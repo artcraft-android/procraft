@@ -211,15 +211,19 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
         a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend);
     }
+    // a leaning pen shades it down its shape's height: from the gradation's share less at the
+    // top of the shape to all of it at the bottom, cubed (so the top fades fast), before the bleed
+    // takes its contrast
+    if (i.look.w > 0.0) {
+        let down = clamp(i.q.y * i.fill.y * 0.5 + 0.5, 0.0, 1.0);
+        let g = 1.0 - i.look.w * (1.0 - down);
+        a = a * g * g * g;
+    }
     // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
     // of the strong ones, and more of both the harder the pen presses
     if (i.grain_bleed > 0.0) {
         let b = 8.0 * i.grain_bleed;
         a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
-    }
-    // a leaning pen shades it across its width, strongest at its leading edge
-    if (i.look.w > 0.0) {
-        a = a * (1.0 - i.look.w * clamp(0.5 - 0.5 * i.q.x, 0.0, 1.0));
     }
     // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
     // covers only its area of one (a shape's quad reaches past it, which thins it as far)
