@@ -1,6 +1,7 @@
 //! Adjustments: the current layer redrawn through a filter while its values are dragged, kept as
 //! one undo step or put back; only what is selected changes.
 
+use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::feather_radius;
 use procraft_engine::tone;
@@ -523,22 +524,33 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// Starts liquifying the current layer; false when it cannot be.
+    /// Starts liquifying what is chosen: the current layer, or with several chosen or a group
+    /// current, every layer chosen or in a chosen group, pushed the same way; false when there is
+    /// none that can change. An adjustment already open is kept first.
     pub fn liquify_begin(&self) -> bool {
-        if !self.adjust_begin() {
-            return false;
-        }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        st.liquify = LiquifyRun::default();
-        if let Some(canvas) = st.canvas.as_mut() {
-            // the layer's mask is pushed along with it
-            if let Some(mask) = st.doc.mask_of(st.doc.current()) {
-                canvas.transform_also(mask);
-            }
-            canvas.begin_liquify();
+        st.finish_stroke();
+        st.settle();
+        let layers = st.edited_layers();
+        let Some((&first, _)) = layers.split_first() else { return false };
+        let alpha_locked = layers.len() == 1 && st.doc.layer(first).is_some_and(|l| l.alpha_lock);
+        // each layer's mask is pushed along with it
+        let along: Vec<LayerId> =
+            layers.iter().skip(1).copied().chain(layers.iter().filter_map(|&id| st.doc.mask_of(id))).collect();
+        let Some(canvas) = st.canvas.as_mut() else { return false };
+        canvas.mark_steps();
+        canvas.set_filter_keeps_alpha(alpha_locked);
+        canvas.begin_transform(first);
+        for id in along {
+            canvas.transform_also(id);
         }
+        canvas.begin_liquify();
+        st.adjusting = true;
+        st.last_filter = None;
+        st.liquify = LiquifyRun::default();
         st.adjust(Filter::Liquify { amount: 1.0 });
+        self.shared.frame(st);
         true
     }
 

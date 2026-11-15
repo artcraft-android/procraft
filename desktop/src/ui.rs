@@ -1889,7 +1889,9 @@ impl Interface {
     /// As [`Self::cut_layer`]; whether anything was.
     fn layer_cut(&mut self, session: &CanvasSession) -> bool {
         self.open = None;
-        if !self.takes_changes(session) {
+        // one layer at a time: a group current or several chosen say so
+        let why = session.why_not_copied(true);
+        if !self.say_blocked(session, why) {
             return false;
         }
         let Some(cut) = session.cut_layer() else { return false };
@@ -1901,12 +1903,22 @@ impl Interface {
 
     /// The current layer (or what is selected of it) copied, to paste.
     fn copy_layer(&mut self, session: &CanvasSession) {
+        self.layer_copied(session);
+    }
+
+    /// As [`Self::copy_layer`]; whether anything was.
+    fn layer_copied(&mut self, session: &CanvasSession) -> bool {
         self.open = None;
-        if let Some(copied) = session.copy_layer() {
-            self.clipboard = Some(copied);
-            self.system_clipboard.copied_here(self.clipboard.as_ref());
-            self.overlays.notice("Layer copied", false);
+        // one layer at a time: a group current or several chosen say so
+        let why = session.why_not_copied(false);
+        if !self.say_blocked(session, why) {
+            return false;
         }
+        let Some(copied) = session.copy_layer() else { return false };
+        self.clipboard = Some(copied);
+        self.system_clipboard.copied_here(self.clipboard.as_ref());
+        self.overlays.notice("Layer copied", false);
+        true
     }
 
     /// The whole picture (or what is selected of it) copied, to paste.
@@ -1976,8 +1988,9 @@ impl Interface {
     /// What is selected copied and pasted as a new layer; nothing selected, the layer duplicated.
     fn duplicate_current(&mut self, session: &CanvasSession) {
         if session.has_selection() {
-            self.copy_layer(session);
-            self.paste_own(session, false);
+            if self.layer_copied(session) {
+                self.paste_own(session, false);
+            }
         } else if let Some(current) = session.layers().into_iter().find(|l| l.current)
             && session.duplicate_layer(current.id).is_none()
         {
@@ -1995,7 +2008,11 @@ impl Interface {
     /// As [`Self::takes_changes`], for why the current layer took nothing (`why`, if anything).
     fn say_blocked(&mut self, session: &CanvasSession, why: Option<Blocked>) -> bool {
         let Some(why) = why else { return true };
-        let Some(l) = session.layers().into_iter().find(|l| l.current) else { return true };
+        // Liquify's alert is about the layer chosen whose alpha is locked
+        let layers = session.layers();
+        let alpha_locked = (why == Blocked::AlphaLocked).then(|| session.alpha_locked_chosen()).flatten();
+        let shown = layers.iter().find(|l| Some(l.id) == alpha_locked).or_else(|| layers.iter().find(|l| l.current));
+        let Some(l) = shown.cloned() else { return true };
         let (title, message, icon, extra) = match why {
             Blocked::Locked => (
                 "Layer is locked",
@@ -2011,7 +2028,13 @@ impl Interface {
             ),
             Blocked::Group => (
                 "Group is selected",
-                format!("\u{201c}{}\u{201d} is a group: choose one of its layers to paint on.", l.name),
+                format!("\u{201c}{}\u{201d} is a group: choose one of the layers in it.", l.name),
+                &crate::icons::FOLDER,
+                None,
+            ),
+            Blocked::Several => (
+                "Several layers are chosen",
+                "This works on one layer at a time: choose just one.".to_owned(),
                 &crate::icons::FOLDER,
                 None,
             ),

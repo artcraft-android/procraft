@@ -2929,12 +2929,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // copy and paste, flipping, pictures
 
-    fun copyLayer() {
+    /** Copies the current layer within the selection; false if nothing was copied. */
+    fun copyLayer(): Boolean {
+        if (!currentTakesChanges(copy = true)) {
+            closePanels()
+            return false
+        }
         val copied = session?.copyLayer()
         clipboard = copied ?: clipboard
         canPaste = clipboard != null
         closePanels()
         if (copied != null) showNotice("Layer copied")
+        return copied != null
     }
 
     fun copyCanvas() {
@@ -2950,7 +2956,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cutLayer(): Boolean {
-        if (!currentTakesChanges()) {
+        if (!currentTakesChanges(cut = true)) {
             closePanels()
             return false
         }
@@ -3347,8 +3353,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Duplicate: the selection copied to a new layer, or without one the current layer. */
     fun duplicateCurrent() {
         if (hasSelection) {
-            copyLayer()
-            paste()
+            if (copyLayer()) paste()
         } else {
             layers.firstOrNull { it.current }?.let(::duplicate)
         }
@@ -4493,7 +4498,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
     /** Why the current layer turned a change away. */
-    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP, ALPHA_LOCKED }
+    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP, SEVERAL, ALPHA_LOCKED }
 
     /** The current layer turned a change away, and why: a dialog offers to unlock or show it, or open Layers. */
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
@@ -4506,15 +4511,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
      * cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
-     * not done afterwards. With [paint] (a stroke or a fill) a group current says so too.
+     * not done afterwards. With [paint] (a stroke or a fill) a group current says so too; an
+     * adjustment or a [copy] (or a cut, [cut]) takes one layer, so a group current or several
+     * layers chosen say so.
      */
-    fun currentTakesChanges(paint: Boolean = false, adjustment: Adjustment? = null): Boolean {
-        val l = layers.firstOrNull { it.current } ?: return true
+    fun currentTakesChanges(paint: Boolean = false, adjustment: Adjustment? = null, copy: Boolean = false, cut: Boolean = false): Boolean {
+        val current = layers.firstOrNull { it.current } ?: return true
         // the shared core decides
         val asked = when {
             paint -> session?.whyUnpainted()
             adjustment != null -> session?.whyNotAdjusted(adjustment)
+            copy || cut -> session?.whyNotCopied(cut)
             else -> session?.whyBlocked()
+        }
+        // Liquify's alert is about the layer chosen whose alpha is locked
+        val l = if (asked == io.github.artcraftandroid.procraft.core.Blocked.ALPHA_LOCKED) {
+            session?.alphaLockedChosen()?.let { id -> layers.firstOrNull { it.id == id } } ?: current
+        } else {
+            current
         }
         val why = when (asked) {
             io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
@@ -4524,6 +4538,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.Blocked.MESH_LOCKED -> Blocked.MESH_LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.GROUP_HIDDEN -> Blocked.GROUP_HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.GROUP -> Blocked.GROUP
+            io.github.artcraftandroid.procraft.core.Blocked.SEVERAL -> Blocked.SEVERAL
             io.github.artcraftandroid.procraft.core.Blocked.ALPHA_LOCKED -> Blocked.ALPHA_LOCKED
             null -> return true
         }
@@ -4546,7 +4561,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     layerChange { said = it.showLayer(l.id) }
                     said?.let { showNotice(it) }
                 }
-                Blocked.EMPTY_GROUP, Blocked.GROUP -> Unit
+                Blocked.EMPTY_GROUP, Blocked.GROUP, Blocked.SEVERAL -> Unit
                 Blocked.MESH_HIDDEN, Blocked.MESH_LOCKED -> {
                     session?.freeMeantMeshes()
                     readMeshes()

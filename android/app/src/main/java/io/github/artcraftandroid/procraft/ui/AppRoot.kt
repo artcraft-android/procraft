@@ -390,6 +390,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
                 CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
                 CanvasViewModel.Blocked.GROUP -> "Group is selected"
+                CanvasViewModel.Blocked.SEVERAL -> "Several layers are chosen"
                 CanvasViewModel.Blocked.ALPHA_LOCKED -> "Alpha Lock is on"
             }
         },
@@ -398,7 +399,8 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
                 CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l.name, vm.blockedBy)
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
-                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
+                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of the layers in it."
+                CanvasViewModel.Blocked.SEVERAL -> "This works on one layer at a time: choose just one."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
                 CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
                 CanvasViewModel.Blocked.ALPHA_LOCKED -> "“${l.name}” can't be liquified while its alpha is locked."
