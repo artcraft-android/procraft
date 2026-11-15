@@ -561,6 +561,10 @@ pub(crate) struct State {
     /// Plugins' changes in progress (an action's or a panel touch's): while any is, no stroke
     /// begins and undo and redo wait, or they would join its step.
     pub(crate) plugin_stepping: u32,
+    /// The brush a plugin's brush studio edits (set, index), while it is open; and whether a plugin
+    /// changed a brush since the app last asked.
+    pub(crate) engine_studio: Option<(usize, usize)>,
+    pub(crate) brushes_changed: bool,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
     /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
@@ -1530,6 +1534,8 @@ impl CanvasSession {
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
             plugin_stepping: 0,
+            engine_studio: None,
+            brushes_changed: false,
             pad_sample: false,
             sphere: None,
             frame_interval_ms: 0.0,

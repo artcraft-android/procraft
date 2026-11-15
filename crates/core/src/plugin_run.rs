@@ -1047,6 +1047,11 @@ impl Running {
         Ok(running)
     }
 
+    /// It is the plugin `id`'s code: what only that plugin's own may reach goes by it.
+    pub(crate) fn own(&mut self, id: &str) {
+        self.store.data_mut().owner = id.to_owned();
+    }
+
     /// `text` written where its key buffer says, for a call that follows: its length.
     fn hand_key_text(&mut self, text: &str) -> Result<i32, Stop> {
         let Running { store, key_buffer, memory, .. } = self;

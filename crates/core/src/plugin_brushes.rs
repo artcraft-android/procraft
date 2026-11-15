@@ -29,6 +29,7 @@ use procraft_engine::input::Sample;
 use procraft_engine::stroke::{OutsideEngine, Stamp, Tint};
 use procraft_gpu::{SecondStroke, StrokeStyle, StrokeTool};
 
+use crate::CanvasSession;
 use crate::hooks::{Hooks, Shared, at_work};
 use crate::plugin_layers::{Record, fields};
 use crate::plugin_run::{DAB_BYTES, Stop};
@@ -40,6 +41,8 @@ pub(crate) struct BrushEngine {
     pub key: String,
     pub label: String,
     pub accepts: Vec<String>,
+    /// The action (`<id>.<key>`) that is its brushes' studio, if it has one.
+    pub studio: Option<String>,
 }
 
 /// A brush an engine made of a file.
@@ -766,6 +769,59 @@ impl crate::State {
     }
 }
 
+#[uniffi::export]
+impl CanvasSession {
+    /// The plugin action that edits the current brush in place of the brush studio: the brush
+    /// studio of the brush engine that made it, while that is on. None opens the brush studio as
+    /// ever. The plugin's studio then reads and changes that brush (see the `brush.data`
+    /// permission) until another opens.
+    pub fn brush_studio_action(&self) -> Option<String> {
+        let mut st = self.shared.lock();
+        let tool = st.tool;
+        let at = st.brush_ref(tool);
+        let engine = st.brush(tool).engine.as_ref()?.engine.clone();
+        let action = st.hooks.as_ref()?.engine_studio(&engine)?;
+        st.engine_studio = Some(at);
+        Some(action)
+    }
+
+    /// Whether a plugin changed a brush of the library since this was last asked (the library to
+    /// be read again and kept).
+    pub fn take_brushes_changed(&self) -> bool {
+        std::mem::take(&mut self.shared.lock().brushes_changed)
+    }
+}
+
+impl CanvasSession {
+    /// The brush a plugin's studio edits (else the current brush), if the brush engine of plugin
+    /// `owner` made it.
+    fn edited_brush(st: &crate::State, owner: &str) -> Option<(usize, usize)> {
+        let at = st.engine_studio.unwrap_or_else(|| st.brush_ref(st.tool));
+        let brush = st.library.get(at.0)?.brushes.get(at.1)?;
+        let engine = brush.engine.as_ref()?;
+        engine.engine.strip_prefix(owner)?.starts_with('.').then_some(at)
+    }
+
+    /// The data of the brush plugin `owner`'s studio edits, as its engine keeps it.
+    pub(crate) fn edited_brush_data(&self, owner: &str) -> Option<Arc<[u8]>> {
+        let st = self.shared.lock();
+        let (set, index) = Self::edited_brush(&st, owner)?;
+        let brush = st.library.get(set)?.brushes.get(index)?;
+        brush.engine.as_ref().map(|e| Arc::clone(&e.data))
+    }
+
+    /// The brush plugin `owner`'s studio edits keeps `data` from now on; false if there is none.
+    pub(crate) fn set_edited_brush_data(&self, owner: &str, data: Vec<u8>) -> bool {
+        let mut st = self.shared.lock();
+        let Some((set, index)) = Self::edited_brush(&st, owner) else { return false };
+        let Some(brush) = st.library.get_mut(set).and_then(|s| s.brushes.get_mut(index)) else { return false };
+        let Some(engine) = brush.engine.as_mut() else { return false };
+        engine.data = data.into();
+        st.brushes_changed = true;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,9 +909,28 @@ mod tests {
         assert!(alpha(&on, 20, 60) > 240 && alpha(&on, 28, 52) > 200, "the first square");
         assert!(alpha(&on, 60, 60) > 240, "the next, 40 on");
         assert_eq!(alpha(&on, 40, 60), 0, "nothing between them");
+        // its studio, the plugin's own: the tip made 40 across on its first page
+        let studio = s.brush_studio_action().expect("its plugin's studio");
+        assert!(plugins.run_action(studio, Arc::clone(&s)));
+        let panel = plugins.panel().expect("the studio's panel");
+        assert_eq!(panel.title, "Squares");
+        let row = panel
+            .rows
+            .iter()
+            .position(|r| matches!(r, crate::PanelRow::Slider { label, .. } if label == "Diameter"))
+            .unwrap();
+        assert!(plugins.panel_touched(row as u32, 40.0, Arc::clone(&s)));
+        assert!(s.take_brushes_changed(), "the brush changed");
+        assert!(!s.take_brushes_changed());
+        let bigger = draw(&s);
+        assert!(alpha(&bigger, 38, 60) > 240, "the first square, 40 across");
+        assert!(alpha(&bigger, 100, 60) > 240 && alpha(&bigger, 60, 60) == 0, "the next, 80 on");
         assert!(plugins.set_on(id, false));
+        assert_eq!(s.brush_studio_action(), None, "with its plugin off, the brush studio as ever");
+        // as the app read it: paint, the app's own way
         let off = draw(&s);
-        assert!(alpha(&off, 40, 60) > 0, "as the app read it: a line");
+        assert!(off.chunks_exact(4).any(|p| p[3] > 0));
+        assert_ne!(off, bigger);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -680,7 +680,9 @@ impl Plugins {
         let store = self.store.as_deref().ok_or(Stop::Damaged)?;
         let (hooks, bytes) = plugin_file::read_code(store, id, version).ok_or(Stop::Damaged)?;
         let kept = plugin_file::read_kept(store, id);
-        Ok((Running::start_told(&bytes, values, &hooks, permissions, kept.as_deref())?, hooks))
+        let mut running = Running::start_told(&bytes, values, &hooks, permissions, kept.as_deref())?;
+        running.own(id);
+        Ok((running, hooks))
     }
 
     /// What `running`, a copy of `id`'s code that has just acted, says to keep: kept with the

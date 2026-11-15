@@ -948,7 +948,8 @@ fn dump_brush_comparisons() {
 /// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest; or
 /// `bundled:Name,Other Name` for those of the brushes the app comes with; `DUMP_FINGER=1` draws
 /// with a finger, `DUMP_STRAIGHT=1` straight across, `DUMP_UNCOMBINE=1` each part of a dual brush
-/// alone.)
+/// alone; `DUMP_PLUGIN=x.procraft-plugin` with that plugin on, as its brush engine reads and draws
+/// the file.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -958,6 +959,16 @@ fn dump_brush_strokes() {
     // the canvas's side, `DUMP_CANVAS` (1024 unless given)
     let side: u32 = std::env::var("DUMP_CANVAS").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
     let Some(s) = session(side, side) else { return };
+    if let Ok(plugin) = std::env::var("DUMP_PLUGIN") {
+        let dir = std::env::temp_dir().join(format!("procraft-dump-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        assert_eq!(plugins.install(std::fs::read(plugin).unwrap()), None);
+        for p in plugins.plugins() {
+            assert!(plugins.set_on(p.id, true));
+        }
+        s.use_plugins(plugins);
+    }
     // the app's own brushes by name, a set of ours, or another app's brushes
     let brushes: Vec<(u32, u32, String)> = match path.strip_prefix("bundled:") {
         Some(names) => {
@@ -967,8 +978,10 @@ fn dump_brush_strokes() {
             all.filter(|b| wanted.contains(&b.name.as_str())).map(|b| (b.set, b.index, b.name.clone())).collect()
         }
         None => {
-            let bytes = std::fs::read(path).unwrap();
-            let imported = s.import_brushes(bytes.clone()).or_else(|| s.import_other_brushes(bytes, "Dump".to_owned()));
+            let bytes = std::fs::read(&path).unwrap();
+            // by its name, as a file picked is
+            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+            let imported = s.import_any_brushes(bytes, name, 0);
             let set = imported.unwrap();
             // with DUMP_UNCOMBINE, a dual brush's two brushes each draw alone
             if std::env::var_os("DUMP_UNCOMBINE").is_some() {

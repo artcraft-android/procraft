@@ -26,6 +26,8 @@ pub enum PluginPermission {
     Notice,
     /// A panel of its own.
     Panel,
+    /// The data of a brush its own brush engine made, to read and change: its brush studio's.
+    BrushData,
 }
 
 impl PluginPermission {
@@ -37,6 +39,7 @@ impl PluginPermission {
             "brush" => Some(PluginPermission::Brush),
             "notice" => Some(PluginPermission::Notice),
             "panel" => Some(PluginPermission::Panel),
+            "brush.data" => Some(PluginPermission::BrushData),
             _ => None,
         }
     }
@@ -51,6 +54,9 @@ impl PluginPermission {
             PluginPermission::Brush => "It can read and set the brush's colour, size and opacity.",
             PluginPermission::Notice => "It can show a short message.",
             PluginPermission::Panel => "It can show a panel of its own when you tap one of its actions.",
+            PluginPermission::BrushData => {
+                "It can read and change the settings of brushes it draws, in a studio of its own."
+            }
         }
     }
 }
@@ -63,11 +69,13 @@ pub(crate) struct Host {
     pub(crate) session: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub(crate) panel: Option<PluginPanel>,
     pub(crate) close_panel: bool,
+    /// The plugin's id, for what only its own may reach (its brushes' data).
+    pub(crate) owner: String,
 }
 
 impl Host {
     pub(crate) fn new(limits: StoreLimits) -> Host {
-        Host { limits, session: None, panel: None, close_panel: false }
+        Host { limits, session: None, panel: None, close_panel: false, owner: String::new() }
     }
 }
 
@@ -102,7 +110,13 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
     ("notice", PluginPermission::Notice, &[I32, I32], &[]),
     ("show_panel", PluginPermission::Panel, &[I32, I32], &[I32]),
     ("close_panel", PluginPermission::Panel, &[], &[]),
+    ("brush_data_len", PluginPermission::BrushData, &[], &[I32]),
+    ("read_brush_data", PluginPermission::BrushData, &[I32], &[I32]),
+    ("write_brush_data", PluginPermission::BrushData, &[I32, I32], &[I32]),
 ];
+
+/// The most bytes of a brush's data a plugin may hand back.
+const MOST_BRUSH_DATA: usize = 64 << 20;
 
 /// Whether everything `module` imports is one of the app's functions `granted` gives, with its
 /// types.
@@ -332,6 +346,24 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
             let host = caller.data_mut();
             host.panel = None;
             host.close_panel = true;
+        })?;
+    }
+    if granted.contains(&PluginPermission::BrushData) {
+        linker.func_wrap(FROM, "brush_data_len", |caller: Caller<'_, Host>| -> i32 {
+            let Some(s) = session(&caller) else { return -1 };
+            s.edited_brush_data(&caller.data().owner).map_or(-1, |d| i32::try_from(d.len()).unwrap_or(-1))
+        })?;
+        linker.func_wrap(FROM, "read_brush_data", |mut caller: Caller<'_, Host>, to: i32| -> i32 {
+            let Some(s) = session(&caller) else { return 0 };
+            let Some(data) = s.edited_brush_data(&caller.data().owner) else { return 0 };
+            let (Some(memory), Ok(at)) = (memory(&caller), usize::try_from(to)) else { return 0 };
+            i32::from(memory.write(&mut caller, at, &data).is_ok())
+        })?;
+        linker.func_wrap(FROM, "write_brush_data", |caller: Caller<'_, Host>, from: i32, len: i32| -> i32 {
+            let Some(s) = session(&caller) else { return 0 };
+            let Some(len) = usize::try_from(len).ok().filter(|&n| n > 0 && n <= MOST_BRUSH_DATA) else { return 0 };
+            let Some(data) = read_bytes(&caller, from, len) else { return 0 };
+            i32::from(s.set_edited_brush_data(&caller.data().owner, data))
         })?;
     }
     if granted.contains(&PluginPermission::Notice) {

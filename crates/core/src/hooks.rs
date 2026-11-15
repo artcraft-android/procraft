@@ -640,6 +640,15 @@ impl Hooks {
         })
     }
 
+    /// The action that is engine `key`'s brushes' studio, if its plugin is on and has one.
+    pub(crate) fn engine_studio(&self, key: &str) -> Option<String> {
+        if !self.has(Hook::Brushes) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.brush_engines.iter().find(|e| e.key == key)?.studio.clone())
+    }
+
     /// The look engine `key` gave the brush whose data is `id`, if it is kept.
     pub(crate) fn look_kept(&self, key: &str, id: u64) -> Option<Arc<crate::plugin_brushes::BrushLook>> {
         let mut working = self.working();

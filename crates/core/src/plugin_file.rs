@@ -209,6 +209,9 @@ struct RawEngine {
     key: String,
     label: String,
     accepts: Vec<String>,
+    /// The key of the action that is its brushes' studio, if it has one.
+    #[serde(default)]
+    studio: Option<String>,
 }
 
 /// The most brush engines a plugin has, and file endings each reads.
@@ -754,6 +757,11 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
                 && engine_keys.insert(e.key.clone())
                 && (1..=MOST_ACCEPTS).contains(&e.accepts.len())
                 && e.accepts.iter().all(|a| ending(a) && endings.insert(a.clone()))
+                // a studio is one of its actions, which shows a panel
+                && e.studio.as_ref().is_none_or(|key| {
+                    raw.actions.iter().any(|a| &a.key == key)
+                        && permissions.contains(&crate::plugin_commands::PluginPermission::Panel)
+                })
         });
     if !engines_fit || (!engined && !raw.brush_engines.is_empty()) {
         return Err(Refusal::Described);
@@ -765,6 +773,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             key: format!("{id}.{}", e.key),
             label: e.label,
             accepts: e.accepts,
+            studio: e.studio.map(|key| format!("{id}.{key}")),
         })
         .collect();
     if !brush_engines.is_empty() {
@@ -1942,6 +1951,73 @@ pub(crate) mod tests {
         manifest["hooks"] = json!([]);
         manifest["kinds"] = kinds;
         pack(&manifest, &[(MODULE, &module)])
+    }
+
+    /// A brush engine's calls that answer nothing, and an action with a panel to be its studio.
+    const ENGINE: &str = r#"(module
+        (import "procraft" "show_panel" (func (param i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (func (export "procraft_brush_in") (param i32) (result i32) (i32.const 1024))
+        (func (export "procraft_brush_out") (result i32) (i32.const 1024))
+        (func (export "procraft_brush_import") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "procraft_brush_load") (param i32 i32) (result i32) (i32.const -1))
+        (func (export "procraft_brush_begin") (param i32) (result i32) (i32.const -1))
+        (func (export "procraft_brush_add") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "procraft_brush_end") (param i32) (result i32) (i32.const 0))
+        (func (export "procraft_action") (param i32) (result i32) (i32.const 0))
+        (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0)))"#;
+
+    #[test]
+    fn a_plugin_written_to_interface_4_lists_its_brush_engines() {
+        let module = wat::parse_str(ENGINE).unwrap();
+        let mut manifest = coded("org.example.pens", &module);
+        manifest["compat"]["procraft"]["interface"] = json!(4);
+        manifest["hooks"] = json!([]);
+        manifest["permissions"] = json!(["panel"]);
+        manifest["actions"] = json!([{ "key": "studio", "label": "Pen studio" }]);
+        manifest["brush_engines"] =
+            json!([{ "key": "pens", "label": "Pens", "accepts": ["pens", "pen2"], "studio": "studio" }]);
+        let package = read_package(&a_coded_file(&manifest, &module)).unwrap();
+        let engine = crate::plugin_brushes::BrushEngine {
+            key: "org.example.pens.pens".to_owned(),
+            label: "Pens".to_owned(),
+            accepts: vec!["pens".to_owned(), "pen2".to_owned()],
+            studio: Some("org.example.pens.studio".to_owned()),
+        };
+        assert_eq!(package.manifest.brush_engines, [engine]);
+        assert_eq!(package.manifest.hooks, [Hook::Brushes], "on the brushes hook, not named");
+        let of = |path: &str, value: Value| refusal(&a_coded_file(&with(manifest.clone(), path, value), &module));
+        // an older interface has none; endings plain and few, each once; a studio one of its actions
+        assert_eq!(of("/compat/procraft/interface", json!(3)), Refusal::Described);
+        let engine = |accepts: Value, studio: Value| json!([{ "key": "pens", "label": "Pens", "accepts": accepts, "studio": studio }]);
+        assert_eq!(of("/brush_engines", engine(json!([]), json!(null))), Refusal::Described);
+        assert_eq!(of("/brush_engines", engine(json!(["Pens"]), json!(null))), Refusal::Described);
+        assert_eq!(of("/brush_engines", engine(json!(["a.b"]), json!(null))), Refusal::Described);
+        assert_eq!(of("/brush_engines", engine(json!(["pens", "pens"]), json!(null))), Refusal::Described);
+        assert_eq!(of("/brush_engines", engine(json!(["pens"]), json!("other"))), Refusal::Described);
+        assert!(
+            read_package(&a_coded_file(
+                &with(manifest.clone(), "/brush_engines", engine(json!(["pens"]), json!(null))),
+                &module
+            ))
+            .is_ok()
+        );
+        // a studio shows a panel
+        assert_eq!(of("/permissions", json!([])), Refusal::Described);
+        // the brush data of its own brushes is a permission it may ask for
+        assert!(
+            read_package(&a_coded_file(
+                &with(manifest.clone(), "/permissions", json!(["panel", "brush.data"])),
+                &module
+            ))
+            .is_ok()
+        );
+        // and code that has no engine can't say it has
+        let plain = a_module();
+        let mut lacking = coded("org.example.plain", &plain);
+        lacking["compat"]["procraft"]["interface"] = json!(4);
+        lacking["brush_engines"] = json!([{ "key": "pens", "label": "Pens", "accepts": ["pens"] }]);
+        assert_eq!(refusal(&a_coded_file(&lacking, &plain)), Refusal::Code);
     }
 
     #[test]
