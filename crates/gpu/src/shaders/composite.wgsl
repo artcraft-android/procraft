@@ -96,6 +96,8 @@ struct StrokePixel {
 // threshold and its opacity
 fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     var s = textureLoad(stroke_tex, p, 0);
+    // what the stamps laid, before the edges, grain and second change it
+    let laid = s.a;
     if (lu.wet < 0.0 && s.a > 0.0) {
         // a preview: how much of an edge the pixel is (its coverage above its neighbours' a few
         // pixels away), the edges a little stronger and the inside as it is (as measured: at
@@ -147,9 +149,14 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         if (lu.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
-        let a = dual_rise(dual_combine(s.a, b, lu.dual - 1u), built, lu.dual - 1u);
-        // the first's colour where it is, else the second's (drawn in the stroke's colour too)
-        let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
+        let mode = lu.dual - 1u;
+        let a = dual_rise(dual_combine(s.a, b, mode), built, mode);
+        // the first's colour; by Normal turned toward the second's (drawn in the stroke's colour)
+        // as far as the second shows where the first laid little, so where the first fades out
+        // the two meet smoothly, not at a seam of whatever colour the first's faintest paint
+        // holds; the second's wherever the first left nothing
+        let toward = select(select(0.0, clamp((1.0 - laid) * b, 0.0, 1.0), mode == 0u), 1.0, s.a <= 0.0);
+        let colour = mix(s.rgb / max(s.a, 1e-6), t.rgb / max(t.a, 1e-6), toward);
         s = vec4<f32>(colour * a, a);
     }
     // burnt edges show where the stroke is thin: where its paper grain or its second took paint

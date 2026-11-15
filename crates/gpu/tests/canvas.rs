@@ -2747,6 +2747,43 @@ fn a_dual_brush_s_second_adds_nothing_where_the_first_is_not() {
 }
 
 #[test]
+fn a_dual_brush_s_first_fades_into_its_second_s_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a soft red first inside a wide blue second, by Normal: where the first fades out its colour
+    // gives way to the second's as far as the second shows past it, not all at once at its edge
+    let laid = |dual: bool| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let first = StrokeStyle { hardness: 0.1, ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0) };
+        if dual {
+            let second = procraft_gpu::SecondStroke {
+                style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
+                mode: 0,
+                threshold: -1.0,
+            };
+            canvas.begin_dual_stroke(doc.current(), first, second);
+            canvas.add_second_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 30.0, 1.0)]);
+        } else {
+            canvas.begin_stroke(doc.current(), first);
+        }
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 12.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let (alone, both) = (laid(false), laid(true));
+    // where the first alone is about half there
+    let x = (32..64).find(|&x| pixel(&alone, 64, x, 16)[3] < 140).unwrap();
+    let [r, _, b, a] = pixel(&both, 64, x, 16);
+    assert!(a > 250, "{a}");
+    assert!(r > 60 && b > 60, "red {r} blue {b} at {x}");
+    // the first's own colour in its middle, the second's past it
+    assert_eq!(pixel(&both, 64, 32, 16), [255, 0, 0, 255]);
+    assert_eq!(pixel(&both, 64, 60, 16), [0, 0, 255, 255]);
+}
+
+#[test]
 fn modulated_wet_paint_lays_a_pixel_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
