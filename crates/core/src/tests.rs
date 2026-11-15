@@ -9010,6 +9010,63 @@ fn crops_among_other_work_undo_and_redo_whole() {
     }
 }
 
+/// While a transform is open the selection's bands over what it leaves out go (its box shows what
+/// moves); an adjustment or Liquify keeps them.
+#[test]
+fn the_selections_bands_go_while_transforming() {
+    let Some(s) = session(100, 200) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let layer = s.layers()[0].id;
+    assert!(s.select_layer_contents(layer));
+    // how many colours a frame shows over a part of the canvas well clear of the dot
+    let colours = |s: &CanvasSession| {
+        use procraft_gpu::wgpu;
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test frame"),
+            size: wgpu::Extent3d { width: 200, height: 200, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let started = std::time::Instant::now();
+        st.draw_frame(&view, format, (200, 200), procraft_engine::profile::Profile::Srgb, started);
+        let gpu = st.gpu.as_ref().unwrap();
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        let px = procraft_gpu::read_texture(gpu, &target, 200, 200).unwrap();
+        let mut seen: Vec<[u8; 4]> = Vec::new();
+        for y in 20..60 {
+            for x in 140..180 {
+                let i = (y * 200 + x) * 4;
+                let p = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+                if !seen.contains(&p) {
+                    seen.push(p);
+                }
+            }
+        }
+        seen.len()
+    };
+    assert!(colours(&s) > 1, "the bands show");
+    assert!(s.transform_begin().is_some());
+    assert_eq!(colours(&s), 1, "no bands while transforming");
+    s.transform_end(false);
+    assert!(colours(&s) > 1, "back once it ends");
+    assert!(s.adjust_begin());
+    assert!(colours(&s) > 1, "an adjustment keeps them");
+    s.adjust_end(false);
+    assert!(s.liquify_begin());
+    assert!(colours(&s) > 1, "Liquify keeps them");
+    s.adjust_end(false);
+}
+
 #[test]
 fn a_crop_drops_what_was_undone_before_it() {
     let Some(s) = session(100, 100) else { return };
