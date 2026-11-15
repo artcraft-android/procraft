@@ -795,7 +795,8 @@ impl Interface {
         let tool_button = match info.tool {
             ToolKind::Smudge => BarButton::Smudge,
             ToolKind::Erase => BarButton::Erase,
-            ToolKind::Paint => BarButton::Paint,
+            // the desktop has no light button yet: it sits with the brush
+            ToolKind::Paint | ToolKind::Light => BarButton::Paint,
         };
         let anchor = |p: Popover| match p {
             Popover::Actions => bar.rect(BarButton::Actions),
@@ -2205,6 +2206,7 @@ impl Interface {
             ToolKind::Paint => "Painting",
             ToolKind::Smudge => "Smudging",
             ToolKind::Erase => "Erasing",
+            ToolKind::Light => "Lighting",
         };
         self.overlays.notice(format!("{doing} with the current brush"), false);
     }
