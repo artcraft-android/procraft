@@ -269,8 +269,11 @@ const SLOW: f32 = 25.0;
 const SPAN: f32 = 100.0;
 /// How many frames the speed is smoothed over.
 const SPEED_FRAMES: f32 = 3.0;
-/// The frames between two samples with the same time: those of a pen sampled 240 times a second.
-const SAMPLE_FRAMES: f32 = 0.25;
+/// The frames between two samples with the same time: a sample's at the input's rate (60 over
+/// the points a second, a pen's 240 and a finger's 120).
+fn sample_frames(pen: bool) -> f32 {
+    (60.0 / if pen { PEN_RATE } else { FINGER_RATE }) as f32
+}
 /// The input rates stabilisation, motion filtering and pressure smoothing are tuned for, samples a
 /// second: a pen's and a finger's. They work per sample at these rates; at others each sample
 /// counts for the time it covers, so they feel the same however fast the input comes.
@@ -1475,7 +1478,7 @@ impl StrokeBuilder {
         let steps = if batched || since <= 0.0 { 1.0 } else { (since / interval).min(MOST_STEPS) as f32 };
         // frames of a 60 Hz display since the last sample (a sample's worth at the tuned rate, if
         // it came with it)
-        let frames = if batched || since <= 0.0 { SAMPLE_FRAMES } else { (since * 0.06) as f32 };
+        let frames = if batched || since <= 0.0 { sample_frames(pen) } else { (since * 0.06) as f32 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
         let smoothing = pressure_keep(together(self.brush.pressure_smoothing, self.input.pressure_smoothing));
         let pressure = match self.pressure {
@@ -2819,6 +2822,29 @@ mod tests {
         assert_eq!(by_speed(0.5, 1.0), 0.5);
         assert_eq!(by_speed(-0.5, 0.0), 0.5);
         assert_eq!(by_speed(-0.5, 1.0), 1.0);
+    }
+
+    #[test]
+    fn samples_with_one_time_are_a_sample_apart_at_the_input_s_rate() {
+        // a fast stroke thinned by speed: samples all with one time count as a pen's (240 a
+        // second) or a finger's (120 a second) apart, as those timed so do
+        let radii = |pointer: Pointer, ms: f64| {
+            let mut b = plain();
+            b.set_setting("speed_size", 1.0);
+            let samples: Vec<Sample> =
+                (0..40).map(|i| Sample::at(Vec2::new(i as f32 * 20.0, 50.0), 1.0, i as f64 * ms)).collect();
+            let mut s = StrokeBuilder::new(b, 10.0, pointer);
+            s.add(&samples);
+            s.finish().iter().map(|s| s.radius).collect::<Vec<f32>>()
+        };
+        for (pointer, rate) in [(Pointer::Stylus, 240.0), (Pointer::Finger, 120.0)] {
+            let (at_once, timed) = (radii(pointer, 0.0), radii(pointer, 1000.0 / rate));
+            assert_eq!(at_once.len(), timed.len(), "{pointer:?}");
+            let off = at_once.iter().zip(&timed).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(off < 1e-3, "{pointer:?}: {off}");
+        }
+        // (and the two differ: a finger's samples are twice as far apart in time)
+        assert_ne!(radii(Pointer::Finger, 0.0), radii(Pointer::Finger, 1000.0 / 240.0));
     }
 
     #[test]
