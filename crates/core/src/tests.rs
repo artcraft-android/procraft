@@ -48,6 +48,25 @@ fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     [px[i], px[i + 1], px[i + 2], px[i + 3]]
 }
 
+/// Frames are drawn no closer together than a little under the screen's refresh period, and with
+/// no rate given (or one that can't be), as soon as they are wanted.
+#[test]
+fn frames_are_spaced_by_the_screens_fastest_refresh() {
+    use crate::frame::frame_spacing;
+    use std::time::Duration;
+    let ms = |d: Option<Duration>| d.map(|d| (d.as_secs_f64() * 1000.0 * 100.0).round() / 100.0);
+    assert_eq!(ms(frame_spacing(120.0)), Some(7.5));
+    assert_eq!(ms(frame_spacing(60.0)), Some(15.0));
+    for unusable in [0.0, -60.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(frame_spacing(unusable), None);
+    }
+    // a rate past a thousand frames a second counts as a thousand
+    assert_eq!(ms(frame_spacing(100_000.0)), Some(0.9));
+    let s = CanvasSession::new(64, 64);
+    s.set_refresh_rate(90.0);
+    assert_eq!(ms(s.shared.lock().frame_spacing), Some(10.0));
+}
+
 /// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
 /// event's work, each frame's (one every two events, as a 240 Hz pen at 120 frames a second), and
 /// the whole stroke with the GPU done, an event's share. Run on a device with `--ignored

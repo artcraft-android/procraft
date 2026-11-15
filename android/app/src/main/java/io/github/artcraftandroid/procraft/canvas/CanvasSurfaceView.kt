@@ -93,6 +93,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private fun remember(width: Int, height: Int, rotation: Int) {
         vm.session?.let { placeGrid(it, width, height, rotation) }
+        // frames no more often than the screen can show them: its fastest refresh at this size
+        display?.let { d ->
+            val size = d.mode
+            val fastest = d.supportedModes.filter { it.physicalWidth == size.physicalWidth && it.physicalHeight == size.physicalHeight }.maxOfOrNull { it.refreshRate }
+            vm.session?.setRefreshRate(fastest ?: d.refreshRate)
+        }
         vm.screenCentre = Offset(width / 2f, height / 2f)
         windowWidth = width
         windowHeight = height

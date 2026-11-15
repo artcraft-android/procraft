@@ -573,6 +573,10 @@ pub(crate) struct State {
     /// A frame wanted at this time, not before: the selection's bands drift slowly, so a frame
     /// shows them moved only every so often (a pixel at a time).
     pub(crate) frame_due: Option<std::time::Instant>,
+    /// The least time between the beginnings of two frames: a little under the screen's refresh
+    /// period, once the app has said what that is (see [`CanvasSession::set_refresh_rate`]).
+    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+    pub(crate) frame_spacing: Option<std::time::Duration>,
     /// Frames wait (the canvas is being redrawn a stroke at a time, as the brush studio's pad is
     /// when its brush changes), and one was asked for meanwhile.
     pub(crate) holding_frames: bool,
@@ -1592,6 +1596,7 @@ impl CanvasSession {
             x_ray: false,
             needs_frame: false,
             frame_due: None,
+            frame_spacing: None,
             holding_frames: false,
             frame_held: false,
             stop: false,
@@ -2112,6 +2117,12 @@ impl CanvasSession {
     /// fill then shows at once instead of spreading in.
     pub fn set_reduce_motion(&self, reduce: bool) {
         self.shared.lock().reduce_motion = reduce;
+    }
+
+    /// How many frames a second the screen shows at most (its fastest refresh): frames are drawn
+    /// no more often than that (a little more, so none is missed), however fast input comes.
+    pub fn set_refresh_rate(&self, hertz: f32) {
+        self.shared.lock().frame_spacing = crate::frame::frame_spacing(hertz);
     }
 
     /// How many window pixels make one interface point (the screen's density).

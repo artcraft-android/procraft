@@ -195,6 +195,13 @@ impl State {
     }
 }
 
+/// The least time between the beginnings of two frames for a screen showing at most `hertz` frames
+/// a second: a tenth under its period, so a frame is ready for every refresh as frames drift
+/// against it. None for a rate that can't be.
+pub(crate) fn frame_spacing(hertz: f32) -> Option<Duration> {
+    (hertz.is_finite() && hertz >= 1.0).then(|| Duration::from_secs_f32(0.9 / hertz.min(1000.0)))
+}
+
 /// The profile a configured surface shows colours in.
 pub fn screen_profile(config: &wgpu::SurfaceConfiguration) -> Profile {
     if config.color_space == wgpu::SurfaceColorSpace::DisplayP3 { Profile::DisplayP3 } else { Profile::Srgb }
