@@ -268,6 +268,28 @@ mod tests {
         );
         stroke.add(&samples);
         assert!(stroke.out.iter().all(|d| d.flags & 176 == 176), "moving paint, dulled, clear");
+        // without smearing alpha, what it moves is laid over what is there
+        let over = xml.replace("</Preset>", r#"<param name="SmudgeRateSmearAlpha"><![CDATA[false]]></param></Preset>"#);
+        let mut data = Record::new();
+        data.field(1, over.as_bytes());
+        let mut stroke = Stroke::new(
+            Rc::new(load(&data.bytes(), false).unwrap()),
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3, turn: 0.0 },
+        );
+        stroke.add(&samples);
+        assert!(stroke.out.iter().all(|d| d.flags & 256 == 256), "laid over");
+    }
+
+    /// A picture tip the preset names but doesn't hold is Krita's default tip, as Krita stands it
+    /// in: round, 40 across, spaced automatically.
+    #[test]
+    fn a_missing_tip_is_krita_s_default() {
+        let xml = r#"<Preset name="M" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="gbr_brush" filename="gone.gih" scale="1" spacing="2"/>]]></param></Preset>"#;
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let brush = load(&data.bytes(), false).unwrap();
+        assert_eq!((brush.tip.width, brush.tip.height), (40.0, 40.0));
+        assert_eq!(brush.tip.auto_spacing, Some(0.8));
     }
 
     /// A brush of `engine` with `params`, its tip a round one `diameter` across, drawn along a line.

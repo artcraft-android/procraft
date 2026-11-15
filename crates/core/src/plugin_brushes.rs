@@ -109,11 +109,13 @@ const FLIP_DOWN: u32 = 2;
 const OWN_COLOUR: u32 = 4;
 const FOR_SECOND: u32 = 8;
 /// A dab that moves the paint under where the stroke's last lay; that paint made one colour first;
-/// that weighed by its tip; the colour it mixes in clear (taking paint away).
+/// that weighed by its tip; the colour it mixes in clear (taking paint away); what it moves laid over
+/// what is there (not in its place).
 const MOVES_PAINT: u32 = 16;
 const DULLS: u32 = 32;
 const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
+const LAID_OVER: u32 = 256;
 
 /// The most tips, and the largest side of one, and of a texture.
 const MOST_TIP_SIDE: u32 = 4096;
@@ -820,6 +822,7 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
             dull: (flags & DULLS != 0)
                 .then(|| (if radius.is_finite() { radius.clamp(0.0, 3.0) } else { 0.0 }, flags & WEIGHED != 0)),
             clear: flags & CLEAR_PAINT != 0,
+            over: flags & LAID_OVER != 0,
         });
     }
     // made sharp, if it says (a threshold of 0 says not)

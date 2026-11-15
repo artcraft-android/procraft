@@ -36,7 +36,7 @@ sketch and spray brushes as far as dabs draw them. It comes with the app, off.
   that paint made one colour first (dulling, from the share of it its smudge radius says, weighed by
   the tip in the newer engine), the colour mixed in at its colour rate (the gradient option moving
   it towards the secondary colour; an eraser's is clear, taking the paint away), laid as far as its
-  smudge rate says, by the older engine's sums or the newer's; the first dab only marks where the
+  smudge rate says (in place of what is there, or over it without smearing alpha), by the older engine's sums or the newer's; the first dab only marks where the
   next picks up from.
 - Other engines: the quick brush (hard round dabs of its diameter and spacing), the tangent normal
   brush (a pixel brush painting the pen's lean, or the stroke's way, or the pen's turn, as a normal
@@ -78,11 +78,11 @@ readers (which its tests use) run in it.
   background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
-- Colour smudge's overlay mode (picking up from every layer: it picks up from the layer drawn on),
-  its paint thickness (lightness tips' height), and how it lays what it moves where that is clear
-  (as smearing alpha does, whatever the preset says).
+- Colour smudge's overlay mode (picking up from every layer: it picks up from the layer drawn on)
+  and its paint thickness (lightness tips' height).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
-  tip of one is drawn round, a masking brush or texture of one left out.
+  tip of one is Krita's default tip, as Krita stands it in (round, 40 px across, the studio saying
+  so); a masking brush or texture of one is left out.
 - The 1-pixel brush's sharp lines, drawn as dabs.
 - Perspective counts as 1 (the app has no perspective assistant), as in Krita without one; a
   gradient map takes the gradient from the colour to the secondary colour (the app has no current

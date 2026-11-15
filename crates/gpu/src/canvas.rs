@@ -1278,7 +1278,8 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         pick: s.center,
         dull: 0.0,
         dull_weighted: 0,
-        _pad: [0; 2],
+        smear_over: 0,
+        _pad: 0,
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1449,7 +1450,9 @@ struct SmudgeUniform {
     /// reach of the middle; weighed by the stamp's shape (1) or not (0).
     dull: f32,
     dull_weighted: u32,
-    _pad: [u32; 2],
+    /// 1: what it carries is laid over what is there (else in place of it, as far as it lays).
+    smear_over: u32,
+    _pad: u32,
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -5687,6 +5690,7 @@ impl Canvas {
                 paint: if pick_up.is_some_and(|p| p.clear) { [0.0; 4] } else { [paint[0], paint[1], paint[2], 1.0] },
                 dull,
                 dull_weighted,
+                smear_over: u32::from(pick_up.is_some_and(|p| p.over)),
                 kept: smudge.kept,
                 blur,
                 anchor,

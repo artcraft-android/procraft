@@ -206,6 +206,7 @@ const MOVES_PAINT: u32 = 16;
 const DULLS: u32 = 32;
 const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
+const LAID_OVER: u32 = 256;
 
 impl Dab {
     pub fn write(&self, out: &mut Vec<u8>) {
@@ -815,6 +816,10 @@ impl Stroke {
                 // Krita mixes the colour in by the brush's composite op: an eraser's takes paint away
                 if brush.erases {
                     dab.flags |= CLEAR_PAINT;
+                }
+                // without smearing alpha, what it moves goes over what is there
+                if !smudge.smear_alpha {
+                    dab.flags |= LAID_OVER;
                 }
                 if smudge.gradient.checked {
                     let g = smudge.gradient.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);

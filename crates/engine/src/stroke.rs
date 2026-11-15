@@ -786,13 +786,15 @@ impl Random {
 /// What a smudge stamp that picks up behind it does with what it picks up: lays it with a share of
 /// its colour mixed in (the stroke's, or its own), or first makes it one colour, the average of
 /// what lies within a share of its reach of the middle (weighed by its shape, or not). A clear
-/// colour (an erasing brush's) takes that share of the paint away instead.
+/// colour (an erasing brush's) takes that share of the paint away instead. It lays what it carries
+/// in place of what is there, or (`over`) over it, so that it never thins what is there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickUp {
     pub paint_share: f32,
     pub paint: Option<[f32; 3]>,
     pub dull: Option<(f32, bool)>,
     pub clear: bool,
+    pub over: bool,
 }
 
 /// A brush engine outside the app's own (a plugin's): it lays a stroke's stamps from its input

@@ -1097,7 +1097,8 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2 mirrored down, 4 its own
   colour, 8 for the second stroke, 16 it moves the paint under where the stroke's last dab lay to
   where it lies, 32 that paint made one colour first, 64 that colour weighed by the dab's tip, 128
-  the colour it mixes in clear, taking paint away), its
+  the colour it mixes in clear, taking paint away, 256 what it moves laid over what is there, never
+  thinning it, rather than in its place), its
   colour (three f32, sRGB 0..1, with flag 4), the texture's
   strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
   lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it

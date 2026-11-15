@@ -317,7 +317,7 @@ impl Studio {
         let names: Vec<&str> = all.iter().map(|(_, name)| *name).collect();
         page.choice(Does::Page, "Page", &names, self.page);
         match all[self.page].0 {
-            Shows::Tip => tip_page(p, &mut page),
+            Shows::Tip => tip_page(p, &self.files, &mut page),
             Shows::Spacing => spacing_page(p, &mut page),
             Shows::Size => option_rows(p, &mut page, "Size", "Size", true),
             Shows::OpacityFlow => {
@@ -516,7 +516,7 @@ fn tip_element(p: &Preset) -> Option<crate::xml::Element> {
     p.element("brush_definition")
 }
 
-fn tip_page(p: &Preset, page: &mut Page) {
+fn tip_page(p: &Preset, files: &[(String, Vec<u8>)], page: &mut Page) {
     let Some(tip) = tip_element(p) else {
         page.text("This brush's tip can't be read.");
         return;
@@ -554,7 +554,16 @@ fn tip_page(p: &Preset, page: &mut Page) {
         );
     } else {
         let file = tip.attribute("filename").unwrap_or("its picture");
-        page.text(&format!("A picture tip: {file}."));
+        // carried in the preset, or beside it
+        let plain = |n: &str| n.rsplit(['/', '\\']).next().unwrap_or(n).to_owned();
+        let carried = p.resource(file).is_some() || files.iter().any(|(n, _)| plain(n) == plain(file));
+        if carried {
+            page.text(&format!("A picture tip: {file}."));
+        } else {
+            page.text(&format!(
+                "A picture tip: {file}, which the file doesn't hold. As in Krita, its default tip stands in: round, 40 px across."
+            ));
+        }
         page.slider(set("scale", false, 0.01), "Scale", 1.0, 1000.0, 1.0, attr("scale", false) * 100.0, "%");
     }
     let degrees = attr("angle", false).to_degrees().rem_euclid(360.0);

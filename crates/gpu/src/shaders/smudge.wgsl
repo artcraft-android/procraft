@@ -123,6 +123,8 @@ struct SmudgeStamp {
     pick: vec2<f32>,
     dull: f32,
     dull_weighted: u32,
+    // 1: what it carries laid over what is there (never thinning it), else in its place
+    smear_over: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -488,7 +490,11 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = window_index(p);
     let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), st.laid_apart == 2u);
     // smudging: the grain lets less of what is carried through
-    var out = mix(w, carried(p), m * g);
+    let moved = carried(p);
+    var out = mix(w, moved, m * g);
+    if (st.smear_over == 1u) {
+        out = moved * (m * g) + w * (1.0 - moved.a * m * g);
+    }
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there

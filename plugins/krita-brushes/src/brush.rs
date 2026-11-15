@@ -471,12 +471,27 @@ fn tip_picture(picture: &Rgba, kind: Kind, image: bool, adjust: &Adjustment) -> 
     Mask { width, height, pixels }
 }
 
-/// A round tip `diameter` across, for a preset whose picture can't be had.
-fn stand_in(diameter: f32) -> Tip {
-    let xml = format!(
-        r#"<Brush type="auto_brush" spacing="0.1"><MaskGenerator type="circle" id="default" diameter="{diameter}" ratio="1" hfade="1" vfade="1" antialiasEdges="1"/></Brush>"#
-    );
-    let brush = crate::xml::parse(&xml).unwrap_or_default();
+/// A hard round tip `diameter` across.
+fn round_tip(diameter: f32) -> Tip {
+    tip_of(
+        &format!(
+            r#"<Brush type="auto_brush" spacing="0.1"><MaskGenerator type="circle" id="default" diameter="{diameter}" ratio="1" hfade="1" vfade="1" antialiasEdges="1"/></Brush>"#
+        ),
+        diameter,
+    )
+}
+
+/// The tip Krita stands in for one whose picture it can't find: its default, a hard round tip 40
+/// across, spaced automatically.
+pub const STAND_IN: &str = r#"<Brush useAutoSpacing="1" angle="0" spacing="0.1" density="1" BrushVersion="2" type="auto_brush" randomness="0" autoSpacingCoeff="0.8"><MaskGenerator spikes="2" hfade="1" ratio="1" diameter="40" id="default" type="circle" antialiasEdges="1" vfade="1"/></Brush>"#;
+
+fn stand_in() -> Tip {
+    tip_of(STAND_IN, 40.0)
+}
+
+/// The auto tip `xml` describes (`diameter` across, should it not draw).
+fn tip_of(xml: &str, diameter: f32) -> Tip {
+    let brush = crate::xml::parse(xml).unwrap_or_default();
     read_tip(&brush, &|_| None, None, false, true).unwrap_or(Tip {
         tips: Tips::Images { count: 1, pipe: None },
         kind: Kind::Mask,
@@ -662,7 +677,8 @@ impl Brush {
         let mut tip = definition
             .as_ref()
             .and_then(|b| read_tip(b, find, Some(&dynamics.softness), light, false))
-            .unwrap_or_else(|| stand_in(definition.as_ref().and_then(|b| b.number("diameter")).unwrap_or(40.0)));
+            // as Krita does, its default tip where the preset's picture can't be found
+            .unwrap_or_else(stand_in);
         let sketch_radius = 0.5 * tip.width.max(tip.height);
         let (sketch, spray) = match p.paintop.as_str() {
             "sketchbrush" => (Some(crate::others::Sketch::read(p)), None),
@@ -672,7 +688,7 @@ impl Brush {
         if sketch.is_some() || spray.as_ref().is_some_and(|s| !s.own_tip) {
             // its lines' and particles' tips: a hard round one, a square (unless its particles
             // are its own tip)
-            let round = stand_in(64.0).masks.into_iter().next();
+            let round = round_tip(64.0).masks.into_iter().next();
             let square = Mask { width: 1, height: 1, pixels: if light { Vec::new() } else { vec![255] } };
             let masks: Vec<Mask> =
                 if sketch.is_some() { vec![square] } else { round.into_iter().chain([square]).collect() };
