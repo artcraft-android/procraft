@@ -987,16 +987,21 @@ impl Timeline {
         true
     }
 
-    /// Clip `id` moved to track `track` (on the same level), as near frame `start` as it fits
-    /// without covering another clip. False if it can't go there.
+    /// Clip `id` moved to track `track` (on any level: into a group clip or out of one), as near
+    /// frame `start` (on that track's level) as it fits without covering another clip. A group
+    /// it goes into grows to cover it (see [`Timeline::cover`]). False if it can't go there (a
+    /// group into itself).
     pub fn move_clip(&mut self, id: ClipId, track: TrackId, start: u32) -> bool {
+        if self.groups_of_track(track).is_none_or(|gs| gs.iter().any(|g| g.id == id)) {
+            return false;
+        }
         let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
-        let Some(to) = level.iter().position(|x| x.id == track) else { return false };
         let Some(clip) = level.get_mut(t).map(|tr| tr.clips.remove(c)) else { return false };
-        let Some(dest) = level.get_mut(to) else { return false };
+        let Some(dest) = self.track_mut(track) else { return false };
         let start = nearest_room(dest, start, clip.duration);
         let at = dest.clips.partition_point(|x| x.start < start);
         dest.clips.insert(at, Clip { start, ..clip });
+        self.cover(track);
         self.fit();
         true
     }
@@ -1116,10 +1121,11 @@ impl Timeline {
         Some(group_id)
     }
 
-    /// Group clip `id` taken apart: its bottom track's clips go back onto its own track (where it
-    /// was), and each of its other tracks goes just above that, their frames back on this level.
-    /// Its own keys and cycle are let go. False if it isn't a group.
-    pub fn ungroup(&mut self, id: ClipId) -> bool {
+    /// Group clip `id` taken apart as it is: its bottom track's clips go back onto its own track
+    /// (where it was), and each of its other tracks goes just above that, their frames back on
+    /// this level. Its own keys and cycle are let go (`ungroup` folds them in first). False if
+    /// it isn't a group.
+    fn take_apart(&mut self, id: ClipId) -> bool {
         let next = self.next_track;
         let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
         let Some(track) = level.get_mut(t) else { return false };
@@ -2459,9 +2465,16 @@ fn renumber(
     }
 }
 
+#[path = "timeline_edits.rs"]
+mod edits;
+
 #[cfg(test)]
 #[path = "timeline_1g_tests.rs"]
 mod tests_1g;
+
+#[cfg(test)]
+#[path = "timeline_edits_tests.rs"]
+mod edits_tests;
 
 #[cfg(test)]
 mod tests {

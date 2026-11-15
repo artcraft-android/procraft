@@ -148,6 +148,19 @@ impl Sound {
     pub fn end(&self) -> f64 {
         self.at + self.length
     }
+
+    /// Its keyed level on each timeline frame it plays through at `fps` frames a second, from the
+    /// frame it starts in to the one it ends in: (that first frame, a level a frame). None when it
+    /// has no volume keys (it plays at its one level) or is muted.
+    pub fn levels(&self, fps: u32) -> Option<(u32, Vec<f32>)> {
+        if self.muted || self.volume_keys.keys.is_empty() {
+            return None;
+        }
+        let fps = f64::from(fps.max(1));
+        let whole = |f: f64| if f >= f64::from(u32::MAX) { u32::MAX } else { f.max(0.0) as u32 };
+        let (first, last) = (whole((self.at * fps).floor()), whole((self.end() * fps).ceil()));
+        Some((first, (first..=last).map(|f| self.gain_at(f)).collect()))
+    }
 }
 
 impl AudioClip {

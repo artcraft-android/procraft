@@ -1707,6 +1707,41 @@ impl Document {
         Some((renamed(root), pairs))
     }
 
+    /// Paint layer `id` (with its mask) put in a new group where it was, the group taking its
+    /// name and the layer renamed `inner`. Returns the group; none if `id` isn't a paint layer.
+    pub fn wrap_in_group(&mut self, id: LayerId, inner: &str) -> Option<LayerId> {
+        let layer = self.layer(id).filter(|l| l.kind == LayerKind::Paint)?;
+        let (name, parent) = (layer.name.clone(), self.group_of(id));
+        let end = self.unit(id)?.end;
+        let group = self.blank(LayerKind::Group, name, parent);
+        let gid = group.id;
+        if let Some(l) = self.layer_mut(id) {
+            l.parent = Some(gid);
+            l.name = inner.to_owned();
+            l.clipped = false;
+        }
+        self.layers.insert(end.min(self.layers.len()), group);
+        self.fix_clips();
+        Some(gid)
+    }
+
+    /// A new empty layer in group `group`: above the current layer when that is inside it, else
+    /// on top of the group's own. It becomes current. None if `group` isn't a group.
+    pub fn add_layer_into(&mut self, group: LayerId) -> Option<LayerId> {
+        self.layer(group).filter(|l| l.kind == LayerKind::Group)?;
+        if self.is_inside(self.current, group) {
+            return Some(self.add_layer());
+        }
+        let name = format!("Layer {}", self.layers.len() + 1);
+        // a group's own entry comes after everything in it
+        let at = self.index_of(group)?;
+        let layer = self.blank(LayerKind::Paint, name, Some(group));
+        let id = layer.id;
+        self.layers.insert(at, layer);
+        self.current = id;
+        Some(id)
+    }
+
     /// Removes a layer, with its mask, or a group with everything in it; the last paint layer
     /// can't be removed. The layer below (or above) becomes current.
     pub fn delete_layer(&mut self, id: LayerId) -> bool {
