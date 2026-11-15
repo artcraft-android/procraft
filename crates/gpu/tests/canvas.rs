@@ -3432,6 +3432,37 @@ fn stamps_mix_in_the_secondary_colour() {
 }
 
 #[test]
+fn a_grain_combined_by_a_colour_only_mode_leaves_the_coverage_alone() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a half-strong dot over the paper grain: hue, saturation, colour, luminosity, darker and
+    // lighter colour have nothing to say about how much paint there is, so it is as without grain
+    let cover = |grain_blend: u32, grain_depth: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            grain: Some(0),
+            grain_depth,
+            grain_scale: 64.0,
+            grain_blend,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 0.5)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (24..40).map(|x| pixel(&layer, 64, x, 32)[3]).collect::<Vec<_>>()
+    };
+    let bare = cover(1, 0.0);
+    for mode in [5, 10, 22, 23, 24, 25] {
+        assert_eq!(cover(mode, 1.0), bare, "mode {mode}");
+    }
+    // a mode that does combine amounts changes it
+    assert_ne!(cover(1, 1.0), bare);
+}
+
+#[test]
 fn the_grain_combines_with_the_stroke_by_its_blend_mode() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

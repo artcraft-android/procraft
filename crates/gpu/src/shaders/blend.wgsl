@@ -138,6 +138,25 @@ fn blend_value(b: f32, s: f32, mode: u32) -> f32 {
     return blend_rgb(vec3<f32>(b), vec3<f32>(s), mode).x;
 }
 
+// a stroke's coverage `a` combined with another amount `b` (its grain, its second's coverage) by
+// a blend mode: the modes that pick or carry over colour alone (darker and lighter colour, hue,
+// saturation, colour, luminosity) leave the coverage as it is; soft light lifts or lowers it
+// from a quarter of the way in, as far as `b` is past its middle; the rest as the colour blends
+fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
+    switch (mode) {
+        case 5u, 10u, 22u, 23u, 24u, 25u: {
+            return a;
+        }
+        case 12u: {
+            let k = 0.5 * a + 0.25;
+            return clamp(select(1.0 - 2.0 * (1.0 - b) * (1.0 - k), 2.0 * b * k, b < 0.5), 0.0, 1.0);
+        }
+        default: {
+            return blend_value(a, b, mode);
+        }
+    }
+}
+
 // coverage `a` and grain `g` combined by the grain's blend mode `mode`, as deep as `depth`: two
 // height-like modes of the grain's own (27: the coverage raised twelvefold, less the grain; 28:
 // the same or as much again over the grain's light), normal laying the coverage over the grain,
@@ -152,7 +171,7 @@ fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
     } else {
         var blended = g + a * (1.0 - g);
         if (mode != 0u) {
-            blended = clamp(blend_value(a, g, mode), 0.0, 1.0);
+            blended = clamp(blend_amount(a, g, mode), 0.0, 1.0);
         }
         r = mix(a, blended, depth);
     }
@@ -197,7 +216,7 @@ fn dual_combine(a: f32, b: f32, mode: u32) -> f32 {
         return dual_height(a, b);
     }
     if (mode != 0u) {
-        return clamp(blend_rgb(vec3<f32>(a), vec3<f32>(b), mode).x, 0.0, 1.0);
+        return clamp(blend_amount(a, b, mode), 0.0, 1.0);
     }
     return a + (1.0 - a) * b;
 }
