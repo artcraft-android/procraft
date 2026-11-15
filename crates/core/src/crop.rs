@@ -176,7 +176,14 @@ impl CanvasSession {
         let refused = st.canvas.as_mut().is_some_and(Canvas::take_smudge_refused);
         let failed = st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()));
         let failed = failed.or_else(|| st.filters.take_said());
-        failed.or_else(|| st.hooks.as_ref().and_then(|hooks| hooks.take_said()))
+        if failed.is_some() {
+            return failed;
+        }
+        // the plugins' list can wait on a plugin at work: asked with the canvas let go, so this
+        // poll (every few seconds) never holds up a touch meanwhile
+        let hooks = st.hooks.clone();
+        drop(guard);
+        hooks.and_then(|hooks| hooks.take_said())
     }
 
     /// The canvas's colour profile, by name.
