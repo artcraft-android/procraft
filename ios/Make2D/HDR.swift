@@ -51,6 +51,12 @@ extension CanvasModel {
         return max(screen?.currentEDRHeadroom ?? 1, 1)
     }
 
+    /// The paint colour lit `stops` above white (an HDR artwork's; 0, as chosen).
+    func setColorStops(_ stops: Float) {
+        colorStops = min(max(stops, 0), hdrLimitMost)
+        session.setColorStops(stops: colorStops)
+    }
+
     func setLightLimit(_ stops: Float) {
         lightLimit = min(max(stops, 0), hdrLimitMost)
         session.setLightLimit(stops: lightLimit)

@@ -620,6 +620,58 @@ enum ScreenCapture {
             // brightened past white: the bands' middles glow on a screen with extended range
             model.setLightLimit(3)
             lit(model)
+        case "hdr-export-check":
+            // what only a run can show: the HDR HEIC, the OpenEXR and the HLG video made, as
+            // hdr-check.* in the exports folder, for a look from outside
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                let session = model.session
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let dir = Sharing.exportsDir
+                    var said: [String] = []
+                    let heic = dir.appendingPathComponent("hdr-check.heic")
+                    do {
+                        let picture = try session.hdrPicture()
+                        if let data = HDRImage.heic(picture), (try? data.write(to: heic)) != nil {
+                            said.append("HEIC: \(data.count) bytes, brightest \(picture.brightest)")
+                        } else {
+                            said.append("HEIC: not encoded")
+                        }
+                    } catch {
+                        said.append("HEIC: \(error)")
+                    }
+                    let exr = dir.appendingPathComponent("hdr-check.exr")
+                    do {
+                        try session.exportExr(path: exr.path)
+                        said.append("EXR: made")
+                    } catch {
+                        said.append("EXR: \(error)")
+                    }
+                    // then as an animation: the picture, and an empty frame after it
+                    DispatchQueue.main.sync {
+                        model.animationAssist.setAssist(true, pages: false)
+                        model.addLayer()
+                    }
+                    let video = CanvasModel.exportAnimation(session, .hevc, AnimatedChoices(fps: 12))
+                    let moved = video.flatMap { url -> URL? in
+                        let to = dir.appendingPathComponent("hdr-check.mp4")
+                        try? FileManager.default.removeItem(at: to)
+                        return (try? FileManager.default.moveItem(at: url, to: to)) != nil ? to : nil
+                    }
+                    said.append(moved == nil ? "HLG: failed" : "HLG: made")
+                    let text = said.joined(separator: "\n")
+                    NSLog("HDR export check: %@", text)
+                    DispatchQueue.main.async { model.saying = ("HDR export check", text) }
+                }
+            }
+        case "hdr-colors":
+            // the colour panel's light above white: the paint lit two stops
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                model.toggle(.light)
+                model.setColorStops(2)
+                colors(model, .value)
+            }
         case "timeline-keys", "timeline-path":
             guard let clip = timelineKeyed(model) else { break }
             model.timeline.picked = clip

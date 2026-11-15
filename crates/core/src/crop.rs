@@ -87,8 +87,9 @@ impl CanvasSession {
         // the old canvas stays for undo, so this is all more: refused while there is still room,
         // not left to the system to find out
         let budget = old.resident_budget();
-        let per = u64::from(c.width) * u64::from(c.height) * 4;
-        let resident = ids.len().min(make2d_gpu::most_resident(budget, c.width, c.height)) as u64;
+        let pixel_bytes = if old.is_hdr() { make2d_engine::hdr::HDR_PIXEL as u32 } else { 4 };
+        let per = u64::from(c.width) * u64::from(c.height) * u64::from(pixel_bytes);
+        let resident = ids.len().min(make2d_gpu::most_resident(budget, c.width, c.height, pixel_bytes)) as u64;
         if crate::device::short_of_memory((resident + CANVAS_LAYERS) * per) {
             log::error!("cropping: {} layers of {per} bytes won't fit in the memory free", resident);
             st.crop_edit.failure = Some(crop_failure_said(&make2d_gpu::GpuError::OutOfMemory(String::new())));
@@ -103,7 +104,9 @@ impl CanvasSession {
             for id in ids {
                 // copied (moved by whole pixels) or resampled on the GPU, nothing read back
                 let m = c.to_old;
-                let room = canvas.has_room();
+                // an HDR canvas's go across on the GPU whatever the room (read back they would be
+                // cut at white): those past the budget are parked, as half floats, as it renders
+                let room = canvas.is_hdr() || canvas.has_room();
                 let on_gpu = room
                     && match c.whole_pixels() {
                         Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),

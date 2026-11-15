@@ -247,6 +247,10 @@ struct ColorPanel: View {
         Popover(width: panelWidth, arrowX: arrowX) {
             header
             picker(c, short: short)
+            // an HDR artwork's paint can be lit above white
+            if background == nil, model.colorMode != .palettes, model.isHdr {
+                ColorLightRow(model: model)
+            }
             if model.colorMode != .palettes {
                 if short {
                     ShortBottom(model: model, c: c, ui: ui)
@@ -398,7 +402,7 @@ private struct Knob: View {
 
 /// A 36-tall slider row: a 4 tall track through `colours` and a pill showing the colour under it.
 /// Touching anywhere on the row moves the pill there.
-private struct SliderRow: View {
+struct SliderRow: View {
     let value: Float
     let colours: [UInt32]
     let onChange: (Float) -> Void

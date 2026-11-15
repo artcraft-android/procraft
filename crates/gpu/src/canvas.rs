@@ -1346,7 +1346,7 @@ fn smudge_uniform(
     s: &StampInstance,
     style: &StrokeStyle,
     bbox: IRect,
-    (width, height, row): (u32, u32, u32),
+    (width, height, stride): (u32, u32, u32),
 ) -> SmudgeUniform {
     let moving = style.grain_mode == GrainMode::Moving;
     SmudgeUniform {
@@ -1360,7 +1360,7 @@ fn smudge_uniform(
         shape: style.shape.map_or(-1, |s| s as i32),
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
-        stride: row / 4,
+        stride,
         bbox: [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
         size: [width, height],
         grid: SMUDGE_GRID,
@@ -3952,19 +3952,32 @@ impl Canvas {
         self.parked.keys().filter(|id| !self.layers.contains_key(*id)).count()
     }
 
+    /// Whether layer `id` is parked (kept compressed, without a texture).
+    pub fn is_parked(&self, id: LayerId) -> bool {
+        self.parked.contains_key(&id) && !self.layers.contains_key(&id)
+    }
+
     /// Gives layer `id` its texture again from its compressed pixels, if it is parked; whether
     /// it has one now. Its pixels go up before any work recorded in this render.
     fn restore(&mut self, gpu: &Gpu, id: LayerId) -> bool {
         if self.layers.contains_key(&id) {
             return true;
         }
-        let Some((painted, rows)) = self.parked.get(&id).and_then(|p| Some((p.rect, p.rows()?))) else {
+        let Some((painted, rows, pixel)) = self.parked.get(&id).and_then(|p| Some((p.rect, p.rows()?, p.pixel))) else {
             return false;
         };
         let texture = texture(&gpu.device, "layer", self.width, self.height, self.format);
         // only where it is painted (a new texture is clear): nothing at all for an empty layer
         if let Some(b) = painted {
-            self.upload_now(gpu, &texture, b, &rows, 0, b.width() as usize * 4);
+            let wide = pixel == make2d_engine::hdr::HDR_PIXEL;
+            let mut encoder =
+                gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("upload") });
+            let used =
+                self.upload_as(&gpu.device, &mut encoder, &texture, b, (&rows, 0, b.width() as usize * pixel), wide);
+            gpu.queue.submit([encoder.finish()]);
+            if let Some(buffer) = used {
+                self.uploads.give_back(buffer);
+            }
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.layers.insert(id, LayerGpu { texture, view });
@@ -4059,10 +4072,6 @@ impl Canvas {
     /// worked on (and what they are clipped to); none while the composite isn't made around
     /// pictures of the others.
     fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
-        // (see `has_room`)
-        if self.format == HDR_FORMAT {
-            return;
-        }
         self.parking_left = false;
         let most = self.most_resident();
         if self.resident_budget == 0 || self.layers.len() <= most {
@@ -4096,10 +4105,16 @@ impl Canvas {
                     break;
                 }
                 reads += 1;
-                let Ok(pixels) = self.read_layer(gpu, id) else { continue };
-                let pictures = Pictures::of(&pixels, self.width, self.height);
-                self.parked.insert(id, Parked::of(&pixels, self.width, pictures.bounds));
-                self.pictures.insert(id, pictures);
+                // an HDR canvas's as half floats, keeping its light above white
+                let ready = if self.format == HDR_FORMAT {
+                    let Ok(half) = self.read_layer_wide(gpu, id) else { continue };
+                    ReadyToPark::of_wide(&half, self.width, self.height)
+                } else {
+                    let Ok(pixels) = self.read_layer(gpu, id) else { continue };
+                    ReadyToPark::of(&pixels, self.width, self.height)
+                };
+                self.parked.insert(id, ready.parked);
+                self.pictures.insert(id, ready.pictures);
             }
             self.layers.remove(&id);
         }
@@ -5773,7 +5788,17 @@ impl Canvas {
 
     /// Bytes per row of a layer copied into a buffer (rows are 256-byte aligned for copies).
     fn row_bytes(&self) -> u32 {
-        (self.width * 4).div_ceil(256) * 256
+        (self.width * self.pixel_bytes()).div_ceil(256) * 256
+    }
+
+    /// Bytes a pixel of a layer: 4 (RGBA8), or 8 on an HDR canvas (half floats).
+    fn pixel_bytes(&self) -> u32 {
+        if self.format == HDR_FORMAT { 8 } else { 4 }
+    }
+
+    /// What a smudge uniform takes of the canvas: its size and its buffers' pixels a row.
+    fn smudge_rows(&self) -> (u32, u32, u32) {
+        (self.width, self.height, self.row_bytes() / self.pixel_bytes())
     }
 
     /// Smudges `instances` into the stroke's layer: per stamp, the brush picks up colour and lays
@@ -5841,12 +5866,6 @@ impl Canvas {
         }
         if self.smudge.as_ref().is_none_or(|s| s.layer != target) {
             if self.smudge_refused {
-                return;
-            }
-            // the smudge works on 8-bit pixels: an HDR canvas's would lose their light above white
-            if self.format == HDR_FORMAT {
-                self.smudge_refused = true;
-                self.smudge_untold = true;
                 return;
             }
             let Some(layer) = self.layers.get(&target) else { return };
@@ -5967,6 +5986,7 @@ impl Canvas {
             return;
         }
         let own_grain = self.full_grain_bind(device, style);
+        let rows = self.smudge_rows();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let bind = smudge_bind(
             device,
@@ -6011,7 +6031,7 @@ impl Canvas {
                 anchor,
                 scale: smudge.scale,
                 half,
-                ..smudge_uniform(s, style, bbox, (self.width, self.height, row))
+                ..smudge_uniform(s, style, bbox, rows)
             });
             smudge.started = true;
             smudge.kept = half;
@@ -6040,8 +6060,8 @@ impl Canvas {
         let row = self.row_bytes();
         let Some(smudge) = self.smudge.as_ref() else { return };
         if let Some(layer) = self.layers.get(&smudge.layer) {
-            let offset =
-                u64::from(row) * u64::try_from(changed.y0).unwrap_or(0) + 4 * u64::try_from(changed.x0).unwrap_or(0);
+            let offset = u64::from(row) * u64::try_from(changed.y0).unwrap_or(0)
+                + u64::from(self.pixel_bytes()) * u64::try_from(changed.x0).unwrap_or(0);
             encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
                     buffer: &smudge.work,
@@ -6073,7 +6093,7 @@ impl Canvas {
         if rect.is_empty() {
             return;
         }
-        let size = (self.width, self.height, self.row_bytes());
+        let size = self.smudge_rows();
         let second = (dual != 0).then(|| self.second_stroke.get(device).1);
         let Some(smudge) = self.smudge.as_ref() else { return };
         let bind = smudge_bind(
@@ -6117,7 +6137,7 @@ impl Canvas {
         if stamps.is_empty() {
             return;
         }
-        let size = (self.width, self.height, self.row_bytes());
+        let size = self.smudge_rows();
         let full = IRect::from_size(self.width, self.height);
         let own_grain = self.full_grain_bind(device, style);
         let dual = self.smudge.as_ref().and_then(|s| s.apart.as_ref()).is_some_and(|a| a.1 != 0);
@@ -7650,9 +7670,9 @@ impl Canvas {
             return usize::MAX;
         }
         // the history takes from the same memory, a layer's worth at a time
-        let per = (u64::from(self.width) * u64::from(self.height) * 4).max(1);
+        let per = (u64::from(self.width) * u64::from(self.height) * u64::from(self.pixel_bytes())).max(1);
         let room = self.resident_budget.saturating_sub(self.history_bytes() / per * per);
-        most_resident(room.max(1), self.width, self.height)
+        most_resident(room.max(1), self.width, self.height, self.pixel_bytes())
     }
 
     /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
@@ -7844,8 +7864,7 @@ impl Canvas {
 
     /// Whether another layer's texture fits the budget.
     pub fn has_room(&self) -> bool {
-        // an HDR canvas's layers are never parked: their compressed copies are 8-bit
-        self.format == HDR_FORMAT || self.layers.len() < self.most_resident()
+        self.layers.len() < self.most_resident()
     }
 
     /// Keeps layer `id`'s pixels (premultiplied RGBA, the canvas's size) compressed, without a
@@ -9951,6 +9970,21 @@ impl Canvas {
         Some([*px.first()?, *px.get(1)?, *px.get(2)?, *px.get(3)?])
     }
 
+    /// [`Canvas::read_composite_pixel`] as floats, premultiplied: an HDR canvas's with its light
+    /// above white (sRGB-encoded, carried on past 1).
+    pub fn read_composite_pixel_wide(&self, gpu: &Gpu, x: u32, y: u32) -> Option<[f32; 4]> {
+        if self.format != HDR_FORMAT {
+            return self.read_composite_pixel(gpu, x, y).map(|px| px.map(|c| f32::from(c) / 255.0));
+        }
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let (x, y) = (i32::try_from(x).ok()?, i32::try_from(y).ok()?);
+        let half = start_reading_part(gpu, &self.composite, IRect::new(x, y, x + 1, y + 1)).wide_pixels().ok()?;
+        let mut px = make2d_engine::hdr::floats(&half);
+        Some([px.next()?, px.next()?, px.next()?, px.next()?])
+    }
+
     /// The composite's pixels as they would be without the layers `left_out` (the gallery's
     /// thumbnail leaves private layers out); the canvas's own composite is made again after.
     pub fn read_composite_without(
@@ -10176,7 +10210,16 @@ impl Canvas {
     /// [`make2d_engine::hdr`]), a standard one's RGBA8. Waits for the GPU.
     pub fn read_layer_wide(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
         if !self.layers.contains_key(&id) {
-            return self.read_layer(gpu, id);
+            // parked as half floats: as they were kept
+            if let Some(parked) = self.parked.get(&id).filter(|p| p.wide()) {
+                return parked
+                    .pixels(self.width, self.height)
+                    .ok_or_else(|| GpuError::Readback(format!("layer {id:?} parked damaged")));
+            }
+            // parked as 8 bits on an HDR canvas (as an artwork opened them): widened, as its
+            // texture would have them
+            let px = self.read_layer(gpu, id)?;
+            return Ok(if self.format == HDR_FORMAT { make2d_engine::hdr::widen(&px) } else { px });
         }
         self.start_reading_layer(gpu, id)?.wide_pixels()
     }
@@ -10213,6 +10256,7 @@ impl Canvas {
         if let Some(parked) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
             return parked
                 .pixels(self.width, self.height)
+                .map(|px| if parked.wide() { make2d_engine::hdr::narrow(&px) } else { px })
                 .ok_or_else(|| GpuError::Readback(format!("layer {id:?} parked damaged")));
         }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
@@ -10667,8 +10711,23 @@ impl Pipelines {
                 compute_texture(7),
             ],
         });
-        let smudge_module =
-            module("smudge", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/smudge.wgsl")));
+        // the smudged layer's pixels as the canvas keeps them
+        let smudge_module = module(
+            "smudge",
+            if high {
+                concat!(
+                    include_str!("shaders/blend.wgsl"),
+                    include_str!("shaders/smudge.wgsl"),
+                    include_str!("shaders/smudge_rgba16f.wgsl")
+                )
+            } else {
+                concat!(
+                    include_str!("shaders/blend.wgsl"),
+                    include_str!("shaders/smudge.wgsl"),
+                    include_str!("shaders/smudge_rgba8.wgsl")
+                )
+            },
+        );
         let smudge_pipeline_layout = layout("smudge", &[Some(&smudge_layout), Some(&brush_layout)]);
         let compute = |label, entry| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -11165,12 +11224,12 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
     painted_bounds_of(&t.rgba, t.width, painted)
 }
 
-/// [`painted_bounds`] of pixels `width` wide, a row at a time: a row's first and last painted
+/// [`painted_bounds`] of pixels `width` wide (`N` bytes each), a row at a time: a row's first and last painted
 /// pixels only widen the box.
-fn painted_bounds_of(rgba: &[u8], width: u32, painted: impl Fn([u8; 4]) -> bool) -> Option<[u32; 4]> {
+fn painted_bounds_of<const N: usize>(rgba: &[u8], width: u32, painted: impl Fn([u8; N]) -> bool) -> Option<[u32; 4]> {
     let mut b: Option<[u32; 4]> = None;
-    for (y, row) in rgba.chunks_exact(width.max(1) as usize * 4).enumerate() {
-        let pixels = row.as_chunks::<4>().0;
+    for (y, row) in rgba.chunks_exact(width.max(1) as usize * N).enumerate() {
+        let pixels = row.as_chunks::<N>().0;
         let Some(first) = pixels.iter().position(|p| painted(*p)) else { continue };
         let last = pixels.iter().rposition(|p| painted(*p)).unwrap_or(first);
         let (x0, x1, y) = (first as u32, last as u32 + 1, y as u32);
@@ -11219,7 +11278,15 @@ impl ReadyToPark {
     /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
     pub fn of(rgba: &[u8], width: u32, height: u32) -> ReadyToPark {
         let pictures = Pictures::of(rgba, width, height);
-        ReadyToPark { parked: Parked::of(rgba, width, pictures.bounds), pictures }
+        ReadyToPark { parked: Parked::of(rgba, width, pictures.bounds, 4), pictures }
+    }
+
+    /// Of an HDR canvas's layer's pixels (premultiplied half floats, as
+    /// [`Canvas::read_layer_wide`] gives them): kept as they are, light above white and all; its
+    /// small pictures cut at white, as [`Canvas::read_layer`] has it.
+    pub fn of_wide(half: &[u8], width: u32, height: u32) -> ReadyToPark {
+        let pictures = Pictures::of_wide(half, width, height);
+        ReadyToPark { parked: Parked::of(half, width, pictures.bounds, make2d_engine::hdr::HDR_PIXEL), pictures }
     }
 
     /// How many bytes the compressed pixels take.
@@ -11233,38 +11300,47 @@ impl ReadyToPark {
 struct Parked {
     rect: Option<IRect>,
     lz4: Vec<u8>,
+    /// Bytes a pixel: 4 (RGBA8), or an HDR canvas's half floats' 8.
+    pixel: usize,
 }
 
 impl Parked {
-    /// Of a layer's pixels (premultiplied RGBA, `width` wide), painted only within `rect`.
-    fn of(rgba: &[u8], width: u32, rect: Option<IRect>) -> Parked {
+    /// Of a layer's pixels (premultiplied RGBA, `width` wide, `pixel` bytes each), painted only
+    /// within `rect`.
+    fn of(rgba: &[u8], width: u32, rect: Option<IRect>, pixel: usize) -> Parked {
         let rect = rect.filter(|r| !r.is_empty());
         let mut rows = Vec::new();
         if let Some(r) = rect {
-            let row = r.width() as usize * 4;
+            let row = r.width() as usize * pixel;
             rows.reserve(row * r.height() as usize);
             for y in r.y0..r.y1 {
-                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                let start = (y as usize * width as usize + r.x0 as usize) * pixel;
                 rows.extend_from_slice(rgba.get(start..start + row).unwrap_or_default());
             }
         }
-        Parked { rect, lz4: make2d_engine::applz4::encode(&rows) }
+        Parked { rect, lz4: make2d_engine::applz4::encode(&rows), pixel }
+    }
+
+    /// Whether it keeps half floats (an HDR canvas's layer).
+    fn wide(&self) -> bool {
+        self.pixel == make2d_engine::hdr::HDR_PIXEL
     }
 
     /// The painted rectangle's rows, one after another; none if damaged.
     fn rows(&self) -> Option<Vec<u8>> {
-        let size = self.rect.map_or(0, |r| r.width() as usize * r.height() as usize * 4);
+        let size = self.rect.map_or(0, |r| r.width() as usize * r.height() as usize * self.pixel);
         make2d_engine::applz4::decode(&self.lz4, size).filter(|p| p.len() == size)
     }
 
-    /// The whole layer (`width` x `height`, clear outside the rectangle); none if damaged.
+    /// The whole layer (`width` x `height`, clear outside the rectangle), as it was kept; none
+    /// if damaged.
     fn pixels(&self, width: u32, height: u32) -> Option<Vec<u8>> {
         let rows = self.rows()?;
-        let mut full = vec![0u8; width as usize * height as usize * 4];
+        let mut full = vec![0u8; width as usize * height as usize * self.pixel];
         if let Some(r) = self.rect {
-            let row = r.width() as usize * 4;
+            let row = r.width() as usize * self.pixel;
             for (y, src) in (r.y0..r.y1).zip(rows.chunks_exact(row.max(1))) {
-                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                let start = (y as usize * width as usize + r.x0 as usize) * self.pixel;
                 full.get_mut(start..start + row)?.copy_from_slice(src);
             }
         }
@@ -11291,6 +11367,18 @@ impl Pictures {
         let bounds =
             painted.map(|[x0, y0, x1, y1]| IRect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 });
         Pictures { whole, drawn, bounds }
+    }
+
+    /// Of an HDR canvas's layer's pixels (half floats, `width` x `height`): pictures of them cut
+    /// at white, and where any alpha is, however faint (which cutting to 8 bits could lose).
+    fn of_wide(half: &[u8], width: u32, height: u32) -> Pictures {
+        let rgba = make2d_engine::hdr::narrow(half);
+        let mut pictures = Pictures::of(&rgba, width, height);
+        let painted =
+            painted_bounds_of(half, width, |[.., a0, a1]: [u8; 8]| u16::from_le_bytes([a0, a1]) & 0x7fff != 0);
+        pictures.bounds =
+            painted.map(|[x0, y0, x1, y1]| IRect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 });
+        pictures
     }
 }
 
@@ -12293,9 +12381,9 @@ impl Readback {
 }
 
 /// How many layers `width` x `height` a canvas keeps on the GPU at once with textures' budget
-/// `budget` bytes (0: no limit; one at least).
-pub fn most_resident(budget: u64, width: u32, height: u32) -> usize {
-    let per = u64::from(width) * u64::from(height) * 4;
+/// `budget` bytes (0: no limit; one at least), a pixel taking `pixel_bytes` (4; an HDR canvas's 8).
+pub fn most_resident(budget: u64, width: u32, height: u32, pixel_bytes: u32) -> usize {
+    let per = u64::from(width) * u64::from(height) * u64::from(pixel_bytes);
     if budget == 0 { usize::MAX } else { usize::try_from(budget / per.max(1)).unwrap_or(usize::MAX).max(1) }
 }
 

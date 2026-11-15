@@ -21,6 +21,16 @@ use crate::{CanvasSession, MobileError};
 pub(crate) const LIGHT_LIMIT: f32 = 2.0;
 /// The most it may be set to.
 pub(crate) const LIGHT_LIMIT_MOST: f32 = 5.0;
+/// The most stops above white the paint colour may be lit.
+pub(crate) const COLOR_STOPS_MOST: f32 = 5.0;
+
+impl crate::State {
+    /// The colour strokes paint with: on an HDR canvas the colour chosen lit its stops above
+    /// white (see [`CanvasSession::set_color_stops`]), else as it is.
+    pub(crate) fn paint_colour(&self) -> [f32; 3] {
+        if self.doc.range.is_high() { pixels::lit_above_white(self.color, self.color_stops) } else { self.color }
+    }
+}
 
 /// The light tool's ceiling (linear light) for a limit of `stops` above white.
 pub(crate) fn ceiling(stops: f32) -> f32 {
@@ -127,6 +137,17 @@ impl CanvasSession {
         self.shared.lock().light_limit
     }
 
+    /// How many stops above white (0 to [`COLOR_STOPS_MOST`]) an HDR canvas's paint colour is lit:
+    /// the colour chosen, as bright as that. A standard canvas paints the colour as it is.
+    pub fn set_color_stops(&self, stops: f32) {
+        let stops = if stops.is_finite() { stops.clamp(0.0, COLOR_STOPS_MOST) } else { 0.0 };
+        self.shared.lock().color_stops = stops;
+    }
+
+    pub fn color_stops(&self) -> f32 {
+        self.shared.lock().color_stops
+    }
+
     /// The screen's headroom now: how many times white's light the brightest it shows is (the
     /// iPad's `currentEDRHeadroom`, which changes with its brightness). An HDR canvas's light
     /// above white is rolled off to it.
@@ -201,6 +222,61 @@ mod tests {
         assert_eq!(ceiling(2.0), 4.0);
         assert_eq!(ceiling(9.0), 32.0);
         assert_eq!(ceiling(f32::NAN), 4.0);
+    }
+
+    /// A line across window y = 100 of a 100 × 100 canvas shown 200 across, in `colour` lit `stops`
+    /// above white, on an HDR canvas or a standard one; then what the eyedropper finds on it.
+    fn picked(hdr: bool, colour: [f32; 3], stops: f32) -> Option<crate::pick::Pick> {
+        let gpu = match make2d_gpu::Gpu::headless() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return None;
+            }
+        };
+        let s = CanvasSession::new(100, 100);
+        s.set_new_hdr(hdr);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(make2d_engine::view::View::fit((100, 100), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let [r, g, b] = colour;
+        s.set_color(r, g, b);
+        s.set_color_stops(stops);
+        let at = |x: f32, t: f64| crate::PenSample {
+            x,
+            y: 100.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: t,
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(20.0, 0.0)]);
+        s.stroke_add((1..40).map(|i| at(20.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![at(180.0, 330.0)]);
+        s.pick(100.0, 100.0, 21)
+    }
+
+    #[test]
+    fn an_hdr_canvas_paints_and_picks_light_above_white() {
+        let Some(lit) = picked(true, [1.0, 0.5, 0.25], 2.0) else { return };
+        // the colour as chosen, and its light: two stops above white
+        assert!((lit.stops - 2.0).abs() < 0.05, "{}", lit.stops);
+        let rgb = lit.rgb.unwrap();
+        assert_eq!(rgb >> 16, 0xFF);
+        assert!(((rgb >> 8) & 0xFF).abs_diff(0x80) <= 2 && (rgb & 0xFF).abs_diff(0x40) <= 2, "{rgb:06x}");
+        // within white, as it was
+        let Some(plain) = picked(true, [1.0, 0.5, 0.25], 0.0) else { return };
+        assert_eq!(plain.stops, 0.0);
+        assert_eq!(plain.rgb, lit.rgb);
+        // a standard canvas paints the colour as it is
+        let Some(standard) = picked(false, [1.0, 0.5, 0.25], 2.0) else { return };
+        assert_eq!(standard.stops, 0.0);
+        assert_eq!(standard.rgb, lit.rgb);
     }
 
     #[test]
