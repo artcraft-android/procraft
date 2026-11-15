@@ -201,7 +201,7 @@ pub struct AudioClip {
     pub volume_keys: Channel<f32>,
 }
 
-/// A sound or video file the canvas carries.
+/// A sound or video file the canvas carries (see `media`).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Media {
     pub id: MediaId,
@@ -210,6 +210,12 @@ pub struct Media {
     pub kind: MediaKind,
     /// Its length, seconds.
     pub seconds: f64,
+    /// Its file's extension (`m4a`, `mov`...), which says how to read it.
+    #[serde(default)]
+    pub extension: String,
+    /// A video's picture size, pixels; none for a sound.
+    #[serde(default)]
+    pub size: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -532,7 +538,7 @@ impl Timeline {
     }
 
     /// A track of its own id holding `clips` (given ids of their own here).
-    fn track_of(&mut self, name: &str, hidden: bool, clips: Vec<Clip>) -> Track {
+    pub(crate) fn track_of(&mut self, name: &str, hidden: bool, clips: Vec<Clip>) -> Track {
         let id = TrackId(self.next_track);
         self.next_track += 1;
         let clips = clips
@@ -953,6 +959,9 @@ impl Timeline {
     /// Clip `id` held for `duration` frames (at least 1). `push`: the clips after it move along
     /// (back, for a shorter hold), keeping the gaps between them; else it stops at the next one.
     pub fn set_duration(&mut self, id: ClipId, duration: u32, push: bool) -> bool {
+        // a sound or video no longer than what is left of it
+        let duration =
+            self.clip(id).and_then(|c| self.media_frames_left(c)).map_or(duration, |left| duration.min(left));
         let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
         let Some(track) = level.get_mut(t) else { return false };
         let Some(clip) = track.clips.get(c) else { return false };
@@ -1144,7 +1153,7 @@ impl Timeline {
     }
 
     /// As long as its clips at least.
-    fn fit(&mut self) {
+    pub(crate) fn fit(&mut self) {
         let end = self.tracks.iter().flat_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(1);
         self.duration = self.duration.max(end);
     }
@@ -1271,7 +1280,7 @@ fn level_of_track(tracks: &mut Vec<Track>, id: TrackId) -> Option<&mut Vec<Track
 
 /// The tracks holding clip `id` (among `tracks` or inside a group clip on them), its track's
 /// index in them and its own.
-fn level_of_clip(tracks: &mut Vec<Track>, id: ClipId) -> Option<(&mut Vec<Track>, usize, usize)> {
+pub(crate) fn level_of_clip(tracks: &mut Vec<Track>, id: ClipId) -> Option<(&mut Vec<Track>, usize, usize)> {
     let here =
         tracks.iter().enumerate().find_map(|(t, track)| track.clips.iter().position(|c| c.id == id).map(|c| (t, c)));
     if let Some((t, c)) = here {
@@ -1417,8 +1426,9 @@ pub enum Shows {
     Drawing(LayerId),
     /// A group's own tracks at its own frame, composited together and then as one.
     Group(Vec<PlanItem>),
-    /// A video's picture at this time in it, seconds.
-    Video { media: MediaId, seconds: f64 },
+    /// A video's picture at this time in it, seconds, drawn into `rect` (left, top, width, height
+    /// on the canvas).
+    Video { media: MediaId, seconds: f64, rect: [f32; 4] },
 }
 
 /// The clips of `tracks` at `frame`, bottom first, into `out`.
@@ -1446,9 +1456,7 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
                 sample(&g.tracks, at, fps, &mut inner);
                 Shows::Group(inner)
             }
-            ClipContent::Video(v) => {
-                Shows::Video { media: v.media, seconds: v.trim_start + f64::from(local) / f64::from(fps.max(1)) }
-            }
+            ClipContent::Video(v) => Shows::Video { media: v.media, seconds: v.picture_at(local, fps), rect: v.rect },
             ClipContent::Audio(_) => {
                 below = None;
                 continue;
@@ -1516,9 +1524,13 @@ fn repair_tracks(tracks: &mut Vec<Track>, top: &[LayerId], seen: &mut Seen) {
                 }
                 ClipContent::Audio(a) => {
                     tidy(&mut a.volume_keys);
+                    a.repair();
                     true
                 }
-                ClipContent::Video(_) => true,
+                ClipContent::Video(v) => {
+                    v.repair();
+                    true
+                }
             }
         });
         track.clips.sort_by_key(|c| c.start);
