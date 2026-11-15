@@ -42,6 +42,11 @@ const PACKET_DATA: u32 = PK_CURSOR | PK_BUTTONS | PK_X | PK_Y | PK_NORMAL_PRESSU
 /// driver moved for it, and still be taken: further, the tablet is mapped otherwise than its
 /// context says, and the pointer's whole pixels are taken instead.
 const FINE_REACH: f32 = 1.5;
+/// How many packets the context's queue is asked to hold, the most first: the driver's own holds
+/// 8, 40 ms of a pen read 200 times a second, and the packets that come while a slow frame is
+/// drawn past that are lost (the stroke goes on at the pressure read before it). A size the driver
+/// can't make leaves the context no queue, so smaller ones are tried until one is made.
+const QUEUE_SIZES: [i32; 5] = [128, 64, 32, 16, 8];
 
 /// WinTab's context description (its `LOGCONTEXTW`, 212 bytes).
 #[repr(C)]
@@ -140,6 +145,7 @@ type WtInfo = unsafe extern "system" fn(u32, u32, *mut c_void) -> u32;
 type WtOpen = unsafe extern "system" fn(HWND, *mut LogContext, i32) -> *mut c_void;
 type WtPacket = unsafe extern "system" fn(*mut c_void, u32, *mut c_void) -> i32;
 type WtOverlap = unsafe extern "system" fn(*mut c_void, i32) -> i32;
+type WtQueueSizeSet = unsafe extern "system" fn(*mut c_void, i32) -> i32;
 
 /// The driver's calls and the context opened on the window, with the device's pressure range,
 /// whether it gives an orientation, and where its packets put the pen on the screen.
@@ -243,16 +249,25 @@ pub fn open(hwnd: HWND) {
         log::warn!("WinTab: the context couldn't be opened");
         return;
     }
+    // SAFETY: looked up by the name WinTab gives it, with the signature WinTab gives it
+    let queue_size_set = unsafe { GetProcAddress(library, s!("WTQueueSizeSet")) }
+        .map(|f| unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, WtQueueSizeSet>(f) });
+    // SAFETY: the context just opened
+    let queue = queue_size_set.and_then(|set| QUEUE_SIZES.into_iter().find(|&n| unsafe { set(opened, n) } != 0));
+    if queue_size_set.is_some() && queue.is_none() {
+        log::warn!("WinTab: no packet queue could be made");
+    }
     let mut name = [0u16; 128];
     // SAFETY: room for the name, in wide characters
     unsafe { info(WTI_DEVICES, DVC_NAME, name.as_mut_ptr().cast()) };
     let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
     let name = String::from_utf16_lossy(name.get(..len).unwrap_or_default());
     log::info!(
-        "WinTab: {name}, pressure {}..{}, {}",
+        "WinTab: {name}, pressure {}..{}, {}, queue {}",
         pressure.min,
         pressure.max,
-        if leans { "with lean" } else { "no lean" }
+        if leans { "with lean" } else { "no lean" },
+        queue.map_or_else(|| "as the driver's".to_owned(), |n| n.to_string())
     );
     if let Ok(mut tablet) = TABLET.lock() {
         *tablet = Some(Tablet {

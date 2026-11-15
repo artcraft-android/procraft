@@ -28,6 +28,9 @@ const R_TAP: Duration = Duration::from_millis(300);
 
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
+/// How many moves a stroke the mouse pointer began with no tablet pen read waits for the pen's
+/// reading, to be the pen's: a reading late at all comes a frame or two after the press.
+const UNREAD_MOVES: u32 = 4;
 
 /// Which touch the interface follows as its pointer. egui follows the first touch down and no other
 /// until it lifts, so a hand resting on the canvas would keep a finger off the panels and the side
@@ -173,6 +176,11 @@ pub struct Input {
     /// A tablet's pen pressed the mouse pointer (X11, a Mac): its pressure as last read, for the
     /// stroke's moves while it goes unread a moment (another pointer heard from in between).
     pen_pressure: Option<f32>,
+    /// The mouse pointer pressed on the canvas with no tablet pen read there: where, and how many
+    /// moves since, while it may still turn out to be the pen's (see [`Input::pen_came`]).
+    unread_press: Option<((f32, f32), u32)>,
+    /// Where the tablet pen moving the mouse pointer is read: the pen's own readings (a test's).
+    read_mouse_pen: fn((f32, f32)) -> Option<crate::pen::MousePen>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
@@ -210,6 +218,8 @@ impl Default for Input {
             key_drag: None,
             pen_panning: None,
             pen_pressure: None,
+            unread_press: None,
+            read_mouse_pen: crate::pen::mouse_pen_at,
             hover_shown: false,
             space: false,
             space_used: false,
@@ -327,8 +337,8 @@ impl Input {
 
     /// What the mouse pointer is now, at `at`: a tablet's pen moving it (X11 gives a pen as the
     /// mouse), as a pen or its eraser end with its pressure there; else the mouse.
-    fn mouse_kind(at: (f32, f32)) -> (PointerKind, f32) {
-        match crate::pen::mouse_pen_at(at) {
+    fn mouse_kind(&self, at: (f32, f32)) -> (PointerKind, f32) {
+        match (self.read_mouse_pen)(at) {
             Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
             None => (PointerKind::Mouse, 1.0),
         }
@@ -337,11 +347,29 @@ impl Input {
     /// The pressure of the mouse pointer's sample at `at`: a stroke a pen began keeps the pen's
     /// last pressure through a moment it goes unread, rather than jumping to full as the mouse's.
     fn mouse_pressure(&mut self, at: (f32, f32)) -> f32 {
-        let read = crate::pen::mouse_pen_at(at).map(|pen| pen.pressure);
+        let read = (self.read_mouse_pen)(at).map(|pen| pen.pressure);
         if self.pen_pressure.is_some() && read.is_some() {
             self.pen_pressure = read;
         }
         read.or(self.pen_pressure).unwrap_or(1.0)
+    }
+
+    /// The mouse pointer pressed on the canvas, now at `at`: if it went down with no tablet pen
+    /// read and the pen's reading has come since, within the stroke's first moves, the stroke is
+    /// begun again as the pen's, where it went down. The pen's reading may come just after the
+    /// press it made (the driver's messages crossing, or its packets only now coming to this
+    /// window, as it comes to the front): taken for the mouse's, the stroke would have no pressure.
+    fn pen_came(&mut self, session: &CanvasSession, at: (f32, f32)) {
+        let Some((down, moves)) = self.unread_press.take() else { return };
+        if (self.read_mouse_pen)(at).is_none() {
+            self.unread_press = (moves < UNREAD_MOVES).then_some((down, moves + 1));
+            return;
+        }
+        let (kind, pressure) = self.mouse_kind(at);
+        let out = session.touch_cancel_one(MOUSE);
+        self.take(out);
+        self.pen_pressure = Some(pressure);
+        self.pressed(session, MOUSE, kind, down, pressure);
     }
 
     /// A sample of pointer `id` at `at`: a pen's with its lean, if the system gave one, and a
@@ -470,6 +498,7 @@ impl Input {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
+                    self.pen_came(session, p);
                     let pressure = self.mouse_pressure(p);
                     self.moved(session, MOUSE, p, pressure);
                     return true;
@@ -501,12 +530,15 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        let (kind, pressure) = Self::mouse_kind(p);
+                        let (kind, pressure) = self.mouse_kind(p);
                         self.pen_pressure = (kind != PointerKind::Mouse).then_some(pressure);
+                        self.unread_press = (kind == PointerKind::Mouse).then_some((p, 0));
                         self.pressed(session, MOUSE, kind, p, pressure);
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
+                        self.pen_came(session, p);
+                        self.unread_press = None;
                         let pressure = self.mouse_pressure(p);
                         self.pen_pressure = None;
                         self.lifted(session, MOUSE, p, pressure, false);
@@ -983,6 +1015,49 @@ mod tests {
         send(&mut input, &session, &finger(TouchPhase::Started, 100.0, 100.0));
         send(&mut input, &session, &finger(TouchPhase::Moved, 140.0, 100.0));
         assert_eq!(input.cursor(), None);
+    }
+
+    thread_local! {
+        /// The tablet pen this test's mouse pointer reads, if any.
+        static TABLET_PEN: std::cell::Cell<Option<crate::pen::MousePen>> = const { std::cell::Cell::new(None) };
+    }
+
+    fn tablet_pen(_: (f32, f32)) -> Option<crate::pen::MousePen> {
+        TABLET_PEN.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_stroke_the_mouse_pointer_began_is_the_tablet_pens_once_the_pens_reading_comes_just_after() {
+        let device_id = DeviceId::dummy();
+        let moved = |x: f64| WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x, 100.0) };
+        let press = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        // the pointer pressed at (100, 100) with no tablet pen read, moved `moves` times before the
+        // pen's reading comes (its tip not yet down, as its packets run ahead of the mouse), and
+        // moved on: whether the stroke became the pen's, which hovers there until it presses
+        let pen_took_it = |moves: Option<usize>| {
+            let (session, mut input) = (shown(), Input { read_mouse_pen: tablet_pen, ..Input::default() });
+            // a pen has drawn with a pressure: pens are known to give one
+            drag(&mut input, &session, 7020, (300.0, 300.0));
+            input.commands.clear();
+            TABLET_PEN.with(|p| p.set(None));
+            send(&mut input, &session, &moved(100.0));
+            send(&mut input, &session, &press(ElementState::Pressed));
+            assert!(painted(&input), "the mouse's stroke begins");
+            for i in 0..8 {
+                if Some(i) == moves {
+                    TABLET_PEN.with(|p| p.set(Some(crate::pen::MousePen { pressure: 0.0, eraser: false })));
+                }
+                send(&mut input, &session, &moved(102.0 + i as f64));
+            }
+            send(&mut input, &session, &press(ElementState::Released));
+            input.commands.iter().any(|c| matches!(c, TouchCommand::PenHovers { x, y } if (*x, *y) == (100.0, 100.0)))
+        };
+        // the reading came with the first move, or a few later
+        assert!(pen_took_it(Some(0)));
+        assert!(pen_took_it(Some(3)));
+        // too long after: the stroke stays as it began; and the mouse alone stays the mouse
+        assert!(!pen_took_it(Some(6)));
+        assert!(!pen_took_it(None));
     }
 
     #[test]
