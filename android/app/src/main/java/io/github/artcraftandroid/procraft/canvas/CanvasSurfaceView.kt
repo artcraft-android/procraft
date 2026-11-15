@@ -276,6 +276,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 vm.fadePanels()
             }
             TouchCommand.PanelTapped -> vm.tapOutsidePanel()
+            // the guide editor: a touch came down (symmetry's options close), or dragged a handle
+            TouchCommand.GuideTouched -> vm.guideTouched(touched = true)
+            TouchCommand.GuideChanged -> vm.guideTouched(touched = false)
         }
     }
 
@@ -323,6 +326,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             if (vm.selecting) vm.selectionPopup = SelectionPopup.NONE
             // a transform's touch takes the node it lands on (the warp's inner points with the advanced mesh)
             s.setTouchTransforming(if (vm.transforming) io.github.artcraftandroid.procraft.core.TransformTouch(vm.advancedMesh) else null)
+            // the guide editor's touch drags a handle; fingers only move the view
+            s.setTouchGuideEditing(vm.guideEditing)
             // the companion's Zoom or Move: a lone press zooms or moves the canvas
             s.setTouchCompanion(
                 when (vm.companionMode) {
@@ -420,13 +425,18 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         }
     }
 
+    /** Touches passed on by what covers the canvas (the guide editor), in the canvas's own place. */
+    private val passedTouch: (MotionEvent) -> Boolean = { e -> onTouchEvent(e) }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         vm.penKeyHeard = penKeyHeard
+        vm.canvasTouch = passedTouch
     }
 
     override fun onDetachedFromWindow() {
         if (vm.penKeyHeard === penKeyHeard) vm.penKeyHeard = null
+        if (vm.canvasTouch === passedTouch) vm.canvasTouch = null
         super.onDetachedFromWindow()
     }
 

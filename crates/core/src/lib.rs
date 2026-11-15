@@ -407,12 +407,14 @@ impl State {
         let Some(m) = self.view_motion else { return false };
         let t = m.start.elapsed().as_secs_f32();
         let (along, seconds) = m.curve.at(t);
-        let centre = Vec2::new(self.doc.width() as f32 / 2.0, self.doc.height() as f32 / 2.0);
-        self.view = Some(View::between(&m.from, &m.to, centre, along));
+        // there, exactly where it was going
         if t >= seconds {
+            self.view = Some(m.to);
             self.view_motion = None;
             return false;
         }
+        let centre = Vec2::new(self.doc.width() as f32 / 2.0, self.doc.height() as f32 / 2.0);
+        self.view = Some(View::between(&m.from, &m.to, centre, along));
         true
     }
 }
@@ -737,7 +739,9 @@ impl State {
     /// view is nearest (fitting straightens a turned canvas, but keeps it on its side if it is).
     pub(crate) fn fitted_view(&self) -> View {
         let turns = self.view.map_or(0, |v| v.quarter_turns());
-        View::fit_turned((self.doc.width(), self.doc.height()), self.window_size, self.fit_insets, turns)
+        // in the guide editor, the whole window (behind its bars)
+        let insets = if self.guide_before.is_some() { [0.0; 4] } else { self.fit_insets };
+        View::fit_turned((self.doc.width(), self.doc.height()), self.window_size, insets, turns)
     }
 
     /// Finishes an open stroke.

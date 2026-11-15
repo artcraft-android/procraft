@@ -2564,6 +2564,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The canvas view's ear for a pen's side button that comes as a key (true: the second), and what it did. */
     var penKeyHeard: ((second: Boolean, action: PenKeyAction) -> Unit)? = null
 
+    /** The canvas view's touch input, for what covers the canvas and passes its touches on (the guide editor). */
+    var canvasTouch: ((android.view.MotionEvent) -> Boolean)? = null
+
     /**
      * Hides the system's bars again (set by the activity). A drag down from the top bar can show
      * them for a moment, and a second drag while they show would pull the notification shade
@@ -2841,25 +2844,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.setGuideOn(on)
     }
 
-    /** Opens the guide editor (turning the guide on), the canvas fitted between its bars. */
+    /**
+     * Opens the guide editor (turning the guide on), the canvas moving into the middle of the
+     * screen; the canvas's touches work the guide (and move the view) until it closes.
+     */
     fun openGuideEditor() {
         val s = session ?: return
         endQuickShape()
         closePanels()
         if (guide?.on != true) s.setGuideOn(true)
-        val d = density
-        // fitted between a fifth of the screen's height above and below (either way up), 40 in from the sides
-        val band = windowSize.y * GUIDE_FIT_BAND
-        guide = s.guideEditBegin(GUIDE_FIT_SIDE_DP * d, band, windowSize.x - GUIDE_FIT_SIDE_DP * d, windowSize.y - band)
+        guide = s.guideEditBegin()
+        s.setTouchGuideEditing(true)
         guideEditing = true
-        refreshView()
+        followView()
     }
 
     fun closeGuideEditor(keep: Boolean) {
+        session?.setTouchGuideEditing(false)
         guide = session?.guideEditEnd(keep)
         guideEditing = false
         symmetryOptionsOpen = false
-        refreshView()
+        followView()
     }
 
     fun chooseGuideKind(kind: GuideType) {
@@ -2888,31 +2893,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    /** What a touch at [p] in the guide editor takes: the turn handle (-2), the centre (-1), or a vanishing point (its index); a tap elsewhere in perspective adds one. */
-    fun guideGrab(p: Offset): Int? {
-        val g = guide ?: return null
-        val reach = QUICKSHAPE_REACH_DP * density
-        symmetryOptionsOpen = false
-        if (g.kind == GuideType.PERSPECTIVE) {
-            val index = session?.touchVanishingPoint(p.x, p.y)?.toInt()
-            guide = session?.guide()
-            return index
-        }
-        return when {
-            (Offset(g.handle[0], g.handle[1]) - p).getDistance() <= reach -> -2
-            (Offset(g.centre[0], g.centre[1]) - p).getDistance() <= reach -> -1
-            else -> null
-        }
-    }
-
-    fun guideDrag(grab: Int?, p: Offset) {
-        val s = session ?: return
-        guide = when (grab) {
-            null -> return
-            -2 -> s.turnGuide(p.x, p.y)
-            -1 -> s.moveGuideCentre(p.x, p.y)
-            else -> s.moveVanishingPoint(grab.toUInt(), p.x, p.y)
-        }
+    /**
+     * The guide editor's canvas touched ([touched]: a touch came down, closing symmetry's options)
+     * or its handle dragged: the guide as it now is (a perspective tap may have added a point).
+     */
+    fun guideTouched(touched: Boolean) {
+        if (touched) symmetryOptionsOpen = false
+        guide = session?.guide() ?: guide
     }
 
     // copy and paste, flipping, pictures
@@ -8158,9 +8145,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val RAPID_UNDO_MIN_S = 0.1f
         const val RAPID_UNDO_MAX_S = 1.5f
         const val SELECTION_VISIBILITY = "selection_visibility"
-        /** The guide editor fits the canvas this far in from the window's sides, top and bottom (points). */
-        const val GUIDE_FIT_SIDE_DP = 40f
-        const val GUIDE_FIT_BAND = 0.2f
         /** The largest side a picture brought in is decoded at (pixels). */
         const val MAX_PICTURE = 4096
         /** How long a stroke is held still to snap (milliseconds), how still (points), and how near a handle a touch takes it. */

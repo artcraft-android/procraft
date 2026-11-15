@@ -3234,13 +3234,21 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
     assert_eq!(pixel(&s, 70, 90), [255, 255, 255, 255]);
     assert!(s.select_layer(assisted));
     assert!(s.guide().assisted);
-    // the editor fits the canvas inside a rectangle, and cancelling puts the guide back
+    // the editor fits the canvas in the middle of the window, and cancelling puts the guide and
+    // the view back, each moving there over its time
     let before = s.view_matrix();
-    s.guide_edit_begin(10.0, 10.0, 60.0, 60.0);
+    let settled = || {
+        std::thread::sleep(std::time::Duration::from_secs_f32(0.3));
+        s.shared.lock().step_view_motion();
+    };
+    s.guide_edit_begin();
+    settled();
+    assert_ne!(s.view_matrix(), before);
     s.set_guide_look(0.5, 0.5, 30.0, 0.7);
     assert_eq!(s.guide().size, 30.0);
     s.guide_edit_end(false);
     assert_eq!(s.guide().size, 71.0);
+    settled();
     assert_eq!(s.view_matrix(), before);
     // perspective points are added by tapping, three at most
     s.set_guide_kind(GuideType::Perspective);

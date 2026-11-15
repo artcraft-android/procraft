@@ -1294,6 +1294,9 @@ impl Interface {
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
                 TouchCommand::ViewMoved | TouchCommand::BrushChanged => {}
+                // the guide editor: a touch on the canvas closes its options; the guide is read each frame
+                TouchCommand::GuideTouched => self.guide_editor.touched(),
+                TouchCommand::GuideChanged => {}
             }
         }
         // a slid threshold redoes the whole fill: once a frame, at the last
@@ -2525,7 +2528,7 @@ impl Interface {
                     Some(Act::DrawingGuide) => _ = session.set_guide_on(!session.guide().on),
                     Some(Act::EditGuide) => {
                         self.open = None;
-                        self.guide_editor.begin(ctx, session);
+                        self.guide_editor.begin(session);
                     }
                     Some(Act::Crop) => {
                         self.open = None;
