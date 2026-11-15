@@ -13,7 +13,7 @@ use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
 use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, IRect};
-use procraft_engine::stroke::{MOST_ROUNDNESS, Stamp};
+use procraft_engine::stroke::{MOST_ROUNDNESS, PickUp, Stamp};
 use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
 use wgpu::util::DeviceExt;
@@ -1220,7 +1220,11 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         // each stamp its own of a set of shapes (see `Stamp::tip`)
         shape: style.shape.map_or(-1, |shape| shape as i32 + s.tip as i32),
         tip_kind: style.tip_kind as u32,
-        _pad: [0; 3],
+        paint_rate: 0.0,
+        pick: s.center,
+        dull: 0.0,
+        dull_weighted: 0,
+        _pad: [0; 2],
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1382,7 +1386,16 @@ struct SmudgeUniform {
     part: u32,
     /// What its shapes are (see [`TipKind`]): pictures cover as far as they are opaque.
     tip_kind: u32,
-    _pad: [u32; 3],
+    /// What the brush carries has this share of the paint mixed in (a stamp that picks up behind
+    /// it: see `Stamp::pick_up`).
+    paint_rate: f32,
+    /// Where the grid's middle cell picks up from (the anchor, or the stroke's last stamp's).
+    pick: [f32; 2],
+    /// Above 0: what it carries made one colour, the average of the cells within this share of its
+    /// reach of the middle; weighed by the stamp's shape (1) or not (0).
+    dull: f32,
+    dull_weighted: u32,
+    _pad: [u32; 2],
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -1425,8 +1438,9 @@ struct Smudge {
     /// before reached (-1 before the first).
     scale: f32,
     kept: i32,
-    /// Stamps laid so far (for the wetness jitter).
+    /// Stamps laid so far (for the wetness jitter), and where the last's grid was anchored.
     stamps: u32,
+    last_anchor: Option<[f32; 2]>,
     /// What it keeps besides the layer as it was: paint laid apart, the stroke as laid (see
     /// `grain_once`) and how much of the paint shows at each pixel; wet paint that builds up by
     /// what is left (the modulated mode), how much each pixel has taken so far, 0..1.
@@ -1494,6 +1508,10 @@ pub struct SecondStroke {
     pub threshold: f32,
 }
 
+/// A smudge's stamps as [`Op::Stamps`] holds them: each one, its wet paint, when it was laid and
+/// what it picks up.
+type SmudgedStamps<'a> = (&'a [StampInstance], &'a [[f32; 8]], &'a [Paced], &'a [Option<PickUp>]);
+
 enum Op {
     /// A plugin's filter, drawn as [`Op::FilterSet`] is, in pieces of its own.
     PluginFilter(plugin_filter::FilterValues),
@@ -1507,8 +1525,9 @@ enum Op {
         second: bool,
         instances: Vec<StampInstance>,
         /// Each stamp's wet-mix scaling (see [`Stamp::wet`]) and where it comes in the stroke, for
-        /// the wet paint drawn in place.
+        /// the wet paint drawn in place, and what a smudge stamp picks up (see [`Stamp::pick_up`]).
         wet: Vec<[f32; 8]>,
+        picks: Vec<Option<PickUp>>,
         times: Vec<Paced>,
         style: StrokeStyle,
         clear: bool,
@@ -1960,6 +1979,7 @@ pub(crate) struct Pipelines {
     selection_module: wgpu::ShaderModule,
     smudge_layout: wgpu::BindGroupLayout,
     smudge_carry: wgpu::ComputePipeline,
+    smudge_dull: wgpu::ComputePipeline,
     smudge_blur_down: wgpu::ComputePipeline,
     smudge_blur_across: wgpu::ComputePipeline,
     smudge_deposit: wgpu::ComputePipeline,
@@ -3006,6 +3026,7 @@ impl Canvas {
         }
         let wet: Vec<[f32; 8]> =
             drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
+        let picks: Vec<Option<PickUp>> = drawn.iter().map(|s| s.pick_up).collect();
         let times: Vec<Paced> = drawn
             .iter()
             .map(|s| Paced {
@@ -3052,6 +3073,7 @@ impl Canvas {
             self.ops.push(Op::Stamps {
                 instances,
                 wet,
+                picks,
                 times,
                 style,
                 clear: clear && !pencil,
@@ -4516,9 +4538,11 @@ impl Canvas {
                 self.smudge_refused = false;
             }
             match op {
-                Op::Stamps { instances, wet, times, style, layer, clear, second: false, .. } if style.in_place() => {
+                Op::Stamps { instances, wet, picks, times, style, layer, clear, second: false, .. }
+                    if style.in_place() =>
+                {
                     next_instance = next_instance.saturating_add(u32::try_from(instances.len()).unwrap_or(u32::MAX));
-                    let stamps = (instances.as_slice(), wet.as_slice(), times.as_slice());
+                    let stamps = (instances.as_slice(), wet.as_slice(), times.as_slice(), picks.as_slice());
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
                     self.smudge_stamps(gpu, &mut encoder, uniforms, stamps, &style, layer, clear);
                 }
@@ -5444,7 +5468,7 @@ impl Canvas {
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         (params, passes): (&mut UniformData, &mut UniformData),
-        (instances, wet, times): (&[StampInstance], &[[f32; 8]], &[Paced]),
+        (instances, wet, times, picks): SmudgedStamps<'_>,
         style: &StrokeStyle,
         target: LayerId,
         restart: bool,
@@ -5460,6 +5484,7 @@ impl Canvas {
                 smudge.scale = 1.0;
                 smudge.kept = -1;
                 smudge.stamps = 0;
+                smudge.last_anchor = None;
                 smudge.pending.clear();
                 smudge.passes = 0;
                 smudge.plot = 0;
@@ -5516,6 +5541,7 @@ impl Canvas {
                 scale: 1.0,
                 kept: -1,
                 stamps: 0,
+                last_anchor: None,
                 keeps,
                 apart,
                 pending: Vec::new(),
@@ -5564,8 +5590,25 @@ impl Canvas {
             }
             let anchor = if smudge.scale <= 1.0 { s.center.map(f32::floor) } else { s.center };
             let half = ((reach / smudge.scale).ceil() as i32).clamp(1, SMUDGE_REACH);
+            // a stamp picking up behind it reads where the last stamp lay, keeping nothing older
+            let pick_up = picks.get(k).copied().flatten();
+            let pick = match pick_up {
+                Some(_) => smudge.last_anchor.unwrap_or(anchor),
+                None => anchor,
+            };
+            smudge.last_anchor = Some(anchor);
+            let (paint_rate, paint, dull, dull_weighted) = pick_up.map_or((0.0, style.color, 0.0, 0), |p| {
+                let (dull, weighed) = p.dull.map_or((0.0, false), |(r, w)| (r.clamp(1e-3, 3.0), w));
+                (p.paint_share.clamp(0.0, 1.0), p.paint.unwrap_or(style.color), dull, u32::from(weighed))
+            });
             let uniform = SmudgeUniform {
-                pull: style.pull.clamp(0.0, 1.0) * smudge_pull_by,
+                pull: if pick_up.is_some() { 0.0 } else { style.pull.clamp(0.0, 1.0) * smudge_pull_by },
+                pick,
+                paint_rate,
+                // an erasing brush mixes in clear paint, taking paint away
+                paint: if pick_up.is_some_and(|p| p.clear) { [0.0; 4] } else { [paint[0], paint[1], paint[2], 1.0] },
+                dull,
+                dull_weighted,
                 kept: smudge.kept,
                 blur,
                 anchor,
@@ -5574,7 +5617,7 @@ impl Canvas {
                 ..smudge_uniform(s, style, bbox, size)
             };
             smudge.started = true;
-            smudge.kept = half;
+            smudge.kept = if pick_up.is_some() { -1 } else { half };
             laid.push((uniform, bbox, blur > 0.0));
         }
         let pieces: Vec<smudge::Piece> =
@@ -9325,6 +9368,7 @@ impl Pipelines {
             })
         };
         let smudge_carry = compute("smudge carry", "cs_carry");
+        let smudge_dull = compute("smudge dull", "cs_dull");
         let smudge_blur_down = compute("smudge blur down", "cs_blur_down");
         let smudge_blur_across = compute("smudge blur across", "cs_blur_across");
         let smudge_deposit = compute("smudge deposit", "cs_deposit");
@@ -9531,6 +9575,7 @@ impl Pipelines {
             rule_layout,
             smudge_layout,
             smudge_carry,
+            smudge_dull,
             smudge_blur_down,
             smudge_blur_across,
             smudge_deposit,
@@ -9729,7 +9774,7 @@ fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
 fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> {
     let mut pieces = Vec::with_capacity(ops.len());
     for op in ops {
-        let Op::Stamps { second, instances, wet, times, style, clear, layer, pencil } = op else {
+        let Op::Stamps { second, instances, wet, picks, times, style, clear, layer, pencil } = op else {
             pieces.push(op);
             continue;
         };
@@ -9747,16 +9792,18 @@ fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> 
             work = work.saturating_add(more);
         }
         if counts.is_empty() {
-            pieces.push(Op::Stamps { second, instances, wet, times, style, clear, layer, pencil });
+            pieces.push(Op::Stamps { second, instances, wet, picks, times, style, clear, layer, pencil });
             continue;
         }
         counts.push(count);
         let (mut instances, mut wet, mut times) = (instances.into_iter(), wet.into_iter(), times.into_iter());
+        let mut picks = picks.into_iter();
         for (i, count) in counts.into_iter().enumerate() {
             pieces.push(Op::Stamps {
                 second,
                 instances: instances.by_ref().take(count).collect(),
                 wet: wet.by_ref().take(count).collect(),
+                picks: picks.by_ref().take(count).collect(),
                 times: times.by_ref().take(count).collect(),
                 style,
                 // from scratch the first time only

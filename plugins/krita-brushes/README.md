@@ -2,7 +2,7 @@
 
 A ProCraft plugin that is a brush engine (see the guide's "Brush engines of its own"): it reads
 Krita's brush presets (`.kpp`) and bundles (`.bundle`) as they are imported, and draws their
-brushes as Krita's pixel brush draws them. It comes with the app, off.
+brushes as Krita's pixel brush and colour smudge brush draw them. It comes with the app, off.
 
 ## What it draws
 
@@ -31,6 +31,12 @@ brushes as Krita's pixel brush draws them. It comes with the app, off.
   the strength its sensors give, softly where it says.
 - Masking brushes: a second brush along the same path, its size a share of the main brush's, its
   coverage combined with the main stroke's by its composite op.
+- Colour smudge: each dab moves the paint under where the last lay to where it lies (smearing), or
+  that paint made one colour first (dulling, from the share of it its smudge radius says, weighed by
+  the tip in the newer engine), the colour mixed in at its colour rate (the gradient option moving
+  it towards the secondary colour; an eraser's is clear, taking the paint away), laid as far as its
+  smudge rate says, by the older engine's sums or the newer's; the first dab only marks where the
+  next picks up from.
 
 The app draws each brush's preview with the plugin, and QuickShape, layers of a plugin's own laying
 their strokes again and painting on a 3D model go through it too; brush files the app writes keep
@@ -47,10 +53,13 @@ readers (which its tests use) run in it.
 
 ## Not yet
 
-- Krita's other engines (colour smudge, deform, and the rest): those presets come in as the app
+- Krita's other engines (sketch, spray, deform, and the rest): those presets come in as the app
   reads them.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
+- Colour smudge's overlay mode (picking up from every layer: it picks up from the layer drawn on),
+  its paint thickness (lightness tips' height), and how it lays what it moves where that is clear
+  (as smearing alpha does, whatever the preset says).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
   tip of one is drawn round, a masking brush or texture of one left out.
 - The 1-pixel brush's sharp lines, drawn as dabs.
@@ -74,7 +83,9 @@ sources for facts only (formulas, defaults and file layouts), none of it copied 
 - the pixel brush's dab: size, rotation, ratio, scatter, mirror, opacity and flow (wash vs build-up,
   the averaged opacity of a washed stroke), darken, mix and HSV;
 - GIMP brush, pipe and pattern files and how pipes pick cells;
-- the texture's mask and its texturing modes; the masking brush and its composite ops.
+- the texture's mask and its texturing modes; the masking brush and its composite ops;
+- the colour smudge brush: its smudge rate, colour rate, smudge radius and gradient options, its
+  dulling and smearing modes and how its older and newer engines combine them.
 
 The file formats (PNG, zip, base64, a small XML reader) are written here from their public
 specifications.

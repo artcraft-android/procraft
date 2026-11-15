@@ -1,8 +1,9 @@
-//! A stroke of a Krita pixel brush, dab by dab: its input walked along, a dab laid each time the
+//! A stroke of a Krita pixel brush (or colour smudge brush), dab by dab: its input walked along, a dab laid each time the
 //! path has gone as far as the spacing of the last dab reaches (an ellipse turned with the dab,
 //! or a circle when the spacing is the same every way), each dab's size, turn, squash, scatter,
 //! mirroring, opacity, flow, colour, tip and texture strength from the brush's options and the pen
-//! where it lies. A masking brush walks the same path with its own spacing.
+//! where it lies. A colour smudge brush's dabs move the paint under the last dab to where they lie,
+//! mixing in the colour as its rates say. A masking brush walks the same path with its own spacing.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 use std::rc::Rc;
@@ -179,12 +180,20 @@ pub struct Dab {
     pub lightness: f32,
     pub threshold: f32,
     pub softness: f32,
+    /// A dab that moves paint: the share of what it lays that is its colour, and the share of where
+    /// the last lay it picks one colour from (dulling).
+    pub paint_share: f32,
+    pub radius: f32,
 }
 
 const FLIP_ACROSS: u32 = 1;
 const FLIP_DOWN: u32 = 2;
 const OWN_COLOUR: u32 = 4;
 const FOR_SECOND: u32 = 8;
+const MOVES_PAINT: u32 = 16;
+const DULLS: u32 = 32;
+const WEIGHED: u32 = 64;
+const CLEAR_PAINT: u32 = 128;
 
 impl Dab {
     pub fn write(&self, out: &mut Vec<u8>) {
@@ -207,8 +216,8 @@ impl Dab {
             self.lightness.to_bits(),
             self.threshold.to_bits(),
             self.softness.to_bits(),
-            0,
-            0,
+            self.paint_share.to_bits(),
+            self.radius.to_bits(),
             0,
             0,
             0,
@@ -515,6 +524,8 @@ impl Stroke {
             lightness: 1.0,
             threshold: 0.0,
             softness: 0.0,
+            paint_share: 0.0,
+            radius: 0.0,
         };
         // its tip: a pipe's cell, or an auto tip's drawing (noise afresh, softness as it says)
         dab.tip = match &tip.tips {
@@ -545,6 +556,36 @@ impl Stroke {
             }
             if brush.lightness.checked {
                 dab.lightness = brush.lightness.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);
+            }
+            if let Some(smudge) = &brush.smudge {
+                let one = |o: &CurveOption, otherwise: f32, fuzz: &mut Fuzz<'_>| {
+                    if o.checked { o.size_like(&info, fuzz, true) } else { otherwise }
+                };
+                let rate = one(&smudge.rate, 1.0, &mut fuzz);
+                let colour_rate = one(&smudge.colour_rate, 0.0, &mut fuzz);
+                let (laid, share) = smudge.laid(rate, colour_rate, dab.opacity);
+                // the first dab only marks where the next picks up from
+                dab.opacity = if self.dabs == 0 { 0.0 } else { laid };
+                dab.flow = 1.0;
+                dab.paint_share = share;
+                dab.radius = one(&smudge.radius, 0.0, &mut fuzz).max(0.0);
+                dab.flags |= MOVES_PAINT;
+                if smudge.dulls {
+                    dab.flags |= DULLS;
+                }
+                if smudge.newer {
+                    dab.flags |= WEIGHED;
+                }
+                // Krita mixes the colour in by the brush's composite op: an eraser's takes paint away
+                if brush.erases {
+                    dab.flags |= CLEAR_PAINT;
+                }
+                if smudge.gradient.checked {
+                    let g = smudge.gradient.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);
+                    let from = if dab.flags & OWN_COLOUR != 0 { dab.colour } else { self.begin.colour };
+                    dab.colour = [0, 1, 2].map(|i| from[i] + (self.begin.secondary[i] - from[i]) * g);
+                    dab.flags |= OWN_COLOUR;
+                }
             }
             let sharp = &brush.sharpness;
             if sharp.option.checked {

@@ -973,7 +973,7 @@ fn dump_brush_comparisons() {
 /// `bundled:Name,Other Name` for those of the brushes the app comes with; `DUMP_FINGER=1` draws
 /// with a finger, `DUMP_STRAIGHT=1` straight across, `DUMP_UNCOMBINE=1` each part of a dual brush
 /// alone; `DUMP_PLUGIN=x.procraft-plugin` with that plugin on, as its brush engine reads and draws
-/// the file.)
+/// the file; `DUMP_UNDER=1` over bands of colour, for a brush that moves paint to move.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -1043,6 +1043,12 @@ fn dump_brush_strokes() {
             }
         }
         let layer = s.add_layer();
+        if std::env::var_os("DUMP_UNDER").is_some() {
+            let bands: [[u8; 4]; 4] = [[220, 40, 40, 255], [40, 160, 60, 255], [40, 80, 220, 255], [230, 200, 40, 255]];
+            let rgba: Vec<u8> = (0..side * side).flat_map(|i| bands[((i % side) * 8 / side) as usize % 4]).collect();
+            let whole = procraft_engine::geom::IRect::from_size(side, side);
+            s.shared.lock().rewrite_layer(procraft_engine::document::LayerId(layer), whole, rgba);
+        }
         assert!(s.select_brush(set, index));
         // settings changed first, to see what each does (`BRUSH_SETTINGS=burnt_edges=0,wet_edges=0`)
         if let Ok(changes) = std::env::var("BRUSH_SETTINGS") {

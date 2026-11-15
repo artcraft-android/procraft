@@ -146,6 +146,58 @@ impl Sharpness {
     }
 }
 
+/// Krita's colour smudge engine: each dab moves the paint under where the last lay to where it
+/// lies (smearing), or that paint's one colour (dulling, picked from a share of it, weighed by the
+/// dab's mask in the newer engine), mixing in the colour at its colour rate; its smudge rate how far
+/// it lays that. A gradient option moves the colour towards the secondary colour.
+#[derive(Clone, Debug)]
+pub struct Smudge {
+    pub rate: CurveOption,
+    pub colour_rate: CurveOption,
+    pub radius: CurveOption,
+    pub gradient: CurveOption,
+    pub dulls: bool,
+    pub newer: bool,
+    pub smear_alpha: bool,
+}
+
+impl Smudge {
+    fn read(p: &Preset) -> Smudge {
+        let newer = p.flag("SmudgeRateUseNewEngine", false);
+        let mut radius = CurveOption::read(p, "", "SmudgeRadius", true, 0.0, 3.0);
+        // older presets kept it in hundredths
+        let kept = p.number("SmudgeRadiusValue", 0.0);
+        let kept = if p.number("SmudgeRadiusVersion", 1.0) < 2.0 { kept / 100.0 } else { kept };
+        radius.strength = kept.clamp(0.0, if newer { 1.0 } else { 3.0 });
+        Smudge {
+            rate: CurveOption::read(p, "", "SmudgeRate", true, 0.0, 1.0),
+            colour_rate: CurveOption::read(p, "", "ColorRate", true, 0.0, 1.0),
+            radius,
+            gradient: CurveOption::read(p, "", "Gradient", true, 0.0, 1.0),
+            dulls: p.number("SmudgeRateMode", 0.0) as u32 == 1,
+            newer,
+            smear_alpha: p.flag("SmudgeRateSmearAlpha", true),
+        }
+    }
+
+    /// How far a dab lays what it moves, and what share of that is the colour, for its smudge rate,
+    /// colour rate and opacity: Krita's two engines' sums, taken as one mix laid at one strength.
+    pub fn laid(&self, rate: f32, colour_rate: f32, opacity: f32) -> (f32, f32) {
+        if !self.newer {
+            let most = (1.0 - self.rate.strength).max(0.2);
+            return ((rate * opacity).clamp(0.0, 1.0), (most * colour_rate * opacity).clamp(0.0, 1.0));
+        }
+        let colour = (colour_rate * colour_rate * opacity).clamp(0.0, 1.0);
+        let moved = (if self.dulls { 0.8 } else { 1.0 } * rate * opacity).clamp(0.0, 1.0);
+        if self.dulls && !self.smear_alpha && colour > 0.0 {
+            // the colour mixed into the dulled one first, that laid as far as the dab moves paint
+            return (moved, colour);
+        }
+        let laid = 1.0 - (1.0 - colour) * (1.0 - moved);
+        (laid, if laid > 0.0 { colour / laid } else { 0.0 })
+    }
+}
+
 /// Krita's airbrush: a dab every `interval` milliseconds (scaled by the rate option) as well as by
 /// its spacing, or only by time.
 #[derive(Clone, Debug)]
@@ -174,6 +226,8 @@ pub struct Brush {
     pub tip: Tip,
     pub dynamics: Dynamics,
     pub airbrush: Option<Airbrush>,
+    /// Its colour smudge, if it is one.
+    pub smudge: Option<Smudge>,
     /// How strongly a lightness tip's grey shows, and its sharpness.
     pub lightness: CurveOption,
     pub sharpness: Sharpness,
@@ -543,13 +597,15 @@ fn texture_mask(p: &Preset, picture: &Rgba) -> Mask {
 }
 
 impl Brush {
-    /// The pixel brush `p` describes, its pictures found by `find`; none for another engine's.
+    /// The pixel brush (or colour smudge brush) `p` describes, its pictures found by `find`; none for
+    /// another engine's.
     /// `light`: only to draw strokes with, its look not made (its pictures neither drawn nor
     /// decoded).
     pub fn read(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Brush> {
-        if p.paintop != "paintbrush" {
+        if p.paintop != "paintbrush" && p.paintop != "colorsmudge" {
             return None;
         }
+        let smudge = (p.paintop == "colorsmudge").then(|| Smudge::read(p));
         let dynamics = Dynamics::read(p, "");
         let definition = p.element("brush_definition");
         let tip = definition
@@ -563,6 +619,7 @@ impl Brush {
             tip,
             dynamics,
             airbrush: Airbrush::read(p),
+            smudge,
             lightness: CurveOption::read(p, "", "LightnessStrength", true, 0.0, 1.0),
             sharpness: Sharpness::read(p),
             darken: CurveOption::read(p, "", "Darken", true, 0.0, 1.0),
@@ -628,7 +685,11 @@ impl Brush {
         if let Some(a) = &self.airbrush {
             look.real(8, a.interval);
         }
-        look.byte(2, u8::from(self.wash));
+        if self.smudge.is_some() {
+            look.byte(9, 1);
+        }
+        // (a smudge's dabs are laid each as far as it says)
+        look.byte(2, u8::from(self.wash && self.smudge.is_none()));
         if let Some(blend) = self.blend {
             look.word(3, blend);
         }

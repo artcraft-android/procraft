@@ -115,6 +115,14 @@ struct SmudgeStamp {
     // what its shapes are (the canvas's TipKind): all but masks (0) RGBA, covering as far as they
     // are opaque
     tip_kind: u32,
+    // a stamp picking up behind it: the share of the paint mixed into what it carries, where the
+    // grid's middle cell picks up from (else the anchor), and (above 0) what it carries made one
+    // colour, the average of the cells within this share of its reach of the middle, weighed by
+    // the stamp's shape (1) or not (0)
+    paint_rate: f32,
+    pick: vec2<f32>,
+    dull: f32,
+    dull_weighted: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -216,15 +224,70 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let c = window_cell(i);
-    // the cell's middle on the canvas: a pixel's middle when a cell is one
-    let under = layer_at(st.anchor + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
+    // the cell's middle on the canvas: a pixel's middle when a cell is one (picked up where the
+    // stamp says, its own place unless it picks up behind it)
+    let under = layer_at(st.pick + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
     let k = c.y * i32(st.grid) + c.x;
     let off = abs(c - vec2<i32>(middle()));
-    if (max(off.x, off.y) > st.kept) {
-        carry[k] = under;
-    } else {
-        carry[k] = mix(under, carry[k], st.pull);
+    var carried = under;
+    if (max(off.x, off.y) <= st.kept) {
+        carried = mix(under, carry[k], st.pull);
     }
+    // the paint mixed in (made one colour first, it is mixed in then), clear paint taking it away
+    if (st.paint_rate > 0.0 && st.dull <= 0.0) {
+        carried = mix(carried, vec4<f32>(st.paint.rgb * st.paint.a, st.paint.a), st.paint_rate);
+    }
+    carry[k] = carried;
+}
+
+// What the brush carries made one colour (a dulling stamp): the average of the cells within the
+// stamp's share of its reach of the middle (premultiplied, weighed by the stamp's shape there if it
+// says), the paint mixed in, kept where the third grid starts for cs_deposit to lay.
+var<workgroup> dull_sums: array<vec4<f32>, 64>;
+var<workgroup> dull_weights: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn cs_dull(@builtin(local_invocation_index) i: u32) {
+    let n = u32(2 * st.half + 1);
+    let g = i32(st.grid);
+    let reach = f32(st.half) * st.dull;
+    var sum = vec4<f32>(0.0);
+    var weight = 0.0;
+    for (var k = i; k < n * n; k = k + 64u) {
+        let c = window_cell(vec2<u32>(k % n, k / n));
+        let off = vec2<f32>(c - vec2<i32>(middle()));
+        if (max(abs(off.x), abs(off.y)) > reach) {
+            continue;
+        }
+        var w = 1.0;
+        if (st.dull_weighted == 1u) {
+            // the stamp's shape over the cell, as it lies where it picks up
+            let d = (off + 0.5) * st.scale;
+            let co = cos(st.angle);
+            let si = sin(st.angle);
+            let local = vec2<f32>(d.x * co + d.y * si, -d.x * si + d.y * co);
+            w = mask(vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness)));
+        }
+        sum = sum + carry[c.y * g + c.x] * w;
+        weight = weight + w;
+    }
+    dull_sums[i] = sum;
+    dull_weights[i] = weight;
+    workgroupBarrier();
+    if (i != 0u) {
+        return;
+    }
+    var total = vec4<f32>(0.0);
+    var weighed = 0.0;
+    for (var k = 0u; k < 64u; k = k + 1u) {
+        total = total + dull_sums[k];
+        weighed = weighed + dull_weights[k];
+    }
+    var one = carry[middle() * g + middle()];
+    if (weighed > 1e-6) {
+        one = total / weighed;
+    }
+    carry[2 * g * g] = mix(one, vec4<f32>(st.paint.rgb * st.paint.a, st.paint.a), st.paint_rate);
 }
 
 // The stamp's blur: what the brush lays down this stamp blurred (a Gaussian as wide in canvas
@@ -289,6 +352,10 @@ fn cs_blur_across(@builtin(global_invocation_id) id: vec3<u32>) {
 // the cell itself when a cell is a pixel
 fn carried(p: vec2<i32>) -> vec4<f32> {
     let g = i32(st.grid);
+    // made one colour
+    if (st.dull > 0.0) {
+        return carry[2 * g * g];
+    }
     let base = select(0, 2 * g * g, st.blur > 0.0);
     let at = (vec2<f32>(p) + 0.5 - st.anchor) / st.scale + f32(middle()) - 0.5;
     let i = vec2<i32>(floor(at));

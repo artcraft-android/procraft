@@ -74,6 +74,7 @@ pub(super) struct Window {
 #[derive(Clone, Copy)]
 pub(super) enum Pipe {
     Carry,
+    Dull,
     BlurDown,
     BlurAcross,
     Deposit,
@@ -124,8 +125,8 @@ fn read_reach(lo: Vec2, hi: Vec2, full: IRect) -> IRect {
 /// window (`half` cells each way of its middle, at `anchor`, `scale` canvas pixels a cell).
 fn carry_reach(u: &SmudgeUniform, [i0, j0, i1, j1]: [u32; 4], full: IRect) -> IRect {
     let at = |i: u32| (i as f32 - u.half as f32 + 0.5) * u.scale;
-    let lo = Vec2::new(u.anchor[0] + at(i0), u.anchor[1] + at(j0));
-    let hi = Vec2::new(u.anchor[0] + at(i1.max(i0 + 1) - 1), u.anchor[1] + at(j1.max(j0 + 1) - 1));
+    let lo = Vec2::new(u.pick[0] + at(i0), u.pick[1] + at(j0));
+    let hi = Vec2::new(u.pick[0] + at(i1.max(i0 + 1) - 1), u.pick[1] + at(j1.max(j0 + 1) - 1));
     read_reach(lo, hi, full)
 }
 
@@ -258,8 +259,11 @@ impl Canvas {
             kept: false,
         };
         let reach = carry_reach(&u, [0, 0, n, n], full).union(bbox);
+        // what it carries made one colour, a workgroup's work
+        let dull = if u.dull > 0.0 { &[(Pipe::Dull, 0, [1, 1])][..] } else { &[] };
         if self.fits_window(reach) {
             let mut dispatches = vec![(Pipe::Carry, 0, [cells, cells])];
+            dispatches.extend_from_slice(dull);
             dispatches.extend_from_slice(blur);
             dispatches.push((Pipe::Deposit, 0, [bbox.width().div_ceil(8), bbox.height().div_ceil(8)]));
             return vec![piece(u, dispatches, reach, bbox)];
@@ -272,6 +276,9 @@ impl Canvas {
                 piece(SmudgeUniform { part: part(0, j0, 255, j1), ..u }, carry, band(j0, j1), IRect::EMPTY)
             })
             .collect();
+        if !dull.is_empty() {
+            pieces.push(piece(u, dull.to_vec(), IRect::EMPTY, IRect::EMPTY));
+        }
         if blurs {
             pieces.push(piece(u, blur.to_vec(), IRect::EMPTY, IRect::EMPTY));
         }
@@ -467,6 +474,7 @@ impl Canvas {
                 pass.set_bind_group(0, &bind, &[offset, piece.listed]);
                 pass.set_pipeline(match pipe {
                     Pipe::Carry => &self.pipelines.smudge_carry,
+                    Pipe::Dull => &self.pipelines.smudge_dull,
                     Pipe::BlurDown => &self.pipelines.smudge_blur_down,
                     Pipe::BlurAcross => &self.pipelines.smudge_blur_across,
                     Pipe::Deposit => &self.pipelines.smudge_deposit,

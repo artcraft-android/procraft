@@ -1063,6 +1063,8 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
     the top) that paint as far as they are opaque: 1 in their own colours, 2 in the colour at the
     lightness their grey says (a middle grey keeps the colour's own, as far as the dab's lightness
     strength goes), 3 in a colour between the colour (black) and the secondary colour (white).
+  - field 9 (u8 1), its dabs move paint, as a smudge's do (see flag 16 below), whatever the tool
+    but the eraser.
   - field 8, how often it wants the pen while it holds still (f32 ms, at least 4), as an airbrush
     lays dabs by time: until the pen lifts, the app hands it the pen as it last was, at the time
     then, every half of that.
@@ -1093,11 +1095,17 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
 - Dabs come back 96 bytes each, twenty-four 32-bit numbers: x, y, its diameter (the longer side of its
   tip, canvas pixels), its angle (radians, clockwise), its squash (0..1 across its angle), its
   opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2 mirrored down, 4 its own
-  colour, 8 for the second stroke), its colour (three f32, sRGB 0..1, with flag 4), the texture's
+  colour, 8 for the second stroke, 16 it moves the paint under where the stroke's last dab lay to
+  where it lies, 32 that paint made one colour first, 64 that colour weighed by the dab's tip, 128
+  the colour it mixes in clear, taking paint away), its
+  colour (three f32, sRGB 0..1, with flag 4), the texture's
   strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
   lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it
   paints fully, what is under it by more than the next number's share of it not at all), that
-  share, then six 0s.
+  share; with flag 16, the share of what it lays that is its colour (the colour, or its own with
+  flag 4) and, with flag 32, the share of its reach around where the last lay that the one colour
+  is picked from (0 its middle, 1 all of it, 3 at most); then four 0s. With flag 16 the opacity is
+  how far it lays what it moves; the first dab of such a stroke only marks its place.
 
 A stroke's start, a batch of samples and its end may each take 40,000,000 steps, for at most a
 quarter of a second; a load 2,000,000,000, for 10 seconds. A stroke laid this way shows no

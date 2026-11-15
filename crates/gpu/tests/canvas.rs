@@ -6,6 +6,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::{Homography, Vec2};
 use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::profile::Profile;
+use procraft_engine::stroke::PickUp;
 use procraft_engine::stroke::{Stamp, StrokeBuilder, Tint};
 use procraft_engine::textures::TEXTURE_SIZE;
 use procraft_engine::view::View;
@@ -2919,6 +2920,43 @@ fn the_wet_mix_blur_softens_what_a_smudge_lays_down() {
     // the whole blur spreads the edge across the stamp
     let (inside, outside) = smudged(1.0);
     assert!(inside < 230 && outside > 25, "blurred: {inside} {outside}");
+}
+
+#[test]
+fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // red on the left of x = 32, clear on the right; a smudge whose first stamp (laying nothing)
+    // lies in the red and whose next lies in the clear, each picking up behind it
+    let moved = |pick: PickUp| {
+        let mut doc = Document::new(96, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(-8.0, y as f32), 40.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Smudge, [0.0, 0.0, 1.0], 1.0));
+        let first = Stamp { alpha: 0.0, pick_up: Some(pick), ..dot(Vec2::new(16.0, 32.0), 8.0) };
+        let next = Stamp { pick_up: Some(pick), ..dot(Vec2::new(60.0, 32.0), 8.0) };
+        canvas.add_stamps(&[first, next]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 96, 60, 32), pixel(&layer, 96, 16, 32))
+    };
+    // smeared: the red laid where it was clear, and where the first lay left as it was
+    let (smeared, first) = moved(PickUp { paint_share: 0.0, paint: None, dull: None, clear: false });
+    assert!(smeared[0] > 240 && smeared[2] < 16 && smeared[3] > 240, "{smeared:?}");
+    assert!(first[0] > 240 && first[3] > 240, "{first:?}");
+    // half the stroke's colour (blue) mixed in
+    let (mixed, _) = moved(PickUp { paint_share: 0.5, paint: None, dull: None, clear: false });
+    assert!(mixed[0].abs_diff(128) <= 12 && mixed[2].abs_diff(128) <= 12 && mixed[3] > 240, "{mixed:?}");
+    // clear paint (an erasing brush's) mixed in: half the red taken away
+    let (thinned, _) = moved(PickUp { paint_share: 0.5, paint: None, dull: None, clear: true });
+    assert!(thinned[3].abs_diff(128) <= 12 && thinned[2] < 16 && thinned[0] > 100, "{thinned:?}");
+    // dulled to one colour, then a quarter of its own colour (green) mixed in
+    let (dulled, _) =
+        moved(PickUp { paint_share: 0.25, paint: Some([0.0, 1.0, 0.0]), dull: Some((1.0, true)), clear: false });
+    assert!(dulled[0].abs_diff(191) <= 12 && dulled[1].abs_diff(64) <= 12 && dulled[3] > 240, "{dulled:?}");
 }
 
 #[test]

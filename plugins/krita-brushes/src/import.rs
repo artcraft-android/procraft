@@ -49,7 +49,7 @@ pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
 fn add(made: &mut Record, kpp: &[u8], find: &dyn Fn(&str) -> Option<Vec<u8>>) {
     let Some(text) = preset_text(kpp) else { return };
     let Some(preset) = Preset::read(&text) else { return };
-    if preset.paintop != "paintbrush" {
+    if preset.paintop != "paintbrush" && preset.paintop != "colorsmudge" {
         return;
     }
     let mut data = Record::new();
@@ -229,6 +229,45 @@ mod tests {
         // saying nothing, a picture with colour stamps itself; an older preset's is twice its size
         assert_eq!(tip("").0, Kind::Stamp);
         assert_eq!(tip("").2, 4.0);
+    }
+
+    /// A colour smudge preset's dabs move paint: the first only marks where the next picks up from,
+    /// the rest laid at its smudge rate (1 where it follows no sensor), the colour's share as the
+    /// older engine reckons it from the colour rate and the most smudge rate; dulling as it says.
+    #[test]
+    fn a_colour_smudge_s_dabs_move_paint() {
+        let xml = r#"<Preset name="S" paintopid="colorsmudge"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.5" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="20" ratio="1" hfade="1" vfade="1"/></Brush>]]></param><param name="PressureSmudgeRate"><![CDATA[false]]></param><param name="SmudgeRateValue"><![CDATA[0.6]]></param><param name="PressureColorRate"><![CDATA[true]]></param><param name="ColorRateValue"><![CDATA[1]]></param><param name="ColorRateUseCurve"><![CDATA[false]]></param><param name="SmudgeRateMode"><![CDATA[1]]></param><param name="PressureSmudgeRadius"><![CDATA[true]]></param><param name="SmudgeRadiusValue"><![CDATA[50]]></param><param name="SmudgeRadiusUseCurve"><![CDATA[false]]></param></Preset>"#;
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes());
+        let brush = load(&data.bytes(), false).unwrap();
+        let look = brush.look();
+        assert!(fields(&look).any(|(f, v)| f == 9 && v == [1]), "its dabs move paint");
+        assert!(fields(&look).any(|(f, v)| f == 2 && v == [0]), "each laid as far as it says");
+        let mut stroke = Stroke::new(
+            Rc::new(brush),
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3 },
+        );
+        let samples: Vec<Sample> =
+            (0..40).map(|i| Sample { x: 10.0 + i as f32 * 2.0, y: 50.0, pressure: 1.0, ..Sample::default() }).collect();
+        stroke.add(&samples);
+        let dabs = &stroke.out;
+        assert!(dabs.len() > 4);
+        assert_eq!(dabs[0].opacity, 0.0, "the first marks its place");
+        assert!(dabs.iter().all(|d| d.flags & 48 == 48), "moving paint, dulled");
+        let second = dabs[1];
+        assert!((second.opacity - 1.0).abs() < 1e-5, "{}", second.opacity);
+        assert!((second.paint_share - 0.4).abs() < 1e-5, "{}", second.paint_share);
+        assert!((second.radius - 0.5).abs() < 1e-5, "{}", second.radius);
+        // an eraser's colour is clear
+        let eraser = xml.replace("</Preset>", r#"<param name="EraserMode"><![CDATA[true]]></param></Preset>"#);
+        let mut data = Record::new();
+        data.field(1, eraser.as_bytes());
+        let mut stroke = Stroke::new(
+            Rc::new(load(&data.bytes(), false).unwrap()),
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3 },
+        );
+        stroke.add(&samples);
+        assert!(stroke.out.iter().all(|d| d.flags & 176 == 176), "moving paint, dulled, clear");
     }
 
     /// A texture's picture carried in a setting comes out of it as a file of the brush's, by its name.

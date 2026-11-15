@@ -83,6 +83,8 @@ mod field {
     pub const TIP_KIND: u16 = 7;
     /// How often it lays a dab while the pen holds still (f32 ms), if it does (an airbrush).
     pub const AIRBRUSH: u16 = 8;
+    /// Its dabs move paint (u8 1): a smudge whose stamps pick up behind them.
+    pub const SMUDGES: u16 = 9;
     /// A load: the brush's id and data, and whether the app holds its look already.
     pub const LOAD_ID: u16 = 1;
     pub const LOAD_DATA: u16 = 2;
@@ -106,6 +108,12 @@ const FLIP_ACROSS: u32 = 1;
 const FLIP_DOWN: u32 = 2;
 const OWN_COLOUR: u32 = 4;
 const FOR_SECOND: u32 = 8;
+/// A dab that moves the paint under where the stroke's last lay; that paint made one colour first;
+/// that weighed by its tip; the colour it mixes in clear (taking paint away).
+const MOVES_PAINT: u32 = 16;
+const DULLS: u32 = 32;
+const WEIGHED: u32 = 64;
+const CLEAR_PAINT: u32 = 128;
 
 /// The most tips, and the largest side of one, and of a texture.
 const MOST_TIP_SIDE: u32 = 4096;
@@ -152,6 +160,8 @@ pub(crate) struct LookTexture {
 pub(crate) struct BrushLook {
     /// Every how many milliseconds its engine is handed the pen again while it holds still.
     pub airbrush: Option<f32>,
+    /// Its dabs move paint (as a smudge's stamps do, picking up behind them).
+    pub smudges: bool,
     pub tips: TipSet,
     pub build: Build,
     pub blend: Option<u32>,
@@ -188,9 +198,10 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
     });
     let mut tips = Vec::new();
     let (mut build, mut blend, mut erases, mut texture, mut second) = (Build::Over, None, false, None, None);
-    let mut airbrush = None;
+    let (mut airbrush, mut smudges) = (None, false);
     for (f, value) in fields(bytes) {
         match f {
+            field::SMUDGES => smudges = value.first() == Some(&1),
             field::AIRBRUSH => airbrush = f32_of(value).filter(|ms| *ms > 0.0).map(|ms| ms.max(MOST_AIRBRUSH_MS)),
             field::TIP => tips.push(read_tip(value, kind.channels() as usize)?),
             field::BUILD => build = read_build(value),
@@ -201,7 +212,7 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
             _ => {}
         }
     }
-    Some(BrushLook { airbrush, tips: tip_set(&tips, id, kind)?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, smudges, tips: tip_set(&tips, id, kind)?, build, blend, erases, texture, second })
 }
 
 /// The pen is handed again at most this often (ms), however often an airbrush lays its dabs.
@@ -365,7 +376,7 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
 /// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
 /// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
 /// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
-const KEPT_LOOK_VERSION: u32 = 3;
+const KEPT_LOOK_VERSION: u32 = 4;
 
 fn kept_tips(set: &TipSet) -> Vec<u8> {
     let mut r = Record::default();
@@ -391,6 +402,7 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
     if let Some(ms) = look.airbrush {
         r.field(8, &ms.to_le_bytes());
     }
+    r.field(9, &[u8::from(look.smudges)]);
     if let Some(t) = &look.texture {
         let mut tex = Record::default();
         tex.field(1, &t.side.to_le_bytes())
@@ -438,10 +450,11 @@ fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
 pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
     let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
         (None, None, Build::Over, None, false, None, None);
-    let mut airbrush = None;
+    let (mut airbrush, mut smudges) = (None, false);
     for (f, value) in fields(bytes) {
         match f {
             1 => version = u32_of(value),
+            9 => smudges = value.first() == Some(&1),
             8 => airbrush = f32_of(value).filter(|ms| *ms >= MOST_AIRBRUSH_MS),
             2 => tips = Some(tips_kept(value, id)?),
             3 => build = read_build(value),
@@ -482,7 +495,7 @@ pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
         }
     }
     (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
-    Some(BrushLook { airbrush, tips: tips?, build, blend, erases, texture, second })
+    Some(BrushLook { airbrush, smudges, tips: tips?, build, blend, erases, texture, second })
 }
 
 /// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
@@ -774,7 +787,8 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     let float = |i: usize| f32::from_le_bytes(word(i));
     let [x, y, diameter, angle, ratio, opacity, flow] = [0, 1, 2, 3, 4, 5, 6].map(float);
     let (tip, flags) = (u32::from_le_bytes(word(7)), u32::from_le_bytes(word(8)));
-    let [r, g, b, strength, tx, ty, lightness, threshold, softness] = [9, 10, 11, 12, 13, 14, 15, 16, 17].map(float);
+    let [r, g, b, strength, tx, ty, lightness, threshold, softness, share, radius] =
+        [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19].map(float);
     if ![x, y, diameter].iter().all(|v| v.is_finite()) || diameter <= 0.0 || tips == 0 {
         return None;
     }
@@ -798,6 +812,16 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     s.grain_offset = center + offset;
     s.grain_depth = unit(strength, 1.0);
     s.lightness = unit(lightness, 1.0);
+    if flags & MOVES_PAINT != 0 {
+        let own = flags & OWN_COLOUR != 0;
+        s.pick_up = Some(procraft_engine::stroke::PickUp {
+            paint_share: unit(share, 0.0),
+            paint: own.then(|| [unit(r, 0.0), unit(g, 0.0), unit(b, 0.0)]),
+            dull: (flags & DULLS != 0)
+                .then(|| (if radius.is_finite() { radius.clamp(0.0, 3.0) } else { 0.0 }, flags & WEIGHED != 0)),
+            clear: flags & CLEAR_PAINT != 0,
+        });
+    }
     // made sharp, if it says (a threshold of 0 says not)
     s.threshold =
         if threshold.is_finite() && threshold > 0.0 { [threshold.min(1.0), unit(softness, 0.0)] } else { [0.0; 2] };
@@ -897,8 +921,11 @@ fn look_styles(
     canvas: &mut procraft_gpu::Canvas,
     gpu: &procraft_gpu::Gpu,
 ) -> Option<(StrokeStyle, Option<SecondStroke>)> {
-    // a brush that erases does so with the paint tool (its preview showing what it takes away)
+    // a brush whose dabs move paint smudges with the paint tool (an erasing one taking paint away
+    // as it does), a brush that erases erases with it (its preview showing what it takes away or
+    // moves: there is nothing under it there)
     let tool = match tool {
+        StrokeTool::Paint if look.smudges && !preview => StrokeTool::Smudge,
         StrokeTool::Paint if look.erases && !preview => StrokeTool::Erase,
         other => other,
     };
@@ -915,6 +942,12 @@ fn look_styles(
         style
     };
     let mut style = paint(look.build, starting.opacity);
+    if tool == StrokeTool::Smudge && look.smudges {
+        // what each stamp picks up behind it, laid as it says: nothing kept, nothing blurred
+        style.pull = 0.0;
+        style.blur = 0.0;
+        style.rendering = Rendering::BuildUp;
+    }
     if let Some(blend) = look.blend {
         style.blend = blend.min(procraft_engine::brush::BRUSH_BEHIND);
     }
@@ -1232,6 +1265,69 @@ mod tests {
         let off = draw(&s);
         assert!(off.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
         assert_ne!(off, bigger);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Krita colour smudge brush moves the paint it goes over: dragged from red into the clear, it
+    /// lays the red where there was nothing, whatever the colour.
+    #[test]
+    fn a_krita_colour_smudge_moves_the_paint_it_goes_over() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-colour-smudge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        s.use_plugins(Arc::clone(&plugins));
+        let xml = r#"<Preset name="Smear" paintopid="colorsmudge"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="20" ratio="1" hfade="1" vfade="1"/></Brush>]]></param><param name="PressureSize"><![CDATA[false]]></param><param name="PressureSmudgeRate"><![CDATA[false]]></param><param name="SmudgeRateValue"><![CDATA[1]]></param><param name="SmudgeRateMode"><![CDATA[0]]></param></Preset>"#;
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+        kpp.extend(chunk(b"IEND", &[]));
+        let read = crate::read_brushes(kpp, Some("Smear.kpp".to_owned())).unwrap();
+        let set = s.add_brushes_read(read, 0).unwrap();
+        assert!(s.select_brush(set, 0));
+        // red on the left half
+        let layer = s.add_layer();
+        {
+            let mut st = s.shared.lock();
+            let rect = procraft_engine::geom::IRect::new(0, 0, 100, 120);
+            st.rewrite_layer(procraft_engine::document::LayerId(layer), rect, [255, 0, 0, 255].repeat(100 * 120));
+        }
+        s.set_color(0.0, 0.0, 1.0);
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
+        s.stroke_add((61..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let px = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
+        assert!(at_x(130)[0] > 128 && at_x(130)[3] > 128 && at_x(130)[2] < 64, "red dragged out: {:?}", at_x(130));
+        assert_eq!(at_x(190)[3], 0, "past the stroke, still clear");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
