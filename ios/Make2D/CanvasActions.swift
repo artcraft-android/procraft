@@ -21,7 +21,7 @@ extension CanvasModel {
     /// Runs `work`, an export by the core, off the main thread with the export card showing how far
     /// it has come and a check once made; what it made goes to the share sheet. Cancelled, nothing
     /// is shared; made nothing, `failed` is told.
-    private func exporting(
+    func exporting(
         failed: @escaping @autoclosure () -> String, progress: (() -> Float)? = nil,
         _ work: @escaping (CanvasSession) -> [URL]
     ) {

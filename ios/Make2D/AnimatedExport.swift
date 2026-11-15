@@ -86,6 +86,15 @@ extension CanvasModel {
                     width: Int(info.width), height: Int(info.height), maxSide: choices.webReady ? webReadySide : mostVideoSide
                 )
                 let order = session.animationSequence()
+                // an HDR artwork's HEVC keeps its light above white (10-bit HLG)
+                if format == .hevc, session.isHdr() {
+                    let made = VideoWriter.writeHlg(to: url, width: width, height: height, count: order.count, fps: choices.fps) { n in
+                        guard !cancelled() else { return nil }
+                        meter?.share = Float(n) / Float(max(order.count, 1))
+                        return session.animationFrameHlg(index: order[n], width: UInt32(width), height: UInt32(height))
+                    }
+                    return made ? url : nil
+                }
                 let made = VideoWriter.write(
                     to: url, width: width, height: height, count: order.count, hevc: format == .hevc,
                     bitsPerPixel: 4, fps: choices.fps

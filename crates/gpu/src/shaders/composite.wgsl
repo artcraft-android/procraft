@@ -341,7 +341,7 @@ fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     if ((lu.stroke_blend & STROKE_LUMINANCE) != 0u && mode != 26u && mode != 29u && s.a > 0.0) {
         let cb = unpremultiply(b);
         let cs = unpremultiply(s);
-        let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+        let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(CEILING));
         let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
         into = unsquared(mix(squared(b), squared(full), s.a));
     }

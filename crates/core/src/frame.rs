@@ -88,6 +88,12 @@ impl State {
     ) {
         self.needs_frame = false;
         self.frame_due = None;
+        // an HDR canvas's light above white, rolled off to what the screen shows now (white, on
+        // a surface without extended range)
+        if let Some(canvas) = self.canvas.as_mut() {
+            let extended = format == wgpu::TextureFormat::Rgba16Float;
+            canvas.set_display_peak(if extended { self.display_peak } else { 1.0 });
+        }
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
@@ -235,7 +241,10 @@ impl State {
 
 /// The profile a configured surface shows colours in.
 pub fn screen_profile(config: &wgpu::SurfaceConfiguration) -> Profile {
-    if config.color_space == wgpu::SurfaceColorSpace::DisplayP3 { Profile::DisplayP3 } else { Profile::Srgb }
+    match config.color_space {
+        wgpu::SurfaceColorSpace::DisplayP3 | wgpu::SurfaceColorSpace::ExtendedDisplayP3 => Profile::DisplayP3,
+        _ => Profile::Srgb,
+    }
 }
 
 /// The matrix moving a canvas's colours in `from` to `to`, if they differ.
@@ -246,14 +255,20 @@ pub(crate) fn colours_to(from: Profile, to: Profile) -> Option<[[f32; 3]; 3]> {
 /// Configures the surface for `size`: a format that doesn't re-encode sRGB, the lowest-latency
 /// present mode on offer, one frame in flight, and (if `wide`) Display P3 where the screen takes
 /// it. A surface an sRGB interface is drawn on as it is (egui's) asks for no wide colour, or the
-/// interface would show over-saturated. None if it can't be (yet).
+/// interface would show over-saturated. For an HDR canvas (`hdr`), half floats in the screen's
+/// extended range where it has one (the iPad's EDR), so light above white shows brighter than
+/// white. None if it can't be (yet).
 pub fn configure(
     gpu: &Gpu,
     surface: &wgpu::Surface<'_>,
     size: (u32, u32),
     wide: bool,
+    hdr: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
     let caps = surface.get_capabilities(&gpu.adapter);
+    if hdr && let Some(config) = configure_extended(gpu, surface, &caps, size) {
+        return Some(config);
+    }
     // an 8-bit one first: a float surface (Rgba16Float, offered first on some Linux drivers) is
     // read by the compositor as linear, so the sRGB-encoded colours drawn on it show washed out
     let eight_bit = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
@@ -304,5 +319,47 @@ pub fn configure(
         config.present_mode,
         config.color_space
     );
+    Some(config)
+}
+
+/// [`configure`] for an HDR canvas: half floats in the screen's extended range (extended sRGB, which
+/// also carries Display P3's colours), sRGB-encoded as the canvas draws, with light past white
+/// shown brighter than it. None where the surface has no extended range.
+fn configure_extended(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'_>,
+    caps: &wgpu::SurfaceCapabilities,
+    size: (u32, u32),
+) -> Option<wgpu::SurfaceConfiguration> {
+    let format = wgpu::TextureFormat::Rgba16Float;
+    let spaces = caps.format_capabilities.iter().find(|f| f.format == format)?.color_spaces;
+    // extended sRGB only: wgpu's extended Display P3 looks its colour space up in a way that
+    // crashes on the iPad simulator. A Display P3 canvas's colours past sRGB go out as values below
+    // 0 and past 1, which extended sRGB carries (see `display.wgsl`).
+    if !spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB) {
+        return None;
+    }
+    let color_space = wgpu::SurfaceColorSpace::ExtendedSrgb;
+    let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
+    config.format = format;
+    config.color_space = color_space;
+    config.view_formats = Vec::new();
+    config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    };
+    if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+        config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+    }
+    // (as `configure` has it)
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { 1 };
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    surface.configure(&gpu.device, &config);
+    if let Some(e) = pollster::block_on(scope.pop()) {
+        log::warn!("the surface couldn't be configured for extended range: {e}");
+        return None;
+    }
+    log::info!("surface {}×{} {:?} {:?}", config.width, config.height, config.format, config.color_space);
     Some(config)
 }

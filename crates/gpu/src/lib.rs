@@ -109,6 +109,8 @@ pub struct Gpu {
     lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
+    /// HDR canvases' pipelines, once the first of them has made them.
+    hdr_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
     /// The pipeline cache kept between runs (see [`kept`]), once the canvases' pipelines are made
     /// with it.
     kept: Arc<OnceLock<Option<kept::Kept>>>,
@@ -369,6 +371,7 @@ impl Gpu {
             errors,
             lost,
             canvas_pipelines: Arc::default(),
+            hdr_pipelines: Arc::default(),
             kept: Arc::default(),
             readbacks: Arc::default(),
         })
@@ -447,12 +450,21 @@ impl Gpu {
     /// The pipelines canvases draw with, made by the first canvas on this device: from their
     /// compiled form kept by an earlier run, where there is one (see [`keep_pipelines_in`]).
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(self.canvas_pipelines.get_or_init(|| {
+        self.canvas_pipelines_for(canvas::layer_format(make2d_engine::document::DynamicRange::Standard))
+    }
+
+    /// The pipelines canvases whose layers are `layer_format` draw with: a standard canvas's, or
+    /// (made by the first HDR canvas) an HDR one's.
+    pub(crate) fn canvas_pipelines_for(&self, layer_format: wgpu::TextureFormat) -> Arc<canvas::Pipelines> {
+        let high = layer_format == canvas::HDR_FORMAT;
+        let made = if high { &self.hdr_pipelines } else { &self.canvas_pipelines };
+        Arc::clone(made.get_or_init(|| {
             let kept = self
                 .kept
                 .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
             let format = canvas::liquify_format(&self.adapter);
-            let pipelines = canvas::Pipelines::new(&self.device, format, kept.as_ref().map(|k| k.cache.clone()));
+            let pipelines =
+                canvas::Pipelines::new(&self.device, format, layer_format, kept.as_ref().map(|k| k.cache.clone()));
             if let Some(kept) = kept {
                 kept.made();
             }

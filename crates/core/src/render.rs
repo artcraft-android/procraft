@@ -132,7 +132,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
         if reconfigure || config.is_none() {
             let st = shared.lock();
             let Some(gpu) = st.gpu.as_ref() else { break };
-            config = configure(gpu, &surface, size, true);
+            config = configure(gpu, &surface, size, true, st.doc.range.is_high());
         }
         let Some(format) = config.as_ref().map(|c| c.format) else {
             std::thread::sleep(Duration::from_millis(16));
@@ -249,7 +249,7 @@ pub(crate) fn project(shared: Arc<Shared>, window: Window) {
             size = wanted;
             let st = shared.lock();
             let Some(gpu) = st.gpu.as_ref() else { break };
-            config = configure(gpu, &surface, size, true);
+            config = configure(gpu, &surface, size, true, st.doc.range.is_high());
             drawn = None;
         }
         let Some(format) = config.as_ref().map(|c| c.format) else {

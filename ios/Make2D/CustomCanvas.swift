@@ -93,6 +93,8 @@ struct CustomCanvas: View {
     /// Which profiles the list shows.
     @State private var cmyk: Bool
     @State private var profileAsked = false
+    /// An HDR canvas: light above white kept.
+    @State private var hdr: Bool
 
     init(model: GalleryModel, onMade: @escaping () -> Void) {
         self.model = model
@@ -100,7 +102,7 @@ struct CustomCanvas: View {
         let start = model.editingPreset.map { model.presets[$0] } ?? CanvasPreset(
             name: "Untitled Canvas", unit: "px", sizeWidth: 1080, sizeHeight: 1080, dpi: 300, background: 0xFF_FFFF,
             backgroundHidden: false, timeLapseResolution: 0, timeLapseQuality: 1, timeLapseHevc: false,
-            profile: "sRGB IEC61966-2.1"
+            profile: "sRGB IEC61966-2.1", hdr: false
         )
         _name = State(initialValue: start.name)
         _width = State(initialValue: start.sizeWidth)
@@ -112,6 +114,7 @@ struct CustomCanvas: View {
         _resolution = State(initialValue: start.timeLapseResolution)
         _quality = State(initialValue: start.timeLapseQuality)
         _hevc = State(initialValue: start.timeLapseHevc)
+        _hdr = State(initialValue: start.hdr)
         _profile = State(initialValue: start.profile)
         _cmyk = State(initialValue: isCmykProfile(name: start.profile))
     }
@@ -125,7 +128,7 @@ struct CustomCanvas: View {
         return CanvasPreset(
             name: shown.isEmpty ? "Untitled Canvas" : shown, unit: unit.key, sizeWidth: width, sizeHeight: height,
             dpi: dpi, background: background, backgroundHidden: hidden, timeLapseResolution: resolution,
-            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile
+            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile, hdr: hdr && !cmyk
         )
     }
 
@@ -336,6 +339,11 @@ struct CustomCanvas: View {
             let names = cmyk ? cmykProfiles() : colorProfiles()
             VStack(spacing: 24) {
                 kindSwitch
+                if !cmyk {
+                    group {
+                        switchLine("HDR", on: hdr) { hdr.toggle() }
+                    }
+                }
                 group {
                     ForEach(names.indices, id: \.self) { i in
                         if i > 0 {

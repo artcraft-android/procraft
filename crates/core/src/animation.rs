@@ -89,13 +89,7 @@ impl CanvasSession {
     /// alpha, scaled to fit `max_side` (0: full size), over the background unless `transparent`;
     /// none if there is no such frame.
     pub fn animation_frame(&self, index: u32, transparent: bool, max_side: u32) -> Option<ThumbnailImage> {
-        let shot = {
-            let doc = &self.shared.lock().doc;
-            match &doc.timeline {
-                Some(tl) => (index < tl.duration).then_some(Shot::At(index))?,
-                None => Shot::Unit(frames(doc).get(usize::try_from(index).ok()?).copied()?),
-            }
-        };
+        let shot = self.shot_at(index)?;
         match self.render_shot(shot, transparent, max_side) {
             Ok((width, height, rgba)) => Some(ThumbnailImage { width, height, rgba }),
             Err(e) => {
@@ -233,6 +227,16 @@ impl CanvasSession {
     /// `shot` (an Animation Assist frame alone, or a timeline's frame as it plays; the background
     /// too unless `transparent`), straight alpha, scaled to fit `max_side` (0: full size). The
     /// canvas shows the whole picture again afterwards.
+    /// What frame `index` of the animation's sequence shows: a timeline's frame, or Animation
+    /// Assist's frame layer.
+    pub(crate) fn shot_at(&self, index: u32) -> Option<Shot> {
+        let doc = &self.shared.lock().doc;
+        Some(match &doc.timeline {
+            Some(tl) => (index < tl.duration).then_some(Shot::At(index))?,
+            None => Shot::Unit(frames(doc).get(usize::try_from(index).ok()?).copied()?),
+        })
+    }
+
     pub(crate) fn render_shot(
         &self,
         shot: Shot,
@@ -250,6 +254,21 @@ impl CanvasSession {
         transparent: bool,
         max_side: u32,
         change: impl FnOnce(&mut Document),
+    ) -> Result<(u32, u32, Vec<u8>), MobileError> {
+        let (w, h, rgba) = self.render_shot_full(shot, transparent, change, false)?;
+        let side = if max_side == 0 { w.max(h) } else { max_side.min(w.max(h)) };
+        Ok(thumbnail(&rgba, w, h, side))
+    }
+
+    /// [`Self::render_shot_of`] at full size: premultiplied RGBA8 (an HDR canvas's light above
+    /// white rolled off), or with `wide` an HDR canvas's half floats as they are (see
+    /// [`make2d_gpu::Canvas::read_composite_wide`]).
+    pub(crate) fn render_shot_full(
+        &self,
+        shot: Shot,
+        transparent: bool,
+        change: impl FnOnce(&mut Document),
+        wide: bool,
     ) -> Result<(u32, u32, Vec<u8>), MobileError> {
         let (w, h, rgba) = {
             let mut guard = self.shared.lock();
@@ -280,7 +299,11 @@ impl CanvasSession {
             }
             canvas.invalidate();
             canvas.render_finished(gpu, &mut doc);
-            let rgba = canvas.read_composite(gpu);
+            let rgba = match (wide, canvas.is_hdr()) {
+                (true, _) => canvas.read_composite_wide(gpu),
+                (false, true) => canvas.read_composite_wide(gpu).map(|half| make2d_engine::hdr::tone_mapped(&half)),
+                (false, false) => canvas.read_composite(gpu),
+            };
             canvas.set_play_frame(played);
             canvas.set_camera_view(camera);
             canvas.invalidate();
@@ -288,8 +311,7 @@ impl CanvasSession {
             self.shared.frame(st);
             (w, h, rgba.map_err(|e| file_error("reading the picture", e))?)
         };
-        let side = if max_side == 0 { w.max(h) } else { max_side.min(w.max(h)) };
-        Ok(thumbnail(&rgba, w, h, side))
+        Ok((w, h, rgba))
     }
 }
 

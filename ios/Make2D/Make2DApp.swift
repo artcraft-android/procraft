@@ -101,7 +101,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -605,6 +605,10 @@ enum ScreenCapture {
             ribbons(model)
         case "light":
             lit(model)
+        case "hdr":
+            // brightened past white: the bands' middles glow on a screen with extended range
+            model.setLightLimit(3)
+            lit(model)
         case "timeline-keys", "timeline-path":
             guard let clip = timelineKeyed(model) else { break }
             model.timeline.picked = clip
@@ -1066,7 +1070,12 @@ enum ScreenCapture {
             let scale = scene.screen.scale
             let width = UInt32(max(bounds.width, bounds.height) * scale)
             let height = UInt32(min(bounds.width, bounds.height) * scale)
-            let model = CanvasModel(session: CanvasSession(width: width, height: height), dir: Gallery.store.newFolder(folder: nil))
+            let session = CanvasSession(width: width, height: height)
+            // an HDR canvas, its light above white shown in the screen's extended range
+            if name.hasPrefix("hdr") {
+                session.setNewHdr(hdr: true)
+            }
+            let model = CanvasModel(session: session, dir: Gallery.store.newFolder(folder: nil))
             open(model)
             switch name {
             case "brushes": model.toolPressed(.paint)

@@ -38,6 +38,7 @@ mod gestures;
 mod gradients;
 mod grain_store;
 mod guide;
+mod hdr;
 mod history;
 mod hooks;
 mod host;
@@ -350,15 +351,16 @@ impl Default for LightSettings {
 }
 
 impl LightSettings {
-    /// As a stroke takes it, brightening no further than white (an ordinary canvas keeps nothing
-    /// past it).
-    fn tool(self) -> make2d_gpu::LightTool {
+    /// As a stroke takes it: brightening no further than white on a standard canvas (which keeps
+    /// nothing past it), and on an HDR one (`hdr`) no further than `limit_stops` above it.
+    fn tool(self, hdr: bool, limit_stops: f32) -> make2d_gpu::LightTool {
         let mode = match self.kind {
             LightKind::Brighten => make2d_gpu::LightMode::Brighten,
             LightKind::Dim => make2d_gpu::LightMode::Dim,
             LightKind::Tame => make2d_gpu::LightMode::Tame,
         };
-        make2d_gpu::LightTool::new(mode, self.strength)
+        let tool = make2d_gpu::LightTool::new(mode, self.strength);
+        if hdr { make2d_gpu::LightTool { ceiling: crate::hdr::ceiling(limit_stops), ..tool } } else { tool }
     }
 }
 
@@ -483,6 +485,12 @@ pub(crate) struct State {
     previous_tool: Option<ToolKind>,
     /// What the light tool does, and how strongly.
     light_tool: LightSettings,
+    /// How far above white the light tool brightens an HDR canvas, stops (see
+    /// [`crate::hdr::LIGHT_LIMIT`]).
+    light_limit: f32,
+    /// The brightest the screen shows now, linear light (1: white; more on an iPad's extended
+    /// range), what an HDR canvas's light above white is rolled off to.
+    display_peak: f32,
     /// The app's own smoothing and pressure, on top of every brush's.
     pub(crate) input: make2d_engine::stroke::InputSettings,
     /// Selection mask visibility, 0..1: how strongly what is not selected is banded.
@@ -959,7 +967,7 @@ impl State {
         let mut style = StrokeStyle::for_brush(&brush, tool.stroke_tool(), paint.colour, opacity, paint.alpha_lock);
         style.secondary = paint.secondary;
         style.preview = preview;
-        style.light = self.light_tool.tool();
+        style.light = self.light_tool.tool(self.doc.range.is_high(), self.light_limit);
         style.wetness = StrokeStyle::wetness_at(sliders.opacity);
         self.use_brush_images(&mut style, &brush);
         (brush, style, diameter)
@@ -1125,7 +1133,13 @@ impl State {
         let made = gpu.checked(|| -> Result<Canvas, make2d_gpu::GpuError> {
             let mut c = Canvas::unfilled(gpu, doc)?;
             c.set_resident_budget(crate::layers::resident_budget());
+            let wide = w as usize * h as usize * make2d_engine::hdr::HDR_PIXEL;
             for (id, pixels) in &pixels {
+                // an HDR artwork's layer as its file keeps it
+                if c.is_hdr() && pixels.len() == wide {
+                    c.upload_layer_wide(gpu, *id, pixels)?;
+                    continue;
+                }
                 // past what fits, kept compressed until needed
                 if c.has_room() { c.upload_layer(gpu, *id, pixels) } else { c.park_pixels(*id, pixels) }?;
             }
@@ -1364,6 +1378,8 @@ impl Shared {
             /// soon be paged.
             Upload(Vec<u8>, Option<make2d_engine::geom::IRect>, Option<make2d_gpu::ReadyToPark>),
             Park(make2d_gpu::ReadyToPark),
+            /// An HDR artwork's layer, its half floats as its file keeps them (never parked).
+            Wide(Vec<u8>),
         }
         // every layer up as it was read, or no canvas (what was opened kept): one the GPU had no
         // memory for would show empty, and be saved so once painted on
@@ -1373,7 +1389,10 @@ impl Shared {
             // read on a few threads (each file decoded and its compressed copy made: those below
             // the top layers that fit are parked, those that fit keep it, so letting them go
             // later needs no reading back), put on the canvas here in order
-            let first_resident = ids.len().saturating_sub(make2d_gpu::most_resident(budget, w, h));
+            let hdr = doc.range.is_high();
+            let first_resident =
+                if hdr { 0 } else { ids.len().saturating_sub(make2d_gpu::most_resident(budget, w, h)) };
+            let wide = w as usize * h as usize * make2d_engine::hdr::HDR_PIXEL;
             // the copies of layers that go up take an eighth of the textures' budget at most, and
             // only those that pack to a quarter or less are kept
             let copy_room = budget / 8;
@@ -1381,7 +1400,7 @@ impl Shared {
             // and only when the layers take half the textures' budget or more: far under it,
             // none is likely to be let go (one that is is read back then)
             let layers_bytes = ids.len() as u64 * u64::from(w) * u64::from(h) * 4;
-            let copying = budget > 0 && layers_bytes.saturating_mul(2) >= budget;
+            let copying = !hdr && budget > 0 && layers_bytes.saturating_mul(2) >= budget;
             let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
             let next = std::sync::atomic::AtomicUsize::new(0);
             std::thread::scope(|scope| {
@@ -1398,7 +1417,9 @@ impl Shared {
                             let read = layer.map(|l| {
                                 l.pixels(w, h).map(|px| {
                                     let hash = project::pixels_hash(&px);
-                                    if i >= first_resident {
+                                    if hdr && px.len() == wide {
+                                        (Read::Wide(px), hash)
+                                    } else if i >= first_resident {
                                         let copy = copying.then(|| make2d_gpu::ReadyToPark::of(&px, w, h));
                                         let painted = crate::layer_ops::painted_rect(&px, w);
                                         (Read::Upload(px, painted, copy), hash)
@@ -1445,6 +1466,7 @@ impl Shared {
                                         c.park_ready(*id, ready);
                                         Ok(())
                                     }
+                                    Read::Wide(px) => c.upload_layer_wide(&gpu, *id, &px),
                                 }?;
                             }
                             Some(Err(e)) => {
@@ -1556,6 +1578,8 @@ impl CanvasSession {
             tool: ToolKind::Paint,
             previous_tool: None,
             light_tool: LightSettings::default(),
+            light_limit: crate::hdr::LIGHT_LIMIT,
+            display_peak: 1.0,
             text_edit: None,
             text_drawn: None,
             text_steps: Vec::new(),

@@ -110,6 +110,8 @@ impl CustomCanvas {
                     time_lapse_quality: 1,
                     time_lapse_hevc: false,
                     profile: SRGB.into(),
+                    // the desktop's canvases are standard ones
+                    hdr: false,
                 },
             ),
         };
@@ -148,6 +150,7 @@ impl CustomCanvas {
             time_lapse_quality: self.quality,
             time_lapse_hevc: self.hevc,
             profile: self.profile.clone(),
+            hdr: false,
         }
     }
 

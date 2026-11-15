@@ -79,6 +79,17 @@ struct LightPanel: View {
                             model.setLight(LightSettings(kind: light.kind, strength: v))
                         }
                     }
+                    // how far past white Brighten goes: an HDR canvas's only (a standard one stops at white)
+                    if model.isHdr, light.kind == .brighten {
+                        group {
+                            PanelSlider(
+                                label: "HDR limit", value: model.lightLimit / hdrLimitMost,
+                                shown: hdrLimitShown(model.lightLimit)
+                            ) { v in
+                                model.setLightLimit(v * hdrLimitMost)
+                            }
+                        }
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
