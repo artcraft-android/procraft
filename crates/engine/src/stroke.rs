@@ -954,8 +954,9 @@ impl StrokeBuilder {
         self
     }
 
-    /// The stroke drawn for show (the library's sample): it never counts as fast, and each use of
-    /// the pressure takes it as it comes.
+    /// The stroke drawn for show (the library's sample): it never counts as fast, each use of the
+    /// pressure takes it as it comes, and no streamline, stabilisation or motion filtering holds
+    /// its path back (it still curves through its points).
     pub fn steady(mut self) -> StrokeBuilder {
         self.steady = true;
         self
@@ -1387,7 +1388,7 @@ impl StrokeBuilder {
     /// `batched`, it came in a batch with the last, see [`BATCHED_MS`]), streamlined: it goes into
     /// the window, and those it pushes out are settled.
     fn go_on(&mut self, target: PathPoint, dt: Option<f64>, batched: bool, out: &mut Vec<Stamp>) {
-        let Some(dt) = dt.filter(|_| !self.exact && self.brush.streamline > 0.0) else {
+        let Some(dt) = dt.filter(|_| !self.exact && !self.steady && self.brush.streamline > 0.0) else {
             self.smoothed = Some(target);
             self.path_to(target, out);
             return;
@@ -1529,7 +1530,7 @@ impl StrokeBuilder {
     /// points, so one pass does the two. The stronger of the app's and the brush's.
     fn made_weights(&self) -> Vec<f32> {
         let amount = self.extras.motion_filtering.max(self.input.motion_filtering);
-        if self.exact || amount <= 0.0 {
+        if self.exact || self.steady || amount <= 0.0 {
             return Vec::new();
         }
         let expression = self.extras.motion_expression.max(self.input.motion_expression);
@@ -1547,7 +1548,7 @@ impl StrokeBuilder {
 
     /// How many samples each way stabilisation averages.
     fn stabilised(&self) -> usize {
-        if self.exact {
+        if self.exact || self.steady {
             return 0;
         }
         (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
@@ -2508,6 +2509,44 @@ mod tests {
         // and it gets there
         let late = radius_at(StrokeBuilder::new(b, 10.0, Pointer::Stylus), 150.0);
         assert!(late > 4.5, "{late}");
+    }
+
+    #[test]
+    fn a_steady_stroke_goes_where_its_samples_are() {
+        // a stroke drawn for show keeps its path where the pen went, however much streamline,
+        // stabilisation and motion filtering the brush has: a wave stays a wave and the pressure
+        // swell lands where the pen pressed
+        let mut b = Brush { streamline: 0.9, pressure_size: 1.0, ..plain() };
+        b.set_setting("stabilization", 0.6);
+        b.set_setting("motion_filtering", 0.6);
+        let samples: Vec<Sample> = (0..36)
+            .map(|i| {
+                let t = i as f32 / 35.0;
+                let pressure = (-9.0 * (t - 0.5) * (t - 0.5)).exp();
+                let at = Vec2::new(100.0 + t * 800.0, 150.0 + (t * 12.0).sin() * 40.0);
+                Sample::at(at, pressure, f64::from(i) * 1000.0 / 240.0)
+            })
+            .collect();
+        let drawn = |s: StrokeBuilder| {
+            let mut s = s;
+            let mut stamps = s.add(&samples);
+            stamps.extend(s.finish());
+            stamps
+        };
+        let off_path = |stamps: &[Stamp]| {
+            stamps
+                .iter()
+                .map(|st| (st.center.y - 150.0 - ((st.center.x - 100.0) / 800.0 * 12.0).sin() * 40.0).abs())
+                .fold(0.0, f32::max)
+        };
+        let widest = |stamps: &[Stamp]| {
+            stamps.iter().fold((0.0f32, 0.0f32), |m, st| if st.radius > m.0 { (st.radius, st.center.x) } else { m }).1
+        };
+        let steady = drawn(StrokeBuilder::new(b.clone(), 20.0, Pointer::Stylus).steady());
+        let held = drawn(StrokeBuilder::new(b, 20.0, Pointer::Stylus));
+        assert!(off_path(&steady) < 3.0, "{}", off_path(&steady));
+        assert!(off_path(&held) > 10.0, "{}", off_path(&held));
+        assert!((widest(&steady) - 500.0).abs() < 30.0, "{}", widest(&steady));
     }
 
     #[test]
