@@ -455,6 +455,13 @@ impl Canvas {
                     resource: wgpu::BindingResource::TextureView(second.unwrap_or(&window.before_view)),
                 },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&window.before_view) },
+                // the layer as a smudge's last pass left it (else anything: not read)
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(
+                        smudge.passed.as_ref().map_or(&window.before_view, |p| &p.1),
+                    ),
+                },
             ],
         });
         let stride = row_bytes(reach.width()) / 4;
@@ -751,7 +758,7 @@ impl super::Smudge {
         let tiles = self.tiles.values().flat_map(|t| {
             std::iter::once(&t.before).chain(t.grained.iter()).chain(t.amount.iter()).chain(t.shown.iter())
         });
-        tiles.chain(self.window.as_ref().map(|w| &w.before)).collect()
+        tiles.chain(self.window.as_ref().map(|w| &w.before)).chain(self.passed.as_ref().map(|p| &p.0)).collect()
     }
 }
 

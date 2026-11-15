@@ -3132,6 +3132,101 @@ fn a_smudge_wider_than_what_it_carries_still_drags_colour() {
     assert!(dragged[0] > 60, "red carried into the blue: {dragged:?}");
 }
 
+/// The smudge's diameter in the tests of how far it drags colour.
+const SMUDGE_D: f32 = 32.0;
+
+/// A hard round smudge `SMUDGE_D` pixels across, stamped every 2.5% of it at `speed` diameters a
+/// second with smudge pull `pull`, from a diameter inside an orange band out across its edge to
+/// eight diameters past it, the stamps given `at_once` at a time (a render after each). Returns the
+/// layer before and after, and the edge's row (alpha only) from the edge on.
+fn smudged_out_of_a_band(gpu: &Gpu, pull: f32, speed: f32, at_once: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let d = SMUDGE_D;
+    let edge = 2.0 * d;
+    let (width, height) = ((edge + 10.0 * d) as u32, (3.0 * d) as u32);
+    let mut doc = Document::new(width, height);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.54, 0.28], 1.0));
+    canvas.add_stamps(&(0..height).map(|y| dot(Vec2::new(edge - 2.0 * d, y as f32), 2.0 * d)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(gpu, &mut doc, None);
+    let before = canvas.read_layer(gpu, doc.current()).unwrap();
+    canvas.begin_stroke(doc.current(), StrokeStyle { pull, ..StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0) });
+    let step = 0.025 * d;
+    let y = height as f32 / 2.0;
+    let stamps: Vec<Stamp> = (0..=(9.0 * d / step) as usize)
+        .map(|i| {
+            let along = i as f32 * step;
+            Stamp {
+                time_ms: f64::from(along / (speed * d)) * 1000.0,
+                distance: along,
+                ..dot(Vec2::new(edge - d + along, y), d / 2.0)
+            }
+        })
+        .collect();
+    for some in stamps.chunks(at_once) {
+        canvas.add_stamps(some);
+        canvas.render(gpu, &mut doc, None);
+    }
+    canvas.end_stroke();
+    canvas.render(gpu, &mut doc, None);
+    let after = canvas.read_layer(gpu, doc.current()).unwrap();
+    let row = (edge as u32..width).map(|x| pixel(&after, width, x, y as u32)[3]).collect();
+    (before, after, row)
+}
+
+/// How far along `row` (pixels from the edge) the colour first falls under `share`, in diameters.
+fn reach(row: &[u8], share: f32) -> f32 {
+    row.iter().position(|&a| f32::from(a) < share * 255.0).unwrap_or(row.len()) as f32 / SMUDGE_D
+}
+
+#[test]
+fn the_smudge_pull_sets_how_far_a_smudge_drags_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // no pull: each stamp picks up what is under it and lays it back where it was
+    let (before, after, _) = smudged_out_of_a_band(&gpu, 0.0, 15.0, usize::MAX);
+    let moved = before.iter().zip(&after).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(moved <= 1, "no pull moved paint by {moved}");
+    // more pull, farther
+    let reaches: Vec<(f32, f32)> = [0.25, 0.5, 0.75, 1.0]
+        .iter()
+        .map(|&pull| {
+            let (_, _, row) = smudged_out_of_a_band(&gpu, pull, 15.0, usize::MAX);
+            (reach(&row, 0.9), reach(&row, 0.5))
+        })
+        .collect();
+    assert!(reaches.windows(2).all(|w| w[0].1 < w[1].1), "{reaches:?}");
+    // a new brush's pull (its default) keeps the colour whole for two to three diameters past
+    // the edge, and half of it for four and a half to almost six
+    let (whole, half) = reaches[2];
+    assert!((2.0..3.0).contains(&whole) && (4.5..5.75).contains(&half), "{whole} {half}");
+    // all the pull: the colour goes all the way to the stroke's end
+    assert!(reaches[3].0 > 8.0, "{reaches:?}");
+}
+
+#[test]
+fn a_slower_smudge_drags_colour_farther() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the stamps of a display frame pick up from the layer as the frame before left it: the
+    // fewer of them a frame (the slower the stroke), the more of what the brush just laid each
+    // picks up again
+    let whole = |speed: f32| reach(&smudged_out_of_a_band(&gpu, 0.75, speed, usize::MAX).2, 0.9);
+    let (slow, fast) = (whole(5.0), whole(15.0));
+    assert!(slow > fast + 2.0, "{slow} {fast}");
+}
+
+#[test]
+fn a_smudge_laid_a_render_at_a_time_is_the_smudge_laid_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a display frame's stamps coming over several renders still pick up from the layer as the
+    // frame before left it
+    let (_, whole, _) = smudged_out_of_a_band(&gpu, 0.75, 15.0, usize::MAX);
+    let (_, piece_by_piece, _) = smudged_out_of_a_band(&gpu, 0.75, 15.0, 3);
+    assert!(whole == piece_by_piece, "the smudge came out differently laid a render at a time");
+}
+
 #[test]
 fn a_wet_stroke_redrawn_whole_is_laid_once() {
     let Some(gpu) = gpu() else { return };

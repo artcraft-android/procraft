@@ -162,7 +162,8 @@ pub struct StrokeStyle {
     pub grain_scale: f32,
     pub grain_depth: f32,
     pub rendering: Rendering,
-    /// Smudge: how much of the colour it carries the brush keeps at each stamp, 0..1.
+    /// Smudge: the brush's smudge pull, 0..1. At each stamp the brush keeps this to the power
+    /// 1/8 of the colour it carries (times its pressure curve), and picks up the rest.
     pub pull: f32,
     /// How much the stroke's paint pools at its edges (wet edges), and burns the paint it goes
     /// over where it is thin (burnt edges), 0..1.
@@ -290,7 +291,7 @@ impl StrokeStyle {
             grain_scale: 256.0,
             grain_depth: 0.0,
             rendering: Rendering::BuildUp,
-            pull: DEFAULT_PULL,
+            pull: NEW_SMUDGE_PULL,
             wet_edges: 0.0,
             burnt_edges: 0.0,
             alpha_threshold: -1.0,
@@ -348,7 +349,7 @@ impl StrokeStyle {
             grain_scale: brush.grain_tile().max(1.0),
             grain_depth: brush.grain.depth.clamp(0.0, 1.0),
             rendering: brush.rendering,
-            pull: DEFAULT_PULL,
+            pull: brush.setting("smudge_pull").clamp(0.0, 1.0),
             wet_edges: brush.setting("wet_edges").clamp(0.0, 1.0),
             burnt_edges: brush.setting("burnt_edges").clamp(0.0, 1.0),
             alpha_threshold: if brush.setting("alpha_threshold") >= 0.5 {
@@ -1153,8 +1154,11 @@ const CLIP_BY_BASE: u32 = 1;
 const CLIP_ATOP: u32 = 2;
 const CLIP_BASE: u32 = 3;
 
-/// How much of what it carries a smudge brush keeps at each stamp.
-const DEFAULT_PULL: f32 = 0.93;
+/// A new brush's smudge pull (see [`StrokeStyle::pull`]).
+const NEW_SMUDGE_PULL: f32 = 0.75;
+/// A brush's pull (wet paint's or the smudge's) to this power is how much of what it carries the
+/// brush keeps at each stamp.
+const PULL_POWER: f32 = 0.125;
 /// A number in 0..1 that looks random, from `n`.
 fn unit_hash(n: u32) -> f32 {
     let mut x = n.wrapping_mul(0x9e37_79b9) ^ 0x85eb_ca6b;
@@ -1191,7 +1195,7 @@ fn wet_mixture(
         (1.0 - run_out(style.falloff, length)) * (1.0 - style.dilution.clamp(0.0, 1.0) * dilution_by).powf(2.4);
     let attack = style.attack.clamp(0.0, 1.0) * attack.clamp(0.0, 1.0);
     let mixture = ((charge + diluted).max(attack) * jitter).clamp(0.0, 1.0);
-    (mixture, style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(0.125))
+    (mixture, style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(PULL_POWER))
 }
 
 /// How much of what a wet stamp carries it lays over what was under its pass's first stamp: all
@@ -1279,7 +1283,9 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         dull: 0.0,
         dull_weighted: 0,
         smear_over: 0,
-        _pad: 0,
+        passed: 0,
+        pass_origin: [0; 2],
+        _pad: [0; 2],
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1452,7 +1458,11 @@ struct SmudgeUniform {
     dull_weighted: u32,
     /// 1: what it carries is laid over what is there (else in place of it, as far as it lays).
     smear_over: u32,
-    _pad: u32,
+    /// 1: a smudge picks up from the layer as the last pass left it (see [`Canvas::lay_smudge`]),
+    /// kept from canvas pixel `pass_origin` on; 0: from the layer as it is.
+    passed: u32,
+    pass_origin: [i32; 2],
+    _pad: [u32; 2],
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -1511,6 +1521,11 @@ struct Smudge {
     pending: Vec<(StampInstance, [f32; 8], Paced)>,
     passes: u32,
     plot: u32,
+    /// A smudge: the pass being laid (its display frame, see [`wet_pass`]) and the part of the
+    /// layer it reaches, kept as the last pass left it (where its stamps pick up, see
+    /// [`Canvas::lay_smudge`]), from that part's corner on.
+    pass: Option<(i64, IRect)>,
+    passed: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// The tiles of the layer it has written to, and the buffers its passes work in.
     tiles: smudge::Tiles,
     window: Option<smudge::Window>,
@@ -5569,6 +5584,7 @@ impl Canvas {
                 smudge.pending.clear();
                 smudge.passes = 0;
                 smudge.plot = 0;
+                smudge.pass = None;
             }
             self.dirty = self.full();
         }
@@ -5628,6 +5644,8 @@ impl Canvas {
                 pending: Vec::new(),
                 passes: 0,
                 plot: 0,
+                pass: None,
+                passed: None,
                 tiles: smudge::Tiles::new(),
                 window: None,
                 laid: false,
@@ -5642,6 +5660,13 @@ impl Canvas {
             let ready = smudge.pending.iter().take_while(|s| Some(key(s)) != newest).count();
             let ready: Vec<_> = smudge.pending.drain(..ready).collect();
             self.lay_wet(gpu, encoder, (params, passes), &ready, style);
+            return;
+        }
+        // a smudge of its own is laid a pass a display frame, as wet paint is; one picking up
+        // behind it (a plugin brush engine's dabs) stamp by stamp from the layer as it is
+        if picks.iter().all(Option::is_none) {
+            let stamps: Vec<_> = instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)).collect();
+            self.lay_smudge(gpu, encoder, params, &stamps, style);
             return;
         }
         let brush = self.full_grain_bind(device, style).unwrap_or_else(|| self.brush_bind.clone());
@@ -5683,7 +5708,11 @@ impl Canvas {
                 (p.paint_share.clamp(0.0, 1.0), p.paint.unwrap_or(style.color), dull, u32::from(weighed))
             });
             let uniform = SmudgeUniform {
-                pull: if pick_up.is_some() { 0.0 } else { style.pull.clamp(0.0, 1.0) * smudge_pull_by },
+                pull: if pick_up.is_some() {
+                    0.0
+                } else {
+                    style.pull.clamp(0.0, 1.0).powf(PULL_POWER) * smudge_pull_by
+                },
                 pick,
                 paint_rate,
                 // an erasing brush mixes in clear paint, taking paint away
@@ -5705,6 +5734,150 @@ impl Canvas {
         let pieces: Vec<smudge::Piece> =
             laid.into_iter().flat_map(|(uniform, bbox, blurs)| self.smudge_pieces(uniform, bbox, blurs)).collect();
         self.lay_pieces(gpu, encoder, params, &pieces, (&brush, None));
+    }
+
+    /// Smudges `stamps` (with their wet-mix scaling and places in the stroke) into the stroke's
+    /// layer, a pass a display frame as wet paint is laid (see [`wet_pass`]): each stamp in turn
+    /// picks up colour into what the brush carries and lays that down, picking up from the layer
+    /// as the last pass left it, so that the stamps of one pass see each other only through what
+    /// the brush carries. A pass goes on from one render to the next as its frame's stamps come.
+    fn lay_smudge(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        params: &mut UniformData,
+        stamps: &[(StampInstance, [f32; 8], Paced)],
+        style: &StrokeStyle,
+    ) {
+        if stamps.is_empty() {
+            return;
+        }
+        let brush = self.full_grain_bind(&gpu.device, style).unwrap_or_else(|| self.brush_bind.clone());
+        let full = IRect::from_size(self.width, self.height);
+        let size = (self.width, self.height);
+        let mut from = 0;
+        while let Some(head) = stamps.get(from) {
+            let key = wet_pass(head.2.time_ms, style.preview);
+            let count = stamps.iter().skip(from).take_while(|s| wet_pass(s.2.time_ms, style.preview) == key).count();
+            let group = stamps.get(from..from + count.max(1)).unwrap_or_default();
+            from += group.len().max(1);
+            let Some(smudge) = self.smudge.as_mut() else { return };
+            let mut laid = Vec::new();
+            for (s, w, _) in group {
+                let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                let bbox =
+                    IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                        .intersect(full);
+                if bbox.is_empty() || s.radius <= 0.0 {
+                    continue;
+                }
+                // the blur and the pull as far as this stamp's pressure takes them
+                let [_, blur_by, blur_jitter_by, _, _, _, _, smudge_pull_by] = *w;
+                smudge.stamps = smudge.stamps.saturating_add(1);
+                // the blur, jitter only ever lowering it
+                let blur = style.blur
+                    * blur_by
+                    * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919)));
+                // what the brush carries a pixel a cell, unless the stroke's first stamp is wider
+                // than the grid; its middle at the stamp's pixel, and the cells the stamp reaches
+                // around it
+                let reach = s.radius.max(0.5) + 1.0;
+                if !smudge.started {
+                    smudge.scale = (reach / SMUDGE_REACH as f32).max(1.0);
+                }
+                let anchor = if smudge.scale <= 1.0 { s.center.map(f32::floor) } else { s.center };
+                let half = ((reach / smudge.scale).ceil() as i32).clamp(1, SMUDGE_REACH);
+                smudge.last_anchor = Some(anchor);
+                let uniform = SmudgeUniform {
+                    pull: style.pull.clamp(0.0, 1.0).powf(PULL_POWER) * smudge_pull_by,
+                    pick: anchor,
+                    kept: smudge.kept,
+                    blur,
+                    anchor,
+                    scale: smudge.scale,
+                    half,
+                    ..smudge_uniform(s, style, bbox, size)
+                };
+                smudge.started = true;
+                smudge.kept = half;
+                laid.push((uniform, bbox, blur > 0.0));
+            }
+            let mut pieces: Vec<smudge::Piece> =
+                laid.into_iter().flat_map(|(uniform, bbox, blurs)| self.smudge_pieces(uniform, bbox, blurs)).collect();
+            // the layer as the last pass left it where this one picks up (or, if that couldn't be
+            // kept, as it is)
+            let reach = pieces.iter().fold(IRect::EMPTY, |r, p| r.union(p.reach)).intersect(full);
+            if let Some(origin) = self.smudge_pass_start(&gpu.device, encoder, key, reach) {
+                for u in pieces.iter_mut().flat_map(|p| p.uniforms.iter_mut()) {
+                    u.passed = 1;
+                    u.pass_origin = origin;
+                }
+            }
+            self.lay_pieces(gpu, encoder, params, &pieces, (&brush, None));
+        }
+    }
+
+    /// Readies what pass `key`'s stamps pick up from, as far as `reach`: the layer as it is now, for
+    /// a pass begun here; for one going on, as much more of it as the pass now reaches (none of it
+    /// laid on yet: what the pass lays lies within what it reached). Where it is kept from, or none
+    /// if it couldn't be (they then pick up from the layer as it is).
+    fn smudge_pass_start(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        key: i64,
+        reach: IRect,
+    ) -> Option<[i32; 2]> {
+        let (width, height) = (self.width, self.height);
+        let smudge = self.smudge.as_mut()?;
+        let layer = self.layers.get(&smudge.layer)?;
+        let kept = smudge.pass.filter(|p| p.0 == key && smudge.passed.is_some()).map(|p| p.1);
+        let rect = kept.map_or(reach, |k| k.union(reach));
+        if rect.is_empty() {
+            return None;
+        }
+        if kept == Some(rect) {
+            return Some([rect.x0, rect.y0]);
+        }
+        smudge.pass = None;
+        let (w, h) = (rect.width(), rect.height());
+        let fits = |t: &wgpu::Texture| t.width() >= w && t.height() >= h;
+        // a pass going on keeps what it had where it had it; else the texture is kept for the next
+        let mut into = None;
+        if kept.is_some() || smudge.passed.as_ref().is_none_or(|(t, _)| !fits(t)) {
+            // grown in steps, so a stroke that reaches further doesn't make one every frame
+            let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
+            let made = texture(device, "smudge pass", side(w, width), side(h, height), LAYER_FORMAT);
+            if let Some(e) = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop())) {
+                log::error!("smudging: {e}");
+                smudge.passed = None;
+                return None;
+            }
+            let view = made.create_view(&wgpu::TextureViewDescriptor::default());
+            into = Some((made, view));
+        }
+        let copy = |encoder: &mut wgpu::CommandEncoder, to: &wgpu::Texture| {
+            encoder.copy_texture_to_texture(copy_at(&layer.texture, rect.x0, rect.y0), copy_at(to, 0, 0), extent(w, h));
+        };
+        match (into, kept) {
+            (Some(made), Some(k)) => {
+                copy(encoder, &made.0);
+                if let Some((was, _)) = &smudge.passed {
+                    let at = copy_at(&made.0, k.x0 - rect.x0, k.y0 - rect.y0);
+                    encoder.copy_texture_to_texture(copy_at(was, 0, 0), at, extent(k.width(), k.height()));
+                }
+                smudge.passed = Some(made);
+            }
+            (Some(made), None) => {
+                copy(encoder, &made.0);
+                smudge.passed = Some(made);
+            }
+            (None, _) => copy(encoder, &smudge.passed.as_ref()?.0),
+        }
+        smudge.pass = Some((key, rect));
+        Some([rect.x0, rect.y0])
     }
 
     /// A dual brush's paint laid in place put together with its second over `rect` (see
@@ -9473,6 +9646,8 @@ impl Pipelines {
                 // a dual brush's second, and the layer as it was (its paint laid in place)
                 compute_texture(6),
                 compute_texture(7),
+                // the layer as a smudge's last pass left it
+                compute_texture(8),
             ],
         });
         let smudge_module =
@@ -11579,6 +11754,17 @@ mod tests {
         canvas.undo();
         canvas.render(&gpu, &mut doc, None);
         assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+    }
+
+    #[test]
+    fn a_smudge_takes_its_brush_s_smudge_pull() {
+        let style = |brush: &Brush| StrokeStyle::for_brush(brush, StrokeTool::Smudge, [0.0; 3], 1.0, false).pull;
+        let mut brush = Brush::round_pen();
+        // a new brush's
+        assert_eq!(style(&brush), 0.75);
+        assert_eq!(StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0).pull, 0.75);
+        brush.set_setting("smudge_pull", 0.3);
+        assert_eq!(style(&brush), 0.3);
     }
 
     #[test]

@@ -1,9 +1,11 @@
 // Smudge: the brush carries colour. A grid fixed to the canvas's axes, a pixel a cell, moving
 // with the brush a whole pixel at a time, holds what it carries (so nothing is resampled as it
 // goes); for each stamp, in order, it picks up some of what is under it (cs_carry) and lays what
-// it carries back down under the stamp's shape (cs_deposit). The part of the layer being smudged
-// that a pass reaches (its window) is a buffer of packed premultiplied RGBA8 pixels, read and
-// written in place.
+// it carries back down under the stamp's shape (cs_deposit). The stamps go down a display frame
+// at a time, as wet paint's do: each picks up from the layer as the last pass left it
+// (`pass_tex`), so the stamps of one frame see each other only through what the brush carries.
+// The part of the layer being smudged that a pass reaches (its window) is a buffer of packed
+// premultiplied RGBA8 pixels, read and written in place.
 
 struct SmudgeStamp {
     center: vec2<f32>,
@@ -125,6 +127,10 @@ struct SmudgeStamp {
     dull_weighted: u32,
     // 1: what it carries laid over what is there (never thinning it), else in its place
     smear_over: u32,
+    // 1: a smudge picks up from the layer as the last pass left it (`pass_tex`, kept from canvas
+    // pixel `pass_origin` on); 0: from the layer as it is
+    passed: u32,
+    pass_origin: vec2<i32>,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -151,6 +157,8 @@ struct WetPass {
 // a dual brush's paint laid in place: its second's coverage, and the layer as it was
 @group(0) @binding(6) var second_tex: texture_2d<f32>;
 @group(0) @binding(7) var before_tex: texture_2d<f32>;
+// a smudge: the layer as its last pass left it, which its stamps pick up from
+@group(0) @binding(8) var pass_tex: texture_2d<f32>;
 @group(1) @binding(0) var shapes: texture_2d_array<f32>;
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
@@ -208,6 +216,27 @@ fn layer_at(q: vec2<f32>) -> vec4<f32> {
     return mix(top, bottom, f.y);
 }
 
+// the layer as the last pass left it at canvas pixel (x, y) (clamped to the canvas)
+fn passed_pixel(x: i32, y: i32) -> vec4<f32> {
+    let c = vec2<i32>(clamp(x, 0, i32(st.size.x) - 1), clamp(y, 0, i32(st.size.y) - 1));
+    let kept = vec2<i32>(textureDimensions(pass_tex)) - 1;
+    return textureLoad(pass_tex, clamp(c - st.pass_origin, vec2<i32>(0), kept), 0);
+}
+
+// what a smudge picks up at a canvas position (pixel centres at +0.5), bilinear: the layer as the
+// last pass left it, or as it is
+fn picked_at(q: vec2<f32>) -> vec4<f32> {
+    if (st.passed == 0u) {
+        return layer_at(q);
+    }
+    let p = q - 0.5;
+    let i = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let top = mix(passed_pixel(i.x, i.y), passed_pixel(i.x + 1, i.y), f.x);
+    let bottom = mix(passed_pixel(i.x, i.y + 1), passed_pixel(i.x + 1, i.y + 1), f.x);
+    return mix(top, bottom, f.y);
+}
+
 // the grid's middle cell
 fn middle() -> i32 {
     return i32(st.grid) / 2;
@@ -228,7 +257,7 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = window_cell(i);
     // the cell's middle on the canvas: a pixel's middle when a cell is one (picked up where the
     // stamp says, its own place unless it picks up behind it)
-    let under = layer_at(st.pick + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
+    let under = picked_at(st.pick + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
     let k = c.y * i32(st.grid) + c.x;
     let off = abs(c - vec2<i32>(middle()));
     var carried = under;
