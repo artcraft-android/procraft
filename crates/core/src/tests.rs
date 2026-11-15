@@ -13437,11 +13437,31 @@ fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(gone.strong_count(), 0, "artwork {round} let go when closed");
-        let Some(live) = live_gpu_resources(&gpu) else { continue };
+        // what it held let go by the threads that were still finishing with it (slow while other
+        // tests run): counted once it settles, or as it is after a few seconds
+        let settled = |want: Option<(usize, usize)>| {
+            let since = std::time::Instant::now();
+            let mut last = live_gpu_resources(&gpu);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let now = live_gpu_resources(&gpu);
+                let done = match want {
+                    Some(w) => now == Some(w),
+                    None => now == last,
+                };
+                if done || since.elapsed() > std::time::Duration::from_secs(10) {
+                    return now;
+                }
+                last = now;
+            }
+        };
         match after_second {
             _ if round == 0 => {}
-            None => after_second = Some(live),
-            Some(second) => assert_eq!(live, second, "textures and buffers after artwork {round}, as after the second"),
+            None => after_second = settled(None),
+            Some(second) => {
+                let live = settled(Some(second));
+                assert_eq!(live, Some(second), "textures and buffers after artwork {round}, as after the second");
+            }
         }
     }
     assert_eq!(gpu.errors(), 0);
