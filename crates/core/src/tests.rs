@@ -5685,6 +5685,78 @@ fn saving_while_idle_writes_only_what_changed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An autosave whose changed layers don't all fit on their way back from the GPU at once reads
+/// the rest a lot at a time, each lot started in a hold of its own: they are saved as they were.
+/// Something changing between the lots makes it give way, the layers counted as changed still,
+/// and the next saves the change.
+#[test]
+fn an_autosave_reads_its_layers_a_lot_at_a_time_and_gives_way_to_a_change() {
+    let Some(s) = session(100, 100) else { return };
+    no_streamline(&s);
+    s.set_brush_size(0.3);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    // three layers painted in three colours (each one's read is past the tests' budget)
+    for k in 0..3 {
+        if k > 0 {
+            s.add_layer();
+        }
+        s.set_color(if k == 0 { 1.0 } else { 0.0 }, if k == 1 { 1.0 } else { 0.0 }, if k == 2 { 1.0 } else { 0.0 });
+        let y = 20.0 + k as f32 * 30.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, y, 0.0)]);
+        s.stroke_add((1..10).map(|i| sample(10.0 + i as f32 * 9.0, y, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let dir = std::env::temp_dir().join(format!("procraft-autosave-lots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.to_string_lossy().into_owned();
+    let opened = |path: &str| {
+        let t = CanvasSession::open(path.to_owned()).unwrap();
+        t.use_gpu(gpu.clone());
+        {
+            let mut st = t.shared.lock();
+            st.window_size = (100, 100);
+            st.view = Some(View::fit((100, 100), (100, 100)));
+            st.ensure_canvas();
+        }
+        t
+    };
+    let shown = |s: &CanvasSession| [20, 50, 80].map(|y| pixel(s, 50, y));
+    assert!(s.save_if_idle(path.clone()).unwrap());
+    let before = shown(&s);
+    assert!(before.iter().all(|p| p[3] > 200), "{before:?}");
+    assert_eq!(shown(&opened(&path)), before);
+    // every layer painted on again, then a change while the snapshot's lots are still to read
+    let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+    for (k, id) in ids.iter().enumerate() {
+        assert!(s.select_layer(*id));
+        s.set_color(1.0, 1.0, 0.0);
+        let x = 30.0 + k as f32 * 20.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 5.0, 0.0)]);
+        s.stroke_add((1..10).map(|i| sample(x, 5.0 + i as f32 * 10.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let known = s.shared.saving.lock().unwrap().known(&dir);
+    let (mut snapshot, edits) = {
+        let mut st = s.shared.lock();
+        (st.save_snapshot(&dir, &known, true).unwrap(), st.edits())
+    };
+    s.stroke_begin(PointerKind::Finger, vec![sample(90.0, 90.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(!s.read_later(&mut snapshot, edits, &dir, &known).unwrap(), "read on past a change");
+    drop(snapshot);
+    // (what the snapshot had as changed is so again, as the autosave leaves it)
+    {
+        let mut st = s.shared.lock();
+        let canvas = st.canvas.as_mut().unwrap();
+        canvas.mark_changed(ids.iter().map(|&id| procraft_engine::document::LayerId(id)));
+    }
+    assert!(s.save_if_idle(path.clone()).unwrap());
+    let after = shown(&s);
+    assert_ne!(after, before);
+    assert_eq!(shown(&opened(&path)), after);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn what_shipped_later_joins_a_kept_library_once() {
     let s = CanvasSession::new(64, 64);
@@ -9182,7 +9254,13 @@ fn saved_again_and_again_into_one_folder_an_artwork_opens_as_it_was_last() {
                 10 => _ = s.fill_layer(current(&s)),
                 11 => s.clear_layer(),
                 _ => {
-                    s.save(path.clone()).unwrap();
+                    // as asked, or as the autosave does: its layers past the first read a lot at
+                    // a time
+                    if next(2) == 0 {
+                        s.save(path.clone()).unwrap();
+                    } else {
+                        assert!(s.save_if_idle(path.clone()).unwrap(), "seed {seed}: {done:?}");
+                    }
                     // now and then closed and opened again, the work going on in what opened
                     if next(2) == 0 {
                         let opened = CanvasSession::open(path.clone()).unwrap();
