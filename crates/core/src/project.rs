@@ -3,6 +3,8 @@
 //! - `artwork.json`: the format, the title and the document (layers and their settings).
 //! - `layers/<id>.png`: each layer's pixels, premultiplied RGBA8 stored losslessly in a PNG (an
 //!   internal store, not for other apps).
+//! - `layers/<id>.store`: what a brush keeps with the layer between strokes, if it keeps anything
+//!   (see `layer_store.rs`).
 //! - `thumbnail.png`: the picture at up to [`THUMBNAIL_SIDE`] pixels, for the gallery.
 //!
 //! Files are written beside their final name and renamed into place, so an interrupted save
@@ -161,6 +163,12 @@ pub(crate) struct SaveSnapshot {
     /// The data of each plugin's layer (empty while it has none yet), for its file beside the
     /// layer's pixels; those whose data couldn't be read left out.
     layer_data: Vec<(LayerId, Arc<Vec<u8>>)>,
+    /// The layers' stores (see `layer_store.rs`): those changed, their kind and their planes on
+    /// their way back from the GPU; and those whose files there stay as they are.
+    stores: Vec<(LayerId, u32, Vec<procraft_gpu::Readback>)>,
+    stores_kept: Vec<LayerId>,
+    /// Stores still the files they were opened from (not shown yet), written as they are.
+    store_files: Vec<(LayerId, Vec<u8>)>,
 }
 
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
@@ -317,6 +325,7 @@ impl crate::State {
         let mut composite = None;
         let mut unshown = None;
         let mut changed_ids = Vec::new();
+        let (mut stores, mut stores_kept, mut store_files) = (Vec::new(), Vec::new(), Vec::new());
         // shown but its canvas still being made (on another thread): made now, so the save has its
         // picture for the gallery
         if self.gpu.is_some() && self.canvas.is_none() {
@@ -368,6 +377,24 @@ impl crate::State {
                 canvas.mark_changed(changed_ids);
                 return Err(e);
             }
+            // the layers' stores: one whose layer is unchanged since a save into this folder stays
+            // as its file is; a store that can't be read isn't saved (its paint dries as it shows)
+            for (id, store) in canvas.stores() {
+                if self.doc.layer(id).is_none() {
+                    continue;
+                }
+                let path = crate::layer_store::store_path(dir, id);
+                if !changed_now.contains(&id) && known.contains_key(&id) && path.exists() {
+                    stores_kept.push(id);
+                    continue;
+                }
+                let reads: Result<Vec<_>, _> =
+                    store.planes.iter().map(|p| canvas.start_reading_layer(gpu, *p)).collect();
+                match reads {
+                    Ok(reads) => stores.push((id, store.kind, reads)),
+                    Err(e) => log::error!("layer {id:?}'s store: {e}"),
+                }
+            }
             // for the gallery's thumbnail: private layers left out, the picture made small on the
             // GPU, so only that comes back (the whole canvas, read each save, was most of an
             // autosave's memory traffic on a large canvas)
@@ -385,6 +412,13 @@ impl crate::State {
                         }
                     }
                     Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
+                }
+            }
+            for (id, bytes) in &self.pending_stores {
+                if fs::read(crate::layer_store::store_path(dir, *id)).ok().as_ref() != Some(bytes) {
+                    store_files.push((*id, bytes.clone()));
+                } else {
+                    stores_kept.push(*id);
                 }
             }
             // a picture made into an artwork and saved before it is shown (the app may be closed
@@ -436,6 +470,9 @@ impl crate::State {
             reference_picture,
             plugin_data,
             layer_data,
+            stores,
+            stores_kept,
+            store_files,
         })
     }
 }
@@ -620,6 +657,9 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         reference_picture,
         plugin_data,
         layer_data,
+        stores,
+        stores_kept,
+        store_files,
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
@@ -656,6 +696,8 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     let stage = |result: Result<PathBuf, MobileError>, to: PathBuf, staged: &mut Vec<(PathBuf, PathBuf)>| {
         result.map(|tmp| staged.push((tmp, to)))
     };
+    // the layers whose stores are in the folder once this save is in place
+    let mut stored = stores_kept;
     let written = (|| {
         // only those not already there as they are, encoded and written side by side, each
         // layer's PNG made in memory before it is written
@@ -723,6 +765,30 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, path, &mut staged)?;
         }
+        // the layers' stores, each whole with the hash of its layer's pixels as saved now (one whose
+        // layer's isn't known can't be told from a stale one when opened, so it isn't saved)
+        for (id, kind, reads) in stores {
+            let layer_hash =
+                layers.iter().find(|(l, ..)| *l == id).map(|(_, h, _)| *h).or(saved.layers.get(&id).copied());
+            let Some(layer_hash) = layer_hash else { continue };
+            let planes = reads
+                .into_iter()
+                .map(|r| r.pixels().map_err(|e| file_error("reading a layer's store", e)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let bytes = crate::layer_store::encode(kind, (w, h), layer_hash, &planes)?;
+            let path = crate::layer_store::store_path(dir, id);
+            let written =
+                write_beside(&path, |p| fs::write(p, &bytes).map_err(|e| file_error("writing a layer's store", e)));
+            stage(written, path, &mut staged)?;
+            stored.push(id);
+        }
+        for (id, bytes) in &store_files {
+            let path = crate::layer_store::store_path(dir, *id);
+            let written =
+                write_beside(&path, |p| fs::write(p, bytes).map_err(|e| file_error("writing a layer's store", e)));
+            stage(written, path, &mut staged)?;
+            stored.push(*id);
+        }
         // a plugin's artwork's own data, whole, before the document that names its kind
         if let Some(data) = plugin_data.as_deref() {
             let path = dir.join(PLUGIN_DATA);
@@ -774,7 +840,10 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             let path = layer_data_path(dir, l.id);
             if path.exists() { path } else { old_layer_data_path(dir, l.id) }
         });
-        let keep: Vec<PathBuf> = file.document.layer_ids().map(|id| layer_path(dir, id)).chain(plugins).collect();
+        // (and a layer's store while it has one)
+        let stores = stored.iter().map(|id| crate::layer_store::store_path(dir, *id));
+        let keep: Vec<PathBuf> =
+            file.document.layer_ids().map(|id| layer_path(dir, id)).chain(plugins).chain(stores).collect();
         for entry in entries.flatten() {
             let path = entry.path();
             if !keep.contains(&path) {
@@ -888,10 +957,14 @@ impl CanvasSession {
                 }
             }
         }
-        // each layer's file as it is, decoded as it goes to the GPU
+        // each layer's file as it is, decoded as it goes to the GPU, and its store's, if it has one
         let mut pngs = Vec::new();
         let mut unread = Vec::new();
+        let mut stores = Vec::new();
         for layer in doc.layers() {
+            if let Ok(bytes) = fs::read(crate::layer_store::store_path(&dir, layer.id)) {
+                stores.push((layer.id, bytes));
+            }
             let path = layer_path(&dir, layer.id);
             // a layer with no file is empty
             if !path.exists() {
@@ -919,6 +992,7 @@ impl CanvasSession {
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
+            st.pending_stores = stores;
             st.layers_unread(unread);
             st.layer_data_unread.extend(data_unread);
             st.info = file.info;
@@ -1517,6 +1591,16 @@ pub(crate) fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8], icc: 
 /// A PNG of premultiplied RGBA8 pixels (as the GPU gives them), none on failure but empty.
 pub(crate) fn rgba_png(width: u32, height: u32, premultiplied: &[u8]) -> Vec<u8> {
     png_bytes(width, height, &straight_alpha(premultiplied), &[]).unwrap_or_default()
+}
+
+/// A PNG of RGBA8 pixels as they are (a layer's store's plane).
+pub(crate) fn png_of(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, MobileError> {
+    png_bytes(width, height, rgba, &[])
+}
+
+/// The RGBA8 pixels of the PNG `bytes`, which must be `width` × `height`.
+pub(crate) fn png_pixels(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+    decode_png(std::io::Cursor::new(bytes), width, height)
 }
 
 /// A PNG of straight RGBA8 pixels, carrying `icc` if it isn't empty.

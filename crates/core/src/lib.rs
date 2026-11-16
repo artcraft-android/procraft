@@ -47,6 +47,7 @@ mod keys;
 #[cfg(target_os = "ios")]
 mod layer;
 mod layer_ops;
+mod layer_store;
 mod layers;
 mod liquify;
 mod modes;
@@ -640,6 +641,9 @@ pub(crate) struct State {
     pub(crate) tracking_since: Option<std::time::Instant>,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
+    /// The layers' stores as their files were opened, put on the canvas as it is made (see
+    /// `layer_store.rs`).
+    pub(crate) pending_stores: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
     /// What was asked that this GPU can't do (an old one's: liquify), to be told once.
@@ -1102,6 +1106,12 @@ impl State {
                 self.unreadable_untold.push(id);
             }
         }
+        // the pixels of the layers with stores, to tell their stores were saved with them
+        let hashes: std::collections::HashMap<_, _> = pixels
+            .iter()
+            .filter(|(id, _)| self.pending_stores.iter().any(|(s, _)| s == id))
+            .map(|(id, px)| (*id, project::pixels_hash(px)))
+            .collect();
         let doc = &self.doc;
         // every layer up as it was read, or no canvas: one the GPU had no memory for would show
         // empty, and be saved so once painted on
@@ -1118,12 +1128,34 @@ impl State {
             Ok(c)
         });
         match made.and_then(|made| made) {
-            Ok(c) => self.canvas = Some(c),
+            Ok(c) => {
+                self.canvas = Some(c);
+                self.put_opened_stores(&hashes);
+            }
             Err(e) => {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
                 self.canvas_failed = true;
                 self.pending_pixels = pixels.into_iter().map(|(id, px)| (id, project::Opened::Pixels(px))).collect();
+            }
+        }
+    }
+
+    /// The layers' stores as they were opened put on the canvas just made, each that was saved
+    /// with the pixels its layer has (`hashes`, by layer) and holds up; the rest dry (see
+    /// `layer_store.rs`).
+    pub(crate) fn put_opened_stores(
+        &mut self,
+        hashes: &std::collections::HashMap<procraft_engine::document::LayerId, u64>,
+    ) {
+        let stores = std::mem::take(&mut self.pending_stores);
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        let size = canvas.size();
+        for (id, bytes) in stores {
+            let opened = layer_store::decode(&bytes, size).filter(|o| hashes.get(&id) == Some(&o.layer_hash));
+            match opened {
+                Some(o) if canvas.put_store(gpu, id, o.kind, &o.planes) => {}
+                _ => log::info!("layer {id:?}'s store left out: it doesn't hold up, or the layer changed since"),
             }
         }
     }
@@ -1398,7 +1430,8 @@ impl Shared {
         }
         // every layer up as it was read, or no canvas (what was opened kept): one the GPU had no
         // memory for would show empty, and be saved so once painted on
-        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
+        type Made = (Canvas, std::collections::HashMap<procraft_engine::document::LayerId, u64>);
+        let made = gpu.checked(|| -> Result<Made, procraft_gpu::GpuError> {
             let budget = crate::layers::resident_budget();
             let (w, h) = (doc.width(), doc.height());
             // read on a few threads (each file decoded and its compressed copy made: those below
@@ -1449,6 +1482,7 @@ impl Shared {
                 // it can't be, the readers stop at their next layer, nothing taking what they read
                 let mut c = Canvas::unfilled(&gpu, &doc)?;
                 c.set_resident_budget(budget);
+                let mut hashes = std::collections::HashMap::new();
                 let mut waiting = std::collections::BTreeMap::new();
                 let mut at = 0;
                 let mut unread = Vec::new();
@@ -1463,6 +1497,7 @@ impl Shared {
                                 if let Ok(mut saved) = self.saving.lock() {
                                     saved.read(*id, hash);
                                 }
+                                hashes.insert(*id, hash);
                                 match layer {
                                     Read::Upload(px, painted, Some(copy))
                                         if copy.bytes() * 4 <= px.len()
@@ -1496,7 +1531,7 @@ impl Shared {
                     c.parked_layers(),
                     copies / 1024
                 );
-                Ok(c)
+                Ok((c, hashes))
             })
         });
         let mut st = self.lock();
@@ -1505,9 +1540,10 @@ impl Shared {
         }
         let same = st.doc == doc && st.pending_pixels.iter().map(|(id, _)| *id).eq(ids.iter().copied());
         match made.and_then(|made| made) {
-            Ok(c) if same => {
+            Ok((c, hashes)) if same => {
                 st.pending_pixels.clear();
                 st.canvas = Some(c);
+                st.put_opened_stores(&hashes);
             }
             Ok(_) => st.ensure_canvas(),
             Err(e) => {
@@ -1600,6 +1636,7 @@ impl CanvasSession {
             sharp: sharp::Sharp::default(),
             lay_to: None,
             layer_data_unread: std::collections::HashSet::new(),
+            pending_stores: Vec::new(),
             pour: None,
             reveal: None,
             reduce_motion: false,
