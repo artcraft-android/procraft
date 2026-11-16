@@ -6,7 +6,7 @@
 use procraft_engine::brush::{
     Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ShapeFile, Source, StockImage, StockImages,
 };
-use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
+use procraft_engine::brushfile::{self, BrushFile, Pick, Pictures, StandIn, Texture};
 use procraft_engine::brushlibrary;
 use procraft_engine::curve::Curve;
 use procraft_engine::stroke::LEAST_ROUNDNESS;
@@ -1821,7 +1821,7 @@ fn png_tip(png: &[u8], white: bool) -> Option<procraft_engine::abr::AbrTip> {
     })
 }
 
-fn brush_from(file: &BrushFile) -> Brush {
+pub(crate) fn brush_from(file: &BrushFile) -> Brush {
     // only the curves the file has (a control without one doesn't follow the pressure)
     let mut b = Brush { name: file.name.clone(), pressure_curves: Default::default(), ..Brush::round_pen() };
     let (image, source, hardness) = shape_for(&file.shape);
@@ -1948,67 +1948,141 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 (Some(shape::GRAINY_DISC), None, None)
             }
         },
-        Texture::Stock { name, inverted } => {
-            // a tip printed in dots: ours dotted on the same lattice, each dot as big as the stock
-            // tip's ink there
-            if let Some(lattice) = halftone_lattice(name)
-                && let (Some(rows), Some(cols), Some(tones)) = (
-                    textures::stock_shape_rows(name, *inverted),
-                    textures::stock_shape_cols(name, *inverted),
-                    textures::stock_shape_tones(name, *inverted),
-                )
-            {
-                let cover = tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
-                let dots = Source::new(textures::halftone_shape(lattice, &rows, &cols, cover));
-                return (Some(shape::STOCK_DOTS), dots, None);
-            }
-            let (image, source, hardness) = stock_stand_in(name, *inverted);
-            // our shape with the stock one's own lights and darks and its rows' share of the ink,
-            // where they were measured: all of the stock one as its brush shows it (inverted, for
-            // one that inverts it: most stock tips are drawn dark on white), our shape as it is
-            let retoned = image
-                .filter(|_| source.is_none())
-                .zip(textures::stock_shape_tones(name, *inverted))
-                .and_then(|(i, tones)| {
-                    let mut shape = textures::shapes().into_iter().nth(i as usize)?;
-                    // as wide and tall as the real tip, where it lies in its square (the grainy
-                    // square, standing in for a tip we know nothing else of, takes its outline
-                    // across and down below)
-                    if i != shape::STOCK_GRAINY_SQUARE
-                        && let (Some(rows), Some(cols)) =
-                            (textures::stock_shape_rows(name, *inverted), textures::stock_shape_cols(name, *inverted))
-                        && let Some(fitted) = textures::fitted_to_box(&shape.pixels, &rows, &cols)
-                    {
-                        shape.pixels = fitted;
-                    }
-                    // its marks as fine as the real tip's: standing in for a tip we know nothing
-                    // else of, the grainy square (smooth for a solid one); any other shape of ours
-                    // takes them over itself, but one drawn to the picture, which has its own
-                    let drawn = textures::drawn_to_stock(i);
-                    if let Some(feature) = textures::stock_shape_feature(name).filter(|_| !drawn) {
-                        let cover =
-                            tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
-                        if i == shape::STOCK_GRAINY_SQUARE {
-                            shape.pixels = textures::grainy_square_of(feature, cover);
-                        } else if let Some(marked) = textures::textured_shape(&shape.pixels, feature, cover) {
-                            shape.pixels = marked;
-                        }
-                    }
-                    // its streaks and gaps across the stroke first (and, standing in for a tip we
-                    // know nothing else of, its outline across too)
-                    let rows = textures::stock_shape_rows(name, *inverted).filter(|_| !drawn);
-                    let cols = textures::stock_shape_cols(name, *inverted).filter(|_| i == shape::STOCK_GRAINY_SQUARE);
-                    let striped = match (rows, cols) {
-                        (Some(rows), Some(cols)) => Some(textures::shaped(&shape.pixels, &rows, &cols)),
-                        (Some(rows), None) => Some(textures::striped(&shape.pixels, &rows)),
-                        _ => None,
-                    };
-                    let pixels = striped.as_deref().unwrap_or(&shape.pixels);
-                    Source::new(textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES))
-                });
-            (image, retoned.or(source), hardness)
-        }
+        Texture::Stock { name, inverted } => drawn_shape(&shape_stand_in(name, *inverted)),
+        Texture::Drawn(s) => drawn_shape(s),
     }
+}
+
+/// Our stand-in for the stock shape a brush file names `name`, chosen by what its name says: a tip
+/// printed in dots (where it was measured) as ours dotted on the same lattice.
+pub(crate) fn shape_stand_in(name: &str, inverted: bool) -> StandIn {
+    let key = textures::stock_key(name);
+    let measured = textures::stock_shape_rows_of(key, inverted).is_some()
+        && textures::stock_shape_cols_of(key, inverted).is_some()
+        && textures::stock_shape_tones_of(key, inverted).is_some();
+    let pick = match halftone_lattice(name) {
+        Some(lattice) if measured => Pick::Halftone(lattice),
+        _ => stock_stand_in(name),
+    };
+    StandIn { pick, key, inverted }
+}
+
+/// The shape a stand-in for a stock one draws (see [`shape_for`]), its image drawn the first time
+/// it is wanted.
+fn drawn_shape(s: &StandIn) -> (Option<u32>, Option<Source>, Option<f32>) {
+    let (key, inverted) = (s.key, s.inverted);
+    let i = match s.pick {
+        Pick::Round(hardness) => return (None, None, Some(hardness)),
+        // a plain image: the stamp's whole square (nothing, inverted)
+        Pick::Blank => {
+            let fill = if inverted { 0 } else { 255 };
+            return (None, Some(drawn(SHAPE, s, move || Some(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]))), None);
+        }
+        // a tip printed in dots: ours dotted on the same lattice, each dot as big as the stock
+        // tip's ink there
+        Pick::Halftone(lattice) => {
+            let measured = (
+                textures::stock_shape_rows_of(key, inverted),
+                textures::stock_shape_cols_of(key, inverted),
+                textures::stock_shape_tones_of(key, inverted),
+            );
+            let (Some(rows), Some(cols), Some(tones)) = measured else { return (Some(shape::STOCK_DOTS), None, None) };
+            let dots = drawn(SHAPE, s, move || {
+                let cover = tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
+                Some(textures::halftone_shape(lattice, &rows, &cols, cover))
+            });
+            return (Some(shape::STOCK_DOTS), Some(dots), None);
+        }
+        Pick::Ours(None) => return (None, None, None),
+        Pick::Ours(Some(i)) => i,
+    };
+    // our shape with the stock one's own lights and darks and its rows' share of the ink, where
+    // they were measured: all of the stock one as its brush shows it (inverted, for one that
+    // inverts it: most stock tips are drawn dark on white), our shape as it is
+    let Some(tones) = textures::stock_shape_tones_of(key, inverted) else { return (Some(i), None, None) };
+    if textures::shape_image(i).is_none() {
+        return (Some(i), None, None);
+    }
+    let retoned = drawn(SHAPE, s, move || {
+        let mut shape = textures::shape_image(i)?;
+        // as wide and tall as the real tip, where it lies in its square (the grainy square,
+        // standing in for a tip we know nothing else of, takes its outline across and down below)
+        if i != shape::STOCK_GRAINY_SQUARE
+            && let (Some(rows), Some(cols)) =
+                (textures::stock_shape_rows_of(key, inverted), textures::stock_shape_cols_of(key, inverted))
+            && let Some(fitted) = textures::fitted_to_box(&shape.pixels, &rows, &cols)
+        {
+            shape.pixels = fitted;
+        }
+        // its marks as fine as the real tip's: standing in for a tip we know nothing else of, the
+        // grainy square (smooth for a solid one); any other shape of ours takes them over itself,
+        // but one drawn to the picture, which has its own
+        let drawn = textures::drawn_to_stock(i);
+        if let Some(feature) = textures::stock_shape_feature_of(key).filter(|_| !drawn) {
+            let cover = tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
+            if i == shape::STOCK_GRAINY_SQUARE {
+                shape.pixels = textures::grainy_square_of(feature, cover);
+            } else if let Some(marked) = textures::textured_shape(&shape.pixels, feature, cover) {
+                shape.pixels = marked;
+            }
+        }
+        // its streaks and gaps across the stroke first (and, standing in for a tip we know
+        // nothing else of, its outline across too)
+        let rows = textures::stock_shape_rows_of(key, inverted).filter(|_| !drawn);
+        let cols = textures::stock_shape_cols_of(key, inverted).filter(|_| i == shape::STOCK_GRAINY_SQUARE);
+        let striped = match (rows, cols) {
+            (Some(rows), Some(cols)) => Some(textures::shaped(&shape.pixels, &rows, &cols)),
+            (Some(rows), None) => Some(textures::striped(&shape.pixels, &rows)),
+            _ => None,
+        };
+        let pixels = striped.as_deref().unwrap_or(&shape.pixels);
+        Some(textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES))
+    });
+    (Some(i), Some(retoned), None)
+}
+
+/// What [`drawn`] draws: a shape or a grain.
+const SHAPE: u8 = 0;
+const GRAIN: u8 = 1;
+
+/// A stand-in drawn, as what it is drawn from tells it apart from any other.
+type DrawnKey = (u8, u64, bool, [u32; 4]);
+
+/// The stand-ins made already, while a brush holds them: brushes standing in for the same stock
+/// image share its pixels, drawn once, rather than each drawing and holding its own.
+static DRAWN: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<DrawnKey, procraft_engine::brush::WeakPixels>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Stand-in `s` (a shape or a grain, `kind`), its image what `draw` draws (`TEXTURE_SIZE` square)
+/// the first time it is wanted, or another brush's for the same; known by what it is drawn from,
+/// and as standing in for the stock image `s` is for.
+fn drawn(kind: u8, s: &StandIn, draw: impl Fn() -> Option<Vec<u8>> + Send + Sync + 'static) -> Source {
+    let pick = match s.pick {
+        Pick::Round(h) => [1, h.to_bits(), 0, 0],
+        Pick::Blank => [2, 0, 0, 0],
+        Pick::Ours(i) => [3, i.unwrap_or(u32::MAX), 0, 0],
+        Pick::Halftone([(a, b), (c, d)]) => [a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()],
+    };
+    let key: DrawnKey = (kind, s.key, s.inverted, pick);
+    // its id: FNV-1a of what it is drawn from
+    let words = [u64::from(kind), s.key, u64::from(s.inverted)].into_iter().chain(pick.map(u64::from));
+    let id = words
+        .flat_map(u64::to_le_bytes)
+        .fold(0x6c62_272e_07bb_0142u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let mut map = DRAWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pixels = match map.get(&key).and_then(procraft_engine::brush::WeakPixels::upgrade) {
+        Some(pixels) => pixels,
+        None => {
+            if map.len() >= 1024 {
+                map.retain(|_, pixels| pixels.upgrade().is_some());
+            }
+            let pixels = procraft_engine::brush::Pixels::later(draw);
+            map.insert(key, pixels.downgrade());
+            pixels
+        }
+    };
+    Source::drawn_later(id, pixels).standing_in_for(s.key)
 }
 
 /// The lattice a stock tip printed in dots has its dots on, as [`textures::halftone_shape`] takes it
@@ -2021,7 +2095,7 @@ fn halftone_lattice(name: &str) -> Option<[(f32, f32); 2]> {
 
 /// Our stand-in for the stock shape `name`: our nearest shape, or the round tip at a hardness, or
 /// (blank) the whole square.
-fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, Option<f32>) {
+fn stock_stand_in(name: &str) -> Pick {
     let n = name.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| names(&n, w));
     // the round tip's words as whole words of the name ("shard" is no hard tip, nor "penguin" a pen;
@@ -2029,27 +2103,25 @@ fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, O
     let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).collect();
     let says = |these: &[&str]| these.iter().any(|w| words.contains(w));
     if has(&["blank"]) {
-        // a plain image: the stamp's whole square (nothing, inverted)
-        let fill = if inverted { 0 } else { 255 };
-        (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
+        Pick::Blank
     } else if has(&["dots"]) {
         // dots scattered over the stamp, whatever outline they fill
-        (Some(stock_shape(&n)), None, None)
+        Pick::Ours(Some(stock_shape(&n)))
     } else if has(&["oval"]) {
         // a flat oval, not the round tip (as wide as its tones say, where they were measured)
-        (Some(shape::SLIM_OVAL), None, None)
+        Pick::Ours(Some(shape::SLIM_OVAL))
     } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
-        (None, None, Some(0.75))
+        Pick::Round(0.75)
     } else if says(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink", "rect", "glow"]) {
-        (None, None, Some(0.95))
+        Pick::Round(0.95)
     } else if has(&["medium"]) {
-        (None, None, Some(0.5))
+        Pick::Round(0.5)
     } else if has(&["ultra-soft", "ultra soft", "ultrasoft"]) {
-        (Some(shape::ULTRA_SOFT_ROUND), None, None)
+        Pick::Ours(Some(shape::ULTRA_SOFT_ROUND))
     } else if has(&["soft", "air", "blur", "glow"]) {
-        (Some(shape::SOFT_ROUND), None, None)
+        Pick::Ours(Some(shape::SOFT_ROUND))
     } else {
-        (Some(stock_shape(&n)), None, None)
+        Pick::Ours(Some(stock_shape(&n)))
     }
 }
 
@@ -2205,48 +2277,59 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             Some(s) => (None, Some(s)),
             None => (Some(grain::PAPER), None),
         },
-        Texture::Stock { name, inverted } => {
-            let n = name.to_lowercase();
-            if n.contains("blank") {
-                return (None, None);
-            }
-            let unknown = || match preview.and_then(preview_look) {
-                Some(PreviewLook::Faint) => Some(grain::SPECKLED),
-                // about white: as good as none
-                Some(PreviewLook::Even) => None,
-                _ => Some(grain::MOTTLED),
-            };
-            let image = named_grain(&n).map_or_else(unknown, Some);
-            // our pattern with the stock grain's own lights and darks, where they were measured;
-            // one drawn to the stock image's proportions as it is drawn (measured smaller, the
-            // stock image's fine lines and dots go grey, which would take the pattern's contrast)
-            let source = image.and_then(|i| {
-                // a paper or a wash: noise as strong at each size as the stock image is, with its
-                // tones (tiled as a share of that image is)
-                if textures::drawn_by_octaves(i)
-                    && let (Some((_, octaves)), Some(tones)) =
-                        (textures::stock_grain_octaves(name), textures::stock_grain_tones(name))
-                {
-                    let mut pixels = textures::octave_grain(&octaves, &tones);
-                    if *inverted {
-                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
-                    }
-                    return Source::new(pixels);
-                }
-                let pattern = textures::grains().into_iter().nth(i as usize)?;
-                let mut pixels = if textures::drawn_to_stock_size(i) {
-                    pattern.pixels
-                } else {
-                    textures::retoned(&pattern.pixels, &textures::stock_grain_tones(name)?, &textures::TONE_SHARES)
-                };
-                if *inverted {
-                    pixels.iter_mut().for_each(|v| *v = 255 - *v);
-                }
-                Source::new(pixels)
-            });
-            (image, source)
-        }
+        Texture::Stock { name, inverted } => drawn_grain(&grain_stand_in(name, *inverted, preview)),
+        Texture::Drawn(s) => drawn_grain(s),
     }
+}
+
+/// Our stand-in for the stock grain a brush file names `name`, chosen by what its name says (none
+/// for a blank one); one whose name says nothing we know by the brush's own preview (`preview`, a
+/// PNG): a dark speckle if it draws faintly, none if its middle draws evenly, else a light mottle.
+pub(crate) fn grain_stand_in(name: &str, inverted: bool, preview: Option<&[u8]>) -> StandIn {
+    let n = name.to_lowercase();
+    let unknown = || match preview.and_then(preview_look) {
+        Some(PreviewLook::Faint) => Some(grain::SPECKLED),
+        // about white: as good as none
+        Some(PreviewLook::Even) => None,
+        _ => Some(grain::MOTTLED),
+    };
+    let image = if n.contains("blank") { None } else { named_grain(&n).map_or_else(unknown, Some) };
+    StandIn { pick: Pick::Ours(image), key: textures::stock_key(name), inverted }
+}
+
+/// The grain a stand-in for a stock one draws (see [`grain_for`]), its image drawn the first time
+/// it is wanted: our pattern with the stock grain's own lights and darks, where they were measured;
+/// one drawn to the stock image's proportions as it is drawn (measured smaller, the stock image's
+/// fine lines and dots go grey, which would take the pattern's contrast).
+fn drawn_grain(s: &StandIn) -> (Option<u32>, Option<Source>) {
+    let Pick::Ours(Some(i)) = s.pick else { return (None, None) };
+    let (key, inverted) = (s.key, s.inverted);
+    let invert = move |mut pixels: Vec<u8>| {
+        if inverted {
+            pixels.iter_mut().for_each(|v| *v = 255 - *v);
+        }
+        pixels
+    };
+    let tones = textures::stock_grain_tones_of(key);
+    let source = if textures::drawn_by_octaves(i)
+        && let (Some((_, octaves)), Some(tones)) = (textures::stock_grain_octaves_of(key), tones)
+    {
+        // a paper or a wash: noise as strong at each size as the stock image is, with its tones
+        // (tiled as a share of that image is)
+        Some(drawn(GRAIN, s, move || Some(invert(textures::octave_grain(&octaves, &tones)))))
+    } else if textures::grain_image(i).is_some() && (textures::drawn_to_stock_size(i) || tones.is_some()) {
+        Some(drawn(GRAIN, s, move || {
+            let pattern = textures::grain_image(i)?;
+            let pixels = match tones.filter(|_| !textures::drawn_to_stock_size(i)) {
+                Some(tones) => textures::retoned(&pattern.pixels, &tones, &textures::TONE_SHARES),
+                None => pattern.pixels,
+            };
+            Some(invert(pixels))
+        }))
+    } else {
+        None
+    };
+    (Some(i), source)
 }
 
 /// The source a file's metalness or roughness is painted through: its image, or our nearest grain
@@ -2256,11 +2339,16 @@ pub(crate) fn material_for(t: &Texture) -> (Option<u32>, Option<Source>) {
     match t {
         Texture::None => (None, None),
         Texture::Image { bytes, inverted } => (None, gray_texture(bytes, *inverted)),
-        Texture::Stock { name, .. } => {
-            let n = name.to_lowercase();
-            (if n.contains("blank") { None } else { named_grain(&n) }, None)
-        }
+        Texture::Stock { name, .. } => (material_stand_in(name), None),
+        Texture::Drawn(s) => (if let Pick::Ours(image) = s.pick { image } else { None }, None),
     }
+}
+
+/// Our grain standing in for the stock image a brush file paints its metalness or roughness
+/// through, if its name says what it is (none for a blank one).
+pub(crate) fn material_stand_in(name: &str) -> Option<u32> {
+    let n = name.to_lowercase();
+    if n.contains("blank") { None } else { named_grain(&n) }
 }
 
 /// Our grain nearest to a stock image named `n` (lower case), if its name says what it is.

@@ -276,7 +276,7 @@ impl Images<'_> {
             Images::Told => format!("{:016x}", source.id),
             Images::Filed(list) => {
                 let name = crate::brush_pictures::pixels_name(source.id);
-                let held = crate::brush_pictures::Held::Pixels(std::sync::Arc::clone(&source.pixels));
+                let held = crate::brush_pictures::Held::Pixels(source.pixels.shared());
                 list.borrow_mut().push((name.clone(), held));
                 format!("{}{name}", crate::brush_pictures::MARK)
             }

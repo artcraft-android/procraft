@@ -96,7 +96,7 @@ impl CanvasSession {
             let shape = &st.brush(st.tool).shape;
             let key =
                 (shape.image, shape.source.as_ref().map(|s| s.id), shape.roundness.to_bits(), shape.rotation.to_bits());
-            let pixels = shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels));
+            let pixels = shape.source.as_ref().map(|s| s.pixels.clone());
             (key, pixels)
         };
         let (image, source, roundness, rotation) = key;
@@ -153,7 +153,7 @@ impl CanvasSession {
                 [brush.hardness, shape.roundness, shape.rotation].map(f32::to_bits),
                 side,
             );
-            (key, shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels)))
+            (key, shape.source.as_ref().map(|s| s.pixels.clone()))
         };
         let mut kept = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((k, stamp)) = kept.as_ref()

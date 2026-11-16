@@ -171,6 +171,16 @@ pub fn grains() -> Vec<GrayImage> {
     GRAINS.get_or_init(make_grains).clone()
 }
 
+/// Shape `index`, if there is one (without copying the others).
+pub fn shape_image(index: u32) -> Option<GrayImage> {
+    SHAPES.get_or_init(make_shapes).get(index as usize).cloned()
+}
+
+/// Grain `index`, if there is one (without copying the others).
+pub fn grain_image(index: u32) -> Option<GrayImage> {
+    GRAINS.get_or_init(make_grains).get(index as usize).cloned()
+}
+
 /// The shares of a grain at which [`stock_grain_tones`] gives its values: none, 5%, 10%, a
 /// quarter, half, three quarters, 90%, 95% and all of it.
 pub const TONE_SHARES: [f32; 9] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
@@ -184,7 +194,13 @@ pub const SHAPE_TONE_SHARES: [f32; 17] = [
 /// The tones of the stock grain a brush file names `name` (its path or file name) instead of
 /// carrying it, as measured: its values at [`TONE_SHARES`], if it is one we know.
 pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
-    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, name)
+    stock_grain_tones_of(stock_key(name))
+}
+
+/// [`stock_grain_tones`] of the stock grain whose measurements are kept under `key` (see
+/// [`stock_key`]).
+pub fn stock_grain_tones_of(key: u64) -> Option<[u8; 9]> {
+    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, key)
 }
 
 /// The sides at which [`stock_grain_features`] gives a stock grain's feature size: the image as a
@@ -195,8 +211,12 @@ pub const FEATURE_SIDES: [f32; 4] = [1024.0, 512.0, 256.0, 128.0];
 /// (how far it shifts before it matches itself only half), at each of [`FEATURE_SIDES`], as
 /// measured, if it is one we know.
 pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
+    stock_grain_features_of(stock_key(name))
+}
+
+/// [`stock_grain_features`] of the stock grain whose measurements are kept under `key`.
+pub fn stock_grain_features_of(key: u64) -> Option<[f32; 4]> {
     let table = crate::stock_tones::STOCK_GRAIN_FEATURES;
-    let key = name_key(name);
     let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
     table.get(at).map(|&(_, v)| v.map(|v| f32::from(v) / 65536.0))
 }
@@ -205,8 +225,12 @@ pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
 /// size of what is left of it with its broad outline taken away, as a share of its side; `Some(None)`
 /// for one with no texture of its own (solid or smooth), none if it is one we don't know.
 pub fn stock_shape_feature(name: &str) -> Option<Option<f32>> {
+    stock_shape_feature_of(stock_key(name))
+}
+
+/// [`stock_shape_feature`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_feature_of(key: u64) -> Option<Option<f32>> {
     let table = crate::stock_tones::STOCK_SHAPE_FEATURES;
-    let key = name_key(name);
     let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
     table.get(at).map(|&(_, [v])| (v < u16::MAX).then(|| f32::from(v) / 65536.0))
 }
@@ -401,7 +425,12 @@ fn feature_share(pixels: &[u8], n: usize) -> Option<f32> {
 /// The tones of the stock shape a brush file names `name`, as measured: its values at
 /// [`SHAPE_TONE_SHARES`] (of it inverted, for a brush that inverts it), if it is one we know.
 pub fn stock_shape_tones(name: &str, inverted: bool) -> Option<[u8; 17]> {
-    let tones = stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, name)?;
+    stock_shape_tones_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_tones`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_tones_of(key: u64, inverted: bool) -> Option<[u8; 17]> {
+    let tones = stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, key)?;
     // inverted, the darkest share is what was the lightest (the shares run evenly both ways)
     Some(if inverted {
         std::array::from_fn(|i| 255 - tones.get(tones.len() - 1 - i).copied().unwrap_or(0))
@@ -414,12 +443,22 @@ pub fn stock_shape_tones(name: &str, inverted: bool) -> Option<[u8; 17]> {
 /// of its fullest (0..255), as measured (of it inverted, for a brush that inverts it), if it is
 /// one we know.
 pub fn stock_shape_rows(name: &str, inverted: bool) -> Option<[u8; 64]> {
-    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, name).map(|means| band_shares(&means, inverted))
+    stock_shape_rows_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_rows`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_rows_of(key: u64, inverted: bool) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, key).map(|means| band_shares(&means, inverted))
 }
 
 /// The same of its columns, left to right.
 pub fn stock_shape_cols(name: &str, inverted: bool) -> Option<[u8; 64]> {
-    stock_tones(crate::stock_tones::STOCK_SHAPE_COLS, name).map(|means| band_shares(&means, inverted))
+    stock_shape_cols_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_cols`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_cols_of(key: u64, inverted: bool) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_COLS, key).map(|means| band_shares(&means, inverted))
 }
 
 /// Bands' mean values as the ink each holds, as shares of the fullest (0..255): the means
@@ -588,8 +627,7 @@ pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
     pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
 }
 
-fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], name: &str) -> Option<[T; N]> {
-    let key = name_key(name);
+fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], key: u64) -> Option<[T; N]> {
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
 }
 
@@ -604,7 +642,12 @@ pub const OCTAVE_SHARE: f32 = 0.25;
 /// [`octave_grain`]'s noise is (finest first) for it to vary as much at each size as that image
 /// does, as measured, if it is one we know.
 pub fn stock_grain_octaves(name: &str) -> Option<(f32, [f32; OCTAVES])> {
-    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, name)?;
+    stock_grain_octaves_of(stock_key(name))
+}
+
+/// [`stock_grain_octaves`] of the stock grain whose measurements are kept under `key`.
+pub fn stock_grain_octaves_of(key: u64) -> Option<(f32, [f32; OCTAVES])> {
+    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, key)?;
     Some((f32::from(width), octaves.map(|a| f32::from(a) / 10000.0)))
 }
 
@@ -644,8 +687,8 @@ pub fn octave_grain(amplitudes: &[f32; OCTAVES], tones: &[u8; 9]) -> Vec<u8> {
 }
 
 /// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
-/// case.
-fn name_key(name: &str) -> u64 {
+/// case. A stand-in drawn for a brush that names no image (the stock library's own) goes by it.
+pub fn stock_key(name: &str) -> u64 {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
     base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
