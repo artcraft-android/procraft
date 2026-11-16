@@ -834,7 +834,8 @@ impl Random {
 /// What a smudge stamp that picks up behind it does with what it picks up: lays it with a share of
 /// its colour mixed in (the stroke's, or its own), or first makes it one colour, the average of
 /// what lies within a share of its reach of the middle (weighed by its shape, or not). A clear
-/// colour (an erasing brush's) takes that share of the paint away instead. It lays what it carries
+/// colour (an erasing brush's) takes that share of the paint away instead; a colour `thin` see-
+/// through (0 not at all, 1 clear) mixes in as far as it is opaque. It lays what it carries
 /// in place of what is there, or (`over`) over it, so that it never thins what is there. `here`: it
 /// picks up where it lies itself, not behind it; `from`: that far from where it lies (canvas
 /// pixels) instead, as a clone does; `before`: from the layer as it was before the stroke. What it
@@ -847,6 +848,7 @@ pub struct PickUp {
     pub paint: Option<[f32; 3]>,
     pub dull: Option<(f32, bool)>,
     pub clear: bool,
+    pub thin: f32,
     pub over: bool,
     pub here: bool,
     pub from: Option<[f32; 2]>,

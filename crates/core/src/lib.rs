@@ -595,6 +595,8 @@ pub(crate) struct State {
     /// The open stroke's brush engine wanting the pen again while it holds still (an airbrush):
     /// every how many ms, the pen as it last was, and when next.
     pub(crate) airbrush: Option<(f64, PenSample, f64)>,
+    /// The open stroke's brush engine, as it is told the colours under the dabs it asks about.
+    pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
     pub(crate) grain_store: grain_store::GrainStore,
     /// Where the library was last kept or read whole, and what it held then (see
@@ -1647,6 +1649,7 @@ impl CanvasSession {
             frames: 0,
             pad_strokes: None,
             airbrush: None,
+            engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
             plugin_stepping: 0,
@@ -2004,6 +2007,8 @@ impl CanvasSession {
         if let Some(recording) = st.recording.as_mut().filter(|_| st.stroke.is_some()) {
             recording.add(&canvas_samples);
         }
+        // a brush engine told the colours under the dabs it asked about before its next samples
+        st.tell_under();
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
         if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide()) {
             st.redraw_painted_on();
@@ -2072,6 +2077,8 @@ impl CanvasSession {
         }
         // (painted into an open adjustment, it tells no plugin: what one did would end it)
         let tells = !st.adjusting;
+        st.tell_under();
+        st.engine_asking = plugin_brushes::Asking::default();
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let mut second = st.second.take();
         lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());

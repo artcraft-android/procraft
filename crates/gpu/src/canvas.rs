@@ -6241,8 +6241,13 @@ impl Canvas {
                 },
                 pick,
                 paint_rate,
-                // an erasing brush mixes in clear paint, taking paint away
-                paint: if pick_up.is_some_and(|p| p.clear) { [0.0; 4] } else { [paint[0], paint[1], paint[2], 1.0] },
+                // an erasing brush mixes in clear paint, taking paint away; see-through paint as far
+                // as it is opaque
+                paint: match pick_up {
+                    Some(p) if p.clear => [0.0; 4],
+                    Some(p) if p.thin.is_finite() => [paint[0], paint[1], paint[2], 1.0 - p.thin.clamp(0.0, 1.0)],
+                    _ => [paint[0], paint[1], paint[2], 1.0],
+                },
                 dull,
                 dull_weighted,
                 smear_over: u32::from(pick_up.is_some_and(|p| p.over)),

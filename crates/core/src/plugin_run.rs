@@ -117,7 +117,9 @@
 //!   `procraft_brush_load(engine: i32, len: i32) -> i32` takes a brush's data and answers how it
 //!   looks (below 0: refused), `procraft_brush_begin(len: i32) -> i32` starts a stroke (its number,
 //!   -1: load its brush first), `procraft_brush_add(stroke: i32, len: i32) -> i32` takes its samples
-//!   and `procraft_brush_end(stroke: i32) -> i32` ends it, each answering how many dabs are at out.
+//!   and `procraft_brush_end(stroke: i32) -> i32` ends it, each answering how many dabs are at out;
+//!   if it has it, `procraft_brush_under(stroke: i32, len: i32) -> i32` takes the colours under the
+//!   dabs it asked about.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -251,6 +253,7 @@ const BRUSH_LOAD: &str = "procraft_brush_load";
 const BRUSH_BEGIN: &str = "procraft_brush_begin";
 const BRUSH_ADD: &str = "procraft_brush_add";
 const BRUSH_END: &str = "procraft_brush_end";
+const BRUSH_UNDER: &str = "procraft_brush_under";
 /// What making brushes of a file may spend and take, and reading one brush (its tips decoded).
 const IMPORT_FUEL: u64 = 8_000_000_000;
 const MOST_IMPORT_TIME: Duration = Duration::from_secs(60);
@@ -671,6 +674,8 @@ struct BrushCalls {
     begin: TypedFunc<i32, i32>,
     add: TypedFunc<(i32, i32), i32>,
     end: TypedFunc<i32, i32>,
+    /// The colours under the dabs a stroke asked about, if it takes them.
+    under: Option<TypedFunc<(i32, i32), i32>>,
 }
 
 /// What a plugin says of an item recorded on its layer.
@@ -963,6 +968,7 @@ impl Running {
                     begin: instance.get_typed_func(&store, BRUSH_BEGIN).ok()?,
                     add: instance.get_typed_func(&store, BRUSH_ADD).ok()?,
                     end: instance.get_typed_func(&store, BRUSH_END).ok()?,
+                    under: instance.get_typed_func(&store, BRUSH_UNDER).ok(),
                 })
             })();
             let key_buffer = instance.get_typed_func(&store, KEY_BUFFER).ok();
@@ -1368,6 +1374,19 @@ impl Running {
             guarded(|| long_call(store, &calls.add, (stroke, len), &mut left, until))?
         };
         self.dabs(count, &mut left, until)
+    }
+
+    /// Stroke `stroke` is handed the colours under the dabs it asked about (`colours`, four f32
+    /// each), if it takes them.
+    pub(crate) fn brush_under(&mut self, stroke: i32, colours: &[u8]) -> Result<(), Stop> {
+        if self.brushes.as_ref().is_none_or(|calls| calls.under.is_none()) {
+            return Ok(());
+        }
+        let (mut left, until) = (DAB_FUEL, Instant::now() + MOST_DAB_TIME);
+        let len = self.brush_in(colours, &mut left, until)?;
+        let Running { store, brushes, .. } = self;
+        let Some(under) = brushes.as_ref().and_then(|calls| calls.under.as_ref()) else { return Ok(()) };
+        guarded(|| long_call(store, under, (stroke, len), &mut left, until)).map(|_| ())
     }
 
     /// The dabs stroke `stroke` lays as it ends, [`DAB_BYTES`] each.

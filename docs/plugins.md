@@ -1059,6 +1059,7 @@ procraft_brush_load(engine: i32, len: i32) -> i32    // a brush: how it looks, i
 procraft_brush_begin(len: i32) -> i32                // a stroke starts: its number; -1 load it first
 procraft_brush_add(stroke: i32, len: i32) -> i32     // its samples: how many dabs
 procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
+procraft_brush_under(stroke: i32, len: i32) -> i32   // optional: the colours under dabs it asked about
 ```
 
 `engine` is the engine's place in `brush_engines`. Everything goes as records, as layers' items do.
@@ -1122,7 +1123,10 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   thinning it, rather than in its place, 512 it picks up where it lies itself rather than where the
   last lay; with flag 16 too: 1024 it picks up from elsewhere, as far from where it lies as words
   20 and 21 say, as a clone does; 2048 what it picks up comes through a warp; 4096 what it picks up
-  is blurred and sharpened; 8192 it picks up from the layer as it was before the stroke), its
+  is blurred and sharpened; 8192 it picks up from the layer as it was before the stroke; 32768 with
+  flags 4 and 16, its colour is as opaque as word 22 says (f32, 0..1, not with 2048 or 4096), so
+  that laid in place it thins what is there towards that; 16384 it lays nothing, but asks for the
+  colours under it, see below), its
   colour (three f32, sRGB 0..1, with flag 4), the texture's
   strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
   lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it
@@ -1141,6 +1145,17 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   blur is added back, sharpening it (f32). With flag 16 the opacity is how far it lays what it
   moves; the first dab of such a stroke only marks its place, unless it picks up where it lies or
   from elsewhere.
+
+- A dab with flag 16384 asks what lies under it: its layer's colours within its diameter around
+  its place, each pixel weighed by 1 - (d / r)^2 at its middle (its tip word 0), or (its tip word 1)
+  over the square of its diameter from its top left corner, the pixels whose corners lie within a
+  pixel past its rim weighed so (less than nothing past the rim) and the rest fully. Before the
+  stroke's next batch of samples the app hands `procraft_brush_under`, if the module has it, the
+  colours under each dab asked about since, in order: four f32 each, the premultiplied red, green
+  and blue and the alpha (0..1, clear off the canvas). They are the layer as the stroke has laid it
+  by then, the dabs of the batch that asked included, since the GPU lays a batch's dabs together:
+  an engine mixing the colours under its dabs into the next is a batch late at most. Strokes the
+  app draws again (QuickShape, a layer's own, a 3D model, the preview) are told nothing.
 
 A stroke's start, a batch of samples and its end may each take 40,000,000 steps, for at most a
 quarter of a second; a load 2,000,000,000, for 10 seconds. A stroke laid this way shows no

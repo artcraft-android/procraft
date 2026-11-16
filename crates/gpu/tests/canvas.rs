@@ -3258,6 +3258,11 @@ fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
     // clear paint (an erasing brush's) mixed in: half the red taken away
     let (thinned, _) = moved(PickUp { paint_share: 0.5, clear: true, ..clear });
     assert!(thinned[3].abs_diff(128) <= 12 && thinned[2] < 16 && thinned[0] > 100, "{thinned:?}");
+    // its own colour (green) a quarter opaque, laid in place over the red: the red thinned to a
+    // quarter, green
+    let own = PickUp { paint_share: 1.0, paint: Some([0.0, 1.0, 0.0]), thin: 0.75, here: true, ..clear };
+    let (thin, _) = moved_from(own, 60.0, 16.0);
+    assert!(thin[3].abs_diff(64) <= 12 && thin[1].abs_diff(thin[3]) <= 4 && thin[0] < 16, "{thin:?}");
     // the clear smeared into the red: in its place it clears it, laid over it the red stays
     let (cleared, _) = moved_from(clear, 60.0, 16.0);
     assert!(cleared[3] < 16, "{cleared:?}");
