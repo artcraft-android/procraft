@@ -2992,24 +2992,33 @@ mod tests {
     fn a_stroke_whose_stamps_follow_its_way_is_laid_as_it_ends_with_its_first_turned() {
         // drawn sample by sample, as the canvas lays them: what is handed out, laid again once
         // its first stamps turn to the way it goes, is how it starts as it ends, so its end lays
-        // only the rest
-        let brush = Brush { shape: crate::brush::Shape { follow: 1.0, ..crate::brush::Shape::default() }, ..plain() };
-        let mut stroke = StrokeBuilder::new(brush, 20.0, Pointer::Stylus);
-        let (mut laid, mut turned) = (Vec::new(), 0);
-        // up the canvas: its first stamp turns from how it began
-        for i in 0..=40 {
-            let s = Sample::at(Vec2::new(50.0, 300.0 - i as f32 * 6.0), 1.0, f64::from(i) * 4.0);
-            let added = stroke.add(&[s]);
-            if stroke.take_turned() {
-                turned += 1;
-                laid = stroke.placed_stamps();
-            } else {
-                laid.extend(added);
+        // only the rest. A plain stamp that follows the stroke's way, and stock paint that does.
+        let stock = |name: &str| crate::library::library().into_iter().flat_map(|s| s.brushes).find(|b| b.name == name);
+        let follows = Brush { shape: crate::brush::Shape { follow: 1.0, ..crate::brush::Shape::default() }, ..plain() };
+        let brushes: Vec<Brush> =
+            [Some(follows), stock("Palette Knife"), stock("Filbert")].into_iter().flatten().collect();
+        assert_eq!(brushes.len(), 3);
+        for brush in brushes {
+            let name = brush.name.clone();
+            let mut stroke = StrokeBuilder::new(brush, 40.0, Pointer::Stylus);
+            let (mut laid, mut turned) = (Vec::new(), 0);
+            // up the canvas and over: its first stamp turns from how it began
+            for i in 0..200 {
+                let t = i as f32 / 200.0;
+                let at = Vec2::new(50.0 + t * 600.0, 400.0 - (t * 9.0).sin() * 300.0);
+                let s = Sample::at(at, 0.3 + 0.6 * (t * 20.0).sin().abs(), f64::from(i) * 4.0);
+                let added = stroke.add(&[s]);
+                if stroke.take_turned() {
+                    turned += 1;
+                    laid = stroke.placed_stamps();
+                } else {
+                    laid.extend(added);
+                }
             }
+            let all = stroke.finish();
+            assert_eq!(turned, 1, "{name}");
+            assert!(all.len() > laid.len() && all.starts_with(&laid), "{name}: {} of {}", laid.len(), all.len());
         }
-        let all = stroke.finish();
-        assert_eq!(turned, 1);
-        assert!(all.len() > laid.len() && all.starts_with(&laid), "{} of {}", laid.len(), all.len());
     }
 
     #[test]
