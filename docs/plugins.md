@@ -1120,15 +1120,27 @@ procraft_brush_end(stroke: i32) -> i32               // it ends: how many dabs
   weighed by the dab's tip, 128
   the colour it mixes in clear, taking paint away, 256 what it moves laid over what is there, never
   thinning it, rather than in its place, 512 it picks up where it lies itself rather than where the
-  last lay), its
+  last lay; with flag 16 too: 1024 it picks up from elsewhere, as far from where it lies as words
+  20 and 21 say, as a clone does; 2048 what it picks up comes through a warp; 4096 what it picks up
+  is blurred and sharpened; 8192 it picks up from the layer as it was before the stroke), its
   colour (three f32, sRGB 0..1, with flag 4), the texture's
   strength in it (0..1), how far the texture is moved where it reads it (x, y), how strongly a
   lightness tip shows (0..1), a threshold that makes its tip hard (0 none; 0..1: what is over it
   paints fully, what is under it by more than the next number's share of it not at all), that
   share; with flag 16, the share of what it lays that is its colour (the colour, or its own with
   flag 4) and, with flag 32, the share of its reach around where the last lay that the one colour
-  is picked from (0 its middle, 1 all of it, 3 at most); then four 0s. With flag 16 the opacity is
-  how far it lays what it moves; the first dab of such a stroke only marks its place.
+  is picked from (0 its middle, 1 all of it, 3 at most); then four words, 0 unless its flags say:
+  with 1024, the canvas pixels across and down from where it lies to where it picks up (f32 each);
+  with 2048, the warp's shift (f32 across, down), amount (f32) and kind (u32): within the dab's
+  outline (r 0 at its middle, 1 at its rim, across and down its turn and squash) each pixel is taken
+  from 1 / (amount (1 - r) + r) as far from the middle (1, scaled), turned by amount radians times
+  1 - r (2), moved back by the shift times 1 - r (3), through a lens out from r (1 + amount r^2) of
+  the radius (4) or in from r / (1 + amount r^2) (5), or from up to amount pixels away at random (6);
+  16 added, the nearest pixel rather than a mix of the four around it; with 4096 (not with 2048),
+  how much it is blurred (f32, 0..1, as a smudge's blur), then how much of its difference from that
+  blur is added back, sharpening it (f32). With flag 16 the opacity is how far it lays what it
+  moves; the first dab of such a stroke only marks its place, unless it picks up where it lies or
+  from elsewhere.
 
 A stroke's start, a batch of samples and its end may each take 40,000,000 steps, for at most a
 quarter of a second; a load 2,000,000,000, for 10 seconds. A stroke laid this way shows no

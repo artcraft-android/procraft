@@ -836,8 +836,12 @@ impl Random {
 /// what lies within a share of its reach of the middle (weighed by its shape, or not). A clear
 /// colour (an erasing brush's) takes that share of the paint away instead. It lays what it carries
 /// in place of what is there, or (`over`) over it, so that it never thins what is there. `here`: it
-/// picks up where it lies itself, not behind it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// picks up where it lies itself, not behind it; `from`: that far from where it lies (canvas
+/// pixels) instead, as a clone does; `before`: from the layer as it was before the stroke. What it
+/// picks up may come through a `warp` (each pixel from elsewhere under it), and be blurred (`blur`,
+/// 0..1 as a smudge's blur) and then sharpened (`sharpen`, how much of the difference from the blur
+/// is added) before it is laid.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PickUp {
     pub paint_share: f32,
     pub paint: Option<[f32; 3]>,
@@ -845,6 +849,37 @@ pub struct PickUp {
     pub clear: bool,
     pub over: bool,
     pub here: bool,
+    pub from: Option<[f32; 2]>,
+    pub before: bool,
+    pub warp: Option<Warp>,
+    pub blur: f32,
+    pub sharpen: f32,
+}
+
+/// How a picking-up stamp moves what it picks up: each pixel under it within its shape's outline
+/// (`r` from 0 at its middle to 1 at its rim, across and down its own turn and squash) taken from
+/// elsewhere, by `kind`: scaled by `amount`, fading to none at the rim (1 / (amount (1 - r) + r)
+/// times as far from the middle: above 1 it grows, below 1 it shrinks); turned by `amount` radians
+/// at the middle, none at the rim; moved by `shift` (canvas pixels) at the middle, none at the rim;
+/// through a lens, `amount` its strength (out: from r (1 + amount r^2) of the radius out, in: from
+/// r / (1 + amount r^2)); or each pixel from up to `amount` pixels away at random. `nearest`: the
+/// pixel nearest where it comes from, not a mix of the four around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Warp {
+    pub kind: WarpKind,
+    pub amount: f32,
+    pub shift: [f32; 2],
+    pub nearest: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WarpKind {
+    Scale = 1,
+    Turn = 2,
+    Shift = 3,
+    LensOut = 4,
+    LensIn = 5,
+    Scatter = 6,
 }
 
 /// A brush engine outside the app's own (a plugin's): it lays a stroke's stamps from its input

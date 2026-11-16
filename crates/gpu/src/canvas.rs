@@ -1306,7 +1306,10 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         passed: 0,
         pass_origin: [0; 2],
         source_image: u32::from(style.from_image),
-        _pad: 0,
+        warp_kind: 0,
+        warp_shift: [0.0; 2],
+        warp_amount: 0.0,
+        sharpen: 0.0,
         kept: -1,
         preserve_alpha: u32::from(style.preserve_alpha),
         // the window's, filled in where it is laid
@@ -1485,7 +1488,13 @@ struct SmudgeUniform {
     pass_origin: [i32; 2],
     /// 1: it picks up from the image as last shown (see [`StrokeStyle::from_image`]).
     source_image: u32,
-    _pad: u32,
+    /// What it picks up comes through a warp (see `procraft_engine::stroke::Warp`): its kind (0
+    /// none; 16 added: the nearest pixel), its shift and its amount; and how much what it picks up
+    /// is sharpened against its blur.
+    warp_kind: u32,
+    warp_shift: [f32; 2],
+    warp_amount: f32,
+    sharpen: f32,
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -6039,10 +6048,16 @@ impl Canvas {
             // the blur and the pull as far as this stamp's pressure takes them
             let [_, blur_by, blur_jitter_by, _, _, _, _, smudge_pull_by] = wet.get(k).copied().unwrap_or([1.0; 8]);
             smudge.stamps = smudge.stamps.saturating_add(1);
-            // the blur, jitter only ever lowering it
-            let blur = style.blur
-                * blur_by
-                * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919)));
+            // the blur, jitter only ever lowering it; a stamp picking up its own way, its own
+            let pick_up = picks.get(k).copied().flatten();
+            let blur = match pick_up {
+                Some(p) if p.blur > 0.0 || p.sharpen > 0.0 => p.blur.clamp(0.0, 1.0),
+                _ => {
+                    style.blur
+                        * blur_by
+                        * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919)))
+                }
+            };
             // what the brush carries a pixel a cell, unless the stroke's first stamp is wider than
             // the grid; its middle at the stamp's pixel, and the cells the stamp reaches around it
             let reach = s.radius.max(0.5) + 1.0;
@@ -6051,12 +6066,14 @@ impl Canvas {
             }
             let anchor = if smudge.scale <= 1.0 { s.center.map(f32::floor) } else { s.center };
             let half = ((reach / smudge.scale).ceil() as i32).clamp(1, SMUDGE_REACH);
-            // a stamp picking up behind it reads where the last stamp lay, keeping nothing older
-            let pick_up = picks.get(k).copied().flatten();
+            // a stamp picking up behind it reads where the last stamp lay, keeping nothing older;
+            // one picking up from elsewhere, that far from its own place
             let pick = match pick_up {
+                Some(PickUp { from: Some([x, y]), .. }) => [anchor[0] + x, anchor[1] + y],
                 Some(p) if !p.here => smudge.last_anchor.unwrap_or(anchor),
                 _ => anchor,
             };
+            let warp = pick_up.and_then(|p| p.warp);
             smudge.last_anchor = Some(anchor);
             let (paint_rate, paint, dull, dull_weighted) = pick_up.map_or((0.0, style.color, 0.0, 0), |p| {
                 let (dull, weighed) = p.dull.map_or((0.0, false), |(r, w)| (r.clamp(1e-3, 3.0), w));
@@ -6080,11 +6097,16 @@ impl Canvas {
                 anchor,
                 scale: smudge.scale,
                 half,
+                source_before: u32::from(style.wet_from_before || pick_up.is_some_and(|p| p.before)),
+                warp_kind: warp.map_or(0, |w| w.kind as u32 + if w.nearest { 16 } else { 0 }),
+                warp_shift: warp.map_or([0.0; 2], |w| w.shift),
+                warp_amount: warp.map_or(0.0, |w| if w.amount.is_finite() { w.amount } else { 0.0 }),
+                sharpen: pick_up.map_or(0.0, |p| if p.sharpen.is_finite() { p.sharpen.max(0.0) } else { 0.0 }),
                 ..smudge_uniform(s, style, bbox, size)
             };
             smudge.started = true;
             smudge.kept = if pick_up.is_some() { -1 } else { half };
-            laid.push((uniform, bbox, blur > 0.0));
+            laid.push((uniform, bbox, blur > 0.0 || uniform.sharpen > 0.0));
         }
         let pieces: Vec<smudge::Piece> =
             laid.into_iter().flat_map(|(uniform, bbox, blurs)| self.smudge_pieces(uniform, bbox, blurs)).collect();

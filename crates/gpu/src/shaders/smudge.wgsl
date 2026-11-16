@@ -133,6 +133,13 @@ struct SmudgeStamp {
     pass_origin: vec2<i32>,
     // 1: it picks up from the image as last shown (every layer), else from its layer
     source_image: u32,
+    // what it picks up comes through a warp: its kind (0 none, 1 scale, 2 turn, 3 shift, 4 lens
+    // out, 5 lens in, 6 scatter; 16 added: the nearest pixel), its shift and amount (see
+    // `warped`); and how much it is sharpened against its blur
+    warp_kind: u32,
+    warp_shift: vec2<f32>,
+    warp_amount: f32,
+    sharpen: f32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -265,8 +272,12 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let c = window_cell(i);
     // the cell's middle on the canvas: a pixel's middle when a cell is one (picked up where the
-    // stamp says, its own place unless it picks up behind it)
-    let under = picked_at(st.pick + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
+    // stamp says, its own place unless it picks up behind it), through its warp
+    var at = st.pick + warped((vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale, c);
+    if (st.warp_kind >= 16u) {
+        at = floor(at) + 0.5;
+    }
+    let under = picked_at(at);
     let k = c.y * i32(st.grid) + c.x;
     let off = abs(c - vec2<i32>(middle()));
     var carried = under;
@@ -278,6 +289,57 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
         carried = mix(carried, vec4<f32>(st.paint.rgb * st.paint.a, st.paint.a), st.paint_rate);
     }
     carry[k] = carried;
+}
+
+// A number 0..1 from a cell and the stamp's place, for a warp that scatters.
+fn warp_hash(c: vec2<i32>, salt: u32) -> vec2<f32> {
+    var h = u32(c.x) * 0x8da6b343u ^ u32(c.y) * 0xd8163841u ^ salt * 0xcb1ab31fu;
+    h = (h ^ (h >> 16u)) * 0x7feb352du;
+    h = (h ^ (h >> 15u)) * 0x846ca68bu;
+    let k = (h ^ (h >> 16u)) * 0x9e3779b9u;
+    return vec2<f32>(f32(h >> 8u), f32(k >> 8u)) / 16777216.0;
+}
+
+// Where the cell `d` from the stamp's middle (canvas pixels) picks up from, from the middle: as it
+// lies, or through the stamp's warp within its outline (`r` 0 at the middle, 1 at the rim, across
+// and down its turn and squash).
+fn warped(d: vec2<f32>, c: vec2<i32>) -> vec2<f32> {
+    let kind = st.warp_kind & 15u;
+    if (kind == 0u) {
+        return d;
+    }
+    let co = cos(st.angle);
+    let si = sin(st.angle);
+    let local = vec2<f32>(d.x * co + d.y * si, -d.x * si + d.y * co);
+    let r = length(vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness)));
+    if (r > 1.0) {
+        return d;
+    }
+    let a = st.warp_amount;
+    if (kind == 1u) {
+        let s = sign(a) * (abs((1.0 - r) * a) + r);
+        if (abs(s) < 1e-4) {
+            return d;
+        }
+        return d / s;
+    }
+    if (kind == 2u) {
+        let t = -a * (1.0 - r);
+        return vec2<f32>(d.x * cos(t) - d.y * sin(t), d.x * sin(t) + d.y * cos(t));
+    }
+    if (kind == 3u) {
+        return d - st.warp_shift * (1.0 - r);
+    }
+    if (kind == 4u || kind == 5u) {
+        let n = d / max(st.radius, 1e-3);
+        let k = 1.0 + a * dot(n, n);
+        if (kind == 4u) {
+            return n * k * st.radius;
+        }
+        return n / max(k, 1e-4) * st.radius;
+    }
+    let salt = bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 0x9e3779b9u);
+    return d + a * (2.0 * warp_hash(c, salt) - 1.0);
 }
 
 // What the brush carries made one colour (a dulling stamp): the average of the cells within the
@@ -385,7 +447,14 @@ fn cs_blur_across(@builtin(global_invocation_id) id: vec3<u32>) {
         sum += carry[g * g + c.y * g + x] * w;
         weight += w;
     }
-    carry[2 * g * g + c.y * g + c.x] = sum / weight;
+    var out = sum / weight;
+    // sharpened: the difference from the blur added back
+    if (st.sharpen > 0.0) {
+        let was = carry[c.y * g + c.x];
+        out = clamp(was + st.sharpen * (was - out), vec4<f32>(0.0), vec4<f32>(1.0));
+        out = vec4<f32>(min(out.rgb, vec3<f32>(out.a)), out.a);
+    }
+    carry[2 * g * g + c.y * g + c.x] = out;
 }
 
 // what the brush lays down at canvas pixel `p`: what it carries there (blurred, when it blurs),

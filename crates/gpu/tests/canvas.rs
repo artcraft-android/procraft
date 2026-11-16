@@ -6,7 +6,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::{Homography, Vec2};
 use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::profile::Profile;
-use procraft_engine::stroke::PickUp;
+use procraft_engine::stroke::{PickUp, Warp, WarpKind};
 use procraft_engine::stroke::{Stamp, StrokeBuilder, Tint};
 use procraft_engine::textures::TEXTURE_SIZE;
 use procraft_engine::view::View;
@@ -3247,7 +3247,7 @@ fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
     };
     // from the red into the clear
     let moved = |pick: PickUp| moved_from(pick, 16.0, 60.0);
-    let clear = PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false, here: false };
+    let clear = PickUp::default();
     // smeared: the red laid where it was clear, and where the first lay left as it was
     let (smeared, first) = moved(PickUp { over: false, ..clear });
     assert!(smeared[0] > 240 && smeared[2] < 16 && smeared[3] > 240, "{smeared:?}");
@@ -3276,6 +3276,46 @@ fn a_stamp_picking_up_behind_it_moves_what_lay_under_the_last() {
 }
 
 #[test]
+fn a_stamp_picks_up_from_elsewhere_through_a_warp_or_blurred() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // red on the left of x = 32, clear on the right; one stamp picking up its own way
+    let laid = |pick: PickUp, at: f32| {
+        let mut doc = Document::new(96, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(-8.0, y as f32), 40.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Smudge, [0.0, 0.0, 1.0], 1.0));
+        canvas.add_stamps(&[Stamp { pick_up: Some(pick), ..dot(Vec2::new(at, 32.0), 8.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    // a clone: the red 44 pixels to its left laid where it lies, over what is there
+    let clone = PickUp { from: Some([-44.0, 0.0]), over: true, before: true, ..PickUp::default() };
+    let cloned = pixel(&laid(clone, 60.0), 96, 60, 32);
+    assert!(cloned[0] > 240 && cloned[2] < 16 && cloned[3] > 240, "{cloned:?}");
+    // where the red's edge is along the middle row
+    let edge = |layer: &[u8]| (20..48).find(|&x| pixel(layer, 96, x, 32)[3] < 128).unwrap_or(0);
+    let here = PickUp { here: true, ..PickUp::default() };
+    let plain = edge(&laid(here, 32.0));
+    assert!((31..=33).contains(&plain), "{plain}");
+    // shifted: what lies to the left taken at the middle, the edge moved right
+    let shift = Warp { kind: WarpKind::Shift, amount: 1.0, shift: [6.0, 0.0], nearest: false };
+    let moved = edge(&laid(PickUp { warp: Some(shift), ..here }, 32.0));
+    assert!(moved >= plain + 2, "{plain} {moved}");
+    // grown: the middle drawn from nearer it, the edge pushed out from the middle at 36
+    let grow = Warp { kind: WarpKind::Scale, amount: 2.0, shift: [0.0; 2], nearest: false };
+    let grown = edge(&laid(PickUp { warp: Some(grow), ..here }, 36.0));
+    assert!(grown < plain, "{plain} {grown}");
+    // blurred: the edge under it softened
+    let blurred = laid(PickUp { blur: 0.5, ..here }, 32.0);
+    let (inside, outside) = (pixel(&blurred, 96, 29, 32)[3], pixel(&blurred, 96, 35, 32)[3]);
+    assert!(inside < 245 && outside > 10, "{inside} {outside}");
+}
+
+#[test]
 fn a_smudge_from_the_image_picks_up_the_layers_under_its_own() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -3290,7 +3330,7 @@ fn a_smudge_from_the_image_picks_up_the_layers_under_its_own() {
         canvas.end_stroke();
         let top = doc.add_layer();
         canvas.render(&gpu, &mut doc, None);
-        let pick = PickUp { paint_share: 0.0, paint: None, dull: None, clear: false, over: false, here: false };
+        let pick = PickUp::default();
         let mut style = StrokeStyle::new(StrokeTool::Smudge, [0.0, 0.0, 1.0], 1.0);
         style.from_image = from_image;
         canvas.begin_stroke(top, style);

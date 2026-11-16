@@ -127,6 +127,14 @@ const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
 const LAID_OVER: u32 = 256;
 const PICKS_HERE: u32 = 512;
+/// It picks up from elsewhere: as far from where it lies as words 20 and 21 say.
+const PICKS_FROM: u32 = 1024;
+/// What it picks up comes through a warp: its kind (word 23), amount (22) and shift (20, 21).
+const WARPS: u32 = 2048;
+/// What it picks up is blurred (word 22, 0..1) and then sharpened (word 23) before it is laid.
+const FILTERS: u32 = 4096;
+/// It picks up from the layer as it was before the stroke.
+const PICKS_BEFORE: u32 = 8192;
 
 /// The most tips, and the largest side of one, and of a texture.
 const MOST_TIP_SIDE: u32 = 4096;
@@ -849,8 +857,9 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     let float = |i: usize| f32::from_le_bytes(word(i));
     let [x, y, diameter, angle, ratio, opacity, flow] = [0, 1, 2, 3, 4, 5, 6].map(float);
     let (tip, flags) = (u32::from_le_bytes(word(7)), u32::from_le_bytes(word(8)));
-    let [r, g, b, strength, tx, ty, lightness, threshold, softness, share, radius] =
-        [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19].map(float);
+    let [r, g, b, strength, tx, ty, lightness, threshold, softness, share, radius, w20, w21, w22] =
+        [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22].map(float);
+    let w23 = u32::from_le_bytes(word(23));
     if ![x, y, diameter].iter().all(|v| v.is_finite()) || diameter <= 0.0 || tips == 0 {
         return None;
     }
@@ -884,6 +893,15 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
             clear: flags & CLEAR_PAINT != 0,
             over: flags & LAID_OVER != 0,
             here: flags & PICKS_HERE != 0,
+            from: (flags & PICKS_FROM != 0 && w20.is_finite() && w21.is_finite()).then_some([w20, w21]),
+            before: flags & PICKS_BEFORE != 0,
+            warp: (flags & WARPS != 0).then(|| warp_of(w23, w22, [w20, w21])).flatten(),
+            blur: if flags & FILTERS != 0 && flags & WARPS == 0 { unit(w22, 0.0) } else { 0.0 },
+            sharpen: if flags & FILTERS != 0 && flags & WARPS == 0 {
+                f32::from_bits(w23).clamp(0.0, 16.0)
+            } else {
+                0.0
+            },
         });
     }
     // made sharp, if it says (a threshold of 0 says not)
@@ -893,7 +911,22 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
     Some(s)
 }
 
-/// Hue (turns), saturation and brightness of `c`, as the stamp shader reckons them.
+/// A dab's warp: its kind (the low four bits; 16 added for the nearest pixel), amount and shift.
+fn warp_of(kind: u32, amount: f32, shift: [f32; 2]) -> Option<procraft_engine::stroke::Warp> {
+    use procraft_engine::stroke::{Warp, WarpKind};
+    let nearest = kind & 16 != 0;
+    let kind = match kind & 15 {
+        1 => WarpKind::Scale,
+        2 => WarpKind::Turn,
+        3 => WarpKind::Shift,
+        4 => WarpKind::LensOut,
+        5 => WarpKind::LensIn,
+        6 => WarpKind::Scatter,
+        _ => return None,
+    };
+    let finite = |v: f32| if v.is_finite() { v.clamp(-4096.0, 4096.0) } else { 0.0 };
+    Some(Warp { kind, amount: finite(amount), shift: shift.map(finite), nearest })
+}
 fn hsb([r, g, b]: [f32; 3]) -> [f32; 3] {
     let hi = r.max(g).max(b);
     let d = hi - r.min(g).min(b);
@@ -1252,6 +1285,42 @@ mod tests {
 
     /// The Krita plugin the app comes with (or the one at `KRITA_PLUGIN`) drawing a preset's squares
     /// where Krita lays them, its studio changing their size; with it off, the brush draws as read.
+    #[test]
+    fn a_dab_picks_up_from_elsewhere_through_a_warp_or_blurred_as_its_words_say() {
+        let dab = |flags: u32, words: [u32; 4]| {
+            let mut d = [0_u8; DAB_BYTES];
+            let mut put = |i: usize, w: u32| d[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            for (i, v) in [10.0_f32, 20.0, 8.0, 0.0, 1.0, 1.0, 1.0].iter().enumerate() {
+                put(i, v.to_bits());
+            }
+            put(8, flags);
+            for (i, w) in words.iter().enumerate() {
+                put(20 + i, *w);
+            }
+            stamp_of(&d, [0.0; 3], 1, Build::Over, 0.0).unwrap().pick_up.unwrap()
+        };
+        let f = f32::to_bits;
+        let clone = dab(MOVES_PAINT | PICKS_FROM | PICKS_BEFORE, [f(-30.0), f(4.0), 0, 0]);
+        assert_eq!((clone.from, clone.before, clone.warp, clone.blur), (Some([-30.0, 4.0]), true, None, 0.0));
+        let warp = dab(MOVES_PAINT | WARPS, [f(2.0), f(0.0), f(0.5), 3 + 16]).warp.unwrap();
+        assert_eq!(
+            warp,
+            procraft_engine::stroke::Warp {
+                kind: procraft_engine::stroke::WarpKind::Shift,
+                amount: 0.5,
+                shift: [2.0, 0.0],
+                nearest: true
+            }
+        );
+        let blurred = dab(MOVES_PAINT | FILTERS, [0, 0, f(0.25), f(1.5)]);
+        assert_eq!((blurred.blur, blurred.sharpen, blurred.from), (0.25, 1.5, None));
+        // without flag 16 none of it
+        let mut plain = [0_u8; DAB_BYTES];
+        plain[8..12].copy_from_slice(&8.0_f32.to_bits().to_le_bytes());
+        plain[32..36].copy_from_slice(&(PICKS_FROM | WARPS).to_le_bytes());
+        assert!(stamp_of(&plain, [0.0; 3], 1, Build::Over, 0.0).unwrap().pick_up.is_none());
+    }
+
     #[test]
     fn krita_squares_lie_where_the_engine_spaces_them() {
         let packed = match std::env::var("KRITA_PLUGIN") {
