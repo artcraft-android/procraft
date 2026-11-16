@@ -219,11 +219,55 @@ fn cubic_deviation(pts: &[P], a: usize, b: usize, nodes: [P; 4]) -> (usize, f32)
     worst
 }
 
+/// Light, spatial Gaussian filtering before fitting: remove small hand jitter without
+/// tracing each wiggle with another Bezier anchor. The radius is measured in pixels along
+/// the stroke, not samples, because a slow pen can produce far more points than a fast one.
+/// Endpoints stay exactly where the user placed them; short strokes are not altered.
+fn smooth_stroke(pts: &[P]) -> Vec<P> {
+    if pts.len() < 4 {
+        return pts.to_vec();
+    }
+    const SIGMA: f32 = 4.0;
+    const RADIUS: f32 = SIGMA * 2.5;
+    let mut along = Vec::with_capacity(pts.len());
+    along.push(0.0f32);
+    for pair in pts.windows(2) {
+        along.push(along.last().copied().unwrap_or(0.0) + length(sub(pair[1], pair[0])));
+    }
+    if along.last().copied().unwrap_or(0.0) < RADIUS * 2.0 {
+        return pts.to_vec();
+    }
+    let mut out = pts.to_vec();
+    let mut left = 0;
+    let mut right = 0;
+    for i in 1..pts.len() - 1 {
+        while along[i] - along[left] > RADIUS {
+            left += 1;
+        }
+        while right + 1 < pts.len() && along[right + 1] - along[i] <= RADIUS {
+            right += 1;
+        }
+        let mut total = 0.0;
+        let mut sum = (0.0, 0.0);
+        for j in left..=right {
+            let delta = (along[j] - along[i]) / SIGMA;
+            let weight = (-0.5 * delta * delta).exp();
+            sum = add(sum, scale(pts[j], weight));
+            total += weight;
+        }
+        if total > 0.0 {
+            out[i] = scale(sum, 1.0 / total);
+        }
+    }
+    out
+}
+
 fn fit(pts: &[P]) -> Vec<P> {
     let pts: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
     if pts.len() < 2 {
         return Vec::new();
     }
+    let pts = smooth_stroke(&pts);
     // A bounded canvas-pixel error preserves the shape even for long multi-wave strokes.
     // A small allowance avoids treating every tiny hand tremor as an intentional bend.
     let tolerance = (size(&pts) * 0.006).clamp(1.5, 3.0);
@@ -338,6 +382,49 @@ mod tests {
             assert!((into.0 * out.1 - into.1 * out.0).abs() <= 1e-3 * length(into) * length(out) + 1e-3);
             assert!(into.0 * out.0 + into.1 * out.1 >= -1e-3);
         }
+    }
+
+    #[test]
+    fn spatial_smoothing_removes_jitter_but_preserves_curve_position() {
+        let clean = |x: f32| 100.0 + 30.0 * (x * std::f32::consts::TAU / 200.0).sin();
+        let noisy: Vec<P> = (0..=200)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                let tremor = if i == 0 || i == 200 {
+                    0.0
+                } else if i % 2 == 0 {
+                    2.8
+                } else {
+                    -2.8
+                };
+                (x, clean(x) + tremor)
+            })
+            .collect();
+        let smooth = smooth_stroke(&noisy);
+        assert_eq!(smooth.first(), noisy.first());
+        assert_eq!(smooth.last(), noisy.last());
+        let mean_error = |pts: &[P]| pts.iter().map(|&(x, y)| (y - clean(x)).abs()).sum::<f32>() / pts.len() as f32;
+        assert!(
+            mean_error(&smooth) < mean_error(&noisy) * 0.40,
+            "jitter was not reduced: {} -> {}",
+            mean_error(&noisy),
+            mean_error(&smooth)
+        );
+        assert!(smooth.iter().zip(&noisy).all(|(&a, &b)| length(sub(a, b)) <= 4.0));
+        let nodes = fit(&noisy);
+        let mut fitted = Vec::new();
+        for base in (0..nodes.len() - 1).step_by(3) {
+            for i in 0..=20 {
+                fitted.push(cubic_at(nodes[base], nodes[base + 1], nodes[base + 2], nodes[base + 3], i as f32 / 20.0));
+            }
+        }
+        let deviation = (0..=200)
+            .map(|i| {
+                let p = (i as f32 * 2.0, clean(i as f32 * 2.0));
+                fitted.windows(2).map(|w| distance_to_segment(p, w[0], w[1])).fold(f32::INFINITY, f32::min)
+            })
+            .fold(0.0f32, f32::max);
+        assert!(deviation < 4.0, "fit drifted {deviation} pixels from intended curve");
     }
 
     #[test]
