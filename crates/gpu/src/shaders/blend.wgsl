@@ -173,32 +173,47 @@ fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
 }
 
 // coverage `a` and grain `g` combined by the grain's blend mode `mode`, as deep as `depth`: two
-// height-like modes of the grain's own (27: the coverage raised twelvefold, less the grain; 28:
-// the same or as much again over the grain's light), normal laying the coverage over the grain,
-// and every other mode by the blend mode's own rule
+// height-like modes of the grain's own (27 and 28: a height the grain cuts into, steep-toothed at
+// a shallow depth and raised by the depth deeper, 28 also thinned over the grain's light), normal
+// taking the coverage down by the tooth, and every other mode by the blend mode's own rule
 fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
     if (mode >= TEXTURE_RULES) {
         return texture_rule(a, g, depth, mode);
     }
-    let h = 12.0 * a * depth;
+    // the cutting modes bite twice as deep as the control says; the ones that only attenuate or
+    // lift (normal, multiply, lighten, screen, dodge) keep it as it is
+    let cuts = mode >= 2u && mode != 6u && mode != 7u && mode != 8u;
+    let d = select(depth, depth * 2.0, cuts);
     var r = 0.0;
-    if (mode == 27u) {
-        r = clamp(h - g, 0.0, 1.0);
-    } else if (mode == 28u) {
-        r = clamp(max(h * (1.0 - g), clamp(h - g, 0.0, 1.0)), 0.0, 1.0);
+    if (mode == 27u || mode == 28u) {
+        // a height the grain cuts into. a shallow depth lays bright paint with a steep tooth (the
+        // cut steepens as the depth falls); a deeper one raises the coverage by the depth and lets
+        // the grain take it down a tooth at a time, so the tooth shows through the middle. the two
+        // ways blend across the depth between them
+        let inv = 1.0 / (2.0 * max(depth, 0.02));
+        let h = 12.0 * a;
+        let shallow = clamp(h - g * inv, 0.0, 1.0);
+        let deep = clamp(h * depth - g, 0.0, 1.0);
+        r = mix(shallow, deep, smoothstep(0.08, 0.16, depth));
+        if (mode == 28u) {
+            r = max(r, clamp(h * depth * (1.0 - g), 0.0, 1.0));
+        }
     } else {
-        var blended = g + a * (1.0 - g);
+        // normal attenuates: even a fully covering stamp keeps the tooth (it never fills it in)
+        var blended = a * g;
         if (mode != 0u) {
             blended = clamp(blend_amount(a, g, mode), 0.0, 1.0);
         }
-        r = mix(a, blended, depth);
+        // past whole depth the grain masks at full strength: half of it leaves stipple solid
+        r = mix(a, blended, min(d, 1.0));
     }
     // where the grain raises the coverage, faint coverage takes only part of the rise (all of it
     // from GRAIN_RISE_FULL up; none where there is none)
     if (r > a) {
         r = a + min(a / GRAIN_RISE_FULL, 1.0) * (r - a);
     }
-    return r;
+    // a depth past whole can take the coverage below nothing
+    return clamp(r, 0.0, 1.0);
 }
 
 // The coverage from which a grain raises it fully (a sixty-fourth, as 1/63.75).

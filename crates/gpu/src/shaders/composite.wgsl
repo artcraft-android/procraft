@@ -143,7 +143,8 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and
         // only where the stroke is
         let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
-        s = s * (a / max(s.a, 1e-6));
+        // scaled by the ratio, the colour can round a hair past the coverage it is scaled to
+        s = vec4<f32>(min(s.rgb * (a / max(s.a, 1e-6)), vec3<f32>(a)), a);
     }
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
@@ -193,7 +194,9 @@ fn burnt(under: vec4<f32>, r: vec4<f32>, w: f32) -> vec4<f32> {
         return r;
     }
     let b = blend(under, r, lu.burnt_blend);
-    return mix(r, vec4<f32>(unpremultiply(b) * r.a, r.a), clamp(w, 0.0, 1.0));
+    // the blend came back rounded: its straight colour can sit a hair past whole
+    let straight = min(unpremultiply(b), vec3<f32>(1.0));
+    return mix(r, vec4<f32>(straight * r.a, r.a), clamp(w, 0.0, 1.0));
 }
 
 // a layer with the stroke in progress on it applied

@@ -81,7 +81,7 @@ mod sharp;
 mod side_slider;
 mod sound_file;
 mod stock_brushes;
-mod stock_library;
+pub mod stock_library;
 mod stroke_sound;
 mod studio;
 #[cfg(test)]

@@ -21,8 +21,9 @@ const ACROSS: [f32; 6] = [0.11003, 0.74916, 0.032273, 0.045396, -0.087172, 0.031
 const DOWN: [f32; 6] = [0.57235, 0.59775, -1.0046, -1.413, 2.7134, -0.97521];
 
 /// The pressure the pen's swell is turned into: the brush's preview minimum plus this many times
-/// the swell (times its preview pressure scale).
-const PRESSURE_GAIN: f32 = 1.0;
+/// the swell (times its preview pressure scale). The swell peaks about at the pressure law's
+/// neutral point, so a preview shows the brush as its reference picture does, not boosted fat.
+const PRESSURE_GAIN: f32 = 0.25;
 
 /// Where along the wave `t` (0..1) is, in canvas pixels.
 fn along(t: f32) -> Vec2 {
@@ -149,10 +150,10 @@ mod tests {
         let (first, last) = (s.first().unwrap(), s.last().unwrap());
         assert!((first.pos.x - 116.6).abs() < 0.5 && (last.pos.x - 933.9).abs() < 0.5);
         assert!(s.iter().all(|p| p.pos.y > 0.4 * CANVAS.1 && p.pos.y < 0.7 * CANVAS.1));
-        // light at the ends, swelling to full in the middle
+        // light at the ends, swelling to about the pressure law's neutral point in the middle
         assert!(first.pressure < 0.15 && last.pressure < 0.15);
-        assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.6);
-        assert_eq!(s.get(SAMPLES / 2).unwrap().pressure, 1.0);
+        assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.2);
+        assert!((s.get(SAMPLES / 2).unwrap().pressure - 0.251).abs() < 0.01);
         assert!((last.time_ms - 35.0 * STEP_MS).abs() < 1e-9);
     }
 

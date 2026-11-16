@@ -304,7 +304,50 @@ pub fn library() -> Vec<BrushSet> {
             }
         }
     }
+    for brush in sets.iter_mut().flat_map(|set| set.brushes.iter_mut()) {
+        retune(brush);
+    }
     sets
+}
+
+/// Keeps a stock brush drawing as it did before the pressure law changed: the size and opacity
+/// curves turn the new law back into the old one over the whole press, and the preview's swell
+/// reaches full pressure as it used to. A grain cuts as deep as it says; the grain tile needs
+/// holding too, which the new model reads differently.
+fn retune(b: &mut Brush) {
+    // the opacity used to ease the pressure to the power 2.5 within the flow; the new law takes it
+    // straight, so the curve carries the ease over the whole press
+    let a = b.pressure_opacity;
+    if a > 0.0 {
+        let amount = 1.0 - (1.0 - a).powf(2.5);
+        let pts: Vec<Vec2> = (0..=32)
+            .map(|i| {
+                let x = i as f32 / 32.0;
+                let eased = (1.0 - a * (1.0 - x)).powf(2.5);
+                Vec2::new(x, 0.25 + (eased - 1.0) / (4.0 * amount))
+            })
+            .collect();
+        b.pressure_opacity = amount;
+        b.opacity_curve = Curve::new(&pts);
+    }
+    // the quarter line turns the new size law into the old one at every pressure, straight or bent
+    // pressure curve alike, so a stock brush never draws boosted
+    if b.pressure_size > 0.0 {
+        b.size_curve = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.25)]);
+    }
+    // the preview's swell used to reach full pressure; the shared gain only reaches the law's
+    // neutral point now, and the control's clamp stops at 1, so the scale goes straight in
+    b.extra.insert("preview_pressure_scale".to_owned(), 2.0);
+    // a grain fixed to the canvas used to tile at its scale alone; now it goes by the file's scale
+    // (360 times 16 times its square over the control's reach), so hold the tile to what it was
+    if b.grain.image.is_some() && b.grain.mode == GrainMode::Texturized {
+        b.grain.scale = crate::studio::MAX_GRAIN_SCALE * (b.grain.scale / 5760.0).sqrt();
+    }
+    // the side jitter keeps its amount's reach under the new squared law
+    let lateral = b.setting("jitter_lateral");
+    if lateral > 0.0 {
+        b.set_setting("jitter_lateral", (3.0f32 / 5.0).sqrt() * lateral.powf(1.1));
+    }
 }
 
 /// The settings each row of [`TAPERS`] gives, in its order: the pen's start, end, size, opacity
@@ -332,39 +375,39 @@ const TAPER_KEYS: [&str; 15] = [
 /// These brushes' tapers, by name ([`TAPER_KEYS`] says what each value is), set on them once they
 /// are made, so the brushes made from them keep their own.
 const TAPERS: &[(&str, [f32; 15])] = &[
-    ("6B Pencil", [0.251, 0.154, 0.196, 0.235, 0.228, 0.279, 0.181, 1.0, 1.0, 0.0, 0.239, 1.0, 0.0, 0.0, 0.0]),
-    ("Acrylic", [0.131, 0.077, 0.0, 1.0, 0.0, 0.227, 0.123, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("6B Pencil", [0.6, 0.4, 0.196, 0.235, 0.228, 0.7, 0.5, 1.0, 1.0, 0.0, 0.239, 1.0, 0.0, 0.0, 0.0]),
+    ("Acrylic", [0.3, 0.2, 0.0, 1.0, 0.0, 0.6, 0.3, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     ("Aurora", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-    ("Brush Pen", [0.254, 0.178, 0.0, 0.0, 0.0, 0.247, 0.212, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Chalk", [0.096, 0.259, 0.975, 0.002, 0.372, 0.244, 0.244, 1.0, 0.002, 0.291, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Charcoal Block", [0.154, 0.229, 0.0, 0.802, 0.0, 0.113, 0.281, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Clouds", [0.0, 0.122, 1.0, 1.0, 0.0, 0.0, 0.122, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Dry Brush", [0.251, 0.167, 0.0, 1.0, 0.0, 0.29, 0.223, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Dry Ink", [0.287, 0.212, 1.0, 1.0, 0.817, 0.024, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Brush Pen", [0.6, 0.4, 0.0, 0.0, 0.0, 0.6, 0.5, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Chalk", [0.2, 0.6, 0.975, 0.002, 0.372, 0.6, 0.6, 1.0, 0.002, 0.291, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Charcoal Block", [0.4, 0.6, 0.0, 0.802, 0.0, 0.3, 0.7, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Clouds", [0.0, 0.3, 1.0, 1.0, 0.0, 0.0, 0.3, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+    ("Dry Brush", [0.6, 0.4, 0.0, 1.0, 0.0, 0.7, 0.6, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Dry Ink", [0.7, 0.5, 1.0, 1.0, 0.817, 0.2, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
     ("Flare", [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Flat Brush", [0.0, 0.0, 0.0, 0.0, 0.0, 0.325, 0.3177, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+    ("Flat Brush", [0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.8, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
     ("Gel Pen", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
     ("Glimmer", [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Gouache", [0.0, 0.0, 0.0, 1.0, 0.0, 0.151, 0.159, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Gouache", [0.0, 0.0, 0.0, 1.0, 0.0, 0.4, 0.4, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     ("Grunge", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("HB Pencil", [0.0, 0.159, 0.178, 0.239, 0.311, 0.237, 0.141, 1.0, 1.0, 0.0, 0.252, 1.0, 0.0, 0.0, 0.0]),
+    ("HB Pencil", [0.0, 0.4, 0.178, 0.239, 0.311, 0.6, 0.4, 1.0, 1.0, 0.0, 0.252, 1.0, 0.0, 0.0, 0.0]),
     ("Hard Airbrush", [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Ink Bleed", [0.395, 0.278, 1.0, 0.0, 0.0, 0.26, 0.276, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Lichen", [0.222, 0.222, 0.113, 0.0, 0.678, 0.13, 0.0, 0.0, 0.0, 0.0, 0.998, 0.0, 1.0, 0.0, 0.0]),
+    ("Ink Bleed", [1.0, 0.7, 1.0, 0.0, 0.0, 0.7, 0.7, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Lichen", [0.6, 0.6, 0.113, 0.0, 0.678, 0.3, 0.0, 0.0, 0.0, 0.0, 0.998, 0.0, 1.0, 0.0, 0.0]),
     ("Marble", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Marker", [0.268, 0.244, 0.663, 1.0, 1.0, 0.545, 0.627, 1.0, 0.57, 1.0, 0.772, 1.0, 0.0, 0.0, 1.0]),
+    ("Marker", [0.7, 0.6, 0.663, 1.0, 1.0, 1.0, 1.0, 1.0, 0.57, 1.0, 0.772, 1.0, 0.0, 0.0, 1.0]),
     ("Medium Airbrush", [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Monoline", [0.151, 0.022, 0.118, 0.0, 0.0, 0.151, 0.022, 0.118, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Oil Paint", [0.251, 1.0, 0.0, 1.0, 0.0, 0.251, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
+    ("Monoline", [0.4, 0.2, 0.118, 0.0, 0.0, 0.4, 0.2, 0.118, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+    ("Oil Paint", [0.6, 1.0, 0.0, 1.0, 0.0, 0.6, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
     ("Oil Pastel", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
     ("Round Brush", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Sable", [0.17, 0.162, 0.0, 1.0, 0.0, 0.17, 0.198, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Smoke", [0.0, 0.0, 0.0, 0.0, 0.0, 0.207, 0.215, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Sable", [0.4, 0.4, 0.0, 1.0, 0.0, 0.4, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Smoke", [0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     ("Soft Airbrush", [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-    ("Soft Pastel", [0.0, 0.0, 0.0, 0.0, 0.0, 0.357, 0.141, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Technical Pencil", [0.329, 0.198, 0.341, 0.25, 0.0, 0.227, 0.159, 1.0, 1.0, 0.0, 0.391, 1.0, 0.0, 0.0, 1.0]),
-    ("Vine Charcoal", [0.268, 0.25, 0.0, 1.0, 0.0, 0.396, 0.192, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    ("Willow Charcoal", [0.237, 0.232, 0.0, 0.67, 0.0, 0.247, 0.241, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Soft Pastel", [0.0, 0.0, 0.0, 0.0, 0.0, 0.9, 0.4, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Technical Pencil", [0.8, 0.5, 0.341, 0.25, 0.0, 0.6, 0.4, 1.0, 1.0, 0.0, 0.391, 1.0, 0.0, 0.0, 1.0]),
+    ("Vine Charcoal", [0.7, 0.6, 0.0, 1.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    ("Willow Charcoal", [0.6, 0.6, 0.0, 0.67, 0.0, 0.6, 0.6, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
 ];
 
 /// The order a new library shows the sets in, by their place in [`library`].
@@ -432,7 +475,7 @@ fn graphite() -> Brush {
             pressure_size: 0.3,
             pressure_opacity: 0.9,
             pressure_curve: soft_curve(),
-            pen_taper: Taper { start: 0.05, end: 0.08, size: 0.4, opacity: 0.3 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.4, opacity: 0.3 },
             touch_taper: Taper::NONE,
             shape: Shape { image: Some(shape::GRAINY_DISC), randomise: true, ..Shape::default() },
             grain: Grain {
@@ -513,8 +556,8 @@ fn brush_pen() -> Brush {
             max_size: 80.0,
             pressure_size: 0.95,
             pressure_curve: soft_curve(),
-            pen_taper: Taper { start: 0.3, end: 0.4, size: 0.95, opacity: 0.0 },
-            touch_taper: Taper { start: 0.2, end: 0.3, size: 0.9, opacity: 0.0 },
+            pen_taper: Taper { start: 0.8, end: 1.0, size: 0.95, opacity: 0.0 },
+            touch_taper: Taper { start: 0.5, end: 0.8, size: 0.9, opacity: 0.0 },
             ..Brush::round_pen()
         },
     )
@@ -531,7 +574,7 @@ fn round_brush() -> Brush {
             flow: 0.35,
             pressure_size: 0.6,
             pressure_opacity: 0.5,
-            pen_taper: Taper { start: 0.1, end: 0.1, size: 0.5, opacity: 0.2 },
+            pen_taper: Taper { start: 0.3, end: 0.3, size: 0.5, opacity: 0.2 },
             ..Brush::round_pen()
         },
     )
@@ -633,7 +676,7 @@ fn charcoal_stick() -> Brush {
                 source: None,
             },
             tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.3 },
-            pen_taper: Taper { start: 0.05, end: 0.05, size: 0.3, opacity: 0.2 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.3, opacity: 0.2 },
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
         },
@@ -759,7 +802,7 @@ fn sketch_pen() -> Brush {
             max_size: 14.0,
             pressure_size: 0.5,
             grain: paper(grain::PAPER, 160.0, 0.2),
-            pen_taper: Taper { start: 0.04, end: 0.08, size: 0.6, opacity: 0.0 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.6, opacity: 0.0 },
             ..Brush::round_pen()
         },
     )
@@ -777,8 +820,8 @@ fn dip_pen() -> Brush {
             max_size: 40.0,
             pressure_size: 1.0,
             pressure_curve: soft_curve(),
-            pen_taper: Taper { start: 0.15, end: 0.3, size: 1.0, opacity: 0.0 },
-            touch_taper: Taper { start: 0.1, end: 0.2, size: 0.9, opacity: 0.0 },
+            pen_taper: Taper { start: 0.4, end: 0.8, size: 1.0, opacity: 0.0 },
+            touch_taper: Taper { start: 0.3, end: 0.5, size: 0.9, opacity: 0.0 },
             ..Brush::round_pen()
         },
     )
@@ -816,7 +859,7 @@ fn dry_ink() -> Brush {
                 max_size: 50.0,
                 pressure_size: 0.7,
                 grain: paper(grain::COARSE, 220.0, 0.55),
-                pen_taper: Taper { start: 0.1, end: 0.2, size: 0.8, opacity: 0.0 },
+                pen_taper: Taper { start: 0.3, end: 0.5, size: 0.8, opacity: 0.0 },
                 ..Brush::round_pen()
             },
         ),
@@ -1017,7 +1060,7 @@ fn chalk() -> Brush {
             shape: Shape { image: Some(shape::PASTEL), randomise: true, ..Shape::default() },
             grain: paper(grain::CONCRETE, 220.0, 0.85),
             tilt: Tilt { angle: LEANING, size: 0.5, opacity: 0.3 },
-            pen_taper: Taper { start: 0.03, end: 0.03, size: 0.3, opacity: 0.2 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.3, opacity: 0.2 },
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
         },
@@ -1120,7 +1163,7 @@ fn round_wash() -> Brush {
                 flow: 0.9,
                 pressure_size: 0.8,
                 shape: Shape::default(),
-                pen_taper: Taper { start: 0.0, end: 0.2, size: 0.8, opacity: 0.0 },
+                pen_taper: Taper { start: 0.0, end: 0.5, size: 0.8, opacity: 0.0 },
                 ..wet_wash()
             },
         ),
@@ -1203,8 +1246,8 @@ fn script_brush() -> Brush {
             max_size: 70.0,
             pressure_size: 1.0,
             pressure_curve: firm_curve(),
-            pen_taper: Taper { start: 0.2, end: 0.45, size: 1.0, opacity: 0.0 },
-            touch_taper: Taper { start: 0.25, end: 0.35, size: 0.9, opacity: 0.0 },
+            pen_taper: Taper { start: 0.5, end: 1.0, size: 1.0, opacity: 0.0 },
+            touch_taper: Taper { start: 0.6, end: 0.9, size: 0.9, opacity: 0.0 },
             ..brush_pen()
         },
     )
@@ -1235,7 +1278,7 @@ fn pointed_nib() -> Brush {
             max_size: 36.0,
             pressure_size: 1.0,
             pressure_curve: soft_curve(),
-            pen_taper: Taper { start: 0.05, end: 0.1, size: 1.0, opacity: 0.0 },
+            pen_taper: Taper { start: 0.2, end: 0.3, size: 1.0, opacity: 0.0 },
             ..dip_pen()
         },
     )
@@ -1509,8 +1552,8 @@ fn light_trail() -> Brush {
                 pressure_size: 0.6,
                 pressure_opacity: 0.3,
                 shape: Shape { image: Some(shape::SOFT_ROUND), ..Shape::default() },
-                pen_taper: Taper { start: 0.2, end: 0.4, size: 0.9, opacity: 0.6 },
-                touch_taper: Taper { start: 0.2, end: 0.4, size: 0.9, opacity: 0.6 },
+                pen_taper: Taper { start: 0.5, end: 1.0, size: 0.9, opacity: 0.6 },
+                touch_taper: Taper { start: 0.5, end: 1.0, size: 0.9, opacity: 0.6 },
                 ..Brush::round_pen()
             },
         ),
@@ -1695,7 +1738,7 @@ fn ballpoint() -> Brush {
             pressure_size: 0.2,
             pressure_opacity: 0.6,
             grain: paper(grain::PAPER, 90.0, 0.15),
-            pen_taper: Taper { start: 0.02, end: 0.04, size: 0.3, opacity: 0.3 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.3, opacity: 0.3 },
             ..Brush::round_pen()
         },
     )
@@ -1712,7 +1755,7 @@ fn studio_ink() -> Brush {
             max_size: 60.0,
             pressure_size: 0.9,
             pressure_curve: firm_curve(),
-            pen_taper: Taper { start: 0.2, end: 0.3, size: 1.0, opacity: 0.0 },
+            pen_taper: Taper { start: 0.5, end: 0.8, size: 1.0, opacity: 0.0 },
             ..Brush::round_pen()
         },
     )
@@ -1726,7 +1769,7 @@ fn gel_pen() -> Brush {
             hardness: 0.97,
             max_size: 12.0,
             pressure_size: 0.2,
-            pen_taper: Taper { start: 0.02, end: 0.03, size: 0.4, opacity: 0.0 },
+            pen_taper: Taper { start: 0.2, end: 0.2, size: 0.4, opacity: 0.0 },
             ..Brush::round_pen()
         },
     )
@@ -1825,7 +1868,7 @@ fn rigger() -> Brush {
             flow: 0.9,
             pressure_size: 0.9,
             grain: moving(grain::FIBRE, 80.0, 0.2),
-            pen_taper: Taper { start: 0.3, end: 0.5, size: 1.0, opacity: 0.0 },
+            pen_taper: Taper { start: 0.8, end: 1.0, size: 1.0, opacity: 0.0 },
             ..round_brush()
         },
     )
@@ -1926,7 +1969,7 @@ fn feather_airbrush() -> Brush {
         Brush {
             flow: 0.12,
             pressure_size: 0.6,
-            pen_taper: Taper { start: 0.2, end: 0.3, size: 0.9, opacity: 0.5 },
+            pen_taper: Taper { start: 0.5, end: 0.8, size: 0.9, opacity: 0.5 },
             ..soft_airbrush()
         },
     )
@@ -2509,7 +2552,7 @@ fn hair() -> Brush {
                 pressure_size: 0.5,
                 pressure_opacity: 0.4,
                 shape: along(shape::HAIR),
-                pen_taper: Taper { start: 0.2, end: 0.3, size: 0.6, opacity: 0.4 },
+                pen_taper: Taper { start: 0.5, end: 0.8, size: 0.6, opacity: 0.4 },
                 rendering: Rendering::Strongest,
                 ..Brush::round_pen()
             },
@@ -2927,5 +2970,49 @@ mod tests {
         }
         assert_ne!(made.pen_taper, monoline.pen_taper);
         assert_ne!(made.setting("classic_taper"), monoline.setting("classic_taper"));
+    }
+
+    #[test]
+    fn a_retuned_grain_tiles_at_the_size_it_was_given() {
+        let all: Vec<Brush> = library().into_iter().flat_map(|set| set.brushes).collect();
+        // a texture brush lays its grain at the scale it was built with, as the old model read it
+        for (name, tile) in [("Canvas Texture", 64.0), ("Checkerboard", 128.0), ("Brickwork", 512.0)] {
+            let b = all.iter().find(|b| b.name == name).unwrap();
+            assert!((b.grain_tile() - tile).abs() < 0.5, "{name}: {}", b.grain_tile());
+        }
+    }
+
+    #[test]
+    fn a_stock_brush_s_size_keeps_the_old_pressure_law_and_never_boosts() {
+        for b in library().iter().flat_map(|s| &s.brushes).filter(|b| b.pressure_size > 0.0) {
+            let a = b.pressure_size;
+            for i in 0..=10 {
+                let p = i as f32 / 10.0;
+                let (size, _) = b.pressure_factors(p);
+                // the old law at the pressure as the pressure curve takes it
+                let x = b.pressure_curve.eval(p);
+                assert!((size - (1.0 - a * (1.0 - x))).abs() < 1e-4, "{} at {p}: {size}", b.name);
+                // a straight pressure curve: the old law at the pressure itself
+                if (x - p).abs() < 1e-5 {
+                    assert!((size - (1.0 - a * (1.0 - p))).abs() < 1e-4, "{} at {p}: {size}", b.name);
+                }
+                assert!(size <= 1.0 + 1e-4, "{} boosts at {p}: {size}", b.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stock_brush_s_opacity_keeps_its_ease_over_the_whole_press() {
+        for b in library().iter().flat_map(|s| &s.brushes).filter(|b| b.pressure_opacity > 0.0) {
+            // the old amount, back out of the eased fall retune keeps
+            let a = 1.0 - (1.0 - b.pressure_opacity).powf(1.0 / 2.5);
+            for i in 0..=10 {
+                let p = i as f32 / 10.0;
+                let x = b.pressure_curve.eval(p);
+                let old = (1.0 - a * (1.0 - x)).powf(2.5);
+                let (_, opacity) = b.pressure_factors(p);
+                assert!((opacity - old).abs() < 2e-3, "{} at {p}: {opacity} vs {old}", b.name);
+            }
+        }
     }
 }

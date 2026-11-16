@@ -549,7 +549,8 @@ mod tests {
         s.studio_end(true);
         let b = imported(&s);
         assert_eq!(b.grain_file_now().map(|f| f.width), Some(0));
-        assert_eq!(b.grain_tile(), b.grain.scale);
+        // a texturized tile goes by the file's scale now, not the image's width
+        assert!((b.grain_tile() - 360.0 * b.grain.file_scale()).abs() < 0.01, "{}", b.grain_tile());
     }
 
     #[test]
@@ -595,7 +596,7 @@ mod tests {
         let s = CanvasSession::new(64, 64);
         s.save_brush_library_file(dir.join("library.json").to_string_lossy().into_owned());
         s.import_brushes(brush_file()).unwrap();
-        let tile = 1500.0 * 0.75 / std::f32::consts::SQRT_2;
+        let tile = 360.0 * 0.75;
         let brought = imported(&s);
         assert!((brought.grain_tile() - tile).abs() < 0.5, "{}", brought.grain_tile());
         let full = brought.grain_file.as_ref().and_then(|f| f.full.clone()).unwrap();
@@ -616,7 +617,7 @@ mod tests {
         assert!(s.load_brush_library(old.to_string()));
         let before = imported(&s);
         assert!(before.grain_file.is_none() && before.grain.source.is_some());
-        assert_eq!(before.grain_tile(), before.grain.scale);
+        assert!((before.grain_tile() - 360.0 * before.grain.file_scale()).abs() < 0.01);
         let _ = fs::remove_dir_all(&dir);
     }
 

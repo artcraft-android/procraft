@@ -718,7 +718,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             // once more with what was under it (nothing shows where the layer was empty)
             let full = select(1.0, built, st.grain_once > 0.5 || st.dual != 0u);
             let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
-            let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
+            let burnt = vec4<f32>(min(unpremultiply(blend(was, own, st.burnt_blend)), vec3<f32>(1.0)) * own.a, own.a);
             let burning = mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0));
             kept = over_layer(was, burning, laid * scale);
             first = over_layer(was, burning, laid);

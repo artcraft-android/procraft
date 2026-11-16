@@ -167,7 +167,7 @@ pub(crate) const RANDOMISED: &[(&str, f32, f32, bool)] = &[
     ("shape_angle", 0.0, 1.0, false),
     ("grain_behavior", 0.0, 1.0, true),
     ("grain_scale", 0.0, 1.0, false),
-    ("grain_depth", 0.0, 1.0, false),
+    ("grain_depth", 0.0, 2.0, false),
     ("rendering_mode", 0.0, 5.0, true),
     ("flow", 0.0, 1.0, false),
     ("jitter_size", 0.0, 1.0, false),

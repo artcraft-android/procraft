@@ -369,7 +369,8 @@ impl StrokeStyle {
             // stamp reading it where it lands
             grain_mode: if brush.grain_each_stamp() { GrainMode::Moving } else { brush.grain.mode },
             grain_scale: brush.grain_tile().max(1.0),
-            grain_depth: brush.grain.depth.clamp(0.0, 1.0),
+            // depth runs past whole now (a re-tuned native grain goes up to twice the old full)
+            grain_depth: brush.grain.depth.clamp(0.0, 2.0),
             rendering: brush.rendering,
             pull: brush.setting("smudge_pull").clamp(0.0, 1.0),
             wet_edges: brush.setting("wet_edges").clamp(0.0, 1.0),
@@ -1331,7 +1332,7 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         grain: style.grain.map_or(-1, |g| g as i32),
         // a moving grain sized and as deep as this stamp says
         grain_scale: if moving { -(style.grain_scale * s.look[1]).max(1.0) } else { style.grain_scale },
-        grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 1.0) } else { style.grain_depth },
+        grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 2.0) } else { style.grain_depth },
         // only the patch turns by the stamp's own turn, where it is read from staying put: the
         // wet shader turns all it reads, so that is turned back first
         grain_offset: {

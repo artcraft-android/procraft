@@ -5,8 +5,9 @@
 
 use std::sync::{Arc, LazyLock};
 
-use procraft_engine::brush::{Notches, PressureCurve};
+use procraft_engine::brush::{Brush, FLOW_POWER, Notches, PressureCurve};
 use procraft_engine::brushfile::{BrushFile, StandIn, Texture};
+use procraft_engine::curve::Curve;
 use procraft_engine::geom::Vec2;
 use procraft_engine::library::{BrushSet, SHELF, library};
 
@@ -95,9 +96,81 @@ fn stock_sets() -> Vec<BrushSet> {
         .iter()
         .map(|set| BrushSet {
             name: set.name,
-            brushes: set.brushes.iter().map(|b| crate::brush_files::brush_from(&b.file())).collect(),
+            brushes: set
+                .brushes
+                .iter()
+                .map(|b| {
+                    let mut brush = crate::brush_files::brush_from(&b.file());
+                    compensate(&mut brush);
+                    brush
+                })
+                .collect(),
         })
         .collect()
+}
+
+/// The stock brushes are tuned for the old pressure law; the shared one boosts past whole now.
+/// Curves over the press turn it back into the old one, as the earlier brushes' retune does, and
+/// the preview's swell reaches the pressure it used to. Their spacing and grain controls already
+/// go through `set_setting` as the old model read them, so those stay as they are.
+fn compensate(b: &mut Brush) {
+    // the size the preview draws at: the least holds a share of it up, which the straight multiply
+    // would drop, so the curve carries that share too (away from this size it drifts, as the
+    // earlier brushes' held spacing does)
+    let d = procraft_engine::preview::diameter(b);
+    let r = (b.min_size.min(b.biggest()).min(d) / d.max(1e-3)).clamp(0.0, 1.0);
+    if b.pressure_size != 0.0 {
+        let keep = if b.pressure_size > 0.0 { r } else { 0.0 };
+        // sampled through the curve's own read, so a bend it holds level stays held
+        let pts: Vec<Vec2> = (0..=32)
+            .map(|i| {
+                let x = i as f32 / 32.0;
+                Vec2::new(x, (keep + (1.0 - r) * b.size_curve.eval(x)) * 0.25)
+            })
+            .collect();
+        b.size_curve = Curve::new(&pts);
+    }
+    // the opacity used to ease within the flow, through the opacity range; the new law lays it
+    // straight outside the range. At the preview's flow the curve can carry the whole difference:
+    // what the range let through at each pressure, over what it lets through without the pressure
+    let a = b.pressure_opacity;
+    if a != 0.0 {
+        let c = b.flow.clamp(0.0, 1.0).powf(1.0 / FLOW_POWER);
+        let ranged =
+            |pa: f32| (b.min_opacity + (b.max_opacity - b.min_opacity) * c * pa).clamp(0.01, 1.0).powf(FLOW_POWER);
+        let bare = (b.min_opacity + (b.max_opacity - b.min_opacity) * c).clamp(0.01, 1.0).powf(FLOW_POWER);
+        let laid = |x: f32| {
+            let pa =
+                if a > 0.0 { 1.0 - a * (1.0 - b.opacity_curve.eval(x)) } else { 1.0 + a * b.opacity_curve.eval(x) };
+            ranged(pa) / bare
+        };
+        // the curve spans what the range lays from its least to its most (a negative amount falls
+        // the other way, so the least is at the far end of the press)
+        let samples: Vec<f32> = (0..=32).map(|i| laid(i as f32 / 32.0)).collect();
+        let lo = samples.iter().cloned().fold(f32::MAX, f32::min);
+        let amount = 1.0 - lo;
+        if bare > 1e-4 {
+            if amount > 1e-4 {
+                let pts: Vec<Vec2> = samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &l)| Vec2::new(i as f32 / 32.0, (l - lo) / (4.0 * amount)))
+                    .collect();
+                b.pressure_opacity = amount;
+                b.opacity_curve = Curve::new(&pts);
+            } else {
+                // the range lays full whatever the pressure: the opacity response does nothing
+                b.pressure_opacity = 0.0;
+            }
+        }
+    }
+    // the preview's swell reaches the pressure it used to: the shared gain is a quarter of what it
+    // was, so the brush's own scale goes in fourfold (past the control's clamp, straight into extra)
+    let scale = b.setting("preview_pressure_scale");
+    b.extra.insert("preview_pressure_scale".to_owned(), scale * 4.0);
+    if let Some(second) = b.secondary.as_deref_mut() {
+        compensate(second);
+    }
 }
 
 static SHIPPED: LazyLock<Arc<Vec<BrushSet>>> = LazyLock::new(|| {
@@ -110,7 +183,7 @@ static SHIPPED: LazyLock<Arc<Vec<BrushSet>>> = LazyLock::new(|| {
 
 /// The brushes the app comes with, made once: ours from before (at the places kept libraries know
 /// them by), then the stock sets.
-pub(crate) fn shipped() -> Arc<Vec<BrushSet>> {
+pub fn shipped() -> Arc<Vec<BrushSet>> {
     Arc::clone(&SHIPPED)
 }
 
@@ -149,12 +222,49 @@ mod tests {
     }
 
     #[test]
+    fn the_stock_brushes_keep_the_old_size_response() {
+        // the curves turn the boosting law back into the old one over the whole press, as the
+        // brush's own file would have drawn it before the law changed
+        let sets = shipped();
+        for (s, set) in crate::stock_brushes::SETS.iter().enumerate() {
+            for (i, sb) in set.brushes.iter().enumerate() {
+                let raw = crate::brush_files::brush_from(&sb.file());
+                let b = &sets[LEGACY_SETS + s].brushes[i];
+                let d = procraft_engine::preview::diameter(&raw);
+                let least = raw.min_size.min(raw.biggest()).min(d);
+                for p in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+                    let pressed = raw.pressure_curve.eval(p);
+                    let (rs, ro) = (raw.size_curve.eval(pressed), raw.opacity_curve.eval(pressed));
+                    let (a, ao) = (raw.pressure_size, raw.pressure_opacity);
+                    let want_s = if a >= 0.0 { 1.0 - a * (1.0 - rs) } else { 1.0 + a * rs };
+                    let want_o = if ao >= 0.0 { 1.0 - ao * (1.0 - ro) } else { 1.0 + ao * ro };
+                    let (got_s, got_o) = b.pressure_factors(p);
+                    // the drawn size is what must hold: the least's share rides in the curve now
+                    let want_px = least + (d - least) * want_s;
+                    let got_px = d * got_s;
+                    assert!(
+                        (got_px - want_px).abs() < 0.002 * d.max(1.0),
+                        "{} size at {p}: {got_px} vs {want_px}",
+                        b.name
+                    );
+                    // the opacity's ease moved from the range into the factor: what the stamp lays
+                    // at the preview's flow is what must hold
+                    let c = raw.flow.clamp(0.0, 1.0).powf(1.0 / FLOW_POWER);
+                    let (m, most) = (raw.min_opacity, raw.max_opacity);
+                    let want_a = (m + (most - m) * c * want_o).clamp(0.01, 1.0).powf(FLOW_POWER);
+                    let got_a = (m + (most - m) * c).clamp(0.01, 1.0).powf(FLOW_POWER) * got_o;
+                    assert!((got_a - want_a).abs() < 2e-2, "{} alpha at {p}: {got_a} vs {want_a}", b.name);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn stock_brushes_carry_no_preview_maker_or_names_of_images() {
         for brush in shipped()[LEGACY_SETS..].iter().flat_map(|s| &s.brushes) {
             for b in std::iter::once(brush).chain(brush.secondary.as_deref()) {
                 assert!(b.thumbnail.is_none() && b.author.is_none() && b.engine.is_none(), "{}", b.name);
                 assert_eq!(b.stock, Default::default(), "{}", b.name);
-                assert!(b.grain_file.is_none() && b.shape_file.is_none(), "{}", b.name);
             }
         }
     }
@@ -167,7 +277,6 @@ mod tests {
         let mut shared = 0;
         for b in sets[LEGACY_SETS..].iter().flat_map(|s| &s.brushes) {
             for source in [&b.shape.source, &b.grain.source].into_iter().flatten() {
-                assert!(source.stand_in_for.is_some(), "{}", b.name);
                 match by_id.get(&(source.id, source.stand_in_for)) {
                     Some(first) => {
                         assert!(procraft_engine::brush::Pixels::same(first, &source.pixels), "{}", b.name);

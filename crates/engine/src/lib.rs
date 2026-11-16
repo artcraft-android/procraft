@@ -46,6 +46,7 @@ pub mod quickshape;
 pub mod reference_window;
 pub mod selection;
 pub mod sqlite;
+pub mod stock_images;
 mod stock_tones;
 pub mod stroke;
 pub mod studio;

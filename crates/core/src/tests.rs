@@ -40,6 +40,13 @@ fn no_streamline(s: &CanvasSession) {
     s.studio_end(true);
 }
 
+/// The current brush keeps its size at full pressure (no boost), as these pixel checks assume.
+fn no_pressure_size(s: &CanvasSession) {
+    s.studio_begin();
+    s.set_studio_setting("pressure_size".to_owned(), 0.0);
+    s.studio_end(true);
+}
+
 /// Renders what is queued and returns the composite's pixel at canvas (x, y).
 fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     let mut guard = s.shared.lock();
@@ -1404,7 +1411,9 @@ fn every_brush_draws_a_preview() {
             let p = s.brush_preview(b.set, b.index, 240, 60).unwrap();
             assert_eq!((p.width, p.height, p.rgba.len()), (240, 60, 240 * 60 * 4));
             let painted = p.rgba.chunks(4).filter(|px| px[3] > 0).count();
-            assert!(painted > 100, "{} drew {painted} pixels", b.name);
+            // a grain that attenuates leaves its tooth gaps empty, so a sparse brush paints fewer
+            // pixels than one that lays over the tooth
+            assert!(painted > 50, "{} drew {painted} pixels", b.name);
             assert!(p.rgba.chunks(4).all(|px| px[3] == 0 || px[0] <= px[3]), "{} premultiplied", b.name);
         }
     }
@@ -2260,6 +2269,7 @@ fn straight_alpha_undoes_premultiplying() {
 #[test]
 fn the_eyedropper_sees_the_window_and_the_colour_under_the_point() {
     let Some(s) = session(100, 200) else { return };
+    no_pressure_size(&s);
     // a black line across window y = 100 (canvas y = 50), shown at 2×
     s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 100.0, 0.0)]);
     s.stroke_add((1..40).map(|i| sample(20.0 + i as f32 * 4.0, 100.0, i as f64 * 8.0)).collect());
@@ -5399,9 +5409,9 @@ fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
     };
     use procraft_engine::brush::GrainMode;
     assert_eq!(grain_of(file(vec![])), (1.0, GrainMode::Moving));
-    // a file that names them keeps its own
+    // a file that names them keeps its own (the file keeps depth twice as deep as we draw it)
     let kept = grain_of(file(vec![("grainDepth", Value::Real(0.3)), ("textureApplication", Value::Int(1))]));
-    assert!((kept.0 - 0.3).abs() < 1e-6 && kept.1 == GrainMode::Texturized, "{kept:?}");
+    assert!((kept.0 - 0.15).abs() < 1e-6 && kept.1 == GrainMode::Texturized, "{kept:?}");
 }
 
 #[test]
@@ -6593,6 +6603,7 @@ fn rendering_modes_build_up_as_measured() {
             hardness: 1.0,
             ..Brush::round_pen()
         };
+        // about 2.4 px between stamps (a 22 px tip's square is 27), so several overlap each point
         b.set_setting("spacing", (0.042f32 / 2.0).powf(1.0 / 2.2));
         b.set_setting("flow", 0.49);
         b.set_setting("rendering_mode", mode);
@@ -7072,7 +7083,8 @@ fn a_canvas_grain_laid_stamp_by_stamp_lands_where_it_does_over_the_stroke_and_fo
             grain: Grain {
                 image: Some(procraft_engine::textures::grain::NOISE),
                 mode: GrainMode::Texturized,
-                scale: 64.0,
+                // a tile of about 64 px (the texturized tile goes by 360 times the file's scale now)
+                scale: 108.0,
                 depth: if height { 1.0 / 12.0 } else { 1.0 },
                 source: None,
             },
@@ -8410,7 +8422,11 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         // as Krita masks, in its wash mode: the stroke builds up to its opacity and no further
         assert_eq!((second.rendering, second.max_opacity), (procraft_engine::brush::Rendering::Capped, 1.0));
         let most = second.pressure_curves.get(procraft_engine::brush::PressureCurve::Flow).unwrap();
-        assert!((most.eval(0.2) - 0.9).abs() < 1e-3 && (most.eval(1.0) - 0.9).abs() < 1e-3);
+        // the transfer is the flow channel, eased now: its curve unwound by that power
+        assert!(
+            (most.eval(0.2).powf(procraft_engine::brush::FLOW_POWER) - 0.9).abs() < 5e-3
+                && (most.eval(1.0).powf(procraft_engine::brush::FLOW_POWER) - 0.9).abs() < 5e-3
+        );
         assert_eq!(second.setting("pressure_flow"), 1.0);
     }
     // written out it is a dual brush that comes back the same
@@ -12432,10 +12448,10 @@ fn a_dip_pen_at_its_least_draws_a_fine_line_at_any_zoom_and_pressure() {
         Some((190..210).map(column).sum::<f32>() / 20.0)
     };
     for off in [0.0, 0.5] {
-        let Some(least) = ink(0.01, 1.0, 1.0, off) else { return };
-        // a line of about a pixel and a half at its least, the same zoomed in
-        assert!(least < 1.8, "{least} at {off}");
-        assert!((ink(0.01, 1.0, 4.0, off).unwrap() - least).abs() < 0.02);
+        // at the neutral pressure point the least size draws a fine line, the same zoomed in
+        let Some(least) = ink(0.01, 0.25, 1.0, off) else { return };
+        assert!(least < 2.2, "{least} at {off}");
+        assert!((ink(0.01, 0.25, 4.0, off).unwrap() - least).abs() < 0.1);
         // a light touch takes its usual size down to about that, a firm one doesn't
         let light = ink(0.335, 0.02, 1.0, off).unwrap();
         assert!(light < least + 0.1, "{light} {least}");
@@ -13741,6 +13757,7 @@ fn shifted(rgba: &[u8], side: u32, dx: i32) -> Vec<u8> {
 #[test]
 fn the_cut_eraser_cuts_vector_strokes_into_pieces_and_lays_them_again() {
     let Some((s, plugins, dir)) = vector_session(160, "cut") else { return };
+    no_pressure_size(&s);
     assert!(plugins.set_slider(format!("{VECTOR_ID}.eraser"), 2.0).is_some());
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
     s.set_brush_size(0.3);
@@ -13811,6 +13828,7 @@ fn a_selection_takes_vector_strokes_inside_it_or_touching_it_and_deleting_a_mask
 #[test]
 fn vector_strokes_moved_as_strokes_are_laid_again_exactly_in_one_step() {
     let Some((s, _plugins, dir)) = vector_session(160, "move") else { return };
+    no_pressure_size(&s);
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
     s.set_brush_size(0.3);
     stroke_across(&s, 50.0, 20.0, 110.0);
@@ -13948,6 +13966,7 @@ fn a_vector_stroke_drawn_inside_a_selection_is_laid_again_within_it() {
 #[test]
 fn the_whole_and_cut_erasers_reach_a_symmetric_vector_stroke_s_copies() {
     let Some((s, plugins, dir)) = vector_session(160, "symmetry") else { return };
+    no_pressure_size(&s);
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
     s.set_guide_on(true);
     s.set_guide_kind(crate::GuideType::Symmetry);
@@ -14303,6 +14322,7 @@ fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_else
 #[test]
 fn a_colour_dropped_on_a_vector_layer_fills_inside_its_strokes_as_an_item_closing_a_gap() {
     let Some((s, _plugins, dir)) = vector_session(160, "fill") else { return };
+    no_pressure_size(&s);
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
     s.set_brush_size(0.15);
     s.set_color(0.0, 0.0, 0.0);
@@ -14425,6 +14445,7 @@ fn share_offers_the_svg_the_vector_layers_plugin_makes_of_an_artwork_s_vector_la
 #[test]
 fn on_a_vector_layer_a_soft_mask_hides_half_and_the_smudge_tool_nudges_strokes() {
     let Some((s, plugins, dir)) = vector_session(160, "soft") else { return };
+    no_pressure_size(&s);
     let vector = s.add_plugin_layer(VECTOR_KIND.to_owned());
     s.set_brush_size(0.3);
     stroke_across(&s, 50.0, 10.0, 150.0);

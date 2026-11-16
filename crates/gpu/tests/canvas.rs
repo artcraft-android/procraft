@@ -288,7 +288,7 @@ fn a_built_stroke_with_taper_and_clear() {
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     let brush = Brush {
         streamline: 0.0,
-        pen_taper: Taper { start: 0.0, end: 0.3, size: 1.0, opacity: 0.0 },
+        pen_taper: Taper { start: 0.0, end: 1.0, size: 1.0, opacity: 0.0 },
         ..Brush::round_pen()
     };
     let mut stroke = StrokeBuilder::new(brush, 12.0, Pointer::Stylus);
@@ -302,7 +302,7 @@ fn a_built_stroke_with_taper_and_clear() {
     let px = canvas.read_composite(&gpu).unwrap();
     // full width in the middle, tapered to nothing at the end
     assert_eq!(pixel(&px, 200, 60, 55), [0, 0, 0, 255]);
-    assert_eq!(pixel(&px, 200, 188, 55), [255, 255, 255, 255]);
+    assert_eq!(pixel(&px, 200, 190, 55), [255, 255, 255, 255]);
 
     canvas.clear_layer(doc.current());
     canvas.render(&gpu, &mut doc, None);
@@ -2176,7 +2176,7 @@ fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);
         let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
-        (pixel(&layer, 64, 33, 32)[3], pixel(&layer, 64, 50, 32)[3])
+        (pixel(&layer, 64, 33, 32)[3], pixel(&layer, 64, 52, 32)[3])
     };
     let (plain, bled) = (laid(0.0), laid(1.0));
     assert!(plain.0 > 240 && bled.0 > 240, "{plain:?} {bled:?}");
@@ -2184,13 +2184,12 @@ fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
 }
 
 #[test]
-fn a_little_pressure_bleed_lays_even_a_stamp_s_whole_middle_short_of_full() {
+fn a_little_pressure_bleed_barely_cuts_a_stamp_s_middle() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
-    // the bleed's contrast is (1 + b) a - b / sqrt(b p), b eight times the bleed and p its
-    // pressure: a little bleed cuts more than it lifts, so even a whole part lays 1 + b - sqrt(b)
-    // at full pressure (0.815 for a bleed of 0.0075), less at a lighter one; a bleed of 1/8 or
-    // more lays it whole
+    // the bleed's contrast is (1 + 8 b^2.2) a - b^1.1 sqrt(2/p), b the bleed and p its pressure:
+    // a little bleed barely cuts (a whole part lays 253 of 255 at a bleed of 0.0075), a lighter
+    // pressure cuts more, and a whole bleed lays the strong parts full
     let laid = |bleed: f32, press: f32| {
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
@@ -2202,15 +2201,16 @@ fn a_little_pressure_bleed_lays_even_a_stamp_s_whole_middle_short_of_full() {
         i32::from(pixel(&layer, 64, 32, 32)[3])
     };
     let contrast = |bleed: f32, press: f32| {
-        let b = 8.0 * bleed;
-        (((1.0 + b) - b / (b * press).sqrt()).clamp(0.0, 1.0) * 255.0).round() as i32
+        let k = 1.0 + 8.0 * bleed.powf(2.2);
+        let off = bleed.powf(1.1) * (2.0 / press.max(0.01)).sqrt();
+        ((k - off).clamp(0.0, 1.0) * 255.0).round() as i32
     };
     assert!(laid(0.0, 1.0) > 250, "{}", laid(0.0, 1.0));
-    for (bleed, press) in [(0.0075, 1.0), (0.0075, 0.5), (0.125, 1.0)] {
+    for (bleed, press) in [(0.0075, 1.0), (0.0075, 0.5), (0.125, 1.0), (0.125, 0.5), (1.0, 1.0)] {
         let (got, formula) = (laid(bleed, press), contrast(bleed, press));
         assert!((got - formula).abs() <= 3, "bleed {bleed} at {press}: {got}, formula {formula}");
     }
-    assert!(contrast(0.0075, 1.0) < 210 && contrast(0.125, 1.0) == 255);
+    assert!(contrast(0.0075, 1.0) > 250 && contrast(1.0, 1.0) == 255);
 }
 
 #[test]
@@ -4093,7 +4093,8 @@ fn a_grain_combined_by_a_colour_only_mode_leaves_the_coverage_alone() {
 fn the_grain_combines_with_the_stroke_by_its_blend_mode() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
-    // a half-strong dot over the paper grain, the grain multiplied or screened
+    // a half-strong dot over the paper grain, the grain multiplied or screened: multiply takes the
+    // coverage down by the tooth, screen lifts it toward the grain's light
     let cover = |grain_blend: u32| {
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
@@ -4165,20 +4166,20 @@ fn a_tapered_round_tip_thins_its_rim_too() {
 }
 
 #[test]
-fn a_stamp_taller_than_wide_draws_in_full() {
+fn a_stamp_told_taller_than_wide_draws_no_taller() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     let mut doc = Document::new(64, 64);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
-    // 8 px wide, 24 px tall
+    // told 8 px wide and 24 tall: a stamp only squashes, so it draws 8 px round
     canvas.add_stamps(&[Stamp { roundness: 3.0, ..dot(Vec2::new(32.0, 32.0), 4.0) }]);
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     let px = canvas.read_composite(&gpu).unwrap();
     let painted = |x: u32, y: u32| pixel(&px, 64, x, y)[0] < 128;
-    assert!(painted(32, 32 + 9) && painted(32, 32 - 9), "its height");
-    assert!(!painted(32 + 7, 32), "its width");
+    assert!(painted(32, 32 + 3) && painted(32 + 3, 32), "its round");
+    assert!(!painted(32, 32 + 9) && !painted(32 + 7, 32), "no taller or wider");
 }
 
 #[test]

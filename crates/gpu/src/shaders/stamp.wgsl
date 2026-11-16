@@ -285,7 +285,15 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
             }
         }
         let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
-        let depth = clamp(su.grain_depth * i.look.x, 0.0, 1.0);
+        // a file's own grain cuts twice as deep as the control says. the combine doubles the
+        // cutting modes already, so a stock grain takes half here to keep its cut and a file's
+        // own keeps whole; the modes that only attenuate or lift take it as it is
+        var depth = clamp(su.grain_depth * i.look.x, 0.0, 2.0);
+        if (su.grain_blend < TEXTURE_RULES) {
+            let cuts = su.grain_blend >= 2u && su.grain_blend != 6u && su.grain_blend != 7u && su.grain_blend != 8u;
+            let k = select(1.0, select(0.5, 1.0, own), cuts);
+            depth = clamp(depth * k, 0.0, 2.0);
+        }
         if (su.grain_blend == TEXTURE_LIGHTNESS) {
             // the texture's grey the colour's lightness, as strongly as the stamp says
             colour = lightness_from(colour, g, depth);
@@ -306,10 +314,12 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         a = a * g * g * g;
     }
     // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
-    // of the strong ones, and more of both the harder the pen presses
+    // of the strong ones, and more of both the harder the pen presses. Tuned to the previews.
     if (i.grain_bleed > 0.0) {
-        let b = 8.0 * i.grain_bleed;
-        a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
+        let b = i.grain_bleed;
+        let k = 1.0 + 8.0 * pow(b, 2.2);
+        let off = pow(b, 1.1) * sqrt(2.0 / max(i.grain_press, 0.01));
+        a = clamp(k * a - off, 0.0, 1.0);
     }
     // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
     // covers only its area of one (a shape's quad reaches past it, which thins it as far)

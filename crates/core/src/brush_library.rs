@@ -737,8 +737,10 @@ impl State {
                 .map(|r| SavedReset { made: r.made, brush: Box::new(self.saved_brush(&r.brush, from, images)) }),
             shape_stock: brush.stock.shape.as_ref().map(|s| (s.name.clone(), s.inverted)),
             grain_stock: brush.stock.grain.as_ref().map(|s| (s.name.clone(), s.inverted)),
-            metallic_source: brush.metallic.source.as_ref().map(source),
-            roughness_source: brush.roughness.source.as_ref().map(source),
+            metallic_source: own(&brush.metallic.source, &base.metallic.source)
+                .filter(|_| brush.stock.metallic.is_none()),
+            roughness_source: own(&brush.roughness.source, &base.roughness.source)
+                .filter(|_| brush.stock.roughness.is_none()),
             metallic_image: image(brush.metallic.image, base.metallic.image),
             roughness_image: image(brush.roughness.image, base.roughness.image),
             metallic_stock: brush.stock.metallic.as_ref().map(|s| (s.name.clone(), s.inverted)),

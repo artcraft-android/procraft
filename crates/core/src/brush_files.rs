@@ -9,6 +9,7 @@ use procraft_engine::brush::{
 use procraft_engine::brushfile::{self, BrushFile, Pick, Pictures, StandIn, Texture};
 use procraft_engine::brushlibrary;
 use procraft_engine::curve::Curve;
+use procraft_engine::stock_images;
 use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
 
@@ -740,13 +741,10 @@ fn spray_tip(
     procraft_engine::abr::AbrTip { name: String::new(), spacing: None, width: n as u32, height: n as u32, pixels }
 }
 
-/// Our jitter's control that throws a stamp of `b` at most `amount` of its diameters away: our
-/// jitter throws a stamp up to its control to the power 2.2 times the scale, of half its diagonal
-/// (for a round stamp a little over 0.7 of its diameter).
-fn jitter_control(b: &Brush, amount: f32) -> f32 {
-    use procraft_engine::stroke::JITTER_FILE_SCALE;
-    let reach = 0.5 * (1.0 + b.shape.roundness * b.shape.roundness).sqrt();
-    (amount / reach / JITTER_FILE_SCALE).powf(1.0 / 2.2).clamp(0.0, 1.0)
+/// Our jitter's control that throws a stamp at most `amount` of its diameters away: our jitter
+/// throws a stamp up to 5 times its control squared, of its radius (half its diameter).
+fn jitter_control(_b: &Brush, amount: f32) -> f32 {
+    (amount / 2.5).sqrt().clamp(0.0, 1.0)
 }
 
 /// A Clip Studio source's curve as ours: `least` and up to all of it, as the curve goes. Its points
@@ -822,9 +820,9 @@ fn csp_curve_at(points: &[(f32, f32)], x: f32) -> f32 {
 /// Speed is left out: how fast the file's own fastest is isn't known, and taken as ours a pen
 /// fades to its least on any quick stroke. Of tilt, only fading the opacity and flattening the tip
 /// as the pen leans are ours (as far as tilt takes them, its curve left out); tilt growing or
-/// shrinking the size is not. What scales our opacity before it is eased (by the power
-/// [`procraft_engine::brush::FLOW_POWER`]) is unwound by that power, so a stamp lays what the file
-/// says.
+/// shrinking the size is not. The opacity lays straight, its curve a quarter of the file's (the
+/// factor reaches four times it); the flow and the lean are eased (by the power
+/// [`procraft_engine::brush::FLOW_POWER`]), so theirs are unwound by it to lay what the file says.
 fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
     use procraft_engine::brush::{FLOW_POWER, PressureCurve};
     let taken = |least: Option<f32>| least.map_or(0.0, |l| 1.0 - l.clamp(0.0, 1.0));
@@ -847,10 +845,10 @@ fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
     let mut chance = 0.0f32;
     if let Some(d) = &pen.opacity {
         match &d.pressure {
-            // all of the opacity follows the curve, from what it leaves at none up, unwound
+            // all of the opacity follows the curve, from what it leaves at none up, a quarter as high
             Some(p) => {
                 b.pressure_opacity = if p.least < 1.0 { 1.0 } else { 0.0 };
-                b.opacity_curve = eased_root(&csp_curve(&p.points, p.least));
+                b.opacity_curve = quartered(&csp_curve(&p.points, p.least));
             }
             None => b.pressure_opacity = 0.0,
         }
@@ -858,7 +856,11 @@ fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
         chance = chance.max(taken(d.random));
     }
     if let Some(d) = &pen.flow {
-        let (amount, curve) = pressed(d).map_or((0.0, None), |(amount, p)| (amount, Some(csp_curve(&p.points, 0.0))));
+        // the flow channel is eased, so its curve is unwound by that power, floor and all
+        let (amount, curve) = match &d.pressure {
+            Some(p) if p.least < 1.0 => (1.0, Some(eased_root(&csp_curve(&p.points, p.least)))),
+            _ => (0.0, None),
+        };
         b.set_setting("pressure_flow", amount);
         b.pressure_curves.set(PressureCurve::Flow, curve);
         chance = chance.max(taken(d.random));
@@ -991,6 +993,8 @@ fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32
 /// dual brush (as a dual brush's second).
 fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     use procraft_engine::abr::{ANGLE_BY_DIRECTION, BY_PRESSURE};
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::geom::Vec2;
     let mut b = abr_shape(a);
     let d = a.dynamics;
     if d.tip && d.angle_control == ANGLE_BY_DIRECTION {
@@ -1053,10 +1057,23 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     }
     // the paint dynamics, pressure's (control 2): the opacity down to its least, the flow from the
     // tool's down to its least; the jitter of either as the opacity's. The stylus page's opacity
-    // is kept as "pressure_flow", its flow as "pressure_opacity".
+    // caps the stroke (the flow channel), its flow lays each stamp (the opacity channel).
     let pressed = |control: i32| d.paint && control == BY_PRESSURE;
-    b.set_setting("pressure_flow", if pressed(d.opacity_control) { 1.0 - d.opacity_min } else { 0.0 });
-    b.set_setting("pressure_opacity", if pressed(d.flow_control) { flow * (1.0 - d.flow_min) } else { 0.0 });
+    if pressed(d.opacity_control) {
+        // the cap is eased now: unwound so it reaches from the least up to all of it
+        b.set_setting("pressure_flow", 1.0);
+        let cap = Curve::new(&[Vec2::new(0.0, d.opacity_min), Vec2::new(1.0, 1.0)]);
+        b.pressure_curves.set(PressureCurve::Flow, Some(eased_root(&cap)));
+    } else {
+        b.set_setting("pressure_flow", 0.0);
+    }
+    if pressed(d.flow_control) {
+        // each stamp lays straight, a quarter as high, from the flow's least up to the tool's
+        b.pressure_opacity = 1.0;
+        b.opacity_curve = quartered(&Curve::new(&[Vec2::new(0.0, d.flow_min), Vec2::new(1.0, 1.0)]));
+    } else {
+        b.pressure_opacity = 0.0;
+    }
     b.set_setting("jitter_opacity", if d.paint { d.flow_jitter.max(d.opacity_jitter) } else { 0.0 });
     if let Some(s) = &a.scatter {
         abr_scatter(&mut b, s, s.amount / 2.0, 1);
@@ -1699,7 +1716,7 @@ fn multiplied(
     }
 }
 
-/// The curve that, eased as a stamp's opacity is (to the power
+/// The curve that, eased as the flow channel is (to the power
 /// [`procraft_engine::brush::FLOW_POWER`]), lays what `curve` says: its root, taken across it (at 17
 /// places and at its own points, so a straight one bends as it should).
 fn eased_root(curve: &Curve) -> Curve {
@@ -1707,6 +1724,13 @@ fn eased_root(curve: &Curve) -> Curve {
     use procraft_engine::geom::Vec2;
     let places = (0..=16).map(|i| i as f32 / 16.0).chain(curve.points().iter().map(|p| p.x));
     Curve::new(&places.map(|x| Vec2::new(x, curve.eval(x).max(0.0).powf(1.0 / FLOW_POWER))).collect::<Vec<_>>())
+}
+
+/// A curve a quarter as high: the opacity channel lays straight now, four times its curve at full
+/// amount, so a quarter of the file's lays what it says.
+fn quartered(curve: &Curve) -> Curve {
+    use procraft_engine::geom::Vec2;
+    Curve::new(&curve.points().iter().map(|p| Vec2::new(p.x, p.y * 0.25)).collect::<Vec<_>>())
 }
 
 /// Gives `b` a Krita preset's scatter as jitter along the stroke and across it: as far at most
@@ -1746,21 +1770,20 @@ fn krita_paint(
     use procraft_engine::brush::PressureCurve;
     use procraft_engine::geom::Vec2;
     b.max_opacity = 1.0;
-    let rooted = |points: &[Vec2]| eased_root(&Curve::new(points));
     b.pressure_opacity = 0.0;
     if !wash {
         b.flow = opacity * flow;
-        // both curves at once, multiplied across
+        // both curves at once, multiplied across; the opacity lays straight, a quarter as high
         if let Some(points) = multiplied(opacity_pressure, flow_pressure) {
             b.pressure_opacity = 1.0;
-            b.opacity_curve = rooted(&points);
+            b.opacity_curve = quartered(&Curve::new(&points));
         }
         return;
     }
     b.flow = flow;
     if let Some(points) = flow_pressure {
         b.pressure_opacity = 1.0;
-        b.opacity_curve = rooted(points);
+        b.opacity_curve = quartered(&Curve::new(points));
     }
     // the stroke builds up towards what its transfer lets through: the opacity, by the pressure
     let most = match opacity_pressure {
@@ -1768,8 +1791,9 @@ fn krita_paint(
         None => vec![Vec2::new(0.0, opacity), Vec2::new(1.0, opacity)],
     };
     if opacity_pressure.is_some() || opacity < 1.0 {
+        // the transfer is the flow channel, eased now: unwound so the stroke reaches the opacity
         b.set_setting("pressure_flow", 1.0);
-        b.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&most)));
+        b.pressure_curves.set(PressureCurve::Flow, Some(eased_root(&Curve::new(&most))));
     }
     b.set_setting("rendering_mode", 1.0);
 }
@@ -1958,8 +1982,24 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 (Some(shape::GRAINY_DISC), None, None)
             }
         },
-        Texture::Stock { name, inverted } => drawn_shape(&shape_stand_in(name, *inverted)),
-        Texture::Drawn(s) => drawn_shape(s),
+        Texture::Stock { name, inverted } => {
+            // the stock library's own image, where we hold it: read as the brush's own would be
+            if let Some(bytes) = stock_images::stock_image_bytes(name)
+                && let Some(s) = real_stock(textures::stock_key(name), *inverted, bytes)
+            {
+                return (None, Some(s), None);
+            }
+            drawn_shape(&shape_stand_in(name, *inverted))
+        }
+        Texture::Drawn(s) => {
+            // the stock library's own image, where we hold the one the stand-in's key names
+            if let Some((_, bytes)) = stock_images::stock_image_by_key(s.key)
+                && let Some(src) = real_stock(s.key, s.inverted, bytes)
+            {
+                return (None, Some(src), None);
+            }
+            drawn_shape(s)
+        }
     }
 }
 
@@ -2093,6 +2133,30 @@ fn drawn(kind: u8, s: &StandIn, draw: impl Fn() -> Option<Vec<u8>> + Send + Sync
         }
     };
     Source::drawn_later(id, pixels).standing_in_for(s.key)
+}
+
+/// The stock library's own images read already, while a brush holds them: brushes naming the same
+/// image share its pixels, read once, rather than each decoding and holding its own. A shape and a
+/// grain of the same image share them too, the pixels being the same however they are used.
+type RealStock = std::collections::HashMap<(u64, bool), (u64, procraft_engine::brush::WeakPixels)>;
+static REAL_STOCK: std::sync::LazyLock<std::sync::Mutex<RealStock>> = std::sync::LazyLock::new(Default::default);
+
+/// The stock image `key` names, read from `bytes` the first time it is wanted, or another brush's
+/// for the same; its pixels shared, not copied. It stands in for the stock image as a stand-in
+/// does, so the library keeps it apart by its key, but its pixels are the image's own.
+fn real_stock(key: u64, inverted: bool, bytes: &[u8]) -> Option<Source> {
+    let mut map = REAL_STOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((id, weak)) = map.get(&(key, inverted))
+        && let Some(pixels) = weak.upgrade()
+    {
+        return Some(Source::drawn_later(*id, pixels).standing_in_for(key));
+    }
+    let source = gray_texture(bytes, inverted)?;
+    if map.len() >= 1024 {
+        map.retain(|_, (_, weak)| weak.upgrade().is_some());
+    }
+    map.insert((key, inverted), (source.id, source.pixels.downgrade()));
+    Some(source.standing_in_for(key))
 }
 
 /// The lattice a stock tip printed in dots has its dots on, as [`textures::halftone_shape`] takes it
@@ -2287,8 +2351,29 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             Some(s) => (None, Some(s)),
             None => (Some(grain::PAPER), None),
         },
-        Texture::Stock { name, inverted } => drawn_grain(&grain_stand_in(name, *inverted, preview)),
-        Texture::Drawn(s) => drawn_grain(s),
+        Texture::Stock { name, inverted } => {
+            let n = name.to_lowercase();
+            if n.contains("blank") {
+                return (None, None);
+            }
+            // the stock library's own grain, where we hold it, with its tooth as it is
+            if let Some(bytes) = stock_images::stock_image_bytes(name)
+                && let Some(s) = real_stock(textures::stock_key(name), *inverted, bytes)
+            {
+                return (None, Some(s));
+            }
+            drawn_grain(&grain_stand_in(name, *inverted, preview))
+        }
+        Texture::Drawn(s) => {
+            // the stock library's own grain, where we hold it (a blank one is as good as none)
+            if let Some((name, bytes)) = stock_images::stock_image_by_key(s.key)
+                && !name.contains("blank")
+                && let Some(src) = real_stock(s.key, s.inverted, bytes)
+            {
+                return (None, Some(src));
+            }
+            drawn_grain(s)
+        }
     }
 }
 
@@ -2349,8 +2434,24 @@ pub(crate) fn material_for(t: &Texture) -> (Option<u32>, Option<Source>) {
     match t {
         Texture::None => (None, None),
         Texture::Image { bytes, inverted } => (None, gray_texture(bytes, *inverted)),
-        Texture::Stock { name, .. } => (material_stand_in(name), None),
-        Texture::Drawn(s) => (if let Pick::Ours(image) = s.pick { image } else { None }, None),
+        Texture::Stock { name, inverted } => {
+            let n = name.to_lowercase();
+            if n.contains("blank") {
+                return (None, None);
+            }
+            if let Some(bytes) = stock_images::stock_image_bytes(name) {
+                return (None, real_stock(textures::stock_key(name), *inverted, bytes));
+            }
+            (material_stand_in(name), None)
+        }
+        Texture::Drawn(s) => {
+            if let Some((name, bytes)) = stock_images::stock_image_by_key(s.key)
+                && !name.contains("blank")
+            {
+                return (None, real_stock(s.key, s.inverted, bytes));
+            }
+            (if let Pick::Ours(image) = s.pick { image } else { None }, None)
+        }
     }
 }
 
@@ -2429,19 +2530,30 @@ fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
     Source::new(gray_square((w, h, channels), &buf, inverted, TEXTURE_SIZE))
 }
 
+/// The picture a texture carries: the file's own, or the stock library's where it holds the name.
+/// A drawn stand-in carries none.
+fn texture_bytes(t: &Texture) -> Option<(&[u8], bool)> {
+    match t {
+        Texture::Image { bytes, inverted } => Some((bytes, *inverted)),
+        Texture::Stock { name, inverted } => stock_images::stock_image_bytes(name).map(|b| (b, *inverted)),
+        Texture::Drawn(s) => stock_images::stock_image_by_key(s.key).map(|(_, b)| (b, s.inverted)),
+        Texture::None => None,
+    }
+}
+
 /// What the image of a brush file's grain gives it beyond `source`: its width, and the image at up
 /// to [`FULL_GRAIN_MOST`] a side if it has more than `source` holds.
 fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
-    let (Texture::Image { bytes, inverted }, Some(source)) = (t, source) else { return None };
+    let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
     let (w, h, channels, buf) = decode_picture(bytes)?;
-    Some(GrainFile { source: source.id, width: w as u32, full: full_image((w, h, channels), &buf, *inverted) })
+    Some(GrainFile { source: source.id, width: w as u32, full: full_image((w, h, channels), &buf, inverted) })
 }
 
 /// What the image of a brush file's shape gives it beyond `source`, if it has more than that holds.
 fn shape_file_for(t: &Texture, source: Option<&Source>) -> Option<ShapeFile> {
-    let (Texture::Image { bytes, inverted }, Some(source)) = (t, source) else { return None };
+    let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
     let (w, h, channels, buf) = decode_picture(bytes)?;
-    Some(ShapeFile { source: source.id, full: full_image((w, h, channels), &buf, *inverted)? })
+    Some(ShapeFile { source: source.id, full: full_image((w, h, channels), &buf, inverted)? })
 }
 
 /// The side of the square an image `longest` pixels across is kept in: as much of it as is kept of
@@ -2597,13 +2709,15 @@ mod tests {
     fn an_oil_painted_canvas_stands_in_as_its_own_noise_not_a_weave() {
         // painted over, its weave doesn't show: its own octaves of noise, measured, not our canvas
         let stock = |name: &str| Texture::Stock { name: name.into(), inverted: false };
+        // the library holds the canvas picture itself now, weave and all
         let (image, source) = grain_for(&stock("Oil-Canvas.jpg"), None);
-        assert_eq!(image, Some(grain::WASH));
-        assert!(textures::stock_grain_octaves("Oil-Canvas.jpg").is_some() && source.is_some());
-        // one whose weave shows keeps it
-        assert_eq!(grain_for(&stock("Raw-Canvas.jpg"), None).0, Some(grain::ROUGH_CANVAS));
+        assert!(image.is_none() && source.is_some());
+        assert!(textures::stock_grain_octaves("Oil-Canvas.jpg").is_some());
+        // a name it doesn't hold: painted over as its own octaves' pattern, a raw one keeps its weave
+        assert_eq!(grain_for(&stock("House-Oil-Canvas.jpg"), None).0, Some(grain::WASH));
+        assert_eq!(grain_for(&stock("House-Raw-Canvas.jpg"), None).0, Some(grain::ROUGH_CANVAS));
         // a daisy's long narrow petals, not our rounder flower's
-        assert_eq!(shape_for(&stock("Brush-Artery-Flower.jpg")).0, Some(shape::DAISY));
+        assert_eq!(shape_for(&stock("House-Artery-Flower.jpg")).0, Some(shape::DAISY));
     }
 
     #[test]
@@ -2626,14 +2740,20 @@ mod tests {
         // splashes, one fine line, short hairs: our drawings of them, taking the pictures' tones
         // but not the marks put on a shape of ours standing in for one we know less of
         let stock = |name: &str| Texture::Stock { name: name.into(), inverted: false };
-        for (name, want) in [
-            ("Brush-Artery-Water-Flicks.jpg", shape::FLICKS),
-            ("Brush-Preset-Spike.png", shape::SPINDLE),
-            ("Brush-Artery-Stubble.jpg", shape::STUBBLE),
-        ] {
+        // the library holds these pictures itself now: read as a file's own image, not stood in
+        for name in ["Brush-Artery-Water-Flicks.jpg", "Brush-Preset-Spike.png", "Brush-Artery-Stubble.jpg"] {
             let (image, source, _) = shape_for(&stock(name));
+            assert!(image.is_none() && source.is_some(), "{name}");
+        }
+        // a name it doesn't hold still stands in as drawn to it
+        for (name, want) in [
+            ("House-Water-Flicks.jpg", shape::FLICKS),
+            ("House-Preset-Spike.png", shape::SPINDLE),
+            ("House-Artery-Stubble.jpg", shape::STUBBLE),
+        ] {
+            let (image, _, _) = shape_for(&stock(name));
             assert_eq!(image, Some(want), "{name}");
-            assert!(textures::drawn_to_stock(want) && source.is_some(), "{name}");
+            assert!(textures::drawn_to_stock(want), "{name}");
         }
         // (any other of ours still takes the marks)
         assert!(!textures::drawn_to_stock(shape::SPLATTER) && !textures::drawn_to_stock(shape::STOCK_LINE));
@@ -3044,14 +3164,15 @@ mod tests {
         // the size from its curve's least up to all of it
         let b = krita_brush(&built);
         assert!(b.pressure_size == 1.0 && near(b.size_curve.eval(0.0), 0.2) && near(b.size_curve.eval(1.0), 1.0));
-        // built up: each stamp lays the opacity times the flow, by the opacity's curve once eased
+        // built up: each stamp lays the opacity times the flow, by the opacity's curve straight
         assert!(near(b.flow, 0.4) && b.pressure_opacity == 1.0);
-        assert!(near(b.opacity_curve.eval(0.5).powf(FLOW_POWER), 0.5));
+        assert!(near(4.0 * b.opacity_curve.eval(0.5), 0.5));
         // washed: each stamp lays the flow, the stroke building up to the opacity by the pressure
         let w = krita_brush(&KritaBrush { wash: true, ..built.clone() });
         assert!(near(w.flow, 0.5) && w.pressure_opacity == 0.0 && w.setting("rendering_mode") == 1.0);
+        // the transfer is the flow channel, eased: its curve unwound by that power
         let most = w.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(near(most.eval(0.5), 0.4) && near(most.eval(1.0), 0.8));
+        assert!(near(most.eval(0.5).powf(FLOW_POWER), 0.4) && near(most.eval(1.0).powf(FLOW_POWER), 0.8));
         // no pressure on the size: it stays as set
         assert_eq!(krita_brush(&KritaBrush { size_pressure: None, ..built }).pressure_size, 0.0);
     }
@@ -3093,10 +3214,9 @@ mod tests {
         let b = krita_brush(&k);
         assert!((b.shape.scatter - 0.6).abs() < 1e-6 && b.shape.randomise && b.shape.follow_azimuth);
         assert_eq!((b.setting("flip_x"), b.setting("flip_y")), (1.0, 0.0));
-        // half a diameter at most along the stroke: our jitter's control to the power 2.2, times its
-        // scale, of half the round stamp's diagonal; by the pressure; none across
-        let thrown =
-            procraft_engine::stroke::JITTER_FILE_SCALE * b.setting("jitter_linear").powf(2.2) * 0.5 * 2f32.sqrt();
+        // half a diameter at most along the stroke: 5 times our jitter's control squared, of the
+        // stamp's radius (half its diameter); by the pressure; none across
+        let thrown = 5.0 * b.setting("jitter_linear").powi(2) * 0.5;
         assert!((thrown - 0.5).abs() < 1e-3, "{thrown}");
         assert!(b.pressure_curves.get(PressureCurve::LinearJitter).is_some());
         assert!(b.pressure_curves.get(PressureCurve::LateralJitter).is_none());
@@ -3161,20 +3281,22 @@ mod tests {
         let mut second = Brush::round_pen();
         masking_paint(&mut second, &m);
         assert_eq!((second.rendering, second.max_opacity, second.flow), (Rendering::Capped, 1.0, 0.3));
-        // the stroke reaches the opacity times its curve: none under 0.6, 0.8 x 0.75 from 0.9
+        // the stroke reaches the opacity times its curve: none under 0.6, 0.8 x 0.75 from 0.9;
+        // the transfer is the flow channel, eased, so its curve is unwound by that power
         let most = second.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(most.eval(0.5) < 1e-3 && (most.eval(1.0) - 0.6).abs() < 1e-3);
+        assert!(most.eval(0.5).powf(FLOW_POWER) < 5e-3 && (most.eval(1.0).powf(FLOW_POWER) - 0.6).abs() < 5e-3);
         assert_eq!(second.setting("pressure_flow"), 1.0);
-        // a stamp lays the flow's curve: its opacity's pressure to the power FLOW_POWER
+        // a stamp lays the flow's curve straight: its opacity's pressure, four times the curve
         assert_eq!(second.pressure_opacity, 1.0);
-        let laid = |p: f32| second.opacity_curve.eval(p).powf(FLOW_POWER);
+        let laid = |p: f32| 4.0 * second.opacity_curve.eval(p);
         assert!(laid(0.5) < 1e-3 && (laid(1.0) - 0.75).abs() < 5e-3);
         // without pressure, a constant: none at full opacity, else the opacity
         let fixed = KritaMasking { opacity_pressure: None, flow_pressure: None, ..m.clone() };
         let mut second = Brush::round_pen();
         masking_paint(&mut second, &fixed);
         assert_eq!(second.pressure_opacity, 0.0);
-        assert!((second.pressure_curves.get(PressureCurve::Flow).unwrap().eval(0.1) - 0.8).abs() < 1e-3);
+        let fixed_most = second.pressure_curves.get(PressureCurve::Flow).unwrap();
+        assert!((fixed_most.eval(0.1).powf(FLOW_POWER) - 0.8).abs() < 5e-3);
         let mut second = Brush::round_pen();
         masking_paint(&mut second, &KritaMasking { opacity: 1.0, ..fixed });
         assert!(second.pressure_curves.get(PressureCurve::Flow).is_none());
@@ -3246,6 +3368,36 @@ mod tests {
         assert_eq!(
             grain_for(&Texture::Stock { name: "Willow-Grain.jpg".into(), inverted: false }, None).0,
             Some(grain::CHARCOAL)
+        );
+    }
+
+    #[test]
+    fn a_stock_image_the_library_holds_is_read_as_the_file_s_own() {
+        // the real sponge tip, not a stand-in: no shape of ours behind it
+        let tip = Texture::Stock { name: "Brush-Preset-Ink-Sponge.png".into(), inverted: false };
+        let (image, source, _) = shape_for(&tip);
+        assert!(image.is_none() && source.is_some());
+        // inverted reads it turned over, as its own image would
+        let back = Texture::Stock { name: "Brush-Preset-Ink-Sponge.png".into(), inverted: true };
+        let (_, inverted, _) = shape_for(&back);
+        let (a, b) = (source.unwrap().pixels, inverted.unwrap().pixels);
+        // a grey's rounding may land a step either side of the exact turn-over
+        assert!(a.iter().zip(b.iter()).all(|(&x, &y)| (u16::from(x) + u16::from(y)).abs_diff(255) <= 1));
+        // a name the library doesn't hold still stands in
+        assert!(shape_for(&Texture::Stock { name: "No-Such-Sponge.png".into(), inverted: false }).0.is_some());
+    }
+
+    #[test]
+    fn a_stock_grain_the_library_holds_keeps_its_tooth_at_its_own_size() {
+        let grain = Texture::Stock { name: "Brush-Artery-Charcoal-Vine.jpg".into(), inverted: true };
+        let (image, source) = grain_for(&grain, None);
+        assert!(image.is_none() && source.is_some());
+        let file = grain_file_for(&grain, source.as_ref()).unwrap();
+        assert_eq!((file.width, file.full.unwrap().side), (1024, 1024));
+        // blank stays no grain at all
+        assert_eq!(
+            grain_for(&Texture::Stock { name: "Brush-Preset-Blank.png".into(), inverted: false }, None),
+            (None, None)
         );
     }
 
@@ -3341,7 +3493,6 @@ mod tests {
     #[test]
     fn a_sprayed_sub_tool_lays_its_particles_about_each_place() {
         use procraft_engine::csp::{CspBrush, CspSpray};
-        use procraft_engine::stroke::JITTER_FILE_SCALE;
         let spray = CspSpray {
             particle: 10.0,
             density: 24,
@@ -3371,7 +3522,7 @@ mod tests {
         assert_eq!((b.shape.count, b.shape.scatter, b.shape.roundness), (16, 0.5, 1.0));
         assert!((b.spacing - 0.2).abs() < 1e-5, "{}", b.spacing);
         // each thrown as far as half the area, either way along the stroke and across it
-        let reach = |b: &Brush| JITTER_FILE_SCALE * b.setting("jitter_lateral").powf(2.2) * 0.5 * 2f32.sqrt();
+        let reach = |b: &Brush| 5.0 * b.setting("jitter_lateral").powi(2) * 0.5;
         assert!((reach(&b) - 0.5).abs() < 1e-3, "{}", reach(&b));
         assert_eq!(b.setting("jitter_linear"), b.setting("jitter_lateral"));
         // a particle larger than the area: the stamp as large as it, thrown half the area (a
@@ -3470,7 +3621,8 @@ mod tests {
             assert!(near(b.size_curve.eval(x), y), "{x}: {}", b.size_curve.eval(x));
         }
         let (none, full) = (b.pressure_factors(0.0).0, b.pressure_factors(1.0).0);
-        assert!(near(none, 0.3) && near(full, 1.0), "{none} {full}");
+        // down to 30% at no pressure, boosting past whole at full
+        assert!(near(none, 0.3) && full > 3.0, "{none} {full}");
         assert!(near(b.setting("jitter_size"), 0.4));
         // no pressure on the opacity; leaning fades it to 20 % and chance (the flow's) takes a
         // tenth: tilt scales it before it is eased, so by its root; speed is left out
@@ -3478,7 +3630,7 @@ mod tests {
         let kept = ["tilt_opacity", "speed_opacity", "jitter_opacity"].map(|k| b.setting(k));
         let root = |v: f32| 1.0 - v.powf(1.0 / procraft_engine::brush::FLOW_POWER);
         assert!(near(kept[0], root(0.2)) && kept[1] == 0.0 && near(kept[2], 0.1), "{kept:?}");
-        // pressure on the opacity: a stamp lays what the curve says once eased
+        // pressure on the opacity: a stamp lays what the curve says, straight
         let pressed = csp_brush(&CspBrush {
             pen: CspPen {
                 opacity: Some(CspDynamics { pressure: Some(bent.clone()), ..Default::default() }),
@@ -3486,7 +3638,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let laid = |p: f32| pressed.pressure_factors(p).1.powf(procraft_engine::brush::FLOW_POWER);
+        let laid = |p: f32| pressed.pressure_factors(p).1;
         assert!(near(laid(0.0), 0.3) && near(laid(1.0), 1.0), "{} {}", laid(0.0), laid(1.0));
         // and between, not only at its ends
         let want = csp_curve(&bent.points, 0.3).eval(0.5);
@@ -3495,6 +3647,9 @@ mod tests {
         assert!(near(b.setting("pressure_flow"), 1.0) && near(b.setting("pressure_roundness"), 1.0));
         assert!(b.pressure_curves.get(PressureCurve::Flow).is_some());
         assert!(b.pressure_curves.get(PressureCurve::Roundness).is_some());
+        // the flow channel is eased, so its curve is the file's unwound by that power
+        let flow = b.pressure_curves.get(PressureCurve::Flow).unwrap();
+        assert!(near(flow.eval(0.5).powf(procraft_engine::brush::FLOW_POWER), 0.5));
         // the texture shows from 40 % at no pressure to all of it at full
         assert!(near(b.pressure_curves.at(PressureCurve::GrainDepth, 0.0), 0.4));
         assert!(near(b.pressure_curves.at(PressureCurve::GrainDepth, 1.0), 1.0));
@@ -3581,7 +3736,9 @@ mod tests {
     #[test]
     fn a_photoshop_preset_comes_in_at_its_size_with_its_dynamics() {
         use procraft_engine::abr::{AbrBrush, AbrDynamics, AbrTip};
+        use procraft_engine::brush::{FLOW_POWER, PressureCurve};
         let shown = |b: &Brush, key: &str| (b.setting(key) * 100.0).round();
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
         // a computed 10 px round, pressure on its size (down to 87%) and opacity
         let round = AbrBrush {
             name: "Hard".into(),
@@ -3605,7 +3762,7 @@ mod tests {
         let b = abr_brush(&round);
         // a tip flatter than the app's least comes in at the least, as it is read back from our
         // own file
-        let flat = abr_brush(&AbrBrush { roundness: Some(0.04), ..round.clone() });
+        let flat = abr_brush(&AbrBrush { roundness: Some(0.005), ..round.clone() });
         assert_eq!(flat.shape.roundness, LEAST_ROUNDNESS);
         // most size 33% (as the file keeps it), the least 1%
         assert_eq!(
@@ -3615,6 +3772,9 @@ mod tests {
         // pressure: size 6.5% (half of what the dynamics let go), the stylus page's opacity full
         assert!((b.setting("pressure_size") - 0.065).abs() < 1e-6);
         assert_eq!((shown(&b, "pressure_flow"), shown(&b, "pressure_opacity")), (100.0, 0.0));
+        // the opacity caps the stroke through the eased flow channel: from nothing up to all of it
+        let cap = b.pressure_curves.get(PressureCurve::Flow).unwrap();
+        assert!(near(cap.eval(0.5).powf(FLOW_POWER), 0.5));
         // untapered, no StreamLine, a uniformed glaze; turned the other way
         assert_eq!(
             (b.setting("pen_taper_size"), b.setting("touch_taper_size"), b.setting("streamline")),
@@ -3640,9 +3800,9 @@ mod tests {
         });
         assert_eq!((sampled.max_size / sampled.size_unit() * 100.0).round(), 298.0);
         assert_eq!(sampled.setting("pressure_size"), 0.0);
-        // as Kyle's charcoal: its tool's flow 76%, the flow by pressure down to 20% (61% on the
-        // stylus page), size by tilt, and a texture of its own over the whole stroke in the Height
-        // mode (its least depth only for a texture on each tip)
+        // as Kyle's charcoal: its tool's flow 76%, the flow by pressure down to 20%, size by tilt,
+        // and a texture of its own over the whole stroke in the Height mode (its least depth only
+        // for a texture on each tip)
         let paper = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
         let kyle = abr_brush(&AbrBrush {
             texture: Some(procraft_engine::abr::AbrTexture {
@@ -3676,8 +3836,10 @@ mod tests {
         });
         assert_eq!(
             (shown(&kyle, "flow"), shown(&kyle, "pressure_opacity"), shown(&kyle, "pressure_flow")),
-            (76.0, 61.0, 0.0)
+            (76.0, 100.0, 0.0)
         );
+        // the flow lays each stamp straight, from its least (20%) up to the tool's at full
+        assert!(near(kyle.pressure_factors(0.0).1, 0.2) && near(kyle.pressure_factors(1.0).1, 1.0));
         assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (50.0, 100.0));
         assert_eq!((shown(&kyle, "jitter_size"), shown(&kyle, "jitter_opacity")), (9.0, 10.0));
         assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::document::BlendMode::Multiply.id());
@@ -3964,8 +4126,8 @@ mod tests {
         assert_eq!(file(400).unwrap().full.side, 512);
         assert_eq!(file(1500).unwrap().full.side, FULL_GRAIN_MOST as u32);
         assert_eq!(file(400).unwrap().source, source.id);
-        // nothing without an image in the file
-        let stock = Texture::Stock { name: "Acrylic-Stamp-5.png".into(), inverted: false };
+        // nothing without an image in the file or the stock library
+        let stock = Texture::Stock { name: "Acrylic-Stamp-9.png".into(), inverted: false };
         assert!(shape_file_for(&stock, Some(&source)).is_none());
     }
 

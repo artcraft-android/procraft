@@ -3922,6 +3922,18 @@ mod tests {
         PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t, roll: 0.0 }
     }
 
+    /// The paint and smudge brushes keep their size at full pressure (no boost), as these checks
+    /// assume.
+    fn no_pressure_size(s: &CanvasSession) {
+        let mut st = s.shared.lock();
+        for tool in [crate::ToolKind::Paint, crate::ToolKind::Smudge] {
+            let (set, index) = st.brush_ref(tool);
+            if let Some(b) = st.library.get_mut(set).and_then(|lib| lib.brushes.get_mut(index)) {
+                b.pressure_size = 0.0;
+            }
+        }
+    }
+
     /// Draws a frame of the model into a `side` square texture.
     fn frame(s: &CanvasSession, side: u32) {
         let mut guard = s.shared.lock();
@@ -4130,6 +4142,7 @@ mod tests {
         if !shown(&s) {
             return;
         }
+        no_pressure_size(&s);
         frame(&s, 200);
         assert_eq!(s.model_info().unwrap().submeshes.len(), 2);
         // a mesh under each side of the window, nothing in the gap or round the edge
@@ -4203,6 +4216,7 @@ mod tests {
         if !shown(&s) {
             return;
         }
+        no_pressure_size(&s);
         frame(&s, 200);
         s.set_color(1.0, 0.0, 0.0);
         pen_across(&s, 40.0, 80.0, 100.0, 0.0);
@@ -4234,6 +4248,7 @@ mod tests {
         if !shown(&s) {
             return;
         }
+        no_pressure_size(&s);
         frame(&s, 200);
         s.set_color(1.0, 0.0, 0.0);
         // a red band on the left mesh, then a smudge across it, on and off it
@@ -4574,6 +4589,7 @@ mod tests {
         if !shown(&s) {
             return;
         }
+        no_pressure_size(&s);
         s.set_color(1.0, 0.0, 0.0);
         frame(&s, 200);
         pen_across(&s, 40.0, 160.0, 100.0, 0.0);

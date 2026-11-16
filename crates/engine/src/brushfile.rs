@@ -221,8 +221,9 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("grain_scale", "textureScale", Kept::Squared16),
     ("grain_zoom", "textureZoom", Kept::Same),
     ("grain_rotation", "textureRotation", Kept::Same),
-    ("grain_depth", "grainDepth", Kept::Same),
-    ("grain_depth_min", "grainDepthMinimum", Kept::Same),
+    // the file keeps depth twice as deep as we draw it
+    ("grain_depth", "grainDepth", Kept::Times(2.0)),
+    ("grain_depth_min", "grainDepthMinimum", Kept::Times(2.0)),
     ("grain_depth_jitter", "grainDepthJitter", Kept::Same),
     ("grain_offset_jitter", "textureOffsetJitter", Kept::Switch),
     ("grain_brightness", "textureBrightness", Kept::Same),
@@ -382,7 +383,8 @@ const OLD_ADD: i64 = 3;
 /// scales. Any other key a file doesn't have is 0.
 const ABSENT: &[(&str, f64)] = &[
     ("shapeRoundness", 1.0),
-    ("grainDepth", 1.0),
+    // full depth: the file keeps it twice as deep as we draw it
+    ("grainDepth", 2.0),
     ("textureOffsetJitter", 1.0),
     ("texturizedGrainFollowsCamera", 1.0),
     ("pencilTipAnimation", 1.0),
@@ -1108,7 +1110,11 @@ mod tests {
         assert_eq!(back.notches.sizes[0], vec![0.25, 0.5]);
         let size_curve = back.size_curve.as_ref().unwrap();
         assert!((size_curve[1] - Vec2::new(0.42, 0.2)).length() < 1e-5);
-        assert!(back.opacity_curve.is_none());
+        let opacity_curve = back.opacity_curve.as_ref().unwrap();
+        assert_eq!(opacity_curve.len(), brush.opacity_curve.points().len());
+        for (got, want) in opacity_curve.iter().zip(brush.opacity_curve.points()) {
+            assert!((*got - *want).length() < 1e-4, "{got:?} {want:?}");
+        }
         assert!((back.shape_angle - brush.shape.rotation).abs() < 1e-6);
         let mut again = Brush::round_pen();
         for (k, v) in &back.settings {
