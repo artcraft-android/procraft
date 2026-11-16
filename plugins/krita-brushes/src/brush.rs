@@ -723,6 +723,35 @@ fn bristles_of(
 }
 
 /// A hard round tip `diameter` across.
+/// The half length of a thin line's pieces the thin line tips are drawn for (canvas pixels).
+pub const THIN_PIECE: f32 = 5.5;
+
+/// The tip a line a pixel thin is laid with, a piece at a time: across it, as much as a line a pixel
+/// wide covers of each pixel by how far its middle is from the line (one less that distance, the
+/// tip being as wide as two pixels once the app's dab reaches past it); along it, ramps where it
+/// meets the next piece, so that the two add up to one (none for a `hard` line, made hard by a
+/// threshold that keeps the pixels nearest).
+fn thin_line(hard: bool, light: bool) -> Mask {
+    const SIDE: u32 = 64;
+    // the app lays a picture over its dab and as far again as this past it each way
+    const PAST: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let pixels = if light {
+        Vec::new()
+    } else {
+        (0..SIDE * SIDE)
+            .map(|i| {
+                let u = ((i % SIDE) as f32 + 0.5) / (SIDE / 2) as f32 - 1.0;
+                let v = ((i / SIDE) as f32 + 0.5) / (SIDE / 2) as f32 - 1.0;
+                let across = 1.0 - v.abs();
+                let along =
+                    if hard { 1.0 } else { ((1.0 - u.abs()) * (THIN_PIECE + PAST) / (2.0 * PAST)).clamp(0.0, 1.0) };
+                (across * along * 255.0).round() as u8
+            })
+            .collect()
+    };
+    Mask { width: SIDE, height: SIDE, pixels }
+}
+
 fn round_tip(diameter: f32) -> Tip {
     tip_of(
         &format!(
@@ -963,9 +992,10 @@ impl Brush {
             // particles are its own tip)
             let round = round_tip(64.0).masks.into_iter().next();
             let square = Mask { width: 1, height: 1, pixels: if light { Vec::new() } else { vec![255] } };
-            // (and a hatching's own, for the background behind its lines)
-            let own = hatch_tip.as_ref().and_then(|t| t.masks.first().cloned());
-            let masks: Vec<Mask> = round.into_iter().chain([square]).chain(own).collect();
+            // (and a hatching's own, for the background behind its lines; then the thin lines')
+            let own = hatch_tip.as_ref().and_then(|t| t.masks.first().cloned()).unwrap_or_else(|| square.clone());
+            let thin = [thin_line(false, light), thin_line(true, light)];
+            let masks: Vec<Mask> = round.into_iter().chain([square, own]).chain(thin).collect();
             let count = masks.len() as u32;
             tip = Tip { tips: Tips::Images { count, pipe: None }, kind: Kind::Mask, masks, ..tip };
         }

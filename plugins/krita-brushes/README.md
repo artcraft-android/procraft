@@ -67,12 +67,14 @@ It comes with the app, off.
   ellipse, a rectangle, a pixel or the brush's own tip, sized, turned and coloured at random as it
   says); the bristle brush (each pixel of its tip a bristle, kept as likely as its density says, as
   long as the tip is opaque there; at each move each bristle a line a pixel wide from where it was,
-  or would have been, to where it is, the bristles spread by its scale and size, shaken by its
+  or would have been, to where it is (covering each pixel as far as a line a pixel wide does, or the
+  pixels nearest it when it isn't smoothed, half a pixel on as Krita lays them), the bristles spread by its scale and size, shaken by its
   randomness, sheared as the pen presses, turned by the rotation option, cut by the pressure's
   threshold, their ink running out pixel by pixel along its curve (soaked up from the colours
   under where the stroke starts if it says), taking their opacity and saturation, by its
   weights or not); the hatching brush (at each dab of its tip, the lines of a hatching anchored to
-  the canvas at its origin, a separation apart, as thick as it says, at its angle, crosshatched as
+  the canvas at its origin, a separation apart, half as wide across as its thickness says (as
+  Krita's own strokes come out), at its angle, crosshatched as
   its style and the crosshatching option say, its separation stepped by the separation option, on
   whole pixels unless it says, over the secondary colour if it says, kept inside the tip); the curve
   brush (a line from where the pen was, and a curve through the points it last passed, at the curves'
@@ -144,8 +146,8 @@ readers (which its tests use) run in it.
 - The sketch brush draws each move's lines over each other (Krita draws them into one dab first,
   then lays that at the opacity option's), keeps the last 4,096 points it passed, and takes its tip
   as round for its reach (Krita's mode that isn't simple takes the tip's own shape); hard lines (its
-  antialiasing off, as it is unless it says, and the bristle brush's) are the pixels a line covers
-  nearly half of or more; the spray brush's particle pictures, its sampled colours and its
+  antialiasing off, as it is unless it says, and the bristle brush's) are the pixels nearest the
+  line; the spray brush's particle pictures, its sampled colours and its
   background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).

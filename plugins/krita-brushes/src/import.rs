@@ -542,7 +542,8 @@ mod tests {
         assert!(!dabs.is_empty());
         assert!(dabs.iter().all(|d| d.flags & (16 | 512 | 2048) == 16 | 512 | 2048 && d.kind == 2 + 16));
         assert!((dabs[0].extra[2] - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
-        assert!((dabs[0].diameter - 30.0).abs() < 0.5, "{}", dabs[0].diameter);
+        // (each dab as much smaller as the app lays its tip's picture past it)
+        assert!((dabs[0].diameter + std::f32::consts::SQRT_2 - 30.0).abs() < 0.5, "{}", dabs[0].diameter);
         let blur = r#"<param name="Filter/id"><![CDATA[gaussian blur]]></param><filterconfig version="1"><param name="horizRadius"><![CDATA[5]]></param><param name="vertRadius"><![CDATA[5]]></param></filterconfig>"#;
         let dabs = drawn("filter", blur, 20.0);
         assert!(!dabs.is_empty() && dabs.iter().all(|d| d.flags & (16 | 512 | 4096 | 8192) == 16 | 512 | 4096 | 8192));
@@ -616,7 +617,7 @@ mod tests {
             40.0,
         );
         assert!(dabs.len() > 30);
-        assert!(dabs.iter().all(|d| (d.diameter - 12.0).abs() < 0.5 && d.opacity == 1.0));
+        assert!(dabs.iter().all(|d| (d.diameter + std::f32::consts::SQRT_2 - 12.0).abs() < 0.5 && d.opacity == 1.0));
         // the preset's opacity whatever the pressure: the quick brush has no opacity option
         let xml = r#"<Preset name="Q" paintopid="roundmarker"><param name="diameter"><![CDATA[12]]></param><param name="OpacityValue"><![CDATA[1]]></param></Preset>"#;
         let mut data = Record::new();
@@ -662,7 +663,8 @@ mod tests {
         let dabs = drawn("sketchbrush", lines, 40.0);
         // a line for each move at the least, and more back to the points it passed
         assert!(dabs.len() > 40, "{}", dabs.len());
-        assert!(dabs.iter().all(|d| d.tip == 1 && d.ratio <= 1.0));
+        // (lines a pixel thin with the thin line tips)
+        assert!(dabs.iter().all(|d| matches!(d.tip, 1 | 3 | 4) && d.ratio <= 1.0));
         assert!(dabs.iter().any(|d| d.diameter > 6.0), "lines longer than a move");
     }
 
@@ -690,10 +692,11 @@ mod tests {
         assert!(!dabs.is_empty() && dabs.len().is_multiple_of(29), "{}", dabs.len());
         let per_move = dabs.len() / 29;
         assert!((20..=40).contains(&per_move), "{per_move}");
-        assert!(dabs.iter().all(|d| d.tip == 1 && d.ratio <= 1.0 && d.opacity <= 1.0));
-        // spread by the scale: twice the tip's reach from the path
-        assert!(dabs.iter().all(|d| (d.y - 50.0).abs() <= 7.0), "within reach");
-        assert!(dabs.iter().any(|d| (d.y - 50.0).abs() >= 3.5), "spread");
+        assert!(dabs.iter().all(|d| matches!(d.tip, 3 | 4) && d.ratio <= 1.0 && d.opacity <= 1.0));
+        // spread by the scale: twice the tip's reach from the path (each half a pixel on, as Krita
+        // lays a bristle's points)
+        assert!(dabs.iter().all(|d| (d.y - 50.5).abs() <= 7.0), "within reach");
+        assert!(dabs.iter().any(|d| (d.y - 50.5).abs() >= 3.5), "spread");
     }
 
     /// Krita 3's chalk brush: its speckled round tip at every pixel; its dyna brush: circles a
@@ -703,7 +706,7 @@ mod tests {
         let chalk = drawn("chalkbrush", r#"<param name="Chalk/radius"><![CDATA[3]]></param>"#, 10.0);
         // a dab at every pixel of the path (30 samples 3 apart), each 7 across
         assert!(chalk.len() >= 80, "{}", chalk.len());
-        assert!(chalk.iter().all(|d| (d.diameter - 7.0).abs() < 0.01));
+        assert!(chalk.iter().all(|d| (d.diameter + std::f32::consts::SQRT_2 - 7.0).abs() < 0.01));
         let dots = r#"<param name="Dyna/action"><![CDATA[0]]></param><param name="Dyna/diameter"><![CDATA[3]]></param><param name="Dyna/mass"><![CDATA[0]]></param><param name="Dyna/drag"><![CDATA[0.65]]></param><param name="Dyna/width"><![CDATA[0.1]]></param>"#;
         let dyna = drawn("dynabrush", dots, 10.0);
         // a circle for each move after the first two (the weight starting where the pen first was)
@@ -769,7 +772,7 @@ mod tests {
         let dabs = drawn("hatchingbrush", hatching, 20.0);
         assert!(!dabs.is_empty() && dabs.iter().all(|d| d.flags & 8 == 0), "no masking stroke");
         // level lines on the canvas's rows a separation apart
-        assert!(dabs.iter().all(|d| d.angle.abs() < 1e-3 && d.tip == 1), "level");
+        assert!(dabs.iter().all(|d| d.angle.abs() < 1e-3 && d.tip == 3), "level");
         assert!(dabs.iter().all(|d| (d.y.rem_euclid(4.0)).min(4.0 - d.y.rem_euclid(4.0)) < 0.01), "on the rows");
         assert!(dabs.iter().any(|d| (d.y - 44.0).abs() < 0.01) && dabs.iter().any(|d| (d.y - 56.0).abs() < 0.01));
         // one dab's lines: inside its round tip, 20 across, not out in its box's corners

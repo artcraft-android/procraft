@@ -265,7 +265,7 @@ fn draw(e: &Element, m: Matrix, inherited: Style, canvas: &mut [f32], size: (u32
         }
         "polygon" | "polyline" => {
             let n = numbers(e.attribute("points").unwrap_or(""));
-            vec![n.chunks_exact(2).map(|p| apply(m, (p[0], p[1]))).collect()]
+            vec![n.as_chunks::<2>().0.iter().map(|p| apply(m, (p[0], p[1]))).collect()]
         }
         _ => return,
     };

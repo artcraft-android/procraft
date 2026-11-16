@@ -380,6 +380,9 @@ thread_local! {
 }
 /// The tip lines, dots and boxes are drawn with: a square (the round one first).
 const LINE_TIP: u32 = 1;
+/// A line a pixel thin's tips: smoothed, and hard.
+const THIN_TIP: u32 = 3;
+const THIN_HARD_TIP: u32 = 4;
 /// The least squash the app lays a dab at.
 const LEAST_SQUASH: f32 = 0.05;
 
@@ -967,8 +970,44 @@ impl Stroke {
         // pixels lighting both rather than neither)
         let hard = self.brush.sketch.as_ref().is_some_and(|s| !s.antialias)
             || self.brush.hairy.as_ref().is_some_and(|h| !h.antialias);
+        // a line a pixel thin (or thinner) covers each pixel as Krita's does: as much as a pixel wide
+        // line covers of it, smoothed (a thinner one fainter); or the pixels nearest it, hard
+        if width <= 1.5 {
+            let n = ((length / (2.0 * crate::brush::THIN_PIECE)).ceil() as usize).clamp(1, 1000);
+            let r = (length / n as f32 * 0.5).max(0.5);
+            // as wide as two pixels once the app's dab reaches past it
+            let ratio = ((1.0 - std::f32::consts::FRAC_1_SQRT_2) / r).clamp(LEAST_SQUASH, 1.0);
+            // (a hard line exactly between two rows takes the lower, as rounding does)
+            let nudge = if hard { 1e-3 } else { 0.0 };
+            for i in 0..n {
+                if self.out.len() >= MOST_DABS {
+                    return;
+                }
+                let t = (i as f32 + 0.5) / n as f32;
+                self.out.push(Dab {
+                    x: a.0 + dx * t + nudge,
+                    y: a.1 + dy * t + nudge,
+                    diameter: 2.0 * r,
+                    angle: dy.atan2(dx),
+                    ratio,
+                    opacity: if hard { opacity } else { opacity * width.min(1.0) },
+                    flow: 1.0,
+                    tip: if hard { THIN_HARD_TIP } else { THIN_TIP },
+                    flags: if colour.is_some() { OWN_COLOUR } else { 0 },
+                    colour: colour.unwrap_or([0.0; 3]),
+                    strength: 1.0,
+                    texture_offset: self.texture_offset,
+                    threshold: if hard { 0.5 } else { 0.0 },
+                    ..Dab::default()
+                });
+            }
+            return;
+        }
         let piece = length / pieces as f32;
         let long = piece.max(width);
+        // (the app lays a picture over its dab and as far again as this past it each way: the dab
+        // that much narrower, so the line covers its own width)
+        let width = (width - 2.0 * std::f32::consts::FRAC_1_SQRT_2).max(0.02);
         for i in 0..pieces {
             if self.out.len() >= MOST_DABS {
                 return;
@@ -1352,8 +1391,10 @@ impl Stroke {
             if h.threshold && bristle.length < threshold {
                 continue;
             }
-            let from = (a.x + fx1, a.y + fy1);
-            let to = (b.x + fx, b.y + fy);
+            // (Krita lays each point of a bristle's line over the pixel it is the corner of: half a
+            // pixel on from a line through the middles)
+            let from = (a.x + fx1 + 0.5, a.y + fy1 + 0.5);
+            let to = (b.x + fx + 0.5, b.y + fy + 0.5);
             let pixels = (((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt().ceil() as u32).max(1);
             let base = state.colour.or(bristle.colour);
             let Some(ink) = h.ink.as_ref().filter(|i| !i.depletion.is_empty()) else {
@@ -1600,10 +1641,9 @@ impl Stroke {
             angles.push(hatching.angle);
         }
         for angle in angles {
-            // Krita's thickness runs across the line's lesser axis (down a flat line, across a
-            // steep one), so its width across the line is less as it leans
-            let (sin, cos) = angle.to_radians().sin_cos();
-            let across = thickness * sin.abs().max(cos.abs());
+            // Krita's lines come out half as wide across as their thickness says, whatever their
+            // angle (as its own strokes show)
+            let across = thickness * 0.5;
             for (a, b) in hatch_lines(hatching, angle, separation, (x0, y0, w, h)) {
                 let length = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
                 let pieces = ((length / step).ceil() as usize).clamp(1, 4096);
@@ -2033,6 +2073,7 @@ impl Stroke {
             self.keep(&mut dab, precision, (dw, dh), softness.unwrap_or(1.0));
         }
         if scale > 0.0 && dab.diameter.is_finite() && lays {
+            fit_to_reach(&mut dab);
             self.out.push(dab);
         }
         // the spacing this dab sets for the next: as Krita measures the tip (its box turned by its
@@ -2086,6 +2127,24 @@ impl Stroke {
             _ => self.kept = Some(next),
         }
     }
+}
+
+/// How far past a dab the app lays its tip's picture each way (canvas pixels).
+const PAST: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// `dab` made that much smaller, so that its tip's picture lies where Krita lays the tip (fainter
+/// where it can't be made small enough).
+fn fit_to_reach(dab: &mut Dab) {
+    let half = dab.diameter * 0.5;
+    let across = half * dab.ratio;
+    if !(half > 0.0 && across > 0.0) {
+        return;
+    }
+    let fitted = (half - PAST).max(0.01);
+    dab.ratio = ((across - PAST).max(0.01) / fitted).clamp(LEAST_SQUASH, 1.0);
+    dab.diameter = 2.0 * fitted;
+    let laid = (fitted + PAST) * (fitted * dab.ratio + PAST);
+    dab.opacity *= (half * across / laid).min(1.0);
 }
 
 /// A dab's turn (radians, as Krita turns its dabs) as its rotation option gives it, the canvas
@@ -2260,6 +2319,32 @@ fn rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thin_line_covers_its_pixels_as_a_line_a_pixel_wide_does() {
+        let preset = crate::preset::Preset::read(
+            r#"<Preset name="B" paintopid="hairybrush"><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1"><MaskGenerator type="circle" id="default" diameter="4"/></Brush>]]></param><param name="HairyBristle/antialias"><![CDATA[true]]></param></Preset>"#,
+        )
+        .unwrap();
+        let brush = Brush::read(&preset, &|_| None, true).unwrap();
+        let begin =
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 1, turn: 0.0 };
+        let mut s = Stroke::new(Rc::new(brush), begin);
+        // 30 pixels: three pieces 10 long, two pixels wide once the app's dab reaches past them
+        s.line((0.0, 5.0), (30.0, 5.0), 1.0, 0.8, None);
+        assert_eq!(s.out.len(), 3);
+        assert!(s.out.iter().all(|d| d.tip == THIN_TIP && d.diameter == 10.0 && d.threshold == 0.0));
+        assert!((s.out[0].ratio * 5.0 - (1.0 - std::f32::consts::FRAC_1_SQRT_2)).abs() < 1e-5);
+        assert!((s.out[1].x - 15.0).abs() < 1e-4 && s.out[0].opacity == 0.8);
+        // a wider one its own width once the app's dab reaches past it
+        s.out.clear();
+        s.line((0.0, 5.0), (10.0, 5.0), 4.0, 1.0, None);
+        assert_eq!(s.out[0].tip, LINE_TIP);
+        assert!((s.out[0].ratio * s.out[0].diameter - (4.0 - std::f32::consts::SQRT_2)).abs() < 1e-4);
+        // the thin tips: across, one less the distance from the middle (two pixels across)
+        let tips = &s.brush.tip.masks;
+        assert_eq!(tips.len(), 5);
+    }
 
     #[test]
     fn a_walk_lays_a_dab_each_spacing() {
