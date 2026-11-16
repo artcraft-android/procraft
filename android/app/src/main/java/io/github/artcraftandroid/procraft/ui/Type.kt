@@ -86,23 +86,25 @@ fun ProCraftTheme(interfaceSize: Float = 1f, clear: Clearance = Clearance(), con
     }
     MaterialTheme(colorScheme = darkColorScheme(primary = Pc.Accent), typography = typography) {
         val density = LocalDensity.current
+        val band = remember { BandColour() }
         CompositionLocalProvider(
             LocalDensity provides Density(density.density * interfaceSize, 1f),
             LocalConfiguration provides sizedScreen(interfaceSize, clear, density.density),
             LocalSizeSettled provides sizeSettled(interfaceSize),
             LocalTextStyle provides text,
             LocalClearance provides clear,
+            LocalBandColour provides band,
             androidx.compose.foundation.LocalIndication provides NoIndication,
         ) {
-            // the interface inside what it keeps clear of, the rest in the top bar's own colour (as
-            // the bar shows over the surround, so the band and the bar read as one); with nothing to keep
+            // the interface inside what it keeps clear of, the rest in the colour of what is under it
+            // (the top bar's, or a screen's own: see BandColour); with nothing to keep
             // clear of, the whole window, each part of it measured to it as the window's root does
             val inside = with(LocalDensity.current) {
                 androidx.compose.foundation.layout.PaddingValues(clear.left.toDp(), clear.top.toDp(), clear.right.toDp(), clear.bottom.toDp())
             }
             androidx.compose.foundation.layout.Box(
                 androidx.compose.ui.Modifier.fillMaxSize()
-                    .then(if (clear.none) androidx.compose.ui.Modifier else androidx.compose.ui.Modifier.background(Pc.Bar.copy(alpha = 1f)))
+                    .then(if (clear.none) androidx.compose.ui.Modifier else androidx.compose.ui.Modifier.background(band.colour ?: Pc.Bar.copy(alpha = 1f)))
                     .padding(inside),
                 propagateMinConstraints = true,
             ) { content() }
@@ -149,6 +151,28 @@ data class Clearance(val left: Int = 0, val top: Int = 0, val right: Int = 0, va
 
 /** What the interface keeps clear of, inside the theme: see [Clearance]. */
 val LocalClearance = staticCompositionLocalOf { Clearance() }
+
+/**
+ * The colour of the band the interface keeps clear of (see [Clearance]): the top bar's own while
+ * the canvas shows, or the colour a screen of its own gives with [ClearBandShows] (the gallery's
+ * background), so the band and what is under it read as one.
+ */
+class BandColour {
+    var colour by androidx.compose.runtime.mutableStateOf<androidx.compose.ui.graphics.Color?>(null)
+}
+
+/** The band's colour, inside the theme: see [BandColour]. */
+val LocalBandColour = staticCompositionLocalOf { BandColour() }
+
+/** While this is composed, the band kept clear of shows [colour] (a screen's own background). */
+@Composable
+fun ClearBandShows(colour: androidx.compose.ui.graphics.Color) {
+    val band = LocalBandColour.current
+    androidx.compose.runtime.DisposableEffect(band, colour) {
+        band.colour = colour
+        onDispose { if (band.colour == colour) band.colour = null }
+    }
+}
 
 /**
  * What the interface keeps clear of with [plugins] as they are ([changes] when they change): the

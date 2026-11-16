@@ -180,6 +180,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
         uri?.let(vm::newFromPicture)
     }
     if (vm.openStack != null && !selecting) BackHandler { vm.showStack(null) }
+    // the band kept clear of the status bar and camera in the gallery's own colour
+    ClearBandShows(Pc.GalleryBackground)
     BoxWithConstraints(Modifier.fillMaxSize().background(Pc.GalleryBackground)) {
         val (screenWidth, screenHeight) = maxWidth to maxHeight
         vm.windowPx = androidx.compose.ui.unit.IntSize(constraints.maxWidth, constraints.maxHeight)
