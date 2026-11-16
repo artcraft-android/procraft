@@ -458,7 +458,9 @@ impl CanvasSession {
             let tilts = brush.setting("preview_tilt") >= 0.5;
             let mut stroke =
                 StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady().on_pad(tilts);
-            canvas.add_stamps(&stroke.add(&samples));
+            // (its first stamps as they turned to the way it goes, so its end lays only the rest)
+            let added = stroke.add(&samples);
+            canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });
             canvas.replace_stamps(&stroke.finish());
         }
         canvas.end_stroke();

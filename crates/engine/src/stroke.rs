@@ -1034,6 +1034,9 @@ pub struct StrokeBuilder {
     /// The stamps laid as the stroke is drawn stay as they are when it ends (see
     /// [`StrokeBuilder::hold_laid`]).
     laid_held: bool,
+    /// The stamps placed before the path had a direction turned with it after they were handed
+    /// out (see [`StrokeBuilder::take_turned`]).
+    turned: bool,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -1281,6 +1284,7 @@ impl StrokeBuilder {
             dab_turn: 0.0,
             spacing_end: None,
             laid_held: false,
+            turned: false,
         }
         .reading_extras()
     }
@@ -1508,6 +1512,23 @@ impl StrokeBuilder {
     /// has moved the paint already): its end isn't walked again, only tapered.
     pub fn hold_laid(&mut self) {
         self.laid_held = true;
+    }
+
+    /// Whether the stamps placed before the path had a direction (a stroke's first) turned with it
+    /// since this was last asked, after they were handed out: laid as they were, the stroke is
+    /// laid again with them as they are now ([`StrokeBuilder::placed_stamps`]), while it is a few
+    /// stamps long, or the stroke's end would find them changed and lay all of it again.
+    pub fn take_turned(&mut self) -> bool {
+        std::mem::take(&mut self.turned)
+    }
+
+    /// The stamps placed so far, as they are handed out while the stroke is drawn.
+    pub fn placed_stamps(&self) -> Vec<Stamp> {
+        if let Some(outside) = &self.outside.0 {
+            return outside.stamps.clone();
+        }
+        let start = self.start_span();
+        self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
 
     /// The stamps from `from` on as they would be drawn were the stroke to end here (its end
@@ -2171,6 +2192,7 @@ impl StrokeBuilder {
                 p.angle += turn;
             }
             self.dab_turn = turn;
+            self.turned |= turn != 0.0 && !self.placed.is_empty();
         }
         self.last_seg = whole.unwrap_or(seg);
         let mut done = 0.0f32;
@@ -2964,6 +2986,30 @@ mod tests {
 
     fn line(n: usize, len: f32) -> Vec<Sample> {
         (0..=n).map(|i| Sample::at(Vec2::new(len * i as f32 / n as f32, 50.0), 1.0, i as f64 * 4.0)).collect()
+    }
+
+    #[test]
+    fn a_stroke_whose_stamps_follow_its_way_is_laid_as_it_ends_with_its_first_turned() {
+        // drawn sample by sample, as the canvas lays them: what is handed out, laid again once
+        // its first stamps turn to the way it goes, is how it starts as it ends, so its end lays
+        // only the rest
+        let brush = Brush { shape: crate::brush::Shape { follow: 1.0, ..crate::brush::Shape::default() }, ..plain() };
+        let mut stroke = StrokeBuilder::new(brush, 20.0, Pointer::Stylus);
+        let (mut laid, mut turned) = (Vec::new(), 0);
+        // up the canvas: its first stamp turns from how it began
+        for i in 0..=40 {
+            let s = Sample::at(Vec2::new(50.0, 300.0 - i as f32 * 6.0), 1.0, f64::from(i) * 4.0);
+            let added = stroke.add(&[s]);
+            if stroke.take_turned() {
+                turned += 1;
+                laid = stroke.placed_stamps();
+            } else {
+                laid.extend(added);
+            }
+        }
+        let all = stroke.finish();
+        assert_eq!(turned, 1);
+        assert!(all.len() > laid.len() && all.starts_with(&laid), "{} of {}", laid.len(), all.len());
     }
 
     #[test]

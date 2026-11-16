@@ -1165,7 +1165,12 @@ fn draw_samples(
         return !kept.is_empty() || !tip.is_empty();
     }
     let stamps = guide::mirrored(guide, &builder.add(samples));
-    canvas.add_stamps(&stamps);
+    if builder.take_turned() {
+        // its first stamps turned to the way it goes: the few laid so far laid again as they are
+        canvas.replace_stamps(&guide::mirrored(guide, &builder.placed_stamps()));
+    } else {
+        canvas.add_stamps(&stamps);
+    }
     // the stretch to the newest point waits for the point after it to curve by: shown meanwhile
     // (as predicted input is, until the next)
     show_ahead(canvas, builder, &[], guide);
