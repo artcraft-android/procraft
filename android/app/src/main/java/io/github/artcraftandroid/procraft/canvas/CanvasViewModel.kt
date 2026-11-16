@@ -3783,6 +3783,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun timeLapseFrame(i: Int): Bitmap? = timeLapse?.frame(i)
 
+    /** Whether frame [i] is kept: one that can't be read but is, this device can't decode. */
+    fun timeLapseFrameKept(i: Int): Boolean = timeLapse?.kept(i) ?: false
+
     fun changeTimeLapseRecording(on: Boolean) {
         timeLapse?.recording = on
         timeLapseRecording = on
@@ -3875,11 +3878,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (exportCancelled) return null
             if (made == null) {
-                // which of the two: they are different faults, in a report too
-                val readable = withContext(Dispatchers.IO) { t.frame(0)?.also { it.recycle() } != null }
-                showNotice(if (readable) "The time-lapse video couldn't be made." else "The time-lapse can't be read on this device.", warning = true)
+                // which of the three: they are different faults, in a report too
+                val why = withContext(Dispatchers.IO) {
+                    when {
+                        t.frame(0)?.also { it.recycle() } != null -> "The time-lapse video couldn't be made."
+                        t.kept(0) -> "The time-lapse can't be read on this device."
+                        else -> TIME_LAPSE_MISSING
+                    }
+                }
+                showNotice(why, warning = true)
                 return null
             }
+            // frames left in their place, not left out silently
+            if (t.unread > 0) showNotice("${t.unread} frames of the time-lapse can't be read on this device: the one before each shows in its place.", warning = true)
             // full, then the check drawn in it before the card goes
             exportShown = ExportShown(1f, done = true)
             kotlinx.coroutines.delay(EXPORT_DONE_MS)
@@ -8158,6 +8169,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         /** A finished export's check is drawn and shown this long before its card goes (ms, as measured). */
         const val EXPORT_DONE_MS = 450L
+
+        /** What the replay and the export say when a frame isn't kept at all (not one this device can't decode). */
+        const val TIME_LAPSE_MISSING = "Part of the time-lapse is missing from the artwork."
 
         /** How often the export card asks the core how far an export has come (ms). */
         private const val EXPORT_POLL_MS = 50L
