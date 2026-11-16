@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     /// A Krita colour smudge brush moves the paint it goes over: dragged from red into the clear, it
-    /// lays the red where there was nothing, whatever the colour.
+    /// lays the red where there was nothing, whatever the colour; within a selection, only inside it.
     #[test]
     fn a_krita_colour_smudge_moves_the_paint_it_goes_over() {
         let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
@@ -1726,6 +1726,18 @@ mod tests {
         let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
         assert!(at_x(130)[0] > 128 && at_x(130)[3] > 128 && at_x(130)[2] < 64, "red dragged out: {:?}", at_x(130));
         assert_eq!(at_x(190)[3], 0, "past the stroke, still clear");
+        // with the left 120 pixels selected, a stroke across its edge moves nothing outside it
+        s.select_shape(false, 0.0, 0.0, 120.0, 120.0, crate::SelectionJoin::Add);
+        let coverage = s.shared.lock().selection.as_ref().unwrap().data.clone();
+        let at = |x: f32| crate::PenSample { y: 25.0, ..at(x) };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
+        s.stroke_add((61..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let moved = |i: usize| px[i * 4..i * 4 + 4] != after[i * 4..i * 4 + 4];
+        assert!(moved(25 * 200 + 110), "dragged inside");
+        let outside = (0..200 * 120).filter(|&i| coverage[i] == 0 && moved(i)).count();
+        assert_eq!(outside, 0, "pixels outside the selection changed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

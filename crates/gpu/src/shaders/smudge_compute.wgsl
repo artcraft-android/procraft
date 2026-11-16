@@ -116,7 +116,7 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = st.bbox.xy + vec2<i32>(id.xy);
-    if (!in_bbox(p)) {
+    if (!in_bbox(p) || left_out(p)) {
         return;
     }
     work[window_index(p)] = pack4x8unorm(synthesized(p));

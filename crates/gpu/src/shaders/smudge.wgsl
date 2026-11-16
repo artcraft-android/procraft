@@ -172,12 +172,19 @@ struct WetPass {
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
 @group(1) @binding(3) var grain_smp: sampler;
-// how much of each canvas pixel is selected (all of it without a selection): paint is moved only
-// as far as that, as a brush lays it
+// how much of each canvas pixel is selected (all of it without a selection, a single texel): paint
+// is moved only as far as that, as a brush lays it
 @group(1) @binding(4) var selected: texture_2d<f32>;
 
 fn selected_at(p: vec2<i32>) -> f32 {
-    return textureSampleLevel(selected, shape_smp, (vec2<f32>(p) + 0.5) / vec2<f32>(st.size), 0.0).r;
+    let last = vec2<i32>(textureDimensions(selected)) - 1;
+    return textureLoad(selected, clamp(p, vec2<i32>(0), last), 0).r;
+}
+
+// whether the selection leaves canvas pixel `p` out: then nothing is laid there, so not even the
+// rounding of what is laid can move it
+fn left_out(p: vec2<i32>) -> bool {
+    return selected_at(p) <= 0.0;
 }
 
 // the layer as it was before the stroke at canvas pixel `p`
@@ -582,7 +589,7 @@ fn deposit(p: vec2<i32>) -> Deposit {
     dep.into_grained = st.laid_apart == 2u;
     dep.amount_set = false;
     dep.shown_set = false;
-    if (!in_bbox(p)) {
+    if (!in_bbox(p) || left_out(p)) {
         return dep;
     }
     // into the stamp's frame
@@ -669,8 +676,8 @@ fn deposit(p: vec2<i32>) -> Deposit {
 // this far: more, and the change's own rounding shows as speckle.
 const LAID_MOST_SCALE: f32 = 4.0;
 
-// The layer at canvas pixel `p` (one of the stamp's bounds) once paint laid apart is put together
-// there, dithered, before it is rounded to 8 bits.
+// The layer at canvas pixel `p` (one of the stamp's bounds, and selected) once paint laid apart is
+// put together there, dithered, before it is rounded to 8 bits.
 fn synthesized(p: vec2<i32>) -> vec4<f32> {
     let laid = shown_at(p);
     let was = before_at(p);

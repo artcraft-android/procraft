@@ -13531,6 +13531,87 @@ fn smudging_moves_paint_only_inside_the_selection() {
     assert_eq!(changed(102..200), 0, "nothing moved outside");
 }
 
+/// Nothing a selection leaves out changes under a brush that moves paint, by even a level: the
+/// smudge tool with its own brush, one with a grain and one that blurs, and wet paint and paint
+/// laid in place, each stroke going from inside out, from outside in, along the edge and to and
+/// fro across it, over paint on both sides. (Pixels its edge only partly covers may change.)
+#[test]
+fn nothing_a_selection_leaves_out_changes_under_a_brush_that_moves_paint() {
+    let Some(s) = session(160, 160) else { return };
+    s.set_brush_size(0.5);
+    for (k, y) in [15.0f32, 45.0, 75.0, 105.0, 135.0].into_iter().enumerate() {
+        let [r, g, b] = [[0.0, 0.0, 1.0], [1.0, 0.2, 0.0], [0.1, 0.8, 0.3]][k % 3];
+        s.set_color(r, g, b);
+        s.stroke_begin(PointerKind::Finger, vec![sample(5.0, y, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(5.0 + i as f32 * 8.0, y, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    // the left half, and a disc on the right whose rim is partly selected
+    s.select_shape(false, 0.0, 0.0, 80.0, 160.0, crate::SelectionJoin::Add);
+    s.select_shape(true, 100.0, 60.0, 140.0, 100.0, crate::SelectionJoin::Add);
+    let coverage = s.shared.lock().selection.as_ref().unwrap().data.clone();
+    let layer = s.layers()[0].id;
+    let brushes: Vec<(ToolKind, (usize, usize), String)> = {
+        let st = s.shared.lock();
+        let first = |want: &dyn Fn(&procraft_engine::brush::Brush) -> bool| {
+            st.library
+                .iter()
+                .enumerate()
+                .find_map(|(i, set)| set.brushes.iter().position(want).map(|j| ((i, j), set.brushes[j].name.clone())))
+        };
+        let picks = [
+            (ToolKind::Smudge, Some((st.smudge_brush, st.brush(ToolKind::Smudge).name.clone()))),
+            (ToolKind::Smudge, first(&|b| b.grain.image.is_some() && b.setting("wet_blur") == 0.0)),
+            (ToolKind::Smudge, first(&|b| b.setting("wet_blur") > 0.0)),
+            (ToolKind::Paint, first(&|b| b.mixes_wet() && !b.mixes_with_stroke())),
+            (ToolKind::Paint, first(&|b| b.mixes_wet() && b.mixes_with_stroke())),
+            (ToolKind::Paint, first(&|b| b.laid_in_place())),
+        ];
+        picks
+            .into_iter()
+            .map(|(tool, pick)| {
+                let (at, name) = pick.expect("a brush of each kind");
+                (tool, at, name)
+            })
+            .collect()
+    };
+    let strokes: [Vec<(f32, f32)>; 4] = [
+        (0..40).map(|k| (40.0 + k as f32 * 2.3, 10.0 + k as f32 * 3.6)).collect(),
+        (0..40).map(|k| (150.0 - k as f32 * 3.3, 30.0 + k as f32 * 1.5)).collect(),
+        (0..40).map(|k| (80.0, 5.0 + k as f32 * 3.8)).collect(),
+        (0..40).map(|k| (112.0 - ((k % 8) as f32 - 4.0).abs() * 13.0, 10.0 + k as f32 * 3.5)).collect(),
+    ];
+    for (tool, (set, index), name) in brushes {
+        s.set_tool(tool);
+        assert!(s.select_brush(set as u32, index as u32));
+        s.set_brush_size(0.5);
+        s.set_color(0.9, 0.9, 0.1);
+        let mut inside = 0;
+        for (n, points) in strokes.iter().enumerate() {
+            let before = s.copy_layer_contents(layer).unwrap().rgba;
+            let at = |k: usize| sample(points[k].0, points[k].1, k as f64 * 8.0);
+            s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+            s.stroke_add((1..points.len()).map(at).collect());
+            s.stroke_end(vec![]);
+            let after = s.copy_layer_contents(layer).unwrap().rgba;
+            let changed = |i: &usize| before[i * 4..i * 4 + 4] != after[i * 4..i * 4 + 4];
+            let left_out: Vec<usize> = (0..160 * 160).filter(|&i| coverage[i] == 0).filter(changed).collect();
+            if let Some(&i) = left_out.first() {
+                panic!(
+                    "{name} ({tool:?}), stroke {n}: {} pixels outside changed, ({}, {}) {:?} to {:?}",
+                    left_out.len(),
+                    i % 160,
+                    i / 160,
+                    &before[i * 4..i * 4 + 4],
+                    &after[i * 4..i * 4 + 4]
+                );
+            }
+            inside += (0..160 * 160).filter(|&i| coverage[i] == 255).filter(changed).count();
+        }
+        assert!(inside > 500, "{name} ({tool:?}) moved paint inside: {inside}");
+    }
+}
+
 /// How long a large library takes to keep and to open again: `LIBRARY_CORPUS` a folder of brush
 /// files (searched through), all brought in first.
 #[test]

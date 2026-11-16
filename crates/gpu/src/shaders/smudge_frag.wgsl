@@ -164,7 +164,7 @@ fn fs_deposit(@builtin(position) pos: vec4<f32>) -> Deposited {
 @fragment
 fn fs_synthesize(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = fragment_pixel(pos);
-    if (!in_bbox(p)) {
+    if (!in_bbox(p) || left_out(p)) {
         return work_at(p);
     }
     return to_eight(synthesized(p));
