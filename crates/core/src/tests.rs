@@ -1849,7 +1849,11 @@ fn an_old_gpu_paints_smudges_and_liquifies_as_others_do() {
         assert_eq!(s.take_failure(), None);
         let liquified = picture(&s);
         assert_ne!(liquified, smudged);
+        // undone, Liquify opens again with its work; cancelled, the smudge is back
         s.undo();
+        assert!(s.is_adjusting());
+        assert_eq!(picture(&s), liquified);
+        s.adjust_end(false);
         assert_eq!(picture(&s), smudged);
         (painted, smudged, liquified)
     });
