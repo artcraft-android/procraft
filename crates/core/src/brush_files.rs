@@ -210,7 +210,14 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
         return Some(read);
     }
     if other {
-        return read_other(bytes, stem, &name);
+        // (one the app reads no brush from still comes, for the brush engines of plugins on: a
+        // bundle of brushes only one of them draws)
+        let file = Some((name.clone(), bytes.into()));
+        return read_other(bytes, stem.clone(), &name).or(Some(ReadBrushes::Set {
+            name: stem,
+            brushes: Vec::new(),
+            file,
+        }));
     }
     read_ours(bytes)
         .or_else(|| {
@@ -233,6 +240,9 @@ impl CanvasSession {
                 if let (Some(hooks), Some((file_name, bytes))) = (hooks, file) {
                     let made = crate::plugin_brushes::make_brushes(&hooks, &file_name, &bytes);
                     crate::plugin_brushes::join_made(&mut brushes, made);
+                }
+                if brushes.is_empty() {
+                    return None;
                 }
                 let mut st = self.shared.lock();
                 brushes.iter_mut().for_each(|b| st.grain_store.take(b));
