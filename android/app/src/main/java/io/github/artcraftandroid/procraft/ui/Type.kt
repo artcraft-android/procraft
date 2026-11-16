@@ -94,14 +94,15 @@ fun ProCraftTheme(interfaceSize: Float = 1f, clear: Clearance = Clearance(), con
             LocalClearance provides clear,
             androidx.compose.foundation.LocalIndication provides NoIndication,
         ) {
-            // the interface inside what it keeps clear of, the rest black; with nothing to keep
+            // the interface inside what it keeps clear of, the rest in the top bar's own colour (as
+            // the bar shows over the surround, so the band and the bar read as one); with nothing to keep
             // clear of, the whole window, each part of it measured to it as the window's root does
             val inside = with(LocalDensity.current) {
                 androidx.compose.foundation.layout.PaddingValues(clear.left.toDp(), clear.top.toDp(), clear.right.toDp(), clear.bottom.toDp())
             }
             androidx.compose.foundation.layout.Box(
                 androidx.compose.ui.Modifier.fillMaxSize()
-                    .then(if (clear.none) androidx.compose.ui.Modifier else androidx.compose.ui.Modifier.background(androidx.compose.ui.graphics.Color.Black))
+                    .then(if (clear.none) androidx.compose.ui.Modifier else androidx.compose.ui.Modifier.background(Pc.Bar.copy(alpha = 1f)))
                     .padding(inside),
                 propagateMinConstraints = true,
             ) { content() }
