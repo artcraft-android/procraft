@@ -391,20 +391,37 @@ impl CanvasSession {
 
     /// Set `set` as a set file.
     pub fn brush_set_as_file(&self, set: u32) -> Option<Vec<u8>> {
-        let (name, brushes) = {
+        let (name, count) = {
             let st = self.shared.lock();
             let entry = st.library.get(set as usize)?;
-            let brushes: Vec<Brush> =
-                entry.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, set as usize, i)).collect();
-            (entry.name.clone(), brushes)
+            (entry.name.clone(), entry.brushes.len())
         };
-        let made: Vec<Made> = brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, set, i as u32)).collect();
-        let brushes: Vec<Brush> = brushes.into_iter().map(|b| self.as_written(b)).collect();
-        let list: Vec<(&Brush, &str, Pictures<'_>)> =
-            brushes.iter().zip(&made).map(|(b, m)| (b, author_name(b), m.pictures())).collect();
         let seed =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-        Some(brushfile::write_set(&name, &list, |i| folder_id(seed, i)))
+        self.brushes_as_set_file(set, 0..count, &name, seed)
+    }
+}
+
+impl CanvasSession {
+    /// Brushes `range` of set `set` as a set file called `name`, their folders named from `seed`.
+    pub(crate) fn brushes_as_set_file(
+        &self,
+        set: u32,
+        range: std::ops::Range<usize>,
+        name: &str,
+        seed: u64,
+    ) -> Option<Vec<u8>> {
+        let brushes: Vec<(usize, Brush)> = {
+            let st = self.shared.lock();
+            let entry = st.library.get(set as usize)?;
+            let brushes = entry.brushes.get(range.clone())?;
+            brushes.iter().zip(range).map(|(b, i)| (i, st.with_sliders(b, set as usize, i))).collect()
+        };
+        let made: Vec<Made> = brushes.iter().map(|(i, b)| self.brush_pictures(b, set, *i as u32)).collect();
+        let brushes: Vec<Brush> = brushes.into_iter().map(|(_, b)| self.as_written(b)).collect();
+        let list: Vec<(&Brush, &str, Pictures<'_>)> =
+            brushes.iter().zip(&made).map(|(b, m)| (b, author_name(b), m.pictures())).collect();
+        Some(brushfile::write_set(name, &list, |i| folder_id(seed, i)))
     }
 }
 
