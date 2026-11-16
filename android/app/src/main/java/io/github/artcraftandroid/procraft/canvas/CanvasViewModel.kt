@@ -3921,11 +3921,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The canvas's dots per inch, as the crop's settings have it. */
     var cropDpi by mutableStateOf(132f)
         private set
+    /** While a corner or side of the frame is dragged: the size it frames, by the touch. */
+    var cropReadout by mutableStateOf<io.github.artcraftandroid.procraft.core.CropReadout?>(null)
+        private set
 
     /** The crop as the core has it now. */
     private fun readCrop() {
         val c = session?.cropShown()
         cropRect = c?.let { androidx.compose.ui.geometry.Rect(it.x, it.y, it.x + it.width, it.y + it.height) }
+        cropReadout = c?.readout
         if (c == null) return
         cropAngle = c.angle
         cropResample = c.resample
@@ -3960,6 +3964,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A press on the frame at window point [at]: near a corner or a side's middle it takes that, else the whole frame. */
     fun cropPress(at: Offset) {
         session?.cropPress(at.x, at.y)
+        readCrop()
     }
 
     /** The drag on the frame reached window point [at]. */
@@ -3970,6 +3975,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cropRelease() {
         session?.cropRelease()
+        readCrop()
     }
 
     fun changeCropAngle(radians: Float) {
