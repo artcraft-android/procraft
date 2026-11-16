@@ -201,13 +201,23 @@ pub extern "C" fn procraft_brush_add(stroke: i32, len: i32) -> i32 {
     })
 }
 
-/// Stroke `stroke` ends: its last dabs (none: each is laid as its samples come).
+/// Stroke `stroke` ends: its last dabs (most are laid as their samples come).
 #[unsafe(no_mangle)]
 pub extern "C" fn procraft_brush_end(stroke: i32) -> i32 {
     with(|s| {
-        s.output.clear();
-        s.strokes.retain(|(n, _)| *n != stroke);
-        0
+        let State { strokes, output, .. } = s;
+        output.clear();
+        let mut laid = 0;
+        if let Some((_, open)) = strokes.iter_mut().find(|(n, _)| *n == stroke) {
+            open.finish();
+            let dabs = std::mem::take(&mut open.out);
+            for d in &dabs {
+                d.write(output);
+            }
+            laid = dabs.len() as i32;
+        }
+        strokes.retain(|(n, _)| *n != stroke);
+        laid
     })
 }
 

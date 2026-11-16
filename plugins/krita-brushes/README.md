@@ -3,7 +3,8 @@
 A ProCraft plugin that is a brush engine (see the guide's "Brush engines of its own"): it reads
 Krita's brush presets (`.kpp`) and bundles (`.bundle`) as they are imported, and draws their
 brushes as Krita's pixel brush and colour smudge brush draw them, and its quick, tangent normal,
-sketch, spray, bristle, hatching, curve, particle and grid brushes as far as dabs draw them. It comes
+sketch, spray, bristle, hatching, curve, particle, grid, clone, deform, filter and shape brushes as
+far as dabs draw them. It comes
 with the app, off.
 
 ## What it draws
@@ -71,6 +72,16 @@ with the app, off.
   takes only its size and spacing options; the sketch, spray and bristle brushes their size,
   opacity and rotation; the hatching brush its size and opacity besides its own; the curve brush its
   opacity besides its own; the particle and grid brushes none.
+- The clone brush (each dab lays the layer's pixels from elsewhere, from the layer as it was before
+  the stroke or from every layer, over what is there: from as far away as the stroke started from
+  its source, the source moving with the brush, or from the source itself; a tap sets the source),
+  the deform brush (each dab, an ellipse of its own diameter, squash, scale, turn and density, takes
+  the pixels under it from elsewhere under it: grown or shrunk, swirled, moved with the pen, through
+  a lens or scattered, by its amount or its counter, mixed from the pixels around or not) and the
+  filter brush (each dab lays the layer as it was before the stroke blurred, by a Gaussian blur or a
+  blur, or sharpened by an unsharp mask, under its tip); the shape brush (the outline the stroke
+  makes, its corners smoothed or its places drawn on by its speed as it says, filled as the stroke
+  ends by the even-odd or the winding rule).
 - Krita 3's chalk and dyna brushes (Krita dropped them in version 4): the chalk brush's speckled round
   tip at every pixel of the path, its ink running out with the log of its dabs if it says; the dyna
   brush's weight on a spring (its mass and drag, in the canvas as 1 each way) pulled towards where
@@ -97,10 +108,12 @@ readers (which its tests use) run in it.
 
 ## Not yet
 
-- Krita's other engines come in as the app reads them. Some lay no dabs at all, so a brush engine
-  of dabs can't draw them: the shape brush (it fills the outline the stroke makes), the filter brush
-  (it filters what is under it), the deform brush (it moves the pixels under it) and the clone brush
-  (it copies pixels from elsewhere). The chalk brush picks among a few speckled tips (Krita speckles
+- Krita's MyPaint brushes come in as the app reads them. The clone brush's source is set by a tap
+  (Krita's with a key held), and it doesn't heal; the filter brush draws blurs and the unsharp mask
+  only (others lay nothing), with the app's blur matched to theirs; the deform brush's lens is as
+  wide as each dab (Krita's as the brush's own diameter) and its spacing scales with its size; the
+  shape brush fills its outline as the stroke ends (Krita as it goes) without its displacement, its
+  edges whole pixels. The chalk brush picks among a few speckled tips (Krita speckles
   each dab afresh). The dyna brush's weight is pulled at each sample the app hands it (Krita at each
   of the tablet's events), so the more samples, the smaller and closer its circles.
 - The bristle brush keeps at most 4,096 bristles, lays its lines over what is there whatever its

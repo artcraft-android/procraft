@@ -288,6 +288,12 @@ pub struct Brush {
     pub grid: Option<crate::others::Grid>,
     pub chalk: Option<crate::others::Chalk>,
     pub dyna: Option<crate::others::Dyna>,
+    /// Krita's clone, deform and filter brushes: dabs that lay the layer's own pixels, from
+    /// elsewhere, moved about or blurred.
+    pub clone: Option<crate::others::Clone>,
+    pub deform: Option<crate::others::Deform>,
+    pub filter: Option<crate::others::Filter>,
+    pub shape: Option<crate::others::Shape>,
     pub sketch_radius: f32,
     /// How strongly a lightness tip's grey shows, and its sharpness.
     pub lightness: CurveOption,
@@ -310,7 +316,7 @@ pub struct Brush {
 /// Krita's engines this one draws: its pixel brush, colour smudge, quick brush, tangent normal,
 /// sketch, spray, bristle, hatching, curve, particle and grid brushes, and Krita 3's chalk and dyna
 /// brushes.
-pub const ENGINES: [&str; 13] = [
+pub const ENGINES: [&str; 17] = [
     "paintbrush",
     "colorsmudge",
     "roundmarker",
@@ -324,6 +330,10 @@ pub const ENGINES: [&str; 13] = [
     "gridbrush",
     "chalkbrush",
     "dynabrush",
+    "duplicate",
+    "deformbrush",
+    "filter",
+    "experimentbrush",
 ];
 
 /// The options of the pixel brush's that each of Krita's engines takes, as its paint op applies
@@ -372,43 +382,55 @@ fn engine_options(engine: &str) -> &'static [&'static str] {
         "hatchingbrush" => &["size", "opacity"],
         "curvebrush" | "chalkbrush" => &["opacity"],
         "particlebrush" => &["airbrush"],
+        "duplicate" => &["size", "opacity", "rotation", "mirror", "texture"],
+        "deformbrush" => &["size", "opacity", "rotation", "airbrush"],
+        "filter" => &["size", "opacity", "rotation", "mirror"],
         _ => &[],
     }
 }
 
 /// The engines that lay lines, dots and shapes rather than their tip, each over the last.
-const SHAPES: [&str; 7] =
-    ["sketchbrush", "spraybrush", "hairybrush", "curvebrush", "particlebrush", "gridbrush", "dynabrush"];
+const SHAPES: [&str; 8] = [
+    "sketchbrush",
+    "spraybrush",
+    "hairybrush",
+    "curvebrush",
+    "particlebrush",
+    "gridbrush",
+    "dynabrush",
+    "experimentbrush",
+];
 
-/// Krita's composite ops as the app's blend modes number them.
+/// Krita's composite ops as the app's blend modes number them (the Layers panel's order: Normal 0,
+/// Multiply 1, Darken 2, Colour Burn 3 ... Luminosity 25; 29 behind).
 pub fn blend_number(op: &str) -> Option<u32> {
     Some(match op {
         "normal" | "over" => 0,
         "multiply" => 1,
         "darken" => 2,
-        "burn" => 4,
-        "linear_burn" => 5,
-        "darker color" => 6,
-        "lighten" => 7,
-        "screen" => 8,
-        "dodge" => 9,
-        "add" | "linear_dodge" => 10,
-        "lighter color" => 11,
-        "overlay" => 12,
-        "soft_light" | "soft_light_svg" | "soft_light_pegtop_delphi" | "soft_light_ifs_illusions" => 13,
-        "hard_light" => 14,
-        "vivid_light" => 15,
-        "linear light" => 16,
-        "pin_light" => 17,
-        "hard_mix" | "hard_mix_photoshop" | "hard_mix_softer_photoshop" => 18,
-        "diff" => 19,
-        "exclusion" => 20,
-        "subtract" => 21,
-        "divide" => 22,
-        "hue" => 23,
-        "saturation" => 24,
-        "color" => 25,
-        "luminize" => 26,
+        "burn" => 3,
+        "linear_burn" => 4,
+        "darker color" => 5,
+        "lighten" => 6,
+        "screen" => 7,
+        "dodge" => 8,
+        "add" | "linear_dodge" => 9,
+        "lighter color" => 10,
+        "overlay" => 11,
+        "soft_light" | "soft_light_svg" | "soft_light_pegtop_delphi" | "soft_light_ifs_illusions" => 12,
+        "hard_light" => 13,
+        "vivid_light" => 14,
+        "linear light" => 15,
+        "pin_light" => 16,
+        "hard_mix" | "hard_mix_photoshop" | "hard_mix_softer_photoshop" => 17,
+        "diff" => 18,
+        "exclusion" => 19,
+        "subtract" => 20,
+        "divide" => 21,
+        "hue" => 22,
+        "saturation" => 23,
+        "color" => 24,
+        "luminize" => 25,
         "behind" => 29,
         _ => return None,
     })
@@ -884,6 +906,8 @@ impl Brush {
             )),
             // the chalk brush: a speckled round tip at every pixel
             "chalkbrush" => crate::xml::parse(&crate::others::Chalk::read(p).tip()),
+            // the deform brush: an ellipse of its own
+            "deformbrush" => crate::xml::parse(&crate::others::Deform::read(p).tip()),
             _ => p.element("brush_definition"),
         };
         let mut tip = definition
@@ -908,6 +932,10 @@ impl Brush {
         let grid = (engine == "gridbrush").then(|| crate::others::Grid::read(p));
         let chalk = (engine == "chalkbrush").then(|| crate::others::Chalk::read(p));
         let dyna = (engine == "dynabrush").then(|| crate::others::Dyna::read(p));
+        let clone = (engine == "duplicate").then(|| crate::others::Clone::read(p));
+        let deform = (engine == "deformbrush").then(|| crate::others::Deform::read(p));
+        let filter = (engine == "filter").then(|| crate::others::Filter::read(p)).flatten();
+        let shape = (engine == "experimentbrush").then(|| crate::others::Shape::read(p));
         // a hatching's lines are laid inside each dab of its tip: the tip drawn, to be read where
         // they lie
         let hatch_tip = hatching
@@ -932,8 +960,9 @@ impl Brush {
         let masking = (has("masking") && p.flag("MaskingBrush/Enabled", false))
             .then(|| Brush::read_masking(p, find, light))
             .flatten();
-        // a masked one always washes
-        let wash = (washes || masking.is_some()) && !SHAPES.contains(&engine) && engine != "roundmarker";
+        // a masked one always washes; a shape's rows of fill never build past its opacity
+        let wash = ((washes || masking.is_some()) && !SHAPES.contains(&engine) && engine != "roundmarker")
+            || engine == "experimentbrush";
 
         let colour = |key: &str, name: &str| {
             let mut option = CurveOption::read(p, "", key, true, 0.0, 1.0);
@@ -959,6 +988,10 @@ impl Brush {
             grid,
             chalk,
             dyna,
+            clone,
+            deform,
+            filter,
+            shape,
             sketch_radius,
             lightness: colour("LightnessStrength", "lightness"),
             sharpness,
@@ -1015,6 +1048,11 @@ impl Brush {
         Some(Masking { tip, dynamics, size, combine })
     }
 
+    /// Whether its dabs move the layer's paint (a colour smudge's, a clone's, a deform's, a filter's).
+    pub fn moves_paint(&self) -> bool {
+        self.smudge.is_some() || self.clone.is_some() || self.deform.is_some() || self.filter.is_some()
+    }
+
     /// How it looks to the app (see the app's guide to brush engines).
     pub fn look(&self) -> Vec<u8> {
         let mut look = Record::new();
@@ -1027,12 +1065,13 @@ impl Brush {
         if let Some(a) = &self.airbrush {
             look.real(8, a.interval);
         }
-        // a colour smudge's dabs move paint, a grid's that takes the colour under it pick it up
-        if self.smudge.is_some() || self.grid.as_ref().is_some_and(|g| g.sample) {
+        // a colour smudge's dabs move paint, a grid's that takes the colour under it pick it up, a
+        // clone's, a deform's and a filter's lay the layer's own
+        if self.moves_paint() || self.grid.as_ref().is_some_and(|g| g.sample) {
             look.byte(9, 1);
         }
-        // in overlay mode, from every layer
-        if self.smudge.as_ref().is_some_and(|s| s.overlay) {
+        // in overlay mode (a clone from the image), from every layer
+        if self.smudge.as_ref().is_some_and(|s| s.overlay) || self.clone.as_ref().is_some_and(|c| c.from_image) {
             look.byte(10, 1);
         }
         // a bristle brush soaking up its ink wants the colours where its strokes start
@@ -1040,7 +1079,7 @@ impl Brush {
             look.word(11, side);
         }
         // (a smudge's dabs are laid each as far as it says)
-        look.byte(2, u8::from(self.wash && self.smudge.is_none() && self.grid.is_none()));
+        look.byte(2, u8::from(self.wash && !self.moves_paint() && self.grid.is_none()));
         if let Some(blend) = self.blend {
             look.word(3, blend);
         }

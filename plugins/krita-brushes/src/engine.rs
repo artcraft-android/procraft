@@ -134,6 +134,8 @@ const LEAST_SPACING: f32 = 0.5;
 /// The most dabs one call lays, and the most points a sketch brush keeps.
 const MOST_DABS: usize = 20_000;
 const MOST_SKETCH_POINTS: usize = 4096;
+/// The most corners a shape brush's outline keeps.
+const MOST_OUTLINE: usize = 16_384;
 
 /// Where a bristle brush's bristle was (from the pen, after its last move), how many pixels it has
 /// painted and how much ink it has left.
@@ -348,6 +350,10 @@ pub struct Dab {
     /// the last lay it picks one colour from (dulling).
     pub paint_share: f32,
     pub radius: f32,
+    /// Words 20 to 23 as its flags say: where it picks up from (across, down), a warp's or a
+    /// blur's amount, and a warp's kind (or a sharpening's amount, as its bits).
+    pub extra: [f32; 3],
+    pub kind: u32,
 }
 
 const FLIP_ACROSS: u32 = 1;
@@ -360,6 +366,18 @@ const WEIGHED: u32 = 64;
 const CLEAR_PAINT: u32 = 128;
 const LAID_OVER: u32 = 256;
 const PICKS_HERE: u32 = 512;
+const PICKS_FROM: u32 = 1024;
+const WARPS: u32 = 2048;
+const FILTERS: u32 = 4096;
+const PICKS_BEFORE: u32 = 8192;
+
+/// Where a clone brush picks up from: the point a tap set, and how far its first stroke after that
+/// started from it (kept while the source moves with the brush).
+type CloneSource = (Option<(f32, f32)>, Option<(f32, f32)>);
+
+thread_local! {
+    static CLONE_SOURCE: std::cell::Cell<CloneSource> = const { std::cell::Cell::new((None, None)) };
+}
 /// The tip lines, dots and boxes are drawn with: a square (the round one first).
 const LINE_TIP: u32 = 1;
 /// The least squash the app lays a dab at.
@@ -388,10 +406,10 @@ impl Dab {
             self.softness.to_bits(),
             self.paint_share.to_bits(),
             self.radius.to_bits(),
-            0,
-            0,
-            0,
-            0,
+            self.extra[0].to_bits(),
+            self.extra[1].to_bits(),
+            self.extra[2].to_bits(),
+            self.kind,
         ];
         for w in words {
             out.extend_from_slice(&w.to_le_bytes());
@@ -460,6 +478,15 @@ pub struct Stroke {
     locked: f32,
     /// The last dab drawn afresh, for the brush's precision.
     kept: Option<Kept>,
+    /// A clone brush's samples held until the pen has moved (a tap sets its source), and how far
+    /// from where it lies each dab picks up while the source moves with it.
+    held: Vec<Sample>,
+    moving: bool,
+    clone_offset: (f32, f32),
+    /// A shape brush's outline so far, and where its smoothing and speed have got to.
+    outline: Vec<(f32, f32)>,
+    smoothing: ((f32, f32), f32),
+    speed_point: ((f32, f32), f32),
     pub out: Vec<Dab>,
     /// The colours under where it starts, if the app handed them.
     pub under: Option<Under>,
@@ -518,6 +545,12 @@ impl Stroke {
             speed: 0.0,
             locked: 0.0,
             kept: None,
+            held: Vec::new(),
+            moving: false,
+            clone_offset: (0.0, 0.0),
+            outline: Vec::new(),
+            smoothing: ((0.0, 0.0), 0.0),
+            speed_point: ((0.0, 0.0), 0.0),
             out: Vec::new(),
             under: None,
             canvas: None,
@@ -574,6 +607,19 @@ impl Stroke {
     }
 
     pub fn add(&mut self, samples: &[Sample]) {
+        // a clone brush lays nothing until the pen has moved: a tap sets where it picks up from
+        if self.brush.clone.is_some() && !self.moving {
+            self.held.extend_from_slice(samples);
+            let first = self.held.first().copied();
+            let far = |s: &Sample| first.is_some_and(|f| (s.x - f.x).hypot(s.y - f.y) >= 3.0);
+            if !self.held.iter().any(far) {
+                return;
+            }
+            self.moving = true;
+            self.clone_offset = self.clone_start(first.map_or((0.0, 0.0), |f| (f.x, f.y)));
+            let held = std::mem::take(&mut self.held);
+            return self.add(&held);
+        }
         for s in samples {
             if !(s.x.is_finite() && s.y.is_finite()) || self.out.len() >= MOST_DABS {
                 continue;
@@ -584,6 +630,14 @@ impl Stroke {
                 let from = self.last.unwrap_or(p);
                 self.sketch_move(&from, &p);
                 self.length += ((p.x - from.x).powi(2) + (p.y - from.y).powi(2)).sqrt();
+                self.last = Some(p);
+                continue;
+            }
+            // a shape brush's outline goes on to each place the pen goes
+            if self.brush.shape.is_some() {
+                if let Some(from) = self.last {
+                    self.shape_move(&from, &p);
+                }
                 self.last = Some(p);
                 continue;
             }
@@ -705,6 +759,146 @@ impl Stroke {
         let walker = if second { &mut self.second } else { &mut self.main };
         walker.at = Some(*p);
         walker.angle = angle;
+    }
+
+    /// A shape brush's move from `a` to `b`: its outline goes on to `b` (as far as the speed takes
+    /// it), or rounds off a corner through where it last turned once the pen has gone as far as its
+    /// smoothing says.
+    fn shape_move(&mut self, a: &Point, b: &Point) {
+        let Some(shape) = self.brush.shape.clone() else { return };
+        if self.outline.is_empty() {
+            self.outline = vec![(a.x, a.y), (b.x, b.y)];
+            self.smoothing = ((a.x, a.y), 0.0);
+            self.speed_point = ((a.x, a.y), 0.0);
+            return;
+        }
+        let mut to = (b.x, b.y);
+        if let Some(multiplier) = shape.speed {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let length = dx.hypot(dy);
+            if length >= 0.1 {
+                let ((sx, sy), coeff) = self.speed_point;
+                let coeff = 0.6 * coeff + 0.4 * (0.5 * length * multiplier);
+                let new = (a.x + dx * coeff / length, a.y + dy * coeff / length);
+                let point = (0.6 * sx + 0.4 * new.0, 0.6 * sy + 0.4 * new.1);
+                self.speed_point = (point, coeff);
+                to = point;
+            }
+        }
+        let length = (to.0 - a.x).abs() + (to.1 - a.y).abs();
+        match shape.smoothing {
+            Some(threshold) => {
+                let (through, gone) = self.smoothing;
+                let gone = gone + length.trunc();
+                if gone > threshold {
+                    let end = ((through.0 + to.0) * 0.5, (through.1 + to.1) * 0.5);
+                    let from = self.outline.last().copied().unwrap_or(through);
+                    // a quadratic curve through where it last turned, in eight pieces
+                    for i in 1..=8 {
+                        let t = i as f32 / 8.0;
+                        let u = 1.0 - t;
+                        self.outline.push((
+                            u * u * from.0 + 2.0 * u * t * through.0 + t * t * end.0,
+                            u * u * from.1 + 2.0 * u * t * through.1 + t * t * end.1,
+                        ));
+                    }
+                    self.smoothing = (to, 0.0);
+                } else {
+                    self.smoothing = (through, gone);
+                }
+            }
+            None => self.outline.push(to),
+        }
+        let over = self.outline.len().saturating_sub(MOST_OUTLINE);
+        self.outline.drain(..over);
+    }
+
+    /// A shape brush's outline filled, closed back to where it started: each row of pixels across
+    /// it, between where the outline crosses it (by the even-odd rule, or the winding one), in
+    /// strips no longer than a dab can be squashed to, laid towards its opacity.
+    fn fill_outline(&mut self) {
+        let Some(shape) = self.brush.shape.clone() else { return };
+        let points = std::mem::take(&mut self.outline);
+        if points.len() < 3 {
+            return;
+        }
+        let opacity = self.brush.dynamics.opacity.strength.clamp(0.0, 1.0);
+        let (top, bottom) = points.iter().fold((f32::MAX, f32::MIN), |(t, b), p| (t.min(p.1), b.max(p.1)));
+        let (top, bottom) = (top.floor().max(-1.0e6) as i32, bottom.ceil().min(1.0e6) as i32);
+        let edges: Vec<((f32, f32), (f32, f32))> =
+            points.iter().zip(points.iter().cycle().skip(1)).map(|(a, b)| (*a, *b)).collect();
+        for row in top..bottom {
+            if self.out.len() >= MOST_DABS {
+                return;
+            }
+            let y = row as f32 + 0.5;
+            // where the outline crosses the row's middle, and which way
+            let mut crossings: Vec<(f32, i32)> = edges
+                .iter()
+                .filter(|(a, b)| (a.1 <= y) != (b.1 <= y))
+                .map(|(a, b)| (a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0), if b.1 > a.1 { 1 } else { -1 }))
+                .collect();
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut winding = 0;
+            for pair in crossings.windows(2) {
+                let ((x0, way), (x1, _)) = (pair[0], pair[1]);
+                winding += way;
+                let inside = if shape.winding { winding != 0 } else { winding % 2 != 0 };
+                if !inside {
+                    continue;
+                }
+                let (x0, x1) = if shape.hard { (x0.round(), x1.round()) } else { (x0, x1) };
+                let mut x = x0;
+                while x < x1 && self.out.len() < MOST_DABS {
+                    let end = (x + 1.0 / LEAST_SQUASH).min(x1);
+                    let long = (end - x).max(1.0);
+                    self.out.push(Dab {
+                        x: (x + end) * 0.5,
+                        y,
+                        diameter: long,
+                        angle: 0.0,
+                        ratio: (1.0 / long).clamp(LEAST_SQUASH, 1.0),
+                        opacity,
+                        flow: 1.0,
+                        tip: LINE_TIP,
+                        strength: 1.0,
+                        texture_offset: self.texture_offset,
+                        ..Dab::default()
+                    });
+                    x = end;
+                }
+            }
+        }
+    }
+
+    /// Where a clone stroke starting at `start` picks up from, from where it lies: from its source
+    /// (kept that far apart from then on, as the source moves with the brush); none set, from where
+    /// it lies.
+    fn clone_start(&mut self, start: (f32, f32)) -> (f32, f32) {
+        let moves = self.brush.clone.as_ref().is_some_and(|c| c.move_source);
+        CLONE_SOURCE.with(|c| {
+            let (source, offset) = c.get();
+            let Some((sx, sy)) = source else { return (0.0, 0.0) };
+            if !moves {
+                return (sx, sy);
+            }
+            let offset = offset.unwrap_or((sx - start.0, sy - start.1));
+            c.set((source, Some(offset)));
+            offset
+        })
+    }
+
+    /// The stroke's last dabs as it ends: a clone stroke that never moved (a tap) sets where the
+    /// brush picks up from instead.
+    pub fn finish(&mut self) {
+        self.fill_outline();
+        if self.brush.clone.is_some() && !self.moving {
+            if let Some(f) = self.held.first() {
+                let at = (f.x, f.y);
+                CLONE_SOURCE.with(|c| c.set((Some(at), None)));
+            }
+            self.held.clear();
+        }
     }
 
     /// How far from `at` to `to` (0..1) the airbrush's next dab comes, if it comes before `to`:
@@ -1565,8 +1759,8 @@ impl Stroke {
         let seed = self.begin.seed;
         let mut fuzz = Fuzz { random: &mut self.random, seed };
         let one = |o: &CurveOption, fuzz: &mut Fuzz<'_>| if o.checked { o.size_like(&info, fuzz, true) } else { 1.0 };
-        // its size: a masking brush's is a share of the main brush's own
-        let mut scale = one(&dynamics.size, &mut fuzz) * k;
+        // its size: a masking brush's is a share of the main brush's own (a deform's scaled as it says)
+        let mut scale = one(&dynamics.size, &mut fuzz) * k * brush.deform.as_ref().map_or(1.0, |d| d.scale);
         let (mut w, mut h) = (tip.width, tip.height);
         if let Some(c) = coeff.filter(|&c| c > 0.0) {
             let main_w = brush.tip.width.max(1e-3);
@@ -1581,8 +1775,13 @@ impl Stroke {
         let turn = rotation + tip.angle;
         let ratio = one(&dynamics.ratio, &mut fuzz).clamp(0.01, 1.0);
         let (dw, dh) = (w * scale, h * scale * ratio);
-        // scattered from the path
+        // scattered from the path (a deform's moved about as it says)
         let (mut x, mut y) = (p.x, p.y);
+        if let (Some(j), false) = (brush.deform.as_ref().and_then(|d| d.jitter.map(|j| (j, d.diameter))), second) {
+            let (amount, diameter) = j;
+            x += (diameter * fuzz.random.next() - diameter * 0.5) * amount;
+            y += (diameter * fuzz.random.next() - diameter * 0.5) * amount;
+        }
         if dynamics.scatter.checked && (dynamics.scatter_axes.0 || dynamics.scatter_axes.1) && scale > 0.0 {
             let reach = dw.max(dh) * dynamics.scatter.size_like(&info, &mut fuzz, true);
             let jitter = (2.0 * fuzz.random.next() - 1.0) * reach;
@@ -1639,7 +1838,11 @@ impl Stroke {
             softness: 0.0,
             paint_share: 0.0,
             radius: 0.0,
+            extra: [0.0; 3],
+            kind: 0,
         };
+        // (a deform moving with the pen lays nothing at its first dab)
+        let mut lays = true;
         // its tip: a pipe's cell, or an auto tip's drawing (noise afresh, softness as it says)
         dab.tip = match &tip.tips {
             Tips::Auto { variants, levels, .. } => {
@@ -1704,6 +1907,57 @@ impl Stroke {
                     dab.flags |= OWN_COLOUR;
                 }
             }
+            // a clone, deform or filter brush's dab lays the layer's own pixels
+            if brush.moves_paint() && brush.smudge.is_none() {
+                dab.opacity = (dab.opacity * dab.flow).clamp(0.0, 1.0);
+                dab.flow = 1.0;
+                dab.paint_share = 0.0;
+                dab.flags |= MOVES_PAINT;
+                if brush.clone.is_some() {
+                    let (ox, oy) = self.clone_offset;
+                    let moves = brush.clone.as_ref().is_some_and(|c| c.move_source);
+                    // from the source moved with it, or from the source itself
+                    dab.extra = if moves { [ox, oy, 0.0] } else { [ox - dab.x, oy - dab.y, 0.0] };
+                    dab.flags |= LAID_OVER | PICKS_FROM | PICKS_BEFORE;
+                }
+                if let Some(f) = &brush.filter {
+                    dab.extra = [0.0, 0.0, f.blur];
+                    dab.kind = f.sharpen.to_bits();
+                    dab.flags |= PICKS_HERE | FILTERS | PICKS_BEFORE;
+                }
+                if let Some(d) = &brush.deform {
+                    let count = (self.main.dabs + 1) as f32;
+                    let (kind, amount) = match d.action {
+                        1 | 2 => {
+                            let sign = if d.action == 1 { 1.0 } else { -1.0 };
+                            (1, 1.0 + sign * if d.counter { count * count / 100.0 } else { d.amount })
+                        }
+                        3 | 4 => {
+                            let sign = if d.action == 3 { 1.0 } else { -1.0 };
+                            (2, sign * if d.counter { count.to_radians() } else { PI * d.amount })
+                        }
+                        5 => (3, d.amount),
+                        6 => (5, d.amount),
+                        7 => (4, d.amount),
+                        8 => (6, d.amount),
+                        _ => (0, 0.0),
+                    };
+                    // moved: as far as the pen went since the last dab (the first lays nothing)
+                    if kind == 3 {
+                        match self.main.at {
+                            Some(last) => dab.extra = [(p.x - last.x) * amount, (p.y - last.y) * amount, 1.0],
+                            None => lays = false,
+                        }
+                    } else {
+                        dab.extra = [0.0, 0.0, amount];
+                    }
+                    dab.kind = kind | if d.bilinear { 0 } else { 16 };
+                    dab.flags |= PICKS_HERE | WARPS;
+                    if d.old_data {
+                        dab.flags |= PICKS_BEFORE;
+                    }
+                }
+            }
             let sharp = &brush.sharpness;
             if sharp.option.checked {
                 let value = sharp.option.size_like(&info, &mut fuzz, true).clamp(0.0, 1.0);
@@ -1749,7 +2003,7 @@ impl Stroke {
         if let (Some(precision), false) = (&brush.precision, second) {
             self.keep(&mut dab, precision, (dw, dh), softness.unwrap_or(1.0));
         }
-        if scale > 0.0 && dab.diameter.is_finite() {
+        if scale > 0.0 && dab.diameter.is_finite() && lays {
             self.out.push(dab);
         }
         // the spacing this dab sets for the next: as Krita measures the tip (its box turned by its

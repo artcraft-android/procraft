@@ -589,3 +589,136 @@ impl DynaWeight {
         true
     }
 }
+
+/// Krita's clone brush: each dab lays the layer's pixels from elsewhere under its tip, over what
+/// is there, from the layer as it was before the stroke (or the image, all its layers): from as far
+/// away as the stroke's start was from the source (the source moving with the brush), or from the
+/// source itself at each dab. Its source is set by a tap (Krita's is set with a key held; the app
+/// hands an engine no keys). Healing (matching the colours around) isn't done.
+#[derive(Clone, Debug)]
+pub struct Clone {
+    pub from_image: bool,
+    pub move_source: bool,
+}
+
+impl Clone {
+    pub fn read(p: &Preset) -> Clone {
+        Clone {
+            from_image: p.flag("Duplicateop/CloneFromProjection", false),
+            move_source: p.flag("Duplicateop/MoveSourcePoint", true),
+        }
+    }
+}
+
+/// Krita's deform brush: each dab (an ellipse of its own diameter, squash, scale and turn, as dense
+/// as it says) takes the pixels under it from elsewhere under it, by its action: grown or shrunk,
+/// swirled, moved with the pen, through a lens, or scattered; by its amount (or more at each dab,
+/// with its counter), from the layer as it is (or as it was before the stroke), mixed from the
+/// pixels around or not.
+#[derive(Clone, Debug)]
+pub struct Deform {
+    pub action: u32,
+    pub amount: f32,
+    pub bilinear: bool,
+    pub counter: bool,
+    pub old_data: bool,
+    pub diameter: f32,
+    pub aspect: f32,
+    pub scale: f32,
+    /// Degrees.
+    pub rotation: f32,
+    pub spacing: f32,
+    pub density: f32,
+    pub jitter: Option<f32>,
+}
+
+impl Deform {
+    pub fn read(p: &Preset) -> Deform {
+        let n = |k: &str, otherwise: f32| p.number(k, otherwise);
+        Deform {
+            action: n("Deform/deformAction", 1.0) as u32,
+            amount: n("Deform/deformAmount", 0.2),
+            bilinear: p.flag("Deform/bilinear", false),
+            counter: p.flag("Deform/useCounter", false),
+            old_data: p.flag("Deform/useOldData", false),
+            diameter: n("Brush/diameter", 20.0).max(1.0),
+            aspect: n("Brush/aspect", 1.0).max(0.01),
+            scale: n("Brush/scale", 1.0).max(0.0),
+            rotation: n("Brush/rotation", 0.0),
+            spacing: n("Brush/spacing", 0.3).max(0.0),
+            density: n("Brush/density", 1.0).clamp(0.0, 1.0),
+            jitter: p.flag("Brush/jitterMovementEnabled", false).then(|| n("Brush/jitterMovement", 0.0)),
+        }
+    }
+
+    /// Its tip: a hard ellipse its diameter across and its aspect down, as dense as it says.
+    pub fn tip(&self) -> String {
+        let (ratio, upright) = if self.aspect <= 1.0 { (self.aspect, 0.0) } else { (1.0 / self.aspect, 1.570_796_4) };
+        let angle = upright + self.rotation.to_radians();
+        let across = self.diameter * self.aspect.max(1.0);
+        format!(
+            r#"<Brush type="auto_brush" spacing="{}" useAutoSpacing="0" angle="{angle}" density="{}" randomness="0" BrushVersion="2"><MaskGenerator type="circle" id="default" diameter="{across}" ratio="{ratio}" hfade="1" vfade="1" antialiasEdges="0"/></Brush>"#,
+            0.5 * self.spacing / self.aspect.max(1.0),
+            self.density,
+        )
+    }
+}
+
+/// Krita's filter brush, as far as the app's own blur goes: each dab lays the layer as it was before
+/// the stroke, blurred (and sharpened, an unsharp mask), under its tip. `blur` is the app's (0..1),
+/// matched to the filter's spread; other filters lay nothing.
+#[derive(Clone, Debug)]
+pub struct Filter {
+    pub blur: f32,
+    pub sharpen: f32,
+}
+
+impl Filter {
+    pub fn read(p: &Preset) -> Option<Filter> {
+        let c = |k: &str, otherwise: f32| p.number(&format!("Filter/config/{k}"), otherwise);
+        // a gaussian's spread from its radius, as Krita reckons it
+        let sigma_of = |radius: f32| 0.3 * radius + 0.3;
+        let (sigma, sharpen) = match p.get("Filter/id").map(str::trim)? {
+            "gaussian blur" => (sigma_of(c("horizRadius", 5.0).max(c("vertRadius", 5.0))), 0.0),
+            // a round kernel half its width across: about half of that a gaussian's spread
+            "blur" => (0.5 * c("halfWidth", 5.0).max(c("halfHeight", 5.0)) * c("strength", 100.0) / 100.0, 0.0),
+            "unsharp" => (sigma_of(c("halfSize", 1.0)), c("amount", 0.5).max(0.0)),
+            _ => return None,
+        };
+        Some(Filter { blur: app_blur(sigma), sharpen })
+    }
+}
+
+/// The app's blur (0..1) whose spread is nearest `sigma` pixels (its spread is a / 3 times the
+/// whole 64 a above, its reach 32 a).
+fn app_blur(sigma: f32) -> f32 {
+    let spread = |a: f32| a / 3.0 * (64.0 * a).ceil();
+    (1..=1000)
+        .map(|i| i as f32 / 1000.0)
+        .min_by(|a, b| (spread(*a) - sigma).abs().total_cmp(&(spread(*b) - sigma).abs()))
+        .unwrap_or(0.0)
+}
+
+/// Krita's shape brush: the outline the stroke makes, from where it started, filled in the colour
+/// (by the even-odd rule, or the winding one), its corners rounded off as the pen goes as far as its
+/// smoothing says, or the pen's place drawn on by its speed. Filled as the stroke ends (Krita fills
+/// it as it goes); its displacement isn't done.
+#[derive(Clone, Debug)]
+pub struct Shape {
+    pub smoothing: Option<f32>,
+    pub speed: Option<f32>,
+    pub winding: bool,
+    pub hard: bool,
+}
+
+impl Shape {
+    pub fn read(p: &Preset) -> Shape {
+        let n = |k: &str, otherwise: f32| p.number(k, otherwise);
+        Shape {
+            smoothing: p.flag("Experiment/smoothing", false).then(|| n("Experiment/smoothingValue", 20.0)),
+            speed: p.flag("Experiment/speedEnabled", false).then(|| n("Experiment/speed", 42.0) * 0.01 * 35.0),
+            winding: p.flag("Experiment/windingFill", false),
+            hard: p.flag("Experiment/hardEdge", false),
+        }
+    }
+}
