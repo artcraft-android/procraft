@@ -265,6 +265,18 @@ impl State {
         if self.heed_filter_run() {
             return;
         }
+        // Liquify: its last step closed, and set aside to come back as it ends (kept, or undone
+        // past its first step), with how many canvas steps there were before
+        let liquifying = self.liquify_open();
+        let set_aside = liquifying && (commit || self.liquify_set_aside);
+        let made = if liquifying {
+            self.liquify.halt();
+            self.close_liquify_step();
+            self.flush();
+            self.canvas.as_ref().map_or(0, Canvas::steps_made)
+        } else {
+            0
+        };
         self.pencil = false;
         self.cloning = false;
         self.clone_source = None;
@@ -274,6 +286,7 @@ impl State {
         {
             // perspective blur's step goes unnamed
             let name = match self.last_filter {
+                _ if liquifying => Some(crate::liquify_steps::LIQUIFY_STEP),
                 Some(Filter::Hsb { .. }) => Some("adjust HSB"),
                 Some(Filter::Curves) => Some("adjust Curves"),
                 Some(Filter::ColorBalance { .. }) => Some("change Color Balance"),
@@ -285,6 +298,9 @@ impl State {
             if let (true, Some(name)) = (commit, filter.as_deref().or(name)) {
                 canvas.name_next_step(name);
             }
+            if set_aside {
+                canvas.keep_liquify();
+            }
             // only where it changed is kept
             match within {
                 Some(within) => canvas.end_transform_within(commit, within),
@@ -293,6 +309,9 @@ impl State {
             if self.simplified_undos {
                 canvas.collapse_steps();
             }
+        }
+        if liquifying {
+            self.liquify_ended(commit, set_aside, made);
         }
     }
 
@@ -546,6 +565,7 @@ impl CanvasSession {
         // each layer's mask is pushed along with it
         let along: Vec<LayerId> =
             layers.iter().skip(1).copied().chain(layers.iter().filter_map(|&id| st.doc.mask_of(id))).collect();
+        let along_kept = along.clone();
         let Some(canvas) = st.canvas.as_mut() else { return false };
         canvas.mark_steps();
         canvas.set_filter_keeps_alpha(alpha_locked);
@@ -557,6 +577,8 @@ impl CanvasSession {
         st.adjusting = true;
         st.last_filter = None;
         st.liquify = LiquifyRun::default();
+        st.liquify_steps = crate::liquify_steps::Steps::new(layers.iter().copied().take(1).chain(along_kept).collect());
+        st.liquify_kept = None;
         st.adjust(Filter::Liquify { amount: 1.0 });
         self.shared.frame(st);
         true
@@ -570,6 +592,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(view) = st.view else { return };
         if start {
+            st.liquify_stroke_begins(brush.kind);
             st.liquify.begin();
             if let (Some(Filter::Liquify { amount }), Some(canvas)) = (st.last_filter, st.canvas.as_mut())
                 && amount < 1.0
@@ -625,24 +648,28 @@ impl CanvasSession {
         st.liquify.going()
     }
 
-    /// How much of the liquify shows (0..1): the adjust slider.
+    /// How much of the liquify shows (0..1): the adjust slider. Moving it is one undo step until
+    /// something else is done.
     pub fn liquify_amount(&self, amount: f32) {
         let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.liquify_adjusts();
         st.adjust(Filter::Liquify { amount: a });
         self.shared.frame(st);
     }
 
-    /// Everything liquified goes back to where it was.
+    /// Everything liquified goes back to where it was: an undo step of its own.
     pub fn liquify_reset(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.liquify_resets();
         st.liquify = LiquifyRun::default();
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.liquify_clear();
         }
         st.adjust(Filter::Liquify { amount: 1.0 });
+        st.close_liquify_step();
         self.shared.frame(st);
     }
 

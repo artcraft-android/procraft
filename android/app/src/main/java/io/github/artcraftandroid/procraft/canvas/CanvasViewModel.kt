@@ -6457,12 +6457,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             followModelChannel()
             readMeshes()
         }
-        // cloning, the core put the source back where it was before the stroke
-        if (adjustment != null) readAdjust()
+        // cloning, the core put the source back where it was before the stroke; Liquify undone
+        // past its first step closes, and the step that kept its work undone opens it again
+        followAdjustmentStep()
         refresh()
         // the thumbnails of the layers it put back (only those) read again
         if (panel == Panel.LAYERS) refreshThumbnails()
         refreshModelThumbnails()
+    }
+
+    /** After an undo or redo: the adjustment open as the core has it (Liquify may open or close). */
+    private fun followAdjustmentStep() {
+        val was = adjustment
+        if (was == null && session?.adjustmentShown()?.adjustment == null) return
+        readAdjust()
+        if (adjustment == null) {
+            liquifyRingAt = null
+            adjustMenuAt = null
+        } else if (was == null) {
+            // opened again: its own bar, nothing else over it
+            panel = Panel.NONE
+            adjustModesOpen = false
+            liquifyPopup = 0
+        }
     }
 
     /**
@@ -6505,7 +6522,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
         refreshModelThumbnails()
-        if (adjustment != null) readAdjust()
+        followAdjustmentStep()
         text?.let { resumeText(it) }
     }
 

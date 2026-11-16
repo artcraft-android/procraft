@@ -50,6 +50,7 @@ mod layer_ops;
 mod layer_store;
 mod layers;
 mod liquify;
+mod liquify_steps;
 mod modes;
 mod palettes;
 mod pick;
@@ -715,6 +716,11 @@ pub(crate) struct State {
     last_filter: Option<procraft_gpu::Filter>,
     /// The liquify brush as it goes.
     liquify: liquify::LiquifyRun,
+    /// Liquify's undo steps while it is open, and the last closed, set aside to come back; and
+    /// whether the end under way sets it aside without keeping its work (undone past its first step).
+    liquify_steps: liquify_steps::Steps,
+    liquify_kept: Option<liquify_steps::Kept>,
+    liquify_set_aside: bool,
     /// The brush studio is open on this (set, brush), and the brush as it opened.
     studio: Option<((usize, usize), Brush)>,
     /// It shows a dual brush's second, not its first.
@@ -1743,6 +1749,9 @@ impl CanvasSession {
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
             liquify: liquify::LiquifyRun::default(),
+            liquify_steps: liquify_steps::Steps::default(),
+            liquify_kept: None,
+            liquify_set_aside: false,
             studio: None,
             studio_second: false,
             pencil: false,
@@ -2549,12 +2558,20 @@ impl CanvasSession {
         if self.recolor_step_aside() {
             return Some(recolor::STEP.to_owned());
         }
+        // Liquify open: its last step taken back (past its first, it closes)
+        if let Some(name) = self.step_liquify(true) {
+            return name;
+        }
         // an adjustment open on the layer: its changes taken back, or the step before it
         if let Some(name) = self.step_adjusting(Self::undo_step, true) {
             return name;
         }
         if self.quickshape_undo() {
             return None;
+        }
+        // the step that kept Liquify's work: taken back, Liquify opens again with its steps
+        if let Some(name) = self.liquify_again(true) {
+            return name;
         }
         self.undo_step()
     }
@@ -2587,12 +2604,19 @@ impl CanvasSession {
         if self.swap_crop(false) {
             return Some("Crop canvas".to_owned());
         }
+        if let Some(name) = self.step_liquify(false) {
+            return name;
+        }
         // an adjustment open on the layer, with nothing changed yet: the step after it
         if let Some(name) = self.step_adjusting(Self::redo_step, false) {
             return name;
         }
         if self.quickshape_redo() {
             return None;
+        }
+        // Liquify undone past its first step, and nothing since: it opens again
+        if let Some(name) = self.liquify_again(false) {
+            return name;
         }
         // recoloring, the open fill steps aside and is made again over what comes back
         let recoloring = self.recolor_step_aside();
@@ -2668,18 +2692,31 @@ impl CanvasSession {
             opacity: sliders.opacity,
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
             // an open shape is kept, then undone; a plugin's artwork goes by its own steps
+            // Liquify open: its first step undone closes it
             can_undo: st.plugin_steps().is_some_and(|(undo, _)| undo)
+                || st.liquify_open()
                 || st.canvas.as_ref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
                 || st.shape.is_some()
                 || st.adjust.touched()
                 || st.text_edit.as_ref().is_some_and(|e| e.has_step(true)),
             // an open shape has only its own drags to redo
-            can_redo: st.shape.as_ref().map_or_else(
-                || st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready() || st.shape_to_redo(),
-                quickshape::ShapeEdit::can_redo,
-            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false))
-                || st.plugin_steps().is_some_and(|(_, redo)| redo),
+            // Liquify open: only its own steps (and the step that kept it, once it came back by an
+            // undo) to redo
+            can_redo: if st.liquify_open() {
+                st.liquify_can_redo()
+            } else {
+                st.shape.as_ref().map_or_else(
+                    || {
+                        st.canvas.as_ref().is_some_and(Canvas::can_redo)
+                            || st.crop_redo_ready()
+                            || st.shape_to_redo()
+                            || st.liquify_redo_ready()
+                    },
+                    quickshape::ShapeEdit::can_redo,
+                ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false))
+                    || st.plugin_steps().is_some_and(|(_, redo)| redo)
+            },
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

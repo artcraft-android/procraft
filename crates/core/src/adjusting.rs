@@ -218,6 +218,22 @@ impl Adjusting {
         Adjusting { open: Some(adjustment), ..Adjusting::default() }
     }
 
+    /// Liquify's Adjust amount as an undo or redo left it, and whether it holds anything liquified.
+    pub(crate) fn liquify_follows(&mut self, amount: f32, liquified: bool) {
+        self.liquify_amount = amount;
+        self.liquified = liquified;
+    }
+
+    /// Liquify opened again by an undo or a redo, as it was: its brush as it is set.
+    pub(crate) fn liquify_open_again(&mut self) {
+        self.open = Some(Adjustment::Liquify);
+        self.pencil = false;
+        self.preview = false;
+        self.touched = true;
+        self.puck = None;
+        self.puck_offset = None;
+    }
+
     /// The liquify brush as it is set.
     pub(crate) fn liquify_brush(&self) -> LiquifyBrush {
         let [size, pressure, distortion, _] = self.liquify;
@@ -791,9 +807,12 @@ impl CanvasSession {
         }
     }
 
-    /// Takes back the adjustment's changes (perspective blur's puck a drag at a time), or with
-    /// none, the last one kept.
+    /// Takes back the adjustment's changes (perspective blur's puck a drag at a time; Liquify's a
+    /// step at a time), or with none, the last one kept.
     pub fn adjustment_undo(&self) {
+        if self.step_liquify(true).is_some() {
+            return;
+        }
         let Some((open, changed)) = self.adjusting(|a, _| a.open.map(|o| (o, a.changed()))) else { return };
         if self.perspective_step(true) {
             return;

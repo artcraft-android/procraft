@@ -1810,6 +1810,84 @@ fn liquify_kept_at_part_of_itself_looks_as_it_did_shown_at_that_part() {
 }
 
 #[test]
+fn liquify_steps_undo_and_redo_one_at_a_time_and_survive_the_edit_ending() {
+    use procraft_gpu::{Filter, LiquifyMode};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(30.0, 40.0), 6.0), dot(Vec2::new(30.0, 90.0), 6.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let untouched = canvas.read_layer(&gpu, layer).unwrap();
+    canvas.begin_transform(layer);
+    canvas.begin_liquify();
+    let push = |canvas: &mut Canvas, y: f32| {
+        for k in 0..30 {
+            canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Push, [30.0 + k as f32, y], 30.0, 1.0)]);
+        }
+    };
+    let shown = |canvas: &mut Canvas, doc: &mut Document| {
+        canvas.set_filter(Filter::Liquify { amount: 1.0 });
+        canvas.render(&gpu, doc, None);
+        canvas.read_layer(&gpu, layer).unwrap()
+    };
+    // two strokes, each its own step; a step that changed nothing is one too
+    push(&mut canvas, 40.0);
+    canvas.liquify_mark();
+    let first = shown(&mut canvas, &mut doc);
+    push(&mut canvas, 90.0);
+    canvas.liquify_mark();
+    let both = shown(&mut canvas, &mut doc);
+    canvas.liquify_mark();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.liquify_steps(), (3, 0));
+    assert!(first != untouched && both != first);
+    // back a step at a time, and forward again
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == both, "the empty step undone changed the field");
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == first, "the second stroke not undone alone");
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == untouched, "the first stroke not undone");
+    assert_eq!(canvas.liquify_steps(), (0, 3));
+    canvas.liquify_redo();
+    assert!(shown(&mut canvas, &mut doc) == first);
+    canvas.liquify_redo();
+    assert!(shown(&mut canvas, &mut doc) == both);
+    // a new stroke after an undo leaves nothing to redo
+    canvas.liquify_undo();
+    push(&mut canvas, 40.0);
+    canvas.liquify_mark();
+    let again = shown(&mut canvas, &mut doc);
+    assert_eq!(canvas.liquify_steps(), (2, 0));
+    // set aside as the edit ends (kept), and taken up by the next: as it was, its steps with it
+    canvas.keep_liquify();
+    canvas.end_transform(true);
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.keeps_liquify());
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == again);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == untouched);
+    canvas.begin_transform(layer);
+    canvas.resume_liquify();
+    assert!(shown(&mut canvas, &mut doc) == again, "the field set aside didn't come back");
+    assert!(!canvas.keeps_liquify());
+    assert_eq!(canvas.liquify_steps(), (2, 0));
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == first);
+    canvas.keep_liquify();
+    canvas.end_transform(false);
+    canvas.forget_liquify();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(!canvas.keeps_liquify());
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == untouched);
+}
+
+#[test]
 fn an_adjustment_painted_on_shows_only_where_painted_and_clone_copies() {
     use procraft_gpu::Filter;
     let Some(gpu) = gpu() else { return };

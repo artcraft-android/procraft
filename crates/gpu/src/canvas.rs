@@ -1821,6 +1821,16 @@ enum Op {
     LiquifyScale(f32),
     /// The liquify field back to no offsets.
     LiquifyClear,
+    /// The liquify field's open step closed: what it changed kept to undo, nothing left to redo.
+    LiquifyMark,
+    /// The liquify field's last closed step undone, or the last undone done again.
+    LiquifyUndo,
+    LiquifyRedo,
+    /// The liquify field set aside with its steps as its edit ends; taken up again by the edit
+    /// begun next, or let go.
+    LiquifyKeep,
+    LiquifyResume,
+    LiquifyForget,
     /// The transform ends: kept as one undo step (keeping only the part `within`, when its layers
     /// changed only there), or put back.
     TransformEnd {
@@ -1969,6 +1979,27 @@ struct LiquifyField {
     scale: [f32; 2],
     /// Where a step works, grown to the widest it has needed.
     scratch: Option<LiquifyScratch>,
+    /// The field as its last closed step left it, and where it has changed since (field pixels).
+    marked: wgpu::Texture,
+    changed: IRect,
+    /// Its closed steps, oldest first: each as it was on its other side (before it, to undo; after
+    /// it, to redo).
+    undo: Vec<FieldStep>,
+    redo: Vec<FieldStep>,
+}
+
+/// A closed step of the liquify field: the part of the field it changed (field pixels), as that
+/// was on the step's other side; nothing, if it changed nothing.
+struct FieldStep {
+    area: IRect,
+    pixels: Option<wgpu::Texture>,
+}
+
+impl FieldStep {
+    /// What it holds on the GPU, with `per_pixel` bytes a field pixel.
+    fn bytes(&self, per_pixel: u64) -> u64 {
+        self.pixels.as_ref().map_or(0, |_| u64::from(self.area.width()) * u64::from(self.area.height()) * per_pixel)
+    }
 }
 
 /// What a step's stamps add up to and the field as they leave it, for a part of the field.
@@ -2418,6 +2449,8 @@ pub struct Canvas {
     /// Where an adjustment is painted on (Pencil), instead of everywhere the selection takes.
     pencil: Option<PencilMask>,
     liquify: Option<LiquifyField>,
+    /// A liquify field set aside as its edit ended (see [`Canvas::keep_liquify`]).
+    kept_liquify: Option<LiquifyField>,
     /// An adjustment leaves the layer's alpha as it is (the layer's Alpha Lock).
     filter_keeps_alpha: bool,
     /// The curves or gradient adjustments read (256 RGBA8 entries).
@@ -2799,6 +2832,7 @@ impl Canvas {
             everything,
             pencil: None,
             liquify: None,
+            kept_liquify: None,
             filter_keeps_alpha: false,
             table,
             table_view,
@@ -4785,6 +4819,52 @@ impl Canvas {
         self.ops.push(Op::LiquifyClear);
     }
 
+    /// Closes the liquify field's open step: what changed since the last is kept to undo (a step
+    /// that changed nothing too), and nothing is left to redo. The oldest steps go once they hold
+    /// more than the history's share.
+    pub fn liquify_mark(&mut self) {
+        self.ops.push(Op::LiquifyMark);
+    }
+
+    /// The liquify field as it was before its last closed step (see [`Self::liquify_mark`]), or
+    /// as the last one undone left it. The caller closes a step still open first.
+    pub fn liquify_undo(&mut self) {
+        self.ops.push(Op::LiquifyUndo);
+    }
+
+    pub fn liquify_redo(&mut self) {
+        self.ops.push(Op::LiquifyRedo);
+    }
+
+    /// How many closed steps the liquify field can undo and redo, as the work run so far leaves it
+    /// (the oldest go when they hold too much).
+    pub fn liquify_steps(&self) -> (usize, usize) {
+        self.liquify.as_ref().map_or((0, 0), |f| (f.undo.len(), f.redo.len()))
+    }
+
+    /// Sets the liquify field aside with its steps, before the edit it is in ends: the next edit
+    /// begun can take it up again ([`Self::resume_liquify`]); a new field lets it go.
+    pub fn keep_liquify(&mut self) {
+        self.ops.push(Op::LiquifyKeep);
+    }
+
+    /// Takes up the liquify field set aside, for the edit just begun (with [`Self::begin_transform`]).
+    pub fn resume_liquify(&mut self) {
+        self.ops.push(Op::LiquifyResume);
+    }
+
+    /// Lets the liquify field set aside go.
+    pub fn forget_liquify(&mut self) {
+        self.ops.push(Op::LiquifyForget);
+    }
+
+    /// Whether a liquify field is set aside that fits this canvas, as the work run so far leaves
+    /// it.
+    pub fn keeps_liquify(&self) -> bool {
+        let (w, h) = (self.width.div_ceil(2), self.height.div_ceil(2));
+        self.kept_liquify.as_ref().is_some_and(|f| f.texture.width() == w && f.texture.height() == h)
+    }
+
     /// Layer `id` copied aside to be transformed (or adjusted) from.
     fn copy_aside(
         &mut self,
@@ -5782,18 +5862,23 @@ impl Canvas {
                     let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
                     let field = texture(device, "liquify field", width, height, format);
                     let view = field.create_view(&wgpu::TextureViewDescriptor::default());
-                    drop(render_pass(
-                        &mut encoder,
-                        "liquify clear",
-                        &view,
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    ));
+                    let marked = texture(device, "liquify marked", width, height, format);
+                    let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+                    drop(render_pass(&mut encoder, "liquify clear", &view, clear));
+                    let marked_view = marked.create_view(&wgpu::TextureViewDescriptor::default());
+                    drop(render_pass(&mut encoder, "liquify clear", &marked_view, clear));
+                    // a new field: the one set aside goes
+                    self.kept_liquify = None;
                     self.liquify = Some(LiquifyField {
                         bind: self.copy_bind_with(device, &view),
                         view,
                         texture: field,
                         scale: [width as f32 / self.width as f32, height as f32 / self.height as f32],
                         scratch: None,
+                        marked,
+                        changed: IRect::EMPTY,
+                        undo: Vec::new(),
+                        redo: Vec::new(),
                     });
                 }
                 Op::PencilBegin => {
@@ -5822,15 +5907,30 @@ impl Canvas {
                 Op::LiquifyStamps(stamps) => self.liquify_step(device, &mut encoder, &mut uniforms, &stamps, 1.0),
                 Op::LiquifyScale(amount) => self.liquify_step(device, &mut encoder, &mut uniforms, &[], amount),
                 Op::LiquifyClear => {
-                    if let Some(field) = &self.liquify {
+                    if let Some(field) = &mut self.liquify {
                         drop(render_pass(
                             &mut encoder,
                             "liquify clear",
                             &field.view,
                             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         ));
+                        field.changed = IRect::from_size(field.texture.width(), field.texture.height());
                     }
                 }
+                Op::LiquifyMark => self.mark_field(device, &mut encoder),
+                Op::LiquifyUndo => self.liquify_history(device, &mut encoder, true),
+                Op::LiquifyRedo => self.liquify_history(device, &mut encoder, false),
+                Op::LiquifyKeep => self.kept_liquify = self.liquify.take(),
+                Op::LiquifyResume => {
+                    if self.keeps_liquify()
+                        && let Some(mut field) = self.kept_liquify.take()
+                    {
+                        // read with the copy of the edit just begun
+                        field.bind = self.copy_bind_with(device, &field.view);
+                        self.liquify = Some(field);
+                    }
+                }
+                Op::LiquifyForget => self.kept_liquify = None,
                 Op::TransformEnd { commit, within } => {
                     self.liquify = None;
                     self.blur_textures.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -7388,6 +7488,59 @@ impl Canvas {
         self.dirty = self.full();
     }
 
+    /// Closes the liquify field's open step (see [`Canvas::liquify_mark`]).
+    fn mark_field(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let most = self.history_most() / 2;
+        let Some(field) = self.liquify.as_mut() else { return };
+        let (w, h) = (field.texture.width(), field.texture.height());
+        let area = std::mem::replace(&mut field.changed, IRect::EMPTY).intersect(IRect::from_size(w, h));
+        let format = field.texture.format();
+        // what was there before is the marked field's; the marked field then follows the field
+        let pixels = (!area.is_empty()).then(|| {
+            let before = texture(device, "liquify step", area.width(), area.height(), format);
+            let size = extent(area.width(), area.height());
+            encoder.copy_texture_to_texture(copy_at(&field.marked, area.x0, area.y0), before.as_image_copy(), size);
+            encoder.copy_texture_to_texture(
+                copy_at(&field.texture, area.x0, area.y0),
+                copy_at(&field.marked, area.x0, area.y0),
+                size,
+            );
+            before
+        });
+        field.undo.push(FieldStep { area, pixels });
+        field.redo.clear();
+        let per_pixel = u64::from(format.block_copy_size(None).unwrap_or(8));
+        let mut bytes: u64 = field.undo.iter().map(|s| s.bytes(per_pixel)).sum();
+        while field.undo.len() > MAX_UNDO || (bytes > most && field.undo.len() > 1) {
+            let dropped = field.undo.remove(0);
+            bytes = bytes.saturating_sub(dropped.bytes(per_pixel));
+        }
+    }
+
+    /// The liquify field's last closed step undone (`undo`), or the last undone done again: the
+    /// part it changed swapped with how it was on the step's other side.
+    fn liquify_history(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, undo: bool) {
+        let Some(field) = self.liquify.as_mut() else { return };
+        let step = if undo { field.undo.pop() } else { field.redo.pop() };
+        let Some(FieldStep { area, pixels }) = step else { return };
+        let format = field.texture.format();
+        let pixels = pixels.map(|other| {
+            let now = texture(device, "liquify step", area.width(), area.height(), format);
+            let size = extent(area.width(), area.height());
+            encoder.copy_texture_to_texture(copy_at(&field.texture, area.x0, area.y0), now.as_image_copy(), size);
+            encoder.copy_texture_to_texture(other.as_image_copy(), copy_at(&field.texture, area.x0, area.y0), size);
+            encoder.copy_texture_to_texture(other.as_image_copy(), copy_at(&field.marked, area.x0, area.y0), size);
+            now
+        });
+        let swapped = FieldStep { area, pixels };
+        if undo {
+            field.redo.push(swapped);
+        } else {
+            field.undo.push(swapped);
+        }
+        self.dirty = self.full();
+    }
+
     /// A step of the liquify brush: `stamps` added up over the part of the field they reach, the
     /// field there carried along by that and `keep` of it left. No stamps: the whole field.
     fn liquify_step(
@@ -7430,6 +7583,8 @@ impl Canvas {
         if area_w == 0 || area_h == 0 {
             return;
         }
+        let to_i32 = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        field.changed = field.changed.union(IRect::new(to_i32(x0), to_i32(y0), to_i32(x1), to_i32(y1)));
         let scratch = match field.scratch.take() {
             Some(s) if s.width >= area_w && s.height >= area_h => s,
             old => {
@@ -8358,6 +8513,12 @@ impl Canvas {
             | Op::LiquifyStamps(_)
             | Op::LiquifyScale(_)
             | Op::LiquifyClear
+            | Op::LiquifyMark
+            | Op::LiquifyUndo
+            | Op::LiquifyRedo
+            | Op::LiquifyKeep
+            | Op::LiquifyResume
+            | Op::LiquifyForget
             | Op::TransformEnd { .. } => transformed_live(),
             Op::Release { before: None, .. } => self.held.as_ref().is_none_or(|h| live.contains(&h.layer)),
             Op::Write { layers, before: None } => layers.iter().all(|(id, ..)| live.contains(id)),

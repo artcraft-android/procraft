@@ -3089,7 +3089,13 @@ fn liquify_moves_paint_as_one_undo_step() {
     assert_ne!(row(&s), before);
     assert!(!s.liquify_lift(f32::NAN, brush) || s.liquify_tick(0.1, brush));
     s.adjust_end(true);
+    let kept = pixel(&s, 30, 50);
+    assert_ne!(kept, [0, 0, 0, 255]);
+    // undone, the layer is back as it was, shown through Liquify open again with its work
     s.undo();
+    assert!(s.is_adjusting());
+    assert_eq!(pixel(&s, 30, 50), kept);
+    s.adjust_end(false);
     assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
 }
 
@@ -12117,6 +12123,173 @@ fn liquify_lifted_moving_goes_on_by_the_touch_timer() {
     assert_ne!(row(&s), lifted, "it went on after the lift");
 }
 
+/// A line across a 100 x 100 canvas at y = 50, Liquify open on it with a small brush, and its row
+/// as shown.
+fn liquify_on_a_line() -> Option<std::sync::Arc<CanvasSession>> {
+    use crate::Adjustment;
+    let s = session(100, 100)?;
+    s.set_brush_size(0.2);
+    s.set_color(0.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 50.0, 0.0)]);
+    s.stroke_add((1..10).map(|i| sample(5.0 + i as f32 * 10.0, 50.0, f64::from(i) * 8.0)).collect());
+    s.stroke_end(vec![]);
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_liquify_value(0, 0.12);
+    s.adjustment_liquify_value(3, 0.0);
+    Some(s)
+}
+
+/// A push down across the line at `x` (window points, as the canvas: shown 1:1).
+fn push_down(s: &CanvasSession, x: f32) {
+    s.adjustment_liquify_stroke((0..=16).flat_map(|i| [x, 40.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false);
+    s.adjustment_liquify_lift();
+}
+
+fn line_row(s: &CanvasSession) -> Vec<[u8; 4]> {
+    (0..100).map(|y| pixel(s, 25, y)).chain((0..100).map(|y| pixel(s, 70, y))).collect()
+}
+
+/// Undo and redo in Liquify step a stroke at a time; undone past its first, it closes, and redo
+/// opens it again; a stroke after an undo leaves nothing to redo.
+#[test]
+fn liquify_undo_and_redo_go_a_stroke_at_a_time() {
+    use crate::Adjustment;
+    let Some(s) = liquify_on_a_line() else { return };
+    let open = |s: &CanvasSession| s.adjustment_shown().adjustment == Some(Adjustment::Liquify);
+    let line = line_row(&s);
+    push_down(&s, 25.0);
+    let one = line_row(&s);
+    push_down(&s, 70.0);
+    let two = line_row(&s);
+    assert!(one != line && two != one, "the pushes did nothing");
+    assert!(s.adjustment_shown().liquified);
+    assert_eq!(s.undo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == one, "undo took back more than the last stroke");
+    assert!(s.info().can_redo);
+    assert_eq!(s.undo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == line);
+    assert!(open(&s) && !s.adjustment_shown().liquified);
+    // undone past its first stroke, Liquify closes, the layer as it was
+    assert!(s.info().can_undo);
+    assert_eq!(s.undo().as_deref(), Some("Liquify"));
+    assert!(!open(&s));
+    assert!(line_row(&s) == line);
+    // redo opens it again, then brings back each stroke in turn
+    assert!(s.info().can_redo);
+    assert_eq!(s.redo().as_deref(), Some("Liquify"));
+    assert!(open(&s));
+    assert!(line_row(&s) == line);
+    assert_eq!(s.redo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == one, "redo didn't bring back the first stroke");
+    assert_eq!(s.redo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == two, "redo didn't bring back the second stroke");
+    assert!(!s.info().can_redo);
+    assert_eq!(s.redo(), None);
+    assert!(open(&s) && line_row(&s) == two);
+    // a stroke after an undo: nothing to redo
+    s.undo();
+    push_down(&s, 70.0);
+    assert!(!s.info().can_redo);
+    assert_eq!(s.redo(), None);
+    assert!(line_row(&s) == two, "the same push again looks the same");
+}
+
+/// Closed, Liquify's work is one undo step: undone, the layer goes back and Liquify opens again
+/// with its strokes, each to undo; redone past its last, the work is kept again and it closes.
+#[test]
+fn liquify_closed_is_one_step_that_undone_opens_it_again() {
+    use crate::Adjustment;
+    let Some(s) = liquify_on_a_line() else { return };
+    let open = |s: &CanvasSession| s.adjustment_shown().adjustment == Some(Adjustment::Liquify);
+    let line = line_row(&s);
+    push_down(&s, 25.0);
+    let one = line_row(&s);
+    push_down(&s, 70.0);
+    let two = line_row(&s);
+    assert!(s.adjustment_end(true));
+    assert!(line_row(&s) == two);
+    // the layer as it was before, shown through Liquify open again
+    assert_eq!(s.undo().as_deref(), Some("Liquify"));
+    assert!(open(&s), "undoing the kept work didn't open Liquify again");
+    assert!(line_row(&s) == two);
+    assert_eq!(s.undo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == one);
+    // redone to its last stroke, and past it: kept again, closed
+    assert_eq!(s.redo().as_deref(), Some("Push"));
+    assert!(s.info().can_redo);
+    assert_eq!(s.redo().as_deref(), Some("Liquify"));
+    assert!(!open(&s));
+    assert!(line_row(&s) == two);
+    assert!(!s.info().can_redo);
+    // and again: undone it opens, and its strokes still undo one by one, then it closes
+    assert_eq!(s.undo().as_deref(), Some("Liquify"));
+    assert!(open(&s));
+    s.undo();
+    s.undo();
+    assert!(line_row(&s) == line);
+    assert_eq!(s.undo().as_deref(), Some("Liquify"));
+    assert!(!open(&s) && line_row(&s) == line);
+    // the stroke that drew the line is next
+    assert_ne!(s.undo().as_deref(), Some("Liquify"));
+    assert!(line_row(&s) != line);
+    // a stroke made after it closed, undone: the kept work undoes as any step, Liquify opening again
+    s.redo();
+    s.redo();
+    s.redo();
+    s.redo();
+    assert!(line_row(&s) == two && open(&s));
+    assert!(s.adjustment_end(true));
+    s.stroke_begin(PointerKind::Finger, vec![sample(90.0, 10.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.undo();
+    assert_eq!(s.undo().as_deref(), Some("Liquify"));
+    assert!(open(&s) && line_row(&s) == two);
+}
+
+/// A stroke's step holds what it set going after it lifted; Adjust and Reset are steps of their own.
+#[test]
+fn liquify_steps_hold_the_coasting_the_adjust_and_the_reset() {
+    let Some(s) = liquify_on_a_line() else { return };
+    let line = line_row(&s);
+    // lifted moving with momentum, it coasts on as time passes: all of it the stroke's
+    s.adjustment_liquify_value(3, 1.0);
+    s.adjustment_liquify_stroke((0..=10).flat_map(|i| [25.0, 30.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false);
+    assert!(s.adjustment_liquify_lift());
+    for _ in 0..10 {
+        s.adjustment_liquify_tick(0.02);
+    }
+    let coasted = line_row(&s);
+    assert!(coasted != line);
+    assert_eq!(s.undo().as_deref(), Some("Push"));
+    assert!(line_row(&s) == line, "the coasting stayed after its stroke was undone");
+    assert!(!s.adjustment_liquify_tick(0.02), "it went on coasting after the undo");
+    s.adjustment_liquify_value(3, 0.0);
+    push_down(&s, 25.0);
+    let one = line_row(&s);
+    // the Adjust slider, however long it is dragged, is one step
+    s.adjustment_liquify_amount(0.8);
+    s.adjustment_liquify_amount(0.5);
+    let half = line_row(&s);
+    assert!(half != one);
+    assert_eq!(s.undo().as_deref(), Some("Adjust"));
+    assert_eq!(s.adjustment_shown().liquify_amount, 1.0);
+    assert!(line_row(&s) == one);
+    assert_eq!(s.redo().as_deref(), Some("Adjust"));
+    assert_eq!(s.adjustment_shown().liquify_amount, 0.5);
+    assert!(line_row(&s) == half);
+    // a stroke after it keeps what was turned down, and undone shows it as it was
+    push_down(&s, 70.0);
+    s.undo();
+    assert_eq!(s.adjustment_shown().liquify_amount, 0.5);
+    assert!(line_row(&s) == half);
+    // Reset, and its undo
+    s.adjustment_liquify_reset();
+    assert!(line_row(&s) == line);
+    assert_eq!(s.undo().as_deref(), Some("Reset"));
+    assert!(line_row(&s) == half);
+    assert_eq!(s.adjustment_shown().liquify_amount, 0.5);
+}
+
 /// Liquify held still works on as the time passes, a stamp at a time adding up to the whole of it.
 #[test]
 fn liquify_held_still_works_on() {
@@ -12534,8 +12707,11 @@ fn liquify_pushes_every_layer_chosen_and_the_others_take_one() {
     let after = column(&s);
     assert_ne!(before[25..45], after[25..45], "the line in the layer below moved");
     assert_ne!(before[65..85], after[65..85], "the line in the layer above moved");
-    // one step puts both back
+    // one step puts both back, shown through Liquify open again on both
     s.undo();
+    assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Liquify));
+    assert_eq!(column(&s), after);
+    assert!(s.adjustment_end(false));
     assert_eq!(column(&s), before);
     // a layer alone takes them all again
     assert!(s.select_layer(above));
