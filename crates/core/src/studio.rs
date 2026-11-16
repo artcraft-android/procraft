@@ -1207,11 +1207,13 @@ mod naming {
     #[test]
     fn a_dual_brush_is_named_whole_whichever_part_shows() {
         let s = CanvasSession::new(64, 64);
-        assert!(s.select_brush(1, 0) && s.combine_brushes(1, 0, 1));
+        // in the set of ours from before, whose brushes are no dual brushes
+        let l = s.brush_library().len() as u32 - 1;
+        assert!(s.select_brush(l, 0) && s.combine_brushes(l, 0, 1));
         s.studio_begin();
         s.studio_show_second(true);
         assert_eq!(s.set_studio_name("Pair".to_owned()), "Pair");
         s.studio_end(true);
-        assert_eq!(name(&s, 1, 0), "Pair");
+        assert_eq!(name(&s, l as usize, 0), "Pair");
     }
 }

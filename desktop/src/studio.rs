@@ -2885,7 +2885,9 @@ mod tests {
     #[test]
     fn a_dual_brush_s_secondary_card_held_offers_uncombine_which_asks_first() {
         let session = CanvasSession::new(64, 64);
-        assert!(session.select_brush(1, 0) && session.combine_brushes(1, 0, 1));
+        // in the set of ours from before, whose brushes are no dual brushes
+        let ours = session.brush_library().len() as u32 - 1;
+        assert!(session.select_brush(ours, 0) && session.combine_brushes(ours, 0, 1));
         let mut open = Open {
             ctx: egui::Context::default(),
             look: Look::default(),

@@ -80,6 +80,8 @@ mod selection;
 mod sharp;
 mod side_slider;
 mod sound_file;
+mod stock_brushes;
+mod stock_library;
 mod stroke_sound;
 mod studio;
 #[cfg(test)]
@@ -105,7 +107,7 @@ use procraft_engine::brush::Brush;
 use procraft_engine::document::Document;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::{Pointer, Sample};
-use procraft_engine::library::{BrushSet, library};
+use procraft_engine::library::BrushSet;
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
@@ -1568,7 +1570,7 @@ impl CanvasSession {
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
         device::start_log();
-        let shipped = library();
+        let shipped = stock_library::shipped();
         let shelf = brush_library::LibrarySet::shipped(&shipped);
         // the round pen to paint, the soft airbrush to erase, the round brush to smudge
         let [paint_brush, erase_brush, smudge_brush] =
@@ -1613,7 +1615,7 @@ impl CanvasSession {
             crop_redo: None,
             library: shelf,
             libraries: brush_libraries::Libraries::default(),
-            shipped: Arc::new(shipped),
+            shipped,
             fallback: Brush::round_pen(),
             paint_brush,
             erase_brush,

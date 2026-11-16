@@ -1242,7 +1242,8 @@ fn eraser_end_and_erase_tool_erase() {
     // the eraser starts on a soft airbrush; give it the hard round pen, as large as it goes
     s.set_tool(ToolKind::Erase);
     assert_eq!(s.current_brush().name, "Soft Airbrush");
-    assert!(s.select_brush(1, 0));
+    let pen = ours(&s, (1, 0));
+    assert!(s.select_brush(pen.0, pen.1));
     assert!(!s.select_brush(99, 0));
     s.set_brush_size(1.0);
     s.set_tool(ToolKind::Paint);
@@ -1436,19 +1437,27 @@ fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
     assert_eq!(dry, preview());
 }
 
+/// Where brush `origin` of ours from before (its set and place as they shipped) is in the library.
+fn ours(s: &CanvasSession, origin: (usize, usize)) -> (u32, u32) {
+    let (set, i) = crate::brush_library::place_of(&s.shared.lock().library, origin);
+    (set as u32, i as u32)
+}
+
 #[test]
 fn brushes_keep_their_own_sliders() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.9);
-    assert!(s.select_brush(0, 0));
+    // ours from before, which bring no slider places of their own
+    let (graphite, pen, charcoal) = (ours(&s, (0, 0)), ours(&s, (1, 0)), ours(&s, (4, 0)));
+    assert!(s.select_brush(graphite.0, graphite.1));
     // at the size its preview shows (0.09 of its range: the slider's place for it)
     let start = 0.09f32.powf(1.0 / procraft_engine::brush::SIZE_CURVE);
     assert!((s.info().size - start).abs() < 1e-6, "a fresh brush starts at its default");
     s.set_brush_size(0.1);
-    assert!(s.select_brush(1, 0));
+    assert!(s.select_brush(pen.0, pen.1));
     assert!((s.info().size - 0.9).abs() < 1e-6, "back to the pen's own size");
     // a textured brush paints through the renderer without trouble
-    assert!(s.select_brush(4, 0));
+    assert!(s.select_brush(charcoal.0, charcoal.1));
     s.stroke_begin(PointerKind::Stylus, (0..20).map(|i| sample(20.0 + i as f32 * 3.0, 50.0, i as f64 * 8.0)).collect());
     s.stroke_end(vec![]);
     let [_, _, _, a] = pixel(&s, 50, 50);
@@ -4376,7 +4385,7 @@ fn brushes_and_sets_are_made_copied_and_deleted() {
     assert_eq!(s.new_brush(start.set), Some(0));
     assert_eq!((s.current_brush().index, s.current_brush().name.as_str()), (0, "Untitled Brush"));
     assert!(s.delete_brush(start.set, 0));
-    assert_eq!(s.current_brush().name, first[start.index as usize]);
+    assert_eq!(s.current_brush().name, first[0]);
     assert_eq!(s.new_brush(start.set), Some(0));
     // a new set at the top of the library moves the others down
     let sets = s.brush_library().len();
@@ -4957,39 +4966,41 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
 fn two_brushes_combine_into_a_dual_brush_and_come_apart_again() {
     let s = CanvasSession::new(64, 64);
     let before = s.brush_library();
-    let names: Vec<String> = before[0].brushes.iter().map(|b| b.name.clone()).collect();
+    // in the set of ours from before, whose brushes are no dual brushes
+    let l = before.len() as u32 - 1;
+    let names: Vec<String> = before[l as usize].brushes.iter().map(|b| b.name.clone()).collect();
     // the tool on the brush that joins: it then uses the dual brush, in the first's place
-    assert!(s.select_brush(0, 3));
-    assert!(s.combine_brushes(0, 1, 3));
+    assert!(s.select_brush(l, 3));
+    assert!(s.combine_brushes(l, 1, 3));
     let after = s.brush_library();
-    assert_eq!(after[0].brushes.len(), names.len() - 1);
-    assert_eq!(after[0].brushes[1].name, names[1]);
-    assert_eq!(after[0].brushes[3].name, names[4]);
-    assert!(s.brush_is_dual(0, 1));
-    assert_eq!((s.current_brush().set, s.current_brush().index), (0, 1));
+    assert_eq!(after[l as usize].brushes.len(), names.len() - 1);
+    assert_eq!(after[l as usize].brushes[1].name, names[1]);
+    assert_eq!(after[l as usize].brushes[3].name, names[4]);
+    assert!(s.brush_is_dual(l, 1));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (l, 1));
     // a dual brush takes no third, and a brush can't join itself
-    assert!(!s.combine_brushes(0, 1, 2));
-    assert!(!s.combine_brushes(0, 2, 1));
-    assert!(!s.combine_brushes(0, 2, 2));
+    assert!(!s.combine_brushes(l, 1, 2));
+    assert!(!s.combine_brushes(l, 2, 1));
+    assert!(!s.combine_brushes(l, 2, 2));
     // the two trade places: the second leads, and back
-    assert!(s.swap_dual_brush(0, 1));
-    assert_eq!(s.brush_library()[0].brushes[1].name, names[3]);
-    assert!(s.brush_is_dual(0, 1));
-    assert!(s.swap_dual_brush(0, 1));
-    assert_eq!(s.brush_library()[0].brushes[1].name, names[1]);
-    assert!(!s.swap_dual_brush(0, 2));
+    assert!(s.swap_dual_brush(l, 1));
+    assert_eq!(s.brush_library()[l as usize].brushes[1].name, names[3]);
+    assert!(s.brush_is_dual(l, 1));
+    assert!(s.swap_dual_brush(l, 1));
+    assert_eq!(s.brush_library()[l as usize].brushes[1].name, names[1]);
+    assert!(!s.swap_dual_brush(l, 2));
     // written out and read back, it stays dual
     let saved = s.saved_brush_library();
     let t = CanvasSession::new(64, 64);
     assert!(t.load_brush_library(saved));
-    assert!(t.brush_is_dual(0, 1));
+    assert!(t.brush_is_dual(l, 1));
     // apart: the second just below the first, the rest as before
-    assert!(s.uncombine_brush(0, 1));
-    assert!(!s.brush_is_dual(0, 1));
-    let apart: Vec<String> = s.brush_library()[0].brushes.iter().map(|b| b.name.clone()).collect();
+    assert!(s.uncombine_brush(l, 1));
+    assert!(!s.brush_is_dual(l, 1));
+    let apart: Vec<String> = s.brush_library()[l as usize].brushes.iter().map(|b| b.name.clone()).collect();
     assert_eq!(apart.len(), names.len());
     assert_eq!(apart[2], names[3]);
-    assert!(!s.uncombine_brush(0, 1));
+    assert!(!s.uncombine_brush(l, 1));
 }
 
 #[test]
@@ -5984,35 +5995,54 @@ fn an_autosave_reads_its_layers_a_lot_at_a_time_and_gives_way_to_a_change() {
 fn what_shipped_later_joins_a_kept_library_once() {
     let s = CanvasSession::new(64, 64);
     let names = |s: &CanvasSession| s.brush_library().into_iter().map(|set| set.name).collect::<Vec<_>>();
-    // a new library: every set, in shelf order, with the tools on their brushes
+    // a new library: the stock sets, then ours from before in one set, the tools on their brushes
     let all = names(&s);
-    assert_eq!(&all[..3], ["Sketching", "Inking", "Drawing"]);
+    assert_eq!(all.last().map(String::as_str), Some("Legacy"));
+    assert_eq!(all.iter().filter(|n| *n == "Legacy").count(), 1);
     assert_eq!(s.current_brush().name, "Round Pen");
     let counts = s.shipped_brush_counts();
-    // a library kept when the first six sets shipped with three, three, three, two, two and two
-    let old = CanvasSession::new(64, 64);
-    let first = ["Sketching", "Inking", "Painting", "Airbrushing", "Charcoals", "Textures"];
-    while let Some(i) = names(&old).iter().position(|n| !first.contains(&n.as_str())) {
-        assert!(old.delete_brush_set(i as u32));
-    }
-    let inking = names(&old).iter().position(|n| n == "Inking").unwrap() as u32;
-    while old.brush_library()[inking as usize].brushes.len() > 3 {
-        assert!(old.delete_brush(inking, 3));
-    }
-    let kept = old.saved_brush_library();
+    let legacy = crate::stock_library::LEGACY_SETS;
+    let shipped_name = |set: usize| s.shared.lock().shipped[set].name.to_owned();
+    // a library kept when only ours had shipped, the first six sets with three, three, three, two,
+    // two and two, the first renamed, and a set of the user's own holding one of ours too
+    let mut kept: Vec<serde_json::Value> = (0..6usize)
+        .map(|set| {
+            let had = [3, 3, 3, 2, 2, 2][set];
+            let name = if set == 0 { "My pencils".to_owned() } else { shipped_name(set) };
+            let brushes: Vec<serde_json::Value> =
+                (0..had).map(|i| serde_json::json!({ "from": [set, i], "name": format!("{set}.{i}") })).collect();
+            serde_json::json!({ "name": name, "brushes": brushes })
+        })
+        .collect();
+    kept.push(
+        serde_json::json!({ "name": "Mine", "brushes": [{ "name": "Own" }, { "from": [10, 0], "name": "10.0" }] }),
+    );
     let t = CanvasSession::new(64, 64);
-    assert!(t.load_brush_library(kept));
-    assert_eq!(t.brush_library().len(), 6);
+    assert!(t.load_brush_library(serde_json::to_string(&kept).unwrap()));
+    // the paint tool on the second brush of the inks, and a QuickMenu button on a charcoal
+    assert!(t.select_brush(1, 1));
+    let key = t.quick_brush_key(4, 0);
     assert_eq!(t.add_shipped_brushes(vec![3, 3, 3, 2, 2, 2]), counts);
-    // the new sets at the end, the new inking brushes after the old ones
-    assert_eq!(t.brush_library().len(), all.len());
-    let ink = &t.brush_library()[inking as usize];
-    assert_eq!(ink.brushes.len() as u32, counts[1]);
-    assert_eq!(ink.brushes[3].name, "Dip Pen");
+    let after = names(&t);
+    // the renamed set and the user's own stay first, the stock sets join after them, and ours as
+    // they shipped go into one set after those, with what shipped of ours since
+    assert_eq!(&after[..2], ["My pencils", "Mine"]);
+    assert_eq!(after.len(), 2 + (counts.len() - legacy) + 1);
+    assert_eq!(after.last().map(String::as_str), Some("Legacy"));
+    let library = t.brush_library();
+    assert_eq!(library[0].brushes.len() as u32, counts[0], "the renamed set takes its new brushes");
+    let ours = library.last().unwrap();
+    let held_elsewhere = 1;
+    assert_eq!(ours.brushes.len() as u32, counts[1..legacy].iter().sum::<u32>() - held_elsewhere);
+    assert_eq!(ours.brushes[1].name, "1.1");
+    assert_eq!(ours.brushes[3].name, "Dip Pen");
+    // the tool and the QuickMenu button follow their brushes
+    assert_eq!(t.current_brush().name, "1.1");
+    assert_eq!(t.quick_brush(key).map(|b| b.name), Some("4.0".to_owned()));
     // and only once, whatever it is told
     assert_eq!(t.add_shipped_brushes(vec![0; 6]), counts);
-    assert_eq!(t.brush_library().len(), all.len());
-    assert_eq!(t.brush_library()[inking as usize].brushes.len() as u32, counts[1]);
+    assert_eq!(names(&t), after);
+    assert_eq!(t.brush_library().last().unwrap().brushes.len(), ours.brushes.len());
 }
 
 #[test]
