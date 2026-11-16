@@ -380,7 +380,9 @@ impl Gpu {
         log::info!("the GPUs listed in {} ms", started.elapsed().as_millis());
         let chosen = std::time::Instant::now();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            // the faster GPU of a laptop's two, unless `WGPU_POWER_PREF` says (`low`: to try the
+            // other when one fails or lags)
+            power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance),
             force_fallback_adapter: false,
             compatible_surface: surface,
             apply_limit_buckets: false,
