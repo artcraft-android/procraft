@@ -10,6 +10,15 @@ Contributed artwork
   https://github.com/artcraft-android/procraft/pull/178 under ProCraft's licence; Transform, Erase
   and Layers changed as Josh, ProCraft's maintainer, chose. See SOURCE.md beside them.
 
+Stock brushes
+
+- The stock brush library (crates/core/src/stock_brushes.rs, built by
+  crates/core/src/stock_library.rs) is ProCraft's own: each brush is a variant of a familiar
+  default brush type, its settings modelled on that type and every value moved by 1% to 3%, so
+  each brush differs from the type it follows; distinctive names are replaced by names of our own.
+  Their shapes and grains are drawn for ProCraft in code. No brush file, picture or preview from
+  elsewhere is included. See docs/stock-brushes.md.
+
 Third-party material
 
 This product bundles third-party material under its own licenses, listed below.
