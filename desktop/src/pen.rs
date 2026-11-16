@@ -700,16 +700,22 @@ mod system {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicIsize, Ordering};
 
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::Controls::{POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN};
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Controls::{
+        FEEDBACK_PEN_BARRELVISUALIZATION, FEEDBACK_PEN_DOUBLETAP, FEEDBACK_PEN_PRESSANDHOLD, FEEDBACK_PEN_RIGHTTAP,
+        FEEDBACK_PEN_TAP, POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN,
+        SetWindowFeedbackSetting,
+    };
     use windows::Win32::UI::Input::Pointer::{
         GetPointerDevice, GetPointerFrameInfo, GetPointerInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO,
         POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_ACTIVATE, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW, SetPropW,
+        SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+        WNDPROC,
     };
+    use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     /// What the pen info gives (`penMask`): its pressure, out of 1024, its turn and its tilts.
@@ -722,6 +728,22 @@ mod system {
     /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
     /// what it did is to be undone.
     const POINTER_FLAG_CANCELED: u32 = 0x8000;
+
+    /// The pen's gestures the system makes of a pen held still or tapped, as its tablet service
+    /// asks a window for them (the window's property of this name, or its answer to
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS`): press and hold for a right click, the ripples shown
+    /// for a tap and for the barrel button, and flicks, all off. A pen held still on the canvas
+    /// paints there.
+    const PEN_SERVICE: PCWSTR = w!("MicrosoftTabletPenServiceProperty");
+    const WM_TABLET_QUERYSYSTEMGESTURESTATUS: u32 = 0x02CC;
+    const TABLET_DISABLE_PRESSANDHOLD: usize = 0x0000_0001;
+    const TABLET_DISABLE_PENTAPFEEDBACK: usize = 0x0000_0008;
+    const TABLET_DISABLE_PENBARRELFEEDBACK: usize = 0x0000_0010;
+    const TABLET_DISABLE_FLICKS: usize = 0x0001_0000;
+    const PEN_GESTURES_OFF: usize = TABLET_DISABLE_PRESSANDHOLD
+        | TABLET_DISABLE_PENTAPFEEDBACK
+        | TABLET_DISABLE_PENBARRELFEEDBACK
+        | TABLET_DISABLE_FLICKS;
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
@@ -738,8 +760,36 @@ mod system {
         // kept, is called for every message after ours
         let winit = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ours as usize as isize) };
         WINIT.store(winit, Ordering::Relaxed);
+        quiet_pen_gestures(hwnd);
         // a tablet whose driver has Windows Ink off: its pen read through WinTab
         super::wintab::open(hwnd);
+    }
+
+    /// The system's own handling of a pen held still or tapped on `hwnd` turned off: no ring
+    /// growing round a pen held still to make a right click, no ripples for its taps and barrel
+    /// button, no flicks. They are for clicking with a pen as with a mouse; on a canvas a pen held
+    /// still is painting.
+    fn quiet_pen_gestures(hwnd: HWND) {
+        let off: i32 = 0;
+        for feedback in [
+            FEEDBACK_PEN_PRESSANDHOLD,
+            FEEDBACK_PEN_TAP,
+            FEEDBACK_PEN_DOUBLETAP,
+            FEEDBACK_PEN_RIGHTTAP,
+            FEEDBACK_PEN_BARRELVISUALIZATION,
+        ] {
+            // SAFETY: the window is this thread's own; the setting is a BOOL, as large as said (a
+            // system without the setting leaves it as it was)
+            let _ = unsafe {
+                SetWindowFeedbackSetting(hwnd, feedback, 0, size_of::<i32>() as u32, Some((&raw const off).cast()))
+            };
+        }
+        // SAFETY: the window is this thread's own; the property's value is the flags themselves,
+        // taken off again as the window goes
+        if let Err(e) = unsafe { SetPropW(hwnd, PEN_SERVICE, Some(HANDLE(PEN_GESTURES_OFF as *mut core::ffi::c_void))) }
+        {
+            log::warn!("the pen's press and hold stays on: {e}");
+        }
     }
 
     /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
@@ -769,7 +819,7 @@ mod system {
 
     /// The kind of device pen `id` belongs to, as the system has it: built into a screen or not
     /// (from the digitizer's own report), with its name in the log the first time it is heard
-    /// from.
+    /// from, and whether the system gives its pressure.
     fn pen_device(id: u32) -> Option<POINTER_DEVICE_TYPE> {
         let mut pointer = POINTER_INFO::default();
         // SAFETY: `pointer` is an info to fill for this pointer
@@ -781,7 +831,11 @@ mod system {
         let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
         let name = String::from_utf16_lossy(name.get(..end).unwrap_or_default());
         if LOGGED.lock().is_ok_and(|mut logged| logged.insert(name.clone())) {
-            log::info!("pen: {name} (device type {})", device.pointerDeviceType.0);
+            let mut info = POINTER_PEN_INFO::default();
+            // SAFETY: `info` is a pen info to fill for this pointer
+            let gives = unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() && info.penMask & PEN_MASK_PRESSURE != 0;
+            let pressure = if gives { "with pressure" } else { "no pressure" };
+            log::info!("pen: {name} (device type {}, {pressure})", device.pointerDeviceType.0);
         }
         Some(device.pointerDeviceType)
     }
@@ -794,6 +848,14 @@ mod system {
         // as after a crash; the artwork open is autosaved)
         if msg == WM_ENDSESSION && wparam.0 != 0 {
             crate::startup::gpu_ended();
+        }
+        // the pen's gestures, as the window's property has them (a system that asks)
+        if msg == WM_TABLET_QUERYSYSTEMGESTURESTATUS {
+            return LRESULT(PEN_GESTURES_OFF as isize);
+        }
+        if msg == WM_DESTROY {
+            // SAFETY: the property this window was given
+            let _ = unsafe { RemovePropW(hwnd, PEN_SERVICE) };
         }
         // WinTab's packets: the pen as the mouse, with its pressure (Windows Ink off)
         if super::wintab::message(hwnd, msg, wparam, lparam) {
