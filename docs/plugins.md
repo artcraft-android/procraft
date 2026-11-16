@@ -18,11 +18,14 @@ A plugin holds one or both of these:
   ([artworks of its own](#artworks-of-its-own)), or add a kind of layer whose strokes it keeps
   ([layers of its own](#layers-of-its-own)), or be a brush engine for brush files of other apps
   ([brush engines of its own](#brush-engines-of-its-own)).
-- **A [filter](#filters)**, which adds a new adjustment. It's a function the GPU runs over a layer.
+- **A [filter](#filters)**, or [several](#several-in-one-plugin), each a new adjustment. A filter is
+  a function the GPU runs over a layer.
 
 The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with code and `vector-layers`
-the largest. `extract-lines`, `posterise` and `outline` are filters. `grid-layer` has an action,
-`colour-triangle` is a picker, `vector-layers` adds layers of its own, and `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds.
+the largest. `effects` lists three filters, each under a switch of its own. `layer-fills` has an
+action beside a filter, `colour-triangle` is a picker, `vector-layers` adds layers of its own, and
+`keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds. `interface`,
+`layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches.
 
 ## What you write
 
@@ -30,7 +33,7 @@ A folder under `plugins/` holding a `craft-extension.json`, and for each thing i
 
 - For code, a Rust crate. Any language that builds to a plain WebAssembly module will do, but
   `tools/pack_plugin.py` builds Rust.
-- For a filter, a `filter.wgsl`.
+- For a filter, a `filter.wgsl`; for several, a `filters/<key>.wgsl` for each.
 
 `craft-extension.json` describes it. `tools/pack_plugin.py` lists the code in it for you.
 
@@ -62,7 +65,8 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Artworks of its own](#artworks-of-its-own)), one kind of layer (see
 [Layers of its own](#layers-of-its-own)) or one brush engine (see
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
-the `picker` hook and kinds of artwork need 2, kinds of layer 3, and brush engines 4.
+the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, and several filters
+5.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -87,6 +91,12 @@ A plugin can have up to eight, each a `slider` or a `switch`; a plugin with code
 | `names` | A name for each of a slider's steps from its lowest, shown in place of the number |
 | `live` | The value goes in as the slider moves, rather than as it lets go |
 | `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
+| `under` | The `key` of a switch it comes under: on the card it shows after that switch, while the switch is on (its value stays as it was while it's hidden) |
+
+A plugin that does several things can have a switch for each, at the top of the list, with that
+thing's sliders `under` it. Turning the plugin on switches none of them on: each is the user's to
+turn on, and the code answers for each only while its switch says so (it is told the switch as any
+control). An action, and a filter of several, can come `under` a switch too.
 
 A `file` control shows Import, or the name of the file picked and Clear. The plugin is told 1 while a
 file is picked, 0 while none is, and is handed the file itself if it takes files (see below); what
@@ -129,6 +139,8 @@ Where they show depends on what the plugin holds:
 - With only a filter, they're on the filter's panel, and start at `starts` each time it opens.
 - With both, each place has its own values: the card's go to the code, and the filter's panel still
   starts at `starts`.
+- With [several filters](#several-in-one-plugin), they're on the card, and each filter's panel opens
+  at the values its own have there.
 
 ## Hooks
 
@@ -629,7 +641,8 @@ undo takes back.
 ```
 
 A plugin can have up to eight actions. Each `key` is used once, and each `label` is the row's words.
-Its card lists them all; `"place"` lists one somewhere else too:
+Its card lists them all (one `under` a switch only while that switch is on, and only then does it
+run); `"place"` lists one somewhere else too:
 
 - `"adjustments"`: in the Adjustments menu's Plugins list, after the filters, for something done
   to the artwork as an adjustment is;
@@ -677,7 +690,7 @@ An action runs in a copy of the code of its own, told the controls as they are, 
 meanwhile. It may take 4,000,000,000 steps, for at most 20 seconds. Calls to the app's functions
 answer only while an action runs. At a hook they do nothing.
 
-`plugins/grid-layer` is one to start from.
+`plugins/layer-fills` is one to start from.
 
 ### Panels
 
@@ -1179,6 +1192,26 @@ Its manifest is like the one above, with `"holds": ["filter"]`, no `hooks`, and 
 ]
 ```
 
+### Several in one plugin
+
+A plugin can list several filters (interface 5), each a row of its own under Adjustments, with its
+code in `filters/<key>.wgsl`, the controls it reads, and the switch it comes under:
+
+```json
+"filters": [
+  { "key": "outline", "label": "Outline", "controls": ["reach"], "under": "outline" },
+  { "key": "posterise", "label": "Posterise", "controls": ["steps"], "under": "posterise" }
+]
+```
+
+- Up to eight. Each `key` is used once, and `label` is its name under Adjustments.
+- Its controls are the plugin's (sliders or switches, each once): its panel shows those, and its code
+  reads them as `v.<key>`, no others.
+- They show on the plugin's card, under their switches, and the panel opens at the values they have
+  there. Reset goes back to those.
+- One under a switch is listed only while that switch is on.
+- Such a plugin has no `filter.wgsl`. It can hold code as well.
+
 ### What is refused
 
 The file is read before anything runs. It's refused if the text is over 64 KiB, doesn't parse, or
@@ -1246,9 +1279,32 @@ other, with the same card, Turn on and Remove.
 - A later version of the app adds any it never added before, and puts a newer file in place of an
   older one that's there, keeping what was set, as an import of it would.
 - One imported before the app came with it is left as it is, but for a newer file.
-- A setting the app used to have and a plugin now `keeps` (ColorDrop gap closing's gap, Interface
-  size, Eyedropper picks from layer, Paste into masks) starts the plugin the app added on with it, if
-  someone had changed it. Once the plugin is turned on or off, that is what's kept.
+- A setting the app used to have and a plugin now `keeps` (ColorDrop tools' gap, Interface's size,
+  Layer tools' eyedropper and paste switches) starts the plugin the app added on with it, if someone
+  had changed it, and the switch it comes under. Once the plugin is turned on or off, that is what's
+  kept.
+
+### Taking the place of other plugins
+
+A plugin can take the place of others, such as several small ones made into one, by their ids:
+
+```json
+"replaces": [
+  { "id": "org.example.size", "switch": "size_on", "controls": { "clear": "clear" } },
+  { "id": "org.example.notices", "switch": "notices" }
+]
+```
+
+- Each id is beside the plugin's own: the same but for its last part. Up to sixteen.
+- `switch` is the key of one of its switches, and `controls` maps the keys of the old one's controls
+  to the keys of its own that take their values. Both can be left out. A control that `keeps` a
+  setting the app used to have takes it as the old one did, under the same key.
+- When it comes in, by an import or with the app, or on a start that finds both, the old ones go from
+  the store at once, and it takes over what they had set: it's on if any of them was, with the switch
+  of each that was, and their controls' values. The import screen names those it takes the place of.
+- What was kept for the old ones, on a start, goes the same way until it has values of its own, which
+  then say instead, read before or after. Removed, it takes what was kept for them with it.
+- An old one can't be imported while it is here.
 
 The packed files are committed, so building the app needs no WebAssembly target. Whenever anything
 under `plugins/` changes, pack them again and commit what changed:
@@ -1270,8 +1326,10 @@ and have `Plugins::with_bundled` add none. What was added stays, as if imported.
 a filter's function, what a filter is given, the kinds of control, and the app's functions. Interface
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
-keeps. Interface 3 added kinds of layer, and interface 4 brush engines, the `brush.data` permission
-and the utilities. What a hook calls stays as it's written here, and the app keeps every interface's
+keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.data` permission and
+the utilities, and interface 5 several filters in one plugin. What comes under a switch, and taking
+the place of other plugins, need no newer interface: an older app shows every control, and leaves
+the others where they are. What a hook calls stays as it's written here, and the app keeps every interface's
 template, so a plugin goes on working as it was written.
 
 Something that needs more uses a newer interface number, and an older app says it needs a newer

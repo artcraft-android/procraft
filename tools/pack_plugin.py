@@ -1,11 +1,12 @@
 """Builds the plugins under plugins/ and packs each as a .procraft-plugin file, which the app imports:
 
-    python tools/pack_plugin.py [touch-offset | extract-lines] [--out DIR]
+    python tools/pack_plugin.py [touch-offset | effects] [--out DIR]
     python tools/pack_plugin.py --bundle
 
 With no name it packs them all. What goes in is what the manifest's `holds` says: for `hooks`, the
 folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown), and for code on the
-`picker` hook its picture.wgsl too; for `filter`, its text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
+`picker` hook its picture.wgsl too; for `filter`, its text: filter.wgsl, or the filters/<key>.wgsl of each
+filter its `filters` list names. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
 asks, and them (plugin.wasm, filter.wgsl or both). They land in target/plugins unless --out says
 where. A file packed again from the same folder comes out the same, byte for byte.
 
@@ -28,6 +29,7 @@ TARGET = 'wasm32-unknown-unknown'
 MODULE = 'plugin.wasm'
 FILTER = 'filter.wgsl'
 PICTURE = 'picture.wgsl'
+FILTERS = 'filters'
 MANIFEST = 'craft-extension.json'
 TARGET_DIR = os.path.join(ROOT, 'target', 'plugins')
 BUNDLED = os.path.join(ROOT, 'crates', 'core', 'bundled-plugins')
@@ -101,8 +103,11 @@ def pack(name, out):
     if 'hooks' in manifest['holds']:
         files[MODULE] = built(name, folder)
     if 'filter' in manifest['holds']:
-        with open(os.path.join(folder, FILTER), 'rb') as f:
-            files[FILTER] = f.read()
+        # one filter, or several listed, each of its own file
+        listed = [f"{FILTERS}/{filter['key']}.wgsl" for filter in manifest.get('filters', [])]
+        for inside in listed or [FILTER]:
+            with open(os.path.join(folder, *inside.split('/')), 'rb') as f:
+                files[inside] = f.read()
     # a picker brings its picture
     if 'picker' in manifest.get('hooks', []):
         with open(os.path.join(folder, PICTURE), 'rb') as f:

@@ -924,14 +924,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
-        const ANSWERING: [&str; 6] = [
-            "eyedropper-layer",
-            "fill-all-layers",
-            "hide-undo-notice",
-            "opacity-together",
-            "pin-panels",
-            "radial-segments",
-        ];
+        const ANSWERING: [&str; 4] = ["colordrop-tools", "interface", "layer-tools", "radial-segments"];
         let dir = store("answering");
         let plugins = Plugins::with_store(dir.clone());
         let hooks = plugins.hooks();
@@ -956,10 +949,19 @@ pub(crate) mod tests {
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), true), "{name}");
         }
-        // the eyedropper's waits for its switch, and radial symmetry makes eight until its slider moves
-        assert_eq!(said(&hooks), ([false, true, true, true, true], Some(8)));
-        // (its switch kept under the setting the app had before it was a plugin)
+        // each waits for its switch, and radial symmetry makes eight until its slider moves
+        assert_eq!(said(&hooks), ([false; 5], Some(8)));
+        // (the eyedropper's kept under the setting the app had before it was a plugin)
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
+        assert_eq!(said(&hooks), ([true, false, false, false, false], Some(8)));
+        for (name, switch) in [
+            ("colordrop-tools", "all_layers"),
+            ("interface", "hide_undo"),
+            ("layer-tools", "opacity"),
+            ("interface", "pin_panels"),
+        ] {
+            assert!(plugins.set_switch(format!("{}.{switch}", id(name)), true), "{switch}");
+        }
         assert!(plugins.set_slider(format!("{}.parts", id("radial-segments")), 12.0).is_some());
         assert_eq!(said(&hooks), ([true; 5], Some(12)));
         for name in ANSWERING {
@@ -1160,12 +1162,17 @@ pub(crate) mod tests {
         let Some(s) = session() else { return };
         let dir = store("grid-layer");
         let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "grid-layer").unwrap();
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "layer-fills").unwrap();
         assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.grid-layer";
+        let id = "io.github.artcraftandroid.layer-fills";
         assert!(plugins.set_on(id.to_owned(), true));
+        // there while its switch is on
+        let card = || plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(card().actions.is_empty());
+        assert!(!plugins.run_action(format!("{id}.add"), Arc::clone(&s)));
+        assert!(plugins.set_switch(format!("{id}.grid"), true));
         // lines 50 apart, 3 wide, in blue
-        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        let card = card();
         assert_eq!(card.actions.len(), 1);
         // on its card only
         assert!(plugins.actions_in(crate::plugins::PluginPlace::Adjustments).is_empty());
@@ -2528,7 +2535,7 @@ pub(crate) mod tests {
     }
 
     /// What whole-canvas fills cost going through a real plugin file, up to the most that can: with
-    /// `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin, `--ignored --nocapture`, on a device.
+    /// `PROCRAFT_PLUGIN_FILE` naming the ColorDrop tools plugin, `--ignored --nocapture`, on a device.
     #[test]
     #[ignore]
     fn a_built_gap_plugin_costs() {
@@ -2538,6 +2545,8 @@ pub(crate) mod tests {
         assert_eq!(plugins.install(bytes), None);
         let found = card(&plugins);
         assert!(plugins.set_on(found.id.clone(), true));
+        // (the switch it comes under, if it has one)
+        plugins.set_switch(format!("{}.gap_closing", found.id), true);
         plugins.set_slider("fill_gap".to_owned(), 8.0);
         let hooks = plugins.hooks();
         assert!(hooks.fill_mask());
@@ -2563,8 +2572,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A gap closed by a real plugin file: with `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin and
-    /// `--ignored`. Two rooms, the same fill through a gap, with the plugin on and off.
+    /// A gap closed by a real plugin file: with `PROCRAFT_PLUGIN_FILE` naming the ColorDrop tools
+    /// plugin and `--ignored`. Two rooms, the same fill through a gap, with the plugin on and off.
     #[test]
     #[ignore]
     fn a_built_gap_plugin_closes_a_real_fill() {
@@ -2584,6 +2593,7 @@ pub(crate) mod tests {
         assert_eq!(plugins.install(bytes), None);
         let found = card(&plugins);
         assert!(plugins.set_on(found.id.clone(), true));
+        plugins.set_switch(format!("{}.gap_closing", found.id), true);
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 32.0), Some(32.0));
         s.use_plugins(Arc::clone(&plugins));
         assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));
