@@ -1313,7 +1313,8 @@ fn dump_brush_comparisons() {
 /// with a finger, `DUMP_STRAIGHT=1` straight across, `DUMP_UNCOMBINE=1` each part of a dual brush
 /// alone; `DUMP_PLUGIN=x.procraft-plugin` with that plugin on, as its brush engine reads and draws
 /// the file; `DUMP_UNDER=1` over bands of colour, for a brush that moves paint to move,
-/// `DUMP_UNDER=below` with the bands on a layer under the stroke's.)
+/// `DUMP_UNDER=below` with the bands on a layer under the stroke's; `DUMP_PATHS=1` a line pressing
+/// harder and a zigzag instead, at the brush's own size, to set beside another app's.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -1422,7 +1423,30 @@ fn dump_brush_strokes() {
         // at full opacity, as a thumbnail is drawn (the opacity a brush file keeps is where its
         // slider was left)
         s.set_brush_opacity(1.0);
-        for (row, size) in sizes.into_iter().enumerate() {
+        // with DUMP_PATHS, strokes as another app's scripting draws them, at the brush's own size,
+        // each sample a corner: across from (100, 256) to (924, 256) pressing from nothing to
+        // fully, then a zigzag pressing fully (on a canvas 1024 across, scaled to this one)
+        let paths = std::env::var_os("DUMP_PATHS").is_some();
+        if paths {
+            // the slider where the brush starts, its own size
+            let starting = crate::starting_sliders_of(&s.shared.lock().brush(ToolKind::Paint).clone(), ToolKind::Paint);
+            s.set_brush_size(starting.size);
+            let across = side as f32 / 1024.0;
+            let at = |(x, y): (f32, f32), pressure: f32, i: usize| PenSample {
+                pressure,
+                ..sample(x * across, y * across, i as f64 * 0.01)
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at((100.0, 256.0), 0.0, 0)]);
+            s.stroke_end(vec![at((924.0, 256.0), 1.0, 1)]);
+            let zigzag = [(100.0, 560.0), (300.0, 760.0), (500.0, 560.0), (700.0, 760.0), (924.0, 600.0)];
+            let mut corners = zigzag.iter().enumerate().map(|(i, &c)| at(c, 1.0, i));
+            s.stroke_begin(PointerKind::Stylus, corners.next().into_iter().collect());
+            let rest: Vec<PenSample> = corners.collect();
+            let (middle, last) = rest.split_at(rest.len() - 1);
+            s.stroke_add(middle.to_vec());
+            s.stroke_end(last.to_vec());
+        }
+        for (row, size) in sizes.into_iter().enumerate().filter(|_| !paths) {
             s.set_brush_size(size);
             let y = side as f32 * (row as f32 + 0.5) / rows;
             let across = side as f32 / 1024.0;
