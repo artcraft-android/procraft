@@ -1899,6 +1899,89 @@ mod tests {
         assert_eq!(without.pick_up.and_then(|p| p.height), None);
     }
 
+    /// A Krita colour smudge brush with a lightness tip keeps its paint with a plain layer between
+    /// strokes, the layer showing it lit by the tip's grey; undone, the layer keeps nothing.
+    #[test]
+    fn a_krita_lightness_smudge_keeps_its_paint_with_the_layer_lit_by_its_thickness() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-thickness-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        s.use_plugins(Arc::clone(&plugins));
+        // a tip 32 pixels a side, a disc (a picture, as it is see-through), its grey in bands 8 rows
+        // each, light and dark
+        let side = 32_usize;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = ((i % side) as f32 - 15.5, (i / side) as f32 - 15.5);
+                let a = if x * x + y * y < 15.5 * 15.5 { 255 } else { 0 };
+                if (i / side / 8).is_multiple_of(2) { [220, 220, 220, a] } else { [40, 40, 40, a] }
+            })
+            .collect();
+        let png = crate::project::png_of(side as u32, side as u32, &pixels).unwrap();
+        let tip = procraft_engine::base64::encode(&png);
+        let xml = format!(
+            r#"<Preset name="Thick" paintopid="colorsmudge"><resources><resource name="bands" filename="bands.png" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="png_brush" filename="bands.png" spacing="0.1" BrushVersion="2" brushApplication="2" scale="1" angle="0" useAutoSpacing="0"/>]]></param><param name="PressureSize"><![CDATA[false]]></param><param name="PressureSmudgeRate"><![CDATA[false]]></param><param name="SmudgeRateValue"><![CDATA[1]]></param><param name="SmudgeRateMode"><![CDATA[0]]></param><param name="SmudgeRateUseNewEngine"><![CDATA[true]]></param><param name="PressureColorRate"><![CDATA[true]]></param><param name="ColorRateValue"><![CDATA[1]]></param></Preset>"#
+        );
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+        kpp.extend(chunk(b"IEND", &[]));
+        let read = crate::read_brushes(kpp, Some("Thick.kpp".to_owned())).unwrap();
+        let set = s.add_brushes_read(read, 0).unwrap();
+        assert!(s.select_brush(set, 0));
+        let layer = procraft_engine::document::LayerId(s.add_layer());
+        // a mid grey all over: its lightness 0.5 goes lighter and darker as the tip's grey says
+        s.set_color(0.5, 0.5, 0.5);
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(40.0)]);
+        s.stroke_add((41..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let store = |s: &crate::CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.store(layer).map(|s| s.kind)
+        };
+        assert_eq!(store(&s), Some(procraft_gpu::STORE_LIT));
+        let px = s.shared.lock().layer_pixels(layer).unwrap();
+        // down the middle of the stroke, the bands of the tip lit light and dark
+        let column: Vec<u8> = (48..72).map(|y| px[(y * 200 + 100) * 4]).collect();
+        let (lo, hi) = (column.iter().min().copied().unwrap(), column.iter().max().copied().unwrap());
+        assert!(lo < 90 && hi > 170, "{column:?}");
+        s.undo();
+        assert_eq!(store(&s), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A brush engine that asks for the colours under where a stroke starts is handed them: a Krita
     /// bristle brush soaking up its ink paints in the red it starts on, whatever the colour.
     #[test]
