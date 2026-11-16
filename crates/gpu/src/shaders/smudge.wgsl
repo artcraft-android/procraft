@@ -699,6 +699,13 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
+    if ((st.dual & DUAL_CLASSIC) != 0u && st.laid_apart == 2u && laid <= 0.0 && toward > 0.0) {
+        // the classic combine where the wet first laid nothing: the stroke's colour, by the
+        // second's share, added to the layer as it was (all of it kept, as its paint starts out),
+        // shown as far as the second does: over paint it tints it, it doesn't cover it
+        let added = mix(was, was + vec4<f32>(st.paint.rgb, 1.0) * toward, a);
+        out = vec4<f32>(min(added.rgb, vec3<f32>(added.a)), added.a);
+    }
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
