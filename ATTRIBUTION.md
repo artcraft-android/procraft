@@ -263,6 +263,12 @@ The same icons, each with the Lucide icon it is:
 Our own among the rest: `ShapeArc`, and the outlines and shapes not listed above
 (chevrons, ticks, the keypad, the brush swipe's bin, the Liquify tools, the brush set glyphs...).
 
+### Code from elsewhere
+
+| Path | What | Author | Source | Licence |
+|---|---|---|---|---|
+| `plugins/krita-brushes/src/mypaint.rs` (in the bundled Krita brushes plugin) | MyPaint's brush engine (its settings, inputs, states and dabs), ported to Rust | Martin Renold and the libmypaint contributors | libmypaint 1.6.1, <https://github.com/mypaint/libmypaint> (`mypaint-brush.c`, `mypaint-mapping.c`, `helpers.c`, `brushsettings.json`) | ISC; the notice is in the file, in the plugin's `README.md` and in [`NOTICE`](NOTICE) |
+
 ## Tests
 
 | Path | Title | Author | Source | Licence |

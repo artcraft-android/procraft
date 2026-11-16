@@ -262,6 +262,9 @@ enum Does {
     MirrorAxes,
     TextureMode,
     Reset,
+    /// A MyPaint brush's setting's base value (its place in MyPaint's list), and its eraser mode.
+    MyPaint(usize),
+    MyPaintEraser,
     Nothing,
 }
 
@@ -274,7 +277,94 @@ pub struct Studio {
     original: Option<String>,
     page: usize,
     rows: Vec<Does>,
+    /// A MyPaint brush's settings (its JSON), and as they came.
+    mypaint: Option<crate::json::Value>,
+    mypaint_original: Option<String>,
 }
+
+/// A MyPaint brush's pages, as Krita sorts its settings, each setting with Krita's name for it.
+const MYPAINT_PAGES: [(&str, &[(&str, &str)]); 8] = [
+    (
+        "Basic",
+        &[
+            ("radius_logarithmic", "Radius Logarithmic"),
+            ("radius_by_random", "Radius by Random"),
+            ("hardness", "Hardness"),
+            ("anti_aliasing", "Anti Aliasing"),
+            ("elliptical_dab_angle", "Elliptical Dab Angle"),
+            ("elliptical_dab_ratio", "Elliptical Dab Ratio"),
+            ("direction_filter", "Direction Filter"),
+            ("snap_to_pixel", "Snap To Pixel"),
+            ("pressure_gain_log", "Pressure Gain"),
+        ],
+    ),
+    (
+        "Color",
+        &[
+            ("change_color_h", "Change Color H"),
+            ("change_color_l", "Change Color L"),
+            ("change_color_v", "Change Color V"),
+            ("change_color_hsl_s", "Change Color HSL S"),
+            ("change_color_hsv_s", "Change Color HSV S"),
+            ("colorize", "Colorize"),
+            ("posterize", "Posterize"),
+            ("posterize_num", "Posterization Levels"),
+        ],
+    ),
+    (
+        "Speed",
+        &[
+            ("speed1_gamma", "Fine Speed Gamma"),
+            ("speed2_gamma", "Gross Speed Gamma"),
+            ("speed1_slowness", "Fine Speed Slowness"),
+            ("speed2_slowness", "Gross Speed Slowness"),
+            ("offset_by_speed", "Offset By Speed"),
+            ("offset_by_speed_slowness", "Offset by Speed Filter"),
+            ("offset_by_random", "Offset By Random"),
+        ],
+    ),
+    (
+        "Dabs",
+        &[
+            ("dabs_per_basic_radius", "Dabs Per Basic Radius"),
+            ("dabs_per_actual_radius", "Dabs Per Actual Radius"),
+            ("dabs_per_second", "Dabs per Second"),
+        ],
+    ),
+    (
+        "Opacity",
+        &[("opaque", "Opaque"), ("opaque_linearize", "Opaque Linearize"), ("opaque_multiply", "Opaque Multiply")],
+    ),
+    (
+        "Tracking",
+        &[
+            ("slow_tracking_per_dab", "Slow tracking per dab"),
+            ("slow_tracking", "Slow Tracking"),
+            ("tracking_noise", "Tracking Noise"),
+        ],
+    ),
+    (
+        "Smudge",
+        &[
+            ("smudge", "Smudge"),
+            ("smudge_length", "Smudge Length"),
+            ("smudge_length_log", "Smudge Length Multiplier"),
+            ("smudge_radius_log", "Smudge Radius Log"),
+            ("smudge_transparency", "Smudge Transparency"),
+            ("smudge_bucket", "Smudge Bucket"),
+        ],
+    ),
+    (
+        "Stroke",
+        &[
+            ("stroke_duration_logarithmic", "Stroke Duration log"),
+            ("stroke_holdtime", "Stroke Holdtime"),
+            ("stroke_threshold", "Stroke Threshold"),
+            ("custom_input", "Custom Input"),
+            ("custom_input_slowness", "Custom Input Slowness"),
+        ],
+    ),
+];
 
 impl Studio {
     /// Opens on the brush the app hands over.
@@ -293,9 +383,13 @@ impl Studio {
     fn read(&mut self, data: &[u8]) {
         self.files.clear();
         self.original = None;
+        self.mypaint = None;
+        self.mypaint_original = None;
         let mut text = None;
         for (id, value) in fields(data) {
             match id {
+                4 => self.mypaint = crate::json::parse(&String::from_utf8_lossy(value)),
+                5 => self.mypaint_original = Some(String::from_utf8_lossy(value).into_owned()),
                 1 => text = Some(String::from_utf8_lossy(value).into_owned()),
                 2 => {
                     let (mut name, mut bytes) = (String::new(), Vec::new());
@@ -320,6 +414,15 @@ impl Studio {
 
     /// The brush's data as it now is, written back to the app.
     fn save(&self) {
+        if let Some(json) = &self.mypaint {
+            let mut data = Record::new();
+            data.field(4, json.write().as_bytes());
+            if let Some(original) = &self.mypaint_original {
+                data.field(5, original.as_bytes());
+            }
+            write_data(&data.bytes());
+            return;
+        }
         let Some(p) = &self.preset else { return };
         let mut data = Record::new();
         data.field(1, p.to_xml().as_bytes());
@@ -337,6 +440,10 @@ impl Studio {
     /// A touch on row `row` with `value`.
     pub fn touched(&mut self, row: usize, value: f32) {
         let Some(does) = self.rows.get(row).cloned() else { return };
+        if self.mypaint.is_some() {
+            self.touched_mypaint(&does, value);
+            return;
+        }
         if does == Does::Page {
             let count = self.preset.as_ref().map_or(1, |p| pages(&p.paintop).len());
             self.page = (value.max(0.0) as usize).min(count - 1);
@@ -360,7 +467,85 @@ impl Studio {
         self.show();
     }
 
+    /// A touch on a MyPaint brush's page.
+    fn touched_mypaint(&mut self, does: &Does, value: f32) {
+        match does {
+            Does::Page => self.page = (value.max(0.0) as usize).min(MYPAINT_PAGES.len() - 1),
+            Does::Reset => {
+                if self.mypaint_original.is_none() {
+                    self.mypaint_original = self.mypaint.as_ref().map(crate::json::Value::write);
+                }
+                self.mypaint = self.mypaint_original.as_deref().and_then(crate::json::parse);
+                self.save();
+            }
+            Does::MyPaint(setting) => {
+                let name = crate::mypaint::SETTINGS.get(*setting).map_or("", |s| s.0);
+                self.set_mypaint(name, value);
+            }
+            Does::MyPaintEraser => self.set_mypaint("eraser", if value >= 0.5 { 1.0 } else { 0.0 }),
+            _ => {}
+        }
+        self.show();
+    }
+
+    /// A MyPaint brush's setting's base value set (the brush written back).
+    fn set_mypaint(&mut self, name: &str, value: f32) {
+        use crate::json::Value;
+        let Some(json) = self.mypaint.as_mut() else { return };
+        if self.mypaint_original.is_none() {
+            self.mypaint_original = Some(json.write());
+        }
+        let Some(settings) = json.entry("settings") else { return };
+        if !matches!(settings, Value::Object(_)) {
+            *settings = Value::Object(Vec::new());
+        }
+        let Some(setting) = settings.entry(name) else { return };
+        if !matches!(setting, Value::Object(_)) {
+            *setting = Value::Object(vec![("inputs".to_owned(), Value::Object(Vec::new()))]);
+        }
+        if let Some(base) = setting.entry("base_value") {
+            *base = Value::Number(f64::from(value));
+        }
+        if let Some(inputs) = setting.entry("inputs")
+            && !matches!(inputs, Value::Object(_))
+        {
+            *inputs = Value::Object(Vec::new());
+        }
+        self.save();
+    }
+
+    /// A MyPaint brush's page: each setting's base value, and the inputs it follows.
+    fn show_mypaint(&mut self) {
+        let Some(json) = self.mypaint.as_ref() else { return };
+        let brush = crate::mypaint::MyPaint::read(&json.write()).unwrap_or_else(crate::mypaint::MyPaint::defaults);
+        let mut page = Page::new("MyPaint brush");
+        self.page = self.page.min(MYPAINT_PAGES.len() - 1);
+        let names: Vec<&str> = MYPAINT_PAGES.iter().map(|(name, _)| *name).collect();
+        page.choice(Does::Page, "Page", &names, self.page);
+        let (_, settings) = MYPAINT_PAGES[self.page];
+        if self.page == 0 {
+            page.switch(Does::MyPaintEraser, "Eraser Mode", brush.erases());
+        }
+        for (name, label) in settings {
+            let Some(index) = crate::mypaint::SETTINGS.iter().position(|s| s.0 == *name) else { continue };
+            let (least, most) = crate::mypaint::RANGES[index];
+            let m = &brush.map[index];
+            page.slider(Does::MyPaint(index), label, least, most, (most - least) / 200.0, m.base, "");
+            if !m.constant() {
+                let inputs: Vec<&str> =
+                    m.curves.iter().filter_map(|(i, _)| crate::mypaint::INPUTS.get(*i).copied()).collect();
+                page.text(&format!("{label} follows {}", inputs.join(", ")));
+            }
+        }
+        page.button(Does::Reset, "Back to the brush as it came");
+        self.rows = page.does.clone();
+        show(&page.json());
+    }
+
     fn show(&mut self) {
+        if self.mypaint.is_some() {
+            return self.show_mypaint();
+        }
         let Some(p) = self.preset.as_ref() else { return };
         let mut page = Page::new(&p.name);
         let all = pages(&p.paintop);
@@ -1199,7 +1384,7 @@ fn change(p: &mut Preset, does: &Does, value: f32) {
                 set(p, "Texture/Pattern/TexturingMode", mode.to_string());
             }
         }
-        Does::Page | Does::Reset | Does::Nothing => {}
+        Does::Page | Does::Reset | Does::MyPaint(_) | Does::MyPaintEraser | Does::Nothing => {}
     }
 }
 
@@ -1259,6 +1444,39 @@ mod tests {
         assert_eq!(studio.preset.as_ref().unwrap().get("SizecommonCurve"), Some("0,1;1,0;"));
         // every page holds up as a panel
         for page in 0..PIXEL_PAGES.len() {
+            studio.touched(0, page as f32);
+            assert!(studio.rows.len() <= MOST_ROWS);
+        }
+    }
+
+    #[test]
+    fn a_mypaint_brush_s_settings_change_on_its_pages() {
+        let json = r#"{"version": 3, "settings": {"hardness": {"base_value": 0.5, "inputs": {"pressure": [[0, 0], [1, 1]]}}}}"#;
+        let mut data = Record::new();
+        data.field(4, json.as_bytes());
+        let mut studio = Studio::default();
+        studio.read(&data.bytes());
+        studio.show();
+        let hardness = crate::mypaint::HARDNESS;
+        let row = studio.rows.iter().position(|d| *d == Does::MyPaint(hardness)).unwrap();
+        studio.touched(row, 0.75);
+        let brush = crate::mypaint::MyPaint::read(&studio.mypaint.as_ref().unwrap().write()).unwrap();
+        assert_eq!(brush.base(hardness), 0.75);
+        assert!(!brush.map[hardness].constant(), "its curve kept");
+        // a setting it didn't say comes in; the eraser switches; back as it came
+        studio.touched(0, 6.0);
+        let smudge = studio.rows.iter().position(|d| *d == Does::MyPaint(crate::mypaint::SMUDGE)).unwrap();
+        studio.touched(smudge, 0.5);
+        studio.touched(0, 0.0);
+        let eraser = studio.rows.iter().position(|d| *d == Does::MyPaintEraser).unwrap();
+        studio.touched(eraser, 1.0);
+        let brush = crate::mypaint::MyPaint::read(&studio.mypaint.as_ref().unwrap().write()).unwrap();
+        assert!(brush.base(crate::mypaint::SMUDGE) == 0.5 && brush.erases());
+        let reset = studio.rows.iter().position(|d| *d == Does::Reset).unwrap();
+        studio.touched(reset, 1.0);
+        let brush = crate::mypaint::MyPaint::read(&studio.mypaint.as_ref().unwrap().write()).unwrap();
+        assert!(brush.base(hardness) == 0.5 && !brush.erases());
+        for page in 0..MYPAINT_PAGES.len() {
             studio.touched(0, page as f32);
             assert!(studio.rows.len() <= MOST_ROWS);
         }

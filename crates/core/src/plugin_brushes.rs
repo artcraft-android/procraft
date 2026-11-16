@@ -1685,6 +1685,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A brush engine that asks what lies under its dabs is told, a batch of samples later: a Krita
+    /// MyPaint brush that smudges, dragged from red into the clear, carries the red there in place of
+    /// its blue (picking up the red it laid itself as it goes on).
+    #[test]
+    fn an_engine_is_told_the_colours_under_the_dabs_it_asks_about() {
+        let packed = match std::env::var("KRITA_PLUGIN") {
+            Ok(path) => std::fs::read(path).unwrap(),
+            Err(_) => crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1.to_vec(),
+        };
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-told-under-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        assert_eq!(plugins.install(packed), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id.clone(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        // a bundle holding only a MyPaint brush that smudges fully, its dabs hard and close
+        let myb = r#"{"version": 3, "settings": {
+            "radius_logarithmic": {"base_value": 1.6, "inputs": {}},
+            "hardness": {"base_value": 0.9, "inputs": {}},
+            "opaque_multiply": {"base_value": 1.0, "inputs": {}},
+            "dabs_per_actual_radius": {"base_value": 4.0, "inputs": {}},
+            "smudge": {"base_value": 1.0, "inputs": {}},
+            "smudge_length": {"base_value": 0.5, "inputs": {}}
+        }}"#;
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("mimetype", b"application/x-krita-resourcebundle");
+        zip.add("paintoppresets/Wet_Drag.myb", myb.as_bytes());
+        let read = crate::read_brushes(zip.finish(), Some("Drag.bundle".to_owned())).unwrap();
+        s.make_engine_brushes(Arc::clone(&read));
+        let set = s.add_brushes_read(read, 0).expect("the engine's brush comes in");
+        let brush = s.shared.lock().library[set as usize].brushes[0].clone();
+        assert_eq!(brush.name, "Wet Drag");
+        assert!(brush.engine.is_some());
+        assert!(s.select_brush(set, 0));
+        // red on the left half
+        let layer = s.add_layer();
+        {
+            let mut st = s.shared.lock();
+            let rect = procraft_engine::geom::IRect::new(0, 0, 100, 120);
+            st.rewrite_layer(procraft_engine::document::LayerId(layer), rect, [255, 0, 0, 255].repeat(100 * 120));
+        }
+        s.set_color(0.0, 0.0, 1.0);
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        // in batches, as the pen's moves come
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
+        for from in (61..=150).step_by(3) {
+            s.stroke_add((from..from + 3).map(|x| at(x as f32)).collect());
+        }
+        s.stroke_end(vec![]);
+        assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
+        let px = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
+        // just past the red, the red it carries (none of its blue: it smudges fully)
+        let [r, _, b, a] = at_x(110).try_into().unwrap();
+        assert!(r > 128 && b < 64 && a > 64, "red carried out: {:?}", at_x(110));
+        // further on, still red: what it laid itself is what it picks up
+        let [r, _, b, _] = at_x(145).try_into().unwrap();
+        assert!(r > 128 && b < 64, "red carried on: {:?}", at_x(145));
+        assert_eq!(at_x(190)[3], 0, "past the stroke, still clear");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A brush engine that asks for the colours under where a stroke starts is handed them: a Krita
     /// bristle brush soaking up its ink paints in the red it starts on, whatever the colour.
     #[test]

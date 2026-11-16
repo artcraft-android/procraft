@@ -34,6 +34,25 @@ This product bundles third-party material under its own licenses, listed below.
 - The Okhsl colour model's code in crates/core/src/colour_models.rs, after Björn Ottosson's reference
   implementation (https://bottosson.github.io/posts/colorpicker/) — MIT License, Copyright (c) 2021
   Björn Ottosson; the notice is in the file.
+- The MyPaint brush engine in the Krita brushes plugin (plugins/krita-brushes/src/mypaint.rs, built
+  into crates/core/bundled-plugins/krita-brushes.procraft-plugin), ported to Rust from libmypaint
+  1.6.1 (https://github.com/mypaint/libmypaint) — ISC License; the notice is in the file and below:
+
+  libmypaint - The MyPaint Brush Library
+  Copyright (C) 2007-2011 Martin Renold <martinxyz@gmx.ch>
+  Copyright (C) 2008-2011 Martin Renold and contributors
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 Libraries
 

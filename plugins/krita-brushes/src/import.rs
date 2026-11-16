@@ -6,6 +6,10 @@
 //! its settings (field 1) and the pictures it names (field 2 each: its file name, field 1, and
 //! bytes, field 2): those the preset carries taken out of its settings and unpacked once, so that a
 //! brush read again needn't pass over them (one kept with them in its settings reads as well).
+//!
+//! A MyPaint brush (a `.myb`, MyPaint's JSON, alone or in a bundle's `paintoppresets/` beside its
+//! preview `<name>_prev.png`; or a preset of Krita's MyPaint engine keeping one) keeps that JSON
+//! (field 4) instead (field 3 is the brush studio's: the settings as they came).
 
 use crate::brush::Brush;
 use crate::files::{Zip, png_picture_only, png_texts};
@@ -20,7 +24,6 @@ fn preset_text(kpp: &[u8]) -> Option<String> {
 /// The brushes made of a file called `name` (`bytes`): a bundle's or a preset's, as the record the
 /// app takes; empty for none.
 pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
-    let _ = name;
     let mut made = Record::new();
     if let Some(zip) = Zip::read(bytes) {
         let names: Vec<String> = zip.names().map(str::to_owned).collect();
@@ -38,10 +41,50 @@ pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
                 add(&mut made, &kpp, &find);
             }
         }
+        // MyPaint's brushes, each beside its preview
+        for n in names.iter().filter(|n| n.starts_with("paintoppresets/") && n.to_ascii_lowercase().ends_with(".myb")) {
+            let stem = &n[..n.len() - 4];
+            let preview = zip.file(&format!("{stem}_prev.png"));
+            if let Some(json) = zip.file(n) {
+                add_mypaint(&mut made, stem.rsplit('/').next().unwrap_or(stem), &json, preview);
+            }
+        }
     } else if bytes.starts_with(b"\x89PNG") {
         add(&mut made, bytes, &|_| None);
+    } else if bytes.trim_ascii_start().starts_with(b"{") {
+        let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let stem = file.split('.').next().unwrap_or(file);
+        add_mypaint(&mut made, if stem.is_empty() { "MyPaint" } else { stem }, bytes, None);
     }
     made.bytes()
+}
+
+/// A brush made of a MyPaint brush file (`json`) called `name` (as Krita names it: the file's name
+/// up to its first dot, its underscores spaces), with its preview if it has one, if it is one.
+fn add_mypaint(made: &mut Record, name: &str, json: &[u8], preview: Option<Vec<u8>>) {
+    let name = name.replace('_', " ");
+    let name = name.as_str();
+    let Ok(text) = std::str::from_utf8(json) else { return };
+    if crate::mypaint::MyPaint::read(text).is_none() {
+        return;
+    }
+    let mut data = Record::new();
+    data.field(4, text.as_bytes());
+    let mut brush = Record::new();
+    brush.field(1, name.as_bytes()).field(2, &data.bytes());
+    if let Some(png) = preview.filter(|p| p.starts_with(b"\x89PNG")) {
+        brush.field(3, &png);
+    }
+    made.field(1, &brush.bytes());
+}
+
+/// The MyPaint JSON a preset of Krita's MyPaint engine keeps (as text, or in base64).
+fn mypaint_json(preset: &Preset) -> Option<String> {
+    let kept = preset.get("MyPaint/json")?.trim();
+    if kept.starts_with('{') {
+        return Some(kept.to_owned());
+    }
+    String::from_utf8(crate::files::base64(kept)?).ok()
 }
 
 /// A brush made of preset `kpp`, its pictures found in it or by `find`, if it is one this engine
@@ -49,6 +92,13 @@ pub fn import(name: &str, bytes: &[u8]) -> Vec<u8> {
 fn add(made: &mut Record, kpp: &[u8], find: &dyn Fn(&str) -> Option<Vec<u8>>) {
     let Some(text) = preset_text(kpp) else { return };
     let Some(preset) = Preset::read(&text) else { return };
+    // Krita's MyPaint engine's: the MyPaint brush it keeps
+    if preset.paintop == "mypaintbrush" {
+        if let Some(json) = mypaint_json(&preset) {
+            add_mypaint(made, &preset.name, json.as_bytes(), png_picture_only(kpp));
+        }
+        return;
+    }
     if !crate::brush::ENGINES.contains(&preset.paintop.as_str()) {
         return;
     }
@@ -132,6 +182,10 @@ pub fn load(data: &[u8], light: bool) -> Option<Brush> {
     let mut files: Vec<(String, &[u8])> = Vec::new();
     for (id, value) in fields(data) {
         match id {
+            4 => {
+                let settings = crate::mypaint::MyPaint::read(&String::from_utf8_lossy(value))?;
+                return Brush::mypaint(settings, light);
+            }
             1 => text = Some(String::from_utf8_lossy(value).into_owned()),
             2 => {
                 let (mut name, mut bytes) = (String::new(), &[][..]);
@@ -190,6 +244,44 @@ mod tests {
             }
         }
         out
+    }
+
+    /// An SVG tip is drawn as Krita draws one: 1000 pixels across, black where it paints, at the
+    /// preset's scale; and a MyPaint brush file in a bundle comes in by Krita's name for it.
+    #[test]
+    fn an_svg_tip_and_a_mypaint_brush_come_in() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="0" y="0" width="50" height="50"/></svg>"#;
+        let xml = r#"<Preset name="S" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="svg_brush" scale="0.5" spacing="0.2" BrushVersion="2" filename="half.svg"/>]]></param></Preset>"#;
+        let mut file = Record::new();
+        file.field(1, b"half.svg").field(2, svg);
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes()).field(2, &file.bytes());
+        let data = data.bytes();
+        let brush = load(&data, false).unwrap();
+        assert_eq!((brush.tip.width, brush.tip.height), (500.0, 250.0));
+        let m = &brush.tip.masks[0];
+        assert_eq!((m.width, m.height), (1000, 500));
+        // painting on its left half, nothing on its right
+        assert!(m.pixels[(250 * 1000 + 250) as usize] > 250 && m.pixels[(250 * 1000 + 750) as usize] < 5);
+        // light: its size only
+        assert_eq!(load(&data, true).unwrap().tip.width, 500.0);
+        // a bundle's MyPaint brush file, by its name with spaces, drawn by MyPaint's engine
+        let myb = br#"{"version": 3, "settings": {"radius_logarithmic": {"base_value": 1.0, "inputs": {}}}}"#;
+        let made = import("x.myb", myb);
+        let (_, made) = fields(&made).next().unwrap();
+        let mut name = String::new();
+        let mut kept = Vec::new();
+        for (f, v) in fields(made) {
+            match f {
+                1 => name = String::from_utf8_lossy(v).into_owned(),
+                2 => kept = v.to_vec(),
+                _ => {}
+            }
+        }
+        assert_eq!(name, "x");
+        let brush = load(&kept, true).unwrap();
+        assert_eq!(brush.mypaint.as_ref().unwrap().base(crate::mypaint::RADIUS_LOGARITHMIC), 1.0);
+        assert_eq!(brush.tip.masks.len(), crate::mypaint::HARDNESSES as usize);
     }
 
     /// A colour picture tip paints as its preset says Krita applies it, and at twice its scale in a

@@ -434,6 +434,17 @@ impl Under {
         (pixels.len() as u64 == u64::from(side) * u64::from(side) * 4).then_some(Under { x0, y0, side, pixels })
     }
 
+    /// The colour and alpha at canvas pixel (x, y) (straight, 0..1), if the square holds it.
+    pub fn pixel(&self, x: i32, y: i32) -> Option<[f32; 4]> {
+        let (i, j) = (x - self.x0, y - self.y0);
+        if i < 0 || j < 0 || i >= self.side as i32 || j >= self.side as i32 {
+            return None;
+        }
+        let at = ((j as u32 * self.side + i as u32) * 4) as usize;
+        let p = self.pixels.get(at..at + 4)?;
+        Some([p[0], p[1], p[2], p[3]].map(|v| f32::from(v) / 255.0))
+    }
+
     /// The colour at canvas pixel (x, y), if the square holds it.
     fn at(&self, x: i32, y: i32) -> Option<[f32; 3]> {
         let (i, j) = (x - self.x0, y - self.y0);
@@ -496,6 +507,8 @@ pub struct Stroke {
     dyna: Option<crate::others::DynaWeight>,
     dyna_across: (f32, f32),
     dyna_lines: Vec<(f32, f32)>,
+    /// A MyPaint brush's stroke, once it has samples.
+    mypaint: Option<crate::mypaint::Stroke>,
 }
 
 impl Stroke {
@@ -557,6 +570,14 @@ impl Stroke {
             dyna: None,
             dyna_across: (0.0, 0.0),
             dyna_lines: Vec::new(),
+            mypaint: None,
+        }
+    }
+
+    /// The colours under the dabs it asked about, told (premultiplied, in order).
+    pub fn told(&mut self, told: &[[f32; 4]]) {
+        if let Some(m) = self.mypaint.as_mut() {
+            m.told(told);
         }
     }
 
@@ -607,6 +628,14 @@ impl Stroke {
     }
 
     pub fn add(&mut self, samples: &[Sample]) {
+        // a MyPaint brush's through MyPaint's engine
+        if let Some(brush) = self.brush.mypaint.as_ref() {
+            let (begin, under) = (self.begin, &mut self.under);
+            let m = self.mypaint.get_or_insert_with(|| crate::mypaint::Stroke::new(brush, begin, under.take()));
+            m.add(samples);
+            self.out.extend(m.take());
+            return;
+        }
         // a clone brush lays nothing until the pen has moved: a tap sets where it picks up from
         if self.brush.clone.is_some() && !self.moving {
             self.held.extend_from_slice(samples);
@@ -2194,7 +2223,7 @@ fn pipe_cell(pick: &PipePick, state: &mut PipeState, info: &Info, count: u32, se
 
 /// The pen's lean across and down (degrees, -60..60) from its lean from upright and the way it
 /// leans (clockwise from up).
-fn lean(tilt: f32, azimuth: f32) -> (f32, f32) {
+pub(crate) fn lean(tilt: f32, azimuth: f32) -> (f32, f32) {
     if !(tilt.is_finite() && azimuth.is_finite()) || tilt <= 0.0 {
         return (0.0, 0.0);
     }

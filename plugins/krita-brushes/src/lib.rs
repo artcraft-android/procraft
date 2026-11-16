@@ -10,7 +10,8 @@
 //! - Loading: the data read again into a brush ready to draw, and how it looks to the app (its tips
 //!   drawn as grey pictures, its texture's mask, whether it washes, its blend), unless the app holds
 //!   that already (it keeps it on the disk). See `brush.rs`.
-//! - Drawing: dab by dab, as Krita spaces and shapes them. See `engine.rs`.
+//! - Drawing: dab by dab, as Krita spaces and shapes them. See `engine.rs`; Krita's MyPaint
+//!   brushes through MyPaint's engine, see `mypaint.rs`.
 //!
 //! What it knows of Krita's brushes comes from Krita's manual and from reading how Krita works; the
 //! code here is its own (see README.md).
@@ -21,11 +22,14 @@ mod engine;
 mod files;
 mod gimp;
 mod import;
+mod json;
+mod mypaint;
 mod options;
 mod others;
 mod preset;
 mod rec;
 mod studio;
+mod svg;
 mod tips;
 mod utilities;
 mod xml;
@@ -198,6 +202,28 @@ pub extern "C" fn procraft_brush_add(stroke: i32, len: i32) -> i32 {
             d.write(output);
         }
         dabs.len() as i32
+    })
+}
+
+/// The colours under the dabs stroke `stroke` asked about (four f32 each, premultiplied, in
+/// order), told before its next samples.
+#[unsafe(no_mangle)]
+pub extern "C" fn procraft_brush_under(stroke: i32, len: i32) -> i32 {
+    with(|s| {
+        let input = s.input.get(..usize::try_from(len).unwrap_or(0)).unwrap_or_default();
+        let told: Vec<[f32; 4]> = input
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|b| {
+                let f = f32s(b);
+                [f[0], f[1], f[2], f[3]].map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })
+            })
+            .collect();
+        if let Some((_, open)) = s.strokes.iter_mut().find(|(n, _)| *n == stroke) {
+            open.told(&told);
+        }
+        0
     })
 }
 

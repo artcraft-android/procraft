@@ -2,21 +2,32 @@
 
 A ProCraft plugin that is a brush engine (see the guide's "Brush engines of its own"): it reads
 Krita's brush presets (`.kpp`) and bundles (`.bundle`) as they are imported, and draws their
-brushes as Krita's pixel brush and colour smudge brush draw them, and its quick, tangent normal,
-sketch, spray, bristle, hatching, curve, particle, grid, clone, deform, filter and shape brushes as
-far as dabs draw them. It comes
-with the app, off.
+brushes as Krita's pixel brush and colour smudge brush draw them, its MyPaint brushes (`.myb`) as
+MyPaint's engine draws them in Krita, and its quick, tangent normal, sketch, spray, bristle,
+hatching, curve, particle, grid, clone, deform, filter and shape brushes as far as dabs draw them.
+It comes with the app, off.
 
 ## What it draws
 
 - Tips: auto tips (circle or rectangle; default, soft-by-curve or Gaussian edge; ratio, fades,
-  spikes, density and randomness, drawn afresh from a few variants), and pictures: PNGs, GIMP
+  spikes, density and randomness, drawn afresh from a few variants), and pictures: PNGs, SVG
+  pictures (their filled shapes drawn as Krita draws an SVG tip: grey over white, 1000 pixels
+  across), GIMP
   brushes (`.gbr`) and pipes (`.gih`, a cell picked per dab by each dimension's selection: constant,
   incremental, random, pressure, angular, velocity, tilt), applied as the preset says: as a mask,
   stamped in their own colours, as a lightness map (its strength an option of its own) or as a
   gradient map (from the colour to the secondary colour), a colour picture's grey through its
   middle point, brightness and contrast; older presets' scale and adjustments read as Krita reads
   them.
+- MyPaint brushes (Krita's MyPaint engine: a `.myb` in a bundle, or a preset keeping one): MyPaint's
+  engine, ported (see below), handed the pen where Krita hands it (at the start, then every square
+  root of the brush's diameter), its size as the slider says over the brush's own and its colour the
+  app's; all its settings and their inputs' curves as MyPaint reads them, laid as Krita lays MyPaint's
+  dabs (its round dab at each hardness, squashed and turned; an eraser as Krita's eraser mode). A
+  brush that smudges asks the app what lies under each dab (the layer as the stroke has laid it so
+  far, weighed as Krita weighs it) and mixes it in as MyPaint does, its dabs laid in place, as
+  opaque as what it carries. Its studio has Krita's pages for MyPaint's settings, each its base
+  value.
 - Spacing: fixed or automatic, by the dab's size across and down its own frame (or the same every
   way), scaled by the spacing option.
 - Options and their sensors: size, opacity, flow, rotation, ratio, spacing, scatter (both ways,
@@ -108,7 +119,13 @@ readers (which its tests use) run in it.
 
 ## Not yet
 
-- Krita's MyPaint brushes come in as the app reads them. The clone brush's source is set by a tap
+- A MyPaint brush that smudges is told what lies under its dabs a batch of the pen's samples late
+  (until then it takes the newest it was told, and what it carries is worked out again once told);
+  its colours mixed in RGB (MyPaint's older path, as Krita drives it: no spectral mixing, colorizing
+  or posterizing); its dabs drawn from its tips at 64 hardnesses (Krita draws each at its own pixels,
+  so a dab a few pixels across is a little softer and wider here). A `.myb` on its own comes in only
+  where the app hands such files to brush engines; in a bundle, always.
+- The clone brush's source is set by a tap
   (Krita's with a key held), and it doesn't heal; the filter brush draws blurs and the unsharp mask
   only (others lay nothing), with the app's blur matched to theirs; the deform brush's lens is as
   wide as each dab (Krita's as the brush's own diameter) and its spacing scales with its size; the
@@ -139,7 +156,8 @@ readers (which its tests use) run in it.
   tip of one is Krita's default tip, as Krita stands it in (round, 40 px across, the studio saying
   so); a masking brush or texture of one is left out.
 - The 1-pixel brush's sharp lines, drawn as dabs.
-- Tips drawn from SVG pictures or text, and the pixel brush's colour sources other than the plain
+- An SVG tip's strokes, text, pictures and gradients (its filled shapes only). Tips drawn from
+  text, and the pixel brush's colour sources other than the plain
   colour (gradient, random, pattern). The hatching brush's mirror and texture.
 - A drawing angle locked at the start takes the way the stroke first goes (Krita takes the way the
   pen moved just before it touched, which the app doesn't hand).
@@ -148,6 +166,29 @@ readers (which its tests use) run in it.
   gradient).
 - Dabs are rotated, scaled and textured on the GPU from tips drawn once, not drawn afresh at each
   dab's own pixels as Krita draws them.
+
+## MyPaint's brush engine
+
+Its MyPaint brushes are drawn by a port of libmypaint's brush engine to Rust (`src/mypaint.rs`), from
+libmypaint 1.6.1 (https://github.com/mypaint/libmypaint), under libmypaint's licence:
+
+```text
+libmypaint - The MyPaint Brush Library
+Copyright (C) 2007-2011 Martin Renold <martinxyz@gmx.ch>
+Copyright (C) 2008-2011 Martin Renold and contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
 
 ## Where its knowledge comes from
 

@@ -311,7 +311,13 @@ pub struct Brush {
     /// How near a dab may be to the last one drawn afresh to be that one laid again (its engine
     /// keeping its dabs that way and its tip allowing it).
     pub precision: Option<Precision>,
+    /// A MyPaint brush's settings, if it is one (drawn by MyPaint's engine, see `mypaint.rs`).
+    pub mypaint: Option<crate::mypaint::MyPaint>,
 }
+
+/// How big a square of the layer under where it starts a MyPaint brush that smudges wants, for
+/// its first dabs (before it is told what lies under them).
+const MYPAINT_UNDER: u32 = 256;
 
 /// Krita's engines this one draws: its pixel brush, colour smudge, quick brush, tangent normal,
 /// sketch, spray, bristle, hatching, curve, particle and grid brushes, and Krita 3's chalk and dyna
@@ -482,6 +488,16 @@ struct Pictures {
 }
 
 fn pictures(bytes: &[u8], light: bool) -> Option<Pictures> {
+    // an SVG tip, drawn as Krita draws it (grey over white, 1000 pixels across)
+    if crate::svg::is_svg(bytes) {
+        let picture = if light {
+            let (width, height) = crate::svg::size(bytes)?;
+            Rgba { width, height, pixels: Vec::new() }
+        } else {
+            crate::svg::render(bytes)?
+        };
+        return Some(Pictures { cells: vec![picture], image: false, colourful: false, pipe: None });
+    }
     if bytes.starts_with(b"\x89PNG") {
         if light {
             let (width, height) = png_size(bytes)?;
@@ -1008,7 +1024,26 @@ impl Brush {
             texture,
             precision,
             masking,
+            mypaint: None,
         })
+    }
+
+    /// A MyPaint brush (`settings`): MyPaint's round dab at each of its hardnesses for its tips;
+    /// `light`: only to draw strokes with (its tips not drawn).
+    pub fn mypaint(settings: crate::mypaint::MyPaint, light: bool) -> Option<Brush> {
+        let stand_in = format!(
+            r#"<Preset name="MyPaint" paintopid="paintbrush"><param name="brush_definition" type="string"><![CDATA[{STAND_IN}]]></param><param name="PaintOpAction" type="string"><![CDATA[1]]></param></Preset>"#
+        );
+        let preset = Preset::read(&stand_in)?;
+        let mut brush = Brush::read(&preset, &|_| None, true)?;
+        let masks = crate::mypaint::tips(light);
+        let count = masks.len() as u32;
+        brush.tip = Tip { tips: Tips::Images { count, pipe: None }, kind: Kind::Mask, masks, ..brush.tip };
+        brush.wash = false;
+        brush.erases = settings.erases();
+        brush.precision = None;
+        brush.mypaint = Some(settings);
+        Some(brush)
     }
 
     fn read_texture(p: &Preset, find: &dyn Fn(&str) -> Option<Vec<u8>>, light: bool) -> Option<Texture> {
@@ -1050,7 +1085,11 @@ impl Brush {
 
     /// Whether its dabs move the layer's paint (a colour smudge's, a clone's, a deform's, a filter's).
     pub fn moves_paint(&self) -> bool {
-        self.smudge.is_some() || self.clone.is_some() || self.deform.is_some() || self.filter.is_some()
+        self.smudge.is_some()
+            || self.clone.is_some()
+            || self.deform.is_some()
+            || self.filter.is_some()
+            || self.mypaint.as_ref().is_some_and(|m| m.smudges() && !m.erases())
     }
 
     /// How it looks to the app (see the app's guide to brush engines).
@@ -1077,6 +1116,10 @@ impl Brush {
         // a bristle brush soaking up its ink wants the colours where its strokes start
         if let Some(side) = self.hairy.as_ref().map(crate::others::Hairy::soaks).filter(|&s| s > 0) {
             look.word(11, side);
+        }
+        // a MyPaint brush that smudges, for its first dabs
+        if self.mypaint.is_some() && self.moves_paint() {
+            look.word(11, MYPAINT_UNDER);
         }
         // (a smudge's dabs are laid each as far as it says)
         look.byte(2, u8::from(self.wash && !self.moves_paint() && self.grid.is_none()));
