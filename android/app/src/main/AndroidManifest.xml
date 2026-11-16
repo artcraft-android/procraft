@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Save to Gallery on Android 9, which writes into the shared Pictures and Movies folders
-         only with this; later versions need nothing to add to the media store -->
+    <!-- Save to Gallery on Android 8 and 9, which write into the shared Pictures and Movies
+         folders only with this; later versions need nothing to add to the media store -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />

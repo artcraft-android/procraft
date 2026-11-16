@@ -99,8 +99,11 @@ class TimeLapse(artwork: File) {
             return null
         }
         val at = i - clip.first.toInt()
-        val frames = runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }
-            .onFailure { AppLog.w("ProCraft", "a time-lapse video's frames by number", it) }.getOrNull().orEmpty()
+        // (before Android 9 a retriever reads no frames by number)
+        val frames = if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) emptyList() else {
+            runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }
+                .onFailure { AppLog.w("ProCraft", "a time-lapse video's frames by number", it) }.getOrNull().orEmpty()
+        }
         if (frames.isEmpty()) return frameAtTime(retriever, at, clip.frames.toInt())
         decoded?.second?.forEach { it.recycle() }
         decoded = i to frames
@@ -263,14 +266,18 @@ class TimeLapse(artwork: File) {
             val retriever = android.media.MediaMetadataRetriever()
             try {
                 retriever.setDataSource(path)
-                frames = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
-                // a few at a time: one seek for each run, not each frame
-                var i = 0
-                while (i < frames) {
-                    val run = minOf(DECODE_RUN, frames - i)
-                    val pictures = runCatching { retriever.getFramesAtIndex(i, run) }.getOrNull() ?: break
-                    pictures.forEach { keepFrame(it); it.recycle() }
-                    i += run
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) {
+                    frames = keepFramesByTime(retriever)
+                } else {
+                    frames = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
+                    // a few at a time: one seek for each run, not each frame
+                    var i = 0
+                    while (i < frames) {
+                        val run = minOf(DECODE_RUN, frames - i)
+                        val pictures = runCatching { retriever.getFramesAtIndex(i, run) }.getOrNull() ?: break
+                        pictures.forEach { keepFrame(it); it.recycle() }
+                        i += run
+                    }
                 }
             } catch (e: Exception) {
                 AppLog.e("ProCraft", "a time-lapse's video", e)
@@ -281,6 +288,26 @@ class TimeLapse(artwork: File) {
             core.takeVideo(path, frames.toUInt())
         }
         core.takeEnd()
+    }
+
+    /**
+     * Before Android 9, whose retriever neither counts a video's frames nor reads them by number: the
+     * frames of a package's video read by their times, as long as it lasts at the time-lapse's
+     * rate, each kept as the next frame; how many.
+     */
+    private fun keepFramesByTime(retriever: android.media.MediaMetadataRetriever): Int {
+        val length = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: return 0
+        val count = (length * FPS + 500) / 1000
+        var kept = 0
+        while (kept < count) {
+            val picture = runCatching {
+                retriever.getFrameAtTime(kept * 1_000_000L / FPS, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
+            }.getOrNull() ?: break
+            keepFrame(picture)
+            picture.recycle()
+            kept++
+        }
+        return kept
     }
 
     /** A package video's frame [picture] kept as the next frame. */

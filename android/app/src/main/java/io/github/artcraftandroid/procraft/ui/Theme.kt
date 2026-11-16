@@ -298,7 +298,7 @@ object CanvasSpace {
         }
     }
 
-    /** [bitmap], of the canvas's colours, marked with the canvas's space (on Android 9, a copy so marked). */
+    /** [bitmap], of the canvas's colours, marked with the canvas's space (before Android 10, a copy so marked). */
     fun tag(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
         if (!p3) return bitmap
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
