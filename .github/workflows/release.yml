@@ -88,7 +88,8 @@ jobs:
 
       - name: Install cargo-ndk and the Android NDK
         run: |
-          cargo install cargo-ndk --version "^4" --locked
+          # the version F-Droid's build of the same tag installs, so its APKs come out the same as ours
+          cargo install cargo-ndk --version 4.1.2 --locked
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" >/dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >>"$GITHUB_ENV"
 
