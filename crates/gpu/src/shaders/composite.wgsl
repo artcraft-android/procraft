@@ -204,6 +204,11 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         let t = textureLoad(stroke_tex, p, 0);
         return select(c0, vec4<f32>(t.rgb, t.a - 1.0), t.a >= 0.5);
     }
+    if (lu.stroke_mode == 5u) {
+        // the same in a stroke of 8 bits a channel: its alpha a half more, halved
+        let t = textureLoad(stroke_tex, p, 0);
+        return select(c0, vec4<f32>(t.rgb, 2.0 * t.a - 1.0), t.a >= 0.25);
+    }
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;

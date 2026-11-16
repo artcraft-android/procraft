@@ -602,14 +602,8 @@ impl Gpu {
             && limits.max_compute_workgroup_size_y >= 16
     }
 
-    /// Whether 3D painting can run here: it draws distances and strokes in floats and marks a
-    /// stroke's footprint in a compute pass.
-    pub fn paints_3d(&self) -> bool {
-        self.computes() && self.draws_half_floats() && self.draws(wgpu::TextureFormat::R32Float)
-    }
-
     /// Whether the GPU draws into `format` (without blending).
-    fn draws(&self, format: wgpu::TextureFormat) -> bool {
+    pub(crate) fn draws(&self, format: wgpu::TextureFormat) -> bool {
         let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
         !self.old && self.adapter.get_texture_format_features(format).allowed_usages.contains(usages)
     }
@@ -621,7 +615,7 @@ impl Gpu {
         if !self.draws_half_floats() {
             lacks.push(
                 "can't draw into half floats: strokes build up in half floats kept as integers beside them, and \
-                 Liquify's field is kept in integers",
+                 Liquify's field is kept in integers, 3D painting's distances and light in 8 bits a channel",
             );
         }
         if !self.computes() {
@@ -629,9 +623,6 @@ impl Gpu {
                 "has no compute passes with storage buffers: strokes, smudges and wet paint are laid in fragment \
                  passes instead",
             );
-        }
-        if !self.paints_3d() {
-            lacks.push("can't paint in 3D");
         }
         lacks
     }
@@ -752,8 +743,8 @@ mod tests {
         };
         assert_eq!(gpu.max_texture_size(), 4096);
         assert_eq!(gpu.device.limits().max_storage_buffers_per_shader_stage, 0);
-        assert!(!gpu.draws_half_floats() && !gpu.computes() && !gpu.paints_3d());
-        assert_eq!(gpu.lacks().len(), 3);
+        assert!(!gpu.draws_half_floats() && !gpu.computes());
+        assert_eq!(gpu.lacks().len(), 2);
         gpu.prepare_canvases();
         assert_eq!(gpu.errors(), 0);
     }

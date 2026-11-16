@@ -1177,6 +1177,8 @@ const STROKE_PAINT: u32 = 1;
 const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
 const STROKE_LAID: u32 = 4;
+/// As `STROKE_LAID`, in a stroke of 8 bits a channel: its alpha marked within it (see the shader).
+const STROKE_LAID_HALVED: u32 = 5;
 
 /// How a paint layer is clipped as it composites (a layer uniform's `clipped`): not at all;
 /// through the alpha of the base it is clipped to, drawn without that base (shown alone, or the
@@ -3273,6 +3275,11 @@ impl Canvas {
         self.laid = Some(Vec::new());
         let within = self.lay_within;
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
+    }
+
+    /// How a laid stroke is marked in this canvas's stroke (see `STROKE_LAID`).
+    fn laid_mode(&self) -> u32 {
+        if self.pipelines.stroke_format == LAYER_FORMAT { STROKE_LAID_HALVED } else { STROKE_LAID }
     }
 
     /// What strokes build up in here: half floats, or 8 bits a channel on a GPU that can't draw
@@ -6921,7 +6928,7 @@ impl Canvas {
                         &LayerUniform {
                             opacity: 1.0,
                             stroke_mode: match (laid, locked) {
-                                (true, _) => STROKE_LAID,
+                                (true, _) => self.laid_mode(),
                                 (_, true) => STROKE_PAINT_LOCKED,
                                 _ => STROKE_PAINT,
                             },
@@ -8769,7 +8776,7 @@ impl Canvas {
                 Some(StrokeTool::Paint) if stroke.is_some_and(|s| s.style.preserve_alpha) => STROKE_PAINT_LOCKED,
                 Some(StrokeTool::Paint) => STROKE_PAINT,
                 Some(StrokeTool::Erase) => STROKE_ERASE,
-                Some(StrokeTool::Laid) => STROKE_LAID,
+                Some(StrokeTool::Laid) => self.laid_mode(),
                 // the smudge changes the layer itself
                 Some(StrokeTool::Smudge) => STROKE_NONE,
             },
