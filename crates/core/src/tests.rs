@@ -12246,6 +12246,44 @@ fn liquify_closed_is_one_step_that_undone_opens_it_again() {
     assert!(open(&s) && line_row(&s) == two);
 }
 
+/// Each drag of the Adjust slider is an undo step of its own, two in a row undone one at a time.
+#[test]
+fn liquify_each_adjust_drag_is_its_own_step() {
+    let Some(s) = liquify_on_a_line() else { return };
+    push_down(&s, 25.0);
+    let full = line_row(&s);
+    let amount = |s: &CanvasSession| s.adjustment_shown().liquify_amount;
+    for a in [0.9, 0.7, 0.6] {
+        s.adjustment_liquify_amount(a);
+    }
+    s.adjustment_liquify_amount_end();
+    let first = line_row(&s);
+    for a in [0.5, 0.4, 0.3] {
+        s.adjustment_liquify_amount(a);
+    }
+    s.adjustment_liquify_amount_end();
+    let second = line_row(&s);
+    assert!(full != first && first != second);
+    assert_eq!(s.undo().as_deref(), Some("Adjust"));
+    assert_eq!(amount(&s), 0.6);
+    assert!(line_row(&s) == first, "the second drag undone took the first with it");
+    assert_eq!(s.undo().as_deref(), Some("Adjust"));
+    assert_eq!(amount(&s), 1.0);
+    assert!(line_row(&s) == full);
+    assert_eq!(s.undo().as_deref(), Some("Push"));
+    assert_eq!(s.redo().as_deref(), Some("Push"));
+    assert_eq!(s.redo().as_deref(), Some("Adjust"));
+    assert_eq!(amount(&s), 0.6);
+    assert_eq!(s.redo().as_deref(), Some("Adjust"));
+    assert_eq!(amount(&s), 0.3);
+    assert!(line_row(&s) == second);
+    // a let go with no drag under way makes no step
+    s.adjustment_liquify_amount_end();
+    assert!(!s.info().can_redo);
+    assert_eq!(s.undo().as_deref(), Some("Adjust"));
+    assert_eq!(amount(&s), 0.6);
+}
+
 /// A stroke's step holds what it set going after it lifted; Adjust and Reset are steps of their own.
 #[test]
 fn liquify_steps_hold_the_coasting_the_adjust_and_the_reset() {

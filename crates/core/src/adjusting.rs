@@ -898,6 +898,11 @@ impl CanvasSession {
         self.liquify_amount(amount);
     }
 
+    /// The finger let go of Adjust's slider: that drag is an undo step of its own.
+    pub fn adjustment_liquify_amount_end(&self) {
+        self.shared.lock().liquify_adjust_ends();
+    }
+
     /// Everything liquify did undone.
     pub fn adjustment_liquify_reset(&self) {
         self.liquify_reset();

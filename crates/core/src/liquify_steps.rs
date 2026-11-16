@@ -152,10 +152,17 @@ impl State {
         self.open_liquify_step(StepKind::Stroke, way(kind));
     }
 
-    /// The Adjust slider moves: one step for as long as it goes on moving.
+    /// The Adjust slider moves: one step for as long as its drag goes on.
     pub(crate) fn liquify_adjusts(&mut self) {
         if self.liquify_steps.open.is_none_or(|s| s.kind != StepKind::Adjust) {
             self.open_liquify_step(StepKind::Adjust, ADJUST_STEP);
+        }
+    }
+
+    /// The Adjust slider let go: its drag is a step of its own, and the next another.
+    pub(crate) fn liquify_adjust_ends(&mut self) {
+        if self.liquify_steps.open.is_some_and(|s| s.kind == StepKind::Adjust) {
+            self.close_liquify_step();
         }
     }
 

@@ -648,8 +648,8 @@ impl CanvasSession {
         st.liquify.going()
     }
 
-    /// How much of the liquify shows (0..1): the adjust slider. Moving it is one undo step until
-    /// something else is done.
+    /// How much of the liquify shows (0..1): the adjust slider. A drag of it is one undo step,
+    /// ended by [`CanvasSession::adjustment_liquify_amount_end`] (or by whatever is done next).
     pub fn liquify_amount(&self, amount: f32) {
         let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();

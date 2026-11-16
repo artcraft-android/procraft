@@ -849,6 +849,11 @@ fn ease_in_out(t: f32) -> f32 {
 /// A popover's slider row (59 tall): its name and value, then a thin slider, blue up to a small
 /// white knob. Returns the value set, while held.
 pub(crate) fn menu_slider(ui: &Ui, row: Rect, label: &str, value: f32, shown: &str) -> Option<f32> {
+    menu_slider_let_go(ui, row, label, value, shown).0
+}
+
+/// [`menu_slider`], and whether the pointer let go of it this frame (a drag's or a tap's end).
+pub(crate) fn menu_slider_let_go(ui: &Ui, row: Rect, label: &str, value: f32, shown: &str) -> (Option<f32>, bool) {
     let ink = argb(MENU_TEXT);
     text(ui.painter(), pos2(row.left() + 14.0, row.top() + 9.0), Align2::LEFT_TOP, label, 16.0, Weight::Regular, ink);
     text(ui.painter(), pos2(row.right() - 13.0, row.top() + 9.0), Align2::RIGHT_TOP, shown, 16.0, Weight::Regular, ink);
@@ -863,8 +868,9 @@ pub(crate) fn menu_slider(ui: &Ui, row: Rect, label: &str, value: f32, shown: &s
     ui.painter().rect_filled(knob, 5.5, Color32::WHITE);
     let response =
         ui.interact(bar.expand2(vec2(0.0, 6.0)), ui.scope_id().with(("menu slider", label)), Sense::click_and_drag());
-    let p = response.interact_pointer_pos()?;
-    Some(((p.x - start) / (end - start)).clamp(0.0, 1.0))
+    let let_go = response.drag_stopped() || response.clicked();
+    let value = response.interact_pointer_pos().map(|p| ((p.x - start) / (end - start)).clamp(0.0, 1.0));
+    (value, let_go)
 }
 
 fn interpolation_name(i: Interpolation, short: bool) -> &'static str {

@@ -6921,6 +6921,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
     }
 
+    /** The finger let go of Adjust's slider: that drag is an undo step of its own. */
+    fun letGoLiquifyAmount() {
+        session?.adjustmentLiquifyAmountEnd()
+    }
+
     fun resetLiquify() {
         session?.adjustmentLiquifyReset()
         liquifyPopup = 0
