@@ -690,7 +690,8 @@ impl Plugins {
     }
 
     /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
-    /// imported, but off, and from then on like any other plugin. One the store holds older takes
+    /// imported. The QuickShape curves plugin starts on so held freehand bends remain smooth;
+    /// other bundled plugins start off. User choices are kept on later starts. One the store holds older takes
     /// the newer file, as an import of it would, keeping what was set. It is written down that each
     /// was added, before it is, so one removed since stays removed.
     pub(crate) fn add_bundled(&self, files: &[(&str, &[u8])]) {
@@ -738,6 +739,10 @@ impl Plugins {
                 if new {
                     failed.push(id);
                 }
+            } else if new && name == "quickshape-curves" {
+                // Curve fitting is the normal held-stroke behavior, not an optional enhancement.
+                // Only enable on first install: never override a returning user's plugin choice.
+                self.set_on(id, true);
             }
         }
         // to be tried again on the next start
@@ -2459,7 +2464,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_start_adds_what_the_app_comes_with_as_files_all_off() {
+    fn the_first_start_enables_smooth_quickshape_curves_only() {
         let dir = store("bundled");
         let plugins = app_at(&dir);
         let cards = plugins.plugins();
@@ -2467,19 +2472,27 @@ mod tests {
         for card in &cards {
             // as an import: a card like any other, kept in the store
             assert_eq!(card.source, PluginSource::File, "{card:?}");
-            assert!(!card.on && card.problem.is_none(), "{card:?}");
+            let curves = card.id == "io.github.artcraftandroid.quickshape-curves";
+            assert_eq!(card.on, curves, "{card:?}");
+            assert!(card.problem.is_none(), "{card:?}");
             assert!(dir_holds(&dir, &format!("{}/{}", card.id, card.version)), "{}", card.id);
         }
-        // off, the app is as it was
+        // Smooth curves are ready without opting in; all unrelated plugins remain off.
+        assert!(plugins.hooks().is_on("io.github.artcraftandroid.quickshape-curves"));
         assert!(plugins.filters().is_empty());
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert_eq!(landing(&plugins), UNTOUCHED);
         assert!(!plugins.hooks().pick_layer());
         assert!(!plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
         assert_eq!(plugins.take_moved_notice(), None);
-        // and so on the next start, the filters too, with nothing kept for them
+        // An explicit choice to disable curves must survive startup/settings restoration.
+        let curves = "io.github.artcraftandroid.quickshape-curves";
+        assert!(plugins.set_on(curves.to_owned(), false));
+        let kept = plugins.kept_lines();
         let next = app_at(&dir);
-        assert_eq!(next.plugins(), cards);
+        read_lines(&next, &kept);
+        assert!(!card(&next, curves).on);
+        assert!(!next.hooks().is_on(curves));
         assert!(next.filters().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
