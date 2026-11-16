@@ -384,10 +384,6 @@ impl Interface {
         self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
         self.adjustments.menu_at = None;
         self.colours.send(session);
-        // as it was left, or fitted (Canvas Orientation Memory)
-        if !self.prefs.orientation_memory {
-            session.forget_saved_view();
-        }
         self.place_canvas(session, scale);
     }
 

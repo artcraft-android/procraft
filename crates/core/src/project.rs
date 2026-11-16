@@ -15,8 +15,6 @@ use std::sync::Arc;
 
 use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind};
 use procraft_engine::formats::{self, PsdKind, PsdLayer};
-use procraft_engine::geom::Vec2;
-use procraft_engine::view::View;
 
 use crate::{CanvasSession, MobileError};
 
@@ -64,13 +62,6 @@ struct ArtworkFile {
     /// Read as kept, or its default if it can't be (as are the document's own settings).
     #[serde(default, deserialize_with = "procraft_engine::document::or_default")]
     info: ArtworkInfo,
-    /// How it was last shown, if it was.
-    #[serde(
-        default,
-        deserialize_with = "procraft_engine::document::or_default",
-        skip_serializing_if = "Option::is_none"
-    )]
-    view: Option<SavedView>,
     /// How the gallery shows it: turned this many quarter turns clockwise (1 to 3), as its canvas
     /// was left; none, upright. Its thumbnail is kept turned so.
     #[serde(
@@ -100,66 +91,6 @@ struct ArtworkFile {
 
 /// A plugin's artwork's data in its folder.
 pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
-
-/// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
-/// rotation (radians), and how much of that rotation was the view turning with the screen as the
-/// device turned (not a turn of the canvas).
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SavedView {
-    centre: [f32; 2],
-    zoom: f32,
-    rotation: f32,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    followed: f32,
-}
-
-/// Nothing to keep.
-fn is_zero(v: &f32) -> bool {
-    *v == 0.0
-}
-
-impl SavedView {
-    /// The view `view` makes in a window `window` pixels, `followed` radians of its turn the
-    /// screen's.
-    pub(crate) fn of(view: &View, window: (u32, u32), followed: f32) -> Option<SavedView> {
-        let middle = Vec2::new(window.0 as f32 / 2.0, window.1 as f32 / 2.0);
-        let centre = view.screen_to_canvas(middle)?;
-        let followed = if followed.is_finite() { followed } else { 0.0 };
-        Some(SavedView {
-            centre: [centre.x, centre.y],
-            zoom: view.zoom(),
-            rotation: view.to_screen().rotation(),
-            followed,
-        })
-    }
-
-    /// How much of its rotation was the view turning with the screen (radians).
-    pub(crate) fn followed(&self) -> f32 {
-        if self.followed.is_finite() { self.followed } else { 0.0 }
-    }
-
-    /// It again, in a window `window` pixels.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    pub(crate) fn view(&self, window: (u32, u32)) -> Option<View> {
-        View::centred(Vec2::new(self.centre[0], self.centre[1]), self.zoom, self.rotation, window)
-    }
-}
-
-/// Whether `view` shows enough of a `canvas`-sized canvas in a `window`-sized window to work on:
-/// its box on screen covers a tenth of the window, or half of it is in the window. A kept view
-/// that doesn't (the canvas pushed off the page) is not used again.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(crate) fn shows_canvas(view: &View, window: (u32, u32), canvas: (u32, u32)) -> bool {
-    let m = view.to_screen();
-    let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
-    let corners = [Vec2::new(0.0, 0.0), Vec2::new(cw, 0.0), Vec2::new(0.0, ch), Vec2::new(cw, ch)].map(|p| m.apply(p));
-    let (x0, x1) = corners.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
-    let (y0, y1) = corners.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
-    let (ww, wh) = (window.0 as f32, window.1 as f32);
-    let seen = (x1.min(ww) - x0.max(0.0)).max(0.0) * (y1.min(wh) - y0.max(0.0)).max(0.0);
-    let whole = (x1 - x0) * (y1 - y0);
-    seen.is_finite() && (seen >= 0.1 * ww * wh || seen >= 0.5 * whole)
-}
 
 /// An artwork's time-lapse in a package: whether it records, its video's settings (quality 0 to 3,
 /// resolution 0 to 2, HEVC or H.264), and its video so far as MP4 files in order, `width` ×
@@ -340,15 +271,6 @@ impl crate::State {
             name: self.name.clone(),
             document: self.doc.clone(),
             info: self.info.clone(),
-            // as shown (while the guide editor is open, as it was before it), or as it opened if it
-            // hasn't been shown
-            view: self
-                .guide_before
-                .as_ref()
-                .map_or(self.view, |(_, before)| *before)
-                .as_ref()
-                .and_then(|v| SavedView::of(v, self.window_size, self.screen_follow))
-                .or(self.saved_view),
             turns: Some(self.turns).filter(|&t| t != 0),
             model: model.as_ref().map(|m| m.saved.clone()),
             reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
@@ -898,7 +820,6 @@ impl CanvasSession {
             st.layers_unread(unread);
             st.layer_data_unread.extend(data_unread);
             st.info = file.info;
-            st.saved_view = file.view;
             st.turns = file.turns.unwrap_or(0) % 4;
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();

@@ -5166,21 +5166,29 @@ fn a_picture_becomes_a_source_fitted_on_black() {
 }
 
 #[test]
-fn an_artwork_opens_as_it_was_shown() {
+fn an_artwork_reopens_fitted_at_the_quarter_turn_nearest_how_it_was_left() {
     let Some(s) = session(100, 100) else { return };
-    s.view_gesture(50.0, 50.0, 5.0, -3.0, 2.0, 0.4);
-    let shown = s.shared.lock().view.unwrap();
     let dir = std::env::temp_dir().join(format!("procraft-view-{}", std::process::id()));
-    s.save(dir.to_string_lossy().into_owned()).unwrap();
-    let t = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-    let back = t.shared.lock().saved_view.and_then(|v| v.view((100, 100))).unwrap();
-    let (a, b) = (shown.to_screen(), back.to_screen());
-    for (x, y) in [(a.a, b.a), (a.b, b.b), (a.c, b.c), (a.d, b.d), (a.e, b.e), (a.f, b.f)] {
-        assert!((x - y).abs() < 1e-2, "{a:?} vs {b:?}");
+    let path = dir.to_string_lossy().into_owned();
+    // turned ~107 degrees, zoomed in and moved: kept a quarter turn; ~141 degrees: a half turn
+    for (degrees, turns) in [(107.0_f32, 1), (141.0, 2), (44.0, 0), (46.0, 1), (-100.0, 3), (-134.0, 3)] {
+        s.shared.lock().view = Some(View::fit((100, 100), (100, 100)));
+        s.view_gesture(50.0, 50.0, 7.0, -3.0, 2.5, degrees.to_radians());
+        s.save(path.clone()).unwrap();
+        let t = CanvasSession::open(path.clone()).unwrap();
+        assert_eq!(t.shown_turns(), turns, "{degrees}");
+        // opened fitted at that turn: the zoom and the place from before not kept
+        let fitted = View::fit_turned((100, 100), (100, 100), [0.0; 4], turns as i32).to_screen();
+        let fitted = vec![fitted.a, fitted.b, fitted.c, fitted.d, fitted.e, fitted.f];
+        let m = t.opening_view_matrix(100, 100);
+        assert!(m.iter().zip(&fitted).all(|(a, b)| (a - b).abs() < 1e-3), "{degrees}: {m:?} vs {fitted:?}");
+        {
+            let mut st = t.shared.lock();
+            st.window_size = (100, 100);
+            st.place_view();
+        }
+        assert_eq!(t.view_matrix(), m, "{degrees}");
     }
-    // without the memory it opens fitted
-    t.forget_saved_view();
-    assert!(t.shared.lock().saved_view.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5243,10 +5251,10 @@ fn an_artwork_left_turned_shows_turned_in_the_gallery() {
     s.follow_screen_turn(0.0, 0.0, -FRAC_PI_2);
     assert_eq!(s.shown_turns(), 1);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
-    // opened again: as it was left, and fitted (without the memory) turned so
+    // opened again: fitted, turned as it was left (without the memory too)
     let t = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
     assert_eq!(t.shown_turns(), 1);
-    t.forget_saved_view();
+    t.set_orientation_memory(false);
     let m = t.opening_view_matrix(200, 200);
     assert!((m[1].atan2(m[0]) - FRAC_PI_2).abs() < 1e-3, "{m:?}");
     // without the memory, turning the canvas leaves the gallery's turn as it was
@@ -7951,24 +7959,6 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         let set = s.import_other_brushes(kpp(op), "Krita".to_owned()).unwrap();
         assert_eq!(s.shared.lock().library[set as usize].brushes[0].setting("dual_blend"), mode as f32, "{op}");
     }
-}
-
-#[test]
-fn a_kept_view_that_leaves_the_canvas_off_the_page_is_not_used() {
-    use crate::project::shows_canvas;
-    let (window, canvas) = ((2560, 1600), (2048, 2048));
-    // fitted: shows
-    let fitted = View::fit(canvas, window);
-    assert!(shows_canvas(&fitted, window, canvas));
-    // centred on a point far beyond the canvas: none of it shows
-    let away = View::centred(procraft_engine::geom::Vec2::new(9000.0, -7000.0), 0.78, 0.0, window).unwrap();
-    assert!(!shows_canvas(&away, window, canvas));
-    // half off the right edge: still enough to work on
-    let half = View::centred(procraft_engine::geom::Vec2::new(0.0, 1024.0), 0.78, 0.0, window).unwrap();
-    assert!(shows_canvas(&half, window, canvas));
-    // zoomed far out, small but whole on screen
-    let tiny = View::centred(procraft_engine::geom::Vec2::new(1024.0, 1024.0), 0.01, 0.0, window).unwrap();
-    assert!(shows_canvas(&tiny, window, canvas));
 }
 
 #[test]

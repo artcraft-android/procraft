@@ -465,9 +465,6 @@ impl Canvas<'_> {
     }
 }
 
-/// The quarter turns clockwise a canvas made with the screen at `orientation` is shown at: 1
-/// upright, 2 upside down, 3 and 4 on its side one way and the other (as measured on files made
-/// each way: a mark at the top left of a canvas made at 3 is stored at the top right).
 /// The `orientation` a canvas shown `turns` quarter turns clockwise is kept with (as
 /// [`shown_turns`] reads it).
 fn orientation_for(turns: u32) -> i64 {
@@ -479,6 +476,9 @@ fn orientation_for(turns: u32) -> i64 {
     }
 }
 
+/// The quarter turns clockwise a canvas made with the screen at `orientation` is shown at: 1
+/// upright, 2 upside down, 3 and 4 on its side one way and the other (as measured on files made
+/// each way: a mark at the top left of a canvas made at 3 is stored at the top right).
 fn shown_turns(orientation: i64) -> u32 {
     match orientation {
         2 => 2,

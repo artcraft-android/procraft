@@ -1422,7 +1422,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // the app's own settings (the settings page beside the canvas): read when the app comes back
 
-    /** An artwork opens as it was left. */
+    /** An artwork is kept turned as its canvas was left (to the nearest quarter turn), and opens so. */
     var orientationMemory = interfacePrefs.getBoolean(ORIENTATION_MEMORY, true)
         private set
 
@@ -1472,8 +1472,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyFitInsets()
     }
 
-    /** The settings the canvas itself keeps: simplified undos, the speed distance and wide colour. */
+    /** The settings the canvas itself keeps: simplified undos, the speed distance, wide colour and orientation memory. */
     private fun applyAppSettings(s: CanvasSession) {
+        s.setOrientationMemory(orientationMemory)
         s.setSimplifiedUndos(interfacePrefs.getBoolean(SIMPLIFIED_UNDOS, true))
         s.setSpeedDistance(interfacePrefs.getFloat(SPEED_DISTANCE, 1f))
         s.setWideColour(wideColorAllowed())
@@ -2404,7 +2405,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             opening = false
             s.onSuccess {
-                if (!orientationMemory) it.forgetSavedView()
                 val m = it.openingViewMatrix(windowPx.width.toUInt(), windowPx.height.toUInt())
                 galleryZoom = cell?.let { c -> GalleryZoom(c, canvasPlace(it, m), opening = true, turns = a.turns) }
                 start(it, a.dir, brushesLoaded = true)
@@ -2812,8 +2812,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the system's animations off: a dropped colour's fill shows at once
         s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         applyPlugins(s)
-        // as it was left, or fitted
-        if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputTipAttached, inputCurve.flatMap { listOf(it.x, it.y) })
         applyAppSettings(s)
         timeLapse = TimeLapse(dir).also {

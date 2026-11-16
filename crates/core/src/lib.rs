@@ -658,8 +658,6 @@ pub(crate) struct State {
     pub(crate) backdrops: Vec<[f32; 6]>,
     /// Where the glass over the canvas is thin (the side bar's slider tracks), the same way.
     pub(crate) backdrop_windows: Vec<[f32; 6]>,
-    /// The view kept with the artwork, shown when the window first comes.
-    pub(crate) saved_view: Option<project::SavedView>,
     /// How the gallery shows the artwork: turned this many quarter turns clockwise, as its canvas
     /// was left (kept with it).
     pub(crate) turns: u8,
@@ -776,18 +774,12 @@ impl State {
         if self.light { SURROUND_LIGHT } else { SURROUND }
     }
 
-    /// Places the canvas in the window the first time: the view kept with the artwork, unless it
-    /// would leave the canvas off the page, else fitted (turned as the gallery shows it).
+    /// Places the canvas in the window the first time: fitted, turned as the gallery shows it (its
+    /// zoom and place from before are not kept).
     pub(crate) fn place_view(&mut self) {
         if self.view.is_none() {
-            let canvas = (self.doc.width(), self.doc.height());
-            let saved = self.saved_view.take();
-            let kept = saved
-                .and_then(|v| v.view(self.window_size))
-                .filter(|v| project::shows_canvas(v, self.window_size, canvas));
-            // what the kept view had turned with the screen, still left out of the gallery's turn
-            self.screen_follow = kept.and(saved).map_or(0.0, |v| v.followed());
-            self.view = Some(kept.unwrap_or_else(|| self.fitted_view()));
+            self.screen_follow = 0.0;
+            self.view = Some(self.fitted_view());
         }
     }
 
@@ -806,7 +798,8 @@ impl State {
                 // its down axis gives its turn whether or not it is mirrored
                 let angle = (-m.c).atan2(m.d) - self.screen_follow;
                 if angle.is_finite() {
-                    ((angle / std::f32::consts::FRAC_PI_2).round() as i32).rem_euclid(4) as u8
+                    // halfway (45 degrees off) goes to upright or upside down
+                    ((angle / std::f32::consts::FRAC_PI_2).round_ties_even() as i32).rem_euclid(4) as u8
                 } else {
                     self.turns
                 }
@@ -1719,7 +1712,6 @@ impl CanvasSession {
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
-            saved_view: None,
             turns: 0,
             screen_follow: 0.0,
             turns_follow_view: true,
@@ -2367,12 +2359,10 @@ impl CanvasSession {
         st.scene = None;
     }
 
-    /// The artwork opens fitted, not as it was left, and the gallery's turn of it stays as it is
-    /// (Canvas Orientation Memory off).
-    pub fn forget_saved_view(&self) {
-        let mut st = self.shared.lock();
-        st.saved_view = None;
-        st.turns_follow_view = false;
+    /// Canvas Orientation Memory: on, the quarter turn the artwork is kept at (which it opens
+    /// at, and the gallery shows it at) follows its canvas's; off, it stays as it is. On at first.
+    pub fn set_orientation_memory(&self, on: bool) {
+        self.shared.lock().turns_follow_view = on;
     }
 
     /// How many quarter turns clockwise the gallery shows the artwork turned by, as it would be

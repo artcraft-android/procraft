@@ -660,16 +660,15 @@ impl CanvasSession {
         vec![m.a, m.b, m.c, m.d, m.e, m.f]
     }
 
-    /// The view the canvas opens with in a window of `width` × `height` pixels (as it was left,
-    /// else fitted), as [`CanvasSession::view_matrix`] gives it; once shown, the view it has.
+    /// The view the canvas opens with in a window of `width` × `height` pixels (fitted, turned as
+    /// the gallery shows it), as [`CanvasSession::view_matrix`] gives it; once shown, the view it
+    /// has.
     pub fn opening_view_matrix(&self, width: u32, height: u32) -> Vec<f32> {
         let st = self.shared.lock();
         let window = (width.max(1), height.max(1));
         let view = st.view.unwrap_or_else(|| {
-            st.saved_view.and_then(|v| v.view(window)).unwrap_or_else(|| {
-                let canvas = (st.doc.width(), st.doc.height());
-                procraft_engine::view::View::fit_turned(canvas, window, st.fit_insets, i32::from(st.turns))
-            })
+            let canvas = (st.doc.width(), st.doc.height());
+            procraft_engine::view::View::fit_turned(canvas, window, st.fit_insets, i32::from(st.turns))
         });
         let m = view.to_screen();
         vec![m.a, m.b, m.c, m.d, m.e, m.f]
