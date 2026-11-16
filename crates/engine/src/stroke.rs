@@ -841,7 +841,8 @@ impl Random {
 /// pixels) instead, as a clone does; `before`: from the layer as it was before the stroke. What it
 /// picks up may come through a `warp` (each pixel from elsewhere under it), and be blurred (`blur`,
 /// 0..1 as a smudge's blur) and then sharpened (`sharpen`, how much of the difference from the blur
-/// is added) before it is laid.
+/// is added) before it is laid. On a stroke that keeps paint with its layer (see the canvas's layer
+/// stores), `height` lays the stamp's tip's grey over the height kept there, that opaque (0..1).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PickUp {
     pub paint_share: f32,
@@ -849,6 +850,7 @@ pub struct PickUp {
     pub dull: Option<(f32, bool)>,
     pub clear: bool,
     pub thin: f32,
+    pub height: Option<f32>,
     pub over: bool,
     pub here: bool,
     pub from: Option<[f32; 2]>,

@@ -23,6 +23,9 @@ use crate::{Gpu, GpuError};
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
 mod smudge;
+mod store;
+
+pub use store::{LayerStore, STORE_LIT};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -255,6 +258,9 @@ pub struct StrokeStyle {
     /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
     /// `Brush::laid_in_place`).
     pub laid_in_place: bool,
+    /// What a smudge's stroke keeps with its layer between strokes, painting into that rather than
+    /// the layer (see [`LayerStore`]): a store's kind ([`STORE_LIT`]), or 0 for none.
+    pub store: u32,
 }
 
 impl StrokeStyle {
@@ -345,6 +351,7 @@ impl StrokeStyle {
             preview: false,
             luminance: false,
             laid_in_place: false,
+            store: 0,
         }
     }
 
@@ -417,6 +424,7 @@ impl StrokeStyle {
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
+            store: 0,
         }
     }
 
@@ -1535,6 +1543,9 @@ const WET_PASS_SIZE: u64 = std::mem::size_of::<WetPass>() as u64;
 /// the buffers its compute passes work in (see `smudge.rs`).
 struct Smudge {
     layer: LayerId,
+    /// What it works in: the layer, or the paint of the layer's store it paints into (`store`).
+    into: LayerId,
+    store: Option<store::StoreStroke>,
     carry: wgpu::Buffer,
     started: bool,
     /// Canvas pixels a cell of what the brush carries (see `SMUDGE_GRID`), and the cells the stamp
@@ -1988,9 +1999,14 @@ struct LayerGpu {
 fn collapsed(steps: Vec<Step>) -> Step {
     let made = steps.last().map_or(0, |s| s.made);
     let name = steps.iter().rev().find_map(|s| s.name.clone());
-    let mut out = Step { made, name, doc: None, pixels: Vec::new(), selection: None, flip: None };
+    let mut out = Step { made, name, doc: None, pixels: Vec::new(), selection: None, flip: None, stores: Vec::new() };
     for step in steps.into_iter().rev() {
         out.pixels.extend(step.pixels);
+        // each layer's store as the first that changed it found it
+        for (layer, store) in step.stores {
+            out.stores.retain(|(l, _)| *l != layer);
+            out.stores.push((layer, store));
+        }
         if step.doc.is_some() {
             out.doc = step.doc;
         }
@@ -2168,6 +2184,8 @@ struct Step {
     selection: Option<Option<Vec<u8>>>,
     /// Layers flipped (across, or down): undone and redone by flipping them again, nothing kept.
     flip: Option<(Vec<LayerId>, bool)>,
+    /// The stores of the layers it made, dried or changed, as each was (none: it had none).
+    stores: Vec<(LayerId, Option<LayerStore>)>,
 }
 
 impl Step {
@@ -2305,6 +2323,8 @@ pub(crate) struct Pipelines {
     /// The pipeline cache they are made with, kept between runs (see `kept`): the screen's
     /// pipelines, made as a window first shows a canvas, as well.
     cache: Option<wgpu::PipelineCache>,
+    /// A layer's store's, made the first time a stroke paints into one.
+    store: OnceLock<store::StorePipelines>,
 }
 
 /// A canvas's own pipelines for drawing to a window, made for each target format as it comes.
@@ -2525,8 +2545,12 @@ pub struct Canvas {
     /// The bytes of newest steps kept on the GPU, set by tests (else see [`RECENT_HISTORY_SHARE`]).
     recent_history: Option<u64>,
     transforming: Option<Transforming>,
-    /// Other layers transformed along with it (layers picked together).
+    /// Other layers transformed along with it (layers picked together, the planes of their stores).
     transform_more: Vec<Transforming>,
+    /// What layers keep for the brushes that paint into them (see [`LayerStore`]), and the planes
+    /// numbered so far.
+    stores: HashMap<LayerId, LayerStore>,
+    next_plane: u64,
     /// For frosted panels, made when first needed, and how many texels wide their blur is where
     /// it is worked out (see [`BACKDROP_TEXELS`]).
     backdrop: Option<BackdropGpu>,
@@ -2844,6 +2868,8 @@ impl Canvas {
             recent_history: None,
             transforming: None,
             transform_more: Vec::new(),
+            stores: HashMap::new(),
+            next_plane: 0,
             backdrop: None,
             backdrop_texels: if gpu.is_weak() { BACKDROP_TEXELS_WEAK } else { BACKDROP_TEXELS },
             frost_stale: IRect::from_size(width, height),
@@ -4420,7 +4446,7 @@ impl Canvas {
                 | Op::Over { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
                 Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, ..)| *id)),
-                Op::Flip { layers, .. } => written.extend(layers.iter().copied()),
+                Op::Flip { layers, .. } => written.extend(self.with_planes(layers)),
                 Op::Duplicate { pairs, .. } => {
                     read.extend(pairs.iter().map(|(from, _)| *from));
                     written.extend(pairs.iter().map(|(_, to)| *to));
@@ -4450,6 +4476,13 @@ impl Canvas {
             }
         }
         written.extend(self.active.map(|a| a.layer));
+        // a stroke into a store and a transform (as far as it moves them) write its planes too
+        let moved = self.ops.iter().filter_map(|op| match op {
+            Op::TransformBegin(id) | Op::TransformAlso(id) => Some(*id),
+            _ => None,
+        });
+        let planes: Vec<LayerId> = self.active.map(|a| a.layer).into_iter().chain(moved).collect();
+        written.extend(self.with_planes(&planes).into_iter().skip(planes.len()));
         (read, written)
     }
 
@@ -4473,6 +4506,7 @@ impl Canvas {
             (None, None) => return,
         };
         keep.extend(self.active.map(|a| a.layer));
+        keep.extend(self.active.and_then(|a| self.stores.get(&a.layer)).into_iter().flat_map(|s| s.planes.clone()));
         keep.extend(self.held.as_ref().map(|h| h.layer));
         let mut gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(*id)).copied().collect();
         gone.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
@@ -4535,6 +4569,7 @@ impl Canvas {
             pixels: Vec::new(),
             selection: Some(before),
             flip: None,
+            stores: Vec::new(),
         });
         self.set_selection(gpu, coverage);
     }
@@ -4966,6 +5001,13 @@ impl Canvas {
                 keep.extend(d.layer_ids());
             }
         }
+        // and the planes of the stores they keep, and of those the history keeps
+        let planes = self.planes_kept(&keep);
+        keep.extend(planes);
+        if let Some(store) = self.smudge.as_ref().and_then(|s| s.store.as_ref()) {
+            keep.extend(store.planes);
+        }
+        self.stores.retain(|layer, _| keep.contains(layer));
         let gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(id)).copied().collect();
         for id in gone {
             if let Some(layer) = self.layers.remove(&id) {
@@ -5349,6 +5391,7 @@ impl Canvas {
                             pixels: vec![snapshot],
                             selection: None,
                             flip: None,
+                            stores: Vec::new(),
                         });
                         self.encode_invert(device, &mut encoder, id, rect);
                         self.dirty = self.dirty.union(rect);
@@ -5370,6 +5413,7 @@ impl Canvas {
                             pixels: vec![snapshot],
                             selection: None,
                             flip: None,
+                            stores: Vec::new(),
                         });
                         self.dirty = full;
                         history_changed = true;
@@ -5386,6 +5430,7 @@ impl Canvas {
                             pixels: vec![snapshot],
                             selection: None,
                             flip: None,
+                            stores: Vec::new(),
                         });
                     }
                     if let Some(layer) = self.layers.get(&id) {
@@ -5413,6 +5458,7 @@ impl Canvas {
                             pixels: vec![snapshot],
                             selection: None,
                             flip: None,
+                            stores: Vec::new(),
                         });
                         let (w, h) = (rect.width(), rect.height());
                         let source = device.create_texture(&wgpu::TextureDescriptor {
@@ -5474,6 +5520,7 @@ impl Canvas {
                     }
                 }
                 Op::RedrawFrom { layer: id, source, size, to_source: m, resample } => {
+                    self.dry(id);
                     if let Some(layer) = self.layers.get(&id) {
                         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("redrawn from"),
@@ -5522,6 +5569,7 @@ impl Canvas {
                     self.dirty = self.full();
                 }
                 Op::PutRegion { layer: id, x, y, width, height, pixels } => {
+                    self.dry(id);
                     let at = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
                     let rect = IRect::new(at(x), at(y), at(x.saturating_add(width)), at(y.saturating_add(height)));
                     if let Some(layer) = self.layers.get(&id) {
@@ -5548,6 +5596,7 @@ impl Canvas {
                                 pixels: held.into_iter().collect(),
                                 selection: None,
                                 flip: None,
+                                stores: Vec::new(),
                             });
                             history_changed = true;
                         }
@@ -5565,7 +5614,8 @@ impl Canvas {
                 }
                 Op::Flip { layers, horizontal, before } => {
                     // undone by flipping again: nothing kept (but the document as it was, if it
-                    // changed too)
+                    // changed too); the planes of their stores flipped with them
+                    let layers = self.with_planes(&layers);
                     let step = Step {
                         made: 0,
                         name: None,
@@ -5573,6 +5623,7 @@ impl Canvas {
                         pixels: Vec::new(),
                         selection: None,
                         flip: Some((layers.clone(), horizontal)),
+                        stores: Vec::new(),
                     };
                     self.push_step(step);
                     self.encode_flip(device, &mut encoder, &layers, horizontal);
@@ -5593,6 +5644,7 @@ impl Canvas {
                             pixels: snapshots,
                             selection: None,
                             flip: None,
+                            stores: Vec::new(),
                         });
                     }
                     for (id, rect, pixels) in layers {
@@ -5619,6 +5671,7 @@ impl Canvas {
                     }
                 }
                 Op::TransformSet { to_source: m, resample } => {
+                    let lit = self.transform_stores_too(device, &mut encoder);
                     let mut drew = false;
                     for t in self.transforming.iter().chain(&self.transform_more) {
                         let Some(layer) = self.layers.get(&t.layer) else { continue };
@@ -5653,6 +5706,9 @@ impl Canvas {
                         drop(pass);
                         drew = true;
                     }
+                    for (layer, planes) in lit {
+                        self.draw_lit(device, &mut encoder, layer, planes, &[self.full()]);
+                    }
                     if drew {
                         self.dirty = self.full();
                     }
@@ -5673,6 +5729,7 @@ impl Canvas {
                     });
                     // written before this frame's commands run
                     gpu.queue.write_buffer(&buffer, 0, bytes);
+                    let lit = self.transform_stores_too(device, &mut encoder);
                     let mut drew = false;
                     for t in self.transforming.iter().chain(&self.transform_more) {
                         let Some(layer) = self.layers.get(&t.layer) else { continue };
@@ -5703,6 +5760,9 @@ impl Canvas {
                         }
                         drop(pass);
                         drew = true;
+                    }
+                    for (layer, planes) in lit {
+                        self.draw_lit(device, &mut encoder, layer, planes, &[self.full()]);
                     }
                     if drew {
                         self.dirty = self.full();
@@ -5793,6 +5853,7 @@ impl Canvas {
                                     pixels: vec![Snapshot::on_gpu(t.layer, rect, texture)],
                                     selection: None,
                                     flip: None,
+                                    stores: Vec::new(),
                                 });
                                 history_changed = true;
                             }
@@ -5823,6 +5884,7 @@ impl Canvas {
                                 pixels,
                                 selection: None,
                                 flip: None,
+                                stores: Vec::new(),
                             });
                             history_changed = true;
                         } else {
@@ -5841,6 +5903,7 @@ impl Canvas {
                     }
                 }
                 Op::Wipe(id) => {
+                    self.dry(id);
                     if let Some(layer) = self.layers.get(&id) {
                         drop(render_pass(
                             &mut encoder,
@@ -5859,6 +5922,7 @@ impl Canvas {
                         pixels: Vec::new(),
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -5871,6 +5935,7 @@ impl Canvas {
                         pixels: Vec::new(),
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     history_changed = true;
                 }
@@ -5891,6 +5956,7 @@ impl Canvas {
                         pixels: Vec::new(),
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -5914,6 +5980,7 @@ impl Canvas {
                         pixels,
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -5959,6 +6026,7 @@ impl Canvas {
                         pixels,
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -5973,6 +6041,7 @@ impl Canvas {
                         pixels,
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -5988,6 +6057,7 @@ impl Canvas {
                         pixels,
                         selection: None,
                         flip: None,
+                        stores: Vec::new(),
                     });
                     self.dirty = self.full();
                     history_changed = true;
@@ -6149,8 +6219,13 @@ impl Canvas {
                 self.smudge_untold = true;
                 return;
             }
+            // painting into the layer's store: what it works in is the store's paint
+            let store =
+                (style.store != 0).then(|| self.store_for_stroke(device, encoder, target, style.store)).flatten();
             self.smudge = Some(Smudge {
                 layer: target,
+                into: store.as_ref().map_or(target, |s| s.planes[0]),
+                store,
                 carry,
                 started: false,
                 scale: 1.0,
@@ -6270,6 +6345,10 @@ impl Canvas {
         let pieces: Vec<smudge::Piece> =
             laid.into_iter().flat_map(|(uniform, bbox, blurs)| self.smudge_pieces(uniform, bbox, blurs)).collect();
         self.lay_pieces(gpu, encoder, params, &pieces, (&brush, None));
+        // into a store: the stamps' heights after their paint, and the layer drawn from them
+        if self.smudge.as_ref().is_some_and(|s| s.store.is_some()) {
+            self.lay_store(device, encoder, &brush, (instances, picks), style);
+        }
     }
 
     /// Smudges `stamps` (with their wet-mix scaling and places in the stroke) into the stroke's
@@ -6366,7 +6445,7 @@ impl Canvas {
     ) -> Option<[i32; 2]> {
         let (width, height) = (self.width, self.height);
         let smudge = self.smudge.as_mut()?;
-        let layer = self.layers.get(&smudge.layer)?;
+        let layer = self.layers.get(&smudge.into)?;
         let kept = smudge.pass.filter(|p| p.0 == key && smudge.passed.is_some()).map(|p| p.1);
         let rect = kept.map_or(reach, |k| k.union(reach));
         if rect.is_empty() {
@@ -6644,37 +6723,50 @@ impl Canvas {
             self.smudge = None;
             return;
         }
-        if cancel {
-            self.smudge_put_back(encoder);
-            self.smudge = None;
-            self.dirty = self.full();
-            return;
-        }
         let rect = bounds.intersect(self.full());
-        if rect.is_empty() {
-            self.smudge = None;
+        if cancel || rect.is_empty() {
+            if cancel {
+                self.smudge_put_back(encoder);
+                self.dirty = self.full();
+            }
+            // a store it made for nothing goes again
+            if let Some(smudge) = self.smudge.take()
+                && let Some(made) = smudge.store.and_then(|s| s.made)
+            {
+                self.swap_stores(vec![(smudge.layer, made)]);
+            }
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("undo"),
-            size: extent(rect.width(), rect.height()),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: LAYER_FORMAT,
-            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let undo = || {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("undo"),
+                size: extent(rect.width(), rect.height()),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: LAYER_FORMAT,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let texture = undo();
         self.smudge_before(encoder, rect, &texture);
+        // into a store: the layer and the height as they were too
+        let also: Vec<(LayerId, wgpu::Texture)> = self
+            .smudge_also()
+            .into_iter()
+            .enumerate()
+            .map(|(k, id)| {
+                let texture = undo();
+                self.smudge_before_of(encoder, rect, &texture, Some(k));
+                (id, texture)
+            })
+            .collect();
         let Some(smudge) = self.smudge.take() else { return };
-        self.push_step(Step {
-            made: 0,
-            name: None,
-            doc: None,
-            pixels: vec![Snapshot::on_gpu(smudge.layer, rect, texture)],
-            selection: None,
-            flip: None,
-        });
+        let mut pixels = vec![Snapshot::on_gpu(smudge.into, rect, texture)];
+        pixels.extend(also.into_iter().map(|(id, texture)| Snapshot::on_gpu(id, rect, texture)));
+        let stores = smudge.store.and_then(|s| s.made).map(|before| (smudge.layer, before)).into_iter().collect();
+        self.push_step(Step { made: 0, name: None, doc: None, pixels, selection: None, flip: None, stores });
     }
 
     fn commit(
@@ -6694,7 +6786,15 @@ impl Canvas {
             let pixels: Vec<Snapshot> =
                 parts.iter().filter_map(|r| self.snapshot(device, encoder, stroke.layer, r.intersect(rect))).collect();
             if !pixels.is_empty() {
-                self.push_step(Step { made: 0, name: None, doc: None, pixels, selection: None, flip: None });
+                self.push_step(Step {
+                    made: 0,
+                    name: None,
+                    doc: None,
+                    pixels,
+                    selection: None,
+                    flip: None,
+                    stores: Vec::new(),
+                });
             }
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
             let scaled = self.scaled.map_or([1.0, 0.0, 0.0, 0.0], |([x, y], k)| [k, x, y, 0.0]);
@@ -7084,6 +7184,7 @@ impl Canvas {
         let made = step.made;
         let name = step.name.clone();
         let step_flip = step.flip;
+        let stores = self.swap_stores(step.stores);
         let mut pixels = Vec::with_capacity(step.pixels.len());
         // what the history's textures hold changes: packing under way reads what they held
         self.history_generation = self.history_generation.wrapping_add(1);
@@ -7145,7 +7246,7 @@ impl Canvas {
             self.encode_flip(device, encoder, layers, *horizontal);
             self.dirty = self.full();
         }
-        Step { made, name, doc: replaced, pixels, selection, flip: step_flip }
+        Step { made, name, doc: replaced, pixels, selection, flip: step_flip, stores }
     }
 
     /// Draws layer `id` inverted within `rect`, from its copy there in the scratch texture.
@@ -7520,6 +7621,8 @@ impl Canvas {
             self.keep_spare_snapshot(step);
             return;
         }
+        // what it changes keeping a store, other than with it, dries
+        self.dry_changed(&mut step);
         self.steps_made += 1;
         step.made = self.steps_made;
         if step.name.is_none() {
@@ -10438,6 +10541,7 @@ impl Pipelines {
             veil_layout,
             veil_pipeline_layout,
             cache,
+            store: OnceLock::new(),
         }
     }
 }

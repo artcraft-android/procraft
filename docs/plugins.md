@@ -1082,6 +1082,9 @@ procraft_brush_under(stroke: i32, len: i32) -> i32   // optional: the colours un
     rather than from the layer they lay it on.
   - field 11 (u32, at most 512), a stroke of the pen's wants the colours of its layer under where it
     starts, a square that many pixels a side around its first point: the begin is handed them.
+  - field 12 (u8), with field 9, what its strokes keep with their layer between strokes (see [What
+    a brush keeps with a layer](#what-a-brush-keeps-with-a-layer)): 1 the paint they lay and a
+    height that lights it.
   - field 8, how often it wants the pen while it holds still (f32 ms, at least 4), as an airbrush
     lays dabs by time: until the pen lifts, the app hands it the pen as it last was, at the time
     then, every half of that.
@@ -1172,6 +1175,31 @@ the plugin's own brushes is open (or for the current brush, if the plugin's engi
 | `brush_data_len() -> i32` | The brush's data's length, -1 for none |
 | `read_brush_data(to: i32) -> i32` | Writes the data at `to`: 1 if it did |
 | `write_brush_data(from: i32, len: i32) -> i32` | The brush's data from now on: 1 if taken |
+
+### What a brush keeps with a layer
+
+A brush whose look says so (field 12) keeps what its strokes lay with their layer between strokes,
+so that thick paint piles up and the strokes after meet it. The layer keeps it beside its pixels, in
+planes the layer's size; the layer's pixels are then drawn from them. A layer without one costs
+nothing, and one with it holds two more layers' worth of pixels.
+
+Kind 1 keeps two: the paint, the colours its strokes lay before they are lit, and a height, a grey
+as opaque as the paint is thick. A stroke's dabs (which move paint, flag 16) lay their paint into
+the first, picking up from it, not from the layer. A dab with flag 65536 then lays its tip's grey
+over the height, as opaque as word 20 says (f32, 0..1; a picture tip's grey is its red over its
+alpha, a mask's a middle grey), first flattened towards a middle grey (127 of 255) as far as its
+lightness strength (word 15) is under 1. Wherever its dabs reach, the layer is the paint at the
+lightness the height says: the paint's own where the height is clear or a middle grey, lighter
+where it is lighter, darker where it is darker, along the curve a lightness tip takes through the
+paint's lightness (its grey, as far from the middle as the height is opaque). Its coverage is the
+paint's.
+
+It goes with the layer through undo and redo, and is saved with the artwork. A transform and a flip
+move it with the layer. A stroke of a brush that doesn't keep the same, and any other change to the
+layer's pixels (a fill, an adjustment, liquify, clearing it, merging it, pasting into it), dries the
+paint: the layer stays as it shows and keeps nothing, until undoing that change brings it back.
+Only a layer of plain pixels keeps anything, and only a stroke whose dabs move paint: the eraser, a
+brush preview, a layer of a plugin's own and painting on a 3D model draw as they would without it.
 
 `plugins/krita-brushes` is one to start from: it reads Krita's presets and bundles, draws Krita's
 pixel brush, and edits a brush in a Krita brush studio of its own.
