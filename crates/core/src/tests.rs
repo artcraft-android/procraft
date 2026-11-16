@@ -15199,16 +15199,21 @@ fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
         }
         assert_eq!(gone.strong_count(), 0, "artwork {round} let go when closed");
         // what it held let go by the threads that were still finishing with it (slow while other
-        // tests run): counted once it settles, or as it is after a few seconds
+        // tests run): counted once it settles (unchanged for a second, as a thread held up by the
+        // others can take that long to make or let go its readback), or as it is after a few seconds
         let settled = |want: Option<(usize, usize)>| {
             let since = std::time::Instant::now();
             let mut last = live_gpu_resources(&gpu);
+            let mut steady = std::time::Instant::now();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let now = live_gpu_resources(&gpu);
+                if now != last {
+                    steady = std::time::Instant::now();
+                }
                 let done = match want {
                     Some(w) => now == Some(w),
-                    None => now == last,
+                    None => steady.elapsed() >= std::time::Duration::from_secs(1),
                 };
                 if done || since.elapsed() > std::time::Duration::from_secs(10) {
                     return now;
