@@ -5,6 +5,8 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+#[cfg(windows)]
+mod compiler;
 mod kept;
 mod lighting;
 mod scene;
@@ -28,6 +30,9 @@ pub use scene::{
 };
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
+
+#[cfg(windows)]
+use compiler::with_compiler;
 
 /// The canvas's textures are made so the GPU keeps them uncompressed: on Mali GPUs (Vulkan), whose
 /// block compression (AFBC) can lose blocks of a picture redrawn a part at a time (a stroke's
@@ -178,26 +183,10 @@ pub struct Gpu {
     old: bool,
 }
 
-/// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
-/// `dxcompiler.dll` (beside it), else the one Windows has. Never one found elsewhere on the PATH, as
-/// wgpu would take: an older one there (an SDK's) can't make our shaders, and nothing draws.
-fn with_compiler(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
-    desc.backend_options.dx12.shader_compiler = dx12_compiler();
-    desc
-}
-
-#[cfg(windows)]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dxcompiler.dll")));
-    match beside.filter(|path| path.is_file()) {
-        Some(path) => wgpu::Dx12Compiler::DynamicDxc { dxc_path: path.to_string_lossy().into_owned() },
-        None => wgpu::Dx12Compiler::Fxc,
-    }
-}
-
+/// Elsewhere there's no Direct3D 12 to choose a shader compiler for.
 #[cfg(not(windows))]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    wgpu::Dx12Compiler::Fxc
+fn with_compiler(desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc
 }
 
 impl Gpu {
