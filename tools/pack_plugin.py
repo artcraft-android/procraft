@@ -37,17 +37,30 @@ SOURCES = 'sources.txt'
 EXTENSION = '.procraft-plugin'
 
 
+def std_source(folder):
+    """The `--remap-path-prefix` that names the standard library's source as rustc does without the
+    rust-src component (/rustc/<its commit>/): with it installed, rustc names the local copy instead
+    (in the user's toolchain folder)."""
+    def rustc(*args):
+        return subprocess.run(['rustc', *args], cwd=folder, capture_output=True, text=True, check=True).stdout
+    sysroot = rustc('--print', 'sysroot').strip()
+    commit = next(line.split(':', 1)[1].strip() for line in rustc('-vV').splitlines() if line.startswith('commit-hash:'))
+    return f"--remap-path-prefix={os.path.join(sysroot, 'lib', 'rustlib', 'src', 'rust')}=/rustc/{commit}/"
+
+
 def built(name, folder):
     """The module of the crate in `folder`, with no local path in it: a panic's location names its
-    source file, so the repository and cargo's home go in under fixed names (a module packed
-    anywhere comes out the same, and names nobody's folders)."""
+    source file, so the repository, cargo's home and the standard library's source go in under fixed
+    names (a module packed anywhere comes out the same, and names nobody's folders)."""
     env = dict(os.environ)
     cargo_home = env.get('CARGO_HOME') or os.path.join(os.path.expanduser('~'), '.cargo')
-    flags = [f'--remap-path-prefix={ROOT}=/procraft', f'--remap-path-prefix={cargo_home}=/cargo']
+    flags = [f'--remap-path-prefix={ROOT}=/procraft', f'--remap-path-prefix={cargo_home}=/cargo', std_source(folder)]
     env.pop('RUSTFLAGS', None)
     env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
+    # an incremental build splits the code differently, and its functions come out in another order
+    env['CARGO_INCREMENTAL'] = '0'
     subprocess.run(
-        ['cargo', 'build', '--release', '--target', TARGET, '--target-dir', TARGET_DIR],
+        ['cargo', 'build', '--release', '--locked', '--target', TARGET, '--target-dir', TARGET_DIR],
         cwd=folder,
         check=True,
         env=env,
