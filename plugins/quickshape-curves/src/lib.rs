@@ -12,9 +12,6 @@
 //!
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
 
-/// Maximum simplification error relative to the stroke's diagonal. Keep the small bends
-/// of a freehand stroke; a larger threshold turns multiple smooth waves into flat spans.
-const CORNER_TOLERANCE: f32 = 0.025;
 /// Closed curves need the same fidelity as open strokes: preserve smaller lobes.
 const CLOSED_TOLERANCE: f32 = 0.025;
 /// A stroke whose ends are this close (a part of its length) comes back round: QuickShape's own
@@ -174,29 +171,94 @@ fn fit_closed(pts: &[P]) -> Option<(Vec<P>, bool)> {
     Some((nodes, wavy))
 }
 
-/// The curve through the stroke's bends: an anchor at each corner, and between each two the two
-/// controls of a cubic, leaning the way the stroke came and went (a sixth of the way to the
-/// neighbours either side), so the joins are smooth.
-fn fit(pts: &[P]) -> Vec<P> {
-    let pts: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
-    let mut anchors = simplify(&pts, CORNER_TOLERANCE * size(&pts));
-    if anchors.len() < 2 {
-        let (Some(&first), Some(&last)) = (pts.first(), pts.last()) else { return Vec::new() };
-        anchors = vec![first, last];
+/// Fit smooth cubic spans that stay close to the *drawn* stroke. Simply connecting a few
+/// Ramer–Douglas–Peucker corners with Catmull–Rom handles changes the path between those corners:
+/// it can cut across a wave and even invent a bulge. Instead, measure each proposed cubic's
+/// distance from the original samples and insert another anchor where the deviation is greatest.
+/// The two controls at a shared anchor use the same tangent, so joins stay smooth.
+const MAX_OPEN_SPANS: usize = 96;
+
+fn cubic_at(a: P, b: P, c: P, d: P, t: f32) -> P {
+    let u = 1.0 - t;
+    add(add(scale(a, u * u * u), scale(b, 3.0 * u * u * t)), add(scale(c, 3.0 * u * t * t), scale(d, t * t * t)))
+}
+
+fn tangent(pts: &[P], at: usize) -> P {
+    let before = pts[at.saturating_sub(3)];
+    let after = pts[(at + 3).min(pts.len() - 1)];
+    let direction = sub(after, before);
+    let len = length(direction);
+    if len > 1e-6 { scale(direction, 1.0 / len) } else { (0.0, 0.0) }
+}
+
+fn cubic_span(pts: &[P], a: usize, b: usize) -> [P; 4] {
+    let start = pts[a];
+    let end = pts[b];
+    let reach = length(sub(end, start)) / 3.0;
+    [start, add(start, scale(tangent(pts, a), reach)), sub(end, scale(tangent(pts, b), reach)), end]
+}
+
+/// Distance to the sampled cubic instead of matching parameter t: pointer samples have varying
+/// speed, and an unequal speed must not count as a geometric error.
+fn cubic_deviation(pts: &[P], a: usize, b: usize, nodes: [P; 4]) -> (usize, f32) {
+    let steps = 10;
+    let mut last = nodes[0];
+    let mut outline = Vec::with_capacity(steps);
+    for i in 1..=steps {
+        let now = cubic_at(nodes[0], nodes[1], nodes[2], nodes[3], i as f32 / steps as f32);
+        outline.push((last, now));
+        last = now;
     }
-    let n = anchors.len();
-    let mut nodes = Vec::with_capacity(n * 3);
-    for i in 0..n {
-        let here = anchors[i];
-        let before = if i == 0 { here } else { anchors[i - 1] };
-        let after = if i + 1 == n { here } else { anchors[i + 1] };
-        nodes.push(here);
-        if i + 1 < n {
-            let beyond = anchors.get(i + 2).copied().unwrap_or(after);
-            nodes.push(add(here, scale(sub(after, before), 1.0 / 6.0)));
-            nodes.push(sub(after, scale(sub(beyond, here), 1.0 / 6.0)));
+    let mut worst = (a, 0.0);
+    for (i, &p) in pts.iter().enumerate().take(b).skip(a + 1) {
+        let distance = outline.iter().map(|&(x, y)| distance_to_segment(p, x, y)).fold(f32::INFINITY, f32::min);
+        if distance > worst.1 {
+            worst = (i, distance);
         }
     }
+    worst
+}
+
+fn fit(pts: &[P]) -> Vec<P> {
+    let pts: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    // A bounded canvas-pixel error preserves the shape even for long multi-wave strokes.
+    // A small allowance avoids treating every tiny hand tremor as an intentional bend.
+    let tolerance = (size(&pts) * 0.006).clamp(1.5, 3.0);
+    let mut anchors = vec![0, pts.len() - 1];
+    loop {
+        if anchors.len() > MAX_OPEN_SPANS {
+            break;
+        }
+        let mut worst = (0, 0.0);
+        for pair in anchors.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b - a < 2 {
+                continue;
+            }
+            let (at, error) = cubic_deviation(&pts, a, b, cubic_span(&pts, a, b));
+            if error > worst.1 {
+                worst = (at, error);
+            }
+        }
+        if worst.1 <= tolerance || worst.0 == 0 {
+            break;
+        }
+        match anchors.binary_search(&worst.0) {
+            Err(at) => {
+                anchors.insert(at, worst.0);
+            }
+            Ok(_) => break,
+        }
+    }
+    let mut nodes = Vec::with_capacity(anchors.len() * 3);
+    for pair in anchors.windows(2) {
+        let [a, b, c, _] = cubic_span(&pts, pair[0], pair[1]);
+        nodes.extend([a, b, c]);
+    }
+    nodes.push(pts[*anchors.last().unwrap_or(&0)]);
     nodes
 }
 
@@ -241,6 +303,40 @@ mod tests {
         assert!(anchors.len() >= 9, "small waves were lost: {anchors:?}");
         for x in [30.0, 90.0, 150.0, 210.0, 270.0, 330.0, 390.0, 450.0] {
             assert!(anchors.iter().any(|&(ax, _)| (ax - x).abs() < 20.0), "missing the bend near {x}: {anchors:?}");
+        }
+    }
+
+    #[test]
+    fn fitted_curve_preserves_a_wavy_strokes_outline_without_new_bumps() {
+        let stroke: Vec<P> = (0..=300)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                (x, 100.0 + 26.0 * (x * std::f32::consts::TAU / 150.0).sin())
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        assert_eq!(nodes.len() % 3, 1);
+        // The entire fitted outline stays close to what was drawn, not just its anchors.
+        let mut samples = Vec::new();
+        for base in (0..nodes.len() - 1).step_by(3) {
+            for i in 0..=32 {
+                samples.push(cubic_at(nodes[base], nodes[base + 1], nodes[base + 2], nodes[base + 3], i as f32 / 32.0));
+            }
+        }
+        let deviation = stroke
+            .iter()
+            .map(|&p| samples.windows(2).map(|w| distance_to_segment(p, w[0], w[1])).fold(f32::INFINITY, f32::min))
+            .fold(0.0f32, f32::max);
+        assert!(deviation < 4.0, "fitted path drifted {deviation} px");
+        for &(_, y) in &samples {
+            assert!((73.0..=127.0).contains(&y), "invented a bulge at y={y}");
+        }
+        // Both sides of every interior anchor have the same direction (smooth join).
+        for k in (3..nodes.len() - 1).step_by(3) {
+            let into = sub(nodes[k], nodes[k - 1]);
+            let out = sub(nodes[k + 1], nodes[k]);
+            assert!((into.0 * out.1 - into.1 * out.0).abs() <= 1e-3 * length(into) * length(out) + 1e-3);
+            assert!(into.0 * out.0 + into.1 * out.1 >= -1e-3);
         }
     }
 

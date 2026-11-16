@@ -219,8 +219,8 @@ const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
 /// What a curve may spend, to start with and by the stroke's point, and the most nodes it may have.
-const CURVE_FUEL: u64 = 5_000_000;
-const CURVE_POINT_FUEL: u64 = 20_000;
+const CURVE_FUEL: u64 = 12_000_000;
+const CURVE_POINT_FUEL: u64 = 40_000;
 const MOST_CURVE_NODES: usize = 3 * 4_096 + 1;
 const STROKE_SOUND: &str = "procraft_stroke_sound";
 const SOUND_PREPARE: &str = "procraft_sound_prepare";
