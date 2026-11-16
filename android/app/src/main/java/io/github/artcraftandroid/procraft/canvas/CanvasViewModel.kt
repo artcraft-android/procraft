@@ -3168,18 +3168,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * A [press] of a hardware keyboard on the canvas (its key as the shared shortcuts name it,
      * crates/core keys.rs, which say what it does): true if it is a shortcut, done (as a plugin
      * rebinding keys takes it), or the key a plugin's panel asked for. Typing in a text field never
-     * comes here.
+     * comes here. A key held down presses again ([repeat]): that only moves the view, as a plugin's
+     * key for one of its own moves does.
      */
-    internal fun keyShortcut(press: KeyPress): Boolean {
+    internal fun keyShortcut(press: KeyPress, repeat: Boolean = false): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
         val (name, command, shift, alt) = press
         if (pluginPanel?.keyPress == true) {
+            if (repeat) return false
             pluginPanelKey(io.github.artcraftandroid.procraft.core.KeyCombo(name, command, shift, alt))
             return true
         }
         // the arrows move what is transformed, or the strokes the selection takes
         val nudges = transforming || takenBox.isNotEmpty()
-        when (val shortcut = plugins.keyShortcut(name, command, shift, alt, nudges) ?: return false) {
+        val shortcut = plugins.keyShortcut(name, command, shift, alt, nudges) ?: return false
+        if (repeat && !movesView(shortcut)) return false
+        when (shortcut) {
             KeyShortcut.Undo -> undo()
             KeyShortcut.Redo -> redo()
             KeyShortcut.CopyLayer -> copyLayer()
@@ -3210,9 +3214,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             } else if (session?.nudgePluginItems(shortcut.dx, shortcut.dy) == true) {
                 refresh()
             }
+            // the view's own moves, which a plugin gives keys to
+            is KeyShortcut.ZoomView, is KeyShortcut.TurnView, is KeyShortcut.PanView -> {
+                session?.keyView(shortcut)
+                refreshView()
+            }
+            KeyShortcut.FitView -> {
+                session?.keyView(shortcut)
+                followView()
+            }
         }
         return true
     }
+
+    /** Whether [shortcut] moves the view by a step, which a key held down does again and again. */
+    private fun movesView(shortcut: KeyShortcut) =
+        shortcut is KeyShortcut.ZoomView || shortcut is KeyShortcut.TurnView || shortcut is KeyShortcut.PanView
 
     /** The key [press] a plugin's panel asked for: told to the plugin off the main thread (it acts as a touch on the panel does), the panel shown as it answers. It asked for that press alone. */
     private fun pluginPanelKey(press: io.github.artcraftandroid.procraft.core.KeyCombo) {

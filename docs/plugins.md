@@ -574,6 +574,13 @@ a sign (`[`, `]`, `;`, `,`, `.`, `/`, `\`, `'`, `` ` ``, `-`, `=`), or a word: `
 `delete`, `backspace`, `escape`, `left`, `right`, `up`, `down`, `f1` to `f12`. A key is at most 16
 characters, lowercase, without `+` or a space. A platform may not have every key.
 
+A few presses are the view's own moves, which no keyboard sends: `view:zoom-in` and `view:zoom-out`
+(1.25 times nearer or further each time), `view:fit` (the whole canvas in the window), `view:turn:15`
+(clockwise by that many degrees, below 0 the other way, at most 360), and `view:pan-left`,
+`view:pan-right`, `view:pan-up` and `view:pan-down` (the view moves that way, the canvas the other).
+They have no keys as the app comes, so a plugin gives them keys by taking presses as them, on every
+platform.
+
 The app writes the press where `procraft_key_buffer` says `len` bytes go, then asks:
 
 - `procraft_key_shortcut`: what the press is taken as. 0 leaves it as it is; below 0 makes it no
@@ -593,12 +600,15 @@ tab apart: its group (`Edit`), what it does (`Undo`), the presses that do it by 
 between), and `1` if the app keeps those keys as they are (holding them moves the view, say) or `0` if
 they may be rebound. A row of the list whose presses each do something of their own (one smaller, one
 bigger) is a line for each press. The list is the platform's: a desktop's has its files, zooming and
-turning too.
+turning too. The view's own moves are lines of the `View` group, their presses those above (but the
+desktop's own zooming and fitting, which it has keys for): `view:turn:15` and `view:turn:-15` stand
+for turning either way.
 
 The kit's `key_shortcut!` takes two functions, from a `&kit::keys::Press` to a `kit::keys::Taken`
 (`AsItIs`, `As(press)` or `Nothing`) and to an `Option<Vec<Press>>`; `key_shortcuts!` takes a
 `fn(Vec<kit::keys::Shortcut>)`. The Keyboard shortcuts plugin the app comes with takes each key bound
-anew as its shortcut's first key as it came, and a key a shortcut no longer has as none.
+anew as its shortcut's first key as it came, and a key a shortcut no longer has as none. It turns
+the canvas by a step of its own, which you choose where the turning shortcuts take their keys.
 
 ### `quickshape_curve`
 

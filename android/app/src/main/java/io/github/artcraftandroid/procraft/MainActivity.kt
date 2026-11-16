@@ -210,7 +210,8 @@ class MainActivity : ComponentActivity() {
         if (typing()) return super.onKeyDown(keyCode, event)
         if (isAltKey(keyCode) && event.repeatCount == 0 && !event.isCtrlPressed && vm.modifyKey(true)) return true
         val press = keyPress(keyCode, event.metaState)
-        if (event.repeatCount == 0 && press != null && vm.keyShortcut(press)) return true
+        // held, a key goes on moving the view, if that is what it does
+        if (press != null && vm.keyShortcut(press, repeat = event.repeatCount > 0)) return true
         return super.onKeyDown(keyCode, event)
     }
 

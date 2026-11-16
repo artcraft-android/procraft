@@ -2868,4 +2868,32 @@ pub(crate) mod tests {
         eprintln!("the most a press spent, by keys bound: {spent:?}");
         assert!(spent.iter().all(|&(_, most)| most < SAMPLE_FUEL), "{spent:?}");
     }
+
+    #[test]
+    fn the_keyboard_plugin_gives_a_tablet_s_view_moves_keys() {
+        // told a tablet's shortcuts (Android's, an iPad's), with keys it kept for the view's own
+        // moves and a turn of 10°: each key is taken as its move's press, which the canvas does
+        use crate::KeyShortcut::{PanView, TurnView, ZoomView};
+        let (code, hooks, permissions) = keyboard_plugin();
+        let mut running = Running::start_on(&code, &[], &hooks, &permissions).unwrap();
+        let kept = "view:zoom-in\tcommand+=\nview:pan-left\tleft\nview:turn:-15\tshift+r\nTurn step\t10";
+        running.give_kept(kept.as_bytes()).unwrap();
+        running.tell_shortcuts(&crate::keys::shortcuts_told(false, false)).unwrap();
+        let combo = |text: &str| crate::KeyCombo::read(text).unwrap();
+        let mut does = |press: &str| {
+            let taken = running.key_shortcut(&combo(press)).unwrap();
+            let taken = taken.map_or_else(|| combo(press), |p| p.into_iter().next().unwrap());
+            crate::key_shortcut(taken.key, taken.command, taken.shift, taken.alt, false)
+        };
+        assert_eq!(does("command+="), Some(ZoomView { by: crate::KEY_ZOOM }));
+        assert_eq!(does("left"), Some(PanView { dx: -1.0, dy: 0.0 }));
+        assert_eq!(does("shift+r"), Some(TurnView { by: (-10f32).to_radians() }));
+        // the rest as they came: Ctrl+Z undoes, R alone does nothing on a tablet
+        assert_eq!(does("command+z"), Some(crate::KeyShortcut::Undo));
+        assert_eq!(does("r"), None);
+        // the list's rows say which keys do them now
+        let keys = running.key_shortcut_keys(&combo("view:zoom-in")).unwrap();
+        assert_eq!(keys, Some(vec![combo("command+=")]));
+        assert_eq!(running.key_shortcut_keys(&combo("view:fit")).unwrap(), None);
+    }
 }

@@ -2726,8 +2726,8 @@ impl Interface {
                 "s" => self.actions.push(if press.shift { Action::SaveAs } else { Action::Save }),
                 "n" => self.actions.push(Action::New),
                 "o" => self.actions.push(Action::Open),
-                "=" | "plus" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
-                "-" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
+                "=" | "plus" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, procraft_core::KEY_ZOOM, 0.0),
+                "-" => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / procraft_core::KEY_ZOOM, 0.0),
                 "0" => session.settle_to_fit(),
                 _ => {
                     return self.canvas_press(ctx, session, info, press);
@@ -2792,6 +2792,13 @@ impl Interface {
             KeyShortcut::Nudge { dx, dy } => {
                 session.nudge_plugin_items(dx, dy);
             }
+            // the view's own moves a plugin took a press as
+            KeyShortcut::ZoomView { .. }
+            | KeyShortcut::TurnView { .. }
+            | KeyShortcut::PanView { .. }
+            | KeyShortcut::FitView => {
+                session.key_view(shortcut);
+            }
         }
     }
 
@@ -2809,9 +2816,6 @@ impl Interface {
         self.library.tool_changed();
     }
 }
-
-/// How far Ctrl with + or - zooms the canvas each time.
-const KEY_ZOOM: f32 = 1.25;
 
 /// Whether Escape was pressed this frame, for what is open to close: it counts as taken, so it
 /// doesn't also turn the canvas upright ([`Interface::show`]).
