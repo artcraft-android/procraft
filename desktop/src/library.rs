@@ -348,7 +348,7 @@ impl Library {
         button: Rect,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let rect = Rect::from_min_size(
@@ -400,243 +400,239 @@ impl Library {
         let mut brush_tapped = None;
         let mut swipe_chose = None;
         let mut title_row = Rect::NOTHING;
-        egui::Area::new(egui::Id::unique("brush library")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
-            ctx,
-            |ui| {
-                // nothing under the panel takes a touch
-                ui.allocate_rect(rect, Sense::click());
-                panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
-                let body = panel::body(rect);
-                // the library in use's name (typed over while it is renamed), or every library's
-                let name = libraries.get(place).map_or("Brush library", |l| l.name.as_str());
-                let renaming = !self.showing_libraries && self.renaming_library.as_ref().is_some_and(|r| r.0 == place);
-                let heading = match (self.showing_libraries, renaming) {
-                    (true, _) => "Brush libraries",
-                    (false, true) => "",
-                    (false, false) => name,
-                };
-                let (tapped, at) = panel::header_title(ui, look, body, heading, 20.0, true, self.title_menu.is_open());
-                title_row = at;
-                if tapped {
-                    self.title_menu.open();
+        panel::area(ctx, egui::Id::unique("brush library"), rect).show(ctx, |ui| {
+            // nothing under the panel takes a touch
+            ui.allocate_rect(rect, Sense::click());
+            panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
+            let body = panel::body(rect);
+            // the library in use's name (typed over while it is renamed), or every library's
+            let name = libraries.get(place).map_or("Brush library", |l| l.name.as_str());
+            let renaming = !self.showing_libraries && self.renaming_library.as_ref().is_some_and(|r| r.0 == place);
+            let heading = match (self.showing_libraries, renaming) {
+                (true, _) => "Brush libraries",
+                (false, true) => "",
+                (false, false) => name,
+            };
+            let (tapped, at) = panel::header_title(ui, look, body, heading, 20.0, true, self.title_menu.is_open());
+            title_row = at;
+            if tapped {
+                self.title_menu.open();
+            }
+            if renaming {
+                let field = Rect::from_min_size(pos2(body.left() + 20.0, body.top() + 17.0), vec2(300.0, 30.0));
+                self.rename_field(ui, session, place, field, 24.0);
+            }
+            // the plus: new brushes and sets, and importing; over the cards, a new library
+            plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
+            if self.picked.is_empty() || self.showing_libraries {
+                look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
+                if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
+                    if self.showing_libraries {
+                        self.libraries_plus.open();
+                    } else {
+                        self.plus_menu.open();
+                    }
                 }
-                if renaming {
-                    let field = Rect::from_min_size(pos2(body.left() + 20.0, body.top() + 17.0), vec2(300.0, 30.0));
-                    self.rename_field(ui, session, place, field, 24.0);
+            } else {
+                self.picked_actions(ui, session, plus);
+            }
+
+            lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
+            if cards {
+                self.libraries_body(ui, look, session, &libraries, lists, shown);
+                return;
+            }
+            // the search: out of sight at first, it comes down as a list is scrolled up past
+            // its top, and goes as they scroll down again (unless it is in use)
+            let in_use = self.searching || !self.query.is_empty();
+            // (by the wheel, or a finger or the mouse pulling a list)
+            let pulled = self.press.is_some_and(|p| p.way == Way::Scroll) || self.set_press.is_some_and(|p| p.spent);
+            let pull = panel::in_panel_by(ctx, ui.input(|i| i.pointer.delta())).y;
+            let wheel = ui.input(|i| i.smooth_scroll_delta.y) + if pulled { pull } else { 0.0 };
+            let hover = ui.input(|i| i.pointer.hover_pos()).map(|p| panel::in_panel(ctx, p));
+            if !in_use && let Some(p) = hover.filter(|p| lists.contains(*p)) {
+                let at_top = if p.x < lists.left() + SETS_WIDTH { self.lists_top.0 } else { self.lists_top.1 };
+                if wheel > 0.0 && at_top {
+                    self.search_down = true;
+                } else if wheel < 0.0 {
+                    self.search_down = false;
                 }
-                // the plus: new brushes and sets, and importing; over the cards, a new library
-                plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
-                if self.picked.is_empty() || self.showing_libraries {
-                    look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                    if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
-                        if self.showing_libraries {
-                            self.libraries_plus.open();
+            }
+            let shown_down = in_use || self.search_down;
+            let down =
+                ui.ctx().animate_bool_with_time(egui::Id::unique("library search"), shown_down, 0.2) * SEARCH_BLOCK;
+            if down > 0.0 {
+                let block = Rect::from_min_size(
+                    pos2(lists.left(), lists.top() + down - SEARCH_BLOCK),
+                    vec2(lists.width(), SEARCH_BLOCK),
+                );
+                self.search_field(ui, block, lists);
+            }
+            lists.min.y += down;
+            if in_use {
+                if let Some(key) = self.search_results(ui, &library, (current.set, current.index), lists) {
+                    brush_tapped = Some((key, false));
+                }
+            } else {
+                let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
+                let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
+                if SET_COLUMN.value() >> 24 != 0 {
+                    ui.painter().rect_filled(sets, 0, argb(SET_COLUMN));
+                }
+                let corner = panel::POPOVER_CORNER;
+                panel::rounded(ui, look, "library brushes", brushes, [0.0, 0.0, corner, 0.0], argb(BRUSH_COLUMN));
+
+                let sets_out = ui.scope_builder(UiBuilder::new().max_rect(sets), |ui| {
+                    ScrollArea::vertical()
+                        .id_salt("library sets")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        // a lifted set is dragged, not the list
+                        .scroll_source(if lifted.is_some() {
+                            egui::scroll_area::ScrollSource::NONE
                         } else {
-                            self.plus_menu.open();
-                        }
-                    }
-                } else {
-                    self.picked_actions(ui, session, plus);
-                }
-
-                lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
-                if cards {
-                    self.libraries_body(ui, look, session, &libraries, lists, shown);
-                    return;
-                }
-                // the search: out of sight at first, it comes down as a list is scrolled up past
-                // its top, and goes as they scroll down again (unless it is in use)
-                let in_use = self.searching || !self.query.is_empty();
-                // (by the wheel, or a finger or the mouse pulling a list)
-                let pulled =
-                    self.press.is_some_and(|p| p.way == Way::Scroll) || self.set_press.is_some_and(|p| p.spent);
-                let wheel = ui.input(|i| i.smooth_scroll_delta.y + if pulled { i.pointer.delta().y } else { 0.0 });
-                if !in_use && let Some(p) = ui.input(|i| i.pointer.hover_pos()).filter(|p| lists.contains(*p)) {
-                    let at_top = if p.x < lists.left() + SETS_WIDTH { self.lists_top.0 } else { self.lists_top.1 };
-                    if wheel > 0.0 && at_top {
-                        self.search_down = true;
-                    } else if wheel < 0.0 {
-                        self.search_down = false;
-                    }
-                }
-                let shown_down = in_use || self.search_down;
-                let down =
-                    ui.ctx().animate_bool_with_time(egui::Id::unique("library search"), shown_down, 0.2) * SEARCH_BLOCK;
-                if down > 0.0 {
-                    let block = Rect::from_min_size(
-                        pos2(lists.left(), lists.top() + down - SEARCH_BLOCK),
-                        vec2(lists.width(), SEARCH_BLOCK),
-                    );
-                    self.search_field(ui, block, lists);
-                }
-                lists.min.y += down;
-                if in_use {
-                    if let Some(key) = self.search_results(ui, &library, (current.set, current.index), lists) {
-                        brush_tapped = Some((key, false));
-                    }
-                } else {
-                    let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
-                    let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
-                    if SET_COLUMN.value() >> 24 != 0 {
-                        ui.painter().rect_filled(sets, 0, argb(SET_COLUMN));
-                    }
-                    let corner = panel::POPOVER_CORNER;
-                    panel::rounded(ui, look, "library brushes", brushes, [0.0, 0.0, corner, 0.0], argb(BRUSH_COLUMN));
-
-                    let sets_out = ui.scope_builder(UiBuilder::new().max_rect(sets), |ui| {
-                        ScrollArea::vertical()
-                            .id_salt("library sets")
-                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                            // a lifted set is dragged, not the list
-                            .scroll_source(if lifted.is_some() {
-                                egui::scroll_area::ScrollSource::NONE
-                            } else {
-                                egui::scroll_area::ScrollSource::default()
-                            })
-                            .show(ui, |ui| {
-                                ui.add_space(12.0);
-                                // the brushes last painted with, and those pinned there, above the sets
-                                let (response, at) = self.recent_row(ui, look, recent);
-                                recent_row = Some(at);
-                                recent_tapped = response.clicked();
-                                ui.add_space(12.0);
-                                for (i, set) in library.iter().enumerate() {
-                                    let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
-                                    // a lifted set is faint where it was
-                                    let faint = lifted.is_some_and(|p| p.set == i);
-                                    let (response, at) = ui
-                                        .scope(|ui| {
-                                            if faint {
-                                                ui.multiply_opacity(0.3);
-                                            }
-                                            self.set_row(ui, look, session, i, set, i == shown && !recent, fill)
-                                        })
-                                        .inner;
-                                    set_rects.push((i, at));
-                                    if self.set_press.is_none()
-                                        && self.press.is_none()
-                                        && response.is_pointer_button_down_on()
-                                        && let Some(p) = response.interact_pointer_pos()
-                                    {
-                                        self.set_press = Some(SetPress {
-                                            set: i,
-                                            origin: p,
-                                            since: Instant::now(),
-                                            grab: p - at.min,
-                                            last: p,
-                                            lifted: false,
-                                            spent: false,
-                                        });
-                                    }
-                                    if response.clicked() {
-                                        set_tapped = Some(i);
-                                    }
-                                    ui.add_space(12.0);
-                                }
-                            })
-                    });
-                    let brushes_out = ui.scope_builder(UiBuilder::new().max_rect(brushes), |ui| {
-                        let list = ScrollArea::vertical()
-                            .id_salt(("library brushes", if recent { usize::MAX } else { shown }))
-                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                            // the list follows a press itself, and carries on when flicked; a brush
-                            // slid or dragged keeps it still
-                            .scroll_source(if taken {
-                                egui::scroll_area::ScrollSource::NONE
-                            } else {
-                                egui::scroll_area::ScrollSource::ALL
-                            });
-                        let list = match held_at {
-                            Some(at) => list.vertical_scroll_offset(at),
-                            None => list,
-                        };
-                        list.show(ui, |ui| {
-                            ui.add_space(9.75);
-                            // the Recent set's brushes (pinned there or not), or the shown set's
-                            let listed: Vec<(&BrushInfo, Option<bool>)> = if recent {
-                                recents
-                                    .iter()
-                                    .filter_map(|r| {
-                                        let b = library.get(r.set as usize)?.brushes.get(r.index as usize)?;
-                                        Some((b, Some(r.pinned)))
-                                    })
-                                    .collect()
-                            } else {
-                                library
-                                    .get(shown)
-                                    .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
-                                    .unwrap_or_default()
-                            };
-                            let chosen = library.get(shown).and_then(|set| set.chosen);
-                            for (b, pinned) in listed {
-                                // the current brush, or the brush last chosen in this set (in the
-                                // Recent set the current brush alone)
-                                let selected = (b.set, b.index) == (current.set, current.index)
-                                    || (!recent && chosen == Some(b.index));
-                                let (response, cell) = self.brush_row(ui, look, b, selected, pinned);
-                                // a brush found from the Recent set is scrolled to in its own
-                                if self.found == Some((b.set, b.index)) {
-                                    self.found = None;
-                                    ui.scroll_to_rect(cell, Some(egui::Align::Center));
-                                }
-                                brush_rects.push(((b.set, b.index), cell));
-                                if let Some(r) = response {
-                                    if r.0 {
-                                        brush_tapped = Some(((b.set, b.index), selected));
-                                    }
-                                    if let Some(chose) = r.1 {
-                                        swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
-                                    }
-                                }
-                                ui.add_space(BRUSH_GAP);
-                            }
-                            ui.add_space(12.0 - BRUSH_GAP);
+                            egui::scroll_area::ScrollSource::default()
                         })
-                    });
-                    self.list_at = brushes_out.inner.state.clamped_offset().y;
-                    self.lists_top = (
-                        sets_out.inner.state.clamped_offset().y <= 0.5,
-                        brushes_out.inner.state.clamped_offset().y <= 0.5,
-                    );
-                }
-                // the dragged brush follows the pointer, over the lists
-                if let Some(p) = dragging
-                    && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
-                {
-                    let size = self
-                        .brush_rects
-                        .iter()
-                        .find(|(k, _)| *k == p.key)
-                        .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
-                    let at = Rect::from_min_size(p.last - p.grab, size);
-                    let painter = ui.painter_at(lists);
-                    painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
-                    self.preview_in(&painter, (b.set, b.index), at, true);
-                    let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
-                    painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
-                    ctx.request_repaint();
-                }
-                // and the lifted set
-                if let Some(p) = lifted
-                    && let Some(set) = library.get(p.set)
-                {
-                    let size = self
-                        .set_rects
-                        .iter()
-                        .find(|(s, _)| *s == p.set)
-                        .map_or(vec2(SETS_WIDTH - 24.0, SET_HEIGHT), |(_, r)| r.size());
-                    let at = Rect::from_min_size(p.last - p.grab, size);
-                    let painter = ui.painter_at(lists);
-                    painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
-                    let icon = icons::SET_ICONS.get(set.icon as usize).unwrap_or(&icons::BRUSH_SET);
-                    look.icon(ui, icon, pos2(at.left() + 24.0, at.center().y), 40.0, Color32::WHITE);
-                    let left = at.left() + 4.0 + 40.0 + 1.0;
-                    let name = one_line(ui, &set.name, 14.0, Weight::SemiBold, Color32::WHITE, at.right() - 8.0 - left);
-                    painter.galley(pos2(left, at.center().y - name.size().y / 2.0), name, Color32::WHITE);
-                    ctx.request_repaint();
-                }
-            },
-        );
+                        .show(ui, |ui| {
+                            ui.add_space(12.0);
+                            // the brushes last painted with, and those pinned there, above the sets
+                            let (response, at) = self.recent_row(ui, look, recent);
+                            recent_row = Some(at);
+                            recent_tapped = response.clicked();
+                            ui.add_space(12.0);
+                            for (i, set) in library.iter().enumerate() {
+                                let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
+                                // a lifted set is faint where it was
+                                let faint = lifted.is_some_and(|p| p.set == i);
+                                let (response, at) = ui
+                                    .scope(|ui| {
+                                        if faint {
+                                            ui.multiply_opacity(0.3);
+                                        }
+                                        self.set_row(ui, look, session, i, set, i == shown && !recent, fill)
+                                    })
+                                    .inner;
+                                set_rects.push((i, at));
+                                if self.set_press.is_none()
+                                    && self.press.is_none()
+                                    && response.is_pointer_button_down_on()
+                                    && let Some(p) = response.interact_pointer_pos()
+                                {
+                                    self.set_press = Some(SetPress {
+                                        set: i,
+                                        origin: p,
+                                        since: Instant::now(),
+                                        grab: p - at.min,
+                                        last: p,
+                                        lifted: false,
+                                        spent: false,
+                                    });
+                                }
+                                if response.clicked() {
+                                    set_tapped = Some(i);
+                                }
+                                ui.add_space(12.0);
+                            }
+                        })
+                });
+                let brushes_out = ui.scope_builder(UiBuilder::new().max_rect(brushes), |ui| {
+                    let list = ScrollArea::vertical()
+                        .id_salt(("library brushes", if recent { usize::MAX } else { shown }))
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        // the list follows a press itself, and carries on when flicked; a brush
+                        // slid or dragged keeps it still
+                        .scroll_source(if taken {
+                            egui::scroll_area::ScrollSource::NONE
+                        } else {
+                            egui::scroll_area::ScrollSource::ALL
+                        });
+                    let list = match held_at {
+                        Some(at) => list.vertical_scroll_offset(at),
+                        None => list,
+                    };
+                    list.show(ui, |ui| {
+                        ui.add_space(9.75);
+                        // the Recent set's brushes (pinned there or not), or the shown set's
+                        let listed: Vec<(&BrushInfo, Option<bool>)> = if recent {
+                            recents
+                                .iter()
+                                .filter_map(|r| {
+                                    let b = library.get(r.set as usize)?.brushes.get(r.index as usize)?;
+                                    Some((b, Some(r.pinned)))
+                                })
+                                .collect()
+                        } else {
+                            library
+                                .get(shown)
+                                .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
+                                .unwrap_or_default()
+                        };
+                        let chosen = library.get(shown).and_then(|set| set.chosen);
+                        for (b, pinned) in listed {
+                            // the current brush, or the brush last chosen in this set (in the
+                            // Recent set the current brush alone)
+                            let selected = (b.set, b.index) == (current.set, current.index)
+                                || (!recent && chosen == Some(b.index));
+                            let (response, cell) = self.brush_row(ui, look, b, selected, pinned);
+                            // a brush found from the Recent set is scrolled to in its own
+                            if self.found == Some((b.set, b.index)) {
+                                self.found = None;
+                                ui.scroll_to_rect(cell, Some(egui::Align::Center));
+                            }
+                            brush_rects.push(((b.set, b.index), cell));
+                            if let Some(r) = response {
+                                if r.0 {
+                                    brush_tapped = Some(((b.set, b.index), selected));
+                                }
+                                if let Some(chose) = r.1 {
+                                    swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
+                                }
+                            }
+                            ui.add_space(BRUSH_GAP);
+                        }
+                        ui.add_space(12.0 - BRUSH_GAP);
+                    })
+                });
+                self.list_at = brushes_out.inner.state.clamped_offset().y;
+                self.lists_top =
+                    (sets_out.inner.state.clamped_offset().y <= 0.5, brushes_out.inner.state.clamped_offset().y <= 0.5);
+            }
+            // the dragged brush follows the pointer, over the lists
+            if let Some(p) = dragging
+                && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
+            {
+                let size = self
+                    .brush_rects
+                    .iter()
+                    .find(|(k, _)| *k == p.key)
+                    .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
+                let at = Rect::from_min_size(p.last - p.grab, size);
+                let painter = ui.painter_at(lists);
+                painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
+                self.preview_in(&painter, (b.set, b.index), at, true);
+                let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
+                painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
+                ctx.request_repaint();
+            }
+            // and the lifted set
+            if let Some(p) = lifted
+                && let Some(set) = library.get(p.set)
+            {
+                let size = self
+                    .set_rects
+                    .iter()
+                    .find(|(s, _)| *s == p.set)
+                    .map_or(vec2(SETS_WIDTH - 24.0, SET_HEIGHT), |(_, r)| r.size());
+                let at = Rect::from_min_size(p.last - p.grab, size);
+                let painter = ui.painter_at(lists);
+                painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
+                let icon = icons::SET_ICONS.get(set.icon as usize).unwrap_or(&icons::BRUSH_SET);
+                look.icon(ui, icon, pos2(at.left() + 24.0, at.center().y), 40.0, Color32::WHITE);
+                let left = at.left() + 4.0 + 40.0 + 1.0;
+                let name = one_line(ui, &set.name, 14.0, Weight::SemiBold, Color32::WHITE, at.right() - 8.0 - left);
+                painter.galley(pos2(left, at.center().y - name.size().y / 2.0), name, Color32::WHITE);
+                ctx.request_repaint();
+            }
+        });
         self.set_rects = set_rects;
         self.brush_rects = brush_rects;
         self.draw_previews(ctx, session);
@@ -868,7 +864,7 @@ impl Library {
             entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
         }
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let top = (set_rect.center().y - size.y / 2.0)
             .clamp(screen.top() + MENU_TOP, (screen.bottom() - size.y).max(screen.top() + MENU_TOP));
         let rect = Rect::from_min_size(pos2(set_rect.left() - SET_MENU_GAP - size.x, top), size);
@@ -945,7 +941,7 @@ impl Library {
     ) {
         let entries = [Entry::Item(&icons::MENU_CLEAR, "Clear", menu::INK)];
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries) + RECENT_MENU_EXTRA);
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let top = (row.center().y - size.y / 2.0)
             .clamp(screen.top() + MENU_TOP, (screen.bottom() - size.y).max(screen.top() + MENU_TOP));
         let rect = Rect::from_min_size(pos2(row.left() - SET_MENU_GAP - size.x, top), size);
@@ -995,7 +991,7 @@ impl Library {
     fn follow_press(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(mut p) = self.press else { return };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
-        let at = at.unwrap_or(p.last);
+        let at = at.map_or(p.last, |at| panel::in_panel(ctx, at));
         let d = at - p.origin;
         let width = self.brush_rects.iter().find(|(k, _)| *k == p.key).map_or(0.0, |(_, r)| r.width());
         if down {
@@ -1069,7 +1065,7 @@ impl Library {
     fn follow_set_press(&mut self, ctx: &egui::Context, session: &CanvasSession, shown: usize) -> bool {
         let Some(mut p) = self.set_press else { return false };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
-        let at = at.unwrap_or(p.last);
+        let at = at.map_or(p.last, |at| panel::in_panel(ctx, at));
         if down {
             if p.lifted {
                 ctx.request_repaint();
@@ -1216,7 +1212,7 @@ impl Library {
         let response = ui.interact(at.intersect(cell), ui.scope_id().with(("brush", key)), Sense::click());
         if response.is_pointer_button_down_on()
             && self.press.is_none()
-            && let Some(origin) = ui.input(|i| i.pointer.interact_pos())
+            && let Some(origin) = ui.input(|i| i.pointer.interact_pos()).map(|p| panel::in_panel(ui.ctx(), p))
         {
             let since = Instant::now();
             self.press = Some(Press {

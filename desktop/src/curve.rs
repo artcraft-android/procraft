@@ -74,6 +74,8 @@ impl CurveEditor {
     /// changed.
     pub fn show(&mut self, ui: &Ui, rect: Rect, curve: &mut Vec<[f32; 2]>, look: &CurveLook, id: &str) -> bool {
         let response = ui.interact(rect, ui.scope_id().with(("curve", id)), Sense::click_and_drag());
+        // how it shows on the window (on a panel shown bigger or smaller, say)
+        let to_window = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or(egui::emath::TSTransform::IDENTITY);
         let to_curve = |p: Pos2| {
             [
                 ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
@@ -89,7 +91,7 @@ impl CurveEditor {
         let mut opened = None;
         if down
             && self.press.is_none()
-            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin()).map(|p| to_window.inverse() * p)
         {
             self.menu = None;
             let at = to_curve(origin);
@@ -143,9 +145,9 @@ impl CurveEditor {
         if let Some(i) = opened
             && let Some(p) = curve.get(i)
         {
-            // centred over its node, its bottom 11 above it
+            // centred over its node where it shows, its bottom 11 above it
             let rows = if i == 0 || i + 1 == curve.len() { 1.0 } else { 2.0 };
-            let at = place(*p);
+            let at = to_window * place(*p);
             let menu = Rect::from_min_size(
                 pos2(at.x - MENU_WIDTH / 2.0, at.y - 11.0 - MENU_ROW * rows),
                 vec2(MENU_WIDTH, MENU_ROW * rows),

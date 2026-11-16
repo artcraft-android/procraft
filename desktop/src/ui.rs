@@ -450,14 +450,18 @@ impl Interface {
 
     /// Fitting the canvas keeps it clear of the bar.
     pub fn place_canvas(&self, session: &CanvasSession, scale: f32) {
-        // with Fit Canvas Inside Interface, clear of the top bar and the side bar (on its side)
+        // with Fit Canvas Inside Interface, clear of the top bar and the side bar (on its side), as
+        // they show
         if !self.prefs.fit_inside {
             session.set_fit_insets(0.0, 0.0, 0.0, 0.0);
             return;
         }
-        let side = if self.side_bar_shown { (pc::SIDE_BAR_WIDTH + crate::panel::POPOVER_GAP) * scale } else { 0.0 };
+        let part = |p: procraft_core::InterfacePart| self.prefs.plugins.interface_part_scale(p);
+        let side_bar = pc::SIDE_BAR_WIDTH * part(procraft_core::InterfacePart::SideBar);
+        let side = if self.side_bar_shown { (side_bar + crate::panel::POPOVER_GAP) * scale } else { 0.0 };
         let (left, right) = if self.prefs.right_handed { (0.0, side) } else { (side, 0.0) };
-        session.set_fit_insets(left, pc::BAR_HEIGHT * scale, right, 0.0);
+        let bar = pc::BAR_HEIGHT * part(procraft_core::InterfacePart::TopBar);
+        session.set_fit_insets(left, bar * scale, right, 0.0);
     }
 
     /// The app's fonts and look, set the first time anything shows.
@@ -485,6 +489,8 @@ impl Interface {
     fn show_frame(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
+        // how big each part of the interface shows, as the plugins on say, before any of it draws
+        crate::panel::set_part_scales(&ctx, &self.prefs.plugins);
         self.ended_export = None;
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
@@ -572,7 +578,7 @@ impl Interface {
         });
         self.recolor_frame(&ctx, session);
         if let Some(opacity) = session.touch_layer_opacity().filter(|_| !self.bars_hidden) {
-            crate::adjustments::layer_opacity_bar(&ctx, opacity, pc::BAR_HEIGHT);
+            crate::adjustments::layer_opacity_bar(&ctx, opacity, crate::panel::bar_shown(&ctx));
         }
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
@@ -743,7 +749,7 @@ impl Interface {
         self.canvas_rect = ui.available_rect_before_wrap();
         // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
         let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
-        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::look::pc::BAR_HEIGHT);
+        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::panel::bar_shown(&ctx));
         crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
@@ -754,7 +760,6 @@ impl Interface {
             && !self.text.editing()
             && (adjusting.adjustment.is_none() || adjusting.pencil);
         crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
-        crate::panel::set_part_scales(&ctx, &self.prefs.plugins);
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
@@ -845,7 +850,9 @@ impl Interface {
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
         self.plugin_panel(&ctx, session, &mut backdrops);
         crate::model_picture::show(&ctx, &mut self.look, session);
-        if let Some(on) = self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT, self.model) {
+        // the bars and panels that hang from the top bar hang from where it ends as it shows
+        let bar_bottom = crate::panel::bar_shown(&ctx);
+        if let Some(on) = self.selection.show(&ctx, &mut self.look, session, bar_bottom, self.model) {
             self.prefs.selection_x_ray = on;
             self.prefs.keep();
         }
@@ -853,7 +860,7 @@ impl Interface {
             &ctx,
             &mut self.look,
             session,
-            pc::BAR_HEIGHT,
+            bar_bottom,
             &self.gradients,
             &self.colours,
             &mut backdrops,
@@ -889,7 +896,7 @@ impl Interface {
         } else {
             self.animation.reset(session);
         }
-        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), pc::BAR_HEIGHT);
+        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), bar_bottom);
         self.copy_paste_panel(&ctx, session);
         self.layer_choice(&ctx, session);
         self.quick_menu(&ctx, session);
@@ -2376,6 +2383,12 @@ impl Interface {
         };
         // while one of the panel's menus is open, a press elsewhere only closes the menu
         let modal = self.modal(which);
+        // laid out in the panels' own space, hanging from where the button shows, and shown at the
+        // size a plugin gives the panels
+        let k = crate::panel::part_scale(ctx, procraft_core::InterfacePart::Panels);
+        let space = crate::panel::PanelSpace::new(ctx.content_rect(), crate::panel::bar_shown(ctx), k);
+        crate::panel::drawing_panel(ctx, Some(space));
+        let (on_window, button) = (button, space.to_window.inverse().mul_rect(button));
         let shown = match which {
             Popover::Brushes => {
                 let shown = self.library.show(ctx, &mut self.look, session, button, backdrops);
@@ -2601,8 +2614,9 @@ impl Interface {
                 shown
             }
         };
+        crate::panel::drawing_panel(ctx, None);
         if !modal {
-            self.close_outside(ctx, shown, button);
+            self.close_outside(ctx, space.to_window.mul_rect(shown), on_window);
         }
     }
 
@@ -3024,7 +3038,7 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
 
 #[cfg(test)]
 mod tests {
-    use egui::{Event, Pos2, RawInput};
+    use egui::{Event, Pos2, RawInput, pos2};
     use winit::dpi::PhysicalPosition;
     use winit::event::{DeviceId, ElementState, Force, MouseButton, Touch, TouchPhase, WindowEvent};
 
@@ -3050,6 +3064,11 @@ mod tests {
         /// A canvas opened on a headless GPU in a window `size` points across, the side bar on the
         /// right with `right`; none without a GPU.
         fn open(size: egui::Vec2, right: bool) -> Option<Window> {
+            Window::open_with(size, crate::prefs::Prefs { right_handed: right, ..Default::default() })
+        }
+
+        /// As [`Window::open`], with `prefs`.
+        fn open_with(size: egui::Vec2, prefs: crate::prefs::Prefs) -> Option<Window> {
             let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
             let session = CanvasSession::new(400, 300);
             session.set_display_scale(1.0);
@@ -3057,7 +3076,7 @@ mod tests {
             session.show_in(size.x as u32, size.y as u32);
             let ctx = egui::Context::default();
             crate::look::install_fonts(&ctx);
-            let mut ui = Interface::with_prefs(crate::prefs::Prefs { right_handed: right, ..Default::default() });
+            let mut ui = Interface::with_prefs(prefs);
             ui.opened(&session, 1.0);
             let (input, touches) = (Input::default(), Default::default());
             let mut window =
@@ -3212,13 +3231,124 @@ mod tests {
             (info.can_undo, info.can_redo)
         }
 
-        /// The middle of the side bar's undo button, and of its redo button.
-        fn undo_redo(&self) -> (Pos2, Pos2) {
-            let bar =
-                crate::chrome::side_bar_rect(Rect::from_min_size(Pos2::ZERO, self.size), self.ui.prefs.right_handed);
-            let shorter = pc::SLIDER_HEIGHT - pc::side_bar_fit(self.size.y).1;
-            let at = |y: f32| Pos2::new(bar.center().x, bar.top() + y - shorter * 2.0);
+        /// The middle of the side bar's undo button, and of its redo button, as the side bar shows
+        /// `scale` times as big under a top bar shown `bar` times as big.
+        fn undo_redo(&self, scale: f32, bar: f32) -> (Pos2, Pos2) {
+            let window = Rect::from_min_size(Pos2::ZERO, self.size);
+            let fit = crate::chrome::fit_side_bar(window, self.ui.prefs.right_handed, scale, pc::BAR_HEIGHT * bar);
+            let (laid_out, to_window) = (fit.laid_out(), fit.to_window());
+            let shorter = pc::SLIDER_HEIGHT - fit.track;
+            let at = |y: f32| to_window * Pos2::new(laid_out.center().x, laid_out.top() + y - shorter * 2.0);
             (at(451.0), at(493.0))
+        }
+
+        /// The middle of the top bar's tool `button` (or Layers, or the colour), as the bar shows
+        /// `scale` times as big.
+        fn tool_button(&self, button: BarButton, scale: f32) -> Pos2 {
+            let width = self.size.x / scale;
+            let (tool_gap, _) = pc::bar_gaps(width);
+            let from_colour = match button {
+                BarButton::Colour => 0.0,
+                BarButton::Layers => 1.0,
+                BarButton::Erase => 2.0,
+                BarButton::Smudge => 3.0,
+                _ => 4.0,
+            };
+            let x =
+                width - pc::BAR_MARGIN - pc::BAR_BUTTON_WIDTH / 2.0 - from_colour * (pc::BAR_BUTTON_WIDTH + tool_gap);
+            Pos2::new(x, pc::BAR_HEIGHT / 2.0) * scale
+        }
+
+        /// Where the area `id` (its layer `order`) shows, and how it is drawn onto the window.
+        fn area_shown(&self, order: egui::Order, id: egui::Id) -> Option<(Rect, egui::emath::TSTransform)> {
+            let rect = self.ctx.memory(|m| m.area_rect(id))?;
+            let layer = egui::LayerId::new(order, id);
+            let to_window = self.ctx.layer_transform_to_global(layer).unwrap_or(egui::emath::TSTransform::IDENTITY);
+            Some((to_window.mul_rect(rect), to_window))
+        }
+    }
+
+    /// The app's plugins in a folder of their own, the Interface plugin sizing each part of the
+    /// interface separately: `scales` in the parts' order (floating panels, menus, the side bar, the
+    /// top bar, the panels).
+    fn parts_sized(name: &str, scales: [f32; 5]) -> (Arc<procraft_core::Plugins>, PathBuf) {
+        const INTERFACE: &str = "io.github.artcraftandroid.interface";
+        let dir = std::env::temp_dir().join(format!("procraft-parts-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on(INTERFACE.to_owned(), true));
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        for (key, scale) in ["floating", "menus", "side_bar", "top_bar", "panels"].into_iter().zip(scales) {
+            assert!(plugins.set_slider(format!("{INTERFACE}.{key}"), scale).is_some(), "{key}");
+        }
+        (plugins, dir)
+    }
+
+    #[test]
+    fn the_side_bar_and_the_top_bar_bigger_or_smaller_take_presses_where_they_show() {
+        for (scales, right) in [([1.0, 1.0, 1.5, 1.5, 1.0], false), ([1.0, 1.0, 0.75, 1.25, 1.0], true)] {
+            let (plugins, dir) = parts_sized(&format!("bars-{right}"), scales);
+            let prefs = crate::prefs::Prefs { right_handed: right, plugins, ..Default::default() };
+            let Some(mut w) = Window::open_with(vec2(1200.0, 800.0), prefs) else { return };
+            let (side, bar) = (scales[2], scales[3]);
+            w.stroke();
+            assert_eq!(w.steps(), (true, false), "{scales:?}");
+            // the side bar's undo and redo, where they show
+            let (undo, redo) = w.undo_redo(side, bar);
+            w.click(undo);
+            assert_eq!(w.steps(), (false, true), "{scales:?}");
+            w.click(redo);
+            assert_eq!(w.steps(), (true, false), "{scales:?}");
+            // its layer draws it at its size, from its top left under the top bar as it shows
+            let (shown, to_window) = w.area_shown(egui::Order::Middle, egui::Id::unique("side bar")).unwrap();
+            assert_eq!(to_window.scaling, side);
+            assert!((shown.width() - pc::SIDE_BAR_WIDTH * side).abs() < 1e-3, "{shown:?}");
+            assert!(shown.top() >= pc::BAR_HEIGHT * bar, "{shown:?}");
+            // the top bar's Layers button, where it shows, opens the layers
+            w.click(w.tool_button(BarButton::Layers, bar));
+            assert_eq!(w.ui.open, Some(Popover::Layers), "{scales:?}");
+            // the canvas starts under the bar as it shows
+            assert_eq!(w.ui.canvas_rect.top(), pc::BAR_HEIGHT * bar);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_panel_bigger_or_smaller_hangs_from_its_button_where_the_top_bar_shows_it_and_its_menus_stay_their_size() {
+        for (bar, panels) in [(1.5, 1.5), (1.0, 0.5), (1.25, 1.0)] {
+            let (plugins, dir) = parts_sized(&format!("panels-{bar}-{panels}"), [1.0, 1.0, 1.0, bar, panels]);
+            let prefs = crate::prefs::Prefs { plugins, ..Default::default() };
+            let Some(mut w) = Window::open_with(vec2(1200.0, 800.0), prefs) else { return };
+            let button = w.tool_button(BarButton::Layers, bar);
+            w.click(button);
+            assert_eq!(w.ui.open, Some(Popover::Layers));
+            // (an area new to egui is guessed big and kept to the window at first, then settles)
+            for _ in 0..40 {
+                w.frame();
+            }
+            let case = format!("{bar} {panels}");
+            let id = egui::Id::unique("layers panel");
+            let (shown, to_window) = w.area_shown(egui::Order::Foreground, id).unwrap();
+            assert_eq!(to_window.scaling, panels, "{case}");
+            assert!((shown.top() - pc::BAR_HEIGHT * bar).abs() < 1e-3, "{case}: {shown:?}");
+            assert!((shown.width() - crate::layers::LAYERS_WIDTH * panels).abs() < 1e-3, "{case}: {shown:?}");
+            assert!(shown.left() < button.x && button.x < shown.right(), "{case}: {shown:?}");
+            assert!(shown.bottom() <= 800.0, "{case}: {shown:?}");
+            // its title opens its menu, at the menus' size, from where the title shows
+            let laid_out = w.ctx.memory(|m| m.area_rect(id)).unwrap();
+            let title = pos2(laid_out.left() + 24.0 + 20.0, laid_out.top() + crate::panel::ARROW_HEIGHT + 19.0 + 12.0);
+            w.click(to_window * title);
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            w.frame();
+            let menu = egui::Id::unique(("layers title menu", "menu"));
+            let (_, menu_to_window) = w.area_shown(egui::Order::Tooltip, menu).expect("the title's menu");
+            assert!((menu_to_window.scaling - 1.0).abs() < 1e-3, "{case}: {menu_to_window:?}");
+            // (the area's place is rounded to the pixel)
+            let opened = w.ctx.memory(|m| m.area_rect(menu)).unwrap();
+            let pivot = pos2(opened.center().x, opened.top());
+            assert!(((menu_to_window * pivot) - (to_window * pivot)).length() < 0.5, "{case}");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -3229,7 +3359,7 @@ mod tests {
             let Some(mut w) = Window::open(size, right) else { return };
             w.stroke();
             assert_eq!(w.steps(), (true, false), "{size:?}");
-            let (undo, redo) = w.undo_redo();
+            let (undo, redo) = w.undo_redo(1.0, 1.0);
             // a tablet's pen through the system's pointer messages (Windows Ink)
             w.pen_tap(undo);
             assert_eq!(w.steps(), (false, true), "{size:?}");

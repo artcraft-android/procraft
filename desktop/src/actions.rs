@@ -559,7 +559,7 @@ impl Actions {
         prefs: &mut Prefs,
         backdrops: &mut Vec<f32>,
     ) -> (Rect, Option<Act>) {
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let (left, arrow_x) = panel::place(ctx, ACTIONS_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let tab = *self.tab.get_or_insert(prefs.actions_tab);
@@ -631,7 +631,7 @@ impl Actions {
         let rect = Rect::from_min_size(pos2(left, top), vec2(ACTIONS_WIDTH, height));
         let mut tapped = None;
         let page = self.page;
-        egui::Area::new(Id::unique("actions panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+        panel::area(ctx, Id::unique("actions panel"), rect).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::click());
             panel::frame(ui, look, "actions frame", rect, arrow_x, backdrops);
             let body = panel::body(rect);
@@ -1309,7 +1309,7 @@ pub fn plugin_panel(
     backdrops: &mut Vec<f32>,
 ) -> Option<PanelTouch> {
     let screen = ctx.content_rect();
-    let top = screen.top() + pc::BAR_HEIGHT + PANEL_MARGIN;
+    let top = screen.top() + crate::panel::bar_shown(ctx) + PANEL_MARGIN;
     let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH;
     let inside = PANEL_WIDTH - 20.0;
     let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::unique("plugin panel measure")));
@@ -1487,7 +1487,7 @@ fn choice_menu(
     chosen: usize,
 ) -> Option<usize> {
     let height = 8.0 + 40.0 * labels.len() as f32 + 8.0;
-    let screen = ctx.content_rect();
+    let screen = panel::screen(ctx);
     let top = (row.top() - 8.0).min(screen.bottom() - 8.0 - height).max(screen.top() + 8.0);
     let rect = Rect::from_min_size(pos2(row.right() - 54.0, top), vec2(254.0, height));
     let mut picked = None;

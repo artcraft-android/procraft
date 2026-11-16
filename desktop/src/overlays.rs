@@ -196,7 +196,7 @@ impl Overlays {
     pub fn show(&mut self, ui: &Ui, look: &mut Look, current: Color32, bar_shown: bool) -> Option<QuickShapeKind> {
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
-        let under_bar = window.top() + if bar_shown { pc::BAR_HEIGHT } else { 0.0 };
+        let under_bar = window.top() + if bar_shown { crate::panel::bar_shown(&ctx) } else { 0.0 };
         let mut chosen = None;
         self.spent = None;
         self.frost = None;
