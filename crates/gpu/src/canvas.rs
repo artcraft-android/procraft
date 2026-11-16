@@ -4901,6 +4901,15 @@ impl Canvas {
         Some(Transforming { layer: id, before, bind, masked, before_bind })
     }
 
+    /// The liquify field's bind group with the edit's copy: its bits where the field is kept in
+    /// integers, else as the copy's second texture.
+    fn liquify_bind(&self, device: &wgpu::Device, field: &wgpu::TextureView) -> wgpu::BindGroup {
+        match self.liquify_field_bind(device, field) {
+            Some(bind) if self.liquifies_in_integers() => bind,
+            _ => self.copy_bind_with(device, field),
+        }
+    }
+
     /// The edit's copy and `second` bound as an adjustment's last-pass group.
     fn copy_bind_with(&self, device: &wgpu::Device, second: &wgpu::TextureView) -> wgpu::BindGroup {
         let fallback;
@@ -5877,10 +5886,7 @@ impl Canvas {
                     drop(render_pass(&mut encoder, "liquify clear", &marked_view, clear));
                     // a new field: the one set aside goes
                     self.kept_liquify = None;
-                    let bind = match self.liquify_field_bind(device, &view) {
-                        Some(bind) if self.liquifies_in_integers() => bind,
-                        _ => self.copy_bind_with(device, &view),
-                    };
+                    let bind = self.liquify_bind(device, &view);
                     self.liquify = Some(LiquifyField {
                         bind,
                         view,
@@ -5939,7 +5945,7 @@ impl Canvas {
                         && let Some(mut field) = self.kept_liquify.take()
                     {
                         // read with the copy of the edit just begun
-                        field.bind = self.copy_bind_with(device, &field.view);
+                        field.bind = self.liquify_bind(device, &field.view);
                         self.liquify = Some(field);
                     }
                 }
