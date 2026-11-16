@@ -60,6 +60,11 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Color Fill is on: what is selected is filled as the tool closes.
+    pub fn color_fill(&self) -> bool {
+        self.color_fill
+    }
+
     /// The icon of how it selects now, for the pointer over the canvas.
     pub fn kind_icon(&self) -> &'static icons::Icon {
         match self.kind {
@@ -102,12 +107,14 @@ impl Selection {
         self.look(session);
     }
 
-    /// The tool closes; a freehand path drawn is closed into a selection.
+    /// The tool closes; a freehand path drawn is closed into a selection. With Color Fill, what is
+    /// selected is filled and the selection ends with it (one undo step, which brings it back).
     pub fn close(&mut self, session: &CanvasSession) {
         if !self.on {
             return;
         }
-        session.close_freehand();
+        session.close_selection_tool(self.color_fill);
+        self.has = session.has_selection();
         session.set_touch_selecting(None);
         self.on = false;
         self.set_popup(session, Popup::None);
@@ -123,10 +130,17 @@ impl Selection {
         session.set_touch_selecting(Some(SelectTouch { kind: self.kind, join, threshold: self.threshold }));
     }
 
-    /// The selection shows tinted while selecting by colour, else striped.
+    /// The selection shows covered by the colour with Color Fill on, else tinted while selecting
+    /// by colour, else striped.
     fn look(&self, session: &CanvasSession) {
-        let tint = self.on && self.kind == SelectKind::Automatic;
-        session.set_selection_display(if tint { SelectionDisplay::Tint } else { SelectionDisplay::Stripes });
+        let display = if self.on && self.color_fill {
+            SelectionDisplay::ColourFill
+        } else if self.on && self.kind == SelectKind::Automatic {
+            SelectionDisplay::Tint
+        } else {
+            SelectionDisplay::Stripes
+        };
+        session.set_selection_display(display);
     }
 
     /// Nothing selected any more (a freehand path being drawn closed first), as Deselect does.
@@ -162,13 +176,10 @@ impl Selection {
         }
     }
 
-    /// A selection was made: Color Fill fills it.
+    /// A selection was made.
     pub fn changed(&mut self, session: &CanvasSession) {
         self.drag = None;
         self.has = session.has_selection();
-        if self.color_fill && self.has {
-            session.fill_selection();
-        }
         self.look(session);
     }
 
@@ -259,9 +270,7 @@ impl Selection {
             Some(Tapped::Button(5)) => self.open_popup(ctx, session, Popup::Saved),
             Some(Tapped::Button(6)) => {
                 self.color_fill = !self.color_fill;
-                if self.color_fill && self.has {
-                    session.fill_selection();
-                }
+                self.look(session);
             }
             Some(Tapped::Button(7)) if model => {
                 let on = !session.selection_x_ray();

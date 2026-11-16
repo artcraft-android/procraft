@@ -4421,6 +4421,29 @@ impl Canvas {
         self.set_selection(gpu, coverage);
     }
 
+    /// Sets the selection as [`Self::change_selection`] does, but as part of step `made` (as
+    /// [`Self::undo_step`] numbers it): undoing that step then puts `before` back too, and redoing
+    /// it changes the selection again. Runs what is queued first; false, changing nothing, if step
+    /// `made` isn't then the last or already changed the selection.
+    pub fn change_selection_with_step(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        coverage: Option<&[u8]>,
+        before: Option<Vec<u8>>,
+        made: u64,
+    ) -> bool {
+        self.render(gpu, doc, None);
+        match self.undo.last_mut() {
+            Some(step) if step.made == made && step.selection.is_none() => {
+                step.selection = Some(before);
+                self.set_selection(gpu, coverage);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Layer `layer`'s pixels as they are on the GPU, if it has any there.
     pub fn layer_view(&self, layer: LayerId) -> Option<&wgpu::TextureView> {
         self.layers.get(&layer).map(|l| &l.view)

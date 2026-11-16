@@ -2418,7 +2418,15 @@ impl CanvasSession {
     /// again ([`CanvasSession::layer_text`]) and draws it.
     pub fn set_color(&self, r: f32, g: f32, b: f32) {
         let c = [r, g, b].map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
-        let changed = std::mem::replace(&mut self.shared.lock().color, c) != c;
+        let changed = {
+            let mut st = self.shared.lock();
+            let changed = std::mem::replace(&mut st.color, c) != c;
+            // what Color Fill will fill shows in the colour
+            if changed && st.selection_display == selection::SelectionDisplay::ColourFill && st.selection.is_some() {
+                self.shared.frame(&mut st);
+            }
+            changed
+        };
         if changed {
             self.text_colour_chosen(c);
         }

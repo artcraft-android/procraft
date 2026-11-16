@@ -73,6 +73,8 @@ impl State {
             }
             SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
             SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
+            // the paint colour is in the canvas's colours
+            SelectionDisplay::ColourFill => SelectionLook::Fill(self.doc.profile.convert(self.color, screen)),
         }
     }
 

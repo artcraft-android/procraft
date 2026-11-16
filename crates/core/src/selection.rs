@@ -23,12 +23,14 @@ impl From<SelectionJoin> for Combine {
 }
 
 /// How the selection shows: bands over what is not selected, or what is selected tinted (while
-/// selecting by colour) or covered (while its threshold is being dragged).
+/// selecting by colour) or covered (while its threshold is being dragged), or covered by the paint
+/// colour (Color Fill, which fills it as the selection tool closes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SelectionDisplay {
     Stripes,
     Tint,
     Fill,
+    ColourFill,
 }
 
 /// Points around an ellipse drawn as a polygon.
@@ -61,6 +63,81 @@ impl State {
             canvas.name_next_step(name);
             canvas.change_selection(gpu, &mut self.doc, coverage, before.map(|m| m.data));
             self.revision += 1;
+        }
+    }
+
+    /// Fills the selection on the current layer with the paint colour, as one undo step (run at
+    /// once); false if there is nothing selected or the layer can't be filled.
+    pub(crate) fn fill_selected(&mut self) -> bool {
+        let current = self.doc.current();
+        if self.doc.layer(current).is_none_or(|l| l.plugin.is_some()) || self.doc.is_locked(current) {
+            return false;
+        }
+        let Some(mask) = self.selection.clone() else { return false };
+        // only what is selected changes
+        let Some(rect) = crate::layer_ops::mask_rect(&mask) else { return false };
+        let Some(mut pixels) = self.layer_part(current, rect) else { return false };
+        let [r, g, b] = self.color.map(|c| c.clamp(0.0, 1.0));
+        let alpha_lock = self.doc.layer(current).is_some_and(|l| l.alpha_lock);
+        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(&mask, rect)) {
+            let [pr, pg, pb, pa] = px;
+            if m == 0 {
+                continue;
+            }
+            // the colour over what is there, as much as is selected (only where there is paint,
+            // with the alpha locked)
+            let k = f32::from(m) / 255.0;
+            let a = f32::from(*pa) / 255.0;
+            let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
+            for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
+                *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
+            }
+            *pa = to_byte(out_a);
+        }
+        let Some(canvas) = self.canvas.as_mut() else { return false };
+        canvas.write_layer_part(current, rect, pixels);
+        self.flush();
+        self.revision += 1;
+        true
+    }
+
+    /// Color Fill as the selection tool closes: what is selected is filled with the paint colour
+    /// and the selection ends, as one undo step (undoing it brings the selection back). False if
+    /// nothing is selected or the current layer can't be filled (the selection then stays).
+    pub(crate) fn colour_fill_and_end(&mut self) -> bool {
+        if self.selection.is_none() {
+            return false;
+        }
+        self.finish_stroke();
+        self.settle();
+        self.flush();
+        let steps = |st: &State| st.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
+        let before = steps(self);
+        if !self.fill_selected() {
+            return false;
+        }
+        let made = self.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step).filter(|_| steps(self) > before);
+        self.drop_selection_with_step(made);
+        true
+    }
+
+    /// Lets go of the selection as part of step `made`, when that is the last step: undoing it
+    /// brings the selection back with what it undoes. Otherwise as a step of its own.
+    pub(crate) fn drop_selection_with_step(&mut self, made: Option<u64>) {
+        self.finish_stroke();
+        self.settle();
+        let Some(before) = self.selection.take() else { return };
+        self.feather_base = None;
+        let folded = match (made, self.canvas.as_mut(), self.gpu.as_ref()) {
+            (Some(made), Some(canvas), Some(gpu)) => {
+                canvas.change_selection_with_step(gpu, &mut self.doc, None, Some(before.data.clone()), made)
+            }
+            _ => false,
+        };
+        if folded {
+            self.revision += 1;
+        } else {
+            self.record_selection(Some(before), "clear selection");
         }
     }
 
@@ -346,35 +423,7 @@ impl CanvasSession {
     pub fn fill_selection(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let current = st.doc.current();
-        if st.doc.layer(current).is_none_or(|l| l.plugin.is_some()) || st.doc.is_locked(current) {
-            return;
-        }
-        let Some(mask) = st.selection.clone() else { return };
-        // only what is selected changes
-        let Some(rect) = crate::layer_ops::mask_rect(&mask) else { return };
-        let Some(mut pixels) = st.layer_part(current, rect) else { return };
-        let [r, g, b] = st.color.map(|c| c.clamp(0.0, 1.0));
-        let alpha_lock = st.doc.layer(current).is_some_and(|l| l.alpha_lock);
-        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(&mask, rect)) {
-            let [pr, pg, pb, pa] = px;
-            if m == 0 {
-                continue;
-            }
-            // the colour over what is there, as much as is selected (only where there is paint,
-            // with the alpha locked)
-            let k = f32::from(m) / 255.0;
-            let a = f32::from(*pa) / 255.0;
-            let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
-            for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
-                *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
-            }
-            *pa = to_byte(out_a);
-        }
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.write_layer_part(current, rect, pixels);
-            st.flush();
-            st.revision += 1;
+        if st.fill_selected() {
             self.shared.frame(st);
         }
     }

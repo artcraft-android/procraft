@@ -2525,6 +2525,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         endFilling()
         endLayerOpacity()
         endTransform(true)
+        // Color Fill fills as the selection tool closes
+        closeSelecting()
         endAdjustment(true)
         val s = session ?: return
         noteTime()
@@ -6351,8 +6353,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val open = openModes()
         val change = modeSwitch(button, open)
         val end = change.end
-        // the selection button closing the selection tool lets go of the selection too
-        if (modeSwitchDeselects(button, open)) clearSelection()
+        // the selection button closing the selection tool lets go of the selection too (with Color Fill, the fill as it closes does)
+        if (modeSwitchDeselects(button, open, colorFill)) clearSelection()
         if (end.quickshape) endQuickShape()
         if (end.filling) endDropBand()
         if (end.recolor) endRecolor()
@@ -6884,7 +6886,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun closeSelecting() {
         if (!selecting) return
-        closeFreehand()
+        // a freehand path still open closes into the selection; with Color Fill, what is selected
+        // is filled and the selection ends with it (one undo step, which brings it back)
+        val s = session
+        freehand = emptyList()
+        if (s != null && s.closeSelectionTool(colorFill)) {
+            refresh()
+            if (panel == Panel.LAYERS) refreshThumbnails()
+        }
         selecting = false
         selectionPopup = SelectionPopup.NONE
         showSelectionLook()
@@ -6930,7 +6939,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The touches made a selection (or a shape dragged out ended): Color Fill fills it. */
+    /** The touches made a selection (or a shape dragged out ended). */
     fun selectionTouched() {
         shapeDrag = null
         selectionChanged()
@@ -6976,7 +6985,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         thresholdDrag = if (live) p to threshold else null
         s.setSelectionDisplay(if (live) SelectionDisplay.FILL else SelectionDisplay.TINT)
         s.selectByColour(p.x, p.y, threshold, join, live)
-        selectionChanged(fill = !live)
+        selectionChanged()
     }
 
     // ColorDrop: the colour dragged from the colour button (or a swatch) and dropped on the canvas
@@ -7320,14 +7329,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun invertSelection() {
         session?.selectInvert()
-        selectionChanged(fill = false)
+        selectionChanged()
     }
 
     fun copySelectionToLayer() {
         val s = session ?: return
         s.copySelectionToLayer() ?: return
         s.selectNone()
-        selectionChanged(fill = false)
+        selectionChanged()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
     }
@@ -7365,7 +7374,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadSelection(i: Int) {
         session?.loadSelection(i.toUInt())
-        selectionChanged(fill = false)
+        selectionChanged()
     }
 
     fun deleteSavedSelection(i: Int) {
@@ -7375,34 +7384,35 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         loadSavedThumbnails()
     }
 
+    /** Color Fill on or off: what is selected shows covered by the colour, filled as the tool closes. */
     fun toggleColorFill() {
         colorFill = !colorFill
-        if (colorFill && hasSelection) {
-            session?.fillSelection()
-            refresh()
-        }
+        showSelectionLook()
     }
 
     fun clearSelection() {
         closeFreehand()
         session?.selectNone()
-        selectionChanged(fill = false)
+        selectionChanged()
     }
 
-    private fun selectionChanged(fill: Boolean = true) {
+    private fun selectionChanged() {
         val s = session ?: return
         hasSelection = s.hasSelection()
-        if (fill && colorFill && hasSelection) {
-            s.fillSelection()
-            refresh()
-        }
         showSelectionLook()
     }
 
-    /** Bands over what is not selected, except while selecting by colour, which tints what is. */
+    /**
+     * Bands over what is not selected, except while selecting by colour, which tints what is, and
+     * with Color Fill on in the selection tool, which covers it with the colour.
+     */
     private fun showSelectionLook() {
-        val tint = selecting && selectionKind == SelectionKind.AUTOMATIC
-        session?.setSelectionDisplay(if (tint) SelectionDisplay.TINT else SelectionDisplay.STRIPES)
+        val look = when {
+            selecting && colorFill -> SelectionDisplay.COLOUR_FILL
+            selecting && selectionKind == SelectionKind.AUTOMATIC -> SelectionDisplay.TINT
+            else -> SelectionDisplay.STRIPES
+        }
+        session?.setSelectionDisplay(look)
         refreshTakenBox()
     }
 

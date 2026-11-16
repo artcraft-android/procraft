@@ -2527,11 +2527,93 @@ fn a_transform_with_a_selection_moves_only_what_it_takes() {
     assert_eq!(pixel(&s, 30, 80), [0, 0, 0, 255]);
     assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 70, 50), [0, 0, 0, 255]);
-    // and the selection went with it
-    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 20.0, 0.0)]);
+    // and the selection ended with it, in the same step: undone, both come back
+    assert!(!s.has_selection());
+    s.undo();
+    assert!(s.has_selection());
+    assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 30, 80), [255, 255, 255, 255]);
+    s.redo();
+    assert!(!s.has_selection());
+    assert_eq!(pixel(&s, 30, 80), [0, 0, 0, 255]);
+    // painting goes anywhere again
+    assert_eq!(pixel(&s, 80, 20), [255, 255, 255, 255]);
+    s.stroke_begin(PointerKind::Finger, vec![sample(80.0, 20.0, 0.0)]);
     s.stroke_end(vec![]);
-    assert_eq!(pixel(&s, 30, 20), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 20), [0, 0, 0, 255]);
     let _ = TransformAction::Reset;
+}
+
+#[test]
+fn color_fill_shows_what_is_selected_covered_by_the_paint_colour() {
+    use crate::selection::{SelectionDisplay, SelectionJoin};
+    use procraft_gpu::wgpu;
+    let Some(s) = session(100, 100) else { return };
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    s.set_color(0.0, 1.0, 0.0);
+    let px = {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test frame"),
+            size: wgpu::Extent3d { width: 100, height: 100, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        st.draw_frame(&view, format, (100, 100), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+        let gpu = st.gpu.as_ref().unwrap();
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        procraft_gpu::read_texture(gpu, &target, 100, 100).unwrap()
+    };
+    let at = |x: usize, y: usize| px[(y * 100 + x) * 4..][..4].to_vec();
+    // what is selected in the colour, the rest as it is (no bands)
+    assert_eq!(at(25, 25), [0, 255, 0, 255]);
+    assert_eq!(at(70, 70), at(90, 60));
+    assert_eq!(at(70, 70), [255, 255, 255, 255]);
+}
+
+#[test]
+fn color_fill_fills_as_the_selection_tool_closes_and_ends_the_selection_in_the_same_step() {
+    use crate::selection::{SelectionDisplay, SelectionJoin};
+    let Some(s) = session(100, 100) else { return };
+    let white = [255, 255, 255, 255];
+    s.set_color(1.0, 0.0, 0.0);
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    s.select_shape(false, 30.0, 30.0, 60.0, 60.0, SelectionJoin::Add);
+    // shown covered by the colour while the tool is open, nothing filled yet
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    assert_eq!(pixel(&s, 20, 20), white);
+    // the colour chosen last is the one it fills with
+    s.set_color(0.0, 0.0, 1.0);
+    // the tool closes: what is selected filled, and the selection gone
+    assert!(s.close_selection_tool(true));
+    assert_eq!(pixel(&s, 20, 20), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 80, 20), white);
+    assert!(!s.has_selection());
+    // one step: undone, the fill goes and the selection comes back; redone, both again
+    s.undo();
+    assert_eq!(pixel(&s, 20, 20), white);
+    assert!(s.has_selection());
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    assert!(!s.has_selection());
+    s.undo();
+    // without Color Fill, closing the tool keeps the selection, unfilled
+    assert!(!s.close_selection_tool(false));
+    assert!(s.has_selection());
+    assert_eq!(pixel(&s, 20, 20), white);
+    // nothing selected: nothing to fill
+    s.select_none();
+    assert!(!s.close_selection_tool(true));
+    assert_eq!(pixel(&s, 20, 20), white);
 }
 
 #[test]

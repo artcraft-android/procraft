@@ -628,23 +628,19 @@ impl CanvasSession {
     }
 
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.
+    /// Kept, it ends the selection too, in the same step (undoing it brings the selection back).
     pub fn transform_end(&self, commit: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let Some(t) = st.transform.as_ref() {
-            // a selection moves with what it took
-            let moved = match (commit, st.selection.as_ref()) {
-                (true, Some(mask)) => match t.warp() {
-                    Some(mesh) => Some(mask.warped(&warp::triangles(&mesh, t.source(), MESH_STEPS))),
-                    None => Homography::quad_to_quad(t.content(), t.source()).map(|h| mask.moved(|p| h.apply(p))),
-                },
-                _ => None,
-            };
+        if st.transform.is_some() {
+            st.flush();
+            let steps = |st: &State| st.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
+            let before = steps(st);
             st.end_transform(commit);
             st.flush();
-            if let Some(moved) = moved {
-                let before = st.selection.replace(moved);
-                st.record_selection(before, "move");
+            if commit && st.selection.is_some() {
+                let made = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step).filter(|_| steps(st) > before);
+                st.drop_selection_with_step(made);
             }
             st.revision += 1;
             st.scene_back_from_tool();
