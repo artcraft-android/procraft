@@ -551,7 +551,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     // the interface's accent as the plugins give it
     init { followPluginLooks() }
 
-    /** What the plugins change in how the interface looks: its accent, Classic's triangle; and whether strokes are heard. */
+    /** What the plugins change in how the interface looks: its accent, Classic's picker, the floating colours; and whether strokes are heard. */
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
@@ -560,10 +560,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 pick = { x, y -> plugins.pickerPick(x, y) },
                 point = { s, v -> plugins.pickerPoint(s, v) },
                 picture = { hue, n -> session?.pickerPicture(hue, n.toUInt()) },
+                hue = { x, y -> plugins.pickerHue(x, y) },
+                huePoint = { h -> plugins.pickerHuePoint(h) },
             )
         } else {
             null
         }
+        io.github.artcraftandroid.procraft.ui.Pc.partScales = io.github.artcraftandroid.procraft.core.InterfacePart.entries.map { plugins.interfacePartScale(it) }
+        io.github.artcraftandroid.procraft.ui.Pc.floatingPickerOnly = plugins.floatingPickerOnly()
         tweensOn = plugins.tweens()
         followStrokeSound()
     }
@@ -772,6 +776,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun pluginsChanged() {
         readPlugins()
         session?.let(::applyPlugins)
+        // the bars as they show now
+        applyFitInsets()
     }
 
     /** [s] goes by the plugins that reach a canvas. */
@@ -1498,8 +1504,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             s.setFitInsets(0f, 0f, 0f, 0f)
             return
         }
-        val side = if (showSideBar) (io.github.artcraftandroid.procraft.ui.Pc.SideBarWidth.value + io.github.artcraftandroid.procraft.ui.Pc.PopoverGap.value) * density else 0f
-        s.setFitInsets(if (rightHanded) 0f else side, io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density, if (rightHanded) side else 0f, 0f)
+        val side = if (showSideBar) (io.github.artcraftandroid.procraft.ui.Pc.sideBarShown.value + io.github.artcraftandroid.procraft.ui.Pc.PopoverGap.value) * density else 0f
+        s.setFitInsets(if (rightHanded) 0f else side, io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density, if (rightHanded) side else 0f, 0f)
     }
 
     /** A new artwork just started: without time-lapse if it is turned off. */
@@ -7022,7 +7028,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Whether window point [p] is over the top bar or the side bar while they show. */
     fun overBars(p: Offset): Boolean =
-        io.github.artcraftandroid.procraft.ui.overBars(p, io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density, sideBarBounds, barsHidden)
+        io.github.artcraftandroid.procraft.ui.overBars(p, io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density, sideBarBounds, barsHidden)
 
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
@@ -7072,7 +7078,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The drawn colour goes after window point [p]. */
     private fun blobTo(p: Offset) {
         val button = dropButton ?: p
-        val overBar = p.y <= io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density || sideBarBounds?.contains(p) == true
+        val overBar = p.y <= io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density || sideBarBounds?.contains(p) == true
         dropBlob?.pointTo(p.x / density, p.y / density, overBar, button.x / density, button.y / density)
     }
 
@@ -7112,7 +7118,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val dot = Offset(step.dotX * density, step.dotY * density)
         val rests = drag.rest(
             ms.toDouble(),
-            dot.y > io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density &&
+            dot.y > io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density &&
                 dropAvoid?.contains(dot) != true &&
                 session?.pourLands(dot.x, dot.y) == true,
         )
