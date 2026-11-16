@@ -1160,6 +1160,16 @@ impl State {
         }
     }
 
+    /// The canvas's zoom (screen pixels a canvas pixel) if a stroke's input comes in whole
+    /// screen pixels, as the first of its `samples` says (a mouse, or a tablet's pen read no finer
+    /// than the pointer it moves): its points are then evened out over the steps of a pixel a slow
+    /// line goes in (see [`StrokeBuilder::read_in_whole_pixels`]).
+    pub(crate) fn whole_pixels(&self, samples: &[PenSample]) -> Option<f32> {
+        let first = samples.first()?;
+        let whole = first.x.fract() == 0.0 && first.y.fract() == 0.0;
+        self.view.map(|v| v.zoom()).filter(|_| whole)
+    }
+
     /// Samples in canvas pixels.
     fn to_canvas(&self, samples: &[PenSample]) -> Vec<Sample> {
         let Some(inv) = self.view.and_then(|v| v.to_screen().inverse()) else { return Vec::new() };
@@ -1922,6 +1932,7 @@ impl CanvasSession {
         st.note_recent(st.brush_ref(tool));
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
+        let whole_pixels = st.whole_pixels(&samples);
         let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
             let preview_tilt = brush.setting("preview_tilt") >= 0.5;
             let mut builder = StrokeBuilder::with_seed(brush, diameter, pointer.into(), seed)
@@ -1929,6 +1940,9 @@ impl CanvasSession {
                 .with_input(st.input.clone())
                 .on_view_turned(st.view.map_or(0.0, |v| v.rotation()))
                 .seen_at(st.view.map_or(1.0, |v| v.zoom()) / st.display_scale);
+            if let Some(zoom) = whole_pixels {
+                builder = builder.read_in_whole_pixels(zoom);
+            }
             if st.pad_strokes.is_some() {
                 // on the studio's pad the lean moves no stamps, and the tilt switches act only
                 // when the brush previews tilt
@@ -1969,7 +1983,7 @@ impl CanvasSession {
         // on a plugin's layer it is recorded as it goes (not on the brush studio's pad)
         st.recording = None;
         if st.pad_strokes.is_none() {
-            st.begin_recording(current, tool, pointer, seed, &canvas_samples);
+            st.begin_recording(current, tool, pointer, seed, whole_pixels, &canvas_samples);
         }
         st.drawn.clear();
         st.drawn_moving = 0.0;

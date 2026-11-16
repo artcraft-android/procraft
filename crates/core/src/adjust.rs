@@ -192,6 +192,9 @@ impl State {
             .with_input(self.input.clone())
             .on_view_turned(self.view.map_or(0.0, |v| v.rotation()))
             .seen_at(self.view.map_or(1.0, |v| v.zoom()) / self.display_scale);
+        if let Some(zoom) = self.whole_pixels(samples) {
+            builder = builder.read_in_whole_pixels(zoom);
+        }
         let canvas_samples = self.to_canvas(samples);
         if let (Some(source), None, Some(first)) = (self.clone_source, self.clone_offset, canvas_samples.first()) {
             let offset = source - first.pos;
