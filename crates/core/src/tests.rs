@@ -1641,9 +1641,17 @@ fn dump_brush_strokes() {
             }
             s.studio_end(true);
         }
-        // in white, or black with `DUMP_COLOUR=black` (as another app's scripting paints)
-        let shade = if std::env::var("DUMP_COLOUR").is_ok_and(|c| c == "black") { 0.0 } else { 1.0 };
-        s.set_color(shade, shade, shade);
+        // in white, black with `DUMP_COLOUR=black` (as another app's scripting paints), or the colour
+        // `DUMP_COLOUR` says (`r,g,b`, 0..1)
+        let colour: Vec<f32> = match std::env::var("DUMP_COLOUR") {
+            Ok(c) if c == "black" => vec![0.0; 3],
+            Ok(c) => c.split(',').filter_map(|v| v.parse().ok()).collect(),
+            Err(_) => Vec::new(),
+        };
+        match colour[..] {
+            [r, g, b] => s.set_color(r, g, b),
+            _ => s.set_color(1.0, 1.0, 1.0),
+        }
         // the slider at the size the brush's preview draws, the pen turned and pressed as there
         let (start, lean, least, gain) = {
             let brush = s.shared.lock().brush(ToolKind::Paint).clone();
@@ -1666,7 +1674,26 @@ fn dump_brush_strokes() {
         // each sample a corner: across from (100, 256) to (924, 256) pressing from nothing to
         // fully, then a zigzag pressing fully (on a canvas 1024 across, scaled to this one)
         let paths = std::env::var_os("DUMP_PATHS").is_some();
-        if paths {
+        // with DUMP_LINES too (`x0,y0,x1,y1;...`, on a canvas 1024 across), those lines instead, each
+        // a stroke of its own pressing fully
+        let lines = std::env::var("DUMP_LINES").ok().filter(|_| paths);
+        if let Some(lines) = &lines {
+            let starting = crate::starting_sliders_of(&s.shared.lock().brush(ToolKind::Paint).clone(), ToolKind::Paint);
+            s.set_brush_size(starting.size);
+            let across = side as f32 / 1024.0;
+            let at = |x: f32, y: f32, i: usize| PenSample {
+                pressure: 1.0,
+                ..sample(x * across, y * across, i as f64 * 0.01)
+            };
+            for line in lines.split(';') {
+                let [x0, y0, x1, y1] = line.split(',').filter_map(|v| v.parse().ok()).collect::<Vec<f32>>()[..] else {
+                    continue;
+                };
+                s.stroke_begin(PointerKind::Stylus, vec![at(x0, y0, 0)]);
+                s.stroke_end(vec![at(x1, y1, 1)]);
+            }
+        }
+        if paths && lines.is_none() {
             // the slider where the brush starts, its own size
             let starting = crate::starting_sliders_of(&s.shared.lock().brush(ToolKind::Paint).clone(), ToolKind::Paint);
             s.set_brush_size(starting.size);
