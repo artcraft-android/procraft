@@ -889,7 +889,7 @@ mod tests {
     }
 
     /// The tests of what moves the mouse pointer, one at a time: it is the app's, not a test's.
-    fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
         static ONE: Mutex<()> = Mutex::new(());
         ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
