@@ -754,6 +754,7 @@ impl Interface {
             && !self.text.editing()
             && (adjusting.adjustment.is_none() || adjusting.pencil);
         crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
+        crate::panel::set_part_scales(&ctx, &self.prefs.plugins);
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
@@ -830,6 +831,7 @@ impl Interface {
             let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
             self.colours.set_picker(picker);
         }
+        self.colours.set_floating_look(&self.prefs.plugins);
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
         // the colour model chosen on the panel, kept; the panel works in the one kept
         if let Some(model) = self.colours.model_chosen.take() {
