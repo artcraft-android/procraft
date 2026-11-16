@@ -1,6 +1,7 @@
 //! Selections: shapes drawn on the window become a selection on the canvas, which painting keeps
 //! inside, and which can be inverted, feathered, saved, filled or copied to a layer of its own.
 
+use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
 
@@ -36,6 +37,16 @@ pub enum SelectionDisplay {
 /// Points around an ellipse drawn as a polygon.
 const ELLIPSE_POINTS: usize = 128;
 
+/// While a colour selection's threshold is dragged: the layer it goes by (the current one, or
+/// the reference layer when another is it), read once as the drag began at the artwork's
+/// `revision` then, and measured from where it began.
+pub(crate) struct ColourSource {
+    layer: LayerId,
+    revision: u64,
+    pixels: Vec<u8>,
+    flood: ColourFlood,
+}
+
 impl State {
     /// Shows the selection on the canvas (or none when nothing is selected).
     fn show_selection(&mut self) {
@@ -50,6 +61,7 @@ impl State {
 
     /// The selection as it is now becomes one undo step, called `name`, that puts `before` back.
     pub(crate) fn record_selection(&mut self, before: Option<Mask>, name: &str) {
+        self.let_go_of_colour_drag();
         self.finish_stroke();
         self.settle();
         if self.selection.as_ref().is_some_and(Mask::is_empty) {
@@ -163,8 +175,27 @@ impl State {
         }
     }
 
+    /// A colour selection's threshold drag left unfinished (its touch lost) is over: the selection
+    /// as it is now is the one there is.
+    fn let_go_of_colour_drag(&mut self) {
+        self.colour_source = None;
+        self.selection_before = None;
+    }
+
+    /// A colour selection's threshold drag that will not end (its touch taken back) is taken back:
+    /// the selection is again as it was before it. False if none was under way.
+    pub(crate) fn take_back_colour_drag(&mut self) -> bool {
+        self.colour_source = None;
+        let Some(before) = self.selection_before.take() else { return false };
+        self.selection = before;
+        self.feather_base = None;
+        self.show_selection();
+        true
+    }
+
     /// Takes the selection back from the canvas (after an undo or redo).
     pub(crate) fn sync_selection(&mut self) {
+        self.let_go_of_colour_drag();
         let (w, h) = (self.doc.width(), self.doc.height());
         self.selection =
             self.canvas.as_ref().and_then(|c| c.selection()).map(|c| Mask { width: w, height: h, data: c.to_vec() });
@@ -234,14 +265,21 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(seed) = st.window_texel(x, y) else { return };
         let (w, h) = (st.doc.width(), st.doc.height());
-        // the layer is read and measured from the seed once for the whole drag
+        let current = st.doc.current();
+        let layer = st.doc.reference().filter(|&r| r != current).unwrap_or(current);
+        // the layer is read and measured from the seed once for the whole drag: kept while it is
+        // still the layer to go by and nothing has changed since
         let (pixels, flood) = match st.colour_source.take() {
-            Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
-            Some((px, _)) => (px, None),
-            None => {
-                let current = st.doc.current();
-                let source = st.doc.reference().filter(|&r| r != current).unwrap_or(current);
-                let Some(px) = st.layer_pixels(source) else { return };
+            Some(kept) if kept.layer == layer && kept.revision == st.revision => {
+                let flood = (kept.flood.seed() == seed).then_some(kept.flood);
+                (kept.pixels, flood)
+            }
+            _ => {
+                // what a drag left unfinished showed goes, as it was never kept
+                if let Some(before) = st.selection_before.take() {
+                    st.selection = before;
+                }
+                let Some(px) = st.layer_pixels(layer) else { return };
                 st.selection_before = Some(st.selection.clone());
                 (px, None)
             }
@@ -260,7 +298,8 @@ impl CanvasSession {
         st.selection = before.clone();
         if live {
             st.join(shape, join, false);
-            st.colour_source = Some((pixels, flood));
+            let revision = st.revision;
+            st.colour_source = Some(ColourSource { layer, revision, pixels, flood });
         } else {
             // the drag ends: one step from before it
             st.join(shape, join, false);
@@ -477,6 +516,19 @@ impl CanvasSession {
         };
         st.join(shape, join, true);
         self.shared.frame(st);
+    }
+
+    /// A colour selection being slid is taken back with its touch, the selection again as it was
+    /// and shown tinted; false if none was under way.
+    pub(crate) fn take_back_colour_drag(&self) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if !st.take_back_colour_drag() {
+            return false;
+        }
+        st.selection_display = SelectionDisplay::Tint;
+        self.shared.frame(st);
+        true
     }
 }
 

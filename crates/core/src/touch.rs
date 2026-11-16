@@ -2213,12 +2213,21 @@ impl CanvasSession {
                 }
             }
             Mode::Select => {
+                let (how, start) = (t.selecting, t.down_at);
                 drop(t);
                 if !cancelled {
                     let at = last_of(&samples).map(|s| ((s.x, s.y), s.time_ms));
                     if let Some((at, ms)) = at {
                         self.select_step(at, ms, true, &mut out);
                     }
+                } else if let Some(how) = how.filter(|how| how.kind == SelectKind::Automatic)
+                    && self.take_back_colour_drag()
+                {
+                    // a colour selection being slid goes with its touch, its threshold left as it
+                    // began; the app's showing of it ends
+                    let (x, y) = start;
+                    out.push(TouchCommand::SelectionThreshold { x, y, threshold: how.threshold, done: true });
+                    out.push(TouchCommand::SelectionChanged);
                 }
             }
             Mode::Transform => {

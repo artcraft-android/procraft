@@ -2933,6 +2933,57 @@ fn a_hidden_reference_layer_is_still_read_and_one_switched_off_is_not() {
 }
 
 #[test]
+fn a_colour_selection_drag_taken_back_leaves_nothing_for_the_next() {
+    use crate::SelectionJoin;
+    use crate::{SelectKind, SelectTouch, TouchCommand};
+    let Some(s) = session(100, 100) else { return };
+    let bottom = ring_under_an_empty_layer(&s);
+    // a threshold drag inside the ring, shown as it goes, that the platform then takes back (a
+    // palm, say)
+    s.set_touch_selecting(Some(SelectTouch { kind: SelectKind::Automatic, join: SelectionJoin::Add, threshold: 0.2 }));
+    s.touch_down(1, PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    let out = s.touch_move(1, vec![sample(85.0, 50.0, 200.0)]);
+    assert!(out.iter().any(|c| matches!(c, TouchCommand::SelectionThreshold { done: false, .. })), "{out:?}");
+    s.show_colour_selection(50.0, 50.0, 0.2);
+    assert!(selected(&s, 50, 50) && !selected(&s, 5, 5));
+    let out = s.touch_cancel();
+    // it is taken back, and the platform told the drag is over
+    assert!(!s.has_selection());
+    assert!(
+        out.iter()
+            .any(|c| matches!(c, TouchCommand::SelectionThreshold { done: true, threshold, .. } if *threshold == 0.2)),
+        "{out:?}"
+    );
+    assert!(out.contains(&TouchCommand::SelectionChanged), "{out:?}");
+    // a frame's showing left after it does nothing
+    s.show_colour_selection(50.0, 50.0, 0.2);
+    assert!(!s.has_selection());
+    // the reference switched off, the next selection reads the current layer afresh: all of it
+    assert!(s.set_layer_reference(bottom, false));
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, false);
+    assert!(selected(&s, 50, 50) && selected(&s, 5, 5), "the layer read for the drag taken back is not read again");
+    s.set_touch_selecting(None);
+}
+
+#[test]
+fn a_colour_selection_left_live_reads_afresh_once_its_layer_changes() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let bottom = ring_under_an_empty_layer(&s);
+    // a host's live showing with no last call after it (a touch it lost): the reference layer read
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, true);
+    assert!(selected(&s, 50, 50) && !selected(&s, 5, 5));
+    // switched off, the next selection goes by the current layer, from the selection before the
+    // drag left over
+    assert!(s.set_layer_reference(bottom, false));
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, false);
+    assert!(selected(&s, 50, 50) && selected(&s, 5, 5), "the reference layer read for the live showing is let go");
+    // one step, from no selection
+    s.undo();
+    assert!(!s.has_selection());
+}
+
+#[test]
 fn a_transform_with_a_selection_moves_only_what_it_takes() {
     use crate::selection::SelectionJoin;
     use crate::transform::{TransformAction, TransformHandle};
