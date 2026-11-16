@@ -1550,7 +1550,8 @@ fn dump_brush_comparisons() {
 /// alone; `DUMP_PLUGIN=x.procraft-plugin` with that plugin on, as its brush engine reads and draws
 /// the file; `DUMP_UNDER=1` over bands of colour, for a brush that moves paint to move,
 /// `DUMP_UNDER=below` with the bands on a layer under the stroke's; `DUMP_PATHS=1` a line pressing
-/// harder and a zigzag instead, at the brush's own size, to set beside another app's.)
+/// harder and a zigzag instead, at the brush's own size, to set beside another app's; `DUMP_STEP=8`
+/// with samples 8 pixels apart along them; `DUMP_COLOUR=black` in black.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
@@ -1640,7 +1641,9 @@ fn dump_brush_strokes() {
             }
             s.studio_end(true);
         }
-        s.set_color(1.0, 1.0, 1.0);
+        // in white, or black with `DUMP_COLOUR=black` (as another app's scripting paints)
+        let shade = if std::env::var("DUMP_COLOUR").is_ok_and(|c| c == "black") { 0.0 } else { 1.0 };
+        s.set_color(shade, shade, shade);
         // the slider at the size the brush's preview draws, the pen turned and pressed as there
         let (start, lean, least, gain) = {
             let brush = s.shared.lock().brush(ToolKind::Paint).clone();
