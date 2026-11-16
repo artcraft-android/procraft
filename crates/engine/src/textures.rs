@@ -74,6 +74,9 @@ pub mod shape {
     pub const STOCK_GRAINY_SQUARE: u32 = 56;
     pub const STOCK_LINE: u32 = 57;
     pub const DAISY: u32 = 58;
+    pub const FLICKS: u32 = 59;
+    pub const SPINDLE: u32 = 60;
+    pub const STUBBLE: u32 = 61;
 }
 
 /// Grains, by index.
@@ -1333,7 +1336,128 @@ fn make_shapes() -> Vec<GrayImage> {
         }),
     });
     shapes.push(GrayImage { name: "Daisy", pixels: daisy() });
+    shapes.push(GrayImage { name: "Flicks", pixels: flicks() });
+    shapes.push(GrayImage { name: "Spindle", pixels: spindle() });
+    shapes.push(GrayImage { name: "Stubble", pixels: stubble() });
     shapes
+}
+
+/// Whether our shape `index` is drawn to a stock picture's own proportions (its marks as wide,
+/// as many and as fine as the picture's), so that standing in for it, it takes the picture's tones
+/// but none of the marks or streaks put on a shape standing in for a picture we know less of.
+pub fn drawn_to_stock(index: u32) -> bool {
+    matches!(index, shape::FLICKS | shape::SPINDLE | shape::STUBBLE)
+}
+
+/// Splashes of water flicked on: six big ones (a sixteenth of the tile across down to a 26th), a
+/// few drops a fifth their size near them and over the rest, many specks, all crisp, their rims
+/// crowned with short spikes and fine streaks flung out of the biggest; about a twentieth of the
+/// tile, inside its middle nine tenths across and three quarters down.
+fn flicks() -> Vec<u8> {
+    let random = |k: u32, salt: u32| hash(k as i32, salt as i32, 7717);
+    // somewhere in the part of the tile the splashes keep to
+    let anywhere = |k: u32| (0.07 + 0.88 * random(k, 1), 0.16 + 0.71 * random(k, 2));
+    // (middle, radius) of each: the big ones spread out, the drops round them and anywhere
+    let big = [0.063f32, 0.061, 0.052, 0.039, 0.039, 0.039];
+    let mut blots: Vec<((f32, f32), f32)> = big.iter().enumerate().map(|(k, &r)| (anywhere(k as u32), r)).collect();
+    let drops = [0.021f32, 0.021, 0.0125, 0.0125, 0.0104, 0.0098];
+    let specks = (0..16).map(|k| 0.003 + 0.0065 * random(k, 3));
+    let dots = (0..73).map(|k| 0.0015 + 0.0015 * random(k, 4));
+    for (k, r) in drops.into_iter().chain(specks).chain(dots).enumerate() {
+        let k = k as u32 + 100;
+        let at = if random(k, 5) < 0.5 {
+            // thrown off one of the big ones, two to four of its radii out
+            let ((x, y), from) =
+                blots.get((random(k, 6) * big.len() as f32) as usize % big.len()).copied().unwrap_or_default();
+            let (way, out) = (random(k, 7) * TAU, from * (2.0 + 2.0 * random(k, 8)));
+            (x + way.cos() * out, y + way.sin() * out)
+        } else {
+            anywhere(k)
+        };
+        blots.push((at, r));
+    }
+    // fine streaks flung out of the big ones: (from, to)
+    let streaks: Vec<((f32, f32), (f32, f32))> = (0..14u32)
+        .filter_map(|k| {
+            let &((x, y), r) = blots.get(k as usize % big.len())?;
+            let way = random(k, 9) * TAU;
+            let (from, to) = (r * (1.6 + random(k, 10)), r * (2.2 + 1.6 * random(k, 11)));
+            Some(((x + way.cos() * from, y + way.sin() * from), (x + way.cos() * to, y + way.sin() * to)))
+        })
+        .collect();
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for (k, &((bx, by), r)) in blots.iter().enumerate() {
+            let (dx, dy) = (x - bx, y - by);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > r * 1.4 + 2.0 / TEXTURE_SIZE as f32 {
+                continue;
+            }
+            // the rim: a few short spikes round it, a wobble between
+            let a = dy.atan2(dx);
+            let seed = k as u32 * 31;
+            let mut rim = 1.0 + 0.05 * (a * 5.0 + random(seed, 12) * TAU).sin();
+            for s in 0..9u32 {
+                let off = (a - random(seed + s, 13) * TAU + PI).rem_euclid(TAU) - PI;
+                rim += 0.3 * random(seed + s, 14) * (1.0 - (off / 0.12).abs()).max(0.0);
+            }
+            ink = ink.max(((r * rim - d) * TEXTURE_SIZE as f32 * 1.5 + 0.5).clamp(0.0, 1.0));
+        }
+        for &(from, to) in &streaks {
+            let (d, _) = segment(x, y, from, to);
+            ink = ink.max(mark(d, 0.6 / TEXTURE_SIZE as f32) * 0.8);
+        }
+        ink
+    })
+}
+
+/// A spindle: one fine line across the tile's diagonal, up from its lower left corner, nine
+/// tenths of the diagonal long, its width (at most a 140th of the tile) going to nothing straight
+/// from its middle to its ends.
+fn spindle() -> Vec<u8> {
+    let (a, b) = ((0.065, 0.937), (0.95, 0.044));
+    let widest = 1.0 / 140.0;
+    let texel = 1.0 / TEXTURE_SIZE as f32;
+    field(|x, y| {
+        let (d, t) = segment(x, y, a, b);
+        let width = widest * (1.0 - (2.0 * t - 1.0).abs()).powf(0.9);
+        // a line under a texel wide as faint as it is thin
+        mark(d, width.max(texel) * 0.5) * (width / texel).min(1.0)
+    })
+}
+
+/// Stubble: 110 short hairs, each a shallow arc lying across (ends up, a 30th of the tile long,
+/// brightest at its middle and fading to its ends, a 400th thick), scattered over the tile's
+/// middle three quarters, thicker towards its middle.
+fn stubble() -> Vec<u8> {
+    let random = |k: u32, salt: u32| hash(k as i32, salt as i32, 9091);
+    let hairs: Vec<(f32, f32, f32)> = (0..110u32)
+        .map(|k| {
+            let (way, out) = (random(k, 1) * TAU, random(k, 2).powf(0.7));
+            (0.505 + 0.37 * out * way.cos(), 0.51 + 0.39 * out * way.sin(), (random(k, 3) - 0.5) * 0.25)
+        })
+        .collect();
+    let (half, sag, thick) = (0.016f32, 0.004f32, 1.25f32 / 1024.0);
+    let least = 0.5 / TEXTURE_SIZE as f32;
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for &(hx, hy, turn) in &hairs {
+            let (dx, dy) = (x - hx, y - hy);
+            if dx.abs() > half * 1.2 || dy.abs() > half * 0.6 {
+                continue;
+            }
+            let (c, s) = (turn.cos(), turn.sin());
+            let (u, v) = (dx * c + dy * s, -dx * s + dy * c);
+            let along = u / half;
+            if along.abs() > 1.0 {
+                continue;
+            }
+            // the arc's ends lie `sag` above its middle
+            let d = (v + sag * (1.0 - along * along)).abs();
+            ink = ink.max(mark(d, thick.max(least)) * (thick / least).min(1.0) * (1.0 - along * along).sqrt());
+        }
+        ink
+    })
 }
 
 /// The hook's pixels (see the shape of that name): the distance to a curve sampled along its length,

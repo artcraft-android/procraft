@@ -1983,8 +1983,9 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                     }
                     // its marks as fine as the real tip's: standing in for a tip we know nothing
                     // else of, the grainy square (smooth for a solid one); any other shape of ours
-                    // takes them over itself
-                    if let Some(feature) = textures::stock_shape_feature(name) {
+                    // takes them over itself, but one drawn to the picture, which has its own
+                    let drawn = textures::drawn_to_stock(i);
+                    if let Some(feature) = textures::stock_shape_feature(name).filter(|_| !drawn) {
                         let cover =
                             tones.iter().map(|&t| f32::from(t)).sum::<f32>() / (tones.len().max(1) as f32 * 255.0);
                         if i == shape::STOCK_GRAINY_SQUARE {
@@ -1995,7 +1996,7 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                     }
                     // its streaks and gaps across the stroke first (and, standing in for a tip we
                     // know nothing else of, its outline across too)
-                    let rows = textures::stock_shape_rows(name, *inverted);
+                    let rows = textures::stock_shape_rows(name, *inverted).filter(|_| !drawn);
                     let cols = textures::stock_shape_cols(name, *inverted).filter(|_| i == shape::STOCK_GRAINY_SQUARE);
                     let striped = match (rows, cols) {
                         (Some(rows), Some(cols)) => Some(textures::shaped(&shape.pixels, &rows, &cols)),
@@ -2074,6 +2075,10 @@ fn stock_shape(n: &str) -> u32 {
     let table: &[(&[&str], u32)] = &[
         // drawn things of their own
         (&["scribble"], shape::SCRIBBLE),
+        // pictures drawn to as they are: splashes of water, a fine line across, hairs
+        (&["water-flicks"], shape::FLICKS),
+        (&["preset-spike"], shape::SPINDLE),
+        (&["artery-stubble"], shape::STUBBLE),
         (&["lightning", "bolt"], shape::BOLT),
         // a daisy's long narrow petals; any other flower's rounder ones
         (&["artery-flower"], shape::DAISY),
@@ -2519,6 +2524,28 @@ mod tests {
     }
 
     #[test]
+    fn stock_flicks_a_spike_and_stubble_stand_in_as_drawn_to_them() {
+        // splashes, one fine line, short hairs: our drawings of them, taking the pictures' tones
+        // but not the marks put on a shape of ours standing in for one we know less of
+        let stock = |name: &str| Texture::Stock { name: name.into(), inverted: false };
+        for (name, want) in [
+            ("Brush-Artery-Water-Flicks.jpg", shape::FLICKS),
+            ("Brush-Preset-Spike.png", shape::SPINDLE),
+            ("Brush-Artery-Stubble.jpg", shape::STUBBLE),
+        ] {
+            let (image, source, _) = shape_for(&stock(name));
+            assert_eq!(image, Some(want), "{name}");
+            assert!(textures::drawn_to_stock(want) && source.is_some(), "{name}");
+        }
+        // (any other of ours still takes the marks)
+        assert!(!textures::drawn_to_stock(shape::SPLATTER) && !textures::drawn_to_stock(shape::STOCK_LINE));
+        // the splashes are about a twentieth of the tile, as the picture's
+        let flicks = textures::shapes().into_iter().nth(shape::FLICKS as usize).expect("drawn").pixels;
+        let cover = flicks.iter().filter(|&&v| v > 127).count() as f32 / flicks.len() as f32;
+        assert!((0.04..0.07).contains(&cover), "{cover}");
+    }
+
+    #[test]
     fn a_pens_glow_stands_in_as_a_glow_not_a_hard_tip() {
         // a glow round a pen's fine line, a fifteenth of it lit: taken for a hard pen tip, its
         // stroke came out solid all across
@@ -2591,7 +2618,8 @@ mod tests {
         assert_eq!(stock_shape("ringtail_shape.png"), shape::STOCK_GRAINY_SQUARE);
         assert_eq!(stock_shape("folder/starling_secondary_shape.png"), shape::STOCK_GRAINY_SQUARE);
         assert_eq!(stock_shape("brush-preset-scribble.jpg"), shape::SCRIBBLE);
-        assert_eq!(stock_shape("brush-preset-spike.png"), shape::STOCK_LINE);
+        assert_eq!(stock_shape("brush-preset-spike.png"), shape::SPINDLE);
+        assert_eq!(stock_shape("brush-artery-spike-2.png"), shape::STOCK_LINE);
         assert_eq!(stock_shape("brush-artery-drip-2.jpg"), shape::DRIP);
         assert_eq!(stock_shape("brush-artery-cloud-shape.jpg"), shape::CLOUD);
         assert_eq!(textures::shapes()[shape::STOCK_LINE as usize].name, "Line");
