@@ -105,6 +105,9 @@ struct OverlayUniform {
 /// a fair margin even at a hundredth of its speed. Much less costs more than it saves: a tiled
 /// GPU can read and write the whole stroke for each piece.
 const WORK_AT_ONCE: u64 = 64 << 20;
+/// The most of an open stroke's stamps kept as laid (see [`Canvas::replace_stamps`]): past it, a
+/// stroke redrawn is laid whole. A stamp is about 140 bytes.
+const LAID_KEPT_MOST: usize = 1 << 17;
 /// The most stamps one render uploads (the rest in renders after it, at once): a long stroke's end
 /// redraws all of it, and its millions of stamps in one buffer could pass the most the GPU makes,
 /// leaving no buffer to draw this or any later stroke with. 1M stamps take about 100 MB.
@@ -2475,6 +2478,10 @@ pub struct Canvas {
     smudge_spare: [wgpu::Buffer; 2],
     /// Stamps of input that hasn't happened yet (predicted), drawn over the canvas for one frame.
     prediction: Vec<StampInstance>,
+    /// The open stroke's stamps as laid so far, so that one redrawn whole with them still at its
+    /// start lays only what comes after (see [`Canvas::replace_stamps`]); none past
+    /// [`LAID_KEPT_MOST`], or for a dual brush's.
+    laid: Option<Vec<Stamp>>,
     ops: Vec<Op>,
     dirty: IRect,
     /// Whether the composite is made around pictures of what isn't being worked on, and them.
@@ -2812,6 +2819,7 @@ impl Canvas {
             wet_params: wet_params(device, 4),
             wet_capacity: 4,
             prediction: Vec::new(),
+            laid: None,
             ops: Vec::new(),
             cache_composites: false,
             caches: None,
@@ -3195,6 +3203,7 @@ impl Canvas {
         self.end_stroke();
         self.prediction.clear();
         let style = self.as_laid_here(style);
+        self.laid = Some(Vec::new());
         let within = self.lay_within;
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
     }
@@ -3234,6 +3243,9 @@ impl Canvas {
         if let Some(active) = self.active.as_mut() {
             active.second = Some(second);
         }
+        // its paint laid apart is put together with its second as each comes: redrawn, it is laid
+        // whole again
+        self.laid = None;
         if !self.measuring {
             self.ops.push(Op::ClearSecond(second));
         }
@@ -3297,12 +3309,29 @@ impl Canvas {
     pub fn add_stamps(&mut self, stamps: &[Stamp]) {
         self.untip();
         self.push_stamps(stamps, false);
+        if let Some(laid) = self.laid.as_mut() {
+            if laid.len() + stamps.len() <= LAID_KEPT_MOST {
+                laid.extend_from_slice(stamps);
+            } else {
+                self.laid = None;
+            }
+        }
     }
 
     /// Redraws the open stroke from scratch with `stamps` (its final form, e.g. with the end taper).
+    /// Those laid so far still at its start stay as they are, and only the rest is laid: a long
+    /// stroke of wet paint, laid whole again as the pen lifted, took a tenth of a second or more.
     pub fn replace_stamps(&mut self, stamps: &[Stamp]) {
+        let unchanged = self.laid.as_ref().filter(|laid| !laid.is_empty() && stamps.starts_with(laid)).map(Vec::len);
+        if let Some(from) = unchanged {
+            self.add_stamps(stamps.get(from..).unwrap_or_default());
+            return;
+        }
         self.tip = None;
         self.push_stamps(stamps, true);
+        if self.laid.is_some() {
+            self.laid = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
+        }
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
@@ -3499,6 +3528,7 @@ impl Canvas {
 
     pub fn end_stroke(&mut self) {
         self.prediction.clear();
+        self.laid = None;
         self.untip();
         if let Some(active) = self.active.take() {
             self.last_ended = Some((active.bounds, active.style.in_place()));
@@ -3632,6 +3662,7 @@ impl Canvas {
     /// its bounds): its undo step keeps only what is under them, and none if they are empty.
     pub fn end_stroke_within(&mut self, rects: Vec<IRect>) {
         self.prediction.clear();
+        self.laid = None;
         self.untip();
         if let Some(active) = self.active.take() {
             self.ops.push(Op::Within(rects));
@@ -3838,6 +3869,7 @@ impl Canvas {
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
+        self.laid = None;
         self.tip = None;
         if let Some(active) = self.active.take()
             && !self.measuring

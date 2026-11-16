@@ -3529,6 +3529,76 @@ fn a_wet_stroke_redrawn_whole_is_laid_once() {
     assert!((f32::from(once) - expected).abs() < 8.0, "{once} {expected}");
 }
 
+/// A stroke redrawn whole as it ends, its stamps laid so far still at its start, lays only those
+/// after them (a long stroke of wet paint took a tenth of a second at the lift), and comes out as
+/// laid whole; with one of them changed (an end taper reaching back), it is laid whole again.
+#[test]
+fn a_stroke_ended_as_it_was_laid_lays_only_its_end() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let stamps = |n: usize| -> Vec<Stamp> {
+        (0..n)
+            .map(|i| Stamp {
+                time_ms: i as f64 * 3.0,
+                ..Stamp::round(Vec2::new(20.0 + i as f32 * 0.6, 40.0 + (i as f32 * 0.2).sin() * 20.0), 9.0, 0.4)
+            })
+            .collect()
+    };
+    let wet = StrokeStyle {
+        wet_pull: Some(0.85),
+        dilution: 0.5,
+        load: 0.1,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.9, 0.2, 0.1], 1.0)
+    };
+    let styles = [("paint", StrokeStyle::new(StrokeTool::Paint, [0.1, 0.4, 0.9], 0.7)), ("wet paint", wet)];
+    for (name, stroke) in styles {
+        // drawn as it comes over a few renders, then ended with `last`; or laid whole at once
+        let laid = |last: Option<&[Stamp]>| {
+            let mut doc = Document::new(128, 96);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            canvas.set_work_at_once(1);
+            canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5, 0.6, 0.2], 1.0));
+            canvas.add_stamps(&(0..96).map(|y| dot(Vec2::new(64.0, y as f32), 18.0)).collect::<Vec<_>>());
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            canvas.begin_stroke(doc.current(), stroke);
+            let all = stamps(140);
+            match last {
+                Some(last) => {
+                    for piece in all.get(..100).unwrap_or_default().chunks(25) {
+                        canvas.add_stamps(piece);
+                        canvas.render(&gpu, &mut doc, None);
+                    }
+                    let before = canvas.pieces_sent();
+                    canvas.replace_stamps(last);
+                    canvas.end_stroke();
+                    canvas.render(&gpu, &mut doc, None);
+                    (canvas.read_layer(&gpu, doc.current()).unwrap(), canvas.pieces_sent() - before)
+                }
+                None => {
+                    canvas.add_stamps(&all);
+                    canvas.end_stroke();
+                    canvas.render(&gpu, &mut doc, None);
+                    (canvas.read_layer(&gpu, doc.current()).unwrap(), 0)
+                }
+            }
+        };
+        let (whole, _) = laid(None);
+        let (ended, sent) = laid(Some(&stamps(140)));
+        assert!(ended == whole, "{name}: ended differently from laid whole");
+        assert!(sent < 100, "{name}: {sent} pieces for the 40 stamps at the end");
+        // the first stamp fainter at the end: all of it again, and as it ends
+        let mut changed = stamps(140);
+        if let Some(first) = changed.first_mut() {
+            first.alpha = 0.1;
+        }
+        let (ended, sent) = laid(Some(&changed));
+        assert!(sent > 100, "{name}: {sent} pieces, not the whole stroke again");
+        let (before, _) = laid(None);
+        assert!(ended != before, "{name}: the changed stamp shows");
+    }
+}
+
 #[test]
 fn wet_paint_thins_as_its_charge_runs_out() {
     let Some(gpu) = gpu() else { return };
