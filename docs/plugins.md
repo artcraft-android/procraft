@@ -270,15 +270,14 @@ number:
 | 1 | Popovers and menus: what drops down from a button or a row |
 | 2 | The side bar |
 | 3 | The top bar (what hangs from it hangs from it as it shows) |
-| 4 | The panels that hang from the top bar's buttons |
+| 4 | The panels that hang from the top bar's buttons (a menu from one shows at part 1's size) |
 
 ```
 procraft_interface_part_scale(part: i32) -> f32
 ```
 
 Answer 1 for a part you don't know: more may come. An answer outside .5 to 2 stops the plugin.
-Several plugins on this hook each scale a part in turn, to .5 to 2 in all. The desktop app sizes
-the floating colour window and the menus so far, and leaves the other parts as the rest.
+Several plugins on this hook each scale a part in turn, to .5 to 2 in all.
 
 ### `floating_picker_only`
 
