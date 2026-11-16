@@ -12,12 +12,11 @@
 //!
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
 
-/// A stroke's bend is a corner when the path strays this far (as a part of the stroke's size) from
-/// the straight line between its neighbours.
-const CORNER_TOLERANCE: f32 = 0.08;
-/// Round a closed stroke, a bend is kept where the path strays this far: closer than an open
-/// stroke's, as its waves are what it is drawn for.
-const CLOSED_TOLERANCE: f32 = 0.05;
+/// Maximum simplification error relative to the stroke's diagonal. Keep the small bends
+/// of a freehand stroke; a larger threshold turns multiple smooth waves into flat spans.
+const CORNER_TOLERANCE: f32 = 0.025;
+/// Closed curves need the same fidelity as open strokes: preserve smaller lobes.
+const CLOSED_TOLERANCE: f32 = 0.025;
 /// A stroke whose ends are this close (a part of its length) comes back round: QuickShape's own
 /// measure.
 const CLOSED: f32 = 0.18;
@@ -225,6 +224,24 @@ mod tests {
         let (before, at, after) = (nodes[2], nodes[3], nodes[4]);
         let (u, v) = (sub(at, before), sub(after, at));
         assert!((u.0 * v.1 - u.1 * v.0).abs() < 1e-2 * length(u) * length(v), "{u:?} {v:?}");
+    }
+
+    #[test]
+    fn a_long_wavy_stroke_keeps_its_smaller_bends() {
+        // A long stroke whose box is much wider than each individual wave must not have its
+        // intermediate turns flattened by the global simplification threshold.
+        let stroke: Vec<P> = (0..=240)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                (x, 100.0 + 18.0 * (x * std::f32::consts::TAU / 120.0).sin())
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        let anchors: Vec<P> = nodes.iter().step_by(3).copied().collect();
+        assert!(anchors.len() >= 9, "small waves were lost: {anchors:?}");
+        for x in [30.0, 90.0, 150.0, 210.0, 270.0, 330.0, 390.0, 450.0] {
+            assert!(anchors.iter().any(|&(ax, _)| (ax - x).abs() < 20.0), "missing the bend near {x}: {anchors:?}");
+        }
     }
 
     #[test]
