@@ -34,7 +34,8 @@ const SPARES_KEPT: usize = 1;
 /// How many pixels of a row or column each pixel of a layer's bounds lines stands for (as
 /// `bounds.wgsl` has it).
 const BOUNDS_STRETCH: u32 = 512;
-/// Half floats, so a stroke's build-up from many faint stamps doesn't band.
+/// Half floats, so a stroke's build-up from many faint stamps doesn't band (where the GPU draws
+/// into them: see [`Abilities::stroke_format`]).
 const STROKE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Every draw gets its own slot in the uniform buffer (dynamic offsets are 256-byte aligned).
 const SLOT: u64 = 256;
@@ -2180,6 +2181,57 @@ impl Step {
     }
 }
 
+/// What the canvases' pipelines are made for: what the GPU can do past the least (an old GPU's
+/// OpenGL ES 3.1 can't draw into half floats, nor run compute passes in storage buffers, on many).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Abilities {
+    /// What strokes build up in: half floats, or where the GPU can't draw into them 8 bits a
+    /// channel (faint stamps building up band, and the faintest lay nothing).
+    pub(crate) stroke_format: wgpu::TextureFormat,
+    /// The format liquify's field takes here, where liquify can run (it adds its stamps up in half
+    /// floats, and the field's offsets are floats).
+    pub(crate) liquify_format: Option<wgpu::TextureFormat>,
+    /// Whether the compute passes run (see [`Gpu::computes`]): without them nothing smudges, wet
+    /// paint and paint laid in place are laid dry, and no stroke is laid by its rule.
+    pub(crate) computes: bool,
+}
+
+impl Abilities {
+    pub(crate) fn of(gpu: &Gpu) -> Abilities {
+        let floats = gpu.draws_half_floats();
+        Abilities {
+            stroke_format: if floats { STROKE_FORMAT } else { LAYER_FORMAT },
+            liquify_format: floats.then(|| liquify_format(&gpu.adapter)),
+            computes: gpu.computes(),
+        }
+    }
+}
+
+/// The compute passes that work in storage buffers: a smudge's and wet paint's (see `smudge`),
+/// and stamps laid by their stroke's rule pixel by pixel (see `Canvas::lay_by_rule`), each with
+/// what it is given.
+pub(crate) struct ComputePipelines {
+    stamp_rule: wgpu::ComputePipeline,
+    rule_layout: wgpu::BindGroupLayout,
+    smudge_layout: wgpu::BindGroupLayout,
+    smudge_carry: wgpu::ComputePipeline,
+    smudge_dull: wgpu::ComputePipeline,
+    smudge_blur_down: wgpu::ComputePipeline,
+    smudge_blur_across: wgpu::ComputePipeline,
+    smudge_deposit: wgpu::ComputePipeline,
+    smudge_synthesize: wgpu::ComputePipeline,
+    smudge_wet_plots: wgpu::ComputePipeline,
+}
+
+/// Liquify's stamps added up and the field carried along by them, the format the field takes
+/// here, and what that second pass reads.
+pub(crate) struct LiquifyPipelines {
+    stamp: wgpu::RenderPipeline,
+    step: wgpu::RenderPipeline,
+    format: wgpu::TextureFormat,
+    layout: wgpu::BindGroupLayout,
+}
+
 /// The pipelines every canvas on a device draws with, made once for the device (see
 /// [`crate::Gpu`]): compiling them takes a tablet a second and a half.
 pub(crate) struct Pipelines {
@@ -2193,10 +2245,10 @@ pub(crate) struct Pipelines {
     uniform_layout: wgpu::BindGroupLayout,
     stamp: wgpu::RenderPipeline,
     stamp_max: wgpu::RenderPipeline,
-    /// Stamps laid by their stroke's rule pixel by pixel (see `Canvas::lay_by_rule`), and what it
-    /// is given.
-    stamp_rule: wgpu::ComputePipeline,
-    rule_layout: wgpu::BindGroupLayout,
+    /// What strokes build up in here (see [`Abilities::stroke_format`]).
+    stroke_format: wgpu::TextureFormat,
+    /// The compute passes, where the GPU runs them.
+    compute: Option<ComputePipelines>,
     layer: wgpu::RenderPipeline,
     /// A normal layer clipped to its base, drawn onto it in their clipping group.
     layer_atop: wgpu::RenderPipeline,
@@ -2232,21 +2284,9 @@ pub(crate) struct Pipelines {
     filters: HashMap<&'static str, wgpu::RenderPipeline>,
     /// What every adjustment's passes are laid out by, a plugin's filter too.
     filter_layout: wgpu::PipelineLayout,
-    /// Liquify's stamps added up and the field carried along by them, the format the field
-    /// takes here, and what that second pass reads.
-    liquify_stamp: wgpu::RenderPipeline,
-    liquify_step: wgpu::RenderPipeline,
-    liquify_format: wgpu::TextureFormat,
-    liquify_layout: wgpu::BindGroupLayout,
+    /// Liquify's, where the GPU draws into floats.
+    liquify: Option<LiquifyPipelines>,
     selection_module: wgpu::ShaderModule,
-    smudge_layout: wgpu::BindGroupLayout,
-    smudge_carry: wgpu::ComputePipeline,
-    smudge_dull: wgpu::ComputePipeline,
-    smudge_blur_down: wgpu::ComputePipeline,
-    smudge_blur_across: wgpu::ComputePipeline,
-    smudge_deposit: wgpu::ComputePipeline,
-    smudge_synthesize: wgpu::ComputePipeline,
-    smudge_wet_plots: wgpu::ComputePipeline,
     display_module: wgpu::ShaderModule,
     display_pipeline_layout: wgpu::PipelineLayout,
     surround_module: wgpu::ShaderModule,
@@ -2391,6 +2431,10 @@ pub struct Canvas {
     /// until it ends. And whether that (or that it couldn't go on) is still to be told.
     smudge_refused: bool,
     smudge_untold: bool,
+    /// A smudge stroke was refused as this GPU can't smudge at all (see [`Canvas::smudges`]):
+    /// still to be told, and told already (once is enough).
+    smudge_lacked: bool,
+    smudge_lack_told: bool,
     /// A layer's pixels set aside by [`Canvas::hold_layer`], and whether its changes meanwhile make
     /// no steps of their own ([`Canvas::hold_layer_quietly`]).
     held: Option<Snapshot>,
@@ -2567,7 +2611,8 @@ pub struct SharedStroke {
 
 impl SharedStroke {
     pub fn new(gpu: &Gpu, width: u32, height: u32) -> SharedStroke {
-        let texture = texture(&gpu.device, "shared stroke", width.max(1), height.max(1), STROKE_FORMAT);
+        let format = gpu.canvas_pipelines().stroke_format;
+        let texture = texture(&gpu.device, "shared stroke", width.max(1), height.max(1), format);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         SharedStroke { texture, view }
     }
@@ -2623,11 +2668,12 @@ impl Canvas {
         }
         let device = &gpu.device;
         let pipelines = gpu.canvas_pipelines();
+        let stroke_format = pipelines.stroke_format;
         let fits = stroke.filter(|s| (s.texture.width(), s.texture.height()) == (width, height));
         let (stroke_texture, stroke_view) = match fits {
             Some(s) => (s.texture.clone(), s.view.clone()),
             None => {
-                let t = texture(device, "stroke", width, height, STROKE_FORMAT);
+                let t = texture(device, "stroke", width, height, stroke_format);
                 let v = t.create_view(&wgpu::TextureViewDescriptor::default());
                 (t, v)
             }
@@ -2708,7 +2754,7 @@ impl Canvas {
             clip_group_second: OnDemand::new("clip group 2", width, height, LAYER_FORMAT),
             play_frame: None,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
-            second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
+            second_stroke: OnDemand::new("second stroke", width, height, stroke_format),
             queued_second: None,
             blur_textures: Mutex::new(HashMap::new()),
             spare_before: None,
@@ -2745,6 +2791,8 @@ impl Canvas {
             smudge: None,
             smudge_refused: false,
             smudge_untold: false,
+            smudge_lacked: false,
+            smudge_lack_told: false,
             held: None,
             held_quietly: false,
             veil: None,
@@ -3146,8 +3194,37 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
+        let style = self.as_laid_here(style);
         let within = self.lay_within;
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
+    }
+
+    /// `style` as this canvas's GPU can lay it: where it can't run the compute passes, wet paint
+    /// and paint laid in place are laid dry, built up in the stroke as any other paint (a smudge
+    /// stays one, refused as it begins: see [`Canvas::smudges`]).
+    fn as_laid_here(&self, style: StrokeStyle) -> StrokeStyle {
+        if self.pipelines.compute.is_some() || !style.paints_in_place() {
+            return style;
+        }
+        StrokeStyle { laid_in_place: false, ..style.dry() }
+    }
+
+    /// Whether this canvas's GPU smudges (see [`crate::Gpu::computes`]): where it can't, a smudge
+    /// stroke lays nothing, and [`Canvas::take_smudge_lacked`] tells so.
+    pub fn smudges(&self) -> bool {
+        self.pipelines.compute.is_some()
+    }
+
+    /// Whether this canvas's GPU liquifies (see [`crate::Gpu::draws_half_floats`]): where it
+    /// can't, [`Canvas::begin_liquify`] leaves the layer as it is.
+    pub fn liquifies(&self) -> bool {
+        self.pipelines.liquify.is_some()
+    }
+
+    /// What strokes build up in here: half floats, or 8 bits a channel on a GPU that can't draw
+    /// into those.
+    pub fn stroke_format(&self) -> wgpu::TextureFormat {
+        self.pipelines.stroke_format
     }
 
     /// Begins a stroke as [`Canvas::begin_stroke`] does, with a dual brush's second (its stamps
@@ -3277,6 +3354,8 @@ impl Canvas {
             None => stamps,
         };
         let full = self.full();
+        // where the GPU runs the rule's pass (see `Canvas::lay_by_rule`)
+        let by_rule_here = self.pipelines.compute.is_some();
         let Some(active) = self.active.as_mut() else { return IRect::EMPTY };
         let style = match (second, active.second) {
             (false, _) => active.style,
@@ -3322,13 +3401,14 @@ impl Canvas {
                 distance: if s.distance.is_finite() { s.distance } else { 0.0 },
             })
             .collect();
-        // laid by the stroke's rule, a gradual stroke builds up pixel by pixel
-        let per_pixel = !style.in_place();
+        // laid by the stroke's rule, a gradual stroke builds up pixel by pixel; where the GPU can't
+        // run the rule, it is drawn over as its prediction is (each stamp standing in for it)
+        let per_pixel = !style.in_place() && by_rule_here;
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
                 let radius = drawn_at(s);
-                let (alpha, transfer) = capped_alpha(&style, true, s, per_pixel);
+                let (alpha, transfer) = capped_alpha(&style, by_rule_here, s, per_pixel);
                 StampInstance {
                     center: [s.center.x, s.center.y],
                     radius,
@@ -4181,6 +4261,12 @@ impl Canvas {
         std::mem::take(&mut self.smudge_untold)
     }
 
+    /// Whether a smudge stroke was refused since this was last asked because this GPU can't smudge
+    /// (see [`Canvas::smudges`]), the first time only.
+    pub fn take_smudge_lacked(&mut self) -> bool {
+        std::mem::take(&mut self.smudge_lacked)
+    }
+
     /// What the layers' textures and the history may take, in bytes: past it, the layers needed
     /// least lately that aren't being worked on are parked (kept compressed off the GPU, and the
     /// composite made around pictures of them) until needed again. 0 keeps every layer on the GPU.
@@ -4610,6 +4696,7 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
+        let style = self.as_laid_here(style);
         self.active =
             Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, within: None });
     }
@@ -5069,8 +5156,8 @@ impl Canvas {
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
                     // a stroke building up gradually or towards its transfer takes its rule pixel
-                    // by pixel
-                    let rule = by_rule(style.rendering);
+                    // by pixel, where the GPU runs it
+                    let rule = by_rule(style.rendering).filter(|_| self.pipelines.compute.is_some());
                     if rule.is_some() && count > 0 && self.rule_out.is_none() {
                         self.rule_out = Some(device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("stamp rule"),
@@ -5169,7 +5256,8 @@ impl Canvas {
                         let room = |n: u32, most: u32| n.max(1).next_multiple_of(256).min(most);
                         let (w, h) = self.tip_backup.as_ref().map_or((0, 0), |b| (b.width(), b.height()));
                         let size = (room(width.max(w), self.width), room(height.max(h), self.height));
-                        self.tip_backup = Some(texture(device, "tip backup", size.0, size.1, STROKE_FORMAT));
+                        let format = self.pipelines.stroke_format;
+                        self.tip_backup = Some(texture(device, "tip backup", size.0, size.1, format));
                     }
                     if let Some(backup) = &self.tip_backup {
                         encoder.copy_texture_to_texture(
@@ -5594,9 +5682,12 @@ impl Canvas {
                 Op::PluginFilter(filter) => {
                     self.plugin_filter(gpu, &mut encoder, &mut uniforms, &filter);
                 }
+                // no field where the GPU can't draw one (see `Canvas::liquifies`): the layer shows
+                // as it is
+                Op::LiquifyBegin if self.pipelines.liquify.is_none() => {}
                 Op::LiquifyBegin => {
+                    let format = self.pipelines.liquify.as_ref().map_or(LAYER_FORMAT, |l| l.format);
                     let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
-                    let format = self.pipelines.liquify_format;
                     let field = texture(device, "liquify field", width, height, format);
                     let view = field.create_view(&wgpu::TextureViewDescriptor::default());
                     drop(render_pass(
@@ -5614,7 +5705,7 @@ impl Canvas {
                     });
                 }
                 Op::PencilBegin => {
-                    let mask = texture(device, "pencil mask", self.width, self.height, STROKE_FORMAT);
+                    let mask = texture(device, "pencil mask", self.width, self.height, self.pipelines.stroke_format);
                     let view = mask.create_view(&wgpu::TextureViewDescriptor::default());
                     drop(render_pass(
                         &mut encoder,
@@ -5977,6 +6068,14 @@ impl Canvas {
         }
         if self.smudge.as_ref().is_none_or(|s| s.layer != target) {
             if self.smudge_refused || !self.layers.contains_key(&target) {
+                return;
+            }
+            // nothing to smudge with on a GPU without the compute passes: told once
+            if self.pipelines.compute.is_none() {
+                self.smudge_refused = true;
+                if !std::mem::replace(&mut self.smudge_lack_told, true) {
+                    self.smudge_lacked = true;
+                }
                 return;
             }
             let wet_paint = style.paints_in_place();
@@ -7163,6 +7262,8 @@ impl Canvas {
     ) {
         let (canvas_w, canvas_h) = (self.width as f32, self.height as f32);
         let chosen = self.selection.as_ref().map(|s| &s.view);
+        let pipelines = Arc::clone(&self.pipelines);
+        let Some(pipes) = pipelines.liquify.as_ref() else { return };
         let Some(field) = self.liquify.as_mut() else { return };
         let (width, height) = (field.texture.width(), field.texture.height());
         let [across, down] = field.scale;
@@ -7198,7 +7299,7 @@ impl Canvas {
                 let wide = old.as_ref().map_or(0, |s| s.width).max(area_w.next_multiple_of(128)).min(width);
                 let high = old.as_ref().map_or(0, |s| s.height).max(area_h.next_multiple_of(128)).min(height);
                 let sums = texture(device, "liquify sums", wide, high, LIQUIFY_SUMS_FORMAT);
-                let next = texture(device, "liquify step", wide, high, self.pipelines.liquify_format);
+                let next = texture(device, "liquify step", wide, high, pipes.format);
                 LiquifyScratch {
                     width: wide,
                     height: high,
@@ -7213,7 +7314,7 @@ impl Canvas {
         let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
         let mut pass = render_pass(encoder, "liquify stamps", &scratch.sums, clear);
         pass.set_viewport(0.0, 0.0, area[2], area[3], 0.0, 1.0);
-        pass.set_pipeline(&self.pipelines.liquify_stamp);
+        pass.set_pipeline(&pipes.stamp);
         for st in stamps {
             let (mode, narrow) = st.mode.code();
             let offset = uniforms.push(&LiquifyUniform {
@@ -7228,7 +7329,7 @@ impl Canvas {
         drop(pass);
         let reads = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("liquify step"),
-            layout: &self.pipelines.liquify_layout,
+            layout: &pipes.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scratch.sums) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&field.view) },
@@ -7246,7 +7347,7 @@ impl Canvas {
         });
         let mut pass = render_pass(encoder, "liquify step", &scratch.next_view, clear);
         pass.set_viewport(0.0, 0.0, area[2], area[3], 0.0, 1.0);
-        pass.set_pipeline(&self.pipelines.liquify_step);
+        pass.set_pipeline(&pipes.step);
         pass.set_bind_group(0, &self.uniform_bind, &[offset]);
         pass.set_bind_group(1, &reads, &[]);
         pass.draw(0..3, 0..1);
@@ -7815,6 +7916,7 @@ impl Canvas {
     ) {
         use wgpu::util::DeviceExt;
         let Some(out) = self.rule_out.as_ref() else { return };
+        let Some(compute) = self.pipelines.compute.as_ref() else { return };
         let bounds = instances.iter().fold(IRect::EMPTY, |b, s| b.union(quad_reach(s))).intersect(self.full());
         let part = RULE_PART as i32;
         let mut y0 = bounds.y0;
@@ -7831,7 +7933,7 @@ impl Canvas {
                 });
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("stamp rule"),
-                    layout: &self.pipelines.rule_layout,
+                    layout: &compute.rule_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -7851,7 +7953,7 @@ impl Canvas {
                     label: Some("stamp rule"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.pipelines.stamp_rule);
+                pass.set_pipeline(&compute.stamp_rule);
                 pass.set_bind_group(0, &bind, &[uniform]);
                 pass.set_bind_group(1, brush, &[]);
                 pass.dispatch_workgroups(rect.width().div_ceil(RULE_TILE), rect.height().div_ceil(RULE_TILE), 1);
@@ -9707,11 +9809,7 @@ pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
 }
 
 impl Pipelines {
-    pub(crate) fn new(
-        device: &wgpu::Device,
-        liquify_format: wgpu::TextureFormat,
-        cache: Option<wgpu::PipelineCache>,
-    ) -> Pipelines {
+    pub(crate) fn new(device: &wgpu::Device, abilities: Abilities, cache: Option<wgpu::PipelineCache>) -> Pipelines {
         let kept = cache.as_ref();
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -9965,155 +10063,173 @@ impl Pipelines {
                 (fs, pipeline)
             })
             .collect();
-        let liquify_module = module("liquify", include_str!("shaders/liquify.wgsl"));
-        let liquify_stamp = blended_pipeline(
-            device,
-            kept,
-            &layout("liquify stamps", &[Some(&uniform_layout)]),
-            &liquify_module,
-            "liquify stamps",
-            ("vs_stamp", "fs_stamp"),
-            LIQUIFY_SUMS_FORMAT,
-            Some(ADD),
-        );
-        let liquify_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("liquify step"),
-            entries: &[tex_entry(0), tex_entry(1), tex_entry(2)],
+        let liquify = abilities.liquify_format.map(|format| {
+            let liquify_module = module("liquify", include_str!("shaders/liquify.wgsl"));
+            let stamp = blended_pipeline(
+                device,
+                kept,
+                &layout("liquify stamps", &[Some(&uniform_layout)]),
+                &liquify_module,
+                "liquify stamps",
+                ("vs_stamp", "fs_stamp"),
+                LIQUIFY_SUMS_FORMAT,
+                Some(ADD),
+            );
+            let liquify_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("liquify step"),
+                entries: &[tex_entry(0), tex_entry(1), tex_entry(2)],
+            });
+            let step = blended_pipeline(
+                device,
+                kept,
+                &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
+                &liquify_module,
+                "liquify step",
+                ("vs_step", "fs_step"),
+                format,
+                None,
+            );
+            LiquifyPipelines { stamp, step, format, layout: liquify_layout }
         });
-        let liquify_step = blended_pipeline(
-            device,
-            kept,
-            &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
-            &liquify_module,
-            "liquify step",
-            ("vs_step", "fs_step"),
-            liquify_format,
-            None,
-        );
         let surround_pipeline_layout = layout("surround", &[Some(&uniform_layout)]);
-        let storage = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let compute_texture = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let smudge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("smudge"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(SMUDGE_UNIFORM_SIZE),
-                    },
-                    count: None,
+        // the compute passes, where the GPU runs them (none where it has no storage buffers)
+        let compute = abilities.computes.then(|| {
+            let storage = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                storage(1),
-                storage(2),
-                storage(3),
-                storage(4),
-                // a pass of wet paint's stamps
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(WET_PASS_SIZE),
-                    },
-                    count: None,
+                count: None,
+            };
+            let compute_texture = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                // a dual brush's second, and the layer as it was (its paint laid in place)
-                compute_texture(6),
-                compute_texture(7),
-                // the layer as a smudge's last pass left it
-                compute_texture(8),
-                // the image as last shown (a smudge picking up from every layer)
-                compute_texture(9),
-            ],
-        });
-        let smudge_module =
-            module("smudge", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/smudge.wgsl")));
-        let smudge_pipeline_layout = layout("smudge", &[Some(&smudge_layout), Some(&brush_layout)]);
-        let compute = |label, entry| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(&smudge_pipeline_layout),
-                module: &smudge_module,
-                entry_point: Some(entry),
+                count: None,
+            };
+            let smudge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("smudge"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: NonZeroU64::new(SMUDGE_UNIFORM_SIZE),
+                        },
+                        count: None,
+                    },
+                    storage(1),
+                    storage(2),
+                    storage(3),
+                    storage(4),
+                    // a pass of wet paint's stamps
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: NonZeroU64::new(WET_PASS_SIZE),
+                        },
+                        count: None,
+                    },
+                    // a dual brush's second, and the layer as it was (its paint laid in place)
+                    compute_texture(6),
+                    compute_texture(7),
+                    // the layer as a smudge's last pass left it
+                    compute_texture(8),
+                    // the image as last shown (a smudge picking up from every layer)
+                    compute_texture(9),
+                ],
+            });
+            let smudge_module =
+                module("smudge", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/smudge.wgsl")));
+            let smudge_pipeline_layout = layout("smudge", &[Some(&smudge_layout), Some(&brush_layout)]);
+            let smudge_pass = |label, entry| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&smudge_pipeline_layout),
+                    module: &smudge_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: kept,
+                })
+            };
+            let smudge_carry = smudge_pass("smudge carry", "cs_carry");
+            let smudge_dull = smudge_pass("smudge dull", "cs_dull");
+            let smudge_blur_down = smudge_pass("smudge blur down", "cs_blur_down");
+            let smudge_blur_across = smudge_pass("smudge blur across", "cs_blur_across");
+            let smudge_deposit = smudge_pass("smudge deposit", "cs_deposit");
+            let smudge_synthesize = smudge_pass("smudge synthesize", "cs_synthesize");
+            let smudge_wet_plots = smudge_pass("smudge wet plots", "cs_wet_plots");
+            // stamps laid by their stroke's rule: the stamp's uniform, the frame's stamps, the part's
+            // tiles, the stroke as it stands and where the part goes
+            let read_storage = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            };
+            let rule_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("stamp rule"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: NonZeroU64::new(UNIFORM_SIZE),
+                        },
+                        count: None,
+                    },
+                    read_storage(1),
+                    read_storage(2),
+                    compute_texture(3),
+                    storage(4),
+                ],
+            });
+            let rule_module = module(
+                "stamp rule",
+                concat!(
+                    include_str!("shaders/blend.wgsl"),
+                    include_str!("shaders/stamp.wgsl"),
+                    include_str!("shaders/stamp_rule.wgsl")
+                ),
+            );
+            let stamp_rule = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("stamp rule"),
+                layout: Some(&layout("stamp rule", &[Some(&rule_layout), Some(&brush_layout)])),
+                module: &rule_module,
+                entry_point: Some("cs_stamp_rule"),
                 compilation_options: Default::default(),
                 cache: kept,
-            })
-        };
-        let smudge_carry = compute("smudge carry", "cs_carry");
-        let smudge_dull = compute("smudge dull", "cs_dull");
-        let smudge_blur_down = compute("smudge blur down", "cs_blur_down");
-        let smudge_blur_across = compute("smudge blur across", "cs_blur_across");
-        let smudge_deposit = compute("smudge deposit", "cs_deposit");
-        let smudge_synthesize = compute("smudge synthesize", "cs_synthesize");
-        let smudge_wet_plots = compute("smudge wet plots", "cs_wet_plots");
-        // stamps laid by their stroke's rule: the stamp's uniform, the frame's stamps, the part's
-        // tiles, the stroke as it stands and where the part goes
-        let read_storage = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let rule_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("stamp rule"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(UNIFORM_SIZE),
-                    },
-                    count: None,
-                },
-                read_storage(1),
-                read_storage(2),
-                compute_texture(3),
-                storage(4),
-            ],
-        });
-        let rule_module = module(
-            "stamp rule",
-            concat!(
-                include_str!("shaders/blend.wgsl"),
-                include_str!("shaders/stamp.wgsl"),
-                include_str!("shaders/stamp_rule.wgsl")
-            ),
-        );
-        let stamp_rule = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("stamp rule"),
-            layout: Some(&layout("stamp rule", &[Some(&rule_layout), Some(&brush_layout)])),
-            module: &rule_module,
-            entry_point: Some("cs_stamp_rule"),
-            compilation_options: Default::default(),
-            cache: kept,
+            });
+            ComputePipelines {
+                stamp_rule,
+                rule_layout,
+                smudge_layout,
+                smudge_carry,
+                smudge_dull,
+                smudge_blur_down,
+                smudge_blur_across,
+                smudge_deposit,
+                smudge_synthesize,
+                smudge_wet_plots,
+            }
         });
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
@@ -10139,7 +10255,7 @@ impl Pipelines {
                     entry_point: Some("fs_stamp"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: STROKE_FORMAT,
+                        format: abilities.stroke_format,
                         blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -10220,10 +10336,7 @@ impl Pipelines {
             before_layout,
             filters,
             filter_layout: filter_pipeline_layout,
-            liquify_stamp,
-            liquify_step,
-            liquify_format,
-            liquify_layout,
+            liquify,
             mesh: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("warp"),
                 layout: Some(&transform_pipeline_layout),
@@ -10265,16 +10378,8 @@ impl Pipelines {
             ),
             stamp,
             stamp_max,
-            stamp_rule,
-            rule_layout,
-            smudge_layout,
-            smudge_carry,
-            smudge_dull,
-            smudge_blur_down,
-            smudge_blur_across,
-            smudge_deposit,
-            smudge_synthesize,
-            smudge_wet_plots,
+            stroke_format: abilities.stroke_format,
+            compute,
             lut_layout,
             display_lut_layout,
             quad_layout,
@@ -11916,6 +12021,82 @@ mod tests {
         assert!(!canvas.take_smudge_refused());
         assert_eq!(canvas.steps_made(), steps + 1);
         assert_ne!(canvas.read_layer(&gpu, id).unwrap(), before);
+    }
+
+    /// On an old GPU (no half floats to draw into, no storage buffers: see `Gpu::headless_old`) a
+    /// canvas opens and paints, its strokes built up in 8 bits a channel; wet paint, paint laid in
+    /// place and strokes laid by their rule are laid dry and over, each one step; a smudge lays
+    /// nothing, makes no step and is told once; liquify leaves the layer as it is; and nothing the
+    /// GPU can't do is asked of it.
+    #[test]
+    fn an_old_gpu_paints_and_does_without_what_it_lacks() {
+        use procraft_engine::document::Document;
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::stroke::Stamp;
+        let Ok(gpu) = Gpu::headless_old() else { return };
+        assert!(!gpu.draws_half_floats() && !gpu.computes() && !gpu.paints_3d());
+        assert_eq!(gpu.lacks().len(), 3);
+        let mut doc = Document::new(96, 72);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        assert_eq!(canvas.stroke_format(), LAYER_FORMAT);
+        assert!(!canvas.smudges() && !canvas.liquifies());
+        let id = doc.current();
+        let line = |y: f32| -> Vec<Stamp> {
+            (0..12).map(|i| Stamp::round(Vec2::new(12.0 + i as f32 * 6.0, y), 5.0, 0.8)).collect()
+        };
+        let plain = StrokeStyle::new(StrokeTool::Paint, [0.9, 0.1, 0.1], 1.0);
+        let styles = [
+            plain,
+            StrokeStyle { rendering: Rendering::Gradual, ..plain },
+            StrokeStyle { rendering: Rendering::Capped, ..plain },
+            StrokeStyle { wet_pull: Some(0.6), load: 0.4, dilution: 0.3, ..plain },
+            StrokeStyle { laid_in_place: true, ..plain },
+        ];
+        for (k, style) in styles.into_iter().enumerate() {
+            let y = 8.0 + 13.0 * k as f32;
+            let steps = canvas.steps_made();
+            canvas.begin_stroke(id, style);
+            canvas.add_stamps(&line(y));
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            assert_eq!(canvas.steps_made(), steps + 1, "style {k}");
+            // red where the stroke went, nothing beside it
+            let px = canvas.read_layer(&gpu, id).unwrap();
+            let at = |x: usize, y: usize| px[(y * 96 + x) * 4..(y * 96 + x) * 4 + 4].to_vec();
+            let row = y as usize;
+            let [r, g, _, a] = at(48, row)[..] else { panic!() };
+            assert!(a > 128 && r > g + 64, "style {k}: {r} {g} {a}");
+            assert_eq!(at(48, row + 6)[3], 0, "style {k}");
+        }
+        // a smudge: nothing laid, no step, told the first time only
+        let before = canvas.read_layer(&gpu, id).unwrap();
+        let steps = canvas.steps_made();
+        for told in [true, false] {
+            canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0));
+            canvas.add_stamps(&line(20.0));
+            canvas.render(&gpu, &mut doc, None);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            assert_eq!(canvas.take_smudge_lacked(), told);
+            assert!(!canvas.take_smudge_refused());
+        }
+        assert_eq!(canvas.steps_made(), steps);
+        assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+        // liquify: no field, the layer shown and kept as it is
+        let shown = canvas.read_composite(&gpu).unwrap();
+        canvas.begin_transform(id);
+        canvas.begin_liquify();
+        canvas.liquify_stamps(&[LiquifyStamp {
+            centre: [48.0, 20.0],
+            way: [8.0, 0.0],
+            radius: 20.0,
+            amount: 1.0,
+            mode: LiquifyMode::Push,
+        }]);
+        canvas.render(&gpu, &mut doc, None);
+        assert_eq!(canvas.read_composite(&gpu).unwrap(), shown);
+        assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+        assert_eq!(gpu.errors(), 0);
     }
 
     /// A layer of colour patches, `width` by `height`, to smudge and paint over.

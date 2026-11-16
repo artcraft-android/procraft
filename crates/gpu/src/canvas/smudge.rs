@@ -425,6 +425,8 @@ impl Canvas {
         let from_image = pieces.iter().any(|p| p.uniforms.iter().any(|u| u.source_image == 1));
         let Some(smudge) = self.smudge.as_ref() else { return false };
         let Some(window) = smudge.window.as_ref() else { return false };
+        // (never begun without them: see `Canvas::smudges`)
+        let Some(compute) = self.pipelines.compute.as_ref() else { return false };
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -436,7 +438,7 @@ impl Canvas {
         let spare = &self.smudge_spare;
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("smudge"),
-            layout: &self.pipelines.smudge_layout,
+            layout: &compute.smudge_layout,
             entries: &[
                 uniform(0, &self.smudge_params, SMUDGE_UNIFORM_SIZE),
                 wgpu::BindGroupEntry { binding: 1, resource: window.work.as_entire_binding() },
@@ -491,13 +493,13 @@ impl Canvas {
                 let Some(&offset) = offsets.get(which) else { continue };
                 pass.set_bind_group(0, &bind, &[offset, piece.listed]);
                 pass.set_pipeline(match pipe {
-                    Pipe::Carry => &self.pipelines.smudge_carry,
-                    Pipe::Dull => &self.pipelines.smudge_dull,
-                    Pipe::BlurDown => &self.pipelines.smudge_blur_down,
-                    Pipe::BlurAcross => &self.pipelines.smudge_blur_across,
-                    Pipe::Deposit => &self.pipelines.smudge_deposit,
-                    Pipe::Synthesize => &self.pipelines.smudge_synthesize,
-                    Pipe::WetPlots => &self.pipelines.smudge_wet_plots,
+                    Pipe::Carry => &compute.smudge_carry,
+                    Pipe::Dull => &compute.smudge_dull,
+                    Pipe::BlurDown => &compute.smudge_blur_down,
+                    Pipe::BlurAcross => &compute.smudge_blur_across,
+                    Pipe::Deposit => &compute.smudge_deposit,
+                    Pipe::Synthesize => &compute.smudge_synthesize,
+                    Pipe::WetPlots => &compute.smudge_wet_plots,
                 });
                 pass.dispatch_workgroups(x, y, 1);
             }

@@ -10,6 +10,8 @@ use crate::Gpu;
 /// The radiance cube's side and levels (the last 2 texels across).
 const CUBE_SIDE: u32 = 256;
 pub(crate) const CUBE_LEVELS: u32 = 8;
+/// In half floats, so bright light keeps its strength (where the GPU draws into them: else 8 bits
+/// a channel, the light past white cut there).
 const CUBE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The BRDF table's side and samples per cell.
 const TABLE_SIDE: usize = 64;
@@ -92,13 +94,14 @@ impl Lighting {
         });
 
         // the radiance cube, level by level and face by face
+        let cube_format = if gpu.draws_half_floats() { CUBE } else { wgpu::TextureFormat::Rgba8Unorm };
         let cube = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("environment radiance"),
             size: wgpu::Extent3d { width: CUBE_SIDE, height: CUBE_SIDE, depth_or_array_layers: 6 },
             mip_level_count: CUBE_LEVELS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: CUBE,
+            format: cube_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -159,7 +162,7 @@ impl Lighting {
                 entry_point: Some("fs_prefilter"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: CUBE,
+                    format: cube_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

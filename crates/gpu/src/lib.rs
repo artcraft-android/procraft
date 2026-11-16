@@ -110,6 +110,27 @@ pub fn treat_as_weak(on: bool) {
     WEAK.store(on, Ordering::Relaxed);
 }
 
+/// What a device made as an old GPU's is held to (see [`Gpu::headless_old`]): what a 2014 Mali
+/// offers on OpenGL ES 3.1 at the least. The downlevel limits, with no storage buffers or images
+/// in any stage (wgpu takes the vertex and fragment stages' counts, often none there, for every
+/// stage), the GLES 3.1 compute minimums and 4096-pixel textures.
+fn old_gpu_limits() -> wgpu::Limits {
+    wgpu::Limits {
+        max_texture_dimension_1d: 4096,
+        max_texture_dimension_2d: 4096,
+        max_storage_buffers_per_shader_stage: 0,
+        max_storage_textures_per_shader_stage: 0,
+        max_dynamic_storage_buffers_per_pipeline_layout: 0,
+        max_storage_buffer_binding_size: 0,
+        max_compute_invocations_per_workgroup: 128,
+        max_compute_workgroup_size_x: 128,
+        max_compute_workgroup_size_y: 128,
+        max_compute_workgroup_size_z: 64,
+        max_compute_workgroup_storage_size: 16 << 10,
+        ..wgpu::Limits::downlevel_defaults()
+    }
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -153,6 +174,8 @@ pub struct Gpu {
     /// Buffers pixels came back from the GPU through, kept for the next readback (see
     /// [`Gpu::readback_buffer`]).
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
+    /// Made as an old GPU's (see [`Gpu::headless_old`]).
+    old: bool,
 }
 
 /// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
@@ -266,6 +289,15 @@ impl Gpu {
         Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
     }
 
+    /// [`Gpu::headless`] as an old GPU's: held to what a 2014 Mali offers on OpenGL ES 3.1
+    /// ([`old_gpu_limits`]), and taken to draw into no half floats, as on one whose OpenGL ES
+    /// can't. For testing what the canvas does without.
+    #[doc(hidden)]
+    pub fn headless_old() -> Result<Gpu, GpuError> {
+        let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
+        Gpu::create(instance, None, true)
+    }
+
     /// The app's device, the canvases' pipelines made: from the first instance that makes one
     /// and builds them without an error or losing it (a driver that fails on them gives way to
     /// the next backend; the last is kept as it is).
@@ -305,7 +337,7 @@ impl Gpu {
             let last = tries + 1 >= count;
             trying(backend);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Gpu::create(instance, None).map(|gpu| {
+                Gpu::create(instance, None, false).map(|gpu| {
                     let taken = last || fine(&gpu);
                     (gpu, taken)
                 })
@@ -323,10 +355,10 @@ impl Gpu {
 
     /// A device that can present to `surface` (made from `instance`).
     pub fn for_surface(instance: wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Gpu, GpuError> {
-        Gpu::create(instance, Some(surface))
+        Gpu::create(instance, Some(surface), false)
     }
 
-    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, old: bool) -> Result<Gpu, GpuError> {
         // a driver's own description can run over several lines: one line in the log
         fn one_line(text: &str) -> String {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -375,7 +407,7 @@ impl Gpu {
             // where the GPU has it: the pipelines' compiled form to keep between runs
             required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             // the adapter's own limits, so large canvases fit where the GPU allows them
-            required_limits: adapter.limits(),
+            required_limits: if old { old_gpu_limits() } else { adapter.limits() },
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
             // is kept for good, and the larger ones held what was never used (a first read back
             // of a few bytes kept 64 MB the CPU can see)
@@ -384,8 +416,11 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
         log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
-        // new canvases and crops kept to what its textures can be
-        procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
+        // new canvases and crops kept to what its textures can be (not by one made as an old GPU's
+        // to test with: that would hold every other test's canvases to its size)
+        if !old {
+            procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
+        }
         // a validation error must never take the app down: log it instead
         let errors = Arc::new(AtomicU64::new(0));
         let counter = Arc::clone(&errors);
@@ -400,7 +435,7 @@ impl Gpu {
             flag.store(true, Ordering::Relaxed);
             log::error!("GPU lost ({reason:?}): {message}");
         });
-        Ok(Gpu {
+        let gpu = Gpu {
             instance,
             adapter,
             device,
@@ -410,7 +445,13 @@ impl Gpu {
             canvas_pipelines: Arc::default(),
             kept: Arc::default(),
             readbacks: Arc::default(),
-        })
+            old,
+        };
+        // what an old GPU can't do, and what the canvas does without it (in the shared log)
+        for lack in gpu.lacks() {
+            log::warn!("this GPU {lack}");
+        }
+        Ok(gpu)
     }
 
     /// A buffer of `size` bytes or more to read pixels back through: one kept from an earlier
@@ -490,8 +531,8 @@ impl Gpu {
             let kept = self
                 .kept
                 .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
-            let format = canvas::liquify_format(&self.adapter);
-            let pipelines = canvas::Pipelines::new(&self.device, format, kept.as_ref().map(|k| k.cache.clone()));
+            let abilities = canvas::Abilities::of(self);
+            let pipelines = canvas::Pipelines::new(&self.device, abilities, kept.as_ref().map(|k| k.cache.clone()));
             if let Some(kept) = kept {
                 kept.made();
             }
@@ -538,6 +579,63 @@ impl Gpu {
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
+    }
+
+    /// Whether the GPU draws into half floats, blended and filtered: strokes build up in them, and
+    /// liquify's field and 3D painting's lighting are drawn in them. An old GPU's OpenGL ES
+    /// without `EXT_color_buffer_half_float` (or `_float`) can only read them.
+    pub fn draws_half_floats(&self) -> bool {
+        if self.old {
+            return false;
+        }
+        let features = self.adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let flags = wgpu::TextureFormatFeatureFlags::FILTERABLE | wgpu::TextureFormatFeatureFlags::BLENDABLE;
+        features.allowed_usages.contains(usages) && features.flags.contains(flags)
+    }
+
+    /// Whether the GPU runs the compute passes that work in storage buffers (smudging, wet paint,
+    /// paint laid in place, stamps laid by their stroke's rule, 3D painting's footprint): four
+    /// storage buffers a stage and groups of 256. An old GPU's OpenGL ES 3.1 often has none
+    /// outside its compute shaders, which wgpu takes for every stage.
+    pub fn computes(&self) -> bool {
+        let limits = self.device.limits();
+        self.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            && limits.max_storage_buffers_per_shader_stage >= 4
+            && limits.max_compute_invocations_per_workgroup >= 256
+            && limits.max_compute_workgroup_size_x >= 64
+            && limits.max_compute_workgroup_size_y >= 16
+    }
+
+    /// Whether 3D painting can run here: it draws distances and strokes in floats and marks a
+    /// stroke's footprint in a compute pass.
+    pub fn paints_3d(&self) -> bool {
+        self.computes() && self.draws_half_floats() && self.draws(wgpu::TextureFormat::R32Float)
+    }
+
+    /// Whether the GPU draws into `format` (without blending).
+    fn draws(&self, format: wgpu::TextureFormat) -> bool {
+        let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        !self.old && self.adapter.get_texture_format_features(format).allowed_usages.contains(usages)
+    }
+
+    /// What the GPU lacks that others have, each with what the canvas does without it, worded
+    /// for the log (after "this GPU"); none on most.
+    pub fn lacks(&self) -> Vec<&'static str> {
+        let mut lacks = Vec::new();
+        if !self.draws_half_floats() {
+            lacks.push("can't draw into half floats: strokes build up in 8 bits a channel, and Liquify is off");
+        }
+        if !self.computes() {
+            lacks.push(
+                "has no compute passes with storage buffers: Smudge is off, wet paint and paint laid in place are \
+                 laid dry, and strokes that build up gradually or to their transfer are drawn over",
+            );
+        }
+        if !self.paints_3d() {
+            lacks.push("can't paint in 3D");
+        }
+        lacks
     }
 }
 
@@ -644,6 +742,22 @@ mod tests {
         gpu.device.destroy();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         assert!(matches!(gpu.checked(|| 7), Err(GpuError::Lost)));
+    }
+
+    /// A device made as an old GPU's is held to what one offers, says what it lacks, and its
+    /// canvases' pipelines are made without asking for any of it.
+    #[test]
+    fn an_old_gpu_is_held_to_its_limits_and_says_what_it_lacks() {
+        let gpu = match Gpu::headless_old() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        assert_eq!(gpu.max_texture_size(), 4096);
+        assert_eq!(gpu.device.limits().max_storage_buffers_per_shader_stage, 0);
+        assert!(!gpu.draws_half_floats() && !gpu.computes() && !gpu.paints_3d());
+        assert_eq!(gpu.lacks().len(), 3);
+        gpu.prepare_canvases();
+        assert_eq!(gpu.errors(), 0);
     }
 
     #[test]
