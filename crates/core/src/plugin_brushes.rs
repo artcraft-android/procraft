@@ -1685,16 +1685,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A brush engine that asks what lies under its dabs is told, a batch of samples later: a Krita
-    /// MyPaint brush that smudges, dragged from red into the clear, carries the red there in place of
-    /// its blue (picking up the red it laid itself as it goes on).
-    #[test]
-    fn an_engine_is_told_the_colours_under_the_dabs_it_asks_about() {
+    /// A session on `gpu` with the Krita plugin on (the one at `KRITA_PLUGIN`, else the bundled one)
+    /// and a bundle's MyPaint brushes brought in: one that smudges fully, its dabs hard and close,
+    /// and one that only paints. The session, the plugins, the plugin's id, the set and its folder.
+    fn mypaint_session(
+        gpu: procraft_gpu::Gpu,
+        tag: &str,
+    ) -> (Arc<crate::CanvasSession>, Arc<crate::Plugins>, String, u32, std::path::PathBuf) {
         let packed = match std::env::var("KRITA_PLUGIN") {
             Ok(path) => std::fs::read(path).unwrap(),
             Err(_) => crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1.to_vec(),
         };
-        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
         let s = crate::CanvasSession::new(200, 120);
         {
             let mut st = s.shared.lock();
@@ -1703,40 +1704,38 @@ mod tests {
             st.gpu = Some(gpu);
             st.ensure_canvas();
         }
-        let dir = std::env::temp_dir().join(format!("procraft-told-under-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("procraft-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
         assert_eq!(plugins.install(packed), None);
         let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
         assert!(plugins.set_on(id.clone(), true));
         s.use_plugins(Arc::clone(&plugins));
-        // a bundle holding only a MyPaint brush that smudges fully, its dabs hard and close
-        let myb = r#"{"version": 3, "settings": {
-            "radius_logarithmic": {"base_value": 1.6, "inputs": {}},
-            "hardness": {"base_value": 0.9, "inputs": {}},
-            "opaque_multiply": {"base_value": 1.0, "inputs": {}},
-            "dabs_per_actual_radius": {"base_value": 4.0, "inputs": {}},
-            "smudge": {"base_value": 1.0, "inputs": {}},
-            "smudge_length": {"base_value": 0.5, "inputs": {}}
-        }}"#;
+        let brush = |smudge: f32| {
+            format!(
+                r#"{{"version": 3, "settings": {{
+                "radius_logarithmic": {{"base_value": 1.6, "inputs": {{}}}},
+                "hardness": {{"base_value": 0.9, "inputs": {{}}}},
+                "opaque_multiply": {{"base_value": 1.0, "inputs": {{}}}},
+                "dabs_per_actual_radius": {{"base_value": 4.0, "inputs": {{}}}},
+                "smudge": {{"base_value": {smudge}, "inputs": {{}}}},
+                "smudge_length": {{"base_value": 0.5, "inputs": {{}}}}
+            }}}}"#
+            )
+        };
         let mut zip = procraft_engine::zip::ZipWriter::new();
         zip.add("mimetype", b"application/x-krita-resourcebundle");
-        zip.add("paintoppresets/Wet_Drag.myb", myb.as_bytes());
+        zip.add("paintoppresets/Wet_Drag.myb", brush(1.0).as_bytes());
+        zip.add("paintoppresets/Plain_Ink.myb", brush(0.0).as_bytes());
         let read = crate::read_brushes(zip.finish(), Some("Drag.bundle".to_owned())).unwrap();
         s.make_engine_brushes(Arc::clone(&read));
-        let set = s.add_brushes_read(read, 0).expect("the engine's brush comes in");
-        let brush = s.shared.lock().library[set as usize].brushes[0].clone();
-        assert_eq!(brush.name, "Wet Drag");
-        assert!(brush.engine.is_some());
-        assert!(s.select_brush(set, 0));
-        // red on the left half
-        let layer = s.add_layer();
-        {
-            let mut st = s.shared.lock();
-            let rect = procraft_engine::geom::IRect::new(0, 0, 100, 120);
-            st.rewrite_layer(procraft_engine::document::LayerId(layer), rect, [255, 0, 0, 255].repeat(100 * 120));
-        }
-        s.set_color(0.0, 0.0, 1.0);
+        let set = s.add_brushes_read(read, 0).expect("the engine's brushes come in");
+        (s, plugins, id, set, dir)
+    }
+
+    /// The pen dragged across the middle of a 200 x 120 canvas, from x = 60 to 150, in batches of
+    /// three samples as its moves come.
+    fn drag_across(s: &crate::CanvasSession) {
         let at = |x: f32| crate::PenSample {
             x,
             y: 60.0,
@@ -1746,12 +1745,37 @@ mod tests {
             time_ms: f64::from(x),
             roll: 0.0,
         };
-        // in batches, as the pen's moves come
         s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
         for from in (61..=150).step_by(3) {
             s.stroke_add((from..from + 3).map(|x| at(x as f32)).collect());
         }
         s.stroke_end(vec![]);
+    }
+
+    /// The brush of `set` called `name`, chosen.
+    fn choose(s: &crate::CanvasSession, set: u32, name: &str) {
+        let index = s.shared.lock().library[set as usize].brushes.iter().position(|b| b.name == name).unwrap();
+        assert!(s.shared.lock().library[set as usize].brushes[index].engine.is_some());
+        assert!(s.select_brush(set, index as u32));
+    }
+
+    /// A brush engine that asks what lies under its dabs is told, a batch of samples later: a Krita
+    /// MyPaint brush that smudges, dragged from red into the clear, carries the red there in place of
+    /// its blue (picking up the red it laid itself as it goes on).
+    #[test]
+    fn an_engine_is_told_the_colours_under_the_dabs_it_asks_about() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let (s, plugins, id, set, dir) = mypaint_session(gpu, "told-under");
+        choose(&s, set, "Wet Drag");
+        // red on the left half
+        let layer = s.add_layer();
+        {
+            let mut st = s.shared.lock();
+            let rect = procraft_engine::geom::IRect::new(0, 0, 100, 120);
+            st.rewrite_layer(procraft_engine::document::LayerId(layer), rect, [255, 0, 0, 255].repeat(100 * 120));
+        }
+        s.set_color(0.0, 0.0, 1.0);
+        drag_across(&s);
         assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
         let px = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
         let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
@@ -1762,6 +1786,35 @@ mod tests {
         let [r, _, b, _] = at_x(145).try_into().unwrap();
         assert!(r > 128 && b < 64, "red carried on: {:?}", at_x(145));
         assert_eq!(at_x(190)[3], 0, "past the stroke, still clear");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On an old GPU (no compute passes: see `Gpu::headless_old`) an engine whose dabs ask what lies
+    /// under them and move paint goes on without trouble: its smudge lays nothing and says so once,
+    /// as the smudge tool does there, the engine still on; one that only paints paints.
+    #[test]
+    fn an_engine_asking_on_an_old_gpu_smudges_nothing_and_says_so() {
+        let gpu = match procraft_gpu::Gpu::headless_old() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let (s, plugins, id, set, dir) = mypaint_session(gpu, "told-under-old");
+        let layer = s.add_layer();
+        s.set_color(0.0, 0.0, 1.0);
+        choose(&s, set, "Plain Ink");
+        drag_across(&s);
+        let painted = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let blue = |px: &[u8], x: usize| px[(60 * 200 + x) * 4 + 2];
+        assert!(blue(&painted, 100) > 200, "it paints");
+        choose(&s, set, "Wet Drag");
+        for told in [true, false] {
+            let before = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+            drag_across(&s);
+            let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+            assert_eq!(before, after, "its smudge lays nothing");
+            assert_eq!(s.take_failure().as_deref(), told.then_some("This device's graphics can't smudge."));
+        }
+        assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
