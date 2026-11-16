@@ -87,8 +87,10 @@ impl Colours {
         let mut closed = !self.modal() && crate::ui::escape(ctx);
         let mut hex_row = Rect::NOTHING;
         let mut kind_button = Rect::NOTHING;
-        // under the panels, which open over it, however it was last touched
-        egui::Area::new(area).fixed_pos(rect.min).order(Order::Middle).show(ctx, |ui| {
+        // under the panels, which open over it, however it was last touched; kept to the window,
+        // and clipped to it, as the window measures it at its scale
+        let measured = transform.inverse().mul_rect(screen);
+        egui::Area::new(area).fixed_pos(rect.min).order(Order::Middle).constrain_to(measured).show(ctx, |ui| {
             // the canvas under it takes no touch
             ui.allocate_rect(rect, Sense::click_and_drag());
             panel::floating_frame(ui, look, "floating colours", rect, k, backdrops);

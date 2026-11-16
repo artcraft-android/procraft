@@ -1300,7 +1300,8 @@ fn panel_row_height(painter: &Painter, row: &PanelRow, inside: f32) -> f32 {
 
 /// A plugin's panel, floating under the bar at the window's right: its title and Done, then its rows
 /// on a card as the Actions panel's are. A slider moved is told as it lets go (`held` keeps where it
-/// is meanwhile); anything else at once. Returns what was asked.
+/// is meanwhile); anything else at once. Returns what was asked. It shows at the size a plugin
+/// gives floating panels, its top right corner where it stays.
 pub fn plugin_panel(
     ctx: &egui::Context,
     look: &mut Look,
@@ -1309,18 +1310,25 @@ pub fn plugin_panel(
     backdrops: &mut Vec<f32>,
 ) -> Option<PanelTouch> {
     let screen = ctx.content_rect();
-    let top = screen.top() + crate::panel::bar_shown(ctx) + PANEL_MARGIN;
-    let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH;
+    let k = panel::part_scale(ctx, procraft_core::InterfacePart::Floating);
+    let top = screen.top() + panel::bar_shown(ctx) + PANEL_MARGIN;
+    let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH * k;
     let inside = PANEL_WIDTH - 20.0;
     let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::unique("plugin panel measure")));
     let rows_height: f32 = panel.rows.iter().map(|r| panel_row_height(&painter, r, inside)).sum::<f32>()
         + panel.rows.len().saturating_sub(1) as f32;
-    let height = (52.0 + 8.0 + rows_height + 10.0).min(screen.bottom() - PANEL_MARGIN - top);
+    let height = (52.0 + 8.0 + rows_height + 10.0).min((screen.bottom() - PANEL_MARGIN - top) / k);
     let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
     let mut asked = None;
-    egui::Area::new(Id::unique("plugin panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+    // laid out at its own size, and drawn (and touched) at its scale from its top left, kept to the
+    // window and clipped to it as the window measures it at that scale
+    let area = Id::unique("plugin panel");
+    let to_window = crate::chrome::scaled_from(rect.min, k);
+    ctx.set_transform_layer(egui::LayerId::new(Order::Foreground, area), to_window);
+    let measured = to_window.inverse().mul_rect(screen);
+    egui::Area::new(area).fixed_pos(rect.min).order(Order::Foreground).constrain_to(measured).show(ctx, |ui| {
         ui.allocate_rect(rect, Sense::click());
-        crate::panel::floating_frame(ui, look, "plugin panel frame", rect, 1.0, backdrops);
+        panel::floating_frame(ui, look, "plugin panel frame", rect, k, backdrops);
         let painter = ui.painter().clone();
         let title_at = pos2(rect.left() + 24.0, rect.top() + 22.5);
         text(&painter, title_at, Align2::LEFT_TOP, &panel.title, 22.0, Weight::Bold, argb(crate::panel::PANEL_TITLE));
@@ -1757,6 +1765,12 @@ mod tests {
     /// What a tap at `at` on a plugin's panel of a button, a switch, a choice and a row of keys asks
     /// (the window 1200 wide).
     fn panel_tapped(at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
+        panel_tapped_at(1.0, at)
+    }
+
+    /// As [`panel_tapped`], floating panels shown `scale` times as big: `at` where it is laid out,
+    /// the tap where that shows.
+    fn panel_tapped_at(scale: f32, at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
         let (ctx, mut look) = (egui::Context::default(), Look::default());
         crate::look::install_fonts(&ctx);
         let panel = PluginPanel {
@@ -1774,8 +1788,9 @@ mod tests {
             key_press: false,
         };
         let top = pc::BAR_HEIGHT + PANEL_MARGIN;
-        let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
-        let point = at(rect);
+        let left = 1200.0 - PANEL_MARGIN - PANEL_WIDTH * scale;
+        let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, 300.0));
+        let point = crate::chrome::scaled_from(rect.min, scale) * at(rect);
         let (mut time, mut asked, mut held) = (0.0, None, None);
         let press = |pos, pressed| Event::PointerButton {
             pos,
@@ -1798,6 +1813,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
+                panel::put_part_scales(ui.ctx(), [scale, 1.0, 1.0, 1.0, 1.0]);
                 asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
             });
             output.textures_delta.clear();
@@ -1815,6 +1831,17 @@ mod tests {
         assert_eq!(panel_tapped(row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "the keys");
         assert_eq!(panel_tapped(|r| pos2(r.right() - 40.0, r.top() + 33.0)), Some(PanelTouch::Close));
         assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
+    }
+
+    #[test]
+    fn a_plugin_panel_bigger_or_smaller_takes_its_touches_where_they_show() {
+        let row = |i: f32| move |r: Rect| pos2(r.left() + 60.0, r.top() + 60.0 + 22.0 + i * 45.0);
+        for scale in [0.5, 1.5] {
+            assert_eq!(panel_tapped_at(scale, row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "{scale}");
+            assert_eq!(panel_tapped_at(scale, row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "{scale}");
+            let done = |r: Rect| pos2(r.right() - 40.0, r.top() + 33.0);
+            assert_eq!(panel_tapped_at(scale, done), Some(PanelTouch::Close), "{scale}");
+        }
     }
 
     const SHADER: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";

@@ -33,7 +33,15 @@ struct SideBarPlace {
 /// (in [`procraft_core::InterfacePart`]'s order), for what draws a part to read.
 pub fn set_part_scales(ctx: &egui::Context, plugins: &procraft_core::Plugins) {
     use procraft_core::InterfacePart as P;
-    let scales = [P::Floating, P::Menus, P::SideBar, P::TopBar, P::Panels].map(|p| plugins.interface_part_scale(p));
+    put_part_scales(
+        ctx,
+        [P::Floating, P::Menus, P::SideBar, P::TopBar, P::Panels].map(|p| plugins.interface_part_scale(p)),
+    );
+}
+
+/// How big each part of the interface shows next to the rest of it this frame, in
+/// [`InterfacePart`]'s order.
+pub fn put_part_scales(ctx: &egui::Context, scales: [f32; 5]) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("interface part scales"), scales));
 }
 
@@ -188,8 +196,9 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
 
 /// Draws a floating panel at `rect` (no arrow): the shadow round it, then its frosted body, whose
 /// blur goes into `backdrops` (window pixels). Its layer shows it `scale` times as big, from its
-/// top-left.
+/// top-left, its icons and shapes drawn for that.
 pub fn floating_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, scale: f32, backdrops: &mut Vec<f32>) {
+    look.set_zoom(ui.layer_id(), scale);
     let ppp = ui.ctx().pixels_per_point();
     let shown = Rect::from_min_size(rect.min, rect.size() * scale);
     let edges = [shown.left(), shown.top(), shown.right(), shown.bottom(), POPOVER_CORNER * scale];
@@ -420,7 +429,7 @@ mod tests {
     use egui::emath::TSTransform;
     use egui::{Pos2, Rect, pos2, vec2};
 
-    use super::{ARROW_SHIFT, POPOVER_GAP, PanelSpace, drawing_panel, place, side_bar_at};
+    use super::{ARROW_SHIFT, POPOVER_GAP, PanelSpace, drawing_panel, place, put_part_scales, side_bar_at};
     use crate::look::pc;
 
     fn near(a: Pos2, b: Pos2) -> bool {
@@ -461,7 +470,7 @@ mod tests {
             let ctx = ui.ctx();
             let width = 384.0;
             for side in [1.0, 1.5] {
-                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("interface part scales"), [1.0, 1.0, side, 1.0, 1.0]));
+                put_part_scales(ctx, [1.0, 1.0, side, 1.0, 1.0]);
                 for right in [false, true] {
                     side_bar_at(ctx, true, right);
                     for scale in [0.5, 1.0, 1.5] {
