@@ -391,21 +391,27 @@ fn memory_cost() {
     report("undone 23");
 }
 
-/// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
-/// event's work, each frame's (one every two events, as a 240 Hz pen at 120 frames a second), and
-/// the whole stroke with the GPU done, an event's share. Run on a device with `--ignored
-/// --nocapture`.
+/// What a pen stroke costs with the GPU, for a few kinds of brush on a canvas already painted on
+/// (`STROKE_COST_SIDE`, 2048 square): each event's work, each frame's (one every two events, as a
+/// 240 Hz pen at 120 frames a second), the lift's (the stroke's end laid and kept, with its
+/// frame), and the whole stroke with the GPU done, an event's share. `STROKE_COST_BRUSHES` lists
+/// the brushes (`,` between), each `[smudge:]name[@size]` (the size slider, 0.4 unless said);
+/// `STROKE_COST_EVENTS` (1000) is a stroke's length, `STROKE_COST_EVERY` (2) the events a frame. Run on a device with `--ignored --nocapture`.
 #[test]
 #[ignore]
 fn stroke_cost() {
-    let Some(s) = session(2048, 1600) else { return };
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let side: u32 = env("STROKE_COST_SIDE", "2048").parse().unwrap_or(2048);
+    let events: usize = env("STROKE_COST_EVENTS", "1000").parse().unwrap_or(1000);
+    let every: usize = env("STROKE_COST_EVERY", "2").parse().unwrap_or(2).max(1);
+    let Some(s) = session(side, 1600) else { return };
     let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
     let at = |v: &mut Vec<f64>, q: f64| {
         v.sort_by(f64::total_cmp);
         v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
     };
     let point = |k: usize| {
-        let t = k as f32 / 2000.0;
+        let t = k as f32 / (2 * events) as f32;
         PenSample {
             x: 100.0 + t * 1400.0,
             y: 800.0 + (t * 25.0).sin() * 500.0,
@@ -423,47 +429,264 @@ fn stroke_cost() {
             c.render(g, &mut st.doc, None);
         }
     };
+    let flush = |s: &CanvasSession| {
+        if let Some(g) = s.shared.lock().gpu.as_ref() {
+            g.flush();
+        }
+    };
     let library = s.brush_library();
-    for wanted in ["Technical Pencil", "Soft Airbrush", "Charcoal Stick", "Oil Paint", "Gouache", "Wet Wash"] {
-        let found = library
+    let pick = |wanted: &str| {
+        library
             .iter()
             .enumerate()
-            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)));
-        let Some((set, index)) = found else {
-            eprintln!("no {wanted}");
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))
+    };
+    // paint to smudge and mix into: strokes across, kept
+    if let Some((set, index)) = pick("Soft Airbrush") {
+        s.select_brush(set, index);
+        s.set_brush_size(1.0);
+        for (k, y) in [300.0_f32, 700.0, 1100.0, 1400.0].into_iter().enumerate() {
+            s.set_color(k as f32 / 3.0, 0.4, 1.0 - k as f32 / 3.0);
+            s.stroke_begin(PointerKind::Stylus, vec![sample(80.0, y, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(80.0 + i as f32 * 50.0, y, i as f64 * 8.0)).collect());
+            s.stroke_end(vec![]);
+            frame(&s);
+        }
+        flush(&s);
+    }
+    s.set_color(0.8, 0.2, 0.1);
+    let brushes = env(
+        "STROKE_COST_BRUSHES",
+        "Round Pen,Technical Pencil,Soft Airbrush,Gouache,Oil Paint,Wet Wash,smudge:Soft Airbrush,smudge:Oil Paint,Charcoal Stick@1,Canvas Texture@1",
+    );
+    for entry in brushes.split(',') {
+        let (tool, rest) = match entry.strip_prefix("smudge:") {
+            Some(rest) => (ToolKind::Smudge, rest),
+            None => (ToolKind::Paint, entry),
+        };
+        let (wanted, size) = match rest.split_once('@') {
+            Some((name, size)) => (name, size.parse().unwrap_or(0.4)),
+            None => (rest, 0.4),
+        };
+        let Some((set, index)) = pick(wanted) else {
+            println!("no {wanted}");
             continue;
         };
+        s.set_tool(tool);
         s.select_brush(set, index);
-        s.set_brush_size(0.4);
+        s.set_brush_size(size);
+        flush(&s);
         let started = std::time::Instant::now();
         s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
         let (mut adds, mut frames) = (Vec::new(), Vec::new());
-        for e in 1..=1000 {
+        for e in 1..=events {
             let t = std::time::Instant::now();
             s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
             adds.push(ms(t));
-            if e % 2 == 0 {
+            if e % every == 0 {
                 let t = std::time::Instant::now();
                 frame(&s);
                 frames.push(ms(t));
             }
         }
+        let t = std::time::Instant::now();
         s.stroke_end(vec![]);
         frame(&s);
-        if let Some(g) = s.shared.lock().gpu.as_ref() {
-            g.flush();
-        }
-        let whole = ms(started) / 1000.0;
+        let lift = ms(t);
+        flush(&s);
+        let whole = ms(started) / events as f64;
         println!(
-            "{wanted}: event {:.3} ms (99th {:.3}), frame {:.3} ms (99th {:.3}), whole with the GPU {:.3} ms an event",
+            "{entry:<26} event {:.3} ms (99th {:.3}) | frame {:.3} ms (99th {:.3}) | lift {:6.2} ms | whole with the GPU {:.3} ms an event",
             at(&mut adds, 0.5),
             at(&mut adds, 0.99),
             at(&mut frames, 0.5),
             at(&mut frames, 0.99),
+            lift,
             whole
         );
         s.undo();
+        frame(&s);
+        flush(&s);
     }
+    s.set_tool(ToolKind::Paint);
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+}
+
+/// How long a save holds the artwork from the app on a very large canvas: a thread asking for
+/// the state every 2 ms records its longest wait while the save goes on. Saved once with every
+/// layer changed (`SAVE_COST_LAYERS`, 10, on a `SAVE_COST_SIDE`, 6000, square canvas), then with
+/// one layer changed (as most autosaves), then with all of them changed again; as the autosave
+/// saves, or as asked (`SAVE_COST_WAY=save`). Run on a device with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn save_cost() {
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let side: u32 = env("SAVE_COST_SIDE", "6000").parse().unwrap_or(6000);
+    let layers: usize = env("SAVE_COST_LAYERS", "10").parse().unwrap_or(10);
+    // saved as asked (`SAVE_COST_WAY=save`: every layer read in one hold), else as the autosave does
+    let asked = env("SAVE_COST_WAY", "autosave") == "save";
+    crate::layers::set_layer_budget(16 << 30);
+    crate::layers::set_resident_budget(8 << 30);
+    // as much on its way back after the hold as the app lets be
+    crate::project::TESTS_READ_AFTER_LOCK.store(256 << 20, std::sync::atomic::Ordering::Relaxed);
+    let Some(s) = session(side, 1600) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let drawn = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render_finished(g, &mut st.doc);
+            g.flush();
+        }
+    };
+    s.set_brush_size(0.8);
+    for _ in 1..layers {
+        s.add_layer();
+    }
+    let stroke_on = |s: &CanvasSession, id: u64, k: usize| {
+        s.select_layer(id);
+        let y = 100.0 + (k as f32 * 131.0) % 1400.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, y, 0.0)]);
+        s.stroke_add(
+            (1..60)
+                .map(|i| sample(60.0 + i as f32 * 25.0, y + (i as f32 * 0.25).sin() * 300.0, i as f64 * 8.0))
+                .collect(),
+        );
+        s.stroke_end(vec![]);
+        drawn(s);
+    };
+    let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+    let dir = std::env::temp_dir().join(format!("procraft-save-cost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let saved = |name: &str| {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prober = {
+            let (s, stop) = (std::sync::Arc::clone(&s), std::sync::Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut longest = 0.0f64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let t = std::time::Instant::now();
+                    drop(s.shared.lock());
+                    longest = longest.max(t.elapsed().as_secs_f64() * 1000.0);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                longest
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let t = std::time::Instant::now();
+        let into = dir.to_string_lossy().into_owned();
+        let result = if asked { s.save(into).map(|()| true) } else { s.save_if_idle(into) };
+        let took = ms(t);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let longest = prober.join().unwrap_or(0.0);
+        println!(
+            "{name:<28} saved in {took:7.0} ms ({result:?}), the app's longest wait for the state {longest:6.1} ms"
+        );
+    };
+    for (k, id) in ids.iter().enumerate() {
+        stroke_on(&s, *id, k);
+    }
+    let info = s.shared.lock().gpu.as_ref().map(|g| g.adapter.get_info());
+    if let Some(info) = info {
+        println!("{} ({:?}), canvas {side} square, {layers} layers", info.name, info.backend);
+    }
+    saved("every layer changed");
+    for k in 0..3 {
+        if let Some(id) = ids.get(k) {
+            stroke_on(&s, *id, k + 20);
+        }
+        saved("one layer changed");
+    }
+    for (k, id) in ids.iter().enumerate() {
+        stroke_on(&s, *id, k + 40);
+    }
+    saved("every layer changed again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the library's sample strokes cost: each stock brush's drawn as the library asks for it
+/// (530 x 162), the time each took and, with a canvas being drawn on meanwhile (a frame every 8
+/// ms on another thread, as the render thread would), its frames' longest and 99th. Run on a
+/// device with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn preview_cost() {
+    let Some(s) = session(2048, 1600) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let at = |v: &mut Vec<f64>, q: f64| {
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
+    };
+    let library = s.brush_library();
+    let all: Vec<(u32, u32, String)> =
+        library.iter().flat_map(|set| set.brushes.iter().map(|b| (b.set, b.index, b.name.clone()))).collect();
+    let frames = |s: &std::sync::Arc<CanvasSession>, stop: &std::sync::Arc<std::sync::atomic::AtomicBool>| {
+        let (s, stop) = (std::sync::Arc::clone(s), std::sync::Arc::clone(stop));
+        std::thread::spawn(move || {
+            let mut took = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t = std::time::Instant::now();
+                {
+                    let mut guard = s.shared.lock();
+                    let st = &mut *guard;
+                    st.needs_frame = true;
+                    if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+                        c.render(g, &mut st.doc, None);
+                        g.flush();
+                    }
+                }
+                took.push(t.elapsed().as_secs_f64() * 1000.0);
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            took
+        })
+    };
+    // the canvas's frames alone first
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let alone = frames(&s, &stop);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut alone = alone.join().unwrap_or_default();
+    // the first drawn makes the preview's canvas
+    let _ = s.brush_preview(0, 0, 530, 162);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let during = frames(&s, &stop);
+    let mut each = Vec::new();
+    let mut slowest = Vec::new();
+    let whole = std::time::Instant::now();
+    for (set, index, name) in &all {
+        let t = std::time::Instant::now();
+        let made = s.brush_preview(*set, *index, 530, 162);
+        let took = ms(t);
+        if made.is_none() {
+            println!("{name}: none");
+        }
+        each.push(took);
+        slowest.push((took, name.clone()));
+    }
+    let whole = ms(whole);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut during = during.join().unwrap_or_default();
+    slowest.sort_by(|a, b| b.0.total_cmp(&a.0));
+    println!(
+        "{} previews in {whole:.0} ms: each {:.1} ms (90th {:.1}, longest {:.1}); slowest {:?}",
+        all.len(),
+        at(&mut each, 0.5),
+        at(&mut each, 0.9),
+        at(&mut each, 1.0),
+        slowest.iter().take(5).map(|(t, n)| format!("{n} {t:.0}")).collect::<Vec<_>>()
+    );
+    println!(
+        "a frame alone {:.2} ms (99th {:.2}, longest {:.2}); while previews are drawn {:.2} ms (99th {:.2}, longest {:.2})",
+        at(&mut alone, 0.5),
+        at(&mut alone, 0.99),
+        at(&mut alone, 1.0),
+        at(&mut during, 0.5),
+        at(&mut during, 0.99),
+        at(&mut during, 1.0)
+    );
 }
 
 /// Real files damaged (cut short, bytes changed) never bring a reader down: each brush file, PSD,
