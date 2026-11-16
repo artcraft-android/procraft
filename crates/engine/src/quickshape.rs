@@ -537,7 +537,11 @@ pub fn recognise(stroke: &[Vec2]) -> Vec<Shape> {
         // a sharp corner counts only where the corners fit clearly better than an even bend: a
         // hand's wobble along an arc can turn as sharply between a few points, but is no corner
         let cornered = || sharp_corner(&pts, &polyline.nodes) && arc_error > 2.0 * outline_error(&polyline, &pts);
-        if polyline.nodes.len() >= 3 && (arc_error > 0.04 || cornered()) {
+        // An S-shaped or otherwise reversing bend is not a single elliptical arc, even
+        // when a conic fit happens to have a small average distance to its outline.
+        // Keep it as a polyline so the QuickShape curves plugin can fit smooth cubics.
+        let reversing = reverses_bend(&pts);
+        if polyline.nodes.len() >= 3 && (reversing || arc_error > 0.025 || cornered()) {
             return vec![polyline, line_of(&pts)];
         }
         return match arc {
@@ -1085,6 +1089,30 @@ fn fit_oval(pts: &[Vec2]) -> Option<Oval> {
 
 /// Whether the stroke turns sharply at any of the corners it simplifies to: its direction just
 /// before a corner and just after differ by more than a corner's worth.
+/// Significant changes of curvature exclude an arc. A real circular/elliptical arc
+/// turns consistently in one direction; a freehand S-wave turns both ways. Simplify with
+/// a finer tolerance than the visible polyline so small but intentional bends count,
+/// while pen jitter does not cause a false reversal.
+fn reverses_bend(pts: &[Vec2]) -> bool {
+    let corners = simplify(pts, 0.045 * size(pts));
+    let (mut positive, mut negative) = (false, false);
+    for triple in corners.windows(3) {
+        let before = triple[1] - triple[0];
+        let after = triple[2] - triple[1];
+        if before.length() < 0.10 * size(pts) || after.length() < 0.10 * size(pts) {
+            continue;
+        }
+        let turn = before.cross(after) / (before.length() * after.length()).max(1e-6);
+        if turn > 0.16 {
+            positive = true;
+        }
+        if turn < -0.16 {
+            negative = true;
+        }
+    }
+    positive && negative
+}
+
 fn sharp_corner(pts: &[Vec2], corners: &[Vec2]) -> bool {
     let reach = path_length(pts) * 0.05;
     corners.iter().skip(1).take(corners.len().saturating_sub(2)).any(|&c| {
@@ -1410,6 +1438,29 @@ mod tests {
         assert_eq!(without_end_hook(&straight, 30.0).len(), straight.len());
         // a small stroke looks for a hook only near its end
         assert_eq!(end_hook_reach(&straight[..6], 30.0), 5.0);
+    }
+
+    #[test]
+    fn a_freehand_s_curve_is_not_mistaken_for_an_elliptical_arc() {
+        let s_curve: Vec<Vec2> = (0..=120)
+            .map(|i| {
+                let x = 4.0 * i as f32;
+                let y = 120.0 + 75.0 * (x * TAU / 480.0).sin();
+                Vec2::new(x, y)
+            })
+            .collect();
+        assert!(reverses_bend(&s_curve));
+        assert_eq!(recognise(&s_curve)[0].kind, ShapeKind::Polyline);
+        // Small alternating jitter is not evidence of a deliberate S bend.
+        let genuine_arc: Vec<Vec2> = (0..=80)
+            .map(|i| {
+                let t = i as f32 / 80.0 * 2.0;
+                let jitter = 1.5 * ((i % 2) as f32 * 2.0 - 1.0);
+                Vec2::new(250.0 + 180.0 * t.cos(), 250.0 + 180.0 * t.sin() + jitter)
+            })
+            .collect();
+        assert!(!reverses_bend(&genuine_arc));
+        assert_eq!(recognise(&genuine_arc)[0].kind, ShapeKind::Arc);
     }
 
     #[test]

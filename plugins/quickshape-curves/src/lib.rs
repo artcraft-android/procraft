@@ -227,7 +227,7 @@ fn smooth_stroke(pts: &[P]) -> Vec<P> {
     if pts.len() < 4 {
         return pts.to_vec();
     }
-    const SIGMA: f32 = 4.0;
+    const SIGMA: f32 = 5.5;
     const RADIUS: f32 = SIGMA * 2.5;
     let mut along = Vec::with_capacity(pts.len());
     along.push(0.0f32);
@@ -270,7 +270,7 @@ fn fit(pts: &[P]) -> Vec<P> {
     let pts = smooth_stroke(&pts);
     // A bounded canvas-pixel error preserves the shape even for long multi-wave strokes.
     // A small allowance avoids treating every tiny hand tremor as an intentional bend.
-    let tolerance = (size(&pts) * 0.006).clamp(1.5, 3.0);
+    let tolerance = (size(&pts) * 0.006).clamp(1.8, 3.2);
     let mut anchors = vec![0, pts.len() - 1];
     loop {
         if anchors.len() > MAX_OPEN_SPANS {
