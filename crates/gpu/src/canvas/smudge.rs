@@ -19,7 +19,7 @@ use super::{
 use crate::Gpu;
 
 /// The side of the tiles a smudge stroke keeps (pixels).
-const TILE: u32 = 256;
+pub(super) const TILE: u32 = 256;
 
 /// The most bytes a window takes for work laid together in it: past it, the work goes in windows of
 /// its own (only a piece that reaches further than this by itself takes one bigger).
@@ -55,11 +55,11 @@ impl Keeps {
 /// the paint shows (these two f32s a pixel, as their bytes); and the textures it changes besides
 /// the one it works in as they were (see [`Canvas::smudge_also`]).
 pub(super) struct Tile {
-    before: wgpu::Texture,
-    grained: Option<wgpu::Texture>,
-    amount: Option<wgpu::Texture>,
-    shown: Option<wgpu::Texture>,
-    more: Vec<wgpu::Texture>,
+    pub(super) before: wgpu::Texture,
+    pub(super) grained: Option<wgpu::Texture>,
+    pub(super) amount: Option<wgpu::Texture>,
+    pub(super) shown: Option<wgpu::Texture>,
+    pub(super) more: Vec<wgpu::Texture>,
 }
 
 /// The buffers a smudge stroke's passes work in (see the module): the layer as the stroke has left
@@ -101,7 +101,7 @@ pub(super) struct Piece {
 }
 
 /// Bytes a row of a window `width` pixels wide takes (rows are 256-byte aligned for copies).
-fn row_bytes(width: u32) -> u32 {
+pub(super) fn row_bytes(width: u32) -> u32 {
     (width.max(1) * 4).div_ceil(256) * 256
 }
 
@@ -195,14 +195,14 @@ fn runs(lo: u32, hi: u32, fits: impl Fn(u32, u32) -> bool) -> Vec<(u32, u32)> {
 }
 
 /// The tiles `rect` (canvas pixels, none negative) touches.
-fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
+pub(super) fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
     let (x0, y0) = (rect.x0.max(0).unsigned_abs() / TILE, rect.y0.max(0).unsigned_abs() / TILE);
     let (x1, y1) = (rect.x1.max(1).unsigned_abs().div_ceil(TILE), rect.y1.max(1).unsigned_abs().div_ceil(TILE));
     let rows = if rect.is_empty() { 0..0 } else { y0..y1 };
     rows.flat_map(move |y| (x0..x1).map(move |x| (x, y)))
 }
 
-fn tile_rect((x, y): (u32, u32)) -> IRect {
+pub(super) fn tile_rect((x, y): (u32, u32)) -> IRect {
     let at = |n: u32| i32::try_from(n * TILE).unwrap_or(i32::MAX);
     IRect::new(at(x), at(y), at(x + 1), at(y + 1))
 }
@@ -407,6 +407,10 @@ impl Canvas {
         reach: IRect,
         (brush, second): (&wgpu::BindGroup, Option<&wgpu::TextureView>),
     ) -> bool {
+        // without compute passes, in fragment passes (see `fragments`)
+        if self.pipelines.compute.is_none() {
+            return self.lay_window_in_fragments(gpu, encoder, params, pieces, reach, (brush, second));
+        }
         let reach = if reach.is_empty() { IRect::new(0, 0, 1, 1) } else { reach }.intersect(self.full());
         // past what a binding holds (a piece the stroke couldn't cut smaller): not laid
         if reach.is_empty() || !self.window_fits(reach, Self::smudge_room_for(&gpu.device)) {
@@ -431,6 +435,7 @@ impl Canvas {
         let Some(window) = smudge.window.as_ref() else { return false };
         // (never begun without them: see `Canvas::smudges`)
         let Some(compute) = self.pipelines.compute.as_ref() else { return false };
+        let Some(carry) = smudge.carry.as_ref() else { return false };
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -446,7 +451,7 @@ impl Canvas {
             entries: &[
                 uniform(0, &self.smudge_params, SMUDGE_UNIFORM_SIZE),
                 wgpu::BindGroupEntry { binding: 1, resource: window.work.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: smudge.carry.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: carry.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: window.grained.as_ref().unwrap_or(&spare[0]).as_entire_binding(),
@@ -515,7 +520,7 @@ impl Canvas {
 
     /// Room for `count` more smudge uniforms: when the buffer they go in is full, what it holds is
     /// written to it now (the passes laid with it read that) and the rest start a bigger one.
-    fn smudge_uniform_room(&mut self, gpu: &Gpu, params: &mut UniformData, count: usize) {
+    pub(super) fn smudge_uniform_room(&mut self, gpu: &Gpu, params: &mut UniformData, count: usize) {
         let slots = SMUDGE_UNIFORM_SIZE.div_ceil(SLOT) * count as u64;
         if params.data.len() as u64 / SLOT + slots <= self.smudge_capacity {
             return;
@@ -822,6 +827,7 @@ impl Canvas {
     ) -> bool {
         let full = self.full();
         let also = self.smudge_also();
+        let in_fragments = self.pipelines.compute.is_none();
         let Some(smudge) = self.smudge.as_mut() else { return false };
         if smudge.stalled {
             return false;
@@ -839,14 +845,17 @@ impl Canvas {
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let tile = |label| texture(device, label, TILE, TILE, LAYER_FORMAT);
+        // (the amounts' bits as words in fragment passes, as their bytes elsewhere)
+        let amounts = if in_fragments { super::fragments::AMOUNT_FORMAT } else { LAYER_FORMAT };
+        let amount_tile = |label| texture(device, label, TILE, TILE, amounts);
         let made: Vec<((u32, u32), Tile)> = missing
             .iter()
             .map(|&at| {
                 let tile = Tile {
                     before: tile("smudge before"),
                     grained: keeps.grained.then(|| tile("smudge grained")),
-                    amount: keeps.amount.then(|| tile("smudge amount")),
-                    shown: keeps.shown.then(|| tile("smudge shown")),
+                    amount: keeps.amount.then(|| amount_tile("smudge amount")),
+                    shown: keeps.shown.then(|| amount_tile("smudge shown")),
                     more: also.iter().map(|_| tile("smudge kept")).collect(),
                 };
                 (at, tile)
@@ -881,7 +890,8 @@ impl Canvas {
 pub(super) type Tiles = BTreeMap<(u32, u32), Tile>;
 
 impl super::Smudge {
-    /// The textures the stroke holds: its tiles' and its window's.
+    /// The textures the stroke holds: its tiles' and its window's (and in fragment passes, what
+    /// the brush carries).
     pub(super) fn textures(&self) -> Vec<&wgpu::Texture> {
         let tiles = self.tiles.values().flat_map(|t| {
             std::iter::once(&t.before)
@@ -890,7 +900,13 @@ impl super::Smudge {
                 .chain(t.shown.iter())
                 .chain(t.more.iter())
         });
-        tiles.chain(self.window.as_ref().map(|w| &w.before)).chain(self.passed.as_ref().map(|p| &p.0)).collect()
+        let fragments =
+            self.held.iter().flat_map(|h| h.textures()).chain(self.frag_window.iter().flat_map(|w| w.textures()));
+        tiles
+            .chain(self.window.as_ref().map(|w| &w.before))
+            .chain(self.passed.as_ref().map(|p| &p.0))
+            .chain(fragments)
+            .collect()
     }
 }
 

@@ -1795,41 +1795,75 @@ fn smudge_tool_moves_paint_and_is_one_undo_step() {
     assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255], "the paint itself stays");
 }
 
+/// The picture `s` shows, every pixel.
+fn picture(s: &CanvasSession) -> Vec<u8> {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render(gpu, &mut st.doc, None);
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    canvas.read_composite(gpu).unwrap()
+}
+
+/// How far two pictures differ: the most any channel does, and how many channels differ at all.
+fn differ(a: &[u8], b: &[u8]) -> (u8, usize) {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).fold((0, 0), |(most, n), (x, y)| (most.max(x.abs_diff(*y)), n + usize::from(x != y)))
+}
+
 /// On an old GPU (no half floats to draw into, no storage buffers: see `Gpu::headless_old`) the
-/// canvas opens and paints, and what it can't do says so: a smudge once (laying nothing, making
-/// no undo step), liquify each time it is asked (not opening).
+/// canvas paints, smudges and liquifies as on any other (within a step of 8 bits here and there),
+/// the smudge one undo step and the liquify another, nothing said.
 #[test]
-fn an_old_gpu_paints_and_says_it_cant_smudge_or_liquify() {
-    use crate::Adjustment;
-    let gpu = match Gpu::headless_old() {
-        Ok(g) => g,
-        Err(e) => return eprintln!("skipped: {e}"),
-    };
-    let s = session_on(gpu, 100, 100);
-    assert!(s.info().error.is_none());
-    s.set_color(1.0, 0.0, 0.0);
-    s.set_brush_size(0.4);
-    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
-    s.stroke_end(vec![]);
-    assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255]);
-    s.set_tool(ToolKind::Smudge);
-    s.set_brush_size(0.6);
-    for told in [true, false] {
+fn an_old_gpu_paints_smudges_and_liquifies_as_others_do() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return eprintln!("skipped: no GPU") };
+    let pictures = [full, old].map(|gpu| {
+        let s = session_on(gpu, 100, 100);
+        assert!(s.info().error.is_none());
+        s.set_color(1.0, 0.0, 0.0);
+        s.set_brush_size(0.4);
+        s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+        let painted = picture(&s);
+        s.set_tool(ToolKind::Smudge);
+        s.set_brush_size(0.6);
         s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
         s.stroke_add((1..30).map(|i| sample(30.0 + i as f32 * 1.5, 50.0, i as f64 * 8.0)).collect());
         s.stroke_end(vec![sample(75.0, 50.0, 250.0)]);
-        assert_eq!(pixel(&s, 60, 50), [255, 255, 255, 255]);
-        assert_eq!(s.take_failure().as_deref(), told.then_some("This device's graphics can't smudge."));
-    }
-    // the paint was the one step
-    s.undo();
-    assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
-    s.redo();
-    for _ in 0..2 {
-        assert!(!s.adjustment_start(Adjustment::Liquify));
-        assert_eq!(s.take_failure().as_deref(), Some("This device's graphics can't liquify."));
-    }
-    assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255]);
+        assert_eq!(s.take_failure(), None);
+        let [r, g, _, _] = pixel(&s, 60, 50);
+        assert!(r > g, "red dragged right: {r} {g}");
+        let smudged = picture(&s);
+        // the smudge was the one step
+        s.undo();
+        assert_eq!(picture(&s), painted);
+        s.redo();
+        // pushed along, then twirled
+        assert!(s.liquify_begin());
+        let push = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
+        s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 52.0, 1.0, 8.0]).collect(), true, false, push);
+        let twirl = LiquifyBrush { kind: LiquifyKind::TwirlRight, ..push };
+        s.liquify_stroke((0..=10).flat_map(|i| [55.0, 45.0 + i as f32, 1.0, 8.0]).collect(), true, false, twirl);
+        s.adjust_end(true);
+        assert_eq!(s.take_failure(), None);
+        let liquified = picture(&s);
+        assert_ne!(liquified, smudged);
+        s.undo();
+        assert_eq!(picture(&s), smudged);
+        (painted, smudged, liquified)
+    });
+    let [(painted, smudged, liquified), (old_painted, old_smudged, old_liquified)] = pictures;
+    let (painted_most, painted_n) = differ(&painted, &old_painted);
+    let (smudged_most, smudged_n) = differ(&smudged, &old_smudged);
+    let (liquified_most, liquified_n) = differ(&liquified, &old_liquified);
+    eprintln!(
+        "old GPU against a full one: painted {painted_most} at most ({painted_n} channels differ), smudged {smudged_most} ({smudged_n}), liquified {liquified_most} ({liquified_n})"
+    );
+    assert!(
+        painted_most <= 1 && smudged_most <= 2 && liquified_most <= 2,
+        "{painted_most} {smudged_most} {liquified_most}"
+    );
 }
 
 #[test]

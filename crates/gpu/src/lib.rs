@@ -273,8 +273,12 @@ impl Gpu {
         }
     }
 
-    /// A device for offscreen work (tests, exports), from the first instance that makes one.
+    /// A device for offscreen work (tests, exports), from the first instance that makes one. With
+    /// `PROCRAFT_HEADLESS_OLD` set, an old GPU's (see [`Gpu::headless_old`]): to run every test there.
     pub fn headless() -> Result<Gpu, GpuError> {
+        if std::env::var_os("PROCRAFT_HEADLESS_OLD").is_some() {
+            return Gpu::headless_old();
+        }
         Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
     }
 
@@ -615,12 +619,15 @@ impl Gpu {
     pub fn lacks(&self) -> Vec<&'static str> {
         let mut lacks = Vec::new();
         if !self.draws_half_floats() {
-            lacks.push("can't draw into half floats: strokes build up in 8 bits a channel, and Liquify is off");
+            lacks.push(
+                "can't draw into half floats: strokes build up in half floats kept as integers beside them, and \
+                 Liquify's field is kept in integers",
+            );
         }
         if !self.computes() {
             lacks.push(
-                "has no compute passes with storage buffers: Smudge is off, wet paint and paint laid in place are \
-                 laid dry, and strokes that build up gradually or to their transfer are drawn over",
+                "has no compute passes with storage buffers: strokes, smudges and wet paint are laid in fragment \
+                 passes instead",
             );
         }
         if !self.paints_3d() {

@@ -1834,32 +1834,37 @@ mod tests {
     }
 
     /// On an old GPU (no compute passes: see `Gpu::headless_old`) an engine whose dabs ask what lies
-    /// under them and move paint goes on without trouble: its smudge lays nothing and says so once,
-    /// as the smudge tool does there, the engine still on; one that only paints paints.
+    /// under them and move paint smudges as on any other (within a step of 8 bits a channel here and
+    /// there), nothing said and the engine still on; one that only paints paints the same.
     #[test]
-    fn an_engine_asking_on_an_old_gpu_smudges_nothing_and_says_so() {
-        let gpu = match procraft_gpu::Gpu::headless_old() {
-            Ok(g) => g,
-            Err(e) => return eprintln!("skipped: {e}"),
+    fn an_engine_asking_on_an_old_gpu_smudges_as_on_others() {
+        let (Ok(full), Ok(old)) = (procraft_gpu::Gpu::headless(), procraft_gpu::Gpu::headless_old()) else {
+            return eprintln!("skipped: no GPU");
         };
-        let (s, plugins, id, set, dir) = mypaint_session(gpu, "told-under-old");
-        let layer = s.add_layer();
-        s.set_color(0.0, 0.0, 1.0);
-        choose(&s, set, "Plain Ink");
-        drag_across(&s);
-        let painted = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
-        let blue = |px: &[u8], x: usize| px[(60 * 200 + x) * 4 + 2];
-        assert!(blue(&painted, 100) > 200, "it paints");
-        choose(&s, set, "Wet Drag");
-        for told in [true, false] {
-            let before = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let laid = [(full, "told-under-full"), (old, "told-under-old")].map(|(gpu, tag)| {
+            let (s, plugins, id, set, dir) = mypaint_session(gpu, tag);
+            let layer = procraft_engine::document::LayerId(s.add_layer());
+            s.set_color(0.0, 0.0, 1.0);
+            choose(&s, set, "Plain Ink");
             drag_across(&s);
-            let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
-            assert_eq!(before, after, "its smudge lays nothing");
-            assert_eq!(s.take_failure().as_deref(), told.then_some("This device's graphics can't smudge."));
-        }
-        assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
-        let _ = std::fs::remove_dir_all(&dir);
+            let painted = s.shared.lock().layer_pixels(layer).unwrap();
+            choose(&s, set, "Wet Drag");
+            s.set_color(1.0, 0.0, 0.0);
+            drag_across(&s);
+            let smudged = s.shared.lock().layer_pixels(layer).unwrap();
+            assert_eq!(s.take_failure(), None);
+            assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
+            let _ = std::fs::remove_dir_all(&dir);
+            (painted, smudged)
+        });
+        let [(painted, smudged), (old_painted, old_smudged)] = laid;
+        let blue = |px: &[u8], x: usize| px[(60 * 200 + x) * 4 + 2];
+        assert!(blue(&old_painted, 100) > 200, "it paints");
+        assert_ne!(old_smudged, old_painted, "it smudges");
+        let most = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+        let (p, m) = (most(&painted, &old_painted), most(&smudged, &old_smudged));
+        eprintln!("old GPU against a full one: painted {p} at most, smudged {m}");
+        assert!(p <= 1 && m <= 2, "{p} {m}");
     }
 
     /// A look's store is kept with it (only for dabs that move paint), and a dab with flag 65536 lays

@@ -224,20 +224,30 @@ fn a_store_put_back_as_an_artwork_kept_it_goes_on_as_it_was() {
 }
 
 #[test]
-fn on_an_old_gpu_a_stroke_into_a_store_lays_nothing_as_a_smudge_does_and_says_so() {
-    let Ok(gpu) = Gpu::headless_old() else { return };
-    let _check = NoErrors(&gpu);
-    let mut doc = Document::new(64, 64);
-    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-    let layer = doc.current();
-    red(&mut canvas, layer);
-    canvas.render(&gpu, &mut doc, None);
-    let before = canvas.read_layer(&gpu, layer).unwrap();
-    let steps = canvas.steps_made();
-    into_store(&mut canvas, &gpu, layer, &[(32.0, 32.0)], 1.0);
-    canvas.render(&gpu, &mut doc, None);
-    assert_eq!(canvas.store(layer), None);
-    assert_eq!(canvas.read_layer(&gpu, layer).unwrap(), before);
-    assert_eq!(canvas.steps_made(), steps);
-    assert!(canvas.take_smudge_lacked());
+fn on_an_old_gpu_a_stroke_into_a_store_lays_as_on_a_full_one() {
+    let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return };
+    let laid = [&full, &old].map(|gpu| {
+        let _check = NoErrors(gpu);
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(gpu, &doc).unwrap();
+        let layer = doc.current();
+        red(&mut canvas, layer);
+        canvas.render(gpu, &mut doc, None);
+        let before = canvas.read_layer(gpu, layer).unwrap();
+        let steps = canvas.steps_made();
+        into_store(&mut canvas, gpu, layer, &[(24.0, 32.0), (32.0, 32.0), (40.0, 30.0)], 1.0);
+        canvas.render(gpu, &mut doc, None);
+        let store = canvas.store(layer).cloned().unwrap();
+        let planes: Vec<Vec<u8>> = store.planes.iter().map(|p| canvas.read_layer(gpu, *p).unwrap()).collect();
+        let pixels = canvas.read_layer(gpu, layer).unwrap();
+        assert_ne!(pixels, before);
+        assert_eq!(canvas.steps_made(), steps + 1);
+        (pixels, planes)
+    });
+    let [(pixels, planes), (old_pixels, old_planes)] = laid;
+    let most = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+    let (layer, paint, height) =
+        (most(&pixels, &old_pixels), most(&planes[0], &old_planes[0]), most(&planes[1], &old_planes[1]));
+    eprintln!("old GPU against a full one: the layer {layer} at most, the paint {paint}, the height {height}");
+    assert!(layer <= 2 && paint <= 2 && height <= 1, "{layer} {paint} {height}");
 }
