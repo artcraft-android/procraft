@@ -939,6 +939,10 @@ impl TimeLapse {
                 let _ = fs::remove_file(&path);
             }
         }
+        // a renumbering cut short, finished before anything is read
+        if !self.finish_renumbering() {
+            return;
+        }
         let text = fs::read_to_string(self.dir.join("segments.json")).ok();
         match (text.as_deref().and_then(Segments::read), self.note()) {
             (Some(read), Some(note)) => {
@@ -953,9 +957,73 @@ impl TimeLapse {
                     );
                     self.write_segments(&Segments { version: TIME_LAPSE_FORMAT, ..note });
                 }
+                self.put_back_before();
             }
             _ => self.take_back(),
         }
+    }
+
+    /// Videos set aside together (by an earlier version, once it couldn't read their note) that
+    /// were all made before anything the time-lapse holds now: the frames before it, which that
+    /// version went on without. Put back in front of it, the newest set first, its videos and
+    /// pictures numbered on after them (moves written down first, as [`Self::renumber`]'s).
+    fn put_back_before(&self) {
+        for group in (0..64u32).rev() {
+            let run = self.aside_run(group);
+            let Some(made) = run.iter().filter_map(|(p, _)| written(p)).max() else { continue };
+            let Some(note) = self.note() else { return };
+            let now: Vec<PathBuf> = (0..note.ends.len())
+                .map(|i| PathBuf::from(self.segment_path(i)))
+                .chain(frame_files(&self.dir).into_iter().filter(|f| frame_index(f).is_some()))
+                .collect();
+            if now.iter().filter_map(|p| written(p)).min().is_none_or(|first| made > first) {
+                continue;
+            }
+            // (what that version set aside is two videos or more; one alone is what a stop
+            // mid-close left, and its frames are in the first noted; and the frames noted since are
+            // new ones: a video made again of the same frames would hold all of them)
+            let total = run.iter().fold(0u32, |n, (_, v)| n.saturating_add(v.frames));
+            if run.len() < 2 || note.ends.first().is_none_or(|&first| first >= total) {
+                continue;
+            }
+            let m = run.len();
+            let pictures: Vec<u32> = frame_files(&self.dir).iter().filter_map(|f| frame_index(f)).collect();
+            let moves: Vec<(u32, u32)> = pictures.iter().map(|&i| (i, i.saturating_add(total))).collect();
+            let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // the videos noted now one place on for each put back (the last first), then those
+            let mut videos: Vec<(String, String)> = (0..note.ends.len())
+                .rev()
+                .map(|j| (name(Path::new(&self.segment_path(j))), name(Path::new(&self.segment_path(j + m)))))
+                .collect();
+            videos.extend(run.iter().enumerate().map(|(i, (p, _))| (name(p), name(Path::new(&self.segment_path(i))))));
+            let mut ends = Vec::with_capacity(m + note.ends.len());
+            let mut end = 0u32;
+            for (_, v) in &run {
+                end = end.saturating_add(v.frames);
+                ends.push(end);
+            }
+            ends.extend(note.ends.iter().map(|e| e.saturating_add(total)));
+            let after = Segments { version: TIME_LAPSE_FORMAT, ends, ..note };
+            let plan = serde_json::json!({ "moves": moves, "placing": false, "videos": videos, "note": after });
+            log::info!("a time-lapse's {m} videos set aside, {total} frames made before it, put back in front of it");
+            let kept = write_atomically(&self.dir.join(RENUMBERING), |p| {
+                fs::write(p, plan.to_string()).map_err(|e| file_error("saving", e))
+            });
+            if kept.is_err() || !self.finish_renumbering() {
+                return;
+            }
+        }
+    }
+
+    /// The videos set aside together as group `group` (`set-aside-0-segment-1.mp4` on), in order,
+    /// while each has a header to count its frames by.
+    fn aside_run(&self, group: u32) -> Vec<(PathBuf, Mp4)> {
+        (0..256)
+            .map_while(|i| {
+                let path = self.dir.join(format!("{SET_ASIDE}{group}-segment-{}.mp4", i + 1));
+                mp4_frames(&path).filter(|m| m.frames > 0).map(|m| (path, m))
+            })
+            .collect()
     }
 
     /// With no note of them, the videos (`segment-1.mp4` on, else those set aside together) noted
@@ -965,9 +1033,6 @@ impl TimeLapse {
     /// counted only them): they are numbered again after the videos, in the order they were
     /// recorded ([`Self::renumber`]).
     fn take_back(&self) {
-        if !self.finish_renumbering() {
-            return;
-        }
         let first_picture = frame_files(&self.dir).iter().filter_map(|f| frame_index(f)).min().unwrap_or(u32::MAX);
         if first_picture == 0 {
             return;
@@ -982,15 +1047,11 @@ impl TimeLapse {
         };
         let mut found = run(&|i| PathBuf::from(self.segment_path(i)));
         let mut aside = false;
-        if found.is_empty() {
-            for group in 0..64u32 {
-                let videos = run(&|i| self.dir.join(format!("{SET_ASIDE}{group}-segment-{}.mp4", i + 1)));
-                if !videos.is_empty() {
-                    found = videos;
-                    aside = true;
-                    break;
-                }
-            }
+        if found.is_empty()
+            && let Some(videos) = (0..64u32).map(|group| self.aside_run(group)).find(|run| !run.is_empty())
+        {
+            found = videos;
+            aside = true;
         }
         let Some(&(_, m)) = found.first() else { return };
         let total = found.iter().fold(0u32, |n, (_, v)| n.saturating_add(v.frames));
@@ -1078,10 +1139,6 @@ impl TimeLapse {
         let plan: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         let moves: Vec<(u32, u32)> =
             plan.get("moves").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default();
-        if moves.is_empty() {
-            let _ = fs::remove_file(&note);
-            return true;
-        }
         let out_of_the_way = |to: u32| self.dir.join(format!("frame-{to:06}.jpg.renumbered"));
         if !plan.get("placing").and_then(serde_json::Value::as_bool).unwrap_or(false) {
             for &(was, to) in &moves {
@@ -1090,7 +1147,10 @@ impl TimeLapse {
                     return false;
                 }
             }
-            let placing = serde_json::json!({ "moves": moves, "placing": true });
+            let mut placing = plan.clone();
+            if let Some(p) = placing.as_object_mut() {
+                p.insert("placing".to_owned(), serde_json::Value::Bool(true));
+            }
             let written =
                 write_atomically(&note, |p| fs::write(p, placing.to_string()).map_err(|e| file_error("saving", e)));
             if written.is_err() {
@@ -1100,6 +1160,23 @@ impl TimeLapse {
         for &(_, to) in &moves {
             let aside = out_of_the_way(to);
             if aside.exists() && fs::rename(&aside, self.frame_path(to)).is_err() {
+                return false;
+            }
+        }
+        // videos moved (each once: where it goes is taken when it has), then their note
+        let videos: Vec<(String, String)> =
+            plan.get("videos").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+        for (from, to) in &videos {
+            let (from, to) = (self.dir.join(from), self.dir.join(to));
+            if from.exists() && !to.exists() && fs::rename(&from, &to).is_err() {
+                return false;
+            }
+        }
+        if let Some(after) = plan.get("note") {
+            let kept = write_atomically(&self.dir.join("segments.json"), |p| {
+                fs::write(p, after.to_string()).map_err(|e| file_error("saving", e))
+            });
+            if kept.is_err() {
                 return false;
             }
         }
@@ -1155,6 +1232,11 @@ impl TimeLapse {
             }
         }
     }
+}
+
+/// When the file at `path` was last written, if that can be told.
+fn written(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// The frame a frame file is (`frame-000123.jpg`: 123).
@@ -2098,6 +2180,72 @@ mod tests {
         (20_000..20_007).for_each(|i| picture(&dir, i));
         let t = opened(&artwork);
         assert_eq!((t.count(), t.clips().len()), (20_007, 40));
+        let _ = fs::remove_dir_all(&artwork);
+    }
+
+    #[test]
+    fn videos_an_earlier_version_set_aside_and_went_on_without_come_back_in_front() {
+        // as 0.0.5 left it on a phone: three videos noted twice, so set aside at the next close;
+        // a new note from frame 0 with one video of the frames since, and two pictures after
+        let (artwork, dir) = recording("before");
+        let written = |name: &str, minutes: u64| {
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(3600 - minutes * 60);
+            fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(when).unwrap();
+        };
+        for (i, frames, at) in [(1, 5, 0), (2, 418, 3), (3, 634, 6)] {
+            let name = format!("set-aside-0-segment-{i}.mp4");
+            fake_mp4(&dir.join(&name), frames, 1280, 1280);
+            written(&name, at);
+        }
+        fake_mp4(&dir.join("segment-1.mp4"), 3, 1280, 1280);
+        written("segment-1.mp4", 8);
+        fs::write(
+            dir.join("segments.json"),
+            r#"{"resolution":0,"quality":1,"hevc":false,"width":1280,"height":1280,"bitrate":6553600,"ends":[3],"clip_size":null,"clip_hevc":null}"#,
+        )
+        .unwrap();
+        for (i, at) in [(3, 9), (4, 10)] {
+            picture(&dir, i);
+            written(&format!("frame-{i:06}.jpg"), at);
+        }
+        let t = opened(&artwork);
+        assert_eq!((t.count(), spans(&t)), (1062, vec![(0, 5), (5, 418), (423, 634), (1057, 3)]));
+        assert!((0..1062).all(|i| t.frame_kept(i)));
+        assert!((red(&t, 1060) - 3).abs() <= 2 && (red(&t, 1061) - 4).abs() <= 2);
+        assert!(!dir.join(RENUMBERING).exists() && !dir.join("set-aside-0-segment-1.mp4").exists());
+        // and stays so; the next video after them
+        let t = opened(&artwork);
+        assert_eq!((t.count(), t.clips().len()), (1062, 4));
+        let plan = t.segment_plan().unwrap();
+        assert_eq!((plan.frames.clone(), plan.noted), (vec![1060, 1061], 4));
+        let _ = fs::remove_dir_all(&artwork);
+
+        // the same cut short (the app stopped mid-way): the picture and two videos moved, the
+        // last not, the note not yet written; finished the next time
+        let (artwork, dir) = recording("before-cut");
+        fake_mp4(&dir.join("segment-1.mp4"), 4, 2, 2);
+        fake_mp4(&dir.join("segment-3.mp4"), 2, 2, 2);
+        fake_mp4(&dir.join("set-aside-0-segment-2.mp4"), 2, 2, 2);
+        fs::write(dir.join("segments.json"), r#"{"width":2,"height":2,"ends":[2]}"#).unwrap();
+        picture(&dir, 8);
+        fs::write(
+            dir.join(RENUMBERING),
+            r#"{"moves":[[2,8]],"placing":true,"videos":[["segment-1.mp4","segment-3.mp4"],["set-aside-0-segment-1.mp4","segment-1.mp4"],["set-aside-0-segment-2.mp4","segment-2.mp4"]],"note":{"version":2,"resolution":0,"quality":1,"hevc":false,"width":2,"height":2,"bitrate":0,"ends":[4,6,8],"clip_size":null,"clip_hevc":null}}"#,
+        )
+        .unwrap();
+        let t = opened(&artwork);
+        assert_eq!((t.count(), spans(&t)), (9, vec![(0, 4), (4, 2), (6, 2)]));
+        assert!(!dir.join(RENUMBERING).exists());
+        let _ = fs::remove_dir_all(&artwork);
+
+        // one video alone set aside (a close stopped mid-way), its frames in the one noted: left
+        let (artwork, dir) = recording("leftover");
+        fake_mp4(&dir.join("set-aside-0-segment-1.mp4"), 3, 2, 2);
+        fake_mp4(&dir.join("segment-1.mp4"), 5, 2, 2);
+        fs::write(dir.join("segments.json"), r#"{"width":2,"height":2,"ends":[5]}"#).unwrap();
+        let t = opened(&artwork);
+        assert_eq!((t.count(), spans(&t)), (5, vec![(0, 5)]));
+        assert!(dir.join("set-aside-0-segment-1.mp4").exists());
         let _ = fs::remove_dir_all(&artwork);
     }
 }
