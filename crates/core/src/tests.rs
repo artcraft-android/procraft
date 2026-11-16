@@ -1672,15 +1672,39 @@ fn dump_brush_strokes() {
                 pressure,
                 ..sample(x * across, y * across, i as f64 * 0.01)
             };
-            s.stroke_begin(PointerKind::Stylus, vec![at((100.0, 256.0), 0.0, 0)]);
-            s.stroke_end(vec![at((924.0, 256.0), 1.0, 1)]);
+            // with DUMP_STEP, the samples that many pixels apart along the way (in batches of four),
+            // for an engine whose stroke would do too much at one sample
+            let step: Option<f32> = std::env::var("DUMP_STEP").ok().and_then(|v| v.parse().ok()).filter(|s| *s > 0.0);
+            let along = |corners: &[(f32, f32)], pressures: &[f32]| -> Vec<PenSample> {
+                let Some(step) = step else {
+                    return corners.iter().zip(pressures).enumerate().map(|(i, (&c, &p))| at(c, p, i)).collect();
+                };
+                let mut out = vec![at(corners[0], pressures[0], 0)];
+                for i in 1..corners.len() {
+                    let ((x0, y0), (x1, y1)) = (corners[i - 1], corners[i]);
+                    let n = (((x1 - x0).hypot(y1 - y0) / step).ceil() as usize).max(1);
+                    for k in 1..=n {
+                        let t = k as f32 / n as f32;
+                        let p = pressures[i - 1] + (pressures[i] - pressures[i - 1]) * t;
+                        let mut sample = at((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), p, 0);
+                        sample.time_ms = (i - 1) as f64 * 0.01 + 0.01 * f64::from(t);
+                        out.push(sample);
+                    }
+                }
+                out
+            };
+            let draw = |samples: Vec<PenSample>| {
+                s.stroke_begin(PointerKind::Stylus, samples.get(..1).unwrap_or_default().to_vec());
+                let rest = samples.get(1..).unwrap_or_default();
+                let (middle, last) = rest.split_at(rest.len().saturating_sub(1));
+                for some in middle.chunks(4) {
+                    s.stroke_add(some.to_vec());
+                }
+                s.stroke_end(last.to_vec());
+            };
+            draw(along(&[(100.0, 256.0), (924.0, 256.0)], &[0.0, 1.0]));
             let zigzag = [(100.0, 560.0), (300.0, 760.0), (500.0, 560.0), (700.0, 760.0), (924.0, 600.0)];
-            let mut corners = zigzag.iter().enumerate().map(|(i, &c)| at(c, 1.0, i));
-            s.stroke_begin(PointerKind::Stylus, corners.next().into_iter().collect());
-            let rest: Vec<PenSample> = corners.collect();
-            let (middle, last) = rest.split_at(rest.len() - 1);
-            s.stroke_add(middle.to_vec());
-            s.stroke_end(last.to_vec());
+            draw(along(&zigzag, &[1.0; 5]));
         }
         for (row, size) in sizes.into_iter().enumerate().filter(|_| !paths) {
             s.set_brush_size(size);
