@@ -5629,34 +5629,45 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Renders the brush's sample stroke once, off the main thread. */
-    fun loadPreview(b: BrushInfo) {
+    /** The sample strokes are drawn one at a time (the core draws them so), waited for here without holding a thread. */
+    private val previewTurn = Mutex()
+
+    /**
+     * Renders the brush's sample stroke once, off the main thread. Called from the brush's row: a row
+     * scrolled away before its turn comes draws none, so a fling through a long library doesn't
+     * leave the rows it stops on waiting behind every row it passed.
+     */
+    suspend fun loadPreview(b: BrushInfo) {
         val key = "${b.set}-${b.index}"
         if (previews.containsKey(key)) return
         val s = session ?: return
         val round = previewRound
-        viewModelScope.launch {
-            val made = withContext(Dispatchers.Default) {
-                // half the sample stroke's own canvas: the cell shows it across its width
-                val t = s.brushPreview(b.set, b.index, 530u, 162u) ?: return@withContext null
-                // whether the stroke runs under the name: the name's box (19.5 in, 14 to 26 down, about
-                // 7.7 a letter wide, in a cell the picture fills 80 high and 261.7 wide) covered more
-                // than 2/255 on average
-                val k = 162f / 80f
-                val x0 = ((19.5f + 6.85f) * k).toInt()
-                val x1 = ((19.5f + 6.85f + 7.7f * b.name.length) * k).toInt().coerceAtMost(530)
-                val y0 = (14f * k).toInt()
-                val y1 = (26f * k).toInt()
-                var cover = 0L
-                for (y in y0 until y1) for (x in x0 until x1) cover += t.rgba[(y * 530 + x) * 4 + 3].toInt() and 0xFF
-                val under = x1 > x0 && cover > 2L * (x1 - x0) * (y1 - y0)
-                val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
-                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
-                bitmap.asImageBitmap() to under
-            }
-            if (made != null && round == previewRound) {
-                shadedNames[key] = made.second
-                previews[key] = made.first
+        previewTurn.withLock {
+            if (previews.containsKey(key) || round != previewRound) return
+            // once begun it is drawn and kept, even if the row has gone meanwhile
+            withContext(kotlinx.coroutines.NonCancellable) {
+                val made = withContext(Dispatchers.Default) {
+                    // half the sample stroke's own canvas: the cell shows it across its width
+                    val t = s.brushPreview(b.set, b.index, 530u, 162u) ?: return@withContext null
+                    // whether the stroke runs under the name: the name's box (19.5 in, 14 to 26 down, about
+                    // 7.7 a letter wide, in a cell the picture fills 80 high and 261.7 wide) covered more
+                    // than 2/255 on average
+                    val k = 162f / 80f
+                    val x0 = ((19.5f + 6.85f) * k).toInt()
+                    val x1 = ((19.5f + 6.85f + 7.7f * b.name.length) * k).toInt().coerceAtMost(530)
+                    val y0 = (14f * k).toInt()
+                    val y1 = (26f * k).toInt()
+                    var cover = 0L
+                    for (y in y0 until y1) for (x in x0 until x1) cover += t.rgba[(y * 530 + x) * 4 + 3].toInt() and 0xFF
+                    val under = x1 > x0 && cover > 2L * (x1 - x0) * (y1 - y0)
+                    val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                    bitmap.asImageBitmap() to under
+                }
+                if (made != null && round == previewRound) {
+                    shadedNames[key] = made.second
+                    previews[key] = made.first
+                }
             }
         }
     }
