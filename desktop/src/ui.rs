@@ -577,7 +577,8 @@ impl Interface {
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
-            selection: self.selection.on,
+            // while the selection tool is open, or while something is selected
+            selection: self.selection.on || session.has_selection(),
             adjustments: self.open == Some(Popover::Adjustments)
                 || session.adjustment_shown().adjustment.is_some()
                 || session.recolor_on()
