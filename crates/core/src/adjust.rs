@@ -534,6 +534,11 @@ impl CanvasSession {
         st.settle();
         let layers = st.edited_layers();
         let Some((&first, _)) = layers.split_first() else { return false };
+        // an old GPU can't draw liquify's field: told, and the layer left as it is
+        if st.canvas.as_ref().is_some_and(|c| !c.liquifies()) {
+            st.lacks_said = Some(crate::crop::LIQUIFY_LACKED_SAID.to_owned());
+            return false;
+        }
         let alpha_locked = layers.len() == 1 && st.doc.layer(first).is_some_and(|l| l.alpha_lock);
         // each layer's mask is pushed along with it
         let along: Vec<LayerId> =

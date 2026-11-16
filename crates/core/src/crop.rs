@@ -18,6 +18,12 @@ const LOST_SAID: &str =
 /// What the apps tell when a smudge stroke couldn't be begun, or couldn't go on.
 const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this canvas.";
 
+/// What the apps tell when the GPU can't smudge at all (an old one: see `Gpu::computes`), once.
+const SMUDGE_LACKED_SAID: &str = "This device's graphics can't smudge.";
+
+/// What the apps tell when the GPU can't liquify (an old one: see `Gpu::draws_half_floats`).
+pub(crate) const LIQUIFY_LACKED_SAID: &str = "This device's graphics can't liquify.";
+
 /// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
 /// caches (four).
 const CANVAS_LAYERS: u64 = 7;
@@ -174,7 +180,9 @@ impl CanvasSession {
             return Some(LOST_SAID.to_owned());
         }
         let refused = st.canvas.as_mut().is_some_and(Canvas::take_smudge_refused);
+        let lacked = st.canvas.as_mut().is_some_and(Canvas::take_smudge_lacked);
         let failed = st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()));
+        let failed = failed.or_else(|| lacked.then(|| SMUDGE_LACKED_SAID.to_owned())).or_else(|| st.lacks_said.take());
         let failed = failed.or_else(|| st.filters.take_said());
         if failed.is_some() {
             return failed;

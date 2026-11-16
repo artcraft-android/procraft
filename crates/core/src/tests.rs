@@ -11,13 +11,17 @@ fn sample(x: f32, y: f32, t: f64) -> PenSample {
 
 /// A session on a headless GPU with a `window` × `window` "screen", or `None` without a GPU.
 fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
-    let gpu = match Gpu::headless() {
-        Ok(g) => g,
+    match Gpu::headless() {
+        Ok(gpu) => Some(session_on(gpu, canvas, window)),
         Err(e) => {
             eprintln!("skipped: {e}");
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// A session on `gpu` with a `window` × `window` "screen".
+fn session_on(gpu: Gpu, canvas: u32, window: u32) -> std::sync::Arc<CanvasSession> {
     let s = CanvasSession::new(canvas, canvas);
     {
         let mut st = s.shared.lock();
@@ -26,7 +30,7 @@ fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
         st.gpu = Some(gpu);
         st.ensure_canvas();
     }
-    Some(s)
+    s
 }
 
 /// The current brush draws just where the input goes.
@@ -1503,6 +1507,43 @@ fn smudge_tool_moves_paint_and_is_one_undo_step() {
     s.undo();
     assert_eq!(pixel(&s, 60, 50), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255], "the paint itself stays");
+}
+
+/// On an old GPU (no half floats to draw into, no storage buffers: see `Gpu::headless_old`) the
+/// canvas opens and paints, and what it can't do says so: a smudge once (laying nothing, making
+/// no undo step), liquify each time it is asked (not opening).
+#[test]
+fn an_old_gpu_paints_and_says_it_cant_smudge_or_liquify() {
+    use crate::Adjustment;
+    let gpu = match Gpu::headless_old() {
+        Ok(g) => g,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    let s = session_on(gpu, 100, 100);
+    assert!(s.info().error.is_none());
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255]);
+    s.set_tool(ToolKind::Smudge);
+    s.set_brush_size(0.6);
+    for told in [true, false] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(30.0 + i as f32 * 1.5, 50.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![sample(75.0, 50.0, 250.0)]);
+        assert_eq!(pixel(&s, 60, 50), [255, 255, 255, 255]);
+        assert_eq!(s.take_failure().as_deref(), told.then_some("This device's graphics can't smudge."));
+    }
+    // the paint was the one step
+    s.undo();
+    assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
+    s.redo();
+    for _ in 0..2 {
+        assert!(!s.adjustment_start(Adjustment::Liquify));
+        assert_eq!(s.take_failure().as_deref(), Some("This device's graphics can't liquify."));
+    }
+    assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255]);
 }
 
 #[test]

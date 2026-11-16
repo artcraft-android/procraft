@@ -638,6 +638,8 @@ pub(crate) struct State {
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
+    /// What was asked that this GPU can't do (an old one's: liquify), to be told once.
+    pub(crate) lacks_said: Option<String>,
     /// Layers whose saved files couldn't be read (shown empty): a save leaves each file as it is
     /// until the layer is painted on, and then keeps the file aside before writing the new one.
     pub(crate) unreadable: std::collections::HashSet<procraft_engine::document::LayerId>,
@@ -1706,6 +1708,7 @@ impl CanvasSession {
             name,
             pending_pixels: project::opened(pixels),
             canvas_failed: false,
+            lacks_said: None,
             unreadable: std::collections::HashSet::new(),
             unreadable_untold: Vec::new(),
             closed: false,
