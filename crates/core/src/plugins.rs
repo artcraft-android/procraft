@@ -435,10 +435,26 @@ fn from_file(manifest: Manifest) -> (PluginInfo, Shape) {
     (info, manifest.shape)
 }
 
+/// The parts of the interface a plugin may show bigger or smaller than the rest
+/// ([`Plugins::interface_part_scale`]), each by its number on the `interface_part_scale` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum InterfacePart {
+    /// Windows that float over the canvas: the colour panel dragged out, and any other.
+    Floating = 0,
+    /// Popovers and menus: what drops down from a button or a row.
+    Menus = 1,
+    /// The side bar.
+    SideBar = 2,
+    /// The bar across the top.
+    TopBar = 3,
+    /// The panels that hang from the top bar's buttons.
+    Panels = 4,
+}
+
 /// `plugin` as its card shows it: what comes under a switch that is off left out.
 fn shown(plugin: &PluginInfo, shape: Option<&Shape>) -> PluginInfo {
     let Some(shape) = shape else { return plugin.clone() };
-    let shows = |under: &[Option<usize>], at: usize| Shape::shows(under.get(at).copied().flatten(), &plugin.controls);
+    let shows = |under: &[Option<usize>], at: usize| shape.shows(under.get(at).copied().flatten(), &plugin.controls);
     let controls = plugin.controls.iter().enumerate().filter(|(at, _)| shows(&shape.under, *at));
     let actions = plugin.actions.iter().enumerate().filter(|(at, _)| shows(&shape.action_under, *at));
     PluginInfo {
@@ -777,10 +793,10 @@ impl Plugins {
                 }
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)
-                    && let Some(text) =
+                    && let Some((text, keys)) =
                         store.and_then(|store| plugin_file::read_picture_code(store, &plugin.id, &plugin.version))
                 {
-                    self.hooks.give_picture(&plugin.id, text);
+                    self.hooks.give_picture(&plugin.id, text, keys, values.clone());
                 }
                 // the files picked for it, handed over
                 for (at, control) in plugin.controls.iter().enumerate() {
@@ -1084,7 +1100,8 @@ impl Plugins {
             if listed.is_empty() {
                 filters.push(plugin.clone());
             }
-            for filter in listed.iter().filter(|f| Shape::shows(f.under, &plugin.controls)) {
+            let shape = list.shapes.get(&plugin.id);
+            for filter in listed.iter().filter(|f| shape.is_none_or(|shape| shape.shows(f.under, &plugin.controls))) {
                 filters.push(PluginInfo {
                     id: filter.id.clone(),
                     name: filter.label.clone(),
@@ -1162,13 +1179,19 @@ impl Plugins {
             let by_flags = flagged.contains(&plugin.id) || carried.contains(&plugin.id);
             if added_off && moved_and_changed(&key, &value) && !by_flags {
                 plugin.on = plugin.problem.is_none();
-                // with the switch it comes under
-                let under = shapes.get(&plugin.id).and_then(|shape| shape.under.get(at).copied().flatten());
-                if let Some(PluginControl::Switch { control }) = under.and_then(|at| plugin.controls.get_mut(at))
-                    && !read.contains(&control.key)
-                    && !flag_switched.contains(&control.key)
-                {
-                    control.on = true;
+                // with the switch it comes under, and the one that comes under
+                let shape = shapes.get(&plugin.id);
+                let mut under = shape.and_then(|shape| shape.under.get(at).copied().flatten());
+                while let Some(above) = under {
+                    if let Some(PluginControl::Switch { control }) = plugin.controls.get_mut(above)
+                        && !read.contains(&control.key)
+                        && !flag_switched.contains(&control.key)
+                    {
+                        control.on = true;
+                    }
+                    // (two deep at most, as read)
+                    under =
+                        shape.and_then(|shape| shape.under.get(above).copied().flatten()).filter(|&next| next != above);
                 }
             }
         } else if moved(&key) {
@@ -1286,8 +1309,9 @@ impl Plugins {
             list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
                 let index = p.actions.iter().position(|a| a.key == key)?;
                 // (one under a switch that is off isn't there)
-                let under = list.shapes.get(&p.id).and_then(|shape| shape.action_under.get(index).copied().flatten());
-                if !Shape::shows(under, &p.controls) {
+                let shape = list.shapes.get(&p.id);
+                let under = shape.and_then(|shape| shape.action_under.get(index).copied().flatten());
+                if !shape.is_none_or(|shape| shape.shows(under, &p.controls)) {
                     return None;
                 }
                 let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
@@ -1583,6 +1607,37 @@ impl Plugins {
     /// (0..1, y down): `[x, y]`, or none with no picker plugin on.
     pub fn picker_point(&self, s: f32, v: f32) -> Option<Vec<f32>> {
         self.hooks().picker_point(s, v).map(|(x, y)| vec![x, y])
+    }
+
+    /// The hue (0..1) the picker plugin says a touch starting at point (`x`, `y`) of the Classic
+    /// square picks (0..1, y down); none where it picks saturation and brightness, or with no picker
+    /// plugin on that picks hues itself.
+    pub fn picker_hue(&self, x: f32, y: f32) -> Option<f32> {
+        self.hooks().picker_hue(x, y)
+    }
+
+    /// Where the picker plugin says hue `h`'s knob sits on the Classic square (0..1, y down): `[x,
+    /// y]`, or none while the app's hue slider has the hue (it shows only then).
+    pub fn picker_hue_point(&self, h: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_hue_point(h).map(|(x, y)| vec![x, y])
+    }
+
+    /// A number that changes whenever a plugin comes on or off or its controls change: what a plugin
+    /// answered, or a picture drawn by one, before it changed may not be what it answers now.
+    pub fn generation(&self) -> u64 {
+        self.hooks().generation()
+    }
+
+    /// How big `part` of the interface shows next to the rest of it, on top of
+    /// [`Self::interface_scale`], as plugins say (1: as the rest).
+    pub fn interface_part_scale(&self, part: InterfacePart) -> f32 {
+        self.hooks().interface_part_scale(part as i32)
+    }
+
+    /// Whether a plugin has the floating colour window show Classic's picker alone: no title, mode
+    /// icons or the other pickers.
+    pub fn floating_picker_only(&self) -> bool {
+        self.hooks().floating_picker_only()
     }
 
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
@@ -2348,6 +2403,7 @@ mod tests {
     const INTERFACE: &str = "io.github.artcraftandroid.interface";
     const LAYER_TOOLS: &str = "io.github.artcraftandroid.layer-tools";
     const LAYER_FILLS: &str = "io.github.artcraftandroid.layer-fills";
+    const TRIANGLE: &str = "io.github.artcraftandroid.colour-triangle";
     const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
 
     /// The app's plugins kept in `dir`, what it comes with added.
@@ -2565,6 +2621,33 @@ mod tests {
         assert!(plugins.picker_on());
         let corner = plugins.picker_pick(0.933, 0.5).unwrap();
         assert!(corner.iter().all(|share| (share - 1.0).abs() < 1e-3), "{corner:?}");
+        // the hue slider has the hue until the ring does, then a touch on the ring picks it
+        assert_eq!(plugins.picker_hue_point(0.0), None);
+        assert_eq!(plugins.picker_hue(0.97, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.ring"), true));
+        let knob = plugins.picker_hue_point(0.25).unwrap();
+        assert!((knob[0] - 0.5).abs() < 1e-3 && (knob[1] - 0.05).abs() < 1e-3, "{knob:?}");
+        assert!(plugins.picker_hue(0.97, 0.5).is_some_and(|h| !(1e-3..=0.999).contains(&h)));
+        assert_eq!(plugins.picker_hue(0.5, 0.5), None, "the triangle's middle");
+        // the floating window: smaller with Interface size's slider, and the picker alone with its switch
+        assert!(!plugins.floating_picker_only());
+        assert!(plugins.set_switch(format!("{TRIANGLE}.picker_only"), true));
+        assert!(plugins.floating_picker_only());
+        // the parts of the interface each on top of the whole, while they're sized separately
+        assert!(plugins.set_slider(format!("{INTERFACE}.floating"), 0.5).is_some());
+        assert!(plugins.set_slider(format!("{INTERFACE}.top_bar"), 1.5).is_some());
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 1.0);
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 0.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::TopBar), 1.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Panels), 1.0);
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6, "the whole as it was");
+        // the triangle's own switch off: Classic is the app's square again, and the window as it was
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), false));
+        assert!(!plugins.picker_on() && !plugins.floating_picker_only());
+        assert_eq!(plugins.picker_pick(0.933, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), true));
+        assert!(plugins.picker_on());
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
@@ -2610,6 +2693,7 @@ mod tests {
         let all = [
             "Interface size",
             "Size",
+            "Size parts separately",
             "Clear of status bar and camera",
             "Interface colour",
             "Hue",
@@ -2618,6 +2702,13 @@ mod tests {
             "Panels stay open",
         ];
         assert_eq!(labels(&plugins, INTERFACE), all);
+        // a switch under a switch, and what comes under it while both are on
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        let parts = ["Floating panels", "Popovers and menus", "Side bar", "Top bar", "Panels"];
+        let with_parts: Vec<&str> = all[..3].iter().chain(&parts).chain(&all[3..]).copied().collect();
+        assert_eq!(labels(&plugins, INTERFACE), with_parts);
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), false));
+        assert_eq!(labels(&plugins, INTERFACE)[..2], ["Interface size", "Interface colour"]);
         let tools = ["Opacity of picked layers", "Paste into masks", "Eyedropper picks from layer"];
         assert_eq!(labels(&plugins, LAYER_TOOLS), tools);
         assert_eq!(labels(&plugins, EFFECTS), ["Extract lines", "Outline", "Posterise"]);

@@ -54,6 +54,8 @@ mod modes;
 mod palettes;
 mod pick;
 mod pickers;
+/// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
+pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
 mod plugin_artwork;
 mod plugin_brushes;
 mod plugin_canvas;
@@ -173,9 +175,9 @@ pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelRow, PluginPanel};
 pub use plugins::{
-    PluginAction, PluginControl, PluginInfo, PluginOffer, PluginPart, PluginPlace, PluginSlider, PluginSource,
-    PluginSwitch, Plugins, plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_choice,
-    plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown, plugin_slider_whole,
+    InterfacePart, PluginAction, PluginControl, PluginInfo, PluginOffer, PluginPart, PluginPlace, PluginSlider,
+    PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes, plugin_slider_along, plugin_slider_at,
+    plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
@@ -488,8 +490,9 @@ pub(crate) struct State {
     /// Opened from a folder holding a plugin's artwork: its kind and its data, until the app opens
     /// it with its plugin.
     pub(crate) plugin_opened: Option<plugin_artwork::PluginOpened>,
-    /// The picker plugin's picture, compiled for this session's GPU: whose it is, and its code.
-    pub(crate) picker_program: Option<(String, Arc<str>, Arc<procraft_gpu::PictureProgram>)>,
+    /// The picker plugin's picture, compiled for this session's GPU: whose it is, its code and the
+    /// keys it reads its controls by.
+    pub(crate) picker_program: Option<PickerProgram>,
     /// When the stroke's input was last heard, for a sound plugin.
     pub(crate) sound_heard: Option<std::time::Instant>,
     /// Where the pen last hovered (window pixels) and when, for the spray can's rattle.

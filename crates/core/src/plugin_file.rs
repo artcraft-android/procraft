@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 5;
+const INTERFACE: u32 = 6;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -49,6 +49,9 @@ const RATIO_FROM: usize = 64 << 10;
 const MOST_DEPTH: usize = 8;
 const MOST_PATH: usize = 200;
 const MOST_CONTROLS: usize = 8;
+/// Controls, for code written to interface 6 or later that holds no filter (a filter has room for
+/// eight values).
+const MOST_CONTROLS_6: usize = 16;
 /// File controls, besides: each a file someone picks (so far a sound), kept with the plugin.
 const MOST_FILES: usize = 8;
 /// The folder in a plugin's home where the files picked for its file controls are kept.
@@ -132,6 +135,8 @@ pub(crate) struct Manifest {
     pub publisher: String,
     pub description: String,
     pub experimental: bool,
+    /// The interface it is written to (see [`crate::plugin_run`]).
+    pub interface: u32,
     /// Where its code steps in, if it holds any.
     pub hooks: Vec<Hook>,
     pub controls: Vec<PluginControl>,
@@ -185,9 +190,19 @@ pub(crate) struct Replaced {
 }
 
 impl Shape {
-    /// Whether whatever comes under `under` shows, in a plugin whose controls are `controls`.
-    pub(crate) fn shows(under: Option<usize>, controls: &[PluginControl]) -> bool {
-        under.is_none_or(|at| matches!(controls.get(at), Some(PluginControl::Switch { control }) if control.on))
+    /// Whether whatever comes under `under` shows, in a plugin whose controls are `controls`: that
+    /// switch is on, and any it comes under.
+    pub(crate) fn shows(&self, under: Option<usize>, controls: &[PluginControl]) -> bool {
+        let mut next = under;
+        // (a switch comes under another at most, as read)
+        for _ in 0..3 {
+            let Some(at) = next else { return true };
+            if !matches!(controls.get(at), Some(PluginControl::Switch { control }) if control.on) {
+                return false;
+            }
+            next = self.under.get(at).copied().flatten();
+        }
+        false
     }
 }
 
@@ -704,7 +719,9 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     }
     // files besides the rest, and only for code to use (a filter has no way to)
     let picked = raw.controls.iter().filter(|c| c.kind == "file").count();
-    if raw.controls.len() - picked > MOST_CONTROLS || picked > MOST_FILES {
+    let more = compat.interface.is_some_and(|interface| interface >= 6) && !holds.contains(&PluginPart::Filter);
+    let most = if more { MOST_CONTROLS_6 } else { MOST_CONTROLS };
+    if raw.controls.len() - picked > most || picked > MOST_FILES {
         return Err(Refusal::Described);
     }
     if picked > 0 && (!holds.contains(&PluginPart::Hooks) || holds.contains(&PluginPart::Filter)) {
@@ -892,6 +909,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         publisher,
         description: raw.description,
         experimental: raw.experimental.unwrap_or(true),
+        interface: compat.interface.unwrap_or(1),
         hooks,
         controls,
         brush_controls,
@@ -907,7 +925,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
 
 /// What the manifest of plugin `id` says beyond its card's list (its controls, actions, filters and
 /// what it replaces, as written), if it holds up: a control or an action comes under a
-/// switch of the list's top level; a listed filter has a plain key and name and reads controls
+/// switch of the list's top level, or under one that comes under such a switch; a listed filter has a plain key and name and reads controls
 /// that aren't files, each once; a plugin it takes the place of has an id beside its own (the same
 /// but for the last part), and what took its values is here.
 fn shape_of(
@@ -917,9 +935,12 @@ fn shape_of(
     listed: &[RawFilter],
     replacing: &[RawReplaced],
 ) -> Result<Shape, Refusal> {
+    // a switch of the top level, or one that comes under one
+    let top = |key: &str| controls.iter().any(|c| c.key == key && c.kind == "switch" && c.under.is_none());
     let switch_at = |key: &str| {
-        let at = controls.iter().position(|c| c.key == key && c.kind == "switch" && c.under.is_none());
-        at.ok_or(Refusal::Described)
+        let at = controls.iter().position(|c| c.key == key && c.kind == "switch");
+        let fits = at.and_then(|at| controls.get(at)).is_some_and(|c| c.under.as_deref().is_none_or(top));
+        at.filter(|_| fits).ok_or(Refusal::Described)
     };
     let control_at =
         |key: &str| controls.iter().position(|c| c.key == key && c.kind != "file").ok_or(Refusal::Described);
@@ -994,7 +1015,10 @@ fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal>
     }
     if manifest.hooks.contains(&Hook::Picker) && path == PICTURE_CODE {
         let text = std::str::from_utf8(data).map_err(|e| e.to_string());
-        let read = text.and_then(|text| procraft_gpu::read_picture(text).map(|_| ()));
+        let read = text.and_then(|text| match picture_keys(manifest) {
+            Some(keys) => procraft_gpu::read_picture_given(text, &keys).map(|_| ()),
+            None => procraft_gpu::read_picture(text).map(|_| ()),
+        });
         let refused = read.map_err(|why| log::warn!("a picture's code was refused: {why}")).is_err();
         return refused.then_some(Refusal::Code);
     }
@@ -1305,10 +1329,17 @@ pub(crate) fn read_brush_engines(dir: &Path, id: &str, version: &str) -> Vec<cra
 }
 
 /// The picture's code of the picker `id` at `version` in `dir`, if it holds up as it did.
-pub(crate) fn read_picture_code(dir: &Path, id: &str, version: &str) -> Option<String> {
+pub(crate) fn read_picture_code(dir: &Path, id: &str, version: &str) -> Option<(String, Option<Vec<String>>)> {
     let folder = dir.join(id).join(version);
-    read_folder(&folder, id, version)?;
-    String::from_utf8(read_capped(&folder.join(PICTURE_CODE), MOST_SHADER)?).ok()
+    let manifest = read_folder(&folder, id, version)?;
+    let text = String::from_utf8(read_capped(&folder.join(PICTURE_CODE), MOST_SHADER)?).ok()?;
+    Some((text, picture_keys(&manifest)))
+}
+
+/// The keys a picker's picture reads its plugin's controls by, in their order, if it is written to
+/// interface 6 or later (one written before is given none).
+pub(crate) fn picture_keys(manifest: &Manifest) -> Option<Vec<String>> {
+    (manifest.interface >= 6).then(|| value_names(&manifest.controls))
 }
 
 /// The manifest of plugin `id` at `version` in `dir` and the code of its filter at `path` in its
@@ -1992,9 +2023,28 @@ pub(crate) mod tests {
 
     #[test]
     fn more_controls_than_a_page_shows_are_refused() {
-        let controls: Vec<Value> =
-            (0..=MOST_CONTROLS).map(|i| json!({ "key": format!("k{i}"), "type": "switch", "label": "A" })).collect();
-        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/controls", json!(controls)))), Refusal::Described);
+        let switches = |n: usize| -> Vec<Value> {
+            (0..n).map(|i| json!({ "key": format!("k{i}"), "type": "switch", "label": "A" })).collect()
+        };
+        let nine = json!(switches(MOST_CONTROLS + 1));
+        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/controls", nine.clone()))), Refusal::Described);
+        // code written to interface 6 has room for sixteen, a filter still for eight
+        let module = crate::plugin_run::tests::position_module(
+            r#"(func (export "procraft_control") (param i32 f32))"#,
+            "(i64.const 0)",
+        );
+        let of = |interface: u32, controls: &Value| {
+            let mut manifest = coded("org.example.plugin", &module);
+            manifest["controls"] = controls.clone();
+            let manifest = with(manifest, "/compat/procraft/interface", json!(interface));
+            read_package(&a_coded_file(&manifest, &module)).map(|p| p.manifest.controls.len())
+        };
+        assert_eq!(of(5, &nine).err(), Some(Refusal::Described));
+        assert_eq!(of(6, &nine).ok(), Some(MOST_CONTROLS + 1));
+        assert_eq!(of(6, &json!(switches(MOST_CONTROLS_6))).ok(), Some(MOST_CONTROLS_6));
+        assert_eq!(of(6, &json!(switches(MOST_CONTROLS_6 + 1))).err(), Some(Refusal::Described));
+        let filter = with(with(a_filter(), "/controls", nine), "/compat/procraft/interface", json!(6));
+        assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
     }
 
     #[test]
@@ -2073,7 +2123,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(6)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(7)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
@@ -2583,9 +2633,32 @@ pub(crate) mod tests {
             manifest.pointer_mut(parent).unwrap()[field] = value;
             refusal(&a_coded_file(&manifest, &module))
         };
-        // under a switch at the top of the list, never a slider, one under another, or itself
+        // under a switch at the top of the list or under one there, never a slider, or itself
         assert_eq!(of("/controls/1/under", json!("size")), Refusal::Described);
         assert_eq!(of("/controls/0/under", json!("grid")), Refusal::Described);
+        let mut deeper = acting();
+        deeper["controls"] = json!([
+            { "key": "grid", "type": "switch", "label": "Grid" },
+            { "key": "fine", "type": "switch", "label": "Fine", "under": "grid" },
+            { "key": "size", "type": "slider", "label": "Size", "least": 1, "most": 9, "under": "fine" },
+            { "key": "finer", "type": "switch", "label": "Finer", "under": "fine" },
+            { "key": "step", "type": "slider", "label": "Step", "least": 1, "most": 9, "under": "finer" },
+        ]);
+        assert_eq!(refusal(&a_coded_file(&deeper, &module)), Refusal::Described, "three deep");
+        deeper["controls"].as_array_mut().unwrap().truncate(3);
+        let shape = read_package(&a_coded_file(&deeper, &module)).unwrap().manifest.shape;
+        assert_eq!(shape.under, [None, Some(0), Some(1)]);
+        // and it shows while both its switches are on
+        let switch = |on: bool| PluginControl::Switch {
+            control: PluginSwitch { key: "k".to_owned(), label: "K".to_owned(), on, starts: on },
+        };
+        let slider = PluginControl::Switch {
+            control: PluginSwitch { key: "s".to_owned(), label: "S".to_owned(), on: false, starts: false },
+        };
+        for (grid, fine, shows) in [(true, true, true), (true, false, false), (false, true, false)] {
+            let controls = [switch(grid), switch(fine), slider.clone()];
+            assert_eq!(shape.shows(Some(1), &controls), shows, "{grid} {fine}");
+        }
         assert_eq!(of("/actions/0/under", json!("size")), Refusal::Described);
         assert_eq!(of("/actions/0/under", json!("nothing")), Refusal::Described);
         // a plugin beside its own id, once, not itself; what took its values is here

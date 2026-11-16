@@ -25,7 +25,8 @@ The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with
 the largest. `effects` lists three filters, each under a switch of its own. `layer-fills` has an
 action beside a filter, `colour-triangle` is a picker, `vector-layers` adds layers of its own, and
 `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds. `interface`,
-`layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches.
+`layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches, and
+`colour-triangle`'s picture draws its hue ring as its switch says.
 
 ## What you write
 
@@ -65,8 +66,8 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Artworks of its own](#artworks-of-its-own)), one kind of layer (see
 [Layers of its own](#layers-of-its-own)) or one brush engine (see
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
-the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, and several filters
-5.
+the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
+5, and more than eight controls, or a picker's picture that reads its controls, 6.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -77,8 +78,8 @@ starts off, until someone taps Turn on. One the app adds by itself starts off, w
 
 ## Controls
 
-A plugin can have up to eight, each a `slider` or a `switch`; a plugin with code can have up to eight
-`file` controls besides.
+A plugin can have up to eight, each a `slider` or a `switch`, or sixteen if it holds code written to
+interface 6 and no filter; a plugin with code can have up to eight `file` controls besides.
 
 | Field | Means |
 |---|---|
@@ -91,7 +92,7 @@ A plugin can have up to eight, each a `slider` or a `switch`; a plugin with code
 | `names` | A name for each of a slider's steps from its lowest, shown in place of the number |
 | `live` | The value goes in as the slider moves, rather than as it lets go |
 | `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
-| `under` | The `key` of a switch it comes under: on the card it shows after that switch, while the switch is on (its value stays as it was while it's hidden) |
+| `under` | The `key` of a switch it comes under: on the card it shows after that switch, while the switch is on (its value stays as it was while it's hidden). That switch is at the top of the list, or comes under one there (interface 6): two deep at most |
 
 A plugin that does several things can have a switch for each, at the top of the list, with that
 thing's sliders `under` it. Turning the plugin on switches none of them on: each is the user's to
@@ -131,7 +132,8 @@ Besides its hooks, code may export any of these, and is told:
   long call, on fuel of its own.
 
 A `key` is lowercase letters, digits and `_`, starting with a letter, and can't be `on`. A filter
-reads it as a field, so there it also has to be a word WGSL allows, and not a keyword such as `loop`.
+reads it as a field, as does a picker's picture written to interface 6, so there it also has to be a
+word WGSL allows, and not a keyword such as `loop`.
 
 Where they show depends on what the plugin holds:
 
@@ -255,6 +257,38 @@ procraft_interface_scale(width: f32, height: f32) -> f32
 
 An answer outside .5 to 2 stops the plugin. The app may show less than the answer, so that every page
 stays in reach on a small window.
+
+### `interface_part_scale`
+
+How big a part of the interface shows next to the rest of it (interface 6), where 1 is as big as
+the rest. It goes on top of [`interface_scale`](#interface_scale). The app asks about each part by
+number:
+
+| `part` | The part |
+|---|---|
+| 0 | Floating panels: the colour panel dragged out by its grabber, and a plugin's own panel |
+| 1 | Popovers and menus: what drops down from a button or a row |
+| 2 | The side bar |
+| 3 | The top bar (what hangs from it hangs from it as it shows) |
+| 4 | The panels that hang from the top bar's buttons |
+
+```
+procraft_interface_part_scale(part: i32) -> f32
+```
+
+Answer 1 for a part you don't know: more may come. An answer outside .5 to 2 stops the plugin.
+Several plugins on this hook each scale a part in turn, to .5 to 2 in all. The desktop app sizes
+the floating colour window and the menus so far, and leaves the other parts as the rest.
+
+### `floating_picker_only`
+
+Whether the floating colour window shows Classic's picker alone (not 0): its grabber, Close and the
+picker with the hue slider under it (or the picker's own [ring](#picker)), and no title, other pickers
+or mode icons.
+
+```
+procraft_floating_picker_only() -> i32
+```
 
 ### `keep_clear`
 
@@ -462,6 +496,25 @@ It's checked as a filter's function is (see [What is refused](#what-is-refused))
 nothing, and its loops pay from a budget. A picture that runs out of budget, or takes too long,
 switches the plugin off. `tools/pack_plugin.py` packs `picture.wgsl` for a plugin on this hook. The
 kit's `picker!` writes the two functions, and `plugins/colour-triangle` is one to start from.
+
+Written to interface 6, the picture is given the plugin's controls too, as a filter is: each as
+`v.<key>`, a switch 1 or 0. The app draws it again when they change.
+
+From interface 6 a picker may also export these, each asked as the controls stand:
+
+```
+procraft_picker_on() -> i32                   // whether it draws Classic now (not 0); without it, always
+procraft_picker_hue(x: f32, y: f32) -> f32     // the hue a touch starting at (x, y) picks, 0 to 1
+procraft_picker_hue_point(h: f32) -> i64       // where hue h's knob sits, packed as above
+```
+
+- While `procraft_picker_on` answers 0, Classic is the app's own square, as with the plugin off.
+- While `procraft_picker_hue_point` answers a point (both halves 0 or more), the picker has the hue
+  too, as on a ring of its own: the app leaves out its hue slider and draws the hue's knob there. A
+  touch that starts where `procraft_picker_hue` answers a hue (0 or more; below 0 elsewhere) moves
+  the hue for the rest of its drag, asked again at each point (one below 0 leaves the hue as it was);
+  any other moves saturation and brightness. Answer -1 for both halves to leave the hue to the slider.
+- An answer that isn't a number stops the plugin.
 
 ### `inbetween`
 
@@ -1382,10 +1435,13 @@ a filter's function, what a filter is given, the kinds of control, and the app's
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
 keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.data` permission and
-the utilities, and interface 5 several filters in one plugin. What comes under a switch, and taking
-the place of other plugins, need no newer interface: an older app shows every control, and leaves
-the others where they are. What a hook calls stays as it's written here, and the app keeps every interface's
-template, so a plugin goes on working as it was written.
+the utilities, interface 5 several filters in one plugin, and interface 6 up to sixteen controls,
+a picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its
+own, a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks.
+What comes under a switch at the top of the list, and taking the place of other plugins, need no
+newer interface: an older app shows every control, and leaves the others where they are. What a
+hook calls stays as it's written here, and the app keeps every interface's template, so a plugin
+goes on working as it was written.
 
 Something that needs more uses a newer interface number, and an older app says it needs a newer
 ProCraft. So does an app that doesn't have a hook a plugin lists, or something `holds` names.
