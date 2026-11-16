@@ -15,13 +15,38 @@ use make2d_engine::timeline::{
 use crate::animation::AnimationPlayback;
 use crate::{CanvasSession, State};
 
+pub(crate) mod autokey;
 mod clipboard;
 mod edits;
+mod groups_inline;
+mod key_lanes;
+mod menus;
+pub(crate) mod panel;
+mod picked;
+mod playback;
 #[cfg(test)]
 mod tests_1g;
 #[cfg(test)]
+mod tests_autokey;
+#[cfg(test)]
 mod tests_edits;
+#[cfg(test)]
+mod tests_groups_inline;
+#[cfg(test)]
+mod tests_key_lanes;
+#[cfg(test)]
+mod tests_menus;
+#[cfg(test)]
+mod tests_panel;
+#[cfg(test)]
+mod tests_picked;
+#[cfg(test)]
+mod tests_playback;
 mod timing;
+
+/// For the media tests, which trim a sound's start as any clip's.
+#[cfg(test)]
+pub(crate) use edits::TimelineEdgePolicy;
 
 /// The most frames a timeline lasts.
 const MOST_FRAMES: u32 = 100_000;
@@ -87,6 +112,12 @@ pub struct TimelineClipInfo {
     /// keys run on across the repeats rather than playing again each time.
     pub cycle: u32,
     pub continue_across: bool,
+    /// Its own opacity (0..1), a blend mode id (see `blend_modes`), whether it is turned off, and
+    /// the colour it is labelled in the panel (0xRRGGBB; none, the panel's own).
+    pub opacity: f32,
+    pub blend: u32,
+    pub disabled: bool,
+    pub label: Option<u32>,
 }
 
 /// How a clip is masked by the clip under it on the track below.
@@ -143,6 +174,10 @@ fn clip_info(c: &Clip, offset: u32) -> TimelineClipInfo {
         mask: TimelineMask::of(c.mask),
         cycle: cycle.map_or(0, |c| c.length),
         continue_across: cycle.is_some_and(|c| c.keys == CycleKeys::ContinueAcross),
+        opacity: c.opacity,
+        blend: c.blend.id(),
+        disabled: c.disabled,
+        label: c.label.map(menus::packed),
     }
 }
 
@@ -154,6 +189,9 @@ pub struct TimelineTrackInfo {
     pub locked: bool,
     /// In time order.
     pub clips: Vec<TimelineClipInfo>,
+    /// Its opacity (0..1), over its clips'; whether it shows alone (see `solo_timeline_track`).
+    pub opacity: f32,
+    pub soloed: bool,
 }
 
 fn playback_of(p: Playback) -> AnimationPlayback {
@@ -209,7 +247,7 @@ impl CanvasSession {
             duration: tl.duration,
             exposure: tl.exposure,
             playback: playback_of(tl.playback),
-            onion_frames: tl.onion.count[0],
+            onion_frames: tl.onion.count[0].max(tl.onion.count[1]),
             onion_opacity: tl.onion.opacity,
             simple: tl.simple.is_some(),
             frame: st.canvas.as_ref().map_or(0, |c| c.timeline_frame()),
@@ -241,6 +279,8 @@ impl CanvasSession {
                 hidden: t.hidden,
                 locked: t.locked,
                 clips: t.clips.iter().map(|c| clip_info(c, offset)).collect(),
+                opacity: t.opacity,
+                soloed: tl.soloed(t.id),
             })
             .collect()
     }
@@ -251,21 +291,29 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(tl) = st.doc.timeline.as_mut() else { return };
         tl.fps = s.fps.clamp(1, MAX_FPS);
-        let end = tl.tracks.iter().flat_map(|t| t.clips.last()).map(|c| c.end()).max().unwrap_or(1);
-        tl.duration = s.duration.clamp(end.max(1), MOST_FRAMES);
+        // shorter than its clips if so (as the end tab's), its looped frames and markers kept within
+        let resized = tl.set_length(s.duration.min(MOST_FRAMES));
         tl.exposure = s.exposure.clamp(1, MAX_EXPOSURE);
         tl.playback = match s.playback {
             AnimationPlayback::Loop => Playback::Loop,
             AnimationPlayback::PingPong => Playback::PingPong,
             AnimationPlayback::OneShot => Playback::OneShot,
         };
-        tl.onion.count = [s.onion_frames.min(make2d_engine::animation::MAX_ONION_FRAMES); 2];
+        // the same count both sides, unless it is as it was (each side set apart, see
+        // `set_timeline_onion`)
+        if s.onion_frames != tl.onion.count[0].max(tl.onion.count[1]) {
+            tl.onion.count = [s.onion_frames.min(make2d_engine::animation::MAX_ONION_FRAMES); 2];
+        }
         tl.onion.opacity = if s.onion_opacity.is_finite() { s.onion_opacity.clamp(0.0, 1.0) } else { 0.4 };
         st.revision += 1;
         if let Some(c) = st.canvas.as_mut() {
             c.invalidate();
         }
         self.shared.frame(st);
+        drop(guard);
+        if resized {
+            self.keep_playhead_within(0);
+        }
     }
 
     /// Simple mode (the track drawn on as a flipbook strip) or every track.

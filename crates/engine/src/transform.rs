@@ -717,6 +717,22 @@ fn carry(p: &Placement, frame: Quad) -> Option<Quad> {
     Some([h.apply(a)?, h.apply(b)?, h.apply(c)?, h.apply(d)?])
 }
 
+/// For a transform that keys a pose rather than moving pixels (a timeline clip's, with autokey):
+/// whether a drag is under way, and the content and box put where `m` carries the source.
+impl Transform {
+    /// Whether a handle is held.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The content and its box go where `m` carries the source rectangle (no warp), as no step
+    /// of its own: what the transform's undo takes back is kept.
+    pub fn place(&mut self, m: Affine) {
+        let source = Placement { content: self.source, frame: self.source, warp: None };
+        self.now = map_placement(&source, m);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

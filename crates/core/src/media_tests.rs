@@ -3,6 +3,8 @@ use super::*;
 use make2d_engine::view::View;
 use make2d_gpu::Gpu;
 
+use crate::timeline::TimelineEdgePolicy;
+
 /// A folder of its own for test `name`, emptied.
 fn folder(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("make2d-media-test-{name}-{}", std::process::id()));
@@ -77,7 +79,7 @@ fn a_sound_brought_in_plays_from_the_playhead_on_a_track_of_its_own() {
     // levels, trims and slips
     assert!(s.set_timeline_sound(clip, 0.5, true, 0.01, true));
     assert_eq!(s.timeline_sounds(0)[0].gain, 0.0);
-    assert!(s.trim_timeline_media_start(clip, 6, true));
+    assert!(s.trim_timeline_clip(clip, true, 6, TimelineEdgePolicy::Push));
     let c = s.timeline_media_clip(clip).unwrap();
     assert!((c.trim_start - 6.0 / f64::from(info.fps)).abs() < 1e-9 && c.volume == 0.5 && c.muted);
     assert!(s.slip_timeline_media(clip, 0.5, true));

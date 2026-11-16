@@ -248,3 +248,73 @@ fn a_sounds_level_is_keyed_and_played_by_frame() {
     assert_eq!(s.timeline_media_clip(sound).unwrap().volume_keys, [0]);
     assert_eq!(s.undo().as_deref(), Some("Remove Level Key"));
 }
+
+#[test]
+fn an_edge_dragged_is_previewed_then_trimmed_in_one_undo_step() {
+    use super::edits::TimelineEdgePolicy as Policy;
+    let Some(s) = three_drawings() else { return };
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
+    // the preview says what would be, and changes nothing
+    let shown = s.timeline_trim_preview(clips[0], false, 4, Policy::Push);
+    assert_eq!(shown.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>(), [(0, 4), (4, 1), (5, 1)]);
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
+    assert!(s.timeline_trim_preview(clips[0], false, 4, Policy::Stop).is_empty(), "the next clip is in the way");
+    // let go: as previewed
+    assert!(s.trim_timeline_clip(clips[0], false, 4, Policy::Push));
+    assert_eq!(spans(&s, 0), [(0, 4), (4, 1), (5, 1)]);
+    // its start into nothing, then the next clip's start into it
+    assert!(s.trim_timeline_clip(clips[0], true, 2, Policy::Stop));
+    assert!(s.trim_timeline_clip(clips[1], true, 3, Policy::Trim));
+    assert_eq!(spans(&s, 0), [(2, 1), (3, 2), (5, 1)]);
+    assert_eq!(s.undo().as_deref(), Some("Trim"));
+    assert_eq!(spans(&s, 0), [(2, 2), (4, 1), (5, 1)]);
+    // a locked track's clips keep their edges
+    let track = s.timeline_tracks()[0].id;
+    assert!(s.set_timeline_track(track, false, true));
+    assert!(!s.trim_timeline_clip(clips[0], false, 9, Policy::Push));
+    assert!(s.timeline_trim_preview(clips[0], false, 9, Policy::Push).is_empty());
+    assert_eq!(s.timeline_move_landing(clips[0], track, 8), None);
+}
+
+#[test]
+fn a_dragged_clip_is_told_where_it_would_land() {
+    let Some(s) = three_drawings() else { return };
+    let track = s.timeline_tracks()[0].id;
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    assert!(s.set_timeline_clip_duration(clips[2], 4, true));
+    // onto the last clip (2..6): the nearest room is just before it or after it
+    assert_eq!(s.timeline_move_landing(clips[0], track, 5), Some(6));
+    assert_eq!(s.timeline_move_landing(clips[0], track, 12), Some(12));
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 4)], "nothing moved");
+    assert!(s.move_timeline_clip(clips[0], track, 5));
+    assert_eq!(s.timeline_tracks()[0].clips.iter().find(|c| c.id == clips[0]).map(|c| c.start), Some(6));
+}
+
+#[test]
+fn clips_picked_together_move_and_are_deleted_in_one_undo_step_each() {
+    let Some(s) = three_drawings() else { return };
+    let track = s.timeline_tracks()[0].id;
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    let layers = s.layers().len();
+    // the last two go later together; the first stays, so earlier they stop at it
+    assert_eq!(s.timeline_shift_room(vec![clips[1], clips[2]], 4), 4);
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)], "nothing moved");
+    assert_eq!(s.shift_timeline_clips(vec![clips[1], clips[2]], 4), 4);
+    assert_eq!(spans(&s, 0), [(0, 1), (5, 1), (6, 1)]);
+    assert_eq!(s.timeline_shift_room(vec![clips[1], clips[2]], -9), -4);
+    assert_eq!(s.undo().as_deref(), Some("Move Clips"));
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
+    // deleted together, their layers with them, and back together
+    assert!(s.delete_timeline_clips(vec![clips[0], clips[2]]));
+    assert_eq!(spans(&s, 0), [(1, 1)]);
+    assert_eq!(s.layers().len(), layers - 2);
+    assert_eq!(s.undo().as_deref(), Some("Delete Clips"));
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
+    assert_eq!(s.layers().len(), layers);
+    // a locked track's clips stay
+    assert!(s.set_timeline_track(track, false, true));
+    assert_eq!(s.shift_timeline_clips(vec![clips[2]], 3), 0);
+    assert_eq!(s.timeline_shift_room(vec![clips[2]], 3), 0);
+    assert!(!s.delete_timeline_clips(vec![clips[2]]));
+}

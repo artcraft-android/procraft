@@ -199,7 +199,7 @@ fn snap_bounds(
 /// The affine map taking corners `from` to corners `to` (top left, top right, bottom right, bottom
 /// left): exact where they are a parallelogram moved as one, else what the top left, top right and
 /// bottom left corners say.
-fn corners_affine(from: [Vec2; 4], to: [Vec2; 4]) -> Option<Affine> {
+pub(crate) fn corners_affine(from: [Vec2; 4], to: [Vec2; 4]) -> Option<Affine> {
     let ([s0, s1, _, s3], [c0, c1, _, c3]) = (from, to);
     let (u, v, u2, v2) = (s1 - s0, s3 - s0, c1 - c0, c3 - c0);
     let det = u.x * v.y - u.y * v.x;
@@ -221,6 +221,11 @@ impl State {
     /// A plugin's layer's items are moved as items, by where the box's corners went, and the layer
     /// laid again exactly.
     pub(crate) fn end_transform(&mut self, commit: bool) {
+        // keying a clip's pose (autokey), nothing was taken up: its keys are kept or put back
+        if self.posing() {
+            self.autokey_end(commit);
+            return;
+        }
         self.snap_pending = None;
         // a vector layer's transform is of its strokes and fills: what was shown moving was only
         // their picture, which is put back, and they are carried to where it was moved and drawn
@@ -305,6 +310,10 @@ impl State {
 
     /// Redraws the layer with the content where the transform has it now.
     fn show_transform(&mut self) {
+        if self.posing() {
+            self.autokey_show();
+            return;
+        }
         let (Some(t), Some(canvas)) = (self.transform.as_ref(), self.canvas.as_mut()) else { return };
         // pixel art blends nothing, whatever Interpolation says: along the canvas's own axes (and
         // in a warp) each pixel is the copy's nearest; turned or pulled out of square, the nearest
@@ -426,6 +435,11 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        // with autokey on a timeline, the drawing at the playhead is keyed where it is moved
+        if let Some(posed) = st.autokey_begin() {
+            self.shared.frame(st);
+            return posed;
+        }
         // a vector layer's selected strokes and fills are picked up onto a layer of their own, which
         // is what is then transformed (and shown moving, the rest of their layer whole under them)
         let vector = st.doc.current();
@@ -558,7 +572,10 @@ impl CanvasSession {
     /// says it: a text layer must be rasterized first, a selection holds nothing of the layer, or
     /// the layer is empty.
     pub fn transform_refusal(&self) -> String {
-        let st = self.shared.lock();
+        let mut st = self.shared.lock();
+        if let Some(why) = st.autokey_refusal() {
+            return why;
+        }
         let current = st.doc.layer(st.doc.current());
         if current.is_some_and(|l| l.text.is_some()) {
             "Rasterize the text to transform it"
@@ -577,6 +594,10 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         let Some(at) = st.window_to_canvas(x, y) else { return };
         st.last_drag = None;
+        st.autokey_anchor();
+        if st.autokey_ignores(handle) {
+            return;
+        }
         if let Some(t) = st.transform.as_mut() {
             t.grab(handle.into(), at);
         }
@@ -587,7 +608,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let to = st.window_to_canvas(x, y)?;
-        let mode = st.transform_mode;
+        let mode = st.posed_mode();
         let guides = st.guides(Vec2::new(x, y));
         if st.transform.as_mut()?.drag(mode, to, &guides) {
             st.show_transform();
@@ -600,6 +621,7 @@ impl CanvasSession {
     pub fn transform_release(&self) -> Option<TransformBox> {
         let mut st = self.shared.lock();
         st.transform.as_mut()?.release();
+        st.autokey_settle(true);
         st.transform_box()
     }
 
@@ -615,6 +637,10 @@ impl CanvasSession {
 
     /// One of the toolbar's changes. Returns the box.
     pub fn transform_apply(&self, action: TransformAction) -> Option<TransformBox> {
+        // keying a pose, its undo takes back the keys it made
+        if action == TransformAction::Undo && self.autokey_undo() {
+            return self.shared.lock().transform_box();
+        }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let (width, height) = (st.doc.width() as f32, st.doc.height() as f32);
@@ -691,6 +717,7 @@ impl CanvasSession {
         let st = &mut *guard;
         st.transform_mode = kind.into();
         if kind == TransformKind::Warp
+            && !st.posing()
             && let Some(t) = st.transform.as_mut()
         {
             t.start_warp();
@@ -720,6 +747,9 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.transform_pixelated = on;
+        if st.posing() {
+            return st.transform_box();
+        }
         st.transform.as_mut()?.set_pixelated(on);
         st.show_transform();
         self.shared.frame(st);

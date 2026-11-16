@@ -78,12 +78,6 @@ final class TimelineMediaTool {
         }
     }
 
-    func trimStart(_ id: UInt64, to frame: UInt32, done: Bool) {
-        if session.trimTimelineMediaStart(id: id, start: frame, done: done) || done {
-            model.refresh()
-        }
-    }
-
     func slip(_ id: UInt64, to seconds: Double, done: Bool) {
         if session.slipTimelineMedia(id: id, trimStart: seconds, done: done) || done {
             model.refresh()

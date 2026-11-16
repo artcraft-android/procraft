@@ -3,15 +3,17 @@ import UIKit
 
 // Debug launch scenes for the timeline's media (`-screen timeline-sound`, `timeline-video`,
 // `timeline-animatic`): a sound and an animatic made on the spot, brought in as a file would be.
+// `timeline-sound-trim`: the sound twice on one track, six frames apart, the second starting ten
+// frames into its file and picked, to trim its start against the first.
 
 enum MediaDebug {
-    static let scenes = ["timeline-sound", "timeline-video", "timeline-animatic"]
+    static let scenes = ["timeline-sound", "timeline-video", "timeline-animatic", "timeline-sound-trim"]
 
     static func open(_ name: String, in model: CanvasModel) {
         model.timeline.setOn(true)
         model.timeline.setSimple(false)
         Task { @MainActor in
-            let video = name != "timeline-sound"
+            let video = name == "timeline-video" || name == "timeline-animatic"
             guard let url = video ? animatic() : beeps(),
                   let read = try? await MediaReading.read(url, kind: video ? .video : .audio),
                   let clip = try? model.session.importTimelineMedia(import: read), clip != 0
@@ -25,6 +27,18 @@ enum MediaDebug {
                 model.timeline.clipOpen = true
             case "timeline-animatic":
                 model.media.detecting = clip
+            case "timeline-sound-trim":
+                guard let again = try? model.session.importTimelineMedia(import: read), again != 0,
+                      let track = model.timeline.tracks.first(where: { $0.clips.contains { $0.id == clip } }),
+                      let first = track.clips.first(where: { $0.id == clip })
+                else { return }
+                model.refresh()
+                let gap = Int(first.start + first.duration) + 6
+                model.timeline.move(again, to: track.id, start: gap)
+                let fps = Double(max(model.session.timelineInfo()?.fps ?? 12, 1))
+                _ = model.session.slipTimelineMedia(id: again, trimStart: 10 / fps, done: true)
+                model.refresh()
+                model.timeline.picked = again
             default:
                 model.timeline.clipOpen = true
             }

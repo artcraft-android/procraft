@@ -1,9 +1,147 @@
 //! Clips moved into and out of group clips, a sound's level keyed over time, and the layers
 //! panel's + on a timeline (a layer in the drawing at the playhead).
 
-use make2d_engine::timeline::{ClipContent, ClipId, Easing};
+use make2d_engine::timeline::{ClipContent, ClipId, Easing, Edge, EdgePolicy, Timeline, TrackId};
 
+use super::TimelineClipInfo;
 use crate::CanvasSession;
+
+/// What dragging a clip's edge does when it reaches the clip next to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum TimelineEdgePolicy {
+    /// It stops there.
+    Stop,
+    /// The clips beyond that edge move with it, the gaps between them kept.
+    Push,
+    /// It trims into that clip, which gets shorter; nothing else moves.
+    Trim,
+}
+
+impl TimelineEdgePolicy {
+    pub(super) fn policy(self) -> EdgePolicy {
+        match self {
+            TimelineEdgePolicy::Stop => EdgePolicy::Clamp,
+            TimelineEdgePolicy::Push => EdgePolicy::Push,
+            TimelineEdgePolicy::Trim => EdgePolicy::TrimNeighbour,
+        }
+    }
+}
+
+/// Clip `id`'s start (`leading`) or end dragged to timeline frame `frame` in `tl`; its track, if
+/// that changed anything (never on a locked track).
+fn trimmed(tl: &mut Timeline, id: u64, leading: bool, frame: u32, policy: TimelineEdgePolicy) -> Option<TrackId> {
+    let id = ClipId(id);
+    let level = tl.origin(id)?.checked_sub(tl.clip(id)?.start)?;
+    let track = tl.track_of_clip(id)?;
+    if tl.track(track)?.locked {
+        return None;
+    }
+    let edge = if leading { Edge::Start } else { Edge::End };
+    tl.trim(id, edge, frame.saturating_sub(level), policy.policy()).then_some(track)
+}
+
+/// Whether any of clips `ids` is on a locked track (one that isn't there counts as not).
+fn any_locked(tl: &Timeline, ids: &[ClipId]) -> bool {
+    ids.iter().any(|id| tl.track_of_clip(*id).and_then(|t| tl.track(t)).is_some_and(|t| t.locked))
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Clip `id`'s start (`leading`) or end (one past its last frame) dragged to timeline frame
+    /// `frame`, the other edge staying put, as an undo step. `policy` says what happens at the
+    /// clip next to it. A start takes the clip's keys along so its motion stays where it showed,
+    /// and a sound or video starts later or earlier in its file. False if nothing changed (a
+    /// locked track, a cycling group's start, an edge already as far as it goes).
+    pub fn trim_timeline_clip(&self, id: u64, leading: bool, frame: u32, policy: TimelineEdgePolicy) -> bool {
+        self.change("Trim", |d| trimmed(d.timeline.as_mut()?, id, leading, frame, policy).map(|_| ())).is_some()
+    }
+
+    /// The clips of clip `id`'s track as [`CanvasSession::trim_timeline_clip`] would leave them,
+    /// changing nothing: what a drag shows before it is let go. Empty if it would change nothing.
+    pub fn timeline_trim_preview(
+        &self,
+        id: u64,
+        leading: bool,
+        frame: u32,
+        policy: TimelineEdgePolicy,
+    ) -> Vec<TimelineClipInfo> {
+        let st = self.shared.lock();
+        let Some(mut tl) = st.doc.timeline.clone() else { return Vec::new() };
+        let Some(track) = trimmed(&mut tl, id, leading, frame, policy) else { return Vec::new() };
+        let offset = tl.level_start(track).unwrap_or(0);
+        tl.track(track).map_or_else(Vec::new, |t| t.clips.iter().map(|c| super::clip_info(c, offset)).collect())
+    }
+
+    /// Clips `ids` moved together along their own tracks by `by` frames (earlier when negative),
+    /// or as far that way as the first of them has room before a clip left behind, as an undo
+    /// step. Returns how far they went: 0 if nowhere, or if any is on a locked track.
+    pub fn shift_timeline_clips(&self, ids: Vec<u64>, by: i32) -> i32 {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        let went = self.change("Move Clips", |d| {
+            let tl = d.timeline.as_mut()?;
+            if any_locked(tl, &ids) {
+                return None;
+            }
+            Some(tl.shift_clips(&ids, i64::from(by))).filter(|went| *went != 0)
+        });
+        went.and_then(|w| i32::try_from(w).ok()).unwrap_or(0)
+    }
+
+    /// How far [`CanvasSession::shift_timeline_clips`] would move clips `ids` if asked for `by`
+    /// frames, changing nothing: what a drag shows before it is let go.
+    pub fn timeline_shift_room(&self, ids: Vec<u64>, by: i32) -> i32 {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        let st = self.shared.lock();
+        let Some(tl) = st.doc.timeline.as_ref() else { return 0 };
+        if any_locked(tl, &ids) {
+            return 0;
+        }
+        i32::try_from(tl.shift_room(&ids, i64::from(by))).unwrap_or(0)
+    }
+
+    /// Clips `ids` taken off their tracks with their drawings' layers (the last layer stays), as
+    /// one undo step; the clips after them stay where they are. False if any is on a locked
+    /// track, or none is there.
+    pub fn delete_timeline_clips(&self, ids: Vec<u64>) -> bool {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        let done = self
+            .change("Delete Clips", |d| {
+                let tl = d.timeline.as_mut()?;
+                if any_locked(tl, &ids) {
+                    return None;
+                }
+                let gone: Vec<_> = ids.iter().filter_map(|id| tl.remove(*id, false)).collect();
+                for root in gone.iter().flat_map(|c| c.roots()) {
+                    d.delete_layer(root);
+                }
+                (!gone.is_empty()).then_some(())
+            })
+            .is_some();
+        if done {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.follow_playhead();
+            self.shared.frame(st);
+        }
+        done
+    }
+
+    /// The timeline frame clip `id` would start on if [`CanvasSession::move_timeline_clip`] moved
+    /// it to track `track` near frame `start`, changing nothing: where a dragged clip will land.
+    /// None if it can't go there.
+    pub fn timeline_move_landing(&self, id: u64, track: u64, start: u32) -> Option<u32> {
+        let st = self.shared.lock();
+        let mut tl = st.doc.timeline.clone()?;
+        if tl.track(TrackId(track))?.locked || tl.track(tl.track_of_clip(ClipId(id))?)?.locked {
+            return None;
+        }
+        let level = tl.level_start(TrackId(track))?;
+        if !tl.move_clip(ClipId(id), TrackId(track), start.saturating_sub(level)) {
+            return None;
+        }
+        Some(tl.clip(ClipId(id))?.start + level)
+    }
+}
 
 #[uniffi::export]
 impl CanvasSession {

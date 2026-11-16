@@ -13721,9 +13721,10 @@ fn a_timeline_is_edited_through_the_session() {
     let copy = s.duplicate_timeline_clip(held);
     assert_ne!(copy, 0);
     assert_eq!(spans(&s, 1), [(2, 2), (4, 2), (6, 2)]);
+    let long = s.timeline_info().unwrap().duration;
     assert!(s.move_timeline_clip(copy, second, 20));
     assert_eq!(spans(&s, 1), [(2, 2), (6, 2), (20, 2)]);
-    assert!(s.timeline_info().unwrap().duration >= 22);
+    assert_eq!(s.timeline_info().unwrap().duration, long, "moved past the end, it waits there");
     let layers_before = s.layers().len();
     assert!(s.delete_timeline_clip(copy, false));
     assert_eq!(s.layers().len(), layers_before - 1);

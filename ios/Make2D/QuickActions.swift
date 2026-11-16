@@ -178,7 +178,7 @@ extension CanvasModel {
         case .pageAssist: animationAssist.setAssist(animationAssist.settings?.pages != true, pages: true)
         case .nextFrame: animationAssist.step(1)
         case .previousFrame: animationAssist.step(-1)
-        case .onionSkin: animationAssist.toggleOnionSkin()
+        case .onionSkin: if timeline.info != nil { timeline.toggleOnionSkin() } else { animationAssist.toggleOnionSkin() }
         case .projectCanvas: changeProjectCanvas(!AppSettings.shared.projectCanvas)
         case .companionMove: toggleCompanionMode(.move)
         case .companionZoom: toggleCompanionMode(.zoom)

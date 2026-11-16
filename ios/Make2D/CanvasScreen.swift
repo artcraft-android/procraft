@@ -61,6 +61,7 @@ struct CanvasScreen: View {
                 GuideOverlay(model: model)
                 if model.transforming {
                     TransformOverlay(model: model)
+                    AutokeyBadge(model: model)
                 }
                 // (and the Paint or Erase tool's lasso shapes as they are drawn)
                 if model.selecting || model.lassoToolOn {

@@ -15,7 +15,7 @@ use std::io::Read;
 use crate::document::BlendMode;
 use crate::timeline::{
     AudioClip, Channel, Clip, ClipContent, ClipId, ClipKeys, Group, MaskMode, Media, MediaId, MediaKind, Timeline,
-    Track, TrackId, VideoClip, level_of_clip,
+    Track, TrackId, VideoClip,
 };
 
 /// The loudest a sound plays (its own level).
@@ -287,37 +287,6 @@ impl Timeline {
         self.tracks.insert(above_sounds, track);
         self.fit();
         Some(ids)
-    }
-
-    /// Sound or video clip `id`'s first frame moved to `start` (on its own level), its end kept:
-    /// it starts that much later or earlier in its media. Kept within its media and clear of the
-    /// clip before it; false if it isn't such a clip.
-    pub fn trim_media_start(&mut self, id: ClipId, start: u32) -> bool {
-        let fps = f64::from(self.fps);
-        let Some((level, t, c)) = level_of_clip(&mut self.tracks, id) else { return false };
-        let Some(track) = level.get_mut(t) else { return false };
-        let before_end = c.checked_sub(1).and_then(|p| track.clips.get(p)).map_or(0, Clip::end);
-        let Some(clip) = track.clips.get_mut(c) else { return false };
-        let end = clip.end();
-        let trim = match &clip.content {
-            ClipContent::Audio(a) => a.trim_start,
-            ClipContent::Video(v) => v.trim_start,
-            ClipContent::Drawing(_) | ClipContent::Group(_) => return false,
-        };
-        // no earlier than its media's start, nor than the clip before; at least a frame long
-        let earliest = (i64::from(clip.start) - (trim * fps).floor() as i64).max(i64::from(before_end));
-        let start = i64::from(start).clamp(earliest, i64::from(end) - 1);
-        let by = start - i64::from(clip.start);
-        let trim = (trim + by as f64 / fps).max(0.0);
-        let Ok(start) = u32::try_from(start) else { return false };
-        clip.start = start;
-        clip.duration = end - start;
-        match &mut clip.content {
-            ClipContent::Audio(a) => a.trim_start = trim,
-            ClipContent::Video(v) => v.trim_start = trim,
-            ClipContent::Drawing(_) | ClipContent::Group(_) => {}
-        }
-        true
     }
 
     /// Sound or video clip `id` starting `trim_start` seconds into its media, where it is (a

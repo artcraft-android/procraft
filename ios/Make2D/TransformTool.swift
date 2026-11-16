@@ -203,6 +203,7 @@ final class TransformTool {
     func apply(_ action: TransformAction) {
         popup = .none
         box = model.session.transformApply(action: action) ?? box
+        model.autokeyFollow()
     }
 
     /// The box after a drag step on the canvas.
@@ -210,6 +211,7 @@ final class TransformTool {
         if let next {
             box = next
         }
+        model.autokeyFollow()
     }
 
     func setSize(width: Float, height: Float) {

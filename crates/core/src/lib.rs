@@ -686,6 +686,9 @@ pub(crate) struct State {
     /// The timeline clipboard's copy this canvas made (whose drawings' textures it keeps), if it
     /// holds one this canvas made.
     pub(crate) timeline_copied: Option<u64>,
+    /// On a timeline, the track shown alone from the timeline panel and every track's hidden flag
+    /// from before, put back when that track is shown alone again (for this session only).
+    pub(crate) timeline_solo: Option<(make2d_engine::timeline::TrackId, Vec<(make2d_engine::timeline::TrackId, bool)>)>,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
@@ -752,6 +755,10 @@ pub(crate) struct State {
     /// An open transform's layers, while what its box snaps onto (the other layers' bounds) isn't
     /// found yet: snapping was off as it began; found when snapping comes on.
     snap_pending: Option<Vec<make2d_engine::document::LayerId>>,
+    /// Autokey: a transform on a timeline keys the pose of the drawing at the playhead.
+    autokey: timeline::autokey::Autokey,
+    /// The timeline panel's last reading, to number the next (see timeline/panel.rs).
+    timeline_panel: timeline::panel::PanelMemo,
     /// What is selected, if anything, and selections kept to load again.
     selection: Option<make2d_engine::selection::Mask>,
     saved_selections: Vec<make2d_engine::selection::Mask>,
@@ -1374,6 +1381,11 @@ impl Shared {
     }
 
     fn frame(&self, st: &mut State) {
+        // the full view's onion skins follow the track drawn on
+        let drawn = st.drawn_track();
+        if let Some(tl) = st.doc.timeline.as_mut() {
+            tl.onion_track.0 = drawn;
+        }
         if st.holding_frames {
             st.frame_held = true;
             return;
@@ -1742,6 +1754,7 @@ impl CanvasSession {
             timeline_track: None,
             timeline_open: None,
             timeline_copied: None,
+            timeline_solo: None,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1762,6 +1775,8 @@ impl CanvasSession {
             selection_pixelated: false,
             transform_guides: transform::GuideSettings::default(),
             snap_pending: None,
+            autokey: timeline::autokey::Autokey::default(),
+            timeline_panel: timeline::panel::PanelMemo::default(),
             selection: None,
             saved_selections: Vec::new(),
             selection_display: selection::SelectionDisplay::Stripes,

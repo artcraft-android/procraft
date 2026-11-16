@@ -78,6 +78,22 @@ pub struct Timeline {
     /// The ids the next track and clip take.
     pub next_track: u64,
     pub next_clip: u64,
+    /// In the full view, the track drawn on, whose drawings either side of the playhead show as
+    /// onion skins (in simple mode, simple mode's track does). Kept by the app as it draws; not
+    /// saved, and left out when timelines are compared.
+    #[serde(skip)]
+    pub onion_track: Unsaved<Option<TrackId>>,
+}
+
+/// A value the app keeps on a document while it is open that isn't part of it: not saved, and
+/// equal to any other, so a document compares the same whatever it holds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Unsaved<T>(pub T);
+
+impl<T> PartialEq for Unsaved<T> {
+    fn eq(&self, _: &Unsaved<T>) -> bool {
+        true
+    }
 }
 
 /// A lane of clips in time. Clips never overlap on a track; their order on it is their order in
@@ -520,7 +536,14 @@ impl Timeline {
             markers: Vec::new(),
             next_track: 1,
             next_clip: 1,
+            onion_track: Unsaved(None),
         }
+    }
+
+    /// The track whose drawings show as onion skins: simple mode's, or in the full view the
+    /// track drawn on.
+    pub fn onion_skinned(&self) -> Option<TrackId> {
+        self.simple.or(self.onion_track.0)
     }
 
     /// Every drawing's root layer, at any depth, in no particular order.
@@ -655,15 +678,14 @@ impl Timeline {
 
     /// The drawings the canvas shows at `frame`, bottom first, each composited as one: the
     /// plan's (groups opened, mattes left out until they are drawn as mattes), and, while drawing
-    /// rather than `playing`, the drawings either side on the simple-mode track as onion skins,
-    /// faded and tinted as Animation Assist's are ([`animation::look`]).
+    /// rather than `playing`, the drawings either side on the onion-skinned track
+    /// ([`Timeline::onion_skinned`]) as onion skins, faded and tinted as Animation Assist's are
+    /// ([`animation::look`]).
     pub fn showing(&self, frame: u32, playing: bool) -> Vec<Showing> {
         let plan = self.plan(frame);
         let mut out = Vec::new();
         for track in &self.tracks {
-            let onions =
-                (!playing && !track.hidden && self.simple == Some(track.id)).then(|| self.onions(track, frame));
-            let (before, after) = onions.unwrap_or_default();
+            let (before, after) = self.onions_on(track, frame, playing);
             out.extend(before);
             for item in plan.items.iter().filter(|i| i.track == track.id) {
                 shown_of(item, 1.0, None, &mut out);
@@ -998,7 +1020,6 @@ impl Timeline {
         let at = dest.clips.partition_point(|x| x.start < start);
         dest.clips.insert(at, Clip { start, ..clip });
         self.cover(track);
-        self.fit();
         true
     }
 
@@ -1159,7 +1180,9 @@ impl Timeline {
         true
     }
 
-    /// As long as its clips at least.
+    /// As long as its clips at least: after what adds clips (a new drawing, sound or video, a
+    /// duplicate, a paste, more cycles), as Koi's grows. Moves and trims leave the length as it
+    /// is, so that clips can be parked past its end.
     pub(crate) fn fit(&mut self) {
         let end = self.tracks.iter().flat_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(1);
         self.duration = self.duration.max(end);
@@ -1197,9 +1220,10 @@ impl Timeline {
     }
 
     /// The onion skins about `frame` on top-level `track`, before it and after it: only on the
-    /// simple-mode track, shown, while drawing rather than `playing`.
+    /// onion-skinned track ([`Timeline::onion_skinned`]), shown, while drawing rather than
+    /// `playing`.
     pub fn onions_on(&self, track: &Track, frame: u32, playing: bool) -> (Vec<Showing>, Vec<Showing>) {
-        if playing || track.hidden || self.simple != Some(track.id) {
+        if playing || track.hidden || self.onion_skinned() != Some(track.id) {
             return (Vec::new(), Vec::new());
         }
         self.onions(track, frame)
@@ -2461,6 +2485,27 @@ fn renumber(
 #[path = "timeline_edits.rs"]
 mod edits;
 
+#[path = "timeline_trim.rs"]
+mod trim;
+pub use trim::Edge;
+
+#[path = "timeline_tracks.rs"]
+mod tracks;
+
+#[path = "timeline_keys_edit.rs"]
+mod keys_edit;
+pub use keys_edit::{KeyChannel, KeyEdit, KeyLane, KeyPick, LaneKey};
+
+#[path = "timeline_cycles.rs"]
+mod cycles;
+pub use cycles::MOST_CYCLES;
+
+#[path = "timeline_duration.rs"]
+mod duration;
+
+#[path = "timeline_place.rs"]
+mod place;
+
 #[cfg(test)]
 #[path = "timeline_1g_tests.rs"]
 mod tests_1g;
@@ -2847,6 +2892,7 @@ mod tests {
     #[test]
     fn clips_move_to_the_nearest_room() {
         let mut tl = edited();
+        let long = tl.duration;
         let (a, b) = (tl.tracks[0].id, tl.tracks[1].id);
         let last = tl.tracks[0].clips[2].id;
         // over the first two: it goes to the gap at 4..5? too small for 2 frames, so the nearest fit
@@ -2855,7 +2901,7 @@ mod tests {
         // onto the other track, wherever asked
         assert!(tl.move_clip(last, b, 9));
         assert_eq!(spans(&tl, 1), [(12, 9, 2)]);
-        assert_eq!(tl.duration, 11);
+        assert_eq!(tl.duration, long, "a move leaves the length as it is, the clip past it if so");
         assert!(tl.tracks.iter().all(Track::is_ordered));
     }
 

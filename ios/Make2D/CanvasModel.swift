@@ -1703,6 +1703,7 @@ final class CanvasModel {
         timeLapse.record()
         animationAssist.refresh()
         timeline.refresh()
+        followAutokeyBox()
         refreshFlags()
         // undo and redo step through a snapped shape: its handles where they now are, and past its
         // drags it gives way to the stroke as drawn and ends

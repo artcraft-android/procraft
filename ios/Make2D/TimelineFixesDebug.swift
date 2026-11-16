@@ -2,10 +2,12 @@ import UIKit
 
 // Debug launch scenes for group clips, the layers panel's + on a timeline, pasting into another
 // canvas and sounds split and keyed (`-screen timeline-group-path`, `timeline-group-out`,
-// `timeline-layers-add`, `timeline-paste-other`, `timeline-sound-keys`).
+// `timeline-layers-add`, `timeline-paste-other`, `timeline-sound-keys`), and clips pushed aside
+// and picked together (`timeline-picked`, `timeline-picked-select`).
 
 enum TimelineFixesDebug {
-    static let scenes = ["timeline-group-path", "timeline-group-out", "timeline-layers-add", "timeline-paste-other", "timeline-sound-keys"]
+    static let scenes = ["timeline-group-path", "timeline-group-out", "timeline-layers-add", "timeline-paste-other", "timeline-sound-keys",
+                         "timeline-picked", "timeline-picked-select"]
 
     static func open(_ name: String, in model: CanvasModel) {
         let s = model.session
@@ -64,6 +66,24 @@ enum TimelineFixesDebug {
                     next.timeline.pasteClips()
                     next.timeline.clipOpen = true
                 }
+            }
+        case "timeline-picked", "timeline-picked-select":
+            // three tracks: three-frame drawings at 0, 3 and 6 on the lowest, one at 3 on the
+            // next, the top empty; picked together: the lowest track's first two
+            drawings(model, 4)
+            model.timeline.setSimple(false)
+            guard let track = s.timelineTracks().first(where: { $0.clips.count >= 4 }) else { return }
+            let ids = track.clips.map(\.id)
+            for id in ids {
+                _ = s.setTimelineClipDuration(id: id, duration: 3, push: true)
+            }
+            let middle = s.addTimelineTrack()
+            _ = s.moveTimelineClip(id: ids[3], track: middle, start: 3)
+            _ = s.addTimelineTrack()
+            s.setTimelineFrame(frame: 0)
+            model.refresh()
+            if name == "timeline-picked-select" {
+                model.timeline.selecting = [ids[0], ids[1]]
             }
         case "timeline-sound-keys":
             // a sound faded in by its level keys, split at frame 12: the second piece's page

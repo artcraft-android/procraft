@@ -514,6 +514,18 @@ enum ScreenCapture {
             MediaDebug.open(name, in: model)
             return
         }
+        if TimelineLanesDebug.scenes.contains(name) {
+            TimelineLanesDebug.open(name, in: model)
+            return
+        }
+        if TimelineBigDebug.scenes.contains(name) {
+            TimelineBigDebug.open(name, in: model)
+            return
+        }
+        if TimelinePagesDebug.scenes.contains(name) {
+            TimelinePagesDebug.open(name, in: model)
+            return
+        }
         if TimelineFixesDebug.scenes.contains(name) {
             TimelineFixesDebug.open(name, in: model)
             return

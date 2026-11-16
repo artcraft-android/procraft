@@ -37,8 +37,10 @@ struct CameraLaneHeader: View {
     }
 }
 
-/// The camera's keys along the timeline. A key's diamond is tapped to go to its frame with the
-/// camera's page open; the lane elsewhere, to go to that frame.
+/// The camera's keys along the timeline, a lane like the key lanes (TimelineKeyLanes.swift): a
+/// key's mark is tapped to pick it (the playhead going to it), with the clips' keys picked below
+/// or alone, and dragged to move the keys picked; the lane elsewhere, to go to that frame. The
+/// camera's page opens from the lane's name.
 struct CameraLane: View {
     let tool: TimelineTool
     let width: CGFloat
@@ -46,31 +48,8 @@ struct CameraLane: View {
     let frames: Int
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            laneFill
-                .frame(width: width, height: cameraLaneHeight)
-                .contentShape(Rectangle())
-                .onTapGesture { location in
-                    let f = min(max(Int(location.x / pitch), 0), max(frames - 1, 0))
-                    tool.goTo(UInt32(f))
-                }
-            ForEach(tool.cameraKeys, id: \.self) { f in
-                let here = f == tool.frame
-                Rectangle()
-                    .fill(here ? Pc.accent : inkDim)
-                    .frame(width: 9, height: 9)
-                    .rotationEffect(.degrees(45))
-                    .frame(width: pitch, height: cameraLaneHeight)
-                    .contentShape(Rectangle())
-                    .offset(x: CGFloat(f) * pitch)
-                    .onTapGesture {
-                        tool.goTo(f)
-                        openCamera(tool)
-                    }
-            }
-        }
-        .frame(width: width, height: cameraLaneHeight, alignment: .leading)
-        .overlay(alignment: .bottom) { rowLineFill.frame(height: 1) }
+        LaneRow(tool: tool, keys: tool.lanes.cameraKeys, spans: [], width: width, pitch: pitch, frames: frames,
+                height: cameraLaneHeight, fill: laneFill)
     }
 }
 

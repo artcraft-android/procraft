@@ -463,25 +463,6 @@ impl CanvasSession {
             .collect()
     }
 
-    /// Sound or video clip `id`'s first frame moved to timeline frame `start`, its end kept (it
-    /// starts that much later or earlier in its media): shown at once, one "Trim" undo step when
-    /// `done`.
-    pub fn trim_timeline_media_start(&self, id: u64, start: u32, done: bool) -> bool {
-        let changed = self.change_live("Trim", done, |d| {
-            let Some(tl) = d.timeline.as_mut() else { return false };
-            let Some(level) = tl.origin(ClipId(id)).zip(tl.clip(ClipId(id))).map(|(o, c)| o - c.start) else {
-                return false;
-            };
-            let before = tl.clip(ClipId(id)).map(|c| c.start);
-            tl.trim_media_start(ClipId(id), start.saturating_sub(level))
-                && (done || before != tl.clip(ClipId(id)).map(|c| c.start))
-        });
-        if changed {
-            self.redraw_media();
-        }
-        changed
-    }
-
     /// Sound or video clip `id` starting `trim_start` seconds into its media where it is (a slip):
     /// shown at once, one "Slip" undo step when `done`.
     pub fn slip_timeline_media(&self, id: u64, trim_start: f64, done: bool) -> bool {

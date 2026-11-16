@@ -1,6 +1,6 @@
 use super::*;
 use crate::document::LayerId;
-use crate::timeline::{Cycle, CycleKeys, Shows};
+use crate::timeline::{Cycle, CycleKeys, Edge, EdgePolicy, Shows};
 
 fn sound(id: u64, seconds: f64) -> Media {
     Media {
@@ -93,18 +93,79 @@ fn trimming_the_start_moves_into_the_media_and_keeps_the_end() {
     let mut tl = Timeline::new(10, 1);
     tl.add_media(sound(1, 3.0));
     let (_, clip) = tl.add_sound(MediaId(1), 10).unwrap();
-    assert!(tl.trim_media_start(clip, 14));
+    assert!(tl.trim(clip, Edge::Start, 14, EdgePolicy::Push));
     let c = tl.clip(clip).unwrap();
     assert_eq!((c.start, c.end()), (14, 40));
     assert!((audio_of(&tl, clip).trim_start - 0.4).abs() < 1e-9);
     // never earlier than the sound's start
-    assert!(tl.trim_media_start(clip, 0));
+    assert!(tl.trim(clip, Edge::Start, 0, EdgePolicy::Push));
     let c = tl.clip(clip).unwrap();
     assert_eq!((c.start, c.end()), (10, 40));
     assert!(audio_of(&tl, clip).trim_start.abs() < 1e-9);
     // nor past its end
-    assert!(tl.trim_media_start(clip, 99));
+    assert!(tl.trim(clip, Edge::Start, 99, EdgePolicy::Push));
     assert_eq!(tl.clip(clip).unwrap().duration, 1);
+}
+
+/// Two sounds on one track: a 2 s one on frames 0..20, and a 3 s one 6 frames after it, 0.5 s
+/// into its file (frames 26..51).
+fn two_sounds() -> (Timeline, ClipId, ClipId) {
+    let mut tl = Timeline::new(10, 1);
+    tl.add_media(sound(1, 2.0));
+    tl.add_media(sound(2, 3.0));
+    let (track, first) = tl.add_sound(MediaId(1), 0).unwrap();
+    let (_, second) = tl.add_sound(MediaId(2), 21).unwrap();
+    assert!(tl.move_clip(second, track, 21));
+    assert!(tl.trim(second, Edge::Start, 26, EdgePolicy::Clamp));
+    let spans = |tl: &Timeline, id| tl.clip(id).map(|c| (c.start, c.end()));
+    assert_eq!((spans(&tl, first), spans(&tl, second)), (Some((0, 20)), Some((26, 51))));
+    assert!((audio_of(&tl, second).trim_start - 0.5).abs() < 1e-9);
+    (tl, first, second)
+}
+
+#[test]
+fn a_sounds_start_dragged_back_stops_at_the_sound_before() {
+    let (mut tl, first, second) = two_sounds();
+    assert!(tl.trim(second, Edge::Start, 22, EdgePolicy::Clamp));
+    assert_eq!(tl.clip(second).map(|c| (c.start, c.end())), Some((22, 51)));
+    assert!((audio_of(&tl, second).trim_start - 0.1).abs() < 1e-9);
+    // as far as the one before ends, though its file had a frame more
+    assert!(tl.trim(second, Edge::Start, 0, EdgePolicy::Clamp));
+    assert_eq!(tl.clip(second).map(|c| (c.start, c.end())), Some((21, 51)));
+    assert_eq!(tl.clip(first).map(|c| (c.start, c.end())), Some((0, 20)));
+    assert!(audio_of(&tl, second).trim_start.abs() < 1e-9);
+}
+
+#[test]
+fn a_sounds_start_dragged_back_pushes_the_sound_before_while_its_file_lasts() {
+    let (mut tl, first, second) = two_sounds();
+    // the clip before has no room to go back: the start stays
+    assert!(!tl.trim(second, Edge::Start, 22, EdgePolicy::Push));
+    // dragged later, the clip before follows it
+    assert!(tl.trim(second, Edge::Start, 30, EdgePolicy::Push));
+    assert_eq!(tl.clip(first).map(|c| (c.start, c.end())), Some((4, 24)));
+    assert_eq!(tl.clip(second).map(|c| (c.start, c.end())), Some((30, 51)));
+    assert!((audio_of(&tl, second).trim_start - 0.9).abs() < 1e-9);
+    // and back, as far as the clip before has room
+    assert!(tl.trim(second, Edge::Start, 0, EdgePolicy::Push));
+    assert_eq!(tl.clip(first).map(|c| (c.start, c.end())), Some((0, 20)));
+    assert_eq!(tl.clip(second).map(|c| (c.start, c.end())), Some((26, 51)));
+    assert!((audio_of(&tl, second).trim_start - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn a_sounds_start_dragged_back_trims_into_the_sound_before() {
+    let (mut tl, first, second) = two_sounds();
+    // into the one before, as far as its own file starts
+    assert!(tl.trim(second, Edge::Start, 0, EdgePolicy::TrimNeighbour));
+    assert_eq!(tl.clip(first).map(|c| (c.start, c.end())), Some((0, 20)));
+    assert_eq!(tl.clip(second).map(|c| (c.start, c.end())), Some((21, 51)));
+    // with more of its file before, into the one before down to its last frame
+    let (mut tl, first, second) = two_sounds();
+    assert!(tl.slip_media(second, 2.5));
+    assert!(tl.trim(second, Edge::Start, 0, EdgePolicy::TrimNeighbour));
+    assert_eq!(tl.clip(first).map(|c| (c.start, c.end())), Some((0, 1)));
+    assert_eq!(tl.clip(second).map(|c| c.start), Some(1));
 }
 
 #[test]
@@ -125,7 +186,6 @@ fn a_clip_is_never_longer_than_what_is_left_of_its_media() {
     let drawing = tl.add_track("Drawings");
     let d = tl.add_drawing(drawing, 0, LayerId(1), "Drawing").unwrap();
     assert!(!tl.slip_media(d, 1.0));
-    assert!(!tl.trim_media_start(d, 1));
 }
 
 #[test]

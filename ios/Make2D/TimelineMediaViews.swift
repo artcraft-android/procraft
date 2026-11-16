@@ -22,7 +22,7 @@ func mediaClock(_ seconds: Double) -> String {
 }
 
 /// A sound or video clip's face on its lane: the waveform of the part of the sound it plays, or
-/// film with its sprocket holes. Picked, its left edge is held to trim where it starts in its file.
+/// film with its sprocket holes. Its start is trimmed into its file with the grips every clip has.
 struct MediaClipFace: View {
     let media: TimelineMediaTool
     let clip: TimelineClipInfo
@@ -31,19 +31,19 @@ struct MediaClipFace: View {
     /// A frame's width on the lane.
     let pitch: CGFloat
     let height: CGFloat
-
-    /// Where it started when its start edge's drag began (the core moves it as the drag goes).
-    @State private var trimFrom: UInt32?
+    /// How many seconds later in its file it would start, its start being dragged.
+    var into: Double = 0
 
     var body: some View {
         let c = media.clip(clip.id)
         let shape = RoundedRectangle(cornerRadius: 8, style: .circular)
         ZStack(alignment: .leading) {
             if clip.kind == .audio {
-                shape.fill(picked ? Pc.accent.opacity(0.85) : soundFill)
+                // in its colour label's colour, if it has one
+                shape.fill(picked ? Pc.accent.opacity(0.85) : clip.label.map { Color(rgb: $0).opacity(0.75) } ?? soundFill)
                 if let c {
                     Waveform(
-                        peaks: media.peaks(c.media), from: c.trimStart,
+                        peaks: media.peaks(c.media), from: max(c.trimStart + into, 0),
                         seconds: Double(clip.duration) / Double(max(fps, 1)) - c.offset,
                         lead: c.offset * Double(max(fps, 1)) * pitch
                     )
@@ -51,7 +51,7 @@ struct MediaClipFace: View {
                     .padding(.vertical, 5)
                 }
             } else {
-                shape.fill(picked ? Pc.accent.opacity(0.85) : filmFill)
+                shape.fill(picked ? Pc.accent.opacity(0.85) : clip.label.map { Color(rgb: $0).opacity(0.75) } ?? filmFill)
                 Sprockets().fill(picked ? Color.white.opacity(0.45) : filmHoles)
             }
             HStack(spacing: 5) {
@@ -68,35 +68,8 @@ struct MediaClipFace: View {
             .padding(.leading, 6)
             .frame(maxHeight: .infinity, alignment: .top)
             .padding(.top, 3)
-            if picked {
-                // the start, held to trim into the file or back out of it
-                Capsule()
-                    .fill(Color.white)
-                    .frame(width: 5, height: height - 14)
-                    .frame(width: 22, height: height)
-                    .contentShape(Rectangle())
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 2, coordinateSpace: .global)
-                            .onChanged { drag in
-                                let from = trimFrom ?? clip.start
-                                trimFrom = from
-                                media.trimStart(clip.id, to: start(from, drag.translation.width), done: false)
-                            }
-                            .onEnded { drag in
-                                let from = trimFrom ?? clip.start
-                                trimFrom = nil
-                                media.trimStart(clip.id, to: start(from, drag.translation.width), done: true)
-                            }
-                    )
-                    .offset(x: -8)
-            }
         }
         .clipShape(shape)
-    }
-
-    /// The first frame the start edge asks for, dragged `dx` from `from`.
-    private func start(_ from: UInt32, _ dx: CGFloat) -> UInt32 {
-        UInt32(max(Int(from) + Int((dx / pitch).rounded()), 0))
     }
 }
 
@@ -243,6 +216,7 @@ struct MediaClipPage: View {
                     }
                     .padding(.top, 10)
                 }
+                MediaClipMarkRows(tool: model.timeline, clip: clip)
                 let frame = model.timeline.info?.frame ?? 0
                 let inside = frame > clip.start && frame < clip.start + clip.duration
                 TlGroup {
