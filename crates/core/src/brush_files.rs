@@ -2023,7 +2023,8 @@ fn halftone_lattice(name: &str) -> Option<[(f32, f32); 2]> {
 fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, Option<f32>) {
     let n = name.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| names(&n, w));
-    // the round tip's words as whole words of the name ("shard" is no hard tip, nor "penguin" a pen)
+    // the round tip's words as whole words of the name ("shard" is no hard tip, nor "penguin" a pen;
+    // a pen's glow is soft)
     let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).collect();
     let says = |these: &[&str]| these.iter().any(|w| words.contains(w));
     if has(&["blank"]) {
@@ -2038,7 +2039,7 @@ fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, O
         (Some(shape::SLIM_OVAL), None, None)
     } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
         (None, None, Some(0.75))
-    } else if says(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink", "rect"]) {
+    } else if says(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink", "rect", "glow"]) {
         (None, None, Some(0.95))
     } else if has(&["medium"]) {
         (None, None, Some(0.5))
@@ -2515,6 +2516,18 @@ mod tests {
         // and a dual brush's second's own tip and grain are measured as its first's are
         assert!(textures::stock_shape_tones("nightjar_secondary_shape.png", false).is_some());
         assert!(textures::stock_grain_tones("lumita_secondary_grain.png").is_some());
+    }
+
+    #[test]
+    fn a_pens_glow_stands_in_as_a_glow_not_a_hard_tip() {
+        // a glow round a pen's fine line, a fifteenth of it lit: taken for a hard pen tip, its
+        // stroke came out solid all across
+        let tip = Texture::Stock { name: "Brush-Artery-Pen-Glow.jpg".to_owned(), inverted: false };
+        let (_, source, hardness) = shape_for(&tip);
+        assert_eq!(hardness, None);
+        let pixels = source.expect("retoned to its measured tones").pixels;
+        let mean = pixels.iter().map(|&v| f32::from(v)).sum::<f32>() / pixels.len() as f32 / 255.0;
+        assert!(mean < 0.15, "{mean}");
     }
 
     #[test]
