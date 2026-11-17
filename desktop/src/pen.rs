@@ -413,6 +413,16 @@ pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoo
 #[cfg(not(any(windows, unix)))]
 pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {}
 
+/// The window fills its screen (F11), or no longer does. On Windows the window's own procedure
+/// (which reads the pen) then lets it grow over the task bar too, as the system asks how big it may
+/// be.
+pub fn set_full_screen(on: bool) {
+    #[cfg(windows)]
+    system::set_full_screen(on);
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
 /// Stops reading the pen, before the window's connection closes.
 pub fn stop() {
     #[cfg(target_os = "linux")]
@@ -698,9 +708,10 @@ mod tablet {
 mod system {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
     use windows::Win32::UI::Controls::{
         FEEDBACK_PEN_BARRELVISUALIZATION, FEEDBACK_PEN_DOUBLETAP, FEEDBACK_PEN_PRESSANDHOLD, FEEDBACK_PEN_RIGHTTAP,
         FEEDBACK_PEN_TAP, POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN,
@@ -711,9 +722,9 @@ mod system {
         POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW, SetPropW,
-        SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-        WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, MINMAXINFO, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW,
+        SetPropW, SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -750,6 +761,23 @@ mod system {
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
+
+    /// The window fills its screen (F11).
+    static FULL_SCREEN: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_full_screen(on: bool) {
+        FULL_SCREEN.store(on, Ordering::Relaxed);
+    }
+
+    /// The whole of the screen `hwnd` is on (most of it, if it spans more than one), the task bar's
+    /// strip with it.
+    fn whole_screen(hwnd: HWND) -> Option<RECT> {
+        // SAFETY: the window is this thread's own; the nearest screen is always one
+        let screen = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // SAFETY: `info` is an info to fill, its size said
+        unsafe { GetMonitorInfoW(screen, &mut info) }.as_bool().then_some(info.rcMonitor)
+    }
 
     /// The pen devices named in the log so far.
     static LOGGED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
@@ -851,6 +879,19 @@ mod system {
         // as after a crash; the artwork open is autosaved)
         if msg == WM_ENDSESSION && wparam.0 != 0 {
             crate::startup::gpu_ended();
+        }
+        // filling its screen, the window may be as big as all of it, maximised too: Windows would
+        // keep it to the screen less the task bar, and the task bar's strip would show black
+        if msg == WM_GETMINMAXINFO && FULL_SCREEN.load(Ordering::Relaxed) {
+            // SAFETY: the message's `lparam` is the sizes for the window to fill, this message's own
+            let sizes = unsafe { (lparam.0 as *mut MINMAXINFO).as_mut() };
+            if let (Some(sizes), Some(screen)) = (sizes, whole_screen(hwnd)) {
+                let size = POINT { x: screen.right - screen.left, y: screen.bottom - screen.top };
+                sizes.ptMaxPosition = POINT { x: screen.left, y: screen.top };
+                sizes.ptMaxSize = size;
+                sizes.ptMaxTrackSize = size;
+                return LRESULT(0);
+            }
         }
         // the pen's gestures, as the window's property has them (a system that asks)
         if msg == WM_TABLET_QUERYSYSTEMGESTURESTATUS {

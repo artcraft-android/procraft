@@ -278,6 +278,7 @@ fn main() {
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
         interface_touches: input::InterfaceTouches::default(),
+        maximised_before_full_screen: false,
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -346,6 +347,8 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
     /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
     interface_touches: input::InterfaceTouches,
+    /// The window was maximised as it went full screen, and is maximised again as it comes back.
+    maximised_before_full_screen: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -356,6 +359,26 @@ fn window_icon() -> Option<winit::window::Icon> {
     let rgba = picture.into_rgba8();
     let (width, height) = rgba.dimensions();
     winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// The window fills its screen without its frame, or goes back to a window. On Windows a maximised
+/// window is put back to its own size first and maximised again as it comes back: left maximised,
+/// Windows keeps it to the screen less the task bar, and the task bar's strip shows black.
+fn toggle_full_screen(window: &Window, maximised_before: &mut bool) {
+    if window.fullscreen().is_some() {
+        pen::set_full_screen(false);
+        window.set_fullscreen(None);
+        if std::mem::take(maximised_before) {
+            window.set_maximized(true);
+        }
+        return;
+    }
+    *maximised_before = cfg!(windows) && window.is_maximized();
+    if *maximised_before {
+        window.set_maximized(false);
+    }
+    pen::set_full_screen(true);
+    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 }
 
 /// Tap Assistance holds a finger's touch where it landed this long.
@@ -481,8 +504,7 @@ impl ApplicationHandler for App {
             && !key.repeat
             && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
         {
-            let full = screen.window.fullscreen().is_none();
-            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+            toggle_full_screen(&screen.window, &mut self.maximised_before_full_screen);
         }
         match event {
             WindowEvent::CloseRequested => {
