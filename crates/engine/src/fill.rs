@@ -9,6 +9,10 @@ use crate::selection::Mask;
 /// How far past the threshold (as a colour distance, 0..1) the fill fades out.
 pub const FADE: f32 = 0.09;
 
+/// A nearly transparent seed behaves as empty paper for ColorDrop, even when
+/// a textured brush left a trace at the point where the colour landed.
+const SEE_THROUGH_ALPHA: u8 = 16;
+
 /// A flood is first worked out on its own thread, quickest when it fills little; past this share
 /// of the picture (one in so many pixels) it is worked out again on every core, quicker then.
 pub(crate) const FLOOD_HERE_MOST: usize = 8;
@@ -67,7 +71,15 @@ impl Flood {
         }
         let i = (seed.1 as usize * width as usize + seed.0 as usize) * 4;
         let colour: [u8; 4] = pixels.get(i..i + 4)?.try_into().ok()?;
-        let distance = Arc::new(pixels.as_chunks::<4>().0.iter().take(count).map(|p| fill_distance(p, &colour)).collect());
+        let mut distance: Vec<u8> =
+            pixels.as_chunks::<4>().0.iter().take(count).map(|p| fill_distance(p, &colour)).collect();
+        // Textured brush tips leave tiny transparent pinholes in otherwise connected
+        // strokes. Close these only in the connectivity map: the artwork itself is
+        // not blurred or modified.
+        if colour[3] <= SEE_THROUGH_ALPHA {
+            bridge_texture_gaps(&mut distance, width as usize, height as usize);
+        }
+        let distance = Arc::new(distance);
         Some(Flood {
             width,
             height,
@@ -94,6 +106,12 @@ impl Flood {
     /// The pixel the fill is measured from.
     pub fn seed(&self) -> (u32, u32) {
         self.seed
+    }
+
+    /// Whether the seed belongs to a transparent/near-transparent area, rather
+    /// than a painted area to recolour.
+    pub fn see_through(&self) -> bool {
+        self.colour[3] <= SEE_THROUGH_ALPHA
     }
 
     /// How much each pixel takes the fill at `threshold` (0..1): the pixels joined to the seed
@@ -483,12 +501,76 @@ fn distance(a: &[u8; 4], b: &[u8; 4]) -> u8 {
 /// stroke. Opaque/coloured seeds retain their original colour-distance behaviour.
 fn fill_distance(pixel: &[u8; 4], seed: &[u8; 4]) -> u8 {
     let base = distance(pixel, seed);
-    if seed[3] > 16 {
+    if seed[3] > SEE_THROUGH_ALPHA {
         return base;
     }
-    let alpha_difference = pixel[3].abs_diff(seed[3]) as f32 / 255.0;
+    let alpha_difference = if pixel[3] <= SEE_THROUGH_ALPHA { 0.0 } else { f32::from(pixel[3]) / 255.0 };
     let coverage = (alpha_difference.powf(0.2) * 255.0).round() as u8;
     base.max(coverage)
+}
+
+/// Tiny gaps in a textured line that can be treated as part of its boundary.
+/// Larger openings remain available to the flood (and to the gap-closing plugin).
+const TEXTURE_HOLE_ALPHA: u8 = 12;
+const TEXTURE_STROKE_ALPHA: u8 = 18;
+const TEXTURE_BLOCK_DISTANCE: u8 = 151;
+
+/// Strongest opposing pair in four directions, at most two pixels away on each
+/// side. Unlike a dilate, this does not grow a line outward; it only bridges
+/// holes *between* existing brush marks. A two-pixel opening is bridged too.
+fn bridge_strength(w: usize, h: usize, x: usize, y: usize, strength: impl Fn(usize) -> u8) -> u8 {
+    let at = |dx: isize, dy: isize| -> Option<u8> {
+        let nx = x.checked_add_signed(dx)?;
+        let ny = y.checked_add_signed(dy)?;
+        if nx < w && ny < h { Some(strength(ny * w + nx)) } else { None }
+    };
+    let mut strongest = 0u8;
+    for (dx, dy) in [(1isize, 0isize), (0, 1), (1, 1), (1, -1)] {
+        for (back, forward) in [(1isize, 1isize), (1, 2), (2, 1)] {
+            if let (Some(a), Some(b)) = (at(-dx * back, -dy * back), at(dx * forward, dy * forward)) {
+                strongest = strongest.max(a.min(b));
+            }
+        }
+    }
+    strongest
+}
+
+/// Fill topology only: a tiny hole between two strokes cannot join the areas
+/// across them. Read from a snapshot so new bridges never create larger bridges.
+fn bridge_texture_gaps(distance: &mut [u8], w: usize, h: usize) {
+    if w < 3 || h < 3 {
+        return;
+    }
+    let original = distance.to_vec();
+    // Iterate over brush marks rather than checking every empty canvas pixel
+    // against a dozen neighbours: sparse drawings stay fast on large canvases.
+    for (i, &start) in original.iter().enumerate() {
+        if start < TEXTURE_BLOCK_DISTANCE {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        for (dx, dy) in [(1isize, 0isize), (0, 1), (1, 1), (1, -1)] {
+            for length in [2isize, 3isize] {
+                let Some(nx) = x.checked_add_signed(dx * length) else { continue };
+                let Some(ny) = y.checked_add_signed(dy * length) else { continue };
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let end = original.get(ny * w + nx).copied().unwrap_or(0);
+                if end < TEXTURE_BLOCK_DISTANCE {
+                    continue;
+                }
+                let bridge = start.min(end);
+                for step in 1..length {
+                    let Some(mx) = x.checked_add_signed(dx * step) else { continue };
+                    let Some(my) = y.checked_add_signed(dy * step) else { continue };
+                    if let Some(value) = distance.get_mut(my * w + mx) {
+                        *value = (*value).max(bridge);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// How far past a flood's bounds a soft edge is followed, pixels.
@@ -508,14 +590,25 @@ pub fn under_edges(mask: &mut Mask, pixels: &[u8]) {
     let mut step = |cx: usize, cy: usize| {
         let at = cy * w + cx;
         let here = alpha(at);
-        if here == 0 || mask.data.get(at).is_none_or(|m| *m == 255) {
+        if mask.data.get(at).is_none_or(|m| *m == 255) {
+            return;
+        }
+        // A speckle of low or zero opacity inside a textured boundary can
+        // otherwise remain a pale seam even when the flood correctly stops
+        // there. Let paint reach it from the filled side, under the brush.
+        let touches_fill = (cy.saturating_sub(1)..(cy + 2).min(h)).any(|ny| {
+            (cx.saturating_sub(1)..(cx + 2).min(w)).any(|nx| mask.data.get(ny * w + nx).is_some_and(|&m| m > 0))
+        });
+        let hole =
+            here <= TEXTURE_HOLE_ALPHA && touches_fill && bridge_strength(w, h, cx, cy, alpha) >= TEXTURE_STROKE_ALPHA;
+        if here == 0 && !hole {
             return;
         }
         let mut most = mask.data.get(at).copied().unwrap_or(0);
         for ny in cy.saturating_sub(1)..(cy + 2).min(h) {
             for nx in cx.saturating_sub(1)..(cx + 2).min(w) {
                 let near = ny * w + nx;
-                if here > alpha(near) {
+                if here > alpha(near) || hole {
                     most = most.max(mask.data.get(near).copied().unwrap_or(0));
                 }
             }
@@ -544,7 +637,7 @@ pub fn under_edges(mask: &mut Mask, pixels: &[u8]) {
 /// `alpha_lock` keeps each pixel's coverage.
 pub fn pour(pixels: &mut [u8], mask: &Mask, seed: [u8; 4], colour: [f32; 3], alpha_lock: bool) {
     let [sr, sg, sb, sa] = seed.map(f32::from);
-    let seed_a = sa / 255.0;
+    let seed_a = if sa <= f32::from(SEE_THROUGH_ALPHA) { 0.0 } else { sa / 255.0 };
     let seed_rgb = [sr, sg, sb].map(|c| if sa > 0.0 { c / sa } else { 0.0 });
     let colour = colour.map(|c| c.clamp(0.0, 1.0));
     pour_with(pixels, mask, alpha_lock, |[r, g, b, a]| {
@@ -840,6 +933,75 @@ mod tests {
         assert_eq!(m.data, vec![255, 0, 255, 255, 0, 255, 255, 255, 255]);
     }
 
+    /// A textured brush stroke with two consecutive pinholes must still divide
+    /// the canvas; a real opening wider than the pinholes must remain open.
+    fn textured_wall(gap: std::ops::Range<usize>) -> Vec<u8> {
+        (0..21 * 21)
+            .flat_map(|i| {
+                let (x, y) = (i % 21, i / 21);
+                let alpha = if x == 10 && !gap.contains(&y) { 36 + (y % 3) as u8 * 12 } else { 0 };
+                [0, 0, 0, alpha]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn textured_lines_bridge_one_and_two_pixel_pores_without_leaking() {
+        for gap in [6..7, 6..8] {
+            let pixels = textured_wall(gap.clone());
+            let f = Flood::new(21, 21, &pixels, (4, 10)).unwrap();
+            let m = f.mask(0.5);
+            assert_eq!(m.data[10 * 21 + 4], 255);
+            assert_eq!(m.data[10 * 21 + 16], 0, "leaked across {gap:?}");
+            let mut under = m.clone();
+            under_edges(&mut under, &pixels);
+            for y in gap.clone() {
+                assert_eq!(under.data[y * 21 + 10], 255, "left a pale pore at {y}");
+            }
+            let mut result = pixels.clone();
+            pour(&mut result, &under, f.colour, ORANGE, false);
+            for y in gap {
+                assert_eq!(result[(y * 21 + 10) * 4], 255, "unfilled transparent pore");
+            }
+            assert_eq!(result[(10 * 21 + 16) * 4 + 3], 0, "outside must stay transparent");
+        }
+    }
+
+    #[test]
+    fn diagonal_textured_strokes_do_not_leak_through_pores() {
+        for gap in [7..8, 7..9] {
+            let pixels: Vec<u8> = (0..15 * 15)
+                .flat_map(|i| {
+                    let (x, y) = (i % 15, i / 15);
+                    [0, 0, 0, if x == y && !gap.contains(&x) { 45 } else { 0 }]
+                })
+                .collect();
+            let f = Flood::new(15, 15, &pixels, (2, 12)).unwrap();
+            assert_eq!(f.mask(0.5).data[2 * 15 + 12], 0, "diagonal leak through {gap:?}");
+        }
+    }
+
+    #[test]
+    fn a_wide_intentional_gap_in_a_textured_line_stays_open() {
+        let f = Flood::new(21, 21, &textured_wall(5..11), (4, 10)).unwrap();
+        assert!(f.mask(0.5).data[10 * 21 + 16] > 0);
+    }
+
+    #[test]
+    fn a_texture_dip_does_not_leave_a_halo_under_the_stroke() {
+        let alphas = [0u8, 0, 25, 8, 30, 60, 40, 0, 0];
+        let pixels: Vec<u8> = alphas.iter().flat_map(|&a| [0, 0, 0, a]).collect();
+        let f = Flood::new(9, 1, &pixels, (0, 0)).unwrap();
+        let mut m = f.mask(0.5);
+        under_edges(&mut m, &pixels);
+        assert_eq!(&m.data[..=5], &[255; 6], "fill must reach the stroke's peak");
+        assert_eq!(m.data[7], 0, "not beyond the outer edge");
+        let mut painted = pixels.clone();
+        pour(&mut painted, &m, f.colour, ORANGE, false);
+        assert!(painted[3 * 4] > 225, "tiny pore must be filled behind the brush");
+        assert_eq!(painted[8 * 4 + 3], 0, "the other side remains clear");
+    }
+
     #[test]
     fn a_fill_goes_on_up_a_soft_edge_to_the_lines_middle_and_no_further() {
         // a row: see-through, a line's rim up to its solid middle and down again, see-through
@@ -865,6 +1027,29 @@ mod tests {
         assert_eq!(&px[0..4], &[255, 136, 72, 255]);
         // 255 * 0.69 and so on, opaque
         assert_eq!(&px[4..8], &[176, 94, 50, 255]);
+    }
+
+    #[test]
+    fn near_transparent_seed_still_fills_empty_pixels_opaqely() {
+        let px = row(&[[0, 0, 0, 16], [0, 0, 0, 0], [0, 0, 0, 22]]);
+        let f = Flood::new(3, 1, &px, (0, 0)).unwrap();
+        let mask = f.mask(0.5);
+        assert_eq!(mask.data[1], 255, "a faint brush residue is still empty space");
+        assert_eq!(mask.data[2], 0, "the outline is still a barrier");
+    }
+
+    #[test]
+    fn a_nearly_transparent_seed_does_not_leave_a_light_boundary() {
+        let pixels = row(&[[0, 0, 0, 8], [0, 0, 0, 35]]);
+        let f = Flood::new(2, 1, &pixels, (0, 0)).unwrap();
+        assert!(f.see_through());
+        let mut painted = pixels.clone();
+        pour(&mut painted, &Mask { width: 2, height: 1, data: vec![255; 2] }, f.colour, ORANGE, false);
+        // The eight-percent black mark still shows over the opaque orange, not
+        // as a white gap: the mark's own coverage is preserved.
+        assert_eq!(&painted[..4], &[247, 132, 70, 255]);
+        assert_eq!(painted[7], 255);
+        assert_eq!(painted[4], 220, "the original texture remains over the fill");
     }
 
     #[test]
