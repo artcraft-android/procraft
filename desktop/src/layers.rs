@@ -3,7 +3,8 @@
 //! background under them. Tap a layer to make it current, the current one for its options (where
 //! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
 //! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it
-//! (with a mouse, just drag it up or down);
+//! (with a mouse, just drag it up or down), out past the panel's side to lift it out and drop it
+//! on the canvas or, through the gallery, into another artwork;
 //! slide it left for lock, duplicate and delete, or a little right to pick it. On a model: each
 //! texture set's name over its meshes (each its picture and box), the open mesh's layers under it,
 //! and under a layer its channels (colour, roughness, metalness), one of which a click paints on.
@@ -43,7 +44,7 @@ const LOCKED_LETTER: u32 = 0xFF808080;
 const LAYER_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const BACKGROUND_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const CHECK_FILL: Themed = Themed(0xFFC7C7C7, 0xFF575757);
-const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
+pub(crate) const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
 /// A text layer's glyph on its thumbnail.
 const TEXT_GLYPH: Themed = Themed(0xFFB8B8B8, 0xFF000000);
 const THUMB: (f32, f32) = (93.0, 61.0);
@@ -94,6 +95,8 @@ const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 /// A dragged row this near an end of the list scrolls it, at most this far a second.
 const DRAG_EDGE: f32 = 56.0;
 const DRAG_SCROLL: f32 = 480.0;
+/// A dragged row this far out past the panel's side is lifted out of it, to drop elsewhere.
+const LIFT_REACH: f32 = 24.0;
 
 /// What a press on a row turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,6 +162,13 @@ pub struct Layers {
     dragged_rows: Vec<u64>,
     last_rows: HashMap<u64, Rect>,
     list: Option<Rect>,
+    /// The panel's box and its rows where the window has them, as last shown: where layers held out
+    /// of it drop.
+    box_on_window: Option<Rect>,
+    rows_on_window: HashMap<u64, Rect>,
+    /// A row dragged out past the panel's side: its layer, to be lifted out and held (the app takes
+    /// it).
+    pub lifted: Option<u64>,
     scroll_by: f32,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
@@ -544,8 +554,11 @@ impl Layers {
                     });
             });
         });
-        self.follow_press(ctx, session, &layers, &row_rects);
+        self.follow_press(ctx, session, &layers, &row_rects, rect);
         self.last_rows.clone_from(&row_rects);
+        let to_window = panel::to_window(ctx);
+        self.box_on_window = Some(to_window.mul_rect(rect));
+        self.rows_on_window = row_rects.iter().map(|(id, r)| (*id, to_window.mul_rect(*r))).collect();
         self.follow_pinch(ctx, session, &row_rects);
         // a layer tapped: picked layers give way to it; the current one shows its options (or
         // hides them); any other becomes the current one
@@ -1157,6 +1170,31 @@ impl Layers {
         }
     }
 
+    /// The row under window point `at` (or the nearest, over the panel), and whether `at` is in its
+    /// top half: where layers held out of a panel drop. None off the panel, or with it closed.
+    pub fn row_at(&self, layers: &[LayerInfo], at: Pos2) -> Option<(u64, bool)> {
+        if !self.box_on_window.is_some_and(|b| b.contains(at)) {
+            return None;
+        }
+        let rows: Vec<(u64, Rect)> =
+            layers.iter().filter_map(|l| self.rows_on_window.get(&l.id).map(|r| (l.id, *r))).collect();
+        let (id, row) = rows.iter().find(|(_, r)| at.y >= r.top() && at.y < r.bottom()).or_else(|| {
+            rows.iter().min_by(|a, b| (a.1.center().y - at.y).abs().total_cmp(&(b.1.center().y - at.y).abs()))
+        })?;
+        Some((*id, at.y < row.center().y))
+    }
+
+    /// Layer `id`'s thumbnail as the panel shows it, if it has been read, and its row on the window.
+    pub fn row_look(&self, id: u64) -> (Option<TextureHandle>, Option<Rect>) {
+        (self.thumbnails.get(&id).map(|(_, t)| t.clone()), self.rows_on_window.get(&id).copied())
+    }
+
+    /// The panel closed: no rows to drop on.
+    pub fn closed(&mut self) {
+        self.box_on_window = None;
+        self.rows_on_window.clear();
+    }
+
     /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
     /// it stays open; slid right past half the way, it picks the layer); held still (or, with a
     /// mouse, moved up or down: a finger or pen doing that scrolls the list, which follows it), the
@@ -1167,6 +1205,7 @@ impl Layers {
         session: &CanvasSession,
         layers: &[LayerInfo],
         rows: &HashMap<u64, Rect>,
+        panel_box: Rect,
     ) {
         let Some(mut p) = self.press else { return };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
@@ -1208,6 +1247,15 @@ impl Layers {
                     ctx.request_repaint();
                 }
                 Way::Reorder => {
+                    // out past the panel's side, the row (with what goes with it) is lifted out,
+                    // held by the pointer from then on wherever it goes
+                    let x = at.map_or(p.origin.x, |at| panel::in_panel(ctx, at).x);
+                    if x < panel_box.left() - LIFT_REACH || x > panel_box.right() + LIFT_REACH {
+                        self.lifted = Some(p.id);
+                        self.press = None;
+                        self.dragged_rows.clear();
+                        return;
+                    }
                     // the row scrolled with the list stays under the pointer
                     let scrolled =
                         self.last_rows.get(&p.id).zip(rows.get(&p.id)).map_or(0.0, |(was, row)| was.top() - row.top());

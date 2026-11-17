@@ -463,6 +463,15 @@ impl Gallery {
         self.pictures.get(dir).copied()
     }
 
+    /// The artwork whose cell is under window point `at`, as last drawn (a stack's: none): where
+    /// layers held over the gallery open.
+    pub fn artwork_at(&self, at: egui::Pos2) -> Option<String> {
+        self.drawn_cells.iter().find(|(_, r)| r.contains(at)).and_then(|(e, _)| match e {
+            GalleryEntry::Artwork { artwork } => Some(artwork.dir.clone()),
+            GalleryEntry::Stack { .. } => None,
+        })
+    }
+
     /// Where the artwork in folder `dir` (its canvas `size` pixels) will be drawn once it shows
     /// turned `turns` quarter turns clockwise (as its canvas was left), if its cell was drawn.
     pub fn picture_as(&self, dir: &str, size: (u32, u32), turns: u32) -> Option<Rect> {

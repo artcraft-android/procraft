@@ -179,6 +179,10 @@ pub struct Interface {
     guide_editor: crate::guide_editor::GuideEditor,
     /// The artwork's folder in the gallery.
     pub artwork_dir: Option<String>,
+    /// Layers lifted out of the layers panel, held by the pointer (across the gallery, into
+    /// another artwork) until let go; and where the top bar's Gallery is, which they open.
+    pub held: Option<crate::held_layers::Held>,
+    gallery_button: Option<Rect>,
     quick_menu: crate::quick_menu::QuickMenu,
     /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
     pen_picking: bool,
@@ -296,6 +300,8 @@ impl Interface {
             crop: crate::crop::Crop::default(),
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
+            held: None,
+            gallery_button: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
             pen_picking: false,
             pen_held: [false; 2],
@@ -478,8 +484,10 @@ impl Interface {
     /// unless it only let go of a field (egui drops the field's keys as the frame begins).
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
         let typing = self.typing;
+        self.gallery_button = None;
         self.show_frame(ui, session, input);
         let ctx = ui.ctx();
+        self.follow_held(ctx, session);
         if !typing && escape_untaken(ctx) && self.canvas_shown() && input.idle() {
             session.settle_upright();
         }
@@ -706,6 +714,7 @@ impl Interface {
             return;
         }
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
+        self.gallery_button = bar.rect(BarButton::Gallery);
         let held = self.tool_hold(&ctx, session, &bar);
         match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
@@ -826,6 +835,10 @@ impl Interface {
         }
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), &mut backdrops);
+        }
+        // its rows not showing, held layers find none to drop on
+        if self.open != Some(Popover::Layers) || self.background_pick.is_some() {
+            self.layers.closed();
         }
         // the background's colour is kept, however its panel closed
         if self.open != Some(Popover::Layers) {
@@ -1752,6 +1765,72 @@ impl Interface {
         !self.inserting.is_empty()
     }
 
+    /// Row `id` dragged out of the layers panel: it, with what a drag of it takes along, lifted out
+    /// to be held by the pointer, held where it was taken hold of.
+    fn lift_layers(&mut self, ctx: &egui::Context, session: &CanvasSession, id: u64) {
+        if self.held.is_some() || session.model_info().is_some() {
+            return;
+        }
+        let Some(bundle) = session.lift_layers(id) else { return };
+        let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
+        let (thumbnail, row) = self.layers.row_look(id);
+        let grab =
+            row.map_or(egui::vec2(180.0, 34.5), |r| egui::vec2((at.x - r.left()).clamp(0.0, 360.0), r.height() / 2.0));
+        self.held = Some(crate::held_layers::Held::new(bundle, id, self.artwork_dir.clone(), thumbnail, grab));
+    }
+
+    /// The layers held, followed: held a moment over the top bar's Gallery, it goes there; let go,
+    /// they drop where the pointer is.
+    fn follow_held(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>) {
+        let Some(held) = self.held.as_mut() else { return };
+        let at = ctx.input(|i| i.pointer.latest_pos());
+        let over_gallery = at.zip(self.gallery_button).is_some_and(|(at, b)| b.contains(at));
+        let lands = session.model_info().is_none() && !over_gallery;
+        match held.frame(ctx, over_gallery.then_some(crate::held_layers::Spring::Gallery), lands) {
+            crate::held_layers::Outcome::Holding => {}
+            crate::held_layers::Outcome::Open(_) => self.actions.push(Action::Gallery),
+            crate::held_layers::Outcome::Gone => self.held = None,
+            crate::held_layers::Outcome::Dropped(at) => {
+                if let Some(held) = self.held.take()
+                    && lands
+                {
+                    self.drop_held(session, &held, at);
+                }
+            }
+        }
+    }
+
+    /// `held` let go at window point `at`: over a row of the layers panel next to it (back among
+    /// their own rows, moved there); over another artwork's canvas above its current layer, one
+    /// ready to transform as a picture brought in is; over the canvas they came from, copied to
+    /// the top.
+    fn drop_held(&mut self, session: &CanvasSession, held: &crate::held_layers::Held, at: egui::Pos2) {
+        let row = self.layers.row_at(&session.layers(), at);
+        let same = held.from.is_some() && held.from == self.artwork_dir;
+        if same && let Some((target, above)) = row {
+            if target != held.layer && !session.moving_with(held.layer).contains(&target) {
+                session.move_next_to(held.layer, target, above);
+            }
+            return;
+        }
+        let place = match row {
+            Some((target, above)) => procraft_core::LayerDrop::NextTo { target, above },
+            None if same => procraft_core::LayerDrop::Top,
+            None => procraft_core::LayerDrop::AboveCurrent,
+        };
+        if self.transform.on {
+            self.transform.end(session, true);
+            self.selection.changed(session);
+        }
+        if session.drop_layers(Arc::clone(&held.bundle), place).is_none() {
+            crate::files::no_room(session);
+            return;
+        }
+        if place == procraft_core::LayerDrop::AboveCurrent && held.items == 1 {
+            self.toggle_transform(session);
+        }
+    }
+
     fn toggle_transform(&mut self, session: &CanvasSession) {
         if !self.transform.on && !self.takes_changes(session) {
             return;
@@ -2424,6 +2503,9 @@ impl Interface {
                 }
                 if let Some((text, warning)) = self.layers.notice.take() {
                     self.overlays.notice(text, warning);
+                }
+                if let Some(id) = self.layers.lifted.take() {
+                    self.lift_layers(ctx, session, id);
                 }
                 if let Some(copied) = self.layers.copied.take() {
                     self.keep_copy(session, copied);

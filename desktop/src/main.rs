@@ -28,6 +28,7 @@ mod gallery;
 mod gesture_controls;
 mod gradient_map;
 mod guide_editor;
+mod held_layers;
 mod icons;
 mod input;
 mod layer_choice;
@@ -887,6 +888,19 @@ impl App {
             // the New canvas list offers the kinds of artwork the plugins on make
             gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // layers held out of an artwork: held a moment over another, it opens; let go here,
+            // they go nowhere
+            if let Some(held) = interface.held.as_mut() {
+                let at = ui.ctx().input(|i| i.pointer.latest_pos());
+                let under = at.and_then(|at| gallery.artwork_at(at)).map(held_layers::Spring::Artwork);
+                match held.frame(ui.ctx(), under, false) {
+                    held_layers::Outcome::Open(held_layers::Spring::Artwork(dir)) => {
+                        asked = Some(gallery::Asked::Open(dir));
+                    }
+                    held_layers::Outcome::Holding | held_layers::Outcome::Open(_) => {}
+                    held_layers::Outcome::Dropped(_) | held_layers::Outcome::Gone => interface.held = None,
+                }
+            }
             // a pen's buttons do nothing here, and nothing in the artwork opened next either
             crate::pen::take_button_presses();
             // a share from the gallery shows its card there
