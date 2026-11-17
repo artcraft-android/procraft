@@ -262,6 +262,8 @@ final class CanvasModel {
     var swipedBrush: String?
     /// The set whose name is being edited.
     var renamingSet: Int?
+    /// The brush whose name is being edited in place, from its menu (its key).
+    var renamingBrush: String?
     /// A brush found from the Recent set, to be scrolled to in its own.
     var foundBrush: String?
     /// The brush chosen before the current one, for Previous brush.
@@ -577,6 +579,14 @@ final class CanvasModel {
         shownSet = Int(session.newBrushSet())
         libraryChanged()
         renamingSet = shownSet
+    }
+
+    /// Names brush `b` (from its menu in the library).
+    func renameBrush(_ b: BrushInfo, name: String) {
+        renamingBrush = nil
+        if session.renameBrush(set: b.set, index: b.index, name: name) {
+            libraryChanged()
+        }
     }
 
     func renameBrushSet(_ i: Int, name: String) {

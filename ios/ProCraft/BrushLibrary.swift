@@ -20,6 +20,8 @@ private let resultFill = Color(argb: 0x14FF_FFFF)
 private let searchBlock: CGFloat = 60
 /// Menus stay below the top bar.
 private let menuTop: CGFloat = 57
+/// A brush held for its menu goes on to follow the finger once it has moved this far.
+private let heldSlop: CGFloat = 8
 /// The set icon picker: how many of the icons it offers, its columns, how far left of the set it
 /// starts, and the room it keeps below.
 private let pickedSetIcons = 42
@@ -76,6 +78,14 @@ struct PanelHeader<Action: View>: View {
     }
 }
 
+/// A brush held for its menu: which, whether it is pinned in the Recent set, and whether the Recent
+/// set shows it.
+private struct BrushMenuAsk {
+    let brush: BrushInfo
+    let pinned: Bool
+    let recent: Bool
+}
+
 /// What the library's rows share while it is open: its menus, the search, and a brush or set held
 /// and dragged, with where the rows are.
 @Observable
@@ -85,6 +95,10 @@ private final class LibraryUi {
     var titleMenu = false
     var setMenu: Int?
     var recentMenu = false
+    /// A brush held: its menu.
+    var brushMenu: BrushMenuAsk?
+    /// A brush is held down (its menu up, or about to follow the finger): the lists stay still.
+    var holding = false
     var iconPicker = false
     var importing = false
     var query = ""
@@ -150,8 +164,8 @@ private struct BrushFrames: PreferenceKey {
 
 /// The brush library hanging from the tool that opened it: the sets down its left, the shown
 /// set's brushes (each its name over its sample stroke) on its right. Tap the chosen set for its
-/// menu, swipe a brush left to share, duplicate or delete it, hold and drag it onto a set or to
-/// another place in its own, and add brushes and sets with the plus.
+/// menu, swipe a brush left to share, duplicate or delete it, hold it for its menu (and drag it on
+/// from there onto a set or to another place in its own), and add brushes and sets with the plus.
 struct BrushLibrary: View {
     let model: CanvasModel
     let arrowX: CGFloat
@@ -217,6 +231,7 @@ struct BrushLibrary: View {
                 model.importBrushes(from: url)
             }
         }
+        .onDisappear { model.renamingBrush = nil }
         #if DEBUG
         .onAppear {
             switch ScreenCapture.libraryShows {
@@ -453,6 +468,48 @@ private struct HeldDrag: ViewModifier {
     }
 }
 
+/// A brush's touch held still: its menu shows (`held`, once the hold is made); moved on from there,
+/// the brush follows the finger (`began` hears where it took hold, in the library's own space), and
+/// `ended` hears that the touch is over, let go or taken away by the system alike.
+private struct HeldBrush: ViewModifier {
+    let ui: LibraryUi
+    let held: () -> Void
+    let began: (CGPoint) -> Void
+    let ended: () -> Void
+    @GestureState private var pressed = false
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.5)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(librarySpace)))
+                    .updating($pressed) { value, state, _ in
+                        if case .second(true, _) = value {
+                            state = true
+                        }
+                    }
+                    .onChanged { value in
+                        guard case let .second(true, drag) = value else { return }
+                        if !ui.holding, !ui.dragging {
+                            ui.holding = true
+                            held()
+                        }
+                        guard let drag else { return }
+                        if !ui.dragging, hypot(drag.translation.width, drag.translation.height) > heldSlop {
+                            began(drag.startLocation)
+                        }
+                        ui.dragAt = drag.location
+                    }
+            )
+            .onChange(of: pressed) { _, now in
+                if !now {
+                    ui.holding = false
+                    ended()
+                }
+            }
+    }
+}
+
 /// The library's sets, the shown one lit, the Recent set above them.
 private struct SetColumn: View {
     let model: CanvasModel
@@ -473,7 +530,7 @@ private struct SetColumn: View {
             }
         }
         .scrollIndicators(.hidden)
-        .scrollDisabled(ui.dragging)
+        .scrollDisabled(ui.dragging || ui.holding)
         .frame(width: setsWidth)
         .background(Pc.setColumn)
     }
@@ -699,7 +756,7 @@ private struct BrushColumn: View {
         // another set's brushes replace these at once
         .id(model.shownSet)
         .scrollIndicators(.hidden)
-        .scrollDisabled(ui.dragging)
+        .scrollDisabled(ui.dragging || ui.holding)
         .frame(maxWidth: .infinity)
         .background(Pc.brushColumn)
     }
@@ -839,9 +896,18 @@ private struct BrushRow: View {
                     // the samples are drawn white: dark on the light interface's cells
                     SampleStroke(image: preview, tint: Look.shared.light && !selected ? .black : nil)
                 }
-                BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
+                if model.renamingBrush == key {
+                    InlineName(name: brush.name, color: selected ? Color.white : Pc.panelTitle, fontSize: 14) {
+                        model.renameBrush(brush, name: $0)
+                    }
                     .padding(.leading, 18)
                     .padding(.top, 11.75)
+                    .padding(.trailing, 12)
+                } else {
+                    BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
+                        .padding(.leading, 18)
+                        .padding(.top, 11.75)
+                }
                 // a pinned brush's mark, at the cell's top right
                 if pinned {
                     PcIconView(PcIcons.pinMark, size: 16, color: selected ? .white : Pc.panelTitle)
@@ -869,12 +935,16 @@ private struct BrushRow: View {
                     model.studio.open()
                 }
             }
-            .modifier(HeldDrag(
+            .modifier(HeldBrush(
                 ui: ui,
+                held: {
+                    model.swipedBrush = nil
+                    withAnimation(Motion.menuOpen) { ui.brushMenu = BrushMenuAsk(brush: brush, pinned: pinned, recent: recent) }
+                },
                 began: { at in
                     // the Recent set's brushes stay where they are
                     guard !recent else { return }
-                    model.swipedBrush = nil
+                    withAnimation(Motion.menuClose) { ui.brushMenu = nil }
                     let frame = ui.brushFrames[key] ?? .zero
                     ui.grab = CGPoint(x: at.x - frame.minX, y: at.y - frame.minY)
                     ui.dragged = brush
@@ -992,6 +1062,10 @@ private struct LibraryMenus: View {
                 MenuDismissal { closeAll() }
                 setMenu(i, frame: frame)
             }
+            if let ask = ui.brushMenu, let frame = ui.brushFrames[CanvasModel.brushKey(ask.brush)] {
+                MenuDismissal { closeAll() }
+                brushMenu(ask, frame: frame)
+            }
         }
     }
 
@@ -1002,7 +1076,57 @@ private struct LibraryMenus: View {
             ui.recentMenu = false
             ui.setMenu = nil
             ui.iconPicker = false
+            ui.brushMenu = nil
         }
+    }
+
+    /// A brush held: its menu under it, their left edges in line. In a set Rename, Duplicate,
+    /// Share and Delete; in the Recent set Find, Pin or Unpin, Share and Clear.
+    private func brushMenu(_ ask: BrushMenuAsk, frame: CGRect) -> some View {
+        let b = ask.brush
+        // two rows, Share between lines, and Delete or Clear
+        let height: CGFloat = 14 + 80 + 21 + 40 + 21 + 40
+        let at = kept(CGPoint(x: frame.minX, y: frame.maxY), CGSize(width: glassMenuWidth, height: height), below: menuTop)
+        return GlassMenu(overPanel: true) {
+            if ask.recent {
+                MenuRow(icon: PcIcons.swipeFind, label: "Find", iconSize: 26) {
+                    closeAll()
+                    model.findBrush(b)
+                }
+                MenuRow(icon: ask.pinned ? PcIcons.swipeUnpin : PcIcons.swipePin, label: ask.pinned ? "Unpin" : "Pin", iconSize: 26) {
+                    closeAll()
+                    model.pinRecentBrush(b, pinned: !ask.pinned)
+                }
+            } else {
+                MenuRow(icon: PcIcons.menuRename, label: "Rename") {
+                    closeAll()
+                    model.renamingBrush = CanvasModel.brushKey(b)
+                }
+                MenuRow(icon: PcIcons.menuDuplicate, label: "Duplicate") {
+                    closeAll()
+                    model.duplicateBrush(b)
+                }
+            }
+            MenuLine()
+            MenuRow(icon: PcIcons.menuShare, label: "Share") {
+                closeAll()
+                model.shareBrush(b)
+            }
+            MenuLine()
+            if ask.recent {
+                MenuRow(icon: PcIcons.menuClear, label: "Clear") {
+                    closeAll()
+                    model.clearRecentBrush(b)
+                }
+            } else {
+                MenuRow(icon: PcIcons.menuTrash, label: "Delete", ink: Pc.menuDanger) {
+                    closeAll()
+                    model.question = Question(title: "Delete this brush?") { model.deleteBrush(b) }
+                }
+            }
+        }
+        .offset(x: at.x, y: at.y)
+        .menuTransition(.topLeading)
     }
 
     private var addMenu: some View {
