@@ -898,7 +898,7 @@ private struct Thumbnail: View {
     @State private var picture: UIImage?
 
     var body: some View {
-        let ratio = artwork.width > 0 && artwork.height > 0 ? CGFloat(artwork.width) / CGFloat(artwork.height) : 0.75
+        let ratio = artwork.shownRatio
         let tall = ratio <= cell.width / cell.thumb
         let size = tall ? CGSize(width: cell.thumb * ratio, height: cell.thumb) : CGSize(width: cell.width, height: cell.width / ratio)
         let corner = RoundedRectangle(cornerRadius: 8, style: .circular)

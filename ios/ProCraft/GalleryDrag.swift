@@ -68,7 +68,7 @@ private func thumbnailBox(_ cell: CGRect) -> CGRect {
 
 /// An artwork's picture as it sits in its thumbnail's `box`: fitted, standing on the box's bottom.
 private func fitted(_ box: CGRect, _ artwork: GalleryArtwork) -> CGRect {
-    let ratio: CGFloat = artwork.width > 0 && artwork.height > 0 ? CGFloat(artwork.width) / CGFloat(artwork.height) : 0.75
+    let ratio = artwork.shownRatio
     let width = ratio <= box.width / box.height ? box.height * ratio : box.width
     let height = width / ratio
     return CGRect(x: box.midX - width / 2, y: box.maxY - height, width: width, height: height)

@@ -462,7 +462,7 @@ struct RenameArtwork: View {
     /// The art fitted in its frame, centred across the screen.
     private var target: CGRect {
         let a = renaming.shown
-        let ratio = a.width > 0 && a.height > 0 ? CGFloat(a.width) / CGFloat(a.height) : 0.75
+        let ratio = a.shownRatio
         let fw = renameFrameWidth - renameArtMargin * 2
         let fh = renameFrameHeight - renameArtMargin * 2
         let wide = ratio > fw / fh

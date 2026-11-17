@@ -22,6 +22,15 @@ private let otherBrushExtensions = ["abr", "gbr", "gih", "vbr", "kpp", "bundle",
 private let srgbName = "sRGB IEC61966-2.1"
 private let p3Name = "Display P3"
 
+extension GalleryArtwork {
+    /// Its width over its height as the gallery shows it: turned as its canvas was left (its
+    /// thumbnail is kept so), on its side the other way.
+    var shownRatio: CGFloat {
+        let upright: CGFloat = width > 0 && height > 0 ? CGFloat(width) / CGFloat(height) : 0.75
+        return turns % 2 == 1 ? 1 / upright : upright
+    }
+}
+
 extension GalleryEntry {
     /// Its folder, which names it in the gallery.
     var dir: String {
