@@ -418,6 +418,18 @@ impl CanvasSession {
         self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
+        // a texture brush's preview is its grain tooth laid full-bleed as a swatch, not a solid tip
+        if stamp_only
+            && brush.grain.source.is_some()
+            && brush.stock.shape.as_ref().is_some_and(|s| s.name.starts_with("Brush-Preset"))
+            && let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref())
+            && let Some(pixels) = self.shared.lock().grain_store.pixels(full)
+        {
+            let swatch = preview::paper_swatch(&pixels, full.side);
+            canvas.use_full_shape(&gpu, &mut style, full.id, full.side, &swatch);
+            style.grain = None;
+            style.full_grain = None;
+        }
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
             let second = second.clone().as_second();
             let mut second_style =

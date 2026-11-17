@@ -36,6 +36,25 @@ fn swell(t: f32) -> f32 {
     1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()
 }
 
+/// A texture brush's preview swatch: its grain tooth repeated fine across the tip and pushed to
+/// the contrast the preview shows, dark valleys and bright peaks, not one copy stretched over it.
+pub fn paper_swatch(pixels: &[u8], side: u32) -> Vec<u8> {
+    let side = side as usize;
+    if pixels.len() != side * side {
+        return pixels.to_vec();
+    }
+    let repeat = 4usize;
+    let mut out = vec![0u8; side * side];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (x, y) = (i % side, i / side);
+        let src = (y * repeat % side) * side + (x * repeat % side);
+        let v = f32::from(pixels.get(src).copied().unwrap_or(0)) / 255.0;
+        let c = ((v - 0.4) * 3.0 + 0.35).clamp(0.0, 1.0);
+        *slot = (c * 255.0) as u8;
+    }
+    out
+}
+
 /// The sample stroke for `brush`, in canvas pixels.
 pub fn samples(brush: &Brush) -> Vec<Sample> {
     let least = brush.setting("preview_pressure_min");
