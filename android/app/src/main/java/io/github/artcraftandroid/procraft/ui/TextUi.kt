@@ -117,6 +117,14 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val box by rememberUpdatedState(windowBox(vm, info))
+    // a touch on the text brings the keyboard back if it was put away; not while the style sheet
+    // has its place: the sheet stays (its keyboard button swaps them back), never under the keyboard
+    fun touchedText() {
+        if (!textTouchBringsKeyboard(vm.textStyleOpen)) return
+        vm.textKeyboard = true
+        focus.requestFocus()
+        keyboard?.show()
+    }
     // a tap outside the box ends the edit, keeping it; dragging inside it moves the text, and
     // dragging a side's dot (past the touch slop) moves that side: the box's width
     Box(Modifier.fillMaxSize().pointerInput(Unit) {
@@ -135,12 +143,8 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                     // after the move: a finger's lift can carry its last one
                     if (!c.pressed) break
                 }
-                if (dragging) vm.endTextSide() else {
-                    // a tap on the dot is a tap on the text
-                    vm.textKeyboard = true
-                    focus.requestFocus()
-                    keyboard?.show()
-                }
+                // a tap on the dot is a tap on the text
+                if (dragging) vm.endTextSide() else touchedText()
                 return@awaitEachGesture
             }
             if (!box.contains(down.position)) {
@@ -169,10 +173,7 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                 }
                 return@awaitEachGesture
             }
-            // a touch on the text brings the keyboard back if it was put away
-            vm.textKeyboard = true
-            focus.requestFocus()
-            keyboard?.show()
+            touchedText()
             var last = down.position
             while (true) {
                 val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
@@ -209,6 +210,12 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         if (vm.textStyleOpen) TextStyleSheet(vm, info) else if (reach > 0) TextBar(vm)
     }
 }
+
+/**
+ * Whether a touch on the text being edited brings the on-screen keyboard up: not while the style
+ * sheet is open, as the sheet has the keyboard's place (its keyboard button swaps them back).
+ */
+internal fun textTouchBringsKeyboard(styleOpen: Boolean): Boolean = !styleOpen
 
 /** Less of the window than this share between its bottom and what shows above is a system bar, not a keyboard. */
 private const val KEYBOARD_LEAST = 0.15f
