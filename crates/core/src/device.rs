@@ -307,6 +307,17 @@ mod tests {
         assert!(first.device == again.device);
     }
 
+    /// An artwork exported from the gallery, never shown, draws on the app's own device (on the
+    /// backend chosen for the machine), not on one made from whichever backend comes first.
+    #[test]
+    fn an_artwork_exported_unseen_draws_on_the_apps_device() {
+        warm_gpu();
+        let Some(app) = kept().clone() else { return eprintln!("skipped: no GPU") };
+        let s = crate::CanvasSession::new(64, 64);
+        assert!(s.prepare_offscreen());
+        assert!(s.shared.lock().gpu.as_ref().is_some_and(|gpu| gpu.device == app.device));
+    }
+
     #[test]
     fn a_backend_whose_try_never_finished_gives_way_to_the_next() {
         assert_eq!(next_start("", 2), 0);

@@ -1070,12 +1070,15 @@ impl CanvasSession {
         saved.autosave = saved.autosave.wrapping_add(1);
     }
 
-    /// Gives an artwork opened only to be exported (never shown) a GPU device of its own, so its
-    /// exports work; false if there is none.
+    /// Gives an artwork opened only to be exported (never shown) a GPU device, so its exports
+    /// work: the app's own where it has made one (the backend chosen for this machine, not
+    /// whichever comes first, as a driver that takes the app down on another may), else one of its
+    /// own; false if there is none.
     pub fn prepare_offscreen(&self) -> bool {
+        let app = crate::device::kept().clone();
         let mut st = self.shared.lock();
         if st.gpu.is_none() {
-            match procraft_gpu::Gpu::headless() {
+            match app.map_or_else(procraft_gpu::Gpu::headless, Ok) {
                 Ok(gpu) => st.gpu = Some(gpu),
                 Err(e) => {
                     log::error!("exporting offscreen: {e}");
