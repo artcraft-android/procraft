@@ -1986,6 +1986,41 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_held_then_moved_onto_another_takes_its_place_and_a_still_hold_shows_the_menu() {
+        let mut f = Finger::new();
+        let from = f.on_a_brush();
+        let (key, cell) = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).copied().unwrap();
+        let name = |f: &Finger, (set, index): (u32, u32)| {
+            f.session.brush_library()[set as usize].brushes[index as usize].name.clone()
+        };
+        let held = name(&f, key);
+        // the brush two places further down, as it shows
+        let (target, onto) = f
+            .library
+            .brush_rects
+            .iter()
+            .find(|(k, r)| k.0 == key.0 && k.1 == key.1 + 2 && r.top() > cell.bottom())
+            .map(|(k, r)| (*k, r.center()))
+            .unwrap();
+        // held still: the menu, and nothing moved
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        assert!(f.library.brush_menu.is_open());
+        // moved on and down onto the other brush, let go there: the menu went, the brush took that place
+        let steps = 6;
+        for i in 1..=steps {
+            f.to(from + (onto - from) * (i as f32 / steps as f32));
+        }
+        assert!(!f.library.brush_menu.is_open());
+        f.up(onto);
+        f.frame(Vec::new());
+        assert_eq!(name(&f, target), held);
+        assert_ne!(name(&f, key), held);
+        assert!(!f.library.brush_menu.is_open());
+    }
+
+    #[test]
     fn a_brush_held_shows_its_menu_moved_on_is_dragged_and_renamed_keeps_its_name() {
         let mut f = Finger::new();
         let from = f.on_a_brush();
