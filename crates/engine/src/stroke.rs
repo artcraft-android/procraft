@@ -958,6 +958,9 @@ pub struct StrokeBuilder {
     /// The canvas shown at this many screen pixels a canvas pixel, if the input comes in whole
     /// screen pixels (see [`StrokeBuilder::read_in_whole_pixels`]).
     whole_pixels: Option<f32>,
+    /// The input turned out to come finer than whole pixels: read so from the next samples on (see
+    /// [`StrokeBuilder::read_finer`]).
+    finer_next: bool,
     /// The path's points as they came in whole pixels, before they are evened out: the first
     /// `steps_settled` gone on to the curve (kept while those still waiting reach them), the rest
     /// waiting for the path to go far enough on past them; and where the last gone on went.
@@ -1160,6 +1163,31 @@ impl StrokeBuilder {
         self
     }
 
+    /// Whether the input is taken as read in whole screen pixels (see
+    /// [`StrokeBuilder::read_in_whole_pixels`]).
+    pub fn reads_whole_pixels(&self) -> bool {
+        self.whole_pixels.is_some() && !self.finer_next
+    }
+
+    /// The input taken as read in whole pixels turned out to come finer (a position between them;
+    /// one read finer lands on whole pixels now and then): as the next samples are added, the
+    /// points still waiting to be evened out go on as they are, and the path is read finer from
+    /// there.
+    pub fn read_finer(&mut self) {
+        self.finer_next = self.whole_pixels.is_some();
+    }
+
+    /// Reads the input finer from here, if it was found to be (see [`StrokeBuilder::read_finer`]).
+    fn take_finer(&mut self, out: &mut Vec<Stamp>) {
+        if std::mem::take(&mut self.finer_next) {
+            self.settle_steps(true, out);
+            self.whole_pixels = None;
+            self.steps.clear();
+            self.steps_settled = 0;
+            self.steps_at = None;
+        }
+    }
+
     /// The stroke drawn for show (the library's sample): it never counts as fast, each use of the
     /// pressure takes it as it comes, and no streamline, stabilisation or motion filtering holds
     /// its path back (it still curves through its points).
@@ -1281,6 +1309,7 @@ impl StrokeBuilder {
             ahead: None,
             before_ahead: None,
             whole_pixels: None,
+            finer_next: false,
             steps: VecDeque::new(),
             steps_settled: 0,
             steps_at: None,
@@ -1403,6 +1432,7 @@ impl StrokeBuilder {
             return stamps;
         }
         let mut out = Vec::new();
+        self.take_finer(&mut out);
         for s in samples.iter().filter(|s| s.is_finite()) {
             self.push(*s, &mut out);
         }
@@ -4109,6 +4139,43 @@ mod tests {
             let spread = rms.iter().fold(0.0f32, |m, l| m.max(*l)) - rms.iter().fold(1.0f32, |m, l| m.min(*l));
             assert!(spread < 0.01, "{read:?}: {rms:?}");
         }
+    }
+
+    #[test]
+    fn with_no_smoothing_what_is_laid_keeps_a_sample_behind_the_pen_unless_it_evens_out_whole_pixels() {
+        // a pen drawn across at 200 px a second, read at 240 Hz finer than a pixel (its first
+        // position on whole pixels, by chance) and handed over four a frame: how far behind the
+        // pen what is laid for good is, once it is under way (screen pixels, the canvas at 100%)
+        let samples: Vec<Sample> = (0..=240)
+            .map(|i| {
+                let p = Vec2::new(100.0 + 200.0 * i as f32 / 240.0, 100.0 + 0.3 * (i as f32 * 0.2).sin());
+                Sample::at(p, 0.6, (i / 4) as f64 * 1000.0 / 60.0 + 0.01 * (i % 4) as f64)
+            })
+            .collect();
+        let behind = |mut b: StrokeBuilder, finer_after_first: bool| {
+            let mut laid = f32::MIN;
+            let mut most = 0.0f32;
+            for (k, some) in samples.chunks(4).enumerate() {
+                if finer_after_first && k == 1 {
+                    b.read_finer();
+                }
+                laid = b.add(some).iter().map(|s| s.center.x).fold(laid, f32::max);
+                if k >= 10 {
+                    most = most.max(some.last().map_or(0.0, |s| s.pos.x) - laid);
+                }
+            }
+            most
+        };
+        let stroke = || StrokeBuilder::new(plain(), 6.0, Pointer::Stylus);
+        // read finer: a sample and a little more (the curve through the points waits for the next)
+        let finer = behind(stroke(), false);
+        assert!(finer < 2.0, "{finer}");
+        // taken for whole pixels, each point waits for the path to go on up to 12 px past it
+        let whole = behind(stroke().read_in_whole_pixels(1.0), false);
+        assert!(whole > 10.0, "{whole}");
+        // found to be read finer at its next samples: as read finer from there
+        let found = behind(stroke().read_in_whole_pixels(1.0), true);
+        assert!((found - finer).abs() < 0.01, "{found} {finer}");
     }
 
     #[test]

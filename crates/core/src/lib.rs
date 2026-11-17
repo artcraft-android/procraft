@@ -331,6 +331,11 @@ impl From<PointerKind> for Pointer {
     }
 }
 
+/// Whether `s` lies on whole screen pixels.
+fn on_whole_pixels(s: &PenSample) -> bool {
+    s.x.fract() == 0.0 && s.y.fract() == 0.0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum ToolKind {
     Paint,
@@ -1169,14 +1174,38 @@ impl State {
         }
     }
 
-    /// The canvas's zoom (screen pixels a canvas pixel) if a stroke's input comes in whole
-    /// screen pixels, as the first of its `samples` says (a mouse, or a tablet's pen read no finer
-    /// than the pointer it moves): its points are then evened out over the steps of a pixel a slow
-    /// line goes in (see [`StrokeBuilder::read_in_whole_pixels`]).
+    /// The canvas's zoom (screen pixels a canvas pixel) if a stroke's input comes in whole screen
+    /// pixels, as `samples`, those it begins with, say: every one of them on whole pixels (a mouse,
+    /// a tablet's pen read no finer than the pointer it moves, some touch screens). Its points are
+    /// then evened out over the steps of a pixel a slow line goes in (see
+    /// [`StrokeBuilder::read_in_whole_pixels`]), until a position finer than a pixel shows it
+    /// isn't so (one read finer lands on whole pixels now and then: see [`State::read_finer`]).
     pub(crate) fn whole_pixels(&self, samples: &[PenSample]) -> Option<f32> {
-        let first = samples.first()?;
-        let whole = first.x.fract() == 0.0 && first.y.fract() == 0.0;
+        let mut finite = samples.iter().filter(|s| s.x.is_finite() && s.y.is_finite()).peekable();
+        let whole = finite.peek().is_some() && finite.all(on_whole_pixels);
         self.view.map(|v| v.zoom()).filter(|_| whole)
+    }
+
+    /// The open stroke's input went on with `samples`: one finer than a pixel and the stroke, if it
+    /// was taken as read in whole pixels, is read finer from here; as it is laid again (QuickShape's
+    /// stroke as drawn, its recording on a plugin's layer), from its start, which is the same where
+    /// that showed at its second sample.
+    pub(crate) fn read_finer(&mut self, samples: &[PenSample]) {
+        if samples.iter().all(|s| !s.x.is_finite() || !s.y.is_finite() || on_whole_pixels(s)) {
+            return;
+        }
+        for builder in [self.stroke.as_mut(), self.second.as_mut()].into_iter().flatten() {
+            builder.read_finer();
+        }
+        if let Some(began) = self.began.as_mut() {
+            began.line.read_finer();
+            if let Some(fresh) = began.fresh.as_mut() {
+                fresh.read_finer();
+            }
+        }
+        if let Some(recording) = self.recording.as_mut() {
+            recording.read_finer();
+        }
     }
 
     /// Samples in canvas pixels.
@@ -2066,6 +2095,7 @@ impl CanvasSession {
             return;
         }
         st.remember_input(&canvas_samples);
+        st.read_finer(&samples);
         if let Some(recording) = st.recording.as_mut().filter(|_| st.stroke.is_some()) {
             recording.add(&canvas_samples);
         }
@@ -2141,6 +2171,7 @@ impl CanvasSession {
         let tells = !st.adjusting;
         st.tell_under();
         st.engine_asking = plugin_brushes::Asking::default();
+        st.read_finer(&samples);
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let mut second = st.second.take();
         lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());

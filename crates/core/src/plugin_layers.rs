@@ -977,6 +977,12 @@ impl Recording {
         item.shape = Some(Arc::new((kind, nodes.to_vec())));
     }
 
+    /// Its input turned out to come finer than whole pixels: laid again, it is read so from its
+    /// start (the stroke as drawn was read so from where that showed, a sample or two in).
+    pub(crate) fn read_finer(&mut self) {
+        self.item.whole_pixels = None;
+    }
+
     /// The last of its samples, `samples`, as the pen lifts.
     pub(crate) fn lift(&mut self, samples: &[Sample]) {
         self.add(samples);
