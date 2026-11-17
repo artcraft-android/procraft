@@ -18,8 +18,8 @@ const START: f32 = 10.0;
 const END: f32 = 1.414;
 /// How long it takes: this long, and this much more the more of the view the fill's box takes up
 /// (all of it or more: the whole of this).
-const SHORTEST: f32 = 0.2;
-const LONGER: f32 = 0.3;
+const SHORTEST: f32 = 0.28;
+const LONGER: f32 = 0.22;
 /// The hole's six corners, a sixth of a turn apart from the right; their handles reach this much
 /// of a corner's distance from the middle.
 const HANDLE: f32 = 0.35;
@@ -107,26 +107,12 @@ pub(crate) fn outline(corners: &[Corner; 6]) -> Vec<[f32; 2]> {
     out
 }
 
-/// How far along it is at `t` (0..1 of its time): slow to start, quickest at the end (a cubic
-/// timing curve through (0.75, 0) and (1, 1)).
+/// How far the fill has spread: starts visibly at once, then settles smoothly.
+/// A slow-start curve hides most of a short ColorDrop animation until its last
+/// frames, making the fill look instantaneous rather than spreading from the tap.
 pub(crate) fn eased(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    let (x1, y1, x2, y2) = (0.75, 0.0, 1.0, 1.0);
-    let at = |u: f32, p1: f32, p2: f32| {
-        let v = 1.0 - u;
-        3.0 * v * v * u * p1 + 3.0 * v * u * u * p2 + u * u * u
-    };
-    // the curve's own parameter where it is `t` across, by halving
-    let (mut low, mut high) = (0.0_f32, 1.0_f32);
-    for _ in 0..30 {
-        let mid = (low + high) / 2.0;
-        if at(mid, x1, x2) < t {
-            low = mid;
-        } else {
-            high = mid;
-        }
-    }
-    at((low + high) / 2.0, y1, y2)
+    1.0 - (1.0 - t).powi(3)
 }
 
 /// How long the hole takes to grow (seconds) for a fill whose box on the screen takes up `share`
@@ -224,28 +210,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_takes_a_fifth_of_a_second_and_up_to_three_tenths_more_for_the_whole_view() {
-        assert!((seconds_for(0.0) - 0.2).abs() < 1e-6);
-        assert!((seconds_for(0.5) - 0.35).abs() < 1e-6);
+    fn it_stays_visible_long_enough_to_show_small_fills() {
+        assert!((seconds_for(0.0) - 0.28).abs() < 1e-6);
+        assert!((seconds_for(0.5) - 0.39).abs() < 1e-6);
         assert!((seconds_for(1.0) - 0.5).abs() < 1e-6);
         assert!((seconds_for(4.0) - 0.5).abs() < 1e-6, "a box past the view counts as all of it");
-        assert!((seconds_for(f32::NAN) - 0.2).abs() < 1e-6);
+        assert!((seconds_for(f32::NAN) - 0.28).abs() < 1e-6);
     }
 
     #[test]
-    fn it_starts_slow_and_ends_quickest() {
+    fn it_starts_visibly_and_eases_to_a_stop() {
         assert!(eased(0.0).abs() < 1e-6);
         assert!((eased(1.0) - 1.0).abs() < 1e-5);
-        // the curve through (0.75, 0) and (1, 1): barely moved half way, quickest at the end
+        // Halfway through, the expanding colour has already covered most of the distance
         let half = eased(0.5);
-        assert!(half > 0.05 && half < 0.2, "{half}");
+        assert!(half > 0.8 && half < 0.9, "{half}");
         let mut last = 0.0;
         for i in 1..=100 {
             let e = eased(i as f32 / 100.0);
             assert!(e >= last, "never back");
             last = e;
         }
-        assert!(eased(1.0) - eased(0.9) > eased(0.1) - eased(0.0));
+        assert!(eased(1.0) - eased(0.9) < eased(0.1) - eased(0.0));
     }
 
     #[test]
@@ -326,7 +312,7 @@ mod tests {
         let small = Reveal::new(drop, IRect::new(490, 490, 510, 510), &view, (800, 800), 2.0, &mut Shake::new(1));
         let whole = Reveal::new(drop, IRect::new(0, 0, 1000, 1000), &view, (800, 800), 2.0, &mut Shake::new(1));
         let (small, whole) = (small.unwrap().seconds, whole.unwrap().seconds);
-        assert!(small < 0.201, "{small}");
+        assert!((0.28..0.281).contains(&small), "{small}");
         // the fitted canvas is the whole window here
         assert!((whole - 0.5).abs() < 0.01, "{whole}");
     }

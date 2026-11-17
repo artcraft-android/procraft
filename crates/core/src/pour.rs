@@ -75,7 +75,7 @@ impl Pour {
         let mask = self.flood.as_ref().map(|flood| {
             let mut mask = self.closed.clone().unwrap_or_else(|| flood.mask(threshold));
             // poured into what is see-through, it goes on under the line it stopped at
-            if flood.colour[3] == 0 {
+            if flood.see_through() {
                 fill::under_edges(&mut mask, self.elsewhere.as_deref().unwrap_or(&self.before));
             }
             if let Some(sel) = &self.selection {
