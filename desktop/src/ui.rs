@@ -145,7 +145,8 @@ pub struct Interface {
     bars_hidden: bool,
     /// A layer copied or cut, to paste.
     clipboard: Option<procraft_core::ThumbnailImage>,
-    /// What other apps copied, which Paste takes once it is the newer.
+    /// The system's clipboard: what is copied here goes on it for other apps, and what they copy
+    /// Paste takes once it is the newer.
     system_clipboard: SystemClipboard,
     /// Paste's button shows, the window in front (it is looked at again as that begins).
     paste_shown: bool,
@@ -1896,8 +1897,7 @@ impl Interface {
     /// The current layer (or what is selected of it) cut, to paste.
     fn cut_layer(&mut self, session: &CanvasSession) {
         if let Some(cut) = self.layer_cut(session) {
-            self.clipboard = Some(cut);
-            self.system_clipboard.copied_here(self.clipboard.as_ref());
+            self.keep_copy(cut);
         }
     }
 
@@ -1917,8 +1917,7 @@ impl Interface {
     /// The current layer (or what is selected of it) copied, to paste.
     fn copy_layer(&mut self, session: &CanvasSession) {
         if let Some(copied) = self.layer_copied(session) {
-            self.clipboard = Some(copied);
-            self.system_clipboard.copied_here(self.clipboard.as_ref());
+            self.keep_copy(copied);
         }
     }
 
@@ -1939,10 +1938,16 @@ impl Interface {
     fn copy_canvas(&mut self, session: &CanvasSession) {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
-            self.clipboard = Some(copied);
-            self.system_clipboard.copied_here(self.clipboard.as_ref());
+            self.keep_copy(copied);
             self.overlays.notice("Canvas copied", false);
         }
+    }
+
+    /// What was cut or copied (`copy`), kept to paste in place of what was before: here as it is,
+    /// and on the system's clipboard as a picture for other apps.
+    fn keep_copy(&mut self, copy: procraft_core::ThumbnailImage) {
+        self.system_clipboard.copied_here(&copy);
+        self.clipboard = Some(copy);
     }
 
     /// Whether there is anything for Paste to take, as far as is known.
@@ -2421,8 +2426,7 @@ impl Interface {
                     self.overlays.notice(text, warning);
                 }
                 if let Some(copied) = self.layers.copied.take() {
-                    self.clipboard = Some(copied);
-                    self.system_clipboard.copied_here(self.clipboard.as_ref());
+                    self.keep_copy(copied);
                 }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
