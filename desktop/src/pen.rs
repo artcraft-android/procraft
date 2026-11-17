@@ -152,7 +152,7 @@ fn keep_pose(id: u64, lean: Option<(f32, f32)>, roll: Option<f32>) {
 }
 
 /// No pen is near the window any more.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn pen_gone() {
     if let Ok(mut latest) = LATEST.lock() {
         *latest = None;
@@ -724,7 +724,7 @@ mod system {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, MINMAXINFO, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW,
         SetPropW, SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -918,6 +918,15 @@ mod system {
             WM_LBUTTONDOWN => super::wintab::pressed(),
             WM_MOUSEMOVE | WM_LBUTTONUP if wparam.0 & MOUSE_BUTTONS == 0 => super::wintab::pen_up(hwnd),
             _ => {}
+        }
+        // the system's pen gone out of reach, or out of the window: none is near now, so the brush
+        // cursor no longer turns as it last leaned (the mouse's moving it)
+        if msg == WM_POINTERLEAVE {
+            let mut kind = POINTER_INPUT_TYPE::default();
+            // SAFETY: `kind` is a type to fill for the pointer leaving (the low word of `wparam`)
+            if unsafe { GetPointerType((wparam.0 & 0xFFFF) as u32, &mut kind) }.is_ok() && kind == PT_PEN {
+                super::pen_gone();
+            }
         }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
