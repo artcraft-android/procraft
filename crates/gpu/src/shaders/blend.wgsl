@@ -195,8 +195,10 @@ fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
         let shallow = clamp(h - g * inv, 0.0, 1.0);
         let deep = clamp(h * depth - g, 0.0, 1.0);
         r = mix(shallow, deep, smoothstep(0.08, 0.16, depth));
-        if (mode == 28u) {
-            r = max(r, clamp(h * depth * (1.0 - g), 0.0, 1.0));
+        if (mode == 28u && g < 1.0) {
+            // the linear height also lifts by the grain's own light (12.5 times the depth), not
+            // by what is left of it, and only where the grain is shy of whole
+            r = max(r, clamp(12.5 * depth * a * g, 0.0, 1.0));
         }
     } else {
         // normal attenuates: even a fully covering stamp keeps the tooth (it never fills it in)

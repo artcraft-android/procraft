@@ -164,6 +164,19 @@ fn compensate(b: &mut Brush) {
             }
         }
     }
+    // the flow reads the pressure neutral at a quarter press now; these brushes drew it straight
+    // off the curve. A curve a quarter as tall turns the neutral read back into the straight one,
+    // as the opacity and size above keep their old reads
+    if b.setting("pressure_flow") > 0.0 {
+        let before = b.pressure_curves.get(PressureCurve::Flow).cloned();
+        let pts: Vec<Vec2> = (0..=32)
+            .map(|i| {
+                let x = i as f32 / 32.0;
+                Vec2::new(x, before.as_ref().map_or(x, |c| c.eval(x)) * 0.25)
+            })
+            .collect();
+        b.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&pts)));
+    }
     // the preview's swell reaches the pressure it used to: the shared gain is a quarter of what it
     // was, so the brush's own scale goes in fourfold (past the control's clamp, straight into extra)
     let scale = b.setting("preview_pressure_scale");

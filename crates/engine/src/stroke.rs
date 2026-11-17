@@ -2532,25 +2532,47 @@ impl StrokeBuilder {
         let pressure = p.soft[4].clamp(0.0, 1.0);
         let curves = &self.brush.pressure_curves;
         let by = |k: PressureCurve| curves.at(k, pressure);
-        // the flow lets through as much as its pressure amount and curve say (an amount below 0
-        // lets it all through)
+        // the flow reads the pressure like the size and opacity do, neutral at a quarter press:
+        // a glaze that keeps the strongest stamp, or builds only towards its transfer, has no
+        // overlap to make up for a flow thinned by the preview's light swell. An amount below 0
+        // falls the other way, four times as fast, reaching nothing partway up the press.
         let flowing = curves.through(PC::Flow, pressure);
-        let pressure_flow = (1.0 - x.pressure_flow * (1.0 - flowing)).clamp(0.0, 1.0);
+        let pressure_flow = if x.pressure_flow < 0.0 {
+            (1.0 + 4.0 * x.pressure_flow * flowing).clamp(0.0, 1.0)
+        } else {
+            (1.0 + x.pressure_flow * (4.0 * flowing - 1.0)).clamp(0.0, 1.0)
+        };
         // the opacity range takes the flow, tilt and speed; the pressure's opacity multiplies the
         // deposit straight, and the flow channel is the one eased. Tuned to the previews.
         let b = &self.brush;
         let control = b.flow.clamp(0.0, 1.0).powf(1.0 / FLOW_POWER) * tilt_alpha * speed_alpha;
         let ranged = (b.min_opacity + (b.max_opacity - b.min_opacity) * control).clamp(0.01, 1.0);
         let eased_flow = pressure_flow.powf(FLOW_TRANSFER_POWER);
+        // a wet brush caps its deposit at the dilution the reference lays instead of building up
+        // solid: (1-dilution)^2.4, lifted along the stroke by the charge term, floored by the attack
+        let wet_cap = if b.mixes_wet() {
+            let d = b.setting("wet_dilution").clamp(0.0, 1.0);
+            let charge = b.setting("wet_charge").clamp(0.0, 1.0);
+            let base = (1.0 - d).powf(2.4);
+            let wetv = if charge > 0.0 {
+                let bb = (0.5f32.cbrt() * (1.0 - charge) * -2.0 + 1.0).max(0.0);
+                (base + bb).min(1.0)
+            } else {
+                base
+            };
+            b.setting("wet_attack").clamp(0.0, 1.0).max(wetv)
+        } else {
+            1.0
+        };
+        let rendering = if b.mixes_wet() { Rendering::Capped } else { self.brush.rendering };
         // a capped stroke builds up towards what the pressure lets through rather than taking it
-        let transfer = eased_flow;
-        let through = if self.brush.rendering == Rendering::Capped { 1.0 } else { eased_flow };
+        let transfer = if b.mixes_wet() { wet_cap } else { eased_flow };
+        let through = if rendering == Rendering::Capped { 1.0 } else { eased_flow };
         let alpha = ranged.powf(FLOW_POWER) * through * pressure_alpha.clamp(0.0, 1.0) * falloff;
         // a gradual stroke's pixels each build up by their own share of the stamp (wet paint is
         // laid stamp by stamp as it is mixed, and a stroke laid in place takes the rule pixel by
         // pixel itself)
-        let gradual =
-            self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place();
+        let gradual = rendering == Rendering::Gradual && !b.mixes_wet() && !b.laid_in_place();
         let overlap = if gradual { diameter / self.step(p) } else { 0.0 };
         let shape = self.brush.shape.clone();
         let [count_by, count_jitter_by, lateral_by, linear_by, size_jitter_by, opacity_jitter_by, scatter_by] = [
@@ -3401,9 +3423,9 @@ mod tests {
     }
 
     #[test]
-    fn a_pressure_transfer_below_none_lets_everything_through() {
-        // the transfer's amount takes away what the pressure's curve leaves; below 0 it would
-        // add past full, so everything goes through
+    fn a_pressure_transfer_below_none_falls_the_other_way() {
+        // the transfer reads the pressure neutral at a quarter press, as the size and opacity do;
+        // below 0 it falls four times as fast, whole at no pressure and nothing partway up
         let transfer = |amount: f32, pressure: f32| {
             let mut brush = plain();
             brush.set_setting("pressure_flow", amount);
@@ -3411,13 +3433,15 @@ mod tests {
             StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&[at])[0].transfer
         };
         // the flow channel is eased on its own (to the transfer power)
-        assert!((transfer(0.6, 0.25) - (1.0 - 0.6 * 0.75f32).powf(FLOW_TRANSFER_POWER)).abs() < 1e-4);
-        assert_eq!(transfer(-0.6, 0.25), 1.0);
-        assert_eq!(transfer(-0.6, 1.0), 1.0);
+        assert!((transfer(0.6, 0.25) - 1.0f32.powf(FLOW_TRANSFER_POWER)).abs() < 1e-4);
+        assert!((transfer(0.6, 0.0) - 0.4f32.powf(FLOW_TRANSFER_POWER)).abs() < 1e-4);
+        assert!((transfer(-0.6, 0.0) - 1.0f32.powf(FLOW_TRANSFER_POWER)).abs() < 1e-4);
+        assert!((transfer(-0.6, 0.25) - 0.4f32.powf(FLOW_TRANSFER_POWER)).abs() < 1e-4);
+        assert_eq!(transfer(-0.6, 1.0), 0.0);
     }
 
     #[test]
-    fn the_opacity_channel_multiplies_straight_and_the_flow_channel_is_eased() {
+    fn the_opacity_and_flow_channels_read_the_pressure_alike() {
         let alpha = |opacity: f32, flow: f32, p: f32| {
             let mut b = Brush { pressure_size: 0.0, pressure_opacity: opacity, ..plain() };
             b.set_setting("pressure_flow", flow);
@@ -3426,8 +3450,9 @@ mod tests {
         // the opacity factor multiplies the deposit straight: half amount, no pressure, half alpha
         assert!((alpha(0.5, 0.0, 0.0) - 0.5).abs() < 1e-4, "{}", alpha(0.5, 0.0, 0.0));
         assert!((alpha(1.0, 0.0, 0.25) - 1.0).abs() < 1e-4);
-        // the flow channel is eased: half let through gives 0.5 to the transfer power of the deposit
-        assert!((alpha(0.0, 1.0, 0.5) - 0.5f32.powf(FLOW_TRANSFER_POWER)).abs() < 1e-4, "{}", alpha(0.0, 1.0, 0.5));
+        // the flow is neutral at a quarter press too, so a light swell still lays the set flow
+        assert!((alpha(0.0, 1.0, 0.25) - 1.0).abs() < 1e-4, "{}", alpha(0.0, 1.0, 0.25));
+        assert!((alpha(0.0, 1.0, 0.0) - 0.0).abs() < 1e-4, "{}", alpha(0.0, 1.0, 0.0));
     }
 
     #[test]
@@ -4445,8 +4470,9 @@ mod tests {
             if let Some(kind) = level {
                 b.pressure_curves.set(kind, Some(Curve::new(&[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0)])));
             }
+            // a light press, under the flow's neutral point, so its curve still shows
             let samples: Vec<Sample> =
-                (0..=30).map(|i| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 0.3, i as f64 * 4.0)).collect();
+                (0..=30).map(|i| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 0.1, i as f64 * 4.0)).collect();
             let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
             s.add(&samples);
             let all = s.finish();
@@ -4844,9 +4870,9 @@ mod tests {
             s.finish()
         };
         let mid = |v: &[Stamp]| v[v.len() / 2];
-        // flow falls with light pressure
-        let plain_light = mid(&stroke(&[], 0.3, Taper::NONE));
-        let flow_light = mid(&stroke(&[("pressure_flow", 1.0)], 0.3, Taper::NONE));
+        // flow falls with light pressure (under its neutral point, where it still reads the press)
+        let plain_light = mid(&stroke(&[], 0.1, Taper::NONE));
+        let flow_light = mid(&stroke(&[("pressure_flow", 1.0)], 0.1, Taper::NONE));
         assert!(flow_light.alpha < plain_light.alpha * 0.5, "{} {}", flow_light.alpha, plain_light.alpha);
         // a blunt tip keeps width at the stroke's ends (all but the very first stamp)
         let taper = Taper { start: 0.3, end: 0.3, size: 1.0, opacity: 0.0 };
