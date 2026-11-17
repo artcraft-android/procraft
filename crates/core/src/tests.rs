@@ -4683,6 +4683,55 @@ fn exports_psd_tiff_pdf_and_layer_pngs() {
 }
 
 #[test]
+fn fit_to_canvas_keeps_a_flip_and_a_turn() {
+    use crate::transform::TransformAction;
+    let Some(s) = session(100, 100) else { return };
+    no_streamline(&s);
+    s.set_brush_size(0.2);
+    // red on the left, blue on the right of a box wider than tall
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.set_color(0.0, 0.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    // the x of the reddest and the bluest pixel along the row through the middle
+    let row = |s: &CanvasSession, y: u32| {
+        let px: Vec<[u8; 4]> = (0..100).map(|x| pixel(s, x, y)).collect();
+        let most = |c: usize| {
+            (0..100u32).max_by_key(|&x| i32::from(px[x as usize][c]) - i32::from(px[x as usize][1])).unwrap()
+        };
+        (most(0), most(2))
+    };
+    let (red, blue) = row(&s, 50);
+    assert!(red < blue, "{red} {blue}");
+    s.transform_begin().unwrap();
+    s.transform_apply(TransformAction::FlipHorizontal);
+    let fitted = s.transform_apply(TransformAction::FitToCanvas).unwrap();
+    // as wide as the canvas
+    let xs: Vec<f32> = fitted.corners.iter().step_by(2).copied().collect();
+    let (left, right) = (xs.iter().copied().fold(f32::MAX, f32::min), xs.iter().copied().fold(f32::MIN, f32::max));
+    assert!(left.abs() < 0.5 && (right - 100.0).abs() < 0.5, "{xs:?}");
+    s.transform_end(true);
+    // flipped still: red on the right now
+    let (red, blue) = row(&s, 50);
+    assert!(red > blue, "{red} {blue}");
+    // a quarter turn fitted: red and blue one above the other, the box as tall as the canvas
+    s.transform_begin().unwrap();
+    s.transform_apply(TransformAction::Rotate45);
+    s.transform_apply(TransformAction::Rotate45);
+    let fitted = s.transform_apply(TransformAction::FitToCanvas).unwrap();
+    let ys: Vec<f32> = fitted.corners.iter().skip(1).step_by(2).copied().collect();
+    let (top, bottom) = (ys.iter().copied().fold(f32::MAX, f32::min), ys.iter().copied().fold(f32::MIN, f32::max));
+    assert!(top.abs() < 0.5 && (bottom - 100.0).abs() < 0.5, "{ys:?}");
+    s.transform_end(true);
+    let column: Vec<[u8; 4]> = (0..100).map(|y| pixel(&s, 50, y)).collect();
+    let most = |c: usize| (0..100usize).max_by_key(|&y| i32::from(column[y][c]) - i32::from(column[y][1])).unwrap();
+    // turned clockwise, what was on the right (red, after the flip) is at the bottom
+    assert!(most(0) > most(2), "{} {}", most(0), most(2));
+}
+
+#[test]
 fn text_is_edited_as_one_step_and_rasterized() {
     use crate::text::{TextAlignment, TextInfo};
     let Some(s) = session(40, 40) else { return };
