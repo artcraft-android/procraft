@@ -339,14 +339,15 @@ final class CanvasModel {
         self.session = session
         self.dir = dir
         _ = session.openBrushes(dir: Self.brushesDir)
+        // the plugins on first: their brush engines make brushes of the files waiting too
+        applyPlugins()
+        PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
         addPendingBrushes()
         brushSets = session.brushLibrary()
         readLibraries()
         readSetChoices()
         let settings = AppSettings.shared
         session.setSelectionVisibility(visibility: settings.selectionVisibility)
-        applyPlugins()
-        PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
         refreshCanvasSpace()
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
@@ -820,9 +821,14 @@ final class CanvasModel {
             creep += (0.95 - creep) * 0.03
             self.importShown = ProgressShown(progress: creep, detail: name)
         }
+        let session = session
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let bytes = url.readPicked()
             let read = bytes.flatMap { readBrushes(bytes: $0, fileName: name) }
+            // plugins' brush engines make theirs of the file here too, off the main thread
+            if let read {
+                session.makeEngineBrushes(read: read)
+            }
             then?()
             DispatchQueue.main.async {
                 creeping.invalidate()
@@ -858,6 +864,7 @@ final class CanvasModel {
             // the name it came with, after what kept it apart
             let name = String(file.lastPathComponent.dropFirst(37))
             if let bytes = try? Data(contentsOf: file), let read = readBrushes(bytes: bytes, fileName: name) {
+                session.makeEngineBrushes(read: read)
                 _ = session.addBrushesRead(read: read, shown: 0)
             }
             try? manager.removeItem(at: file)

@@ -238,13 +238,10 @@ enum ScreenCapture {
     private static func recordFrames(_ model: CanvasModel, then: @escaping () -> Void) {
         let session = model.session
         let lapse = model.timeLapse.lapse
-        let side = timeLapseSide(s: lapse.settings)
         DispatchQueue.global(qos: .userInitiated).async {
             for colour: [Float] in [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]] {
                 _ = session.setBackgroundColor(r: colour[0], g: colour[1], b: colour[2], done: true)
-                if let shot = session.timeLapseFrame(maxSide: side) {
-                    lapse.record(shot)
-                }
+                lapse.record(from: session)
             }
             DispatchQueue.main.async(execute: then)
         }

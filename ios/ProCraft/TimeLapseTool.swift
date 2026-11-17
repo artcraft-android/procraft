@@ -159,9 +159,15 @@ final class ArtworkTimeLapse {
         core.bytes()
     }
 
-    /// Keeps a frame unless it is the same as the last.
-    func record(_ shot: ThumbnailImage) {
-        _ = core.record(rgba: shot.rgba, width: shot.width, height: shot.height)
+    /// Keeps `session`'s canvas as the next frame, unless it is the same as the last: read back at
+    /// the size frames are kept, private layers left out, the picture never leaving the core.
+    func record(from session: CanvasSession) {
+        _ = session.recordTimeLapse(lapse: core)
+    }
+
+    /// What to tell, once, when the time-lapse couldn't be written (the storage full, say).
+    func takeProblem() -> String? {
+        core.takeProblem()
     }
 
     /// Deletes what has been recorded; the settings, and whether it records, stay.
@@ -477,13 +483,16 @@ final class TimeLapseTool {
         let session = model.session
         let lapse = lapse
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            // frames as large as the video they make, private layers left out
-            if let shot = session.timeLapseFrame(maxSide: timeLapseSide(s: lapse.settings)) {
-                lapse.record(shot)
-            }
+            // kept by the core without the picture coming here: a frame after each stroke
+            lapse.record(from: session)
             let count = lapse.count
+            let problem = lapse.takeProblem()
             DispatchQueue.main.async {
                 guard let self else { return }
+                // one that couldn't be kept (the storage full) is told once
+                if let problem {
+                    self.model.showNotice(problem, warning: true)
+                }
                 if self.stale {
                     self.take()
                 } else {
