@@ -847,6 +847,8 @@ impl State {
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
+        // a shape kept as it shows, moved since the last frame or not
+        self.draw_moved_shape();
         let shape = self.shape.take();
         // a stroke on a model ends there, as the pen lifting would end it
         if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {

@@ -278,6 +278,192 @@ fn frame_cost() {
     assert_eq!(errors, 0, "GPU validation errors");
 }
 
+/// What editing a snapped shape costs with heavy brushes: an oval drawn across the canvas with each
+/// brush and held until it snaps, then dragged about as a finger does, a move every 4 ms (a 240 Hz
+/// screen's touches) for `QS_COST_MOVES` (360) moves, while another thread draws frames as the
+/// render thread does (each recorded under the lock, then the GPU waited for outside it, as
+/// presenting waits for the image). Prints, for each brush, how long a move waited at the median
+/// and at worst (the app's own thread: past five seconds the system calls it not responding), the
+/// frames drawn, and the longest a frame held the lock. `QS_COST_SIDE` (the canvas, 2732 square),
+/// `QS_COST_BRUSHES` (names, `,` between) and `QS_COST_SIZE` (0.6) set the scene. Run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn quickshape_edit_cost() {
+    use procraft_gpu::wgpu;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let side: u32 = env("QS_COST_SIDE", "2732").parse().unwrap_or(2732);
+    let moves: usize = env("QS_COST_MOVES", "360").parse().unwrap_or(360);
+    let size: f32 = env("QS_COST_SIZE", "0.6").parse().unwrap_or(0.6);
+    let brushes = env("QS_COST_BRUSHES", "Elfin Saddle,Humpback,Gouache,Grey Heron,Wet Acrylic,Oil Paint");
+    let (width, height) = (1340u32, 800u32);
+    let Some(s) = session(side, width.max(height)) else { return };
+    s.resize_window(width, height);
+    s.set_display_scale(1.5);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = {
+        let mut st = s.shared.lock();
+        st.view = Some(View::fit((side, side), (width, height)));
+        let Some(gpu) = st.gpu.as_ref() else { return };
+        let info = gpu.adapter.get_info();
+        println!("{} ({:?}), canvas {side} square, brush size {size}", info.name, info.backend);
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    };
+    let view = target.create_view(&Default::default());
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let library = s.brush_library();
+    let pick = |wanted: &str| {
+        library
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))
+    };
+    let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+    for wanted in brushes.split(',') {
+        let Some((set, index)) = pick(wanted) else {
+            println!("no {wanted}");
+            continue;
+        };
+        s.select_brush(set, index);
+        s.set_brush_size(size);
+        // an oval most of the way across the window, held at its end until it snaps
+        let oval: Vec<PenSample> = (0..=120)
+            .map(|i| {
+                let t = i as f32 / 120.0 * std::f32::consts::TAU;
+                PenSample {
+                    x: cx + 300.0 * t.cos(),
+                    y: cy + 200.0 * t.sin(),
+                    pressure: 0.6,
+                    tilt: 0.0,
+                    orientation: 0.0,
+                    time_ms: f64::from(i) * 8.0,
+                    roll: 0.0,
+                }
+            })
+            .collect();
+        s.stroke_begin(PointerKind::Stylus, oval[..1].to_vec());
+        s.stroke_add(oval[1..].to_vec());
+        if s.quickshape_hold().is_none() {
+            println!("{wanted}: no shape");
+            s.stroke_end(vec![]);
+            continue;
+        }
+        s.stroke_end(vec![]);
+        // its frames drawn and waited for
+        {
+            let mut st = s.shared.lock();
+            st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, Instant::now());
+        }
+        if let Some(g) = s.shared.lock().gpu.clone() {
+            g.flush();
+        }
+        // a move and a frame each alone, the GPU waited for after each
+        let (mut alone_move, mut alone_lay, mut alone_frame) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..12 {
+            let d = if i % 2 == 0 { 4.0 } else { -4.0 };
+            let t = Instant::now();
+            s.quickshape_move(cx, cy, cx + d, cy);
+            alone_move.push(t.elapsed());
+            {
+                let mut st = s.shared.lock();
+                // the stroke laid along the shape, then the frame recorded
+                let t = Instant::now();
+                st.draw_moved_shape();
+                alone_lay.push(t.elapsed());
+                let t = Instant::now();
+                st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, Instant::now());
+                alone_frame.push(t.elapsed());
+            }
+            if let Some(g) = s.shared.lock().gpu.clone() {
+                g.flush();
+            }
+        }
+        alone_move.sort();
+        alone_lay.sort();
+        alone_frame.sort();
+        let stop = AtomicBool::new(false);
+        let (mut waits, frames, held) = std::thread::scope(|scope| {
+            let render = scope.spawn(|| {
+                let started = Instant::now();
+                let (mut frames, mut held) = (0usize, Duration::ZERO);
+                let gpu = s.shared.lock().gpu.clone();
+                while !stop.load(Ordering::Acquire) {
+                    let mut st = s.shared.lock();
+                    if !st.needs_frame {
+                        drop(st);
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    let t = Instant::now();
+                    st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, started);
+                    held = held.max(t.elapsed());
+                    parking_lot::MutexGuard::unlock_fair(st);
+                    if let Some(g) = gpu.as_ref() {
+                        g.flush();
+                    }
+                    frames += 1;
+                }
+                (frames, held)
+            });
+            let mut waits = Vec::with_capacity(moves);
+            let began = Instant::now();
+            let mut at = (cx, cy);
+            for i in 0..moves {
+                let due = began + Duration::from_micros(4167 * i as u64);
+                if let Some(rest) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(rest);
+                }
+                // round in a circle, a few pixels a move
+                let a = i as f32 * 0.05;
+                let to = (cx + 60.0 * a.cos(), cy + 60.0 * a.sin());
+                let t = Instant::now();
+                s.quickshape_move(at.0, at.1, to.0, to.1);
+                waits.push(t.elapsed());
+                at = to;
+            }
+            let moving = began.elapsed();
+            stop.store(true, Ordering::Release);
+            let (frames, held) = render.join().unwrap_or((0, Duration::ZERO));
+            (waits, (frames, moving), held)
+        });
+        s.quickshape_done();
+        if let Some(g) = s.shared.lock().gpu.clone() {
+            g.flush();
+        }
+        s.undo();
+        waits.sort();
+        let median = waits.get(waits.len() / 2).copied().unwrap_or_default();
+        let worst = waits.last().copied().unwrap_or_default();
+        println!(
+            "{wanted:<16} alone: a move {:6.2} ms, its stroke laid {:6.2} ms, the frame recorded {:6.2} ms (medians)",
+            ms(alone_move[alone_move.len() / 2]),
+            ms(alone_lay[alone_lay.len() / 2]),
+            ms(alone_frame[alone_frame.len() / 2])
+        );
+        println!(
+            "{wanted:<16} a move waited {:7.2} ms (median), {:8.2} ms at worst | {} frames in {:6.0} ms | a frame held the lock {:7.2} ms at most",
+            ms(median),
+            ms(worst),
+            frames.0,
+            ms(frames.1),
+            ms(held)
+        );
+    }
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+}
+
 /// What a long session on a large canvas holds as it goes: strokes across a 3000 square canvas of
 /// six layers (`MEMORY_COST_SIDE`, `MEMORY_COST_LAYERS`), each drawn as the screen would until the
 /// canvas wants no more, saved every ten as the autosave does, with the canvas's textures, the
@@ -3691,6 +3877,73 @@ fn an_edited_shape_is_turned_by_its_outline_and_moved_elsewhere() {
         assert!((b - a - d).abs() < 0.5, "{i}: {a} -> {b}");
     }
     s.quickshape_done();
+}
+
+#[test]
+fn a_shape_dragged_about_ends_as_one_moved_there_at_once() {
+    use procraft_gpu::wgpu;
+    // wet paint laid in place (the heaviest to draw again) and a plain round brush
+    for wanted in ["Elfin Saddle", "Hard Airbrush"] {
+        // the canvas as dragged by `moves` (window pixels, the canvas shown at its size), frames
+        // drawn after those marked, then kept
+        let kept = |moves: &[(f32, f32, bool)]| -> Option<Vec<u8>> {
+            let s = session(200, 200)?;
+            let library = s.brush_library();
+            let (set, index) = library
+                .iter()
+                .enumerate()
+                .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))?;
+            s.select_brush(set, index);
+            s.set_brush_size(0.3);
+            let target = s.shared.lock().gpu.as_ref()?.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("window"),
+                size: wgpu::Extent3d { width: 200, height: 200, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            let started = std::time::Instant::now();
+            let frame = || {
+                let format = wgpu::TextureFormat::Rgba8Unorm;
+                let srgb = procraft_engine::profile::Profile::Srgb;
+                s.shared.lock().draw_frame(&view, format, (200, 200), srgb, started);
+            };
+            let oval: Vec<PenSample> = (0..=60)
+                .map(|i| {
+                    let t = i as f32 / 60.0 * std::f32::consts::TAU;
+                    sample(90.0 + 50.0 * t.cos(), 90.0 + 30.0 * t.sin(), f64::from(i) * 8.0)
+                })
+                .collect();
+            s.stroke_begin(PointerKind::Stylus, oval[..1].to_vec());
+            s.stroke_add(oval[1..].to_vec());
+            s.quickshape_hold()?;
+            s.stroke_end(vec![]);
+            frame();
+            let mut at = (90.0, 90.0);
+            for &(dx, dy, then_frame) in moves {
+                s.quickshape_move(at.0, at.1, at.0 + dx, at.1 + dy);
+                at = (at.0 + dx, at.1 + dy);
+                if then_frame {
+                    frame();
+                }
+            }
+            s.quickshape_done();
+            pixel(&s, 0, 0);
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            st.canvas.as_mut()?.read_composite(st.gpu.as_ref()?).ok()
+        };
+        // several moves a frame, then more after the last frame
+        let dragged = [false, true, false, false, true, false].map(|then_frame| (3.0, 2.0, then_frame));
+        let Some(about) = kept(&dragged) else { return };
+        let Some(at_once) = kept(&[(18.0, 12.0, true)]) else { return };
+        assert!(about.iter().zip(&at_once).all(|(a, b)| a == b), "{wanted}: the pixels differ");
+        assert_eq!(about.len(), at_once.len());
+    }
 }
 
 #[test]

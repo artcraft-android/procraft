@@ -104,6 +104,9 @@ pub(crate) struct ShapeEdit {
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
     stroke: Option<DrawnStroke>,
+    /// Moved since its stroke was last drawn: drawn again as the next frame is, or as it is kept.
+    /// A drag's moves come faster than frames, and each would lay the whole stroke again.
+    stale: bool,
 }
 
 impl ShapeEdit {
@@ -117,7 +120,8 @@ impl ShapeEdit {
     ) -> ShapeEdit {
         let first = shape.clone();
         let modes = initial_curve_modes(&shape);
-        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, along, modes, held, stroke }
+        let (earlier, later) = (Vec::new(), Vec::new());
+        ShapeEdit { shape, first, earlier, later, choices, drawn, along, modes, held, stroke, stale: false }
     }
 
     /// A drag undone can be done again.
@@ -318,6 +322,9 @@ impl State {
 
     /// Redraws the open stroke along the shape's outline.
     fn draw_shape(&mut self) {
+        if let Some(edit) = self.shape.as_mut() {
+            edit.stale = false;
+        }
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
         let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
@@ -342,6 +349,14 @@ impl State {
         self.second = None;
     }
 
+    /// Redraws the open stroke along the shape if it moved since it was last drawn: as a frame is
+    /// drawn, and before it is kept (see [`ShapeEdit::stale`]).
+    pub(crate) fn draw_moved_shape(&mut self) {
+        if self.shape.as_ref().is_some_and(|edit| edit.stale) {
+            self.draw_shape();
+        }
+    }
+
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
     /// with it, about its start (open shapes) or centre (closed ones). Whether it changed.
     pub(crate) fn follow_shape(&mut self, to: Vec2) -> bool {
@@ -363,7 +378,7 @@ impl State {
             return false;
         }
         edit.shape = shape;
-        self.draw_shape();
+        edit.stale = true;
         true
     }
 
@@ -848,7 +863,7 @@ impl CanvasSession {
             edit.shape.move_handle(index, to);
         }
         refresh_corners(&mut edit.shape, &edit.modes);
-        st.draw_shape();
+        edit.stale = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -947,7 +962,7 @@ impl CanvasSession {
         let edit = st.shape.as_mut()?;
         edit.held = None;
         edit.shape = edit.shape.translated(by);
-        st.draw_shape();
+        edit.stale = true;
         self.shared.frame(st);
         st.shape_info()
     }
