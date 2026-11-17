@@ -3522,6 +3522,11 @@ impl Canvas {
         self.dirty = self.dirty.union(bounds);
         if !instances.is_empty() || clear {
             let pencil = active.pencil;
+            // drawn from scratch: what is still queued of it would be laid only to be cleared (a
+            // shape dragged about draws its stroke again at each move, faster than frames come)
+            if clear && !pencil && !second {
+                drop_superseded_stamps(&mut self.ops, active.layer);
+            }
             self.ops.push(Op::Stamps {
                 instances,
                 wet,
@@ -10938,6 +10943,23 @@ fn without_passing_tips(ops: Vec<Op>) -> Vec<Op> {
         kept.push(op);
     }
     kept
+}
+
+/// `ops` without the open stroke's stamps into `layer` at their end (not its second's, nor an
+/// adjustment's mask's), nor the tips put aside and given back among them, back to the last other
+/// work: the stroke redrawn from scratch after them clears what they would lay.
+fn drop_superseded_stamps(ops: &mut Vec<Op>, layer: LayerId) {
+    while let Some(op) = ops.last() {
+        let superseded = match op {
+            Op::Stamps { second: false, pencil: false, layer: on, .. } => *on == layer,
+            Op::SaveTip(_) | Op::Untip(_) => true,
+            _ => false,
+        };
+        if !superseded {
+            break;
+        }
+        ops.pop();
+    }
 }
 
 /// The work of `stamps` on a canvas `full` (see [`stamp_work`]).

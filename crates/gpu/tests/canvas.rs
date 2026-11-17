@@ -3612,6 +3612,51 @@ fn a_wet_stroke_redrawn_whole_is_laid_once() {
     assert!((f32::from(once) - expected).abs() < 8.0, "{once} {expected}");
 }
 
+/// A stroke redrawn from scratch more than once before a render (a shape dragged about faster
+/// than frames come) is laid as its last drawing alone: the pixels that drawn once makes, and
+/// none of the work of those before it.
+#[test]
+fn a_stroke_redrawn_twice_before_a_render_lays_only_the_last() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let line = |y: f32| -> Vec<Stamp> {
+        (0..40)
+            .map(|i| Stamp {
+                time_ms: f64::from(i) * 4.0,
+                distance: i as f32,
+                ..Stamp::round(Vec2::new(12.0 + i as f32, y), 5.0, 0.5)
+            })
+            .collect()
+    };
+    let (first, last) = (line(20.0), line(44.0));
+    let blue = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    // built up in the stroke texture, and wet paint laid in place
+    for style in [blue, StrokeStyle { wet_pull: Some(0.85), dilution: 0.5, load: 0.1, ..blue }] {
+        let laid = |drawings: &[&[Stamp]]| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            canvas.render(&gpu, &mut doc, None);
+            // a piece sent for each stamp: the pieces count the stamps laid
+            canvas.set_work_at_once(1);
+            canvas.begin_stroke(doc.current(), style);
+            for stamps in drawings {
+                canvas.replace_stamps(stamps);
+            }
+            let sent = canvas.pieces_sent();
+            canvas.render(&gpu, &mut doc, None);
+            let pieces = canvas.pieces_sent() - sent;
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            (canvas.read_layer(&gpu, doc.current()).unwrap(), pieces)
+        };
+        let (once, once_pieces) = laid(&[&last]);
+        let (twice, twice_pieces) = laid(&[&first, &last]);
+        let wet = style.in_place();
+        assert!(once == twice, "wet {wet}: laid twice, it came out differently");
+        assert_eq!(twice_pieces, once_pieces, "wet {wet}: the first drawing was laid too");
+    }
+}
+
 /// A stroke redrawn whole as it ends, its stamps laid so far still at its start, lays only those
 /// after them (a long stroke of wet paint took a tenth of a second at the lift), and comes out as
 /// laid whole; with one of them changed (an end taper reaching back), it is laid whole again.
