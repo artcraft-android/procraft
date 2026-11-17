@@ -2856,21 +2856,21 @@ fn paint_laid_in_place_turns_a_mirrored_stamp_s_shape() {
 }
 
 #[test]
-fn wet_edges_pool_wet_paint_by_how_much_of_it_shows() {
+fn wet_edges_pool_wet_paint_by_how_far_its_stamps_built_up() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     // light stamps of watery paint (as a light press lays) show only part of their paint, though
-    // after a few the paper is touched all over: the wet edges pool by the part that shows, as a
-    // dry stroke's do by its coverage (so a stroke's thinning ends get the rim, near full where
-    // about 0.7 shows), not by the touch
-    let shown = |wet_edges: f32| {
+    // after a few the paper is touched all over: the wet edges pool by how far the stamps built
+    // up there, whatever the water did to the paint (pooled by how thin it is, thin paint over most
+    // of a stroke would go darker, a rim round each stroke)
+    let shown = |load: f32, wet_edges: f32| {
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let style = StrokeStyle {
             wet_pull: Some(0.5),
             dilution: 1.0,
-            load: 1.0,
-            attack: 1.0,
+            load,
+            attack: 0.0,
             rendering: Rendering::Gradual,
             wet_edges,
             ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
@@ -2889,11 +2889,13 @@ fn wet_edges_pool_wet_paint_by_how_much_of_it_shows() {
         let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
         f32::from(pixel(&layer, 64, 32, 32)[3]) / 255.0
     };
-    let (plain, pooled) = (shown(0.0), shown(1.0));
-    assert!((0.2..0.95).contains(&plain), "thinned paint shows part: {plain}");
-    let x = 4.5 * plain;
-    let expected = 1.0 - (x.sin() / x).abs();
-    assert!((pooled - expected).abs() < 0.04, "pooled {pooled}, by what shows {expected} (plain {plain})");
+    // less paint on the brush (its charge), thinner paint
+    let (thin, thick) = (shown(0.2, 0.0), shown(1.0, 0.0));
+    assert!(thin > 0.2 && thin + 0.1 < thick, "less paint shows less: {thin} against {thick}");
+    // the same stamps built up as far: both pooled alike, the thin paint no darker for being thin
+    let (thin_pooled, thick_pooled) = (shown(0.2, 1.0) / thin, shown(1.0, 1.0) / thick);
+    assert!((thick_pooled - 1.0).abs() > 0.03, "the wet edges pool: {thick_pooled}");
+    assert!((thin_pooled - thick_pooled).abs() < 0.03, "thin paint pooled to {thin_pooled}, thick {thick_pooled}");
 }
 
 #[test]

@@ -686,16 +686,10 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     let built = select(laid, min(amount_at(p), laid), st.rule != 0u);
     var a = built;
     if (st.wet_edges > 0.0 && built > 0.0) {
-        // the paint pools (see pooled_over), by how much of it shows: wet paint thinned by its
-        // water shows less than it touched (what it took of the room the layer had; over a full
-        // layer, as far as it touched). Where it took none (over paint as strong as itself) it
-        // pools to nothing, as the thinnest paint does
-        var shown = built;
-        if (st.laid_apart == 2u && was.a < 0.999) {
-            let now = grained_at(p).a;
-            shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0) * built / max(laid, 1e-6);
-        }
-        a = built * mix(1.0, pooled_over(shown), st.wet_edges);
+        // the paint pools (see pooled_over) by how far the stroke's stamps built up, wet paint as
+        // dry: water thins the paint they lay, not how far they reach, so thin wet paint over
+        // most of a stroke isn't pooled into a dark rim
+        a = built * mix(1.0, pooled_over(built), st.wet_edges);
     }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
