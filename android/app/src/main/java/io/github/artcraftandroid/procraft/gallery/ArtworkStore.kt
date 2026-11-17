@@ -57,6 +57,12 @@ class ArtworkStore(val root: File) {
     /** A copy under the same name, right after the original. */
     fun duplicate(a: Artwork): File = File(core.duplicate(a.dir.path))
 
+    /** Stack [s] and every artwork in it gone. */
+    fun deleteStack(s: Stack) = core.delete(s.dir.path)
+
+    /** A copy of stack [s], right after it: a copy of each of its artworks, in its order. */
+    fun duplicateStack(s: Stack): File = File(core.duplicate(s.dir.path))
+
     /**
      * [e] moved to [to] (its place in the order without it) in folder [into]: the gallery or a
      * stack, by default the one it is in; from a stack to the gallery, it is taken out of it.

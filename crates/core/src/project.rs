@@ -1326,6 +1326,85 @@ impl CanvasSession {
     }
 }
 
+/// Several artworks as one PDF (a gallery's stack, or artworks picked, shared as a PDF): a page
+/// for each, in the order they are added, each its artwork's flattened picture at its own size,
+/// resolution and colours. Written beside its place a page at a time and put there by
+/// [`PdfBook::finish`]; dropped unfinished, nothing is left.
+#[derive(uniffi::Object)]
+pub struct PdfBook {
+    path: PathBuf,
+    quality: u8,
+    /// The file being written and its writer, until finished.
+    writing: parking_lot::Mutex<Option<(PathBuf, formats::PdfWriter<std::io::BufWriter<fs::File>>)>>,
+}
+
+#[uniffi::export]
+impl PdfBook {
+    /// A PDF to be put at `path`, its pictures kept exactly at `quality` 100, as JPEG below it.
+    #[uniffi::constructor]
+    pub fn create(path: String, quality: u8) -> Result<Arc<PdfBook>, MobileError> {
+        let path = PathBuf::from(path);
+        let tmp = beside(&path);
+        let file = fs::File::create(&tmp).map_err(|e| file_error("saving", e))?;
+        let writer = formats::PdfWriter::new(std::io::BufWriter::new(file)).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            file_error("saving", e)
+        })?;
+        Ok(Arc::new(PdfBook { path, quality: quality.min(100), writing: parking_lot::Mutex::new(Some((tmp, writer))) }))
+    }
+
+    /// The flattened picture of the artwork open in `session` (made ready to draw offscreen) as
+    /// the next page.
+    pub fn add(&self, session: Arc<CanvasSession>) -> Result<(), MobileError> {
+        let p = session.pictures(false)?;
+        let (icc, inks) = file_colours(&p.doc);
+        let picture = formats::PdfPicture::new(p.width, p.height, &p.composite, self.quality, inks.as_ref());
+        let dpi = p.doc.dpi;
+        drop(p);
+        let mut writing = self.writing.lock();
+        let Some((_, writer)) = writing.as_mut() else {
+            return Err(file_error("saving", "the PDF is finished"));
+        };
+        writer.page(&picture, dpi, &icc).map_err(|e| file_error("saving", e))?;
+        session.exported(1.0);
+        Ok(())
+    }
+
+    /// How many pages it has.
+    pub fn pages(&self) -> u32 {
+        self.writing.lock().as_ref().map_or(0, |(_, w)| w.pages() as u32)
+    }
+
+    /// Ends the PDF and puts it in its place.
+    pub fn finish(&self) -> Result<(), MobileError> {
+        let Some((tmp, writer)) = self.writing.lock().take() else {
+            return Err(file_error("saving", "the PDF is finished"));
+        };
+        let ended = writer.finish().and_then(|mut out| {
+            use std::io::Write;
+            out.flush()?;
+            out.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()
+        });
+        if let Err(e) = ended
+            .map_err(|e| file_error("saving", e))
+            .and_then(|()| fs::rename(&tmp, &self.path).map_err(|e| file_error("saving", e)))
+        {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PdfBook {
+    fn drop(&mut self) {
+        if let Some((tmp, writer)) = self.writing.get_mut().take() {
+            drop(writer);
+            let _ = fs::remove_file(tmp);
+        }
+    }
+}
+
 /// The signature kept in the artwork's folder `dir` (about/signature.json): its strokes, each the
 /// x, y of its points across the signature's box (0..1); none if there is none.
 #[uniffi::export]
@@ -1574,15 +1653,20 @@ pub(crate) fn write_beside(
     path: &Path,
     write: impl FnOnce(&Path) -> Result<(), MobileError>,
 ) -> Result<PathBuf, MobileError> {
-    // a name of its own, so that no other write of the same file can touch it
-    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{}.tmp", n));
+    let tmp = beside(path);
     if let Err(e) = write(&tmp) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(tmp)
+}
+
+/// A file beside `path` to write what goes there into: a name of its own, so that no other write
+/// of the same file can touch it.
+fn beside(path: &Path) -> PathBuf {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("{}.tmp", n))
 }
 
 /// A PNG of RGBA8 pixels, carrying the colour profile `icc` (none if empty).

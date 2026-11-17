@@ -985,6 +985,68 @@ pub fn share_artworks(
     });
 }
 
+/// Artworks from the gallery as one PDF where the user picks (first named `group`): a page for
+/// each in their order, each its artwork's picture at its own size, kept at `quality`. One alone
+/// is shared as [`share_artworks`] shares it. `card` shows the pages made, an artwork at a time;
+/// cancelled, nothing is left where it was going.
+pub fn share_pdf(
+    list: &[procraft_core::GalleryArtwork],
+    quality: u8,
+    group: &str,
+    card: &mut crate::export_card::ExportCard,
+) {
+    if list.len() < 2 {
+        share_artworks(list, Format::Pdf, quality, card);
+        return;
+    }
+    if card.busy() {
+        return;
+    }
+    let Some(path) = dialog()
+        .set_title(format!("Share {}", Format::Pdf.name()))
+        .add_filter(Format::Pdf.name(), &["pdf"])
+        .set_file_name(format!("{}.pdf", export_file_name(group.to_owned(), false)))
+        .save_file()
+    else {
+        return;
+    };
+    let path = with_extension(path, "pdf").to_string_lossy().into_owned();
+    let list = list.to_vec();
+    // written on a thread of its own (each artwork opened on a device of its own takes seconds),
+    // a page at a time beside where it goes until all are in
+    let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let following = Arc::clone(&done);
+    let exporting = card.start(move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)));
+    write_meanwhile(false, move || {
+        let count = list.len() as f32;
+        let written = (|| -> Result<bool, String> {
+            let book = procraft_core::PdfBook::create(path, quality).map_err(|e| e.to_string())?;
+            for (i, a) in list.iter().enumerate() {
+                // left unfinished, the book leaves nothing
+                if exporting.cancelled() {
+                    return Ok(false);
+                }
+                let s = CanvasSession::open(a.dir.clone()).map_err(|e| format!("{}: {e}", a.name))?;
+                if !s.prepare_offscreen() {
+                    return Err(format!("{}: There's no GPU device to draw it with.", a.name));
+                }
+                book.add(s).map_err(|e| format!("{}: {e}", a.name))?;
+                let progress = (i + 1) as f32 / count;
+                done.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+            book.finish().map_err(|e| e.to_string())?;
+            Ok(true)
+        })();
+        match written {
+            Ok(made) => exporting.ended(made),
+            Err(e) => {
+                exporting.ended(false);
+                tell_later("Can't share", &e);
+            }
+        }
+    });
+}
+
 /// The artwork `a` from the gallery written as `format` at `path` (a PDF's pictures at
 /// `pdf_quality`), opened on a GPU device of its own, never shown.
 pub fn write_artwork(

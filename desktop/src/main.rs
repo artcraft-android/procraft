@@ -928,8 +928,9 @@ impl App {
             Some(gallery::Asked::Share(list, format)) => {
                 files::share_artworks(&list, format, 100, &mut self.ui.export_card);
             }
-            Some(gallery::Asked::SharePdf(list, quality)) => {
-                files::share_artworks(&list, files::Format::Pdf, quality, &mut self.ui.export_card);
+            // several as one PDF, a page each
+            Some(gallery::Asked::SharePdf(list, quality, group)) => {
+                files::share_pdf(&list, quality, &group, &mut self.ui.export_card);
             }
             Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
             // opened (read as Open reads it), then shared

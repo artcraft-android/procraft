@@ -2428,20 +2428,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * pie filling an artwork at a time; its Cancel stops after the artwork being written. Null if
      * cancelled or none could be written (that is told).
      */
-    suspend fun shareFromGallery(list: List<Artwork>, format: String, pdfQuality: Int = 100): Pair<List<File>, String>? {
+    suspend fun shareFromGallery(list: List<Artwork>, format: String, pdfQuality: Int = 100, group: String = GROUP_NAME): Pair<List<File>, String>? {
         galleryShared = 0f
         return withCard("The artwork couldn't be exported.", { galleryShared }) {
-            shareableFiles(list, format, pdfQuality) { written -> galleryShared = written / list.size.coerceAtLeast(1).toFloat() }
+            shareableFiles(list, format, pdfQuality, group) { written -> galleryShared = written / list.size.coerceAtLeast(1).toFloat() }
                 .takeIf { it.first.isNotEmpty() }
         }
     }
 
     /**
      * Artworks from the gallery written as [format] (one of [SHARE_FORMATS] but the animated ones)
-     * into the cache, to share; with the type they are. [written] hears how many are done after
-     * each; a cancelled export stops before the next.
+     * into the cache, to share; with the type they are. Several as a PDF are one file named
+     * [group], a page each in their order. [written] hears how many are done after each; a
+     * cancelled export stops before the next.
      */
-    suspend fun shareableFiles(list: List<Artwork>, format: String, pdfQuality: Int = 100, written: (Int) -> Unit = {}): Pair<List<File>, String> = withContext(Dispatchers.IO) {
+    suspend fun shareableFiles(list: List<Artwork>, format: String, pdfQuality: Int = 100, group: String = GROUP_NAME, written: (Int) -> Unit = {}): Pair<List<File>, String> = withContext(Dispatchers.IO) {
         val (extension, mime) = when (format) {
             "PSD" -> "psd" to "image/vnd.adobe.photoshop"
             "PDF" -> "pdf" to "application/pdf"
@@ -2452,6 +2453,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             else -> OWN_EXTENSION to "application/octet-stream"
         }
         val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+        if (format == "PDF" && list.size >= 2) return@withContext groupPdf(list, File(dir, "${io.github.artcraftandroid.procraft.core.exportFileName(group, false)}.$extension"), pdfQuality, written) to mime
         val used = mutableSetOf<String>()
         val files = mutableListOf<File>()
         for ((i, a) in list.withIndex()) {
@@ -2465,6 +2467,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         files to mime
     }
+
+    /**
+     * Artworks [list] as one PDF at [out], a page each in their order (each its picture at its own
+     * size, kept at [quality]); one that can't be read is left out. Nothing if cancelled or none
+     * could be written. [written] hears how many are done after each.
+     */
+    private fun groupPdf(list: List<Artwork>, out: File, quality: Int, written: (Int) -> Unit): List<File> =
+        runCatching {
+            io.github.artcraftandroid.procraft.core.PdfBook.create(out.path, quality.coerceIn(1, 100).toUByte()).use { book ->
+                for ((i, a) in list.withIndex()) {
+                    // left unfinished, the book leaves nothing
+                    if (exportCancelled) return@runCatching emptyList<File>()
+                    runCatching { CanvasSession.open(a.dir.path).use { s -> if (s.prepareOffscreen()) book.add(s) } }
+                        .onFailure { AppLog.e("ProCraft", "a page of a PDF", it) }
+                    written(i + 1)
+                }
+                if (book.pages() == 0u) return@runCatching emptyList<File>()
+                book.finish()
+                listOf(out)
+            }
+        }.onFailure { AppLog.e("ProCraft", "sharing a PDF", it) }.getOrDefault(emptyList())
 
     /**
      * Opens artwork [a] to set up its animated export as [kind], going back to the gallery after;
@@ -2491,6 +2514,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun duplicateArtwork(a: Artwork) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.duplicate(a) }
+            refreshGallery()
+        }
+    }
+
+    /** Stack [s] deleted, with every artwork in it. */
+    fun deleteStack(s: io.github.artcraftandroid.procraft.gallery.Stack) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.deleteStack(s) }
+            refreshGallery()
+        }
+    }
+
+    /** A copy of stack [s] right after it, each of its artworks copied. */
+    fun duplicateStack(s: io.github.artcraftandroid.procraft.gallery.Stack) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.duplicateStack(s) }
             refreshGallery()
         }
     }
@@ -8319,6 +8358,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Other apps' brush files: Photoshop's, GIMP's brushes, pipes and generated brushes, Krita's presets and bundles, Clip Studio's sub tools and their groups. */
         val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut", "sutg")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)
+
+        /** Several artworks shared as one PDF from the gallery itself (not a stack) are named so. */
+        const val GROUP_NAME = "Artworks"
 
         /** What the gallery's Share offers, in order: still pictures, then animations. */
         val SHARE_FORMATS = listOf(OWN_LABEL, PACKAGE_LABEL, "PSD", "PDF", "JPEG", "PNG", "TIFF") + Animated.entries.map { it.title }

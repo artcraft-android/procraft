@@ -4683,6 +4683,50 @@ fn exports_psd_tiff_pdf_and_layer_pngs() {
 }
 
 #[test]
+fn artworks_go_into_one_pdf_a_page_each_at_their_own_sizes() {
+    // a wide canvas and a tall one
+    let made = |w: u32, h: u32| {
+        let gpu = Gpu::headless().ok()?;
+        let s = CanvasSession::new(w, h);
+        {
+            let mut st = s.shared.lock();
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        Some(s)
+    };
+    let (Some(wide), Some(tall)) = (made(40, 30), made(20, 50)) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-book-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("both.pdf");
+    let book = crate::PdfBook::create(path.to_string_lossy().into_owned(), 100).unwrap();
+    book.add(wide.clone()).unwrap();
+    book.add(tall.clone()).unwrap();
+    assert_eq!(book.pages(), 2);
+    // nothing in its place until it is finished
+    assert!(!path.exists());
+    book.finish().unwrap();
+    assert!(book.add(wide.clone()).is_err() && book.finish().is_err());
+    let pdf = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+    assert!(pdf.contains("/Count 2"));
+    // the pages in the order added, each its canvas's size at its resolution
+    let size = |s: &CanvasSession, w: f32, h: f32| {
+        let dpi = s.info().dpi;
+        format!("/MediaBox [0 0 {:.2} {:.2}]", w * 72.0 / dpi, h * 72.0 / dpi)
+    };
+    let (first, second) = (size(&wide, 40.0, 30.0), size(&tall, 20.0, 50.0));
+    let (a, b) = (pdf.find(&first).unwrap(), pdf.find(&second).unwrap());
+    assert!(a < b, "{first} {second}");
+    // one left unfinished leaves nothing
+    let other = crate::PdfBook::create(dir.join("other.pdf").to_string_lossy().into_owned(), 60).unwrap();
+    other.add(tall).unwrap();
+    drop(other);
+    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [std::ffi::OsString::from("both.pdf")]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn fit_to_canvas_keeps_a_flip_and_a_turn() {
     use crate::transform::TransformAction;
     let Some(s) = session(100, 100) else { return };
