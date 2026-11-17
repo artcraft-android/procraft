@@ -1201,16 +1201,59 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var symmetryOptionsOpen by mutableStateOf(false)
 
-    /** What was last copied or cut, for pasting (in this artwork or another). */
+    /**
+     * What was last copied or cut, for pasting (in this artwork or another), kept as it is; it goes
+     * on the system's clipboard too, in place of what that held, as a picture other apps paste.
+     */
     private var clipboard: io.github.artcraftandroid.procraft.core.ThumbnailImage? = null
         set(v) {
             // when something new was cut or copied here, against the system's clipboard
-            if (v !== field) clipboardAt = System.currentTimeMillis()
+            if (v !== field) {
+                clipboardAt = System.currentTimeMillis()
+                v?.let(::putOnSystemClipboard)
+            }
             field = v
         }
 
     /** When [clipboard] last took something new (wall clock, as the system clipboard's time is). */
     private var clipboardAt = 0L
+
+    /** Which copy went to the system's clipboard last: one still on its way is left out once a newer one is made. */
+    private var clipTurn = 0L
+
+    /** The picture of a copy made here that the system's clipboard holds, to tell it from another app's. */
+    private var clipUri: android.net.Uri? = null
+
+    /** One copy at a time goes on the system's clipboard, in the order they were made. */
+    private val clipWrites = Mutex()
+
+    /**
+     * Puts [copy] (premultiplied, as kept here) on the system's clipboard in place of what it held: a
+     * PNG other apps paste, its transparency kept, from the app's files. Made off the main thread, as
+     * a big canvas takes a moment.
+     */
+    private fun putOnSystemClipboard(copy: io.github.artcraftandroid.procraft.core.ThumbnailImage) {
+        val turn = ++clipTurn
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            clipWrites.withLock {
+                if (turn != clipTurn) return@launch
+                val dir = File(app.cacheDir, "exports/clipboard")
+                val file = File(dir, "copy-${System.currentTimeMillis()}.png")
+                val written = withContext(Dispatchers.Default) {
+                    dir.mkdirs()
+                    io.github.artcraftandroid.procraft.core.writeCopyPng(copy, file.path)
+                }
+                val uri = if (written && turn == clipTurn) runCatching { androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file) }.getOrNull() else null
+                val board = systemClipboard
+                val put = uri != null && board != null && runCatching { board.setPrimaryClip(android.content.ClipData.newUri(app.contentResolver, "Picture", uri)) }.isSuccess
+                if (put) clipUri = uri
+                // only the one on the clipboard is kept
+                withContext(Dispatchers.IO) { dir.listFiles()?.filter { if (put) it != file else it == file }?.forEach { it.delete() } }
+            }
+        }
+    }
+
     var canPaste by mutableStateOf(false)
         private set
 
@@ -5586,7 +5629,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val uri = clip?.getItemAt(0)?.uri
         // what was cut or copied here, unless another app's picture went on the clipboard since
         val own = clipboard
-        if (own != null && (uri == null || clipboardAt >= (clip.description?.timestamp ?: 0L))) {
+        if (own != null && (uri == null || uri == clipUri || clipboardAt >= (clip.description?.timestamp ?: 0L))) {
             val source = withContext(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.sourceFromCopy(own) }
             if (source.isNotEmpty()) return source
         }
