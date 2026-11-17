@@ -1537,7 +1537,7 @@ private fun readFrames(dir: String, side: Int): PlayedFrames? {
                 bitmap.asImageBitmap()
             }
         }
-        return PlayedFrames(pictures, s.animationSequence().map { it.toInt() }, settings.fps.toInt(), settings.playback)
+        return PlayedFrames(pictures, s.animationPlayOrder().map { it.toInt() }, settings.fps.toInt(), settings.playback)
     } finally {
         s.destroy()
     }

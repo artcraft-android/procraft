@@ -5436,6 +5436,156 @@ fn animation_assist_shows_onion_skins_and_plays() {
     assert!(s.animation_settings().is_none());
 }
 
+/// Where the four frames of [`four_frames`] have their dots, on its 120 canvas.
+const FRAME_DOTS: [(u32, u32); 4] = [(30, 30), (90, 30), (30, 90), (90, 90)];
+
+/// Four frames (bottom first), each a dot of its own colour in a corner of its own, Animation
+/// Assist on, with a background or a foreground frame or neither.
+fn four_frames(background: bool, foreground: bool) -> Option<std::sync::Arc<CanvasSession>> {
+    let s = session(120, 120)?;
+    s.set_brush_size(0.2);
+    let colours = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0)];
+    for (k, ((x, y), (r, g, b))) in FRAME_DOTS.into_iter().zip(colours).enumerate() {
+        if k > 0 {
+            s.add_layer();
+        }
+        s.set_color(r, g, b);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x as f32, y as f32, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    assert!(s.set_animation_assist(true));
+    let mut a = s.animation_settings().unwrap();
+    a.background = background;
+    a.foreground = foreground;
+    s.set_animation_settings(a);
+    Some(s)
+}
+
+/// Which of [`four_frames`]' dots straight RGBA `rgba`, `side` pixels across, shows over the
+/// white background.
+fn dots_in(rgba: &[u8], side: u32) -> [bool; 4] {
+    FRAME_DOTS.map(|(x, y)| {
+        let i = ((y * side / 120 * side + x * side / 120) * 4) as usize;
+        rgba[i..i + 3].iter().any(|c| *c < 128)
+    })
+}
+
+/// Which of [`four_frames`]' dots the canvas shows.
+fn frame_dots_shown(s: &CanvasSession) -> [bool; 4] {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render(gpu, &mut st.doc, None);
+    dots_in(&canvas.read_composite(gpu).unwrap(), 120)
+}
+
+/// The dots of the frames each place shows while playing, frame `k` played.
+fn with_frame(still: [bool; 4], k: usize) -> [bool; 4] {
+    let mut dots = still;
+    dots[k] = true;
+    dots
+}
+
+/// The dots each place of [`four_frames`] shows, place after place.
+type PlacesDots = Vec<[bool; 4]>;
+
+/// Plays `s` through on the canvas (as the apps do), and writes it as a GIF and an animated PNG:
+/// the dots each place shows, from the canvas, the frames, the GIF and the PNG's frame count.
+fn played_dots(s: &CanvasSession, name: &str) -> (PlacesDots, PlacesDots, PlacesDots, u32) {
+    let sequence = s.animation_sequence();
+    let canvas = s
+        .animation_played_places()
+        .into_iter()
+        .map(|slot| {
+            s.set_play_frame(Some(sequence[slot as usize]));
+            frame_dots_shown(s)
+        })
+        .collect();
+    s.set_play_frame(None);
+    let frames = s
+        .animation_play_order()
+        .into_iter()
+        .map(|i| {
+            let f = s.animation_frame(i, false, 0).unwrap();
+            dots_in(&f.rgba, f.width)
+        })
+        .collect();
+    let dir = std::env::temp_dir().join(format!("procraft-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gif_path = dir.join("a.gif");
+    s.export_gif(gif_path.to_string_lossy().into_owned(), 0, 15.0, false, true, false).unwrap();
+    let mut gif = Vec::new();
+    procraft_engine::gif::frames(&std::fs::read(&gif_path).unwrap(), |rgba, _| {
+        gif.push(dots_in(rgba, 120));
+        true
+    });
+    let png_path = dir.join("a.png");
+    s.export_apng(png_path.to_string_lossy().into_owned(), 0, 15.0, false).unwrap();
+    let png = std::fs::read(&png_path).unwrap();
+    let at = png.windows(4).position(|w| w == b"acTL").unwrap();
+    let png_frames = u32::from_be_bytes(png[at + 4..at + 8].try_into().unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+    (canvas, frames, gif, png_frames)
+}
+
+#[test]
+fn a_background_frame_shows_under_every_frame_and_never_plays_alone() {
+    let Some(s) = four_frames(true, false) else { return };
+    let ids = s.animation_frames();
+    // held, it holds no places that play; the second frame held one more
+    s.set_frame_hold(ids[0], 2);
+    s.set_frame_hold(ids[2], 1);
+    // the timeline keeps its card (its options turn it off), but three frames play
+    assert_eq!(ids.len(), 4);
+    assert_eq!(s.animation_sequence(), vec![0, 0, 0, 1, 2, 2, 3]);
+    assert_eq!(s.animation_played_places(), vec![3, 4, 5, 6]);
+    assert_eq!(s.animation_frame_count(), 3);
+    assert_eq!(s.animation_play_order(), vec![0, 1, 1, 2]);
+    assert!(s.animation_frame(3, false, 0).is_none());
+    // frames 1 to 3 each over the background, as played, as drawn for a video, and as exported
+    let back = [true, false, false, false];
+    let want: Vec<[bool; 4]> = [1, 2, 2, 3].map(|k| with_frame(back, k)).to_vec();
+    let (canvas, frames, gif, png) = played_dots(&s, "background");
+    assert_eq!(canvas, want, "played on the canvas");
+    assert_eq!(frames, want, "the frames a video is made of");
+    assert_eq!(gif, want, "the GIF");
+    assert_eq!(png, 4, "the animated PNG's frames");
+    // turned off, it plays as a frame again
+    let mut a = s.animation_settings().unwrap();
+    a.background = false;
+    s.set_animation_settings(a);
+    assert_eq!(s.animation_frame_count(), 4);
+    assert_eq!(s.animation_played_places(), vec![0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(s.animation_play_order(), vec![0, 0, 0, 1, 2, 2, 3]);
+}
+
+#[test]
+fn a_foreground_frame_shows_over_every_frame_and_never_plays_alone() {
+    let Some(s) = four_frames(false, true) else { return };
+    assert_eq!(s.animation_sequence(), vec![0, 1, 2, 3]);
+    assert_eq!(s.animation_played_places(), vec![0, 1, 2]);
+    assert_eq!(s.animation_frame_count(), 3);
+    assert_eq!(s.animation_play_order(), vec![0, 1, 2]);
+    let front = [false, false, false, true];
+    let want: Vec<[bool; 4]> = [0, 1, 2].map(|k| with_frame(front, k)).to_vec();
+    let (canvas, frames, gif, png) = played_dots(&s, "foreground");
+    assert_eq!(canvas, want, "played on the canvas");
+    assert_eq!(frames, want, "the frames a video is made of");
+    assert_eq!(gif, want, "the GIF");
+    assert_eq!(png, 3, "the animated PNG's frames");
+}
+
+#[test]
+fn with_a_background_and_a_foreground_frame_the_frames_between_play() {
+    let Some(s) = four_frames(true, true) else { return };
+    assert_eq!(s.animation_played_places(), vec![1, 2]);
+    assert_eq!(s.animation_frame_count(), 2);
+    let ends = [true, false, false, true];
+    let want: Vec<[bool; 4]> = [1, 2].map(|k| with_frame(ends, k)).to_vec();
+    let (canvas, frames, gif, png) = played_dots(&s, "both-ends");
+    assert_eq!((canvas, frames, gif, png), (want.clone(), want.clone(), want, 2));
+}
+
 #[test]
 fn layers_at_a_point_are_listed_top_first() {
     let Some(s) = session(40, 40) else { return };

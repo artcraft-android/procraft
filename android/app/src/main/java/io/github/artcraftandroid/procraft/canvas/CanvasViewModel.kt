@@ -6349,7 +6349,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         val frame = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                         val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
                         val ok = try {
-                            val order = s.animationSequence()
+                            val order = s.animationPlayOrder()
                             VideoWriter.write(file, w, h, fps, order.size, mime) { i, pixels ->
                                 if (cancelled()) return@write false
                                 videoDone = i.toFloat() / order.size
@@ -7858,6 +7858,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The frames' layers, bottom first, and which one is current. */
     var animationFrames by mutableStateOf<List<ULong>>(emptyList())
         private set
+
+    /** The timeline's places that play: all but a background frame's and a foreground frame's. */
+    var playedSlots by mutableStateOf<List<Int>>(emptyList())
+        private set
     var currentFrame by mutableStateOf<Int?>(null)
         private set
 
@@ -7914,6 +7918,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (settings == null) {
             animationFrames = emptyList()
             frameSlots = emptyList()
+            playedSlots = emptyList()
             currentFrame = null
             animationSettingsOpen = false
             frameOptionsOpen = false
@@ -7921,6 +7926,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         animationFrames = s.animationFrames()
         frameSlots = s.animationSequence().map { it.toInt() }
+        playedSlots = s.animationPlayedPlaces().map { it.toInt() }
         currentFrame = s.currentFrame()?.toInt()
         refreshFrameThumbnails()
     }
@@ -8040,6 +8046,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val id = currentFrame?.let { animationFrames.getOrNull(it) } ?: return
         session?.changeFrameHold(id, frames.coerceIn(0, MAX_HOLD).toUInt(), false)
         frameSlots = session?.animationSequence()?.map { it.toInt() }.orEmpty()
+        playedSlots = session?.animationPlayedPlaces()?.map { it.toInt() }.orEmpty()
         holdVersion++
     }
 
@@ -8055,8 +8062,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun play() {
         val s = session ?: return
         val a = animation ?: return
-        // the frames in playing order, each as often as it is held (the shared core's)
-        val order = s.animationSequence().map { it.toInt() }
+        // the timeline's places that play, in order, each frame as often as it is held (the shared
+        // core's): a background or foreground frame shows with each, never on its own
+        val places = s.animationSequence().map { it.toInt() }
+        val order = s.animationPlayedPlaces().map { it.toInt() }.filter { it in places.indices }
         if (order.isEmpty()) return
         animationSettingsOpen = false
         frameOptionsOpen = false
@@ -8065,9 +8074,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             var at = 0
             var step = 1
             while (true) {
-                val frame = order[at]
+                val frame = places[order[at]]
                 playingFrame = frame
-                playingSlot = at
+                playingSlot = order[at]
                 s.setPlayFrame(frame.toUInt())
                 kotlinx.coroutines.delay(1000L / (animation?.fps ?: a.fps).toInt().coerceAtLeast(1))
                 // round again, turned back, or (a single pass) done

@@ -4566,6 +4566,11 @@ impl Canvas {
         self.dirty = self.full();
     }
 
+    /// The frame Animation Assist is playing, if it is.
+    pub fn play_frame(&self) -> Option<usize> {
+        self.play_frame
+    }
+
     /// Animation Assist playing: frame `frame` shows alone (none: back to drawing).
     pub fn set_play_frame(&mut self, frame: Option<usize>) {
         if self.play_frame != frame {

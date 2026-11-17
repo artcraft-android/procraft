@@ -2237,7 +2237,12 @@ fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
     let count = session.animation_frame_count();
     let fit = (PLAYED_MOST / 4.0 / f64::from(count.max(1))).sqrt() as u32;
     let pictures: Vec<_> = (0..count).filter_map(|i| session.animation_frame(i, false, side.min(fit))).collect();
-    Some(PlayedFrames { pictures, order: session.animation_sequence(), fps: settings.fps, playback: settings.playback })
+    Some(PlayedFrames {
+        pictures,
+        order: session.animation_play_order(),
+        fps: settings.fps,
+        playback: settings.playback,
+    })
 }
 
 /// A thread reading the gallery's thumbnails one after another: an artwork's folder, when it was
