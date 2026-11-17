@@ -71,8 +71,11 @@ impl Flood {
         }
         let i = (seed.1 as usize * width as usize + seed.0 as usize) * 4;
         let colour: [u8; 4] = pixels.get(i..i + 4)?.try_into().ok()?;
+        // Transparent seeds use a precomputed coverage curve. Computing powf for
+        // every pixel made a large ColorDrop needlessly expensive.
+        let coverage = (colour[3] <= SEE_THROUGH_ALPHA).then(coverage_distances);
         let mut distance: Vec<u8> =
-            pixels.as_chunks::<4>().0.iter().take(count).map(|p| fill_distance(p, &colour)).collect();
+            pixels.as_chunks::<4>().0.iter().take(count).map(|p| fill_distance(p, &colour, coverage)).collect();
         // Textured brush tips leave tiny transparent pinholes in otherwise connected
         // strokes. Close these only in the connectivity map: the artwork itself is
         // not blurred or modified.
@@ -512,14 +515,25 @@ fn distance(a: &[u8; 4], b: &[u8; 4]) -> u8 {
 /// and the default 50% threshold floods straight through it. Give differences in
 /// coverage more weight without changing the pixels or the colour poured under the
 /// stroke. Opaque/coloured seeds retain their original colour-distance behaviour.
-fn fill_distance(pixel: &[u8; 4], seed: &[u8; 4]) -> u8 {
+fn coverage_distances() -> &'static [u8; 256] {
+    static COVERAGE: OnceLock<[u8; 256]> = OnceLock::new();
+    COVERAGE.get_or_init(|| {
+        std::array::from_fn(|alpha| {
+            if alpha <= usize::from(SEE_THROUGH_ALPHA) {
+                0
+            } else {
+                ((alpha as f32 / 255.0).powf(0.2) * 255.0).round() as u8
+            }
+        })
+    })
+}
+
+fn fill_distance(pixel: &[u8; 4], seed: &[u8; 4], coverage: Option<&[u8; 256]>) -> u8 {
     let base = distance(pixel, seed);
-    if seed[3] > SEE_THROUGH_ALPHA {
-        return base;
+    match coverage {
+        Some(coverage) => base.max(coverage.get(usize::from(pixel[3])).copied().unwrap_or(0)),
+        None => base,
     }
-    let alpha_difference = if pixel[3] <= SEE_THROUGH_ALPHA { 0.0 } else { f32::from(pixel[3]) / 255.0 };
-    let coverage = (alpha_difference.powf(0.2) * 255.0).round() as u8;
-    base.max(coverage)
 }
 
 /// Tiny gaps in a textured line that can be treated as part of its boundary.
@@ -929,7 +943,7 @@ mod tests {
     fn coloured_fills_preserve_their_original_distance() {
         let seed = [90, 80, 70, 128];
         let pixel = [95, 85, 75, 140];
-        assert_eq!(fill_distance(&pixel, &seed), distance(&pixel, &seed));
+        assert_eq!(fill_distance(&pixel, &seed, None), distance(&pixel, &seed));
     }
 
     #[test]
@@ -1007,6 +1021,57 @@ mod tests {
                 .collect();
             let f = Flood::new(15, 15, &pixels, (2, 12)).unwrap();
             assert_eq!(f.mask(0.5).data[2 * 15 + 12], 0, "diagonal leak through {gap:?}");
+        }
+    }
+
+    #[test]
+    fn a_granular_closed_ring_stays_sealed_and_keeps_its_brush_texture() {
+        // A thin, uneven circular stroke, with scattered low-alpha grains and
+        // single-pixel transparent pores, over an otherwise transparent layer.
+        // Unlike a straight wall, this checks the diagonal and curved joins.
+        let side = 128usize;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = (i % side, i / side);
+                let dx = x as f32 - 64.0;
+                let dy = y as f32 - 64.0;
+                let radius = (dx * dx + dy * dy).sqrt();
+                let grain = ((x * 37 + y * 73 + x * y * 11) % 29) as u8;
+                let alpha = if (radius - 39.0).abs() < 2.5 {
+                    if grain.is_multiple_of(19) { 0 } else { 23 + grain * 2 }
+                } else {
+                    0
+                };
+                [0, 0, 0, alpha]
+            })
+            .collect();
+        let flood = Flood::new(side as u32, side as u32, &pixels, (64, 64)).unwrap();
+        let mut mask = flood.mask(0.5);
+        assert_eq!(mask.data[64 * side + 64], 255);
+        for (x, y) in [(2, 2), (64, 2), (124, 64), (64, 124), (2, 64)] {
+            assert_eq!(mask.data[y * side + x], 0, "escaped the grainy ring at ({x}, {y})");
+        }
+        under_edges(&mut mask, &pixels);
+        let mut painted = pixels.clone();
+        pour(&mut painted, &mask, flood.colour, ORANGE, false);
+        assert_eq!(painted[(64 * side + 64) * 4], 255, "interior filled");
+        for (x, y) in [(2, 2), (64, 2), (124, 64), (64, 124), (2, 64)] {
+            assert_eq!(painted[(y * side + x) * 4 + 3], 0, "colour leaked beyond the ring");
+        }
+        // The shaded, grainy outline isn't overwritten with the flat fill colour.
+        assert!(painted[(64 * side + 103) * 4] < 255);
+    }
+
+    #[test]
+    fn the_coverage_lookup_matches_the_previous_curve() {
+        let coverage = coverage_distances();
+        for (alpha, &actual) in coverage.iter().enumerate() {
+            let previous = if alpha <= usize::from(SEE_THROUGH_ALPHA) {
+                0
+            } else {
+                ((alpha as f32 / 255.0).powf(0.2) * 255.0).round() as u8
+            };
+            assert_eq!(actual, previous, "alpha {alpha}");
         }
     }
 

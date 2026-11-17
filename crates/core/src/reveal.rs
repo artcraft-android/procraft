@@ -312,7 +312,7 @@ mod tests {
         let small = Reveal::new(drop, IRect::new(490, 490, 510, 510), &view, (800, 800), 2.0, &mut Shake::new(1));
         let whole = Reveal::new(drop, IRect::new(0, 0, 1000, 1000), &view, (800, 800), 2.0, &mut Shake::new(1));
         let (small, whole) = (small.unwrap().seconds, whole.unwrap().seconds);
-        assert!(small >= 0.28 && small < 0.281, "{small}");
+        assert!((0.28..0.281).contains(&small), "{small}");
         // the fitted canvas is the whole window here
         assert!((whole - 0.5).abs() < 0.01, "{whole}");
     }
