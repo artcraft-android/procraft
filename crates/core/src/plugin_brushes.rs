@@ -2305,4 +2305,113 @@ mod tests {
         assert_eq!(brushes[1].name, "Ink");
         assert!(brushes[1].engine.is_some());
     }
+
+    /// A Krita tip turned by its angle points where Krita draws it, by the plugin's engine and by the
+    /// app's own reading of the preset alike: Krita turns a tip counter-clockwise on the canvas
+    /// (whose rows run down) by its angle, so a bar from the tip's middle to its right edge points up
+    /// and to the right at 30°, straight up at 90° and straight down at 270°, the notch at its end on
+    /// its left as it goes (never mirrored to its right).
+    #[test]
+    fn a_krita_tip_turned_by_its_angle_points_where_krita_draws_it() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 200);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(procraft_engine::view::View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-krita-angle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        s.use_plugins(Arc::clone(&plugins));
+        // a tip 40 pixels a side, a picture (see-through): a bar 8 rows thick from its middle to its
+        // right edge, nothing on its left, with a notch up from the bar's end
+        let side = 40_usize;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = ((i % side) as f32 - 19.5, (i / side) as f32 - 19.5);
+                let bar = x > 2.0 && y.abs() < 4.0;
+                let notch = (11.0..19.0).contains(&x) && (-15.0..-3.0).contains(&y);
+                let a = if bar || notch { 255 } else { 0 };
+                [0, 0, 0, a]
+            })
+            .collect();
+        let png = crate::project::png_of(side as u32, side as u32, &pixels).unwrap();
+        let tip = procraft_engine::base64::encode(&png);
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        // a dab of the tip at `degrees` in the middle of a layer of its own
+        let dab_at = |degrees: f32, engine: bool| {
+            let angle = degrees.to_radians();
+            let xml = format!(
+                r#"<Preset name="Bar" paintopid="paintbrush"><resources><resource name="bar" filename="bar.png" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="png_brush" filename="bar.png" spacing="5" BrushVersion="2" brushApplication="0" scale="1" angle="{angle}" useAutoSpacing="0"/>]]></param><param name="PressureSize"><![CDATA[false]]></param><param name="PressureOpacity"><![CDATA[false]]></param></Preset>"#
+            );
+            let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+            kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+            kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+            kpp.extend(chunk(b"IEND", &[]));
+            let read = crate::read_brushes(kpp, Some("Bar.kpp".to_owned())).unwrap();
+            if engine {
+                s.make_engine_brushes(Arc::clone(&read));
+            }
+            let set = s.add_brushes_read(read, 0).unwrap();
+            assert_eq!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), engine);
+            assert!(s.select_brush(set, 0));
+            if !engine {
+                // the app's own brush at its biggest, to be measured as finely
+                s.set_brush_size(1.0);
+            }
+            s.set_color(0.0, 0.0, 0.0);
+            let layer = s.add_layer();
+            let at = crate::PenSample {
+                x: 100.0,
+                y: 100.0,
+                pressure: 1.0,
+                tilt: 0.0,
+                orientation: 0.0,
+                time_ms: 0.0,
+                roll: 0.0,
+            };
+            s.stroke_begin(crate::PointerKind::Stylus, vec![at]);
+            s.stroke_end(vec![]);
+            s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap()
+        };
+        let alpha = |rgba: &[u8], x: f32, y: f32| rgba[(y.round() as usize * 200 + x.round() as usize) * 4 + 3];
+        for engine in [true, false] {
+            assert!(plugins.set_on(id.clone(), engine));
+            for degrees in [0.0_f32, 30.0, 90.0, 270.0] {
+                let rgba = dab_at(degrees, engine);
+                // the dab's size against the tip's: its farthest corner (19, -15) from its middle
+                let far = (0..200 * 200)
+                    .filter(|i| rgba[i * 4 + 3] > 128)
+                    .map(|i| ((i % 200) as f32 - 100.0).hypot((i / 200) as f32 - 100.0))
+                    .fold(0.0_f32, f32::max);
+                let k = far / 24.2;
+                let (c, sn) = (degrees.to_radians().cos(), degrees.to_radians().sin());
+                // a point of the tip (right, down) where it lands, turned counter-clockwise on the
+                // canvas
+                let lands = |(x, y): (f32, f32)| (100.0 + k * (x * c + y * sn), 100.0 + k * (y * c - x * sn));
+                let way = if engine { "the engine" } else { "the app" };
+                // 8 pixels out along the bar, and as far the other way
+                let (toward, away) = (lands((8.0, 0.0)), lands((-8.0, 0.0)));
+                let (on, off) = (alpha(&rgba, toward.0, toward.1), alpha(&rgba, away.0, away.1));
+                assert!(on > 200 && off < 20, "{way}, {degrees}°: {on} toward {toward:?}, {off} away (k {k})");
+                // the notch, on the bar's left (up, at 0°), not mirrored across it
+                let (notch, mirrored) = (lands((15.0, -10.0)), lands((15.0, 10.0)));
+                let (on, off) = (alpha(&rgba, notch.0, notch.1), alpha(&rgba, mirrored.0, mirrored.1));
+                assert!(on > 200 && off < 20, "{way}, {degrees}°: the notch {on} at {notch:?}, {off} mirrored");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

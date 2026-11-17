@@ -1452,7 +1452,8 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     if let Some(spacing) = k.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
-    b.shape.rotation = k.angle;
+    // Krita turns its tips counter-clockwise on the canvas, ours clockwise
+    b.shape.rotation = (-k.angle).rem_euclid(std::f32::consts::TAU);
     if k.follows {
         b.shape.follow = 1.0;
     }
