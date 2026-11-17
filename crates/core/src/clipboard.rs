@@ -74,6 +74,34 @@ pub(crate) fn premultiplied(mut image: ThumbnailImage) -> ThumbnailImage {
     image
 }
 
+/// A copy (premultiplied, as layers hold it) in straight colours, as other apps take pictures off
+/// the system's clipboard. Premultiplied again it is the copy as it was, to the last bit.
+pub fn copy_straight(image: &ThumbnailImage) -> ThumbnailImage {
+    ThumbnailImage { width: image.width, height: image.height, rgba: crate::project::straight_alpha(&image.rgba) }
+}
+
+/// A picture in straight colours as a PNG, its transparency kept; none if it can't be made (its
+/// pixels aren't the size it says).
+pub fn picture_png(straight: &ThumbnailImage) -> Option<Vec<u8>> {
+    let (w, h) = (straight.width, straight.height);
+    let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    if len == 0 || straight.rgba.len() != len {
+        return None;
+    }
+    crate::project::png_of(w, h, &straight.rgba).ok()
+}
+
+/// A copy (premultiplied) written at `path` as the PNG the system's clipboard hands other apps,
+/// its transparency kept: whole, or not at all. Whether it was.
+#[uniffi::export]
+pub fn write_copy_png(image: ThumbnailImage, path: String) -> bool {
+    let Some(png) = picture_png(&copy_straight(&image)) else { return false };
+    let written = crate::project::write_atomically(std::path::Path::new(&path), |p| {
+        std::fs::write(p, &png).map_err(|e| crate::project::file_error("copying", e))
+    });
+    written.is_ok()
+}
+
 /// `image` placed on a `width` × `height` canvas: centred, and scaled down to fit when `fit` and
 /// it is larger (premultiplied RGBA8; anything outside is cut off).
 fn placed(image: ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
@@ -404,6 +432,62 @@ mod tests {
             flipped(&px, 2, false),
             [[0, 0, 255, 255], [255, 255, 255, 255], [255, 0, 0, 255], [0, 255, 0, 255]].concat()
         );
+    }
+
+    /// Every premultiplied pixel there is (each colour no more than its alpha), a row an alpha.
+    fn every_premultiplied() -> ThumbnailImage {
+        let mut rgba = Vec::new();
+        for a in 0..=255u8 {
+            for c in 0..=255u8 {
+                let c = c.min(a);
+                rgba.extend_from_slice(&[c, a - c, c / 2, a]);
+            }
+        }
+        ThumbnailImage { width: 256, height: 256, rgba }
+    }
+
+    #[test]
+    fn a_copy_in_straight_colours_premultiplies_back_as_it_was() {
+        let copy = every_premultiplied();
+        let straight = copy_straight(&copy);
+        // the alpha as it was, the colours brought out of it
+        assert!(straight.rgba.chunks(4).zip(copy.rgba.chunks(4)).all(|(s, c)| s[3] == c[3]));
+        assert_eq!(&straight.rgba[(200 * 256 + 50) * 4..][..4], &[64, 191, 32, 200]);
+        assert_eq!(premultiplied(straight), copy);
+    }
+
+    #[test]
+    fn a_copy_as_a_png_keeps_its_transparency() {
+        let copy = every_premultiplied();
+        let png = picture_png(&copy_straight(&copy)).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let mut out = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut out).unwrap();
+        assert_eq!((info.width, info.height), (256, 256));
+        assert_eq!((info.color_type, info.bit_depth), (png::ColorType::Rgba, png::BitDepth::Eight));
+        out.truncate(info.buffer_size());
+        assert_eq!(out, copy_straight(&copy).rgba);
+        // clear stays clear, half shows half
+        assert_eq!(out[3], 0);
+        assert_eq!(out[(128 * 256 + 10) * 4 + 3], 128);
+        // pasted back here, it is the copy
+        assert_eq!(premultiplied(ThumbnailImage { width: 256, height: 256, rgba: out }), copy);
+    }
+
+    #[test]
+    fn a_copy_that_isnt_its_size_makes_no_png() {
+        assert!(picture_png(&ThumbnailImage { width: 3, height: 3, rgba: vec![0; 8] }).is_none());
+        assert!(picture_png(&ThumbnailImage { width: 0, height: 0, rgba: vec![] }).is_none());
+        let dir = std::env::temp_dir().join(format!("procraft-copy-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("copy.png");
+        let bad = ThumbnailImage { width: 2, height: 2, rgba: vec![0; 4] };
+        assert!(!write_copy_png(bad, path.to_string_lossy().into_owned()));
+        assert!(!path.exists());
+        let good = ThumbnailImage { width: 2, height: 1, rgba: vec![255, 0, 0, 255, 0, 0, 0, 0] };
+        assert!(write_copy_png(good, path.to_string_lossy().into_owned()));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
