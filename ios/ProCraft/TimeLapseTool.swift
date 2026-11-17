@@ -6,6 +6,12 @@ import UIKit
 private let framesASecond = Int32(timeLapseFps())
 /// A video's bit rate is never less than this, bits a second.
 private let leastBitRate = 1_000_000
+/// Frames tried for the first readable one (each can be a slow decode).
+private let firstTries = 120
+
+/// What the replay and the export say when a frame isn't kept at all (not one this device can't
+/// decode).
+let timeLapseMissing = "Part of the time-lapse is missing from the artwork."
 
 // the canvas's surround and grid, light with the light interface
 private var replayFill: Color { Look.shared.light ? Color(argb: 0xFFCE_D1D2) : Color(argb: 0xFF25_2525) }
@@ -172,12 +178,38 @@ final class ArtworkTimeLapse {
         return clipFrame(i)
     }
 
+    /// Whether frame `i` is kept (a picture, or in a video): one that can't be read but is, this
+    /// device can't decode.
+    func kept(_ i: Int) -> Bool {
+        core.frameKept(i: UInt32(i))
+    }
+
+    /// Frames the last video made couldn't read, the one before each shown in its place.
+    private(set) var unread = 0
+
+    /// Why a video of the frames wasn't made, of three different faults: the encoder, a time-lapse
+    /// this device can't decode, or one that isn't all there.
+    func whyNotMade() -> String {
+        if frame(0) != nil {
+            return "The time-lapse video couldn't be made."
+        }
+        return kept(0) ? "The time-lapse can't be read on this device." : timeLapseMissing
+    }
+
     private func clipFrame(_ i: Int) -> UIImage? {
         lock.lock()
         defer { lock.unlock() }
+        let within = { (clip: TimeLapseClip) in i >= Int(clip.first) && i - Int(clip.first) < Int(clip.frames) }
         let all = clips ?? core.clips()
         clips = all
-        guard let clip = all.first(where: { i >= Int($0.first) && i - Int($0.first) < Int($0.frames) }) else { return nil }
+        var found = all.first(where: within)
+        if found == nil {
+            // the videos read again when one isn't there: another may have been made since
+            let again = core.clips()
+            clips = again
+            found = again.first(where: within)
+        }
+        guard let clip = found else { return nil }
         if reading?.path != clip.path {
             let generator = AVAssetImageGenerator(asset: AVURLAsset(url: URL(fileURLWithPath: clip.path)))
             generator.requestedTimeToleranceBefore = .zero
@@ -242,32 +274,52 @@ final class ArtworkTimeLapse {
                 return nil
             }
         }
+        // a video that couldn't be noted (or one gone): the frames out of them are made afresh
+        guard core.allInVideos() else { return nil }
         dropClipFrames()
         let parts = core.forPackage().segments.map { URL(fileURLWithPath: $0) }
         return !parts.isEmpty && VideoWriter.join(parts, to: out) ? true : nil
     }
 
     /// The frames `picks` as a video at `url`, each fitted on white into `size` (else into the first
-    /// one's, within the settings' side); its size, or none if it wasn't made. `going` as for `export`.
+    /// readable one's, within the settings' side); its size, or none if none can be read or it wasn't
+    /// made. A frame that can't be read shows the one before it again (counted in `unread`), so every
+    /// frame keeps its place. `going` as for `export`.
     private func encode(
         to url: URL, picks: [Int], size: (Int, Int)?, hevc: Bool, going: (Float) -> Bool = { _ in true }
     ) -> (Int, Int)? {
-        guard let first = picks.first else { return nil }
+        unread = 0
+        guard !picks.isEmpty else { return nil }
         let video = settings
+        // the frame shown last: white until one is read
+        var shown: CGImage?
         var fitted = size
         if fitted == nil {
-            guard let picture = frame(first)?.cgImage else { return nil }
+            for pick in picks.prefix(firstTries) {
+                if let picture = frame(pick)?.cgImage {
+                    shown = picture
+                    break
+                }
+            }
+            guard let picture = shown else { return nil }
             fitted = VideoWriter.fit(width: picture.width, height: picture.height, maxSide: Int(timeLapseSide(s: video)))
         }
         guard let (width, height) = fitted else { return nil }
+        var missed = 0
         let made = VideoWriter.write(
             to: url, width: width, height: height, count: picks.count, hevc: hevc,
             bitsPerPixel: Int(timeLapseBitsPerPixel(s: video))
         ) { n, context in
-            guard going(Float(n) / Float(picks.count)), let source = frame(picks[n])?.cgImage else { return false }
+            guard going(Float(n) / Float(picks.count)) else { return false }
+            if let source = frame(picks[n])?.cgImage {
+                shown = source
+            } else {
+                missed += 1
+            }
             // fitted on white
             context.setFillColor(UIColor.white.cgColor)
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            guard let source = shown else { return true }
             let scale = min(CGFloat(width) / CGFloat(source.width), CGFloat(height) / CGFloat(source.height))
             let shownWidth = CGFloat(source.width) * scale
             let shownHeight = CGFloat(source.height) * scale
@@ -278,6 +330,7 @@ final class ArtworkTimeLapse {
             ))
             return true
         }
+        unread = missed
         return made ? (width, height) : nil
     }
 
@@ -470,7 +523,9 @@ struct TimeLapseReplay: View {
     @State private var index = 0
     @State private var scrubbing = false
     @State private var shown: UIImage?
+    /// A frame couldn't be read, and whether it isn't kept at all (else this device can't decode it).
     @State private var unreadable = false
+    @State private var missing = false
     /// Where a scrub began, and the frame it began on.
     @State private var scrubFrom: (x: CGFloat, frame: Int)?
 
@@ -484,7 +539,8 @@ struct TimeLapseReplay: View {
         if count == 0 {
             return "Nothing recorded yet"
         }
-        return unreadable && shown == nil ? "The time-lapse can't be read on this device" : nil
+        guard unreadable, shown == nil else { return nil }
+        return missing ? String(timeLapseMissing.dropLast()) : "The time-lapse can't be read on this device"
     }
 
     /// The surround's grid as the canvas draws it (1 1/3 pt lines every 16, none under the top bar).
@@ -577,8 +633,9 @@ struct TimeLapseReplay: View {
                 let read = await Task.detached(priority: .userInitiated) { lapse.frame(i) }.value
                 if let read {
                     shown = read
-                } else {
+                } else if !unreadable {
                     unreadable = true
+                    missing = await Task.detached(priority: .userInitiated) { !lapse.kept(i) }.value
                 }
             }
         }

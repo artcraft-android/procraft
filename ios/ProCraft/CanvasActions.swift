@@ -51,7 +51,8 @@ extension CanvasModel {
     }
 
     /// The time-lapse as a video to share: all of it, or `seconds` long; its card shows how far it has
-    /// come. Which of two things went wrong, if it can't be made, is told: they are different faults.
+    /// come. Which of three things went wrong, if it can't be made, is told: they are different
+    /// faults. Frames it couldn't read (the one before each in their place) are told too.
     func shareTimeLapse(seconds: Int?) {
         let lapse = timeLapse.lapse
         guard lapse.count > 0 else {
@@ -59,14 +60,21 @@ extension CanvasModel {
             return
         }
         let meter = ExportMeter()
-        exporting(
-            failed: lapse.frame(0) != nil ? "The time-lapse video couldn't be made." : "The time-lapse can't be read on this device.",
-            progress: { meter.share }
-        ) { [weak self] session in
+        exporting(failed: lapse.whyNotMade(), progress: { meter.share }) { [weak self] session in
             let out = Sharing.exportsDir.appendingPathComponent(exportFileName(name: session.name(), package: false) + ".mp4")
             let made = lapse.export(to: out, seconds: seconds) { share in
                 meter.share = share
                 return self?.exportCancelled != true
+            }
+            let unread = lapse.unread
+            if made, unread > 0 {
+                // frames left in their place, not left out silently
+                DispatchQueue.main.async {
+                    self?.showNotice(
+                        "\(unread) frames of the time-lapse can't be read on this device: the one before each shows in its place.",
+                        warning: true
+                    )
+                }
             }
             return made ? [out] : []
         }
