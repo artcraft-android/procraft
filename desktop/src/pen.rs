@@ -712,8 +712,8 @@ mod system {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW, SetPropW,
-        SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-        WNDPROC,
+        SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -728,6 +728,9 @@ mod system {
     /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
     /// what it did is to be undone.
     const POINTER_FLAG_CANCELED: u32 = 0x8000;
+    /// A mouse message's buttons held (its `wparam`): the left, right and middle, and the two
+    /// side ones.
+    const MOUSE_BUTTONS: usize = 0x0001 | 0x0002 | 0x0010 | 0x0020 | 0x0040;
 
     /// The pen's gestures the system makes of a pen held still or tapped, as its tablet service
     /// asks a window for them (the window's property of this name, or its answer to
@@ -861,9 +864,19 @@ mod system {
         if super::wintab::message(hwnd, msg, wparam, lparam) {
             return LRESULT(0);
         }
-        // the window active again: its WinTab context goes on top
-        if msg == WM_ACTIVATE && wparam.0 & 0xFFFF != 0 {
-            super::wintab::activated();
+        // the window coming to the front (the low word not WA_INACTIVE) or going back: its WinTab
+        // context is seen to once winit and the system have done with it, the keyboard given to it
+        if msg == WM_ACTIVATE {
+            let result = to_winit(hwnd, msg, wparam, lparam);
+            super::wintab::activated(hwnd, wparam.0 & 0xFFFF != 0);
+            return result;
+        }
+        // a tablet's pen moving the mouse (Windows Ink off) pressing, and up again: the mouse with
+        // no button held (its keys and buttons in `wparam`)
+        match msg {
+            WM_LBUTTONDOWN => super::wintab::pressed(),
+            WM_MOUSEMOVE | WM_LBUTTONUP if wparam.0 & MOUSE_BUTTONS == 0 => super::wintab::pen_up(hwnd),
+            _ => {}
         }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
@@ -909,7 +922,12 @@ mod system {
             // SAFETY: the message as it came, to the system's default procedure
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
-        // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back
+        to_winit(hwnd, msg, wparam, lparam)
+    }
+
+    /// The message on to winit's procedure for the window.
+    fn to_winit(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back, for its own window
         let winit: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(WINIT.load(Ordering::Relaxed)) };
         unsafe { CallWindowProcW(winit, hwnd, msg, wparam, lparam) }
     }
