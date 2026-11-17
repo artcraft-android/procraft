@@ -169,7 +169,8 @@ struct CanvasScreen: View {
                         .offset(x: left)
                 }
                 TextEditing(model: model, screen: screen.size)
-                if model.reference.on {
+                // Crop and Resize puts it away while it is open, and it comes back after
+                if model.reference.on, model.crop.shown == nil {
                     ReferenceWindow(model: model, screen: screen.size)
                         .transition(.opacity)
                 }

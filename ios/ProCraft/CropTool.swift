@@ -114,6 +114,7 @@ final class CropTool {
 
     func press(_ at: CGPoint) {
         model.session.cropPress(x: Float(at.x * model.pixels), y: Float(at.y * model.pixels))
+        read()
     }
 
     func drag(_ at: CGPoint) {
@@ -123,6 +124,7 @@ final class CropTool {
 
     func release() {
         model.session.cropRelease()
+        read()
     }
 
     func change(_ apply: (CanvasSession) -> Void) {
@@ -253,11 +255,66 @@ struct CropOverlay: View {
                     ],
                     onDone: { tool.end(keep: true) }
                 )
+                CropSizeReadout(readout: shown.readout, pixels: model.pixels)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 // 9 from the screen's right edge, its arrow up at Settings (183 from that edge)
                 if tool.settingsOpen {
                     CropSettings(tool: tool, shown: shown)
                         .offset(x: -9, y: 66)
                 }
+            }
+        }
+    }
+}
+
+/// While a corner or side of the frame is dragged: its width and height in a small box above the
+/// touch, beside it away from the frame's middle (the core places it, window pixels), fading as the
+/// touch lifts.
+private struct CropSizeReadout: View {
+    let readout: CropReadout?
+    let pixels: CGFloat
+    /// The last one shown, kept while it fades.
+    @State private var last: CropReadout?
+
+    /// A row: its name from its left half, its value to the right; 8 either side of the middle.
+    private func row(_ name: String, _ value: UInt32) -> some View {
+        HStack(spacing: 0) {
+            Text(verbatim: name)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(settingsInk)
+                .lineLimit(1)
+                .padding(.leading, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(verbatim: "\(value)px")
+                .font(.system(size: 13))
+                .foregroundStyle(settingsInk)
+                .lineLimit(1)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 16)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let shown = readout ?? last {
+                VStack(spacing: 16) {
+                    row("Width", shown.width)
+                    row("Height", shown.height)
+                }
+                .padding(.top, 3)
+                .frame(width: 148, height: 54, alignment: .top)
+                .background(RoundedRectangle(cornerRadius: 8, style: .circular).fill(popoverFill))
+                .offset(x: CGFloat(shown.x) / pixels, y: CGFloat(shown.y) / pixels)
+                .opacity(readout == nil ? 0 : 1)
+                .animation(readout == nil ? Animation.easeOut(duration: 0.3) : nil, value: readout == nil)
+            }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: readout, initial: true) { _, now in
+            if let now {
+                last = now
             }
         }
     }
