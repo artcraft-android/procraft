@@ -2031,12 +2031,13 @@ pub(crate) mod tests {
         let shape = zigzag(&s, 1000.0).expect("it snaps");
         assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
         assert!(shape.choices.contains(&QuickShapeKind::Polyline));
-        assert!(shape.anchors.len() >= 3 && shape.anchors.iter().all(|a| *a == QuickShapeAnchor::Smooth));
-        // a tap on an anchor in the middle steps it on: broken, then a corner
-        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
-        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken);
+        assert!(shape.anchors.len() >= 3);
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken, "a deliberate sharp turn needs independent handles");
+        // a tap cycles a detected broken anchor through corner and smooth
         let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
         assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Smooth);
         // a control is no anchor
         assert!(s.quickshape_cycle_anchor(1).is_none());
         // shown as the polyline, then as a curve again: the plugin fits it afresh

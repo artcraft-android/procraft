@@ -116,18 +116,8 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
-        ShapeEdit {
-            shape,
-            first,
-            earlier: Vec::new(),
-            later: Vec::new(),
-            choices,
-            drawn,
-            along,
-            modes: Vec::new(),
-            held,
-            stroke,
-        }
+        let modes = initial_curve_modes(&shape);
+        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, along, modes, held, stroke }
     }
 
     /// A drag undone can be done again.
@@ -464,6 +454,27 @@ fn mode_of(shape: &Shape, k: usize) -> usize {
     if shape.closed_curve() && k == shape.nodes.len().saturating_sub(1) / 3 { 0 } else { k }
 }
 
+/// A plugin can return a corner with independent incoming and outgoing Bezier handles.
+/// Recognize that geometry when it is first fitted (and when another shape is converted
+/// into a curve), otherwise dragging one handle would mirror the other and round the corner.
+fn initial_curve_modes(shape: &Shape) -> Vec<Anchor> {
+    if shape.kind != ShapeKind::Curve {
+        return Vec::new();
+    }
+    let n = shape.nodes.len().saturating_sub(1) / 3 + 1;
+    (0..n)
+        .map(|k| {
+            let i = k * 3;
+            if i == 0 || i + 1 >= shape.nodes.len() {
+                return Anchor::Smooth;
+            }
+            let (incoming, outgoing) = (shape.nodes[i] - shape.nodes[i - 1], shape.nodes[i + 1] - shape.nodes[i]);
+            let lengths = incoming.length() * outgoing.length();
+            if lengths > 1e-5 && incoming.dot(outgoing) < 0.96 * lengths { Anchor::Broken } else { Anchor::Smooth }
+        })
+        .collect()
+}
+
 /// How each of a curve's anchors sits, for its handles to be drawn as.
 fn anchor_list(shape: &Shape, modes: &[Anchor]) -> Vec<QuickShapeAnchor> {
     if shape.kind != ShapeKind::Curve {
@@ -747,7 +758,7 @@ impl CanvasSession {
         edit.earlier.push(before);
         edit.later.clear();
         // fitted afresh: the anchors it had are no guide
-        edit.modes.clear();
+        edit.modes = initial_curve_modes(&edit.shape);
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()

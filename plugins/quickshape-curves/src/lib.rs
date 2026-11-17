@@ -210,11 +210,11 @@ fn stroke_tangents(pts: &[P], reach: f32) -> Vec<P> {
         .collect()
 }
 
-fn cubic_span(pts: &[P], tangents: &[P], a: usize, b: usize) -> [P; 4] {
+fn cubic_span(pts: &[P], outgoing: &[P], incoming: &[P], a: usize, b: usize) -> [P; 4] {
     let start = pts[a];
     let end = pts[b];
     let reach = length(sub(end, start)) / 3.0;
-    [start, add(start, scale(tangents[a], reach)), sub(end, scale(tangents[b], reach)), end]
+    [start, add(start, scale(outgoing[a], reach)), sub(end, scale(incoming[b], reach)), end]
 }
 
 /// Distance to the sampled cubic instead of matching parameter t: pointer samples have varying
@@ -281,10 +281,13 @@ fn smoothing_radius(pts: &[P]) -> f32 {
 }
 
 fn smooth_stroke(pts: &[P]) -> Vec<P> {
+    smooth_stroke_with_sigma(pts, smoothing_radius(pts))
+}
+
+fn smooth_stroke_with_sigma(pts: &[P], sigma: f32) -> Vec<P> {
     if pts.len() < 4 {
         return pts.to_vec();
     }
-    let sigma = smoothing_radius(pts);
     let radius = sigma * 2.5;
     let mut along = Vec::with_capacity(pts.len());
     along.push(0.0f32);
@@ -318,17 +321,120 @@ fn smooth_stroke(pts: &[P]) -> Vec<P> {
     out
 }
 
+/// Find *supported* hard turns in the sampled path, without classifying tiny hand
+/// tremors as corners. Simplification proposes candidates; the direction over a longer
+/// stretch of path on either side must change sharply for a candidate to count.
+fn hard_corners(pts: &[P]) -> Vec<usize> {
+    if pts.len() < 5 {
+        return Vec::new();
+    }
+    let scale = size(pts);
+    // Corner candidates come from a *lightly* smoothed path, not raw noisy samples.
+    // This discards brief stylus wiggles but preserves sustained direction changes.
+    let guide = smooth_stroke_with_sigma(pts, 3.5);
+    let candidates = simplify(&guide, (scale * 0.014).clamp(2.0, 5.0));
+    let reach = (scale * 0.047).clamp(13.0, 26.0);
+    let mut found = Vec::new();
+    for corner in candidates.iter().skip(1).take(candidates.len().saturating_sub(2)) {
+        let Some(i) = guide.iter().position(|p| p == corner) else { continue };
+        if i == 0 || i + 1 >= pts.len() {
+            continue;
+        }
+        let mut before = i;
+        let mut after = i;
+        let (mut gone_back, mut gone_forward) = (0.0, 0.0);
+        while before > 0 && gone_back < reach {
+            gone_back += length(sub(guide[before], guide[before - 1]));
+            before -= 1;
+        }
+        while after + 1 < pts.len() && gone_forward < reach {
+            gone_forward += length(sub(guide[after + 1], guide[after]));
+            after += 1;
+        }
+        if gone_back < reach * 0.85 || gone_forward < reach * 0.85 {
+            continue;
+        }
+        let into = sub(guide[i], guide[before]);
+        let out = sub(guide[after], guide[i]);
+        let dot = (into.0 * out.0 + into.1 * out.1) / (length(into) * length(out)).max(1e-6);
+        if dot >= 0.55 {
+            continue;
+        }
+        // A smoothly curved wave can change heading by 60+ degrees across a broad
+        // distance, especially at its peaks. A *corner* turns abruptly on a shorter
+        // scale as well. Check both scales to retain bends but not false hard corners.
+        let near_reach = (scale * 0.014).clamp(5.0, 9.0);
+        let (mut left, mut right) = (i, i);
+        let (mut left_path, mut right_path) = (0.0, 0.0);
+        while left > 0 && left_path < near_reach {
+            left_path += length(sub(guide[left], guide[left - 1]));
+            left -= 1;
+        }
+        while right + 1 < pts.len() && right_path < near_reach {
+            right_path += length(sub(guide[right + 1], guide[right]));
+            right += 1;
+        }
+        if left_path < near_reach * 0.8 || right_path < near_reach * 0.8 {
+            continue;
+        }
+        let u = sub(guide[i], guide[left]);
+        let v = sub(guide[right], guide[i]);
+        let near_dot = (u.0 * v.0 + u.1 * v.1) / (length(u) * length(v)).max(1e-6);
+        if near_dot < 0.55 && found.last().is_none_or(|&previous| previous != i) {
+            found.push(i);
+        }
+    }
+    found
+}
+
+/// Smooth each stretch separately. The Gaussian kernel must not cross a hard corner,
+/// and the exact corner position must survive smoothing and adaptive Bezier fitting.
+fn smooth_between_corners(pts: &[P], corners: &[usize]) -> Vec<P> {
+    let mut smoothed = pts.to_vec();
+    let mut start = 0;
+    for &end in corners.iter().chain(std::iter::once(&(pts.len() - 1))) {
+        if start < end {
+            smoothed[start..=end].copy_from_slice(&smooth_stroke(&pts[start..=end]));
+        }
+        start = end;
+    }
+    smoothed
+}
+
 fn fit(pts: &[P]) -> Vec<P> {
     let valid: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
     if valid.len() < 2 {
         return Vec::new();
     }
-    let pts = smooth_stroke(&limit_samples(&valid));
-    let tangents = stroke_tangents(&pts, smoothing_radius(&pts) * 1.5);
+    let sampled = limit_samples(&valid);
+    let corners = hard_corners(&sampled);
+    let pts = smooth_between_corners(&sampled, &corners);
+    let tangent_reach = smoothing_radius(&pts) * 1.5;
+    let mut incoming = vec![(0.0, 0.0); pts.len()];
+    let mut outgoing = vec![(0.0, 0.0); pts.len()];
+    let mut start = 0;
+    for &end in corners.iter().chain(std::iter::once(&(pts.len() - 1))) {
+        if start < end {
+            let local = stroke_tangents(&pts[start..=end], tangent_reach);
+            for (at, &direction) in local.iter().enumerate() {
+                let i = start + at;
+                if i != start || start == 0 {
+                    incoming[i] = direction;
+                }
+                if i != end || end == pts.len() - 1 {
+                    outgoing[i] = direction;
+                }
+            }
+        }
+        start = end;
+    }
     // Fit the broad centreline, rather than approximating every small variation in it.
     // This allows slightly more positional freedom in exchange for a fairer, simpler curve.
     let tolerance = (size(&pts) * 0.012).clamp(3.0, 7.0);
-    let mut anchors = vec![0, pts.len() - 1];
+    let mut anchors = Vec::with_capacity(corners.len() + 2);
+    anchors.push(0);
+    anchors.extend(corners);
+    anchors.push(pts.len() - 1);
     loop {
         if anchors.len() > MAX_OPEN_SPANS {
             break;
@@ -339,7 +445,7 @@ fn fit(pts: &[P]) -> Vec<P> {
             if b - a < 2 {
                 continue;
             }
-            let (at, error) = cubic_deviation(&pts, a, b, cubic_span(&pts, &tangents, a, b));
+            let (at, error) = cubic_deviation(&pts, a, b, cubic_span(&pts, &outgoing, &incoming, a, b));
             if error > worst.1 {
                 worst = (at, error);
             }
@@ -356,7 +462,7 @@ fn fit(pts: &[P]) -> Vec<P> {
     }
     let mut nodes = Vec::with_capacity(anchors.len() * 3);
     for pair in anchors.windows(2) {
-        let [a, b, c, _] = cubic_span(&pts, &tangents, pair[0], pair[1]);
+        let [a, b, c, _] = cubic_span(&pts, &outgoing, &incoming, pair[0], pair[1]);
         nodes.extend([a, b, c]);
     }
     nodes.push(pts[*anchors.last().unwrap_or(&0)]);
@@ -377,16 +483,95 @@ mod tests {
     }
 
     #[test]
+    fn a_sharp_turn_remains_sharp_after_smoothing() {
+        let corners = [(0.0, 0.0), (120.0, 0.0), (120.0, 120.0)];
+        let stroke: Vec<P> = corners
+            .windows(2)
+            .flat_map(|w| (0..=40).map(move |i| add(w[0], scale(sub(w[1], w[0]), i as f32 / 40.0))))
+            .collect();
+        let nodes = fit(&stroke);
+        let (at, point) = nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 == 0)
+            .map(|(i, &p)| (i, p))
+            .min_by(|(_, a), (_, b)| length(sub(*a, corners[1])).total_cmp(&length(sub(*b, corners[1]))))
+            .unwrap();
+        assert!(length(sub(point, corners[1])) < 2.0, "corner moved: {point:?}");
+        assert!(at >= 3 && at + 3 < nodes.len());
+        let into = sub(nodes[at], nodes[at - 1]);
+        let out = sub(nodes[at + 1], nodes[at]);
+        let turn_cos = (into.0 * out.0 + into.1 * out.1) / (length(into) * length(out)).max(1e-6);
+        assert!(turn_cos < 0.65, "intentionally sharp corner was rounded: {turn_cos}");
+    }
+
+    #[test]
+    fn a_wobbly_arc_like_stroke_is_fitted_to_a_consistent_curve() {
+        // A moderately uneven freehand circular arc should become a fair curved line,
+        // rather than tracing the small oscillations or inventing a sharp angle.
+        let centre = (200.0, 200.0);
+        let radius = 145.0;
+        let stroke: Vec<P> = (0..=180)
+            .map(|i| {
+                let angle = 0.15 + i as f32 * 2.5 / 180.0;
+                let wobble = if i == 0 || i == 180 {
+                    0.0
+                } else {
+                    3.2 * (i as f32 * std::f32::consts::TAU / 13.0).sin()
+                        + 2.0 * (i as f32 * std::f32::consts::TAU / 37.0).sin()
+                };
+                let r = radius + wobble;
+                (centre.0 + r * angle.cos(), centre.1 + r * angle.sin())
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        let mut output = Vec::new();
+        for i in (0..nodes.len() - 1).step_by(3) {
+            for k in 0..=24 {
+                output.push(cubic_at(nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3], k as f32 / 24.0));
+            }
+        }
+        let mean = output.iter().map(|&p| (length(sub(p, centre)) - radius).abs()).sum::<f32>() / output.len() as f32;
+        let worst = output.iter().map(|&p| (length(sub(p, centre)) - radius).abs()).fold(0.0f32, f32::max);
+        assert!(mean < 3.0, "fitted arc remained uneven: {mean}");
+        assert!(worst < 6.0, "fitted arc strayed from its intended shape: {worst}");
+        assert_eq!(hard_corners(&limit_samples(&stroke)), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn nearby_pen_wobble_does_not_create_a_false_corner() {
+        let stroke: Vec<P> = (0..=200)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                (
+                    x,
+                    100.0
+                        + 50.0 * (x * std::f32::consts::TAU / 400.0).sin()
+                        + 2.0 * (x * std::f32::consts::TAU / 13.0).sin(),
+                )
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        for k in (3..nodes.len() - 1).step_by(3) {
+            let into = sub(nodes[k], nodes[k - 1]);
+            let out = sub(nodes[k + 1], nodes[k]);
+            let cross = (into.0 * out.1 - into.1 * out.0).abs() / (length(into) * length(out)).max(1e-6);
+            assert!(cross < 0.05, "false corner at {k}: {nodes:?}");
+        }
+    }
+
+    #[test]
     fn a_stroke_bending_twice_gets_a_curve_through_its_bends() {
         let nodes = fit(&zigzag());
         // anchors at 0, 3, 6 ...: each span's two controls between them; one at each corner
         assert_eq!(nodes.len() % 3, 1, "{nodes:?}");
         assert!(nodes.len() >= 10, "{nodes:?}");
         assert_eq!(nodes[0], (0.0, 0.0));
-        // each anchor's controls either side on one line (smooth), the first's toward the next
+        // A deliberate zigzag's hard bends should stay non-collinear, not be rounded.
         let (before, at, after) = (nodes[2], nodes[3], nodes[4]);
         let (u, v) = (sub(at, before), sub(after, at));
-        assert!((u.0 * v.1 - u.1 * v.0).abs() < 1e-2 * length(u) * length(v), "{u:?} {v:?}");
+        let dot = (u.0 * v.0 + u.1 * v.1) / (length(u) * length(v)).max(1e-6);
+        assert!(dot < 0.66, "sharp bend was rounded: {u:?} {v:?}");
     }
 
     #[test]
