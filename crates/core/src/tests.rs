@@ -15683,3 +15683,128 @@ fn only_a_stroke_shown_on_to_the_pen_waits_to_even_out_whole_pixels() {
     assert!(reads_whole(ToolKind::Paint));
     assert!(!reads_whole(ToolKind::Smudge));
 }
+
+/// A `size` × `size` picture, clear but for `rect` (x0, y0, x1, y1) in colour `px`.
+fn block(size: u32, rect: (u32, u32, u32, u32), px: [u8; 4]) -> crate::ThumbnailImage {
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    for y in rect.1..rect.3 {
+        for x in rect.0..rect.2 {
+            rgba[((y * size + x) * 4) as usize..][..4].copy_from_slice(&px);
+        }
+    }
+    crate::ThumbnailImage { width: size, height: size, rgba }
+}
+
+/// Layers lifted out of one artwork drop into another with their settings, masks, clipping and
+/// groups, and their pixels as they were.
+#[test]
+fn layers_dropped_into_another_artwork_come_as_they_were() {
+    use crate::{LayerDrop, LayerType};
+    let Some(a) = session(100, 100) else { return };
+    // a red block; above it a blue one, multiplied at half opacity, clipped, with a mask dark on
+    // its left half; and a group holding a green block
+    let red = a.paste(block(100, (10, 10, 60, 60), [255, 0, 0, 255])).unwrap();
+    let blue = a.paste(block(100, (20, 20, 80, 80), [0, 0, 255, 255])).unwrap();
+    assert!(a.set_layer_blend(blue, procraft_engine::document::BlendMode::Multiply.id()));
+    assert!(a.set_layer_opacity(blue, 0.5, true));
+    assert!(a.set_layer_clipped(blue, true));
+    let mask = a.add_mask(blue).unwrap();
+    a.shared.lock().rewrite_layer(
+        procraft_engine::document::LayerId(mask),
+        procraft_engine::geom::IRect::new(0, 0, 50, 100),
+        [0, 0, 0, 255].repeat(50 * 100),
+    );
+    let green = a.paste(block(100, (70, 0, 100, 30), [0, 255, 0, 255])).unwrap();
+    assert!(a.select_layer(green));
+    let group = a.group_picked();
+    assert_ne!(group, 0);
+    // the blue layer, the group and the red one, picked together; lifting one lifts them all
+    assert!(a.select_layer(blue));
+    assert!(a.pick_layer(group) && a.pick_layer(red));
+    let bundle = a.lift_layers(red).unwrap();
+    assert_eq!((bundle.items(), bundle.layer_count()), (3, 4));
+    let pixels = |s: &CanvasSession, id: u64| s.copy_layer_contents(id).unwrap().rgba;
+    let theirs: Vec<Vec<u8>> = [red, blue, mask, green].iter().map(|&id| pixels(&a, id)).collect();
+
+    let Some(b) = session(100, 100) else { return };
+    let before = b.layers();
+    let top = b.drop_layers(bundle.clone(), LayerDrop::AboveCurrent).unwrap();
+    let layers = b.layers();
+    assert_eq!(layers.len(), before.len() + 5);
+    // top first: the group with the green layer, the blue one with its mask, the red one, then
+    // what was there
+    let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
+    let mine = |n: usize| &layers[n];
+    assert_eq!(mine(0).kind, LayerType::Group);
+    assert_eq!(mine(0).id, top);
+    assert!(mine(0).current);
+    assert_eq!(mine(1).parent, Some(top), "{names:?}");
+    assert_eq!((mine(2).kind, mine(2).parent), (LayerType::Mask, Some(mine(3).id)));
+    let (b_green, b_mask, b_blue, b_red) = (mine(1).id, mine(2).id, mine(3).id, mine(4).id);
+    let blue_there = mine(3);
+    assert_eq!(blue_there.blend, procraft_engine::document::BlendMode::Multiply.id());
+    assert_eq!((blue_there.opacity, blue_there.clipped), (0.5, true));
+    assert!(mine(3).picked && mine(4).picked);
+    assert_eq!(
+        layers.iter().map(|l| l.name.clone()).take(5).collect::<Vec<_>>(),
+        a.layers()
+            .iter()
+            .filter(|l| [red, blue, mask, green, group].contains(&l.id))
+            .map(|l| l.name.clone())
+            .collect::<Vec<_>>()
+    );
+    let mine_pixels: Vec<Vec<u8>> = [b_red, b_blue, b_mask, b_green].iter().map(|&id| pixels(&b, id)).collect();
+    assert!(mine_pixels == theirs, "the pixels came as they were");
+    // what shows matches too: the blue only on the red's right, half multiplied over it
+    assert_eq!(pixel(&b, 55, 30), pixel(&a, 55, 30));
+    assert_eq!(pixel(&b, 30, 30), pixel(&a, 30, 30));
+    assert_eq!(pixel(&b, 90, 10), [0, 255, 0, 255]);
+
+    // one undo step takes them all out; redone they are back with their pixels
+    assert_eq!(b.undo().as_deref(), Some("insert layers"));
+    assert_eq!(b.layers(), before);
+    assert_eq!(pixel(&b, 90, 10), [255, 255, 255, 255]);
+    assert!(b.redo().is_some());
+    assert_eq!(b.layers().len(), before.len() + 5);
+    assert_eq!(pixel(&b, 90, 10), [0, 255, 0, 255]);
+    assert_eq!(pixels(&b, b_blue), theirs[1]);
+
+    // the artwork they came from is as it was
+    assert_eq!(pixels(&a, blue), theirs[1]);
+}
+
+/// Layers from a canvas of another size: what is painted of them, together, centred and scaled down
+/// to fit if larger; a layer dropped on a row goes next to it.
+#[test]
+fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
+    use crate::LayerDrop;
+    let Some(a) = session(200, 200) else { return };
+    // a red block at the top left and a blue one at the bottom right: together 180 × 180
+    let red = a.paste(block(200, (10, 10, 30, 30), [255, 0, 0, 255])).unwrap();
+    let blue = a.paste(block(200, (170, 170, 190, 190), [0, 0, 255, 255])).unwrap();
+    assert!(a.pick_layer(red));
+    let bundle = a.lift_layers(blue).unwrap();
+    let Some(b) = session(90, 90) else { return };
+    b.drop_layers(bundle.clone(), LayerDrop::AboveCurrent).unwrap();
+    // halved: the red block at 0..10, the blue at 80..90, the two still apart as they were
+    let layers = b.layers();
+    let (b_blue, b_red) = (layers[0].id, layers[1].id);
+    let painted = |id: u64| {
+        let px = b.copy_layer_contents(id).unwrap();
+        crate::layer_ops::painted_rect(&px.rgba, 90).map(|r| (r.x0, r.y0, r.x1, r.y1))
+    };
+    assert_eq!(painted(b_red), Some((0, 0, 10, 10)));
+    assert_eq!(painted(b_blue), Some((80, 80, 90, 90)));
+    assert_eq!(pixel(&b, 5, 5), [255, 0, 0, 255]);
+    // onto a bigger canvas they keep their size, in the middle
+    let Some(c) = session(400, 400) else { return };
+    let first = c.layers()[0].id;
+    let top = c.drop_layers(bundle, LayerDrop::NextTo { target: first, above: false }).unwrap();
+    let layers = c.layers();
+    // below the row it was dropped on, the top one current
+    assert_eq!((layers[0].id, layers[1].id), (first, top));
+    assert!(layers[1].current && layers[2].picked);
+    let px = c.copy_layer_contents(top).unwrap();
+    let r = crate::layer_ops::painted_rect(&px.rgba, 400).unwrap();
+    assert_eq!((r.x0, r.y0, r.x1, r.y1), (270, 270, 290, 290));
+}

@@ -551,6 +551,18 @@ pub fn set_layer_budget(bytes: u64) {
     BUDGET.store(bytes.clamp(256 << 20, 64 << 30), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Where layers brought into a document go ([`Document::insert_copies`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// Above the current layer (with its mask) or group, in the same group, as a new layer goes.
+    AboveCurrent,
+    /// At the top of the stack, in no group.
+    Top,
+    /// At position `to` of the stack (0 = bottom), joining the group they land in, as a moved
+    /// layer does.
+    At(usize),
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Document {
     width: u32,
@@ -1066,6 +1078,111 @@ impl Document {
         self.picked = self.picked.iter().filter_map(|p| made.get(p).copied()).collect();
         self.fix_clips();
         Some(pairs)
+    }
+
+    /// What is chosen as whole items, bottom first: a mask stands for its layer, and what is in a
+    /// chosen group goes with it.
+    pub fn chosen_whole(&self) -> Vec<LayerId> {
+        self.chosen_items()
+    }
+
+    /// The layers of `items` (each a paint layer with its mask, a group with everything in it; a
+    /// mask stands for its layer), bottom first as they lie, each item on its own (in no group):
+    /// what copies of them in another document are made from. An item inside another one goes
+    /// with it, once.
+    pub fn items_layers(&self, items: &[LayerId]) -> Vec<Layer> {
+        let mut owners: Vec<LayerId> = Vec::new();
+        for id in items {
+            let Some(l) = self.layer(*id) else { continue };
+            let owner = if l.kind == LayerKind::Mask { l.parent } else { Some(*id) };
+            if let Some(owner) = owner.filter(|o| !owners.contains(o) && self.layer(*o).is_some()) {
+                owners.push(owner);
+            }
+        }
+        let groups: Vec<LayerId> =
+            owners.iter().copied().filter(|g| self.layer(*g).is_some_and(|l| l.kind == LayerKind::Group)).collect();
+        owners.retain(|id| !groups.iter().any(|g| self.is_inside(*id, *g)));
+        owners.sort_by_key(|id| self.index_of(*id).unwrap_or(usize::MAX));
+        let mut out = Vec::new();
+        for owner in owners {
+            let Some(unit) = self.unit(owner) else { continue };
+            for l in self.layers.get(unit).unwrap_or_default() {
+                let mut l = l.clone();
+                if l.id == owner {
+                    l.parent = None;
+                }
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    /// Copies of `layers` (as [`Document::items_layers`] gives them, from this document or
+    /// another) put in at `landing` together, in their order, with ids of this document's own; the
+    /// top item becomes the current layer and the others the picks. A copy is never the reference
+    /// layer. Returns each (given, copy) pair, groups included; none if there is nothing to put in.
+    pub fn insert_copies(&mut self, layers: &[Layer], landing: Landing) -> Option<Vec<(LayerId, LayerId)>> {
+        let given: Vec<LayerId> = layers.iter().map(|l| l.id).collect();
+        // an item is a layer whose parent isn't among them (a mask always has its layer with it)
+        let is_item = |l: &Layer| l.kind != LayerKind::Mask && l.parent.is_none_or(|p| !given.contains(&p));
+        let fits = |l: &Layer| l.kind != LayerKind::Mask || l.parent.is_some_and(|p| given.contains(&p));
+        if !layers.iter().any(is_item) || !layers.iter().all(fits) {
+            return None;
+        }
+        let (mut at, parent) = match landing {
+            Landing::AboveCurrent => match self.layer(self.current) {
+                Some(c) => {
+                    let owner = if c.kind == LayerKind::Mask { c.parent.unwrap_or(c.id) } else { c.id };
+                    let top = self.unit(owner).map_or(self.layers.len(), |u| u.end);
+                    (top, self.group_of(owner))
+                }
+                None => (self.layers.len(), None),
+            },
+            Landing::Top => (self.layers.len(), None),
+            Landing::At(to) => {
+                let mut to = to.min(self.layers.len());
+                // never between a layer and its mask
+                if self.layers.get(to).is_some_and(|l| l.kind == LayerKind::Mask) {
+                    to += 1;
+                }
+                // landing below a group's entry, or among its layers, it joins that group
+                let parent = self.layers.get(to).and_then(|above| match above.kind {
+                    LayerKind::Group => Some(above.id),
+                    _ => self.group_of(above.id),
+                });
+                (to, parent)
+            }
+        };
+        at = at.min(self.layers.len());
+        let mut made = std::collections::HashMap::new();
+        for id in &given {
+            let copy = self.new_id();
+            made.insert(*id, copy);
+        }
+        let renamed = |old: LayerId| made.get(&old).copied().unwrap_or(old);
+        let mut items = Vec::new();
+        let copies: Vec<Layer> = layers
+            .iter()
+            .map(|l| {
+                let mut c = l.clone();
+                c.id = renamed(l.id);
+                c.reference = false;
+                c.parent = if is_item(l) {
+                    items.push(c.id);
+                    parent
+                } else {
+                    l.parent.map(renamed)
+                };
+                c
+            })
+            .collect();
+        self.layers.splice(at..at, copies);
+        if let Some(top) = items.last() {
+            self.current = *top;
+        }
+        self.picked = items.iter().rev().skip(1).copied().collect();
+        self.fix_clips();
+        Some(given.iter().map(|g| (*g, renamed(*g))).collect())
     }
 
     /// Moves what is chosen (each with what goes with it, in its order) together to position `to`
@@ -2543,6 +2660,71 @@ mod tests {
         let copies: Vec<LayerId> = pairs.iter().map(|(_, c)| *c).collect();
         assert_eq!(d.chosen(), copies);
         assert_eq!(d.layer(d.current()).unwrap().name, "3");
+    }
+
+    #[test]
+    fn items_lifted_out_go_into_another_document_with_what_goes_with_them() {
+        // 1, 2 (with a mask), and a group holding 3 and 4
+        let (mut d, ids) = stack(4);
+        let [one, two, three, four]: [LayerId; 4] = ids.try_into().unwrap();
+        let mask = d.add_mask(two).unwrap();
+        d.set_current(three);
+        d.toggle_pick(four);
+        let group = d.group_chosen().unwrap();
+        d.set_blend(two, BlendMode::Multiply);
+        d.set_opacity(two, 0.4);
+        d.set_clipped(two, true);
+        d.set_reference(four, true);
+        // the mask stands for its layer; the group takes what is in it, once
+        let lifted = d.items_layers(&[group, mask, four, LayerId(999)]);
+        let lifted_ids: Vec<LayerId> = lifted.iter().map(|l| l.id).collect();
+        assert_eq!(lifted_ids, [two, mask, three, four, group]);
+        assert!(lifted.iter().all(|l| l.id != one));
+        assert_eq!(lifted.iter().find(|l| l.id == group).unwrap().parent, None);
+        // into another document above its current layer: new ids, the same settings and shape
+        let (mut e, _) = stack(2);
+        let below = e.layers()[0].id;
+        e.set_current(below);
+        let pairs = e.insert_copies(&lifted, Landing::AboveCurrent).unwrap();
+        assert_eq!(pairs.len(), 5);
+        let copy = |old: LayerId| pairs.iter().find(|(g, _)| *g == old).map(|(_, c)| *c).unwrap();
+        assert_eq!(names(&e), ["1", "2", "Layer Mask", "3", "4", "New group", "2"]);
+        let two_copy = e.layer(copy(two)).unwrap();
+        assert_eq!((two_copy.blend, two_copy.opacity, two_copy.clipped), (BlendMode::Multiply, 0.4, true));
+        assert_eq!(e.mask_of(copy(two)), Some(copy(mask)));
+        assert_eq!(e.group_of(copy(three)), Some(copy(group)));
+        assert_eq!(e.group_of(copy(group)), None);
+        // never the reference layer there; the top item current, the other picked
+        assert!(e.reference().is_none());
+        assert_eq!(e.current(), copy(group));
+        assert_eq!(e.picked(), [copy(two)]);
+    }
+
+    #[test]
+    fn layers_brought_in_land_on_top_or_where_dropped() {
+        let (d, ids) = stack(2);
+        let lifted = d.items_layers(&[ids[1]]);
+        let (mut e, theirs) = stack(3);
+        let group = {
+            e.set_current(theirs[1]);
+            e.group_chosen().unwrap()
+        };
+        e.set_current(theirs[1]);
+        // at the top, in no group
+        let pairs = e.insert_copies(&lifted, Landing::Top).unwrap();
+        assert_eq!(e.layers().last().map(|l| l.id), Some(pairs[0].1));
+        assert_eq!(e.group_of(pairs[0].1), None);
+        // dropped under a group's row, it joins the group
+        let at = e.index_of(group).unwrap();
+        let pairs = e.insert_copies(&lifted, Landing::At(at)).unwrap();
+        assert_eq!(e.group_of(pairs[0].1), Some(group));
+        assert_eq!(e.index_of(pairs[0].1), Some(at));
+        // a mask without its layer, or nothing, isn't put in
+        let mut m = Document::new(10, 10);
+        let mask = m.add_mask(m.current()).unwrap();
+        let alone: Vec<Layer> = m.items_layers(&[mask]).into_iter().filter(|l| l.id == mask).collect();
+        assert!(e.insert_copies(&alone, Landing::Top).is_none());
+        assert!(e.insert_copies(&[], Landing::Top).is_none());
     }
 
     #[test]
