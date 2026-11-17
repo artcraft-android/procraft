@@ -160,6 +160,9 @@ internal fun pendingBrushFileName(stamp: Long, name: String): String {
     return "$stamp-${kept.ifEmpty { "Imported" }}"
 }
 
+/** A clip of a picture: one of the kinds of thing it says it holds is an image. */
+private fun isPicture(kinds: android.content.ClipDescription) = (0 until kinds.mimeTypeCount).any { kinds.getMimeType(it).startsWith("image/") }
+
 /** The gallery, the open artwork and the state of the controls around it; outlives configuration changes. */
 class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var session: CanvasSession? = null
@@ -1256,8 +1259,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The system's clipboard held a picture (another app's, or one copied here before) when last looked at. */
+    private var systemPicture = false
+
+    /** Paste has something to take: a copy made here, or a picture on the system's clipboard. */
     var canPaste by mutableStateOf(false)
         private set
+
+    private fun offerPaste() {
+        canPaste = clipboard != null || systemPicture
+    }
+
+    /**
+     * Looks again whether the system's clipboard holds a picture, by the kinds of thing it says it
+     * holds: nothing is read from it, so the system doesn't tell the user it was.
+     */
+    fun lookAtSystemClipboard() {
+        val kinds = runCatching { systemClipboard?.primaryClipDescription }.getOrNull()
+        systemPicture = kinds != null && isPicture(kinds)
+        offerPaste()
+    }
+
+    private val clipChanged = android.content.ClipboardManager.OnPrimaryClipChangedListener { lookAtSystemClipboard() }
+
+    init {
+        runCatching { systemClipboard?.addPrimaryClipChangedListener(clipChanged) }
+    }
 
     /** The shape the last stroke snapped to (drawn and held), and whether its handles are shown. */
     var quickShape by mutableStateOf<QuickShapeInfo?>(null)
@@ -3084,7 +3111,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Copies the current layer within the selection, to paste. */
     fun copyLayer() {
         layerCopied()?.let { clipboard = it }
-        canPaste = clipboard != null
+        offerPaste()
     }
 
     /** The current layer within the selection, copied; null if nothing was. */
@@ -3106,7 +3133,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
             clipboard = copied ?: clipboard
-            canPaste = clipboard != null
+            offerPaste()
             if (copied != null) showNotice("Canvas copied")
         }
     }
@@ -3114,7 +3141,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Cuts the current layer within the selection, to paste. */
     fun cutLayer() {
         layerCut()?.let { clipboard = it }
-        canPaste = clipboard != null
+        offerPaste()
     }
 
     /** The current layer within the selection, cut; null if nothing was. */
@@ -3130,9 +3157,39 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return cut
     }
 
-    /** What was cut or copied, on a new layer; a [private] one is left out of the gallery's thumbnail. */
+    /**
+     * What was cut or copied last, here or in another app, on a new layer; a [private] one is left
+     * out of the gallery's thumbnail. Another app's picture comes in as an inserted one does, ready
+     * to transform.
+     */
     fun paste(private: Boolean = false) {
+        // a picture copied after the last copy here goes first (only then is the clip itself read)
+        val kinds = runCatching { systemClipboard?.primaryClipDescription }.getOrNull()
+        if (kinds != null && isPicture(kinds) && (clipboard == null || kinds.timestamp > clipboardAt)) {
+            val uri = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            if (uri != null && uri != clipUri) {
+                pastePicture(uri, private)
+                return
+            }
+        }
         paste(clipboard ?: return, private)
+    }
+
+    /** Another app's picture at [uri], pasted: into the current mask if a plugin says so, else as an inserted picture. */
+    private fun pastePicture(uri: android.net.Uri, private: Boolean) {
+        val s = session ?: return
+        closePanels()
+        viewModelScope.launch {
+            // a mask that takes what is pasted has no use for a copy of the picture
+            if (!private && !(modelOpen && !modelFlat) && s.pastesIntoMask()) {
+                val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
+                if (image != null && withContext(Dispatchers.Default) { s.pastePictureIntoMask(image) }) {
+                    refresh()
+                    return@launch
+                }
+            }
+            insertPictureNow(uri, private, transform = true)
+        }
     }
 
     /** A copy ([image]) on a new layer; a [private] one is left out of the gallery's thumbnail. */
@@ -8109,7 +8166,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun copyLayerContents(l: LayerInfo) {
         clipboard = session?.copyLayerContents(l.id) ?: clipboard
-        canPaste = clipboard != null
+        offerPaste()
     }
 
     fun fillLayer(l: LayerInfo) = layerChange { it.fillLayer(l.id) }
@@ -8312,6 +8369,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        runCatching { systemClipboard?.removePrimaryClipChangedListener(clipChanged) }
         strokeSound.follow(null, false)
         saveNow()
         session?.stopAutosave()

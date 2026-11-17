@@ -253,7 +253,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (!hasFocus) return
+        hideSystemBars()
+        // what another app copied meanwhile (the clipboard can only be looked at with the focus)
+        vm.lookAtSystemClipboard()
     }
 
     /** The canvas uses the whole screen; a swipe from the edge shows the bars for a moment. */
