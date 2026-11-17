@@ -444,7 +444,7 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                 val travel = size.height - thumb.height - inset * 2
                 for (n in notches) {
                     val y = inset + thumb.height / 2f + travel * (1f - n)
-                    drawRoundRect(NotchMark, Offset((size.width - bar.width) / 2f, y - bar.height / 2f), bar, CornerRadius(bar.height / 2f))
+                    drawRoundRect(Pc.NotchMark, Offset((size.width - bar.width) / 2f, y - bar.height / 2f), bar, CornerRadius(bar.height / 2f))
                 }
                 drawPath(Path().apply { addRoundRect(knob) }, Pc.SliderThumb)
                 if (notches.any { kotlin.math.abs(it - value) < 1e-4f }) {
@@ -471,7 +471,6 @@ private fun LiquifyRing(vm: CanvasViewModel) {
 
 private val NotchWidth = 20.dp
 private val NotchHeight = 4.dp
-private val NotchMark = Color(0x1AFFFFFF)
 
 /**
  * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a

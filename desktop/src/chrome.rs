@@ -269,7 +269,6 @@ struct Press {
 const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 const NOTCH_WIDTH: f32 = 20.0;
 const NOTCH_HEIGHT: f32 = 4.0;
-const NOTCH_MARK: u32 = 0x1AFFFFFF;
 
 const SLIDER_LEFT: f32 = 5.0;
 const SIZE_TRACK_TOP: f32 = 6.0;
@@ -501,7 +500,7 @@ impl SideBar {
                 let y = inset + thumb.y / 2.0 + travel * (1.0 - n);
                 let mut mark = tiny_skia::PathBuilder::new();
                 round_rect(&mut mark, Rect::from_center_size(pos2(size.x / 2.0, y), bar), [bar.y / 2.0; 4]);
-                fill(pixmap, mark.finish(), argb(NOTCH_MARK), t);
+                fill(pixmap, mark.finish(), argb(pc::NOTCH_MARK), t);
             }
             let mut thumb_path = tiny_skia::PathBuilder::new();
             round_rect(&mut thumb_path, knob, [thumb.y / 2.0; 4]);

@@ -119,6 +119,10 @@ pub mod pc {
     pub const SLIDER_RIM: Themed = Themed(0xB96E6E6E, 0xFFE9E9E9);
     pub const SLIDER_RIM_WIDTH: f32 = 0.8;
     pub const SLIDER_THUMB: Themed = Themed(0xFFA6A6A6, 0xFFF8F8F8);
+    /// A value saved on a slider (a notch): a short bar across the track, mid grey and see-through
+    /// on either look, so that it shows on the dark track and the light one (119 over the dark
+    /// track's 103 and 162 over the light one's 244, over white).
+    pub const NOTCH_MARK: u32 = 0xB3808080;
     pub const SIDE_GLYPH: Themed = Themed(0xFF969696, 0xFF646464);
     pub const SIDE_GLYPH_DISABLED: Themed = Themed(0x1AFFFFFF, 0x33000000);
     pub const SIDE_BAR_WIDTH: f32 = 51.0;
@@ -789,6 +793,29 @@ mod tests {
             assert_eq!(top, pc::BAR_HEIGHT);
             assert!(top + pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0 <= height, "{height}");
         }
+    }
+
+    /// The grey (0..255) `top` (0xAARRGGBB, a grey) shows over an `under` grey.
+    fn over(top: u32, under: f32) -> f32 {
+        let [a, g, ..] = top.to_be_bytes();
+        let a = f32::from(a) / 255.0;
+        f32::from(g) * a + under * (1.0 - a)
+    }
+
+    #[test]
+    fn a_saved_value_s_mark_shows_on_the_track_in_either_look() {
+        for track in [pc::SLIDER_TRACK.0, pc::SLIDER_TRACK.1] {
+            // over the white canvas, the black surround and a mid grey
+            for behind in [255.0, 0.0, 128.0] {
+                let under = over(track, behind);
+                let mark = over(pc::NOTCH_MARK, under);
+                assert!((mark - under).abs() >= 15.0, "{track:x} over {behind}: {mark} on {under}");
+            }
+        }
+        // as measured over white: 119 on the dark track's 103, 162 on the light one's 244
+        let (dark, light) = (over(pc::SLIDER_TRACK.0, 255.0), over(pc::SLIDER_TRACK.1, 255.0));
+        assert!((dark - 103.0).abs() < 2.0 && (over(pc::NOTCH_MARK, dark) - 119.0).abs() < 2.0);
+        assert!((light - 244.0).abs() < 2.0 && (over(pc::NOTCH_MARK, light) - 162.0).abs() < 2.0);
     }
 
     #[test]

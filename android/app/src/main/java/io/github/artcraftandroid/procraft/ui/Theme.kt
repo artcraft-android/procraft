@@ -186,6 +186,12 @@ object Pc {
     val SliderRim: Color get() = pick(0xB96E6E6E, 0xFFE9E9E9)
     val SliderRimWidth = 0.8.dp
     val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFF8F8F8)
+    /**
+     * A value saved on a slider (a notch): a short bar across the track, mid grey and see-through
+     * on either look, so that it shows on the dark track and the light one (119 over the dark
+     * track's 103 and 162 over the light one's 244, over white).
+     */
+    val NotchMark = Color(0xB3808080)
     val SideGlyph: Color get() = pick(0xFF969696, 0xFF646464)
     val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x33000000)
     val SideBarWidth = 51.dp
