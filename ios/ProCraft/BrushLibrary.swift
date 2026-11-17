@@ -22,6 +22,14 @@ private let searchBlock: CGFloat = 60
 private let menuTop: CGFloat = 57
 /// A brush held for its menu goes on to follow the finger once it has moved this far.
 private let heldSlop: CGFloat = 8
+/// Two fingers pinched on a library and let go at this much of their spread at the start (or less)
+/// go to every library's card; pinched out on a card past this much, that library opens. While they
+/// pinch, a library's lists shrink with them no further than the least here, and grow no further
+/// than the most.
+let pinchToLibraries: CGFloat = 0.66
+let pinchToLibrary: CGFloat = 2
+private let pinchShownLeast: CGFloat = 0.6
+private let pinchShownMost: CGFloat = 1.05
 /// The set icon picker: how many of the icons it offers, its columns, how far left of the set it
 /// starts, and the room it keeps below.
 private let pickedSetIcons = 42
@@ -165,7 +173,8 @@ private struct BrushFrames: PreferenceKey {
 /// The brush library hanging from the tool that opened it: the sets down its left, the shown
 /// set's brushes (each its name over its sample stroke) on its right. Tap the chosen set for its
 /// menu, swipe a brush left to share, duplicate or delete it, hold it for its menu (and drag it on
-/// from there onto a set or to another place in its own), and add brushes and sets with the plus.
+/// from there onto a set or to another place in its own), pinch the lists in for every library's
+/// card, and add brushes and sets with the plus.
 struct BrushLibrary: View {
     let model: CanvasModel
     let arrowX: CGFloat
@@ -175,6 +184,9 @@ struct BrushLibrary: View {
     let screen: CGSize
     @State private var ui = LibraryUi()
     @FocusState private var searching: Bool
+    /// Two fingers pinching on the lists: how far (their spread, a part of what it was). The lists
+    /// follow, as far as the pinch can take them, and spring back when it isn't taken.
+    @State private var pinched: CGFloat?
 
     var body: some View {
         let shown = model.shownSet == CanvasModel.recentSet || model.brushSets.indices.contains(model.shownSet)
@@ -220,6 +232,22 @@ struct BrushLibrary: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            // two fingers pinched in on them shrink them, and let go small enough show every
+            // library's card
+            .scaleEffect(min(max(pinched ?? 1, pinchShownLeast), pinchShownMost))
+            .clipped()
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { pinched = $0.magnification }
+                    .onEnded { value in
+                        withAnimation(Motion.swipeSettle) { pinched = nil }
+                        if value.magnification <= pinchToLibraries {
+                            ui.brushMenu = nil
+                            model.renamingBrush = nil
+                            model.showingLibraries = true
+                        }
+                    }
+            )
         }
         .coordinateSpace(.named(librarySpace))
         .onPreferenceChange(SetFrames.self) { ui.setFrames = $0 }

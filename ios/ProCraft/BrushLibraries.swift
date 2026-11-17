@@ -183,6 +183,8 @@ private struct LibraryCard: View {
     let ui: LibrariesUi
     let index: Int
     let library: BrushLibraryInfo
+    /// Two fingers pinching out on it: how far (their spread, a part of what it was).
+    @State private var zoom: CGFloat = 1
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cardCorner, style: .circular)
@@ -217,6 +219,19 @@ private struct LibraryCard: View {
         }
         .clipShape(shape)
         .contentShape(shape)
+        // pinched out, it grows with the fingers, and let go far enough apart it opens
+        .scaleEffect(min(max(zoom, 1), pinchToLibrary))
+        .zIndex(zoom > 1 ? 1 : 0)
+        .simultaneousGesture(
+            MagnifyGesture()
+                .onChanged { zoom = $0.magnification }
+                .onEnded { value in
+                    withAnimation(Motion.swipeSettle) { zoom = 1 }
+                    if value.magnification > pinchToLibrary {
+                        model.openLibrary(index)
+                    }
+                }
+        )
         .onTapGesture { model.openLibrary(index) }
         .onLongPressGesture(minimumDuration: 0.5, maximumDistance: 10) {
             withAnimation(Motion.menuOpen) { ui.cardMenu = index }
