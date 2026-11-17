@@ -1873,6 +1873,8 @@ final class CanvasModel {
         let c = colorRgb()
         let channel = { (shift: UInt32) in Float((c >> shift) & 0xFF) / 255 }
         session.setColor(r: channel(16), g: channel(8), b: channel(0))
+        // editing text, the letters chosen take it (and what is typed next): drawn again
+        text.colourChosen()
         if colorNames {
             nameColourSoon()
         }

@@ -707,6 +707,12 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.toggle(.color)
             case .showBrushes:
                 model.toggle(.brushes)
+            case .guideTouched:
+                model.guide.touched(true)
+            case .guideChanged:
+                model.guide.touched(false)
+            case let .guideNodeTapped(point, x, y):
+                model.guide.nodeTapped(point: point, x: x, y: y)
             default:
                 break
             }
