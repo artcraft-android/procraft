@@ -1883,10 +1883,10 @@ impl Interface {
             Choice::Copy => self.copy_layer(session),
             Choice::CopyAll => self.copy_canvas(session),
             Choice::Duplicate => self.duplicate_current(session),
-            // nothing cut (a locked layer, an empty one): what is on the clipboard stays there
+            // straight back as a new layer: what is on the clipboard stays there
             Choice::CutAndPaste => {
-                if self.layer_cut(session) {
-                    self.paste_own(session, false);
+                if let Some(cut) = self.layer_cut(session) {
+                    self.paste_image(session, cut, false);
                 }
             }
             Choice::Paste => self.paste(ctx, false),
@@ -1895,42 +1895,44 @@ impl Interface {
 
     /// The current layer (or what is selected of it) cut, to paste.
     fn cut_layer(&mut self, session: &CanvasSession) {
-        self.layer_cut(session);
+        if let Some(cut) = self.layer_cut(session) {
+            self.clipboard = Some(cut);
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
+        }
     }
 
-    /// As [`Self::cut_layer`]; whether anything was.
-    fn layer_cut(&mut self, session: &CanvasSession) -> bool {
+    /// The current layer (or what is selected of it) cut; none if nothing was.
+    fn layer_cut(&mut self, session: &CanvasSession) -> Option<procraft_core::ThumbnailImage> {
         self.open = None;
         // one layer at a time: a group current or several chosen say so
         let why = session.why_not_copied(true);
         if !self.say_blocked(session, why) {
-            return false;
+            return None;
         }
-        let Some(cut) = session.cut_layer() else { return false };
-        self.clipboard = Some(cut);
-        self.system_clipboard.copied_here(self.clipboard.as_ref());
+        let cut = session.cut_layer()?;
         self.overlays.notice("Layer cut", false);
-        true
+        Some(cut)
     }
 
     /// The current layer (or what is selected of it) copied, to paste.
     fn copy_layer(&mut self, session: &CanvasSession) {
-        self.layer_copied(session);
+        if let Some(copied) = self.layer_copied(session) {
+            self.clipboard = Some(copied);
+            self.system_clipboard.copied_here(self.clipboard.as_ref());
+        }
     }
 
-    /// As [`Self::copy_layer`]; whether anything was.
-    fn layer_copied(&mut self, session: &CanvasSession) -> bool {
+    /// The current layer (or what is selected of it) copied; none if nothing was.
+    fn layer_copied(&mut self, session: &CanvasSession) -> Option<procraft_core::ThumbnailImage> {
         self.open = None;
         // one layer at a time: a group current or several chosen say so
         let why = session.why_not_copied(false);
         if !self.say_blocked(session, why) {
-            return false;
+            return None;
         }
-        let Some(copied) = session.copy_layer() else { return false };
-        self.clipboard = Some(copied);
-        self.system_clipboard.copied_here(self.clipboard.as_ref());
+        let copied = session.copy_layer()?;
         self.overlays.notice("Layer copied", false);
-        true
+        Some(copied)
     }
 
     /// The whole picture (or what is selected of it) copied, to paste.
@@ -1985,6 +1987,12 @@ impl Interface {
     fn paste_own(&mut self, session: &CanvasSession, private: bool) {
         self.open = None;
         let Some(image) = self.clipboard.clone() else { return };
+        self.paste_image(session, image, private);
+    }
+
+    /// A copy (`image`) pasted as a new layer (a private one, if `private`).
+    fn paste_image(&mut self, session: &CanvasSession, image: procraft_core::ThumbnailImage, private: bool) {
+        self.open = None;
         if self.model && !session.model_flat() {
             if !session.model_picture_begin(image, false) {
                 crate::files::no_room(session);
@@ -1997,11 +2005,12 @@ impl Interface {
         }
     }
 
-    /// What is selected copied and pasted as a new layer; nothing selected, the layer duplicated.
+    /// What is selected copied and pasted as a new layer (what is on the clipboard stays there);
+    /// nothing selected, the layer duplicated.
     fn duplicate_current(&mut self, session: &CanvasSession) {
         if session.has_selection() {
-            if self.layer_copied(session) {
-                self.paste_own(session, false);
+            if let Some(copied) = self.layer_copied(session) {
+                self.paste_image(session, copied, false);
             }
         } else if let Some(current) = session.layers().into_iter().find(|l| l.current)
             && session.duplicate_layer(current.id).is_none()

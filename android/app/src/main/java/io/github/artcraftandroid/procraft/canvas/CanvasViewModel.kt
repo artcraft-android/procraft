@@ -3036,18 +3036,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // copy and paste, flipping, pictures
 
-    /** Copies the current layer within the selection; false if nothing was copied. */
-    fun copyLayer(): Boolean {
+    /** Copies the current layer within the selection, to paste. */
+    fun copyLayer() {
+        layerCopied()?.let { clipboard = it }
+        canPaste = clipboard != null
+    }
+
+    /** The current layer within the selection, copied; null if nothing was. */
+    private fun layerCopied(): io.github.artcraftandroid.procraft.core.ThumbnailImage? {
         if (!currentTakesChanges(copy = true)) {
             closePanels()
-            return false
+            return null
         }
         val copied = session?.copyLayer()
-        clipboard = copied ?: clipboard
-        canPaste = clipboard != null
         closePanels()
         if (copied != null) showNotice("Layer copied")
-        return copied != null
+        return copied
     }
 
     fun copyCanvas() {
@@ -3062,23 +3066,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun cutLayer(): Boolean {
+    /** Cuts the current layer within the selection, to paste. */
+    fun cutLayer() {
+        layerCut()?.let { clipboard = it }
+        canPaste = clipboard != null
+    }
+
+    /** The current layer within the selection, cut; null if nothing was. */
+    private fun layerCut(): io.github.artcraftandroid.procraft.core.ThumbnailImage? {
         if (!currentTakesChanges(cut = true)) {
             closePanels()
-            return false
+            return null
         }
         val cut = session?.cutLayer()
-        clipboard = cut ?: clipboard
-        canPaste = clipboard != null
         closePanels()
         refresh()
         if (cut != null) showNotice("Layer cut")
-        return cut != null
+        return cut
     }
 
     /** What was cut or copied, on a new layer; a [private] one is left out of the gallery's thumbnail. */
     fun paste(private: Boolean = false) {
-        val image = clipboard ?: return
+        paste(clipboard ?: return, private)
+    }
+
+    /** A copy ([image]) on a new layer; a [private] one is left out of the gallery's thumbnail. */
+    private fun paste(image: io.github.artcraftandroid.procraft.core.ThumbnailImage, private: Boolean) {
         val s = session
         // on a model it is placed on the surface, not in the texture
         if (s != null && modelOpen && !modelFlat) {
@@ -3468,16 +3481,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The Copy & Paste panel (three fingers swiped down) is open. */
     var copyPasteOpen by mutableStateOf(false)
 
-    /** Cut & Paste: what is selected (or the layer) cut out and put back as a new layer. */
+    /** Cut & Paste: what is selected (or the layer) cut out and put back as a new layer; what is on the clipboard stays there. */
     fun cutAndPaste() {
-        // nothing cut (a locked layer, an empty one): what is on the clipboard stays there
-        if (cutLayer()) paste()
+        layerCut()?.let { paste(it, private = false) }
     }
 
-    /** Duplicate: the selection copied to a new layer, or without one the current layer. */
+    /** Duplicate: the selection copied to a new layer (what is on the clipboard stays there), or without one the current layer. */
     fun duplicateCurrent() {
         if (hasSelection) {
-            if (copyLayer()) paste()
+            layerCopied()?.let { paste(it, private = false) }
         } else {
             layers.firstOrNull { it.current }?.let(::duplicate)
         }
