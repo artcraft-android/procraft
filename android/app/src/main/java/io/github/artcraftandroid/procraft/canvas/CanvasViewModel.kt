@@ -2975,12 +2975,30 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.guideEditEnd(keep)
         guideEditing = false
         symmetryOptionsOpen = false
+        guideNodeMenu = null
         followView()
     }
 
     fun chooseGuideKind(kind: GuideType) {
         guide = session?.setGuideKind(kind)
         symmetryOptionsOpen = false
+        guideNodeMenu = null
+    }
+
+    /**
+     * A handle tapped in the guide editor, at [at] (window pixels): a perspective guide's point
+     * ([point], its place) offers Delete, the centre of the others Reset.
+     */
+    data class GuideNodeMenu(val point: Int?, val at: Offset)
+
+    /** The menu of the guide editor's handle tapped, while it shows. */
+    var guideNodeMenu by mutableStateOf<GuideNodeMenu?>(null)
+
+    /** What the guide editor's handle menu offers, picked: the point deleted, or the centre put back. */
+    fun guideNodeAction(menu: GuideNodeMenu) {
+        guideNodeMenu = null
+        val s = session ?: return
+        guide = if (menu.point != null) s.removeVanishingPoint(menu.point.toUInt()) else s.resetGuidePlace()
     }
 
     /** The shown kind's look, each left as it is when not given. */
@@ -3009,7 +3027,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * or its handle dragged: the guide as it now is (a perspective tap may have added a point).
      */
     fun guideTouched(touched: Boolean) {
-        if (touched) symmetryOptionsOpen = false
+        if (touched) {
+            symmetryOptionsOpen = false
+            guideNodeMenu = null
+        }
         guide = session?.guide() ?: guide
     }
 

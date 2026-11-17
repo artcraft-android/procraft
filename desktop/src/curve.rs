@@ -7,9 +7,32 @@ use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2
 
 use crate::look::{Themed, Weight, argb, pc, text};
 
+/// A node menu's look (a curve's, the guide editor's handles'): its fill, width and rows' height.
 const MENU_FILL: u32 = 0xFF101010;
-const MENU_WIDTH: f32 = 70.0;
-const MENU_ROW: f32 = 36.0;
+pub(crate) const MENU_WIDTH: f32 = 70.0;
+pub(crate) const MENU_ROW: f32 = 36.0;
+
+/// A node menu in `menu` (a row for each of `rows`, white on near black, rounded 12 over a soft
+/// shadow); the row picked, if one was.
+pub(crate) fn node_menu(ctx: &egui::Context, id: &str, menu: Rect, rows: &[&str]) -> Option<usize> {
+    let mut picked = None;
+    egui::Area::new(Id::unique(id)).fixed_pos(menu.min).order(Order::Tooltip).show(ctx, |ui| {
+        ui.allocate_rect(menu, Sense::click());
+        let shadow =
+            egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(0x80) };
+        ui.painter().add(shadow.as_shape(menu, 12.0));
+        ui.painter().rect_filled(menu, 12, argb(MENU_FILL));
+        for (k, label) in rows.iter().enumerate() {
+            let row =
+                Rect::from_min_size(pos2(menu.left(), menu.top() + MENU_ROW * k as f32), vec2(menu.width(), MENU_ROW));
+            text(ui.painter(), row.center(), Align2::CENTER_CENTER, label, 17.0, Weight::Regular, Color32::WHITE);
+            if ui.interact(row, ui.scope_id().with(("node", k)), Sense::click()).clicked() {
+                picked = Some(k);
+            }
+        }
+    });
+    picked
+}
 
 /// How a curve's box is drawn: its fill, rules and edge, rounding, the curve's colour and width,
 /// and its handles' radii (ring, middle).
@@ -191,24 +214,7 @@ impl CurveEditor {
         }
         let end = index == 0 || index + 1 == curve.len();
         let rows: &[&str] = if end { &["Reset"] } else { &["Delete", "Reset"] };
-        let mut picked = None;
-        egui::Area::new(Id::unique("curve node menu")).fixed_pos(menu.min).order(Order::Tooltip).show(ctx, |ui| {
-            ui.allocate_rect(menu, Sense::click());
-            let shadow =
-                egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(0x80) };
-            ui.painter().add(shadow.as_shape(menu, 12.0));
-            ui.painter().rect_filled(menu, 12, argb(MENU_FILL));
-            for (k, label) in rows.iter().enumerate() {
-                let row = Rect::from_min_size(
-                    pos2(menu.left(), menu.top() + MENU_ROW * k as f32),
-                    vec2(menu.width(), MENU_ROW),
-                );
-                text(ui.painter(), row.center(), Align2::CENTER_CENTER, label, 17.0, Weight::Regular, Color32::WHITE);
-                if ui.interact(row, ui.scope_id().with(("node", k)), Sense::click()).clicked() {
-                    picked = Some(*label);
-                }
-            }
-        });
+        let picked = node_menu(ctx, "curve node menu", menu, rows).and_then(|k| rows.get(k).copied());
         let pressed_elsewhere =
             ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p)));
         match picked {

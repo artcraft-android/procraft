@@ -676,7 +676,8 @@ impl Interface {
             let mut glass = Vec::new();
             self.guide_editor.show(&ctx, &mut self.look, session, &mut glass);
             session.set_backdrops(glass);
-            self.popover_open = false;
+            // a handle's menu takes a press on the canvas, to close
+            self.popover_open = self.guide_editor.menu_open();
             return;
         }
         // the drawing guide over the canvas, under the bars (and shown full screen too)
@@ -1316,6 +1317,9 @@ impl Interface {
                 // the guide editor: a touch on the canvas closes its options; the guide is read each frame
                 TouchCommand::GuideTouched => self.guide_editor.touched(),
                 TouchCommand::GuideChanged => {}
+                TouchCommand::GuideNodeTapped { point, x, y } => {
+                    self.guide_editor.node_tapped(ctx, point, egui::pos2(x, y) / ctx.pixels_per_point());
+                }
             }
         }
         // a slid threshold redoes the whole fill: once a frame, at the last

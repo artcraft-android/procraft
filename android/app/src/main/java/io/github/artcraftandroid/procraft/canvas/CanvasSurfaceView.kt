@@ -287,9 +287,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 vm.fadePanels()
             }
             TouchCommand.PanelTapped -> vm.tapOutsidePanel()
-            // the guide editor: a touch came down (symmetry's options close), or dragged a handle
+            // the guide editor: a touch came down (symmetry's options close), dragged a handle or
+            // added a point; a handle tapped shows its menu
             TouchCommand.GuideTouched -> vm.guideTouched(touched = true)
             TouchCommand.GuideChanged -> vm.guideTouched(touched = false)
+            is TouchCommand.GuideNodeTapped -> vm.guideNodeMenu = CanvasViewModel.GuideNodeMenu(c.point?.toInt(), Offset(c.x, c.y))
         }
     }
 

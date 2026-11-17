@@ -97,6 +97,9 @@ pub(crate) const POUR_SLIDE_GENTLER: f32 = 2.7;
 const TRANSFORM_SLOP: f32 = 15.0;
 /// A touch on perspective blur's puck moved this far (points) drags it.
 const PUCK_SLOP: f32 = 10.0;
+/// A touch on the guide editor's canvas moved this far (points) drags the handle it took; less,
+/// and it was a tap (on a handle, its menu; elsewhere, a perspective guide's new point).
+const GUIDE_SLOP: f32 = 10.0;
 /// A tap this near a freehand selection's first point closes it; its points are added this far
 /// apart (points).
 const FREEHAND_CLOSE: f32 = 22.0;
@@ -356,10 +359,18 @@ pub enum TouchCommand {
     PanelFades,
     PanelTapped,
     /// The guide editor ([`CanvasSession::set_touch_guide_editing`]): a touch came down on its
-    /// canvas (its popovers close; a perspective guide may have a new point); what it took was
-    /// dragged. Either way the guide reads anew.
+    /// canvas (its popovers close); what it took was dragged, or a tap gave a perspective guide a
+    /// new point. Either way the guide reads anew.
     GuideTouched,
     GuideChanged,
+    /// A tap on one of the guide editor's handles, at window point (`x`, `y`): a perspective
+    /// guide's point (`point`, its place) offers Delete ([`CanvasSession::remove_vanishing_point`]),
+    /// the centre of the others Reset ([`CanvasSession::reset_guide_place`]).
+    GuideNodeTapped {
+        point: Option<u32>,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -562,9 +573,11 @@ pub(crate) struct Touches {
     /// A panel is open over the canvas, and the touch waiting for it to go.
     panel_open: bool,
     held: Option<Held>,
-    /// The guide editor is open, and what its touch took.
+    /// The guide editor is open, what its touch took, and whether the touch has gone past
+    /// [`GUIDE_SLOP`].
     guide_editing: bool,
     guide_grab: Option<crate::guide::GuideGrab>,
+    guide_moved: bool,
     /// Window pixels a point: how far a touch has to go.
     scale: f32,
     /// Window pixels a point of the interface: how near a touch has to be to a handle it draws.
@@ -659,6 +672,7 @@ impl Default for Touches {
             held: None,
             guide_editing: false,
             guide_grab: None,
+            guide_moved: false,
             scale: 1.0,
             handle_scale: 1.0,
         }
@@ -933,10 +947,11 @@ impl CanvasSession {
         self.touches().transforming = transforming;
     }
 
-    /// The guide editor open (or not): a touch drags the guide's handle it lands on (a perspective
-    /// guide's tap adds a point), two fingers move, zoom and turn the canvas as ever (a quick pinch
-    /// in fitting it to the whole window), and nothing else: nothing paints, and fingers tapped,
-    /// held, scrubbed or swiped do nothing.
+    /// The guide editor open (or not): a touch drags the guide's handle it lands on, and a tap on
+    /// one shows its menu; a tap elsewhere gives a perspective guide a point (up to three); two
+    /// fingers move, zoom and turn the canvas as ever (a quick pinch in fitting it to the whole
+    /// window), and nothing else: nothing paints, and fingers tapped, held, scrubbed or swiped do
+    /// nothing.
     pub fn set_touch_guide_editing(&self, editing: bool) {
         let mut t = self.touches();
         t.guide_editing = editing;
@@ -1411,7 +1426,11 @@ impl CanvasSession {
                 }
             }
             Mode::Guide if id == t.stroke_pointer => {
-                if let Some(grab) = t.guide_grab {
+                // the handle stays put until the touch has gone far enough not to be a tap
+                if !t.guide_moved && dist(at, t.down_at) > GUIDE_SLOP * t.scale {
+                    t.guide_moved = true;
+                }
+                if let Some(grab) = t.guide_grab.filter(|_| t.guide_moved) {
                     drop(t);
                     self.guide_drag(grab, at.0, at.1);
                     out.push(TouchCommand::GuideChanged);
@@ -1696,11 +1715,12 @@ impl CanvasSession {
         t.tap_moved = 0.0;
         t.tap_done = false;
         let id = t.down.first().map_or(0, |d| d.id);
-        // the guide editor: the touch takes the handle it lands on (a perspective guide's tap adds a
-        // point there), and nothing else
+        // the guide editor: the touch takes the handle it lands on, and nothing else (a tap adds a
+        // perspective guide's point when it lifts)
         if t.guide_editing {
             t.stroke_pointer = id;
             t.mode = Mode::Guide;
+            t.guide_moved = false;
             t.guide_grab = self.guide_grab(at.0, at.1, t.handle_scale);
             out.push(TouchCommand::GuideTouched);
             return;
@@ -2276,6 +2296,30 @@ impl CanvasSession {
                 self.pour_end(!cancelled, None);
                 out.push(TouchCommand::Filled);
             }
+            // a tap in the guide editor: on a handle, its menu (the turn handle has none); elsewhere a
+            // perspective guide's new point, where it came down
+            Mode::Guide if !cancelled && !t.guide_moved && now - t.tap_start <= TAP_MS => {
+                let (grab, at) = (t.guide_grab.take(), t.down_at);
+                drop(t);
+                match grab {
+                    Some(crate::guide::GuideGrab::Turn) => {}
+                    Some(grab) => {
+                        if let Some((x, y)) = self.guide_handle_at(grab) {
+                            let point = match grab {
+                                crate::guide::GuideGrab::Point(i) => Some(i),
+                                _ => None,
+                            };
+                            out.push(TouchCommand::GuideNodeTapped { point, x, y });
+                        }
+                    }
+                    None => {
+                        if self.guide_tap(at.0, at.1) {
+                            out.push(TouchCommand::GuideChanged);
+                        }
+                    }
+                }
+            }
+            Mode::Guide => t.guide_grab = None,
             // a tap on a handle rather than a drag of it: a curve's anchor steps to its next state
             Mode::Shape(i) => {
                 let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS && !cancelled;
@@ -3657,6 +3701,107 @@ mod tests {
         s.guide_edit_end(true);
         s.fit_view();
         assert!(zoom(&s) < fitted * 0.9, "{} {fitted}", zoom(&s));
+    }
+
+    #[test]
+    fn in_the_guide_editor_a_tap_adds_a_point_and_a_handle_tapped_shows_its_menu() {
+        let s = shown(1.0);
+        s.set_guide_on(true);
+        s.set_guide_kind(crate::GuideType::Perspective);
+        s.guide_edit_begin();
+        {
+            let mut st = s.shared.lock();
+            st.view = st.view_motion.take().map(|m| m.to).or(st.view);
+        }
+        s.set_touch_guide_editing(true);
+        let points = |s: &CanvasSession| s.guide().vanishing.len() / 2;
+        // a pinch adds no point, not even where its first finger lands
+        pinch(&s, -1.0, 200.0, 0.0);
+        assert_eq!(points(&s), 0);
+        // each touch a second after the last
+        let clock = std::cell::Cell::new(1000.0);
+        let next = || {
+            clock.set(clock.get() + 1000.0);
+            clock.get()
+        };
+        let tap = |x: f32, y: f32, held: f64| {
+            let ms = next();
+            let mut out = s.touch_down(1, PointerKind::Finger, at(x, y, ms));
+            out.extend(s.touch_up(1, at(x, y, ms + held)));
+            out
+        };
+        // a touch held longer than a tap, or dragged, adds none either
+        tap(200.0, 300.0, 600.0);
+        assert_eq!(points(&s), 0);
+        let ms = next();
+        s.touch_down(1, PointerKind::Finger, at(200.0, 300.0, ms));
+        assert_eq!(points(&s), 0);
+        s.touch_move(1, at(260.0, 300.0, ms + 16.0));
+        s.touch_up(1, at(260.0, 300.0, ms + 32.0));
+        assert_eq!(points(&s), 0);
+        // a tap adds one where it lands, up to three
+        let out = tap(200.0, 300.0, 50.0);
+        assert!(out.contains(&TouchCommand::GuideChanged), "{out:?}");
+        assert_eq!(points(&s), 1);
+        let v = s.guide().vanishing;
+        assert!((v[0] - 200.0).abs() < 1e-2 && (v[1] - 300.0).abs() < 1e-2, "{v:?}");
+        tap(600.0, 300.0, 50.0);
+        tap(400.0, 100.0, 50.0);
+        assert_eq!(points(&s), 3);
+        let out = tap(400.0, 500.0, 50.0);
+        assert_eq!(points(&s), 3);
+        assert!(!out.contains(&TouchCommand::GuideChanged), "{out:?}");
+        // a tap on a point shows its menu, there, and adds nothing
+        let out = tap(604.0, 303.0, 50.0);
+        assert_eq!(points(&s), 3);
+        let menu = out.iter().find_map(|c| match c {
+            TouchCommand::GuideNodeTapped { point, x, y } => Some((*point, *x, *y)),
+            _ => None,
+        });
+        assert!(
+            matches!(menu, Some((Some(1), x, y)) if (x - 600.0).abs() < 1e-2 && (y - 300.0).abs() < 1e-2),
+            "{out:?}"
+        );
+        // a touch on it wobbling a little leaves it; dragged, it follows
+        let ms = next();
+        s.touch_down(1, PointerKind::Finger, at(600.0, 300.0, ms));
+        s.touch_move(1, at(605.0, 302.0, ms + 16.0));
+        let still = s.guide().vanishing;
+        assert!((still[2] - 600.0).abs() < 1e-2 && (still[3] - 300.0).abs() < 1e-2, "{still:?}");
+        let out = s.touch_move(1, at(700.0, 320.0, ms + 32.0));
+        assert!(out.contains(&TouchCommand::GuideChanged), "{out:?}");
+        let out = s.touch_up(1, at(700.0, 320.0, ms + 48.0));
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::GuideNodeTapped { .. })), "{out:?}");
+        let v = s.guide().vanishing;
+        assert!((v[2] - 700.0).abs() < 1e-2 && (v[3] - 320.0).abs() < 1e-2, "{v:?}");
+        // far off the canvas too
+        let ms = next();
+        s.touch_down(1, PointerKind::Finger, at(700.0, 320.0, ms));
+        s.touch_move(1, at(790.0, 590.0, ms + 16.0));
+        s.touch_up(1, at(790.0, 590.0, ms + 32.0));
+        let far = s.guide().vanishing;
+        assert!((far[2] - 790.0).abs() < 1e-2 && (far[3] - 590.0).abs() < 1e-2, "{far:?}");
+        // Delete takes it away, and the others stay
+        assert_eq!(s.remove_vanishing_point(1).vanishing, [v[0], v[1], v[4], v[5]]);
+        // the other kinds: the centre tapped offers Reset, the turn handle nothing
+        s.set_guide_kind(crate::GuideType::Grid);
+        s.move_guide_centre(300.0, 250.0);
+        s.turn_guide(400.0, 100.0);
+        let g = s.guide();
+        let out = tap(g.centre[0] + 3.0, g.centre[1], 50.0);
+        assert!(out.iter().any(|c| matches!(c, TouchCommand::GuideNodeTapped { point: None, .. })), "{out:?}");
+        let out = tap(g.handle[0], g.handle[1], 50.0);
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::GuideNodeTapped { .. })), "{out:?}");
+        assert_eq!(s.guide().centre, g.centre);
+        // Reset: back in the middle of the canvas (where the pinch left it), upright
+        let back = s.reset_guide_place();
+        assert!((back.centre[0] - 400.0).abs() < 1.0 && (back.centre[1] - 300.0).abs() < 1.0, "{back:?}");
+        assert!((back.handle[0] - back.centre[0]).abs() < 1e-2 && back.handle[1] < back.centre[1], "{back:?}");
+        // and a tap elsewhere adds nothing to them
+        tap(100.0, 100.0, 50.0);
+        assert_eq!(s.guide().centre, back.centre);
+        s.set_touch_guide_editing(false);
+        s.guide_edit_end(true);
     }
 
     #[test]
