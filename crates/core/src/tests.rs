@@ -15261,7 +15261,7 @@ fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
     let root = std::env::temp_dir().join(format!("procraft-one-after-another-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let mut after_second = None;
-    for round in 0..4u32 {
+    for round in 0..7u32 {
         let dir = root.join(format!("artwork-{round}")).to_string_lossy().into_owned();
         let s = CanvasSession::new(400, 300);
         s.use_gpu(gpu.clone());
@@ -15318,11 +15318,12 @@ fn artworks_opened_and_closed_one_after_another_leave_nothing_behind() {
             _ if round == 0 => {}
             None => after_second = settled(None),
             Some(second) => {
-                // a readback buffer kept for reuse may first be made in a later round (by when the
-                // autosave's thumbnail is read): one more buffer once is that, more would be a leak
+                // the readback buffers kept for reuse (the autosave's thumbnail's, a time-lapse
+                // frame's) may first be made in a later round, as their threads get to them: up to
+                // two more buffers is those, while a leak would add one or more every round
                 let live = settled(Some(second)).expect("counted as before");
                 assert_eq!(live.0, second.0, "textures after artwork {round}, as after the second");
-                assert!(live.1 <= second.1 + 1, "buffers after artwork {round}: {} against {}", live.1, second.1);
+                assert!(live.1 <= second.1 + 2, "buffers after artwork {round}: {} against {}", live.1, second.1);
             }
         }
     }
