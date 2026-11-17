@@ -78,6 +78,11 @@ impl Flood {
         // not blurred or modified.
         if colour[3] <= SEE_THROUGH_ALPHA {
             bridge_texture_gaps(&mut distance, width as usize, height as usize);
+            // A colour can land directly in a tiny pore. The synthetic barrier
+            // must never block the seed itself, or ColorDrop paints nothing.
+            if let Some(d) = distance.get_mut(seed.1 as usize * width as usize + seed.0 as usize) {
+                *d = 0;
+            }
         }
         let distance = Arc::new(distance);
         Some(Flood {
@@ -97,10 +102,18 @@ impl Flood {
     /// as it was, if `seed` is off the picture.
     pub fn reseed(&mut self, seed: (u32, u32)) -> bool {
         let on = seed.0 < self.width && seed.1 < self.height;
-        if on {
-            self.seed = seed;
+        if !on {
+            return false;
         }
-        on
+        // A transparent pixel can have been blocked only by a synthetic
+        // texture bridge. Remeasure there, allowing the new seed to be open,
+        // rather than reusing a flood whose starting pixel is inaccessible.
+        let i = seed.1 as usize * self.width as usize + seed.0 as usize;
+        if self.distance.get(i) != Some(&0) {
+            return false;
+        }
+        self.seed = seed;
+        true
     }
 
     /// The pixel the fill is measured from.
@@ -965,6 +978,22 @@ mod tests {
             }
             assert_eq!(result[(10 * 21 + 16) * 4 + 3], 0, "outside must stay transparent");
         }
+    }
+
+    #[test]
+    fn a_drop_landing_inside_a_texture_pore_still_fills_its_seed() {
+        let mut pixels = vec![0u8; 3 * 3 * 4];
+        for x in [0, 2] {
+            pixels[(3 + x) * 4 + 3] = 90;
+        }
+        // The middle pixel is a synthetic barrier when the flood begins
+        // elsewhere, but must be usable as the seed of its own flood.
+        let mut from_above = Flood::new(3, 3, &pixels, (1, 0)).unwrap();
+        assert_eq!(from_above.mask(0.5).data[4], 0);
+        let mut from_hole = Flood::new(3, 3, &pixels, (1, 1)).unwrap();
+        assert_eq!(from_hole.mask(0.5).data[4], 255);
+        assert!(!from_above.reseed((1, 1)), "blocked seeds must be remeasured");
+        assert!(from_hole.reseed((1, 1)));
     }
 
     #[test]
