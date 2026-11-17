@@ -936,27 +936,56 @@ fn fit_curve(pts: &[Vec2]) -> Shape {
     Shape { kind: ShapeKind::Curve, nodes }
 }
 
-/// The curve's chain of cubics, sampled span by span.
+/// The curve's chain of cubics as points: each span halved until its pieces lie within about half
+/// a pixel of it and none is longer than 24 pixels, so a curve of many spans isn't hundreds of
+/// points a span to lay the stroke along at every move of a handle.
 fn curve_points(nodes: &[Vec2]) -> Vec<Vec2> {
-    let mut out = Vec::new();
-    for span in 0..nodes.len().saturating_sub(1) / 3 {
-        let base = span * 3;
+    let spans = nodes.len().saturating_sub(1) / 3;
+    let mut out = Vec::with_capacity(spans.saturating_mul(12).saturating_add(1));
+    for span in 0..spans {
+        let i = span * 3;
         let (Some(&a), Some(&b), Some(&c), Some(&d)) =
-            (nodes.get(base), nodes.get(base + 1), nodes.get(base + 2), nodes.get(base + 3))
+            (nodes.get(i), nodes.get(i + 1), nodes.get(i + 2), nodes.get(i + 3))
         else {
             continue;
         };
-        for k in 0..OUTLINE_STEPS {
-            out.push(cubic(a, b, c, d, k as f32 / OUTLINE_STEPS as f32));
+        if out.is_empty() {
+            out.push(a);
         }
+        append_cubic_points(a, b, c, d, 0, &mut out);
     }
-    if let Some(&end) = nodes.last() {
+    if out.is_empty()
+        && let Some(&end) = nodes.last()
+    {
         out.push(end);
     }
     out
 }
 
+/// The points of the cubic from `a` to `d` through the controls `b` and `c`, after `a`: halved (de
+/// Casteljau) until its controls lie within half a pixel of its chord, at most ten times deep.
+fn append_cubic_points(a: Vec2, b: Vec2, c: Vec2, d: Vec2, depth: usize, out: &mut Vec<Vec2>) {
+    const MAX_CHORD: f32 = 24.0;
+    const MAX_DEVIATION: f32 = 0.55;
+    const MOST_DEPTH: usize = 10;
+    let flat = distance_to_segment(b, a, d).max(distance_to_segment(c, a, d)) <= MAX_DEVIATION;
+    if depth >= MOST_DEPTH || (flat && a.distance(d) <= MAX_CHORD) {
+        out.push(d);
+        return;
+    }
+    let ab = a.lerp(b, 0.5);
+    let bc = b.lerp(c, 0.5);
+    let cd = c.lerp(d, 0.5);
+    let abc = ab.lerp(bc, 0.5);
+    let bcd = bc.lerp(cd, 0.5);
+    let mid = abc.lerp(bcd, 0.5);
+    append_cubic_points(a, ab, abc, mid, depth + 1, out);
+    append_cubic_points(mid, bcd, cd, d, depth + 1, out);
+}
+
 /// The point `t` of the way along the cubic from `a` to `d` through the controls `b` and `c`.
+/// (The tests hold the outline to it.)
+#[cfg(test)]
 fn cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: f32) -> Vec2 {
     let keep = 1.0 - t;
     a * (keep * keep * keep) + b * (3.0 * keep * keep * t) + c * (3.0 * keep * t * t) + d * (t * t * t)
@@ -1179,6 +1208,49 @@ mod tests {
         // a stroke that is no polyline is left as it was
         let line = vec![Vec2::ZERO, Vec2::new(100.0, 1.0)];
         assert_eq!(with_curve(recognise(&line), &line), recognise(&line));
+    }
+
+    #[test]
+    fn simple_curve_outline_avoids_thousands_of_redundant_samples() {
+        let mut nodes = Vec::new();
+        for segment in 0..80 {
+            let x = segment as f32 * 60.0;
+            nodes.extend([Vec2::new(x, 50.0), Vec2::new(x + 20.0, 50.0), Vec2::new(x + 40.0, 50.0)]);
+        }
+        nodes.push(Vec2::new(4800.0, 50.0));
+        let outline = curve_points(&nodes);
+        assert_eq!(outline.first(), nodes.first());
+        assert_eq!(outline.last(), nodes.last());
+        assert!(outline.len() < 1100, "too many redundant outline points: {}", outline.len());
+        assert!(outline.windows(2).all(|w| w[0].distance(w[1]) <= 24.01));
+    }
+
+    #[test]
+    fn adaptive_curve_outline_follows_true_cubic_without_flattening_corners() {
+        let nodes = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(40.0, 100.0),
+            Vec2::new(140.0, -50.0),
+            Vec2::new(170.0, 70.0),
+            Vec2::new(170.0, 90.0),
+            Vec2::new(240.0, 160.0),
+            Vec2::new(310.0, 110.0),
+        ];
+        let outline = curve_points(&nodes);
+        assert_eq!(outline.first(), nodes.first());
+        assert_eq!(outline.last(), nodes.last());
+        assert!(outline.contains(&nodes[3]), "sharp join was omitted");
+        assert!(outline.len() < 180, "oversampled a short curve: {}", outline.len());
+        for span in 0..2 {
+            let i = span * 3;
+            for j in 0..=200 {
+                let t = j as f32 / 200.0;
+                let original = cubic(nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3], t);
+                let error =
+                    outline.windows(2).map(|w| distance_to_segment(original, w[0], w[1])).fold(f32::INFINITY, f32::min);
+                assert!(error < 1.1, "flattened curve by {error:.2} px at span {span} t={t:.2}");
+            }
+        }
     }
 
     #[test]
