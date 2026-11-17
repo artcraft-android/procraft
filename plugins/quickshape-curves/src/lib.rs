@@ -272,13 +272,9 @@ fn limit_samples(pts: &[P]) -> Vec<P> {
     out
 }
 
-/// Create a fair centreline before fitting the Bezier spans. A narrow, fixed kernel only
-/// removes sensor jitter, and the adaptive fit otherwise traces every slight hand wobble.
-/// A wider kernel follows the intended sweep. It is sized in *stroke distance*, not samples,
-/// and bounded so smaller curls and deliberately tight turns are not erased.
-/// Use a wider fairing kernel only for strokes with measurable short-scale jitter.
-/// Clean arcs and deliberate broad waves keep the narrower kernel (and their shape).
-/// Segment boundaries are hard corners, so no filter crosses a real turn.
+/// A bounded smoothing radius removes small hand tremors without shifting the broad
+/// shape of the stroke. Its units are *distance along the pen path*, not input samples.
+/// Hard corners are fitted separately, so this filter never crosses a sharp turn.
 fn smoothing_radius(pts: &[P]) -> f32 {
     (size(pts) * 0.021).clamp(5.5, 11.0)
 }

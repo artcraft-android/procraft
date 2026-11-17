@@ -186,17 +186,23 @@ impl Shape {
             // Both their control handles have to follow the shared anchor.
             if closed && (index == 0 || index == last) {
                 for i in [0, 1, last - 1, last] {
-                    self.nodes[i] = self.nodes[i] + delta;
+                    if let Some(node) = self.nodes.get_mut(i) {
+                        *node = *node + delta;
+                    }
                 }
             } else {
                 for i in [index.checked_sub(1), Some(index), (index < last).then_some(index + 1)].into_iter().flatten()
                 {
-                    self.nodes[i] = self.nodes[i] + delta;
+                    if let Some(node) = self.nodes.get_mut(i) {
+                        *node = *node + delta;
+                    }
                 }
             }
             return;
         }
-        self.nodes[index] = to;
+        if let Some(node) = self.nodes.get_mut(index) {
+            *node = to;
+        }
         if !mirror {
             return;
         }
@@ -962,10 +968,10 @@ fn curve_points(nodes: &[Vec2]) -> Vec<Vec2> {
         }
         append_cubic_points(a, b, c, d, 0, &mut out);
     }
-    if out.is_empty() {
-        if let Some(&end) = nodes.last() {
-            out.push(end);
-        }
+    if out.is_empty()
+        && let Some(&end) = nodes.last()
+    {
+        out.push(end);
     }
     out
 }
@@ -1151,10 +1157,11 @@ fn fit_circle_oval(pts: &[Vec2]) -> Option<Oval> {
         let x = (p.x as f64 - mx) / scale;
         let y = (p.y as f64 - my) / scale;
         let (v, distance) = ([x, y, 1.0], x * x + y * y);
-        for i in 0..3 {
-            rhs[i] += v[i] * distance;
-            for j in 0..3 {
-                m[i][j] += v[i] * v[j];
+        for (i, (rhs_row, matrix_row)) in rhs.iter_mut().zip(m.iter_mut()).enumerate() {
+            let Some(&vi) = v.get(i) else { continue };
+            *rhs_row += vi * distance;
+            for (mj, &vj) in matrix_row.iter_mut().zip(v.iter()) {
+                *mj += vi * vj;
             }
         }
     }
@@ -1196,13 +1203,20 @@ fn arc_follows_stroke(arc: &Shape, stroke: &[Vec2]) -> bool {
     }
     let scale = size(stroke);
     let end_limit = (scale * 0.028).clamp(3.5, 17.0);
-    if arc.nodes[0].distance(first) > end_limit || arc.nodes[2].distance(last) > end_limit {
+    if arc.nodes.first().is_none_or(|p| p.distance(first) > end_limit)
+        || arc.nodes.get(2).is_none_or(|p| p.distance(last) > end_limit)
+    {
         return false;
     }
     let local_limit = (scale * 0.042).clamp(5.0, 24.0);
     let outline = arc.outline();
     let near_segments = |point: Vec2, path: &[Vec2]| {
-        path.windows(2).map(|w| distance_to_segment(point, w[0], w[1])).fold(f32::MAX, f32::min)
+        path.windows(2)
+            .filter_map(|w| {
+                let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else { return None };
+                Some(distance_to_segment(point, a, b))
+            })
+            .fold(f32::MAX, f32::min)
     };
     stroke.iter().all(|&p| near_segments(p, &outline) <= local_limit)
         && outline.iter().all(|&p| near_segments(p, stroke) <= local_limit)
@@ -1217,20 +1231,22 @@ fn arc_misses_stroke_end(pts: &[Vec2]) -> bool {
         return false;
     }
     let cutoff = (size(pts) * 0.08).clamp(14.0, 45.0);
+    let Some(&tip) = pts.last() else { return false };
     let mut start = pts.len() - 1;
     let mut covered = 0.0;
     while start > 0 && covered < cutoff {
-        covered += pts[start].distance(pts[start - 1]);
+        let (Some(&current), Some(&previous)) = (pts.get(start), pts.get(start - 1)) else { return false };
+        covered += current.distance(previous);
         start -= 1;
     }
     if start < 6 {
         return false;
     }
-    let candidates = [fit_oval(&pts[..=start]), fit_circle_oval(&pts[..=start])];
+    let Some(body) = pts.get(..=start) else { return false };
+    let candidates = [fit_oval(body), fit_circle_oval(body)];
     let Some(oval) = candidates.into_iter().flatten().min_by(|a, b| {
         let error = |oval: &Oval| {
-            pts[..=start]
-                .iter()
+            body.iter()
                 .map(|&p| {
                     let v = p - oval.centre;
                     let angle = v.y.atan2(v.x);
@@ -1250,9 +1266,8 @@ fn arc_misses_stroke_end(pts: &[Vec2]) -> bool {
         let angle = v.y.atan2(v.x);
         p.distance(oval.at_angle(angle))
     };
-    let body_error = pts[..=start].iter().map(|&p| miss(p)).sum::<f32>() / (start + 1) as f32;
+    let body_error = body.iter().map(|&p| miss(p)).sum::<f32>() / body.len() as f32;
     let threshold = (size(pts) * 0.012).clamp(3.0, 7.0) + body_error * 1.5;
-    let tip = *pts.last().unwrap();
     if miss(tip) <= threshold {
         return false;
     }
@@ -1261,10 +1276,11 @@ fn arc_misses_stroke_end(pts: &[Vec2]) -> bool {
     let near_reach = (size(pts) * 0.025).clamp(4.0, 12.0);
     let mut walked = 0.0;
     while near > start + 1 && walked < near_reach {
-        walked += pts[near].distance(pts[near - 1]);
+        let (Some(&current), Some(&previous)) = (pts.get(near), pts.get(near - 1)) else { return false };
+        walked += current.distance(previous);
         near -= 1;
     }
-    miss(pts[near]) > threshold * 0.45
+    pts.get(near).is_some_and(|&p| miss(p) > threshold * 0.45)
 }
 
 /// Whether the stroke turns sharply at any of the corners it simplifies to: its direction just
@@ -1277,8 +1293,13 @@ fn reverses_bend(pts: &[Vec2]) -> bool {
     let corners = simplify(pts, 0.045 * size(pts));
     let (mut positive, mut negative) = (false, false);
     for triple in corners.windows(3) {
-        let before = triple[1] - triple[0];
-        let after = triple[2] - triple[1];
+        let (Some(&before_point), Some(&centre_point), Some(&after_point)) =
+            (triple.first(), triple.get(1), triple.get(2))
+        else {
+            continue;
+        };
+        let before = centre_point - before_point;
+        let after = after_point - centre_point;
         if before.length() < 0.10 * size(pts) || after.length() < 0.10 * size(pts) {
             continue;
         }

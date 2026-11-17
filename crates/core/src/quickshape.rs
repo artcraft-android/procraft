@@ -468,7 +468,12 @@ fn initial_curve_modes(shape: &Shape) -> Vec<Anchor> {
             if i == 0 || i + 1 >= shape.nodes.len() {
                 return Anchor::Smooth;
             }
-            let (incoming, outgoing) = (shape.nodes[i] - shape.nodes[i - 1], shape.nodes[i + 1] - shape.nodes[i]);
+            let (Some(&point), Some(&prior), Some(&next)) =
+                (shape.nodes.get(i), shape.nodes.get(i - 1), shape.nodes.get(i + 1))
+            else {
+                return Anchor::Smooth;
+            };
+            let (incoming, outgoing) = (point - prior, next - point);
             let lengths = incoming.length() * outgoing.length();
             if lengths > 1e-5 && incoming.dot(outgoing) < 0.96 * lengths { Anchor::Broken } else { Anchor::Smooth }
         })
