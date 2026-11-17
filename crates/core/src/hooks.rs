@@ -1965,6 +1965,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quickshape_curves_stay_on_for_dense_and_wavy_strokes() {
+        let dir = store("curves-dense-samples");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bundled) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bundled.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.quickshape-curves";
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let hooks = plugins.hooks();
+        // a curve that ran out of its budget would switch the plugin off, and every held stroke
+        // after it would be a polyline: thousands of pen samples, and many bends over a few hundred
+        // (the fit's most work), stay within it
+        let dense = |count: usize| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let x = i as f32 * 600.0 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (x, 120.0 + 55.0 * (x * tau / 300.0).sin() + 3.0 * (x * tau / 23.0).sin())
+                })
+                .collect()
+        };
+        let wavy = |count: usize, waves: f32| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let t = i as f32 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (t * 1600.0, 400.0 + 300.0 * (t * waves * tau).sin() + 6.0 * (i as f32 * 1.7).sin())
+                })
+                .collect()
+        };
+        let strokes =
+            [dense(4_001), dense(12_001), wavy(400, 4.0), wavy(257, 12.0), wavy(1000, 12.0), wavy(5000, 25.0)];
+        for points in &strokes {
+            let nodes = hooks.quickshape_curve(points, 1).expect("a curve");
+            assert!(nodes.len() >= 10 && nodes.len() % 3 == 1, "{} samples: {} nodes", points.len(), nodes.len());
+            assert!(hooks.is_on(ID), "off after {} samples", points.len());
+        }
+        assert!(plugins.plugins().iter().find(|p| p.id == ID).is_some_and(|p| p.on && p.problem.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_stroke_bending_twice_snaps_to_a_curve_while_a_plugin_says_so() {
         use crate::{QuickShapeAnchor, QuickShapeKind};
         let Some(s) = session() else { return };
@@ -2000,12 +2041,13 @@ pub(crate) mod tests {
         let shape = zigzag(&s, 1000.0).expect("it snaps");
         assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
         assert!(shape.choices.contains(&QuickShapeKind::Polyline));
-        assert!(shape.anchors.len() >= 3 && shape.anchors.iter().all(|a| *a == QuickShapeAnchor::Smooth));
-        // a tap on an anchor in the middle steps it on: broken, then a corner
-        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
-        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken);
+        assert!(shape.anchors.len() >= 3);
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken, "a deliberate sharp turn needs independent handles");
+        // a tap cycles a detected broken anchor through corner and smooth
         let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
         assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Smooth);
         // a control is no anchor
         assert!(s.quickshape_cycle_anchor(1).is_none());
         // shown as the polyline, then as a curve again: the plugin fits it afresh
