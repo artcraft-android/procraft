@@ -4761,6 +4761,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (session?.deleteBrush(b.set, b.index) == true) libraryChanged()
     }
 
+    /** The brush whose name is being edited in place, from its menu (its place, "set-index"). */
+    var renamingBrush by mutableStateOf<String?>(null)
+
+    fun renameBrush(b: BrushInfo, name: String) {
+        renamingBrush = null
+        if (session?.renameBrush(b.set, b.index, name) == true) libraryChanged()
+    }
+
     /** The brushes of the shown set picked by a swipe right, by place ("set-index"). */
     val pickedBrushes = androidx.compose.runtime.mutableStateListOf<String>()
 

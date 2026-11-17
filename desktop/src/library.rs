@@ -1,8 +1,9 @@
 //! The brush library, as the Android app's (ui/BrushLibrary.kt): sets on the left, the shown set's
 //! brushes with a sample stroke on the right. Tapping a set shows it, the shown one for its menu
 //! (rename, duplicate, share, delete); tapping a brush chooses it; sliding one left shows Share,
-//! Duplicate and Delete; holding one drags it to another place or set. The plus makes a brush or a
-//! set, or brings brushes in from a file.
+//! Duplicate and Delete; holding one shows its menu (Rename, Duplicate, Share, Delete; in the Recent
+//! set Find, Pin or Unpin, Share, Clear), and moving on from there drags it to another place or
+//! set. The plus makes a brush or a set, or brings brushes in from a file.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,7 +81,8 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
     corner: 26.0,
     shadow: false,
 };
-/// A press moved this far (points) has gone somewhere; held still this long, it drags the brush.
+/// A press moved this far (points) has gone somewhere; held still this long, it shows the brush's
+/// menu (and moved on from there, drags the brush).
 const SLOP: f32 = 8.0;
 const HOLD: Duration = Duration::from_millis(400);
 /// A press slides its brush once this far sideways (points), going this many times further
@@ -105,7 +107,9 @@ enum Way {
     Undecided,
     /// Sideways: the brush slides.
     Swipe,
-    /// Held: the brush is dragged to another place or set.
+    /// Held still: the brush's menu shows.
+    Held,
+    /// Held and moved on: the brush is dragged to another place or set.
     Drag,
     /// Up or down first: the list has it, and scrolls.
     Scroll,
@@ -186,6 +190,12 @@ pub struct Library {
     picker_scrolled: bool,
     /// A set renamed in place: which, the name as typed, and whether it has been focused.
     renaming_set: Option<(usize, String, bool)>,
+    /// A brush's menu (a brush held), and for which brush (in the Recent set, whether it is
+    /// pinned there); a brush renamed in place from it: which, the name as typed, and whether it
+    /// has been focused.
+    brush_menu: Menu,
+    brush_menu_for: Option<((u32, u32), Option<bool>)>,
+    renaming_brush: Option<((u32, u32), String, bool)>,
     deleting: Alert,
     delete_what: Option<Deleting>,
     /// Every library's card shows rather than the one in use; the title's menu; the plus's menu
@@ -248,6 +258,7 @@ impl Library {
             || self.set_menu.is_open()
             || self.recent_menu.is_open()
             || self.icon_picker.is_open()
+            || self.brush_menu.is_open()
             || self.deleting.is_open()
             || self.title_menu.is_open()
             || self.libraries_plus.is_open()
@@ -279,7 +290,11 @@ impl Library {
     /// menu, a question, a set being renamed, a brush pressed, the studio asked for or open:
     /// `studio_open`), which brushes added at the top would move; they wait for that to end.
     pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<(bool, bool)> {
-        let holding = self.modal() || self.renaming_set.is_some() || self.press.is_some() || self.studio.is_some();
+        let holding = self.modal()
+            || self.renaming_set.is_some()
+            || self.renaming_brush.is_some()
+            || self.press.is_some()
+            || self.studio.is_some();
         if studio_open || holding {
             return Vec::new();
         }
@@ -336,6 +351,7 @@ impl Library {
         self.slid.clear();
         self.swiped = None;
         self.picked.clear();
+        self.brush_menu.close();
         self.changed = true;
     }
 
@@ -381,7 +397,7 @@ impl Library {
         // the set a dragged brush or set is over
         let dragging = self.press.filter(|p| p.way == Way::Drag);
         let lifted = self.set_press.filter(|p| p.lifted);
-        let taken = self.press.is_some_and(|p| matches!(p.way, Way::Swipe | Way::Drag));
+        let taken = self.press.is_some_and(|p| matches!(p.way, Way::Swipe | Way::Held | Way::Drag));
         // a press on a brush holds the list where it was (stopping it if it was running on) until
         // it has gone up or down
         let held_at = self.press.filter(|p| p.way != Way::Scroll).map(|p| p.list);
@@ -572,7 +588,7 @@ impl Library {
                             // Recent set the current brush alone)
                             let selected = (b.set, b.index) == (current.set, current.index)
                                 || (!recent && chosen == Some(b.index));
-                            let (response, cell) = self.brush_row(ui, look, b, selected, pinned);
+                            let (response, cell) = self.brush_row(ui, look, session, b, selected, pinned);
                             // a brush found from the Recent set is scrolled to in its own
                             if self.found == Some((b.set, b.index)) {
                                 self.found = None;
@@ -708,6 +724,7 @@ impl Library {
         if let Some(row) = recent_row {
             self.recent_menu(ctx, look, session, row, backdrops);
         }
+        self.brush_menu(ctx, look, session, backdrops);
         self.libraries_plus_menu(ctx, look, session, plus, backdrops);
         self.card_menu(ctx, look, session, &libraries, backdrops);
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
@@ -930,6 +947,78 @@ impl Library {
         }
     }
 
+    /// A held brush's menu, under it, their left edges in line: Rename, Duplicate, Share and
+    /// Delete; in the Recent set Find, Pin or Unpin, Share and Clear.
+    fn brush_menu(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession, backdrops: &mut Vec<f32>) {
+        let Some((key, pinned)) = self.brush_menu_for else { return };
+        let Some(cell) = self.brush_rects.iter().find(|(k, _)| *k == key).map(|(_, r)| *r) else {
+            self.brush_menu.close();
+            return;
+        };
+        let ink = menu::INK;
+        let mut entries = match pinned {
+            Some(pinned) => vec![
+                Entry::Item(&icons::SWIPE_FIND, "Find", ink),
+                if pinned {
+                    Entry::Item(&icons::SWIPE_UNPIN, "Unpin", ink)
+                } else {
+                    Entry::Item(&icons::SWIPE_PIN, "Pin", ink)
+                },
+            ],
+            None => {
+                vec![
+                    Entry::Item(&icons::MENU_RENAME, "Rename", ink),
+                    Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink),
+                ]
+            }
+        };
+        entries.extend([menu::DIVIDER, Entry::Item(&icons::MENU_SHARE, "Share", ink), menu::DIVIDER]);
+        entries.push(match pinned {
+            Some(_) => Entry::Item(&icons::MENU_CLEAR, "Clear", ink),
+            None => Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER),
+        });
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let screen = panel::screen(ctx);
+        let top = cell.bottom().clamp(screen.top() + MENU_TOP, (screen.bottom() - size.y).max(screen.top() + MENU_TOP));
+        let rect = Rect::from_min_size(pos2(cell.left(), top), size);
+        let mut tapped = None;
+        self.brush_menu.show(ctx, "library brush menu", rect, rect.left_top(), menu::OVER_A_PANEL, backdrops, |ui| {
+            tapped = menu::entries(ui, look, rect, &entries);
+        });
+        let Some(Entry::Item(_, label, _)) = tapped.and_then(|t| entries.get(t)) else { return };
+        self.brush_menu.close();
+        let name = session
+            .brush_library()
+            .get(key.0 as usize)
+            .and_then(|s| s.brushes.get(key.1 as usize))
+            .map(|b| b.name.clone());
+        let Some(name) = name else { return };
+        match *label {
+            "Rename" => self.renaming_brush = Some((key, name, false)),
+            "Duplicate" => {
+                if session.duplicate_brush(key.0, key.1).is_some() {
+                    self.library_changed();
+                }
+            }
+            "Share" => {
+                if let Some(bytes) = session.brush_as_file(key.0, key.1) {
+                    crate::files::save_file(&bytes, &name, "brush", "Brush");
+                }
+            }
+            "Delete" => self.ask_delete(Deleting::Brush(key.0, key.1)),
+            // shown in its own set, chosen there
+            "Find" => {
+                self.recent = false;
+                self.shown_set = Some(key.0 as usize);
+                self.found = Some(key);
+                session.select_brush(key.0, key.1);
+                self.changed = true;
+            }
+            "Pin" | "Unpin" => self.changed |= session.pin_recent_brush(key.0, key.1, *label == "Pin"),
+            _ => self.changed |= session.clear_recent_brush(key.0, key.1),
+        }
+    }
+
     /// The Recent set's menu, left of its row and centred on it as a set's: Clear alone.
     fn recent_menu(
         &mut self,
@@ -1001,12 +1090,22 @@ impl Library {
                         p.way = way;
                     } else if d.length() > SLOP {
                         // going somewhere, not yet plain which way: it is no hold
-                    } else if p.since.elapsed() >= HOLD && !self.recent {
-                        // (the Recent set's brushes stay where they are)
-                        p.way = Way::Drag;
+                    } else if p.since.elapsed() >= HOLD {
+                        // held still: its menu shows
+                        p.way = Way::Held;
                         self.swiped = None;
+                        self.open_brush_menu(session, p.key);
                     } else {
                         ctx.request_repaint_after(HOLD.saturating_sub(p.since.elapsed()));
+                    }
+                }
+                // moved on from there, the menu goes and the brush is dragged (the Recent set's
+                // brushes stay where they are)
+                Way::Held => {
+                    if d.length() > SLOP && !self.recent {
+                        p.way = Way::Drag;
+                        self.brush_menu.close();
+                        ctx.request_repaint();
                     }
                 }
                 Way::Swipe => {
@@ -1055,8 +1154,17 @@ impl Library {
                     self.library_changed();
                 }
             }
-            Way::Undecided | Way::Scroll => {}
+            Way::Undecided | Way::Held | Way::Scroll => {}
         }
+    }
+
+    /// Brush `key`'s menu opens (a brush held, or clicked with the secondary button).
+    fn open_brush_menu(&mut self, session: &CanvasSession, key: (u32, u32)) {
+        let pinned = self
+            .recent
+            .then(|| session.recent_brushes().iter().find(|r| (r.set, r.index) == key).is_some_and(|r| r.pinned));
+        self.brush_menu_for = Some((key, pinned));
+        self.brush_menu.open();
     }
 
     /// Follows the press on a set: moved first, it is left to the list; held still, the set lifts
@@ -1183,14 +1291,15 @@ impl Library {
     }
 
     /// A brush: its sample stroke filling the cell's height (its ends past the cell's sides), under
-    /// its name; slid left, its buttons behind it. `pinned`: in the Recent set, whether it is pinned
-    /// there (marked so). Returns whether it was tapped and which of its buttons was, and where its
-    /// cell is.
+    /// its name (typed over while it is renamed); slid left, its buttons behind it. `pinned`: in the
+    /// Recent set, whether it is pinned there (marked so). Returns whether it was tapped and which
+    /// of its buttons was, and where its cell is. Clicked with the secondary button, its menu opens.
     #[allow(clippy::too_many_arguments)]
     fn brush_row(
         &mut self,
         ui: &mut Ui,
         look: &mut Look,
+        session: &CanvasSession,
         b: &BrushInfo,
         selected: bool,
         pinned: Option<bool>,
@@ -1241,13 +1350,22 @@ impl Library {
         faded.multiply_opacity(alpha);
         let shaded = self.preview_in(&faded, key, at, selected);
         let ink = if selected || picked { Color32::WHITE } else { argb(PANEL_TITLE) }.gamma_multiply(alpha);
-        let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, at.width() - 18.0 - 10.0);
         let name_at = at.min + vec2(18.0, 11.75);
-        if shaded {
-            let pill = Rect::from_min_size(name_at, galley.size()).expand2(vec2(6.0, 2.0));
-            painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL).gamma_multiply(alpha));
+        if self.renaming_brush.as_ref().is_some_and(|(k, _, _)| *k == key) {
+            let field = Rect::from_min_size(name_at, vec2(at.width() - 18.0 - 12.0, 18.0));
+            self.brush_name_field(ui, session, field, ink);
+        } else {
+            let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, at.width() - 18.0 - 10.0);
+            if shaded {
+                let pill = Rect::from_min_size(name_at, galley.size()).expand2(vec2(6.0, 2.0));
+                painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL).gamma_multiply(alpha));
+            }
+            painter.galley(name_at, galley, ink);
         }
-        painter.galley(name_at, galley, ink);
+        if response.secondary_clicked() {
+            self.swiped = None;
+            self.open_brush_menu(session, key);
+        }
         // a pinned brush's mark, at the cell's top right
         if pinned == Some(true) {
             let mut marked = ui.new_child(UiBuilder::new().max_rect(cell));
@@ -1256,6 +1374,33 @@ impl Library {
         }
         let tapped = response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided);
         (Some((tapped, chose)), cell)
+    }
+
+    /// The brush being renamed: its name typed over at `field`, all of it chosen to start with; the
+    /// name it has when the field lets go of the keys is its own.
+    fn brush_name_field(&mut self, ui: &mut Ui, session: &CanvasSession, field: Rect, ink: Color32) {
+        let Some((key, typed, focused)) = self.renaming_brush.as_mut() else { return };
+        let mut output = egui::TextEdit::singleline(typed)
+            .font(Weight::SemiBold.font(14.0))
+            .text_color(ink)
+            .frame(egui::Frame::NONE)
+            .margin(vec2(0.0, 0.0))
+            .desired_width(field.width())
+            .show(&mut ui.new_child(UiBuilder::new().max_rect(field)));
+        if !*focused {
+            // the whole name chosen, to type over
+            output.response.request_focus();
+            let all = CCursorRange::two(CCursor::new(0), CCursor::new(typed.chars().count()));
+            output.state.cursor.set_char_range(Some(all));
+            output.state.store(ui.ctx(), output.response.id);
+            *focused = true;
+        } else if output.response.lost_focus() {
+            let (key, name) = (*key, typed.clone());
+            self.renaming_brush = None;
+            if session.rename_brush(key.0, key.1, name) {
+                self.library_changed();
+            }
+        }
     }
 
     /// Asks for a brush's sample stroke when it is in sight and not drawn yet.
@@ -1748,6 +1893,67 @@ mod tests {
         f.up(at);
         assert!(f.top() < start - 50.0, "the list stayed: {} to {}", start, f.top());
         assert!(f.library.swiped.is_none(), "a brush opened on a scroll");
+    }
+
+    #[test]
+    fn a_brush_held_shows_its_menu_moved_on_is_dragged_and_renamed_keeps_its_name() {
+        let mut f = Finger::new();
+        let from = f.on_a_brush();
+        let key = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).map(|(k, _)| *k).unwrap();
+        let chosen = f.session.current_brush();
+        let held = |f: &mut Finger| {
+            f.down(from);
+            std::thread::sleep(HOLD + Duration::from_millis(50));
+            f.frame(Vec::new());
+        };
+        // held still: its menu, for it
+        held(&mut f);
+        assert!(f.library.brush_menu.is_open());
+        assert_eq!(f.library.brush_menu_for.map(|(k, _)| k), Some(key));
+        // let go there, the menu stays, and nothing is chosen or moved
+        f.up(from);
+        f.frame(Vec::new());
+        assert!(f.library.brush_menu.is_open());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (chosen.set, chosen.index));
+        // (closed as a press elsewhere would, a frame shown without it)
+        f.library.brush_menu.close();
+        f.frame(Vec::new());
+        // held and moved on: the menu goes and the brush is dragged (back to its place: it stays)
+        held(&mut f);
+        assert!(f.library.brush_menu.is_open());
+        f.to(from + vec2(0.0, 20.0));
+        assert!(!f.library.brush_menu.is_open());
+        assert!(f.library.press.is_some_and(|p| p.way == Way::Drag));
+        f.to(from);
+        f.up(from);
+        // the secondary button opens it too
+        let click = |pressed| Event::PointerButton {
+            pos: from,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        f.frame(vec![Event::PointerMoved(from), click(true)]);
+        f.frame(vec![click(false)]);
+        assert!(f.library.brush_menu.is_open());
+        f.library.brush_menu.close();
+        f.frame(Vec::new());
+        // Rename: the name typed over, kept when the field lets go
+        f.library.renaming_brush = Some((key, "old".into(), false));
+        f.frame(Vec::new());
+        f.frame(vec![Event::Text("My brush".into())]);
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        f.frame(vec![enter]);
+        f.frame(Vec::new());
+        assert!(f.library.renaming_brush.is_none());
+        let name = f.session.brush_library()[key.0 as usize].brushes[key.1 as usize].name.clone();
+        assert_eq!(name, "My brush");
     }
 
     #[test]

@@ -227,9 +227,11 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 
 /**
  * The brush library: sets on the left, the set's brushes with a sample stroke on the right. Tap
- * the chosen set for its menu, swipe a brush left to share, duplicate or delete it, hold and drag
- * it onto a set or to another place in its own, and add brushes and sets with the plus.
+ * the chosen set for its menu, swipe a brush left to share, duplicate or delete it, hold it for
+ * its menu (and drag it on from there onto a set or to another place in its own), and add brushes
+ * and sets with the plus.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
     val sets = vm.brushSets
@@ -264,7 +266,14 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
-    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.pickedBrushes.clear() } }
+    // a brush held: its menu (by place, "set-index")
+    var brushMenu by remember { mutableStateOf<String?>(null) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            vm.pickedBrushes.clear()
+            vm.renamingBrush = null
+        }
+    }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importBrushes(it) } }
     // a brush held and dragged: which, where the finger is and where on the brush it took hold
     // (window pixels); and where the sets, the brushes and the lists are on the screen
@@ -606,34 +615,50 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                         .pointerInput(key, recent) {
                                             // the Recent set's brushes stay where they are
                                             if (recent) return@pointerInput
+                                            // held, its menu shows; moved on from there, the menu goes and the
+                                            // brush follows the finger
+                                            var held = Offset.Zero
+                                            var moved = Offset.Zero
                                             detectDragGesturesAfterLongPress(
                                                 onDragStart = { at ->
-                                                    vm.swipedBrush = null
-                                                    val top = brushBounds[key]?.topLeft ?: Offset.Zero
-                                                    grab = at
-                                                    dragAt = top + at
-                                                    dragged = b
+                                                    held = at
+                                                    moved = Offset.Zero
                                                 },
                                                 onDrag = { change, by ->
                                                     change.consume()
-                                                    dragAt += by
+                                                    moved += by
+                                                    if (dragged == null && moved.getDistance() > viewConfiguration.touchSlop) {
+                                                        brushMenu = null
+                                                        vm.swipedBrush = null
+                                                        grab = held
+                                                        dragAt = (brushBounds[key]?.topLeft ?: Offset.Zero) + held + moved
+                                                        dragged = b
+                                                    } else if (dragged != null) {
+                                                        dragAt += by
+                                                    }
                                                 },
-                                                onDragEnd = { drop() },
+                                                onDragEnd = { if (dragged != null) drop() },
                                                 onDragCancel = { dragged = null },
                                             )
                                         }
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(if (selected) Pc.RowSelected else if (picked) PickedBrush else Color.Transparent)
-                                        .clickable {
+                                        .combinedClickable(
+                                            onLongClick = {
+                                                vm.swipedBrush = null
+                                                focus.clearFocus()
+                                                brushMenu = key
+                                            },
+                                        ) {
                                             // with a brush swiped open, a tap only closes it
                                             if (vm.swipedBrush != null) {
                                                 vm.swipedBrush = null
-                                                return@clickable
+                                                return@combinedClickable
                                             }
                                             // and with brushes picked, only lets them go
                                             if (vm.pickedBrushes.isNotEmpty()) {
                                                 vm.pickedBrushes.clear()
-                                                return@clickable
+                                                return@combinedClickable
                                             }
                                             // a highlighted brush opens in the studio
                                             vm.chooseBrush(b)
@@ -650,7 +675,13 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                             modifier = Modifier.fillMaxSize(),
                                         )
                                     }
-                                    BrushName(b.name, selected || picked, vm.shadedNames[key] == true, Modifier.padding(start = 18.dp, top = 11.75.dp))
+                                    if (vm.renamingBrush == key) {
+                                        InlineName(b.name, if (selected || picked) Color.White else Pc.PanelTitle, 14.sp, Modifier.padding(start = 18.dp, top = 11.75.dp, end = 12.dp), FontWeight.SemiBold) {
+                                            vm.renameBrush(b, it)
+                                        }
+                                    } else {
+                                        BrushName(b.name, selected || picked, vm.shadedNames[key] == true, Modifier.padding(start = 18.dp, top = 11.75.dp))
+                                    }
                                     // a pinned brush's mark, at the cell's top right
                                     if (pinned) {
                                         Icon(
@@ -658,6 +689,37 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                             modifier = Modifier.align(Alignment.TopEnd).padding(top = 12.5.dp, end = 11.dp).requiredSize(16.dp),
                                         )
                                     }
+                                }
+                            }
+                            // held, its menu under it, their left edges in line: in a set Rename, Duplicate,
+                            // Share and Delete; in the Recent set Find, Pin or Unpin, Share and Clear
+                            LibraryMenu(
+                                brushMenu == key, androidx.compose.ui.graphics.TransformOrigin(0f, 0f),
+                                MenuPlace(with(density) { MenuTop.roundToPx() }) { a, _ -> IntOffset(a.left, a.bottom) },
+                                onDismiss = { brushMenu = null }, overPanel = true,
+                            ) {
+                                fun pick(action: () -> Unit) {
+                                    brushMenu = null
+                                    action()
+                                }
+                                if (recent) {
+                                    MenuItem(PcIcons.SwipeFind, "Find", iconSize = 26.dp) { pick { vm.findBrush(b) } }
+                                    if (pinned) {
+                                        MenuItem(PcIcons.SwipeUnpin, "Unpin", iconSize = 26.dp) { pick { vm.pinRecentBrush(b, false) } }
+                                    } else {
+                                        MenuItem(PcIcons.SwipePin, "Pin", iconSize = 26.dp) { pick { vm.pinRecentBrush(b, true) } }
+                                    }
+                                } else {
+                                    MenuItem(PcIcons.MenuRename, "Rename") { pick { vm.renamingBrush = key } }
+                                    MenuItem(PcIcons.MenuDuplicate, "Duplicate") { pick { vm.duplicateBrush(b) } }
+                                }
+                                MenuDivider()
+                                MenuItem(PcIcons.MenuShare, "Share") { pick { share(b) } }
+                                MenuDivider()
+                                if (recent) {
+                                    MenuItem(PcIcons.MenuClear, "Clear") { pick { vm.clearRecentBrush(b) } }
+                                } else {
+                                    MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) { pick { deleting = "Delete this brush?" to { vm.deleteBrush(b) } } }
                                 }
                             }
                         }

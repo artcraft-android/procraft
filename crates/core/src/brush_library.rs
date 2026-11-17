@@ -1192,6 +1192,20 @@ impl CanvasSession {
         true
     }
 
+    /// Names brush `index` of `set` (from its menu in the library), as a set is named: trimmed, at
+    /// most 256 characters; a name of nothing but spaces leaves it as it was. Whether it changed.
+    pub fn rename_brush(&self, set: u32, index: u32, name: String) -> bool {
+        let name: String = name.trim().chars().take(256).collect();
+        let mut st = self.shared.lock();
+        match st.library.get_mut(set as usize).and_then(|s| s.brushes.get_mut(index as usize)) {
+            Some(brush) if !name.is_empty() && brush.name != name => {
+                brush.name = name;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Removes a brush; a tool that used it takes the one now in its place.
     pub fn delete_brush(&self, set: u32, index: u32) -> bool {
         let mut st = self.shared.lock();
@@ -1857,6 +1871,33 @@ impl CanvasSession {
 #[cfg(test)]
 mod keeping {
     use crate::CanvasSession;
+
+    #[test]
+    fn a_brush_renamed_from_its_menu_keeps_the_name_and_its_settings() {
+        let s = CanvasSession::new(32, 32);
+        let library = s.brush_library();
+        let stock = library.first().and_then(|set| set.brushes.get(1)).cloned().expect("a stock brush");
+        assert!(s.select_brush(0, 1));
+        let size = s.info().size;
+        // trimmed; the current brush's name follows; nothing but spaces, or the same name, changes nothing
+        assert!(s.rename_brush(0, 1, "  My pencil ".into()));
+        assert_eq!(s.current_brush().name, "My pencil");
+        assert!(!s.rename_brush(0, 1, "   ".into()));
+        assert!(!s.rename_brush(0, 1, "My pencil".into()));
+        assert!(!s.rename_brush(0, 9999, "Nowhere".into()) && !s.rename_brush(9999, 0, "Nowhere".into()));
+        assert!(s.rename_brush(0, 1, "x".repeat(300)));
+        assert_eq!(s.current_brush().name.chars().count(), 256);
+        assert!(s.rename_brush(0, 1, "My pencil".into()));
+        // the others keep theirs, and the brush draws as before
+        assert_eq!(s.brush_library()[0].brushes[0].name, library[0].brushes[0].name);
+        assert_eq!(s.info().size, size);
+        assert_ne!(stock.name, "My pencil");
+        // kept with the library, and read back
+        let kept = s.saved_brush_library();
+        let other = CanvasSession::new(32, 32);
+        assert!(other.load_brush_library(kept));
+        assert_eq!(other.brush_library()[0].brushes[1].name, "My pencil");
+    }
 
     #[test]
     fn brushes_moved_deleted_and_combined_at_random_leave_every_place_sound() {
