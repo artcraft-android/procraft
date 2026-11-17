@@ -36,20 +36,24 @@ fn swell(t: f32) -> f32 {
     1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()
 }
 
-/// A texture brush's preview swatch: its grain tooth repeated fine across the tip and pushed to
-/// the contrast the preview shows, dark valleys and bright peaks, not one copy stretched over it.
+/// A texture brush's preview swatch: its grain tooth repeated fine across the tip, the weave whole
+/// as the preview shows it - valleys dark and ridges lit, not just its brightest specks on black.
 pub fn paper_swatch(pixels: &[u8], side: u32) -> Vec<u8> {
     let side = side as usize;
     if pixels.len() != side * side {
         return pixels.to_vec();
     }
     let repeat = 4usize;
+    // the grain sits on one side of grey (its field); the tooth is the lean to the other side,
+    // valleys left dark so the weave reads as ridges on the paper, not a flat grey wash
+    let mean = pixels.iter().map(|&v| f32::from(v)).sum::<f32>() / (side * side) as f32 / 255.0;
+    let slope = if mean < 0.5 { -2.2 } else { 2.2 };
     let mut out = vec![0u8; side * side];
     for (i, slot) in out.iter_mut().enumerate() {
         let (x, y) = (i % side, i / side);
         let src = (y * repeat % side) * side + (x * repeat % side);
         let v = f32::from(pixels.get(src).copied().unwrap_or(0)) / 255.0;
-        let c = ((v - 0.4) * 3.0 + 0.35).clamp(0.0, 1.0);
+        let c = ((v - mean) * slope).clamp(0.0, 1.0);
         *slot = (c * 255.0) as u8;
     }
     out
