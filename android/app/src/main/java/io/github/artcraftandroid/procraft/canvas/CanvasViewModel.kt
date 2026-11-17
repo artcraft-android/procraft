@@ -8149,6 +8149,111 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun moveNextTo(l: LayerInfo, target: LayerInfo, above: Boolean) = layerChange(thumbs = false) { it.moveNextTo(l.id, target.id, above) }
 
+    /**
+     * Layers lifted out of the layers panel by a finger ([pointer]) that holds them while it goes
+     * on, as the other hand goes to the gallery and opens another artwork, until it lets them go:
+     * [bundle] holds them apart from the artwork they came from ([from], where they were the row
+     * of [layer]). Shown as a row ([name], [thumbnail], [items] if several) held at [grab] from its
+     * corner.
+     */
+    class HeldLayers(
+        val bundle: io.github.artcraftandroid.procraft.core.LayerBundle,
+        val layer: ULong,
+        val from: File?,
+        val pointer: androidx.compose.ui.input.pointer.PointerId,
+        val name: String,
+        val items: Int,
+        val thumbnail: ImageBitmap?,
+        val grab: Offset,
+    )
+
+    /** The layers held out of the panel, while a finger holds them. */
+    var heldLayers by mutableStateOf<HeldLayers?>(null)
+        private set
+
+    /** Where the finger holding [heldLayers] is, in the window. */
+    var heldLayersAt by mutableStateOf(Offset.Zero)
+        private set
+
+    /** Where each finger down is in the window, as the screen's root saw it last. */
+    val fingersAt = HashMap<androidx.compose.ui.input.pointer.PointerId, Offset>()
+
+    /** The layers panel's rows and its box in the window, while it is open: where held layers drop. */
+    var layerRows: Map<ULong, androidx.compose.ui.geometry.Rect> = emptyMap()
+    var layersBox: androidx.compose.ui.geometry.Rect? = null
+
+    /**
+     * Row [l] dragged out of the layers panel by finger [pointer], at [at] in the window with the
+     * row's corner at [corner]: it and what a drag of it takes along (its mask, a group's layers,
+     * the others chosen with it) are lifted out to be held.
+     */
+    fun liftLayers(l: LayerInfo, pointer: androidx.compose.ui.input.pointer.PointerId, at: Offset, corner: Offset) {
+        val s = session ?: return
+        if (heldLayers != null || modelOpen || l.kind == LayerType.MASK) return
+        val bundle = runCatching { s.liftLayers(l.id) }.getOrNull() ?: return
+        heldLayers = HeldLayers(bundle, l.id, artworkDir, pointer, bundle.name(), bundle.items().toInt(), thumbnails[l.id], at - corner)
+        heldLayersAt = at
+    }
+
+    fun moveHeld(at: Offset) {
+        heldLayersAt = at
+    }
+
+    /** Whether the layers held would land if let go now: over an artwork open on the canvas. */
+    fun heldLands(): Boolean = heldLayers != null && screen == Screen.CANVAS && session != null && !modelOpen
+
+    /**
+     * The layers held let go at [at] in the window. Over a row of the layers panel they go next to
+     * it (back among their own rows, moved there); over another artwork's canvas, above its current
+     * layer, one ready to transform as a picture brought in is; over the canvas they came from,
+     * copied to the top. Anywhere else (the gallery) they go nowhere.
+     */
+    fun dropHeld(at: Offset) {
+        val h = heldLayers ?: return
+        heldLayers = null
+        h.bundle.use { bundle ->
+            val s = session ?: return
+            if (!(screen == Screen.CANVAS && !modelOpen)) return
+            val same = artworkDir != null && artworkDir == h.from
+            val row = heldRow(at)
+            if (same && row != null) {
+                val l = layers.firstOrNull { it.id == h.layer } ?: return
+                val target = layers.firstOrNull { it.id == row.first } ?: return
+                if (target.id != l.id && target.id !in movingWith(l)) moveNextTo(l, target, row.second)
+                return
+            }
+            val place = when {
+                row != null -> io.github.artcraftandroid.procraft.core.LayerDrop.NextTo(row.first, row.second)
+                same -> io.github.artcraftandroid.procraft.core.LayerDrop.Top
+                else -> io.github.artcraftandroid.procraft.core.LayerDrop.AboveCurrent
+            }
+            if (transforming) endTransform(true)
+            if (runCatching { s.dropLayers(bundle, place) }.getOrNull() == null) {
+                message = noRoom()
+                return
+            }
+            refresh()
+            if (panel == Panel.LAYERS) refreshThumbnails()
+            if (place == io.github.artcraftandroid.procraft.core.LayerDrop.AboveCurrent && h.items == 1) toggleTransform()
+        }
+    }
+
+    /** The layers held let go of where they can't land (the finger taken away by the system). */
+    fun cancelHeld() {
+        heldLayers?.bundle?.close()
+        heldLayers = null
+    }
+
+    /** The row of the layers panel open under window point [at] (or the nearest, over the panel), and whether [at] is in its top half. */
+    private fun heldRow(at: Offset): Pair<ULong, Boolean>? {
+        if (panel != Panel.LAYERS || layersBox?.contains(at) != true) return null
+        val shown = layers.filter { !hidden(it) }.mapNotNull { l -> layerRows[l.id]?.let { l.id to it } }
+        val (id, row) = shown.firstOrNull { (_, r) -> at.y >= r.top && at.y < r.bottom }
+            ?: shown.minByOrNull { (_, r) -> kotlin.math.abs(r.center.y - at.y) }
+            ?: return null
+        return id to (at.y < row.center.y)
+    }
+
     fun addMask(l: LayerInfo) = layerChange { if (it.addMask(l.id) == null && !hasMask(l)) message = noRoom() }
 
     fun combineDown(l: LayerInfo) = layerChange { it.combineDown(l.id) }

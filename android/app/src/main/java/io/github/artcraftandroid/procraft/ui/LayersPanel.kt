@@ -105,6 +105,8 @@ private val RowGap = 1.dp
 /** A dragged row this near an end of the list scrolls it, at most this far a second. */
 private val DragEdge = 56.dp
 private val DragScroll = 480.dp
+/** A dragged row this far out past the panel's side is lifted out of it, to drop elsewhere. */
+private val LiftReach = 24.dp
 private val ListCorner = 8.dp
 /** A group's row height, and how far in each level of group sits. */
 private val GroupHeight = 44.dp
@@ -127,9 +129,10 @@ private val OptionsTop = 57.dp
 
 /**
  * The layers panel: top layer first. Tap a layer to make it current, tap the current one for its
- * options, tap the blend letter for blend mode and opacity, hold and drag to reorder, swipe left
- * for lock, duplicate and delete, swipe right to pick it to act on with the current one (the
- * title's menu then groups, merges, shares, duplicates or deletes them).
+ * options, tap the blend letter for blend mode and opacity, hold and drag to reorder (out past the
+ * panel's side, it is lifted out to drop on the canvas or, through the gallery, into another
+ * artwork), swipe left for lock, duplicate and delete, swipe right to pick it to act on with the
+ * current one (the title's menu then groups, merges, shares, duplicates or deletes them).
  */
 @Composable
 fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
@@ -171,10 +174,18 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     var dragUnit by remember { mutableStateOf(emptySet<ULong>()) }
     // where each row is in the window: for dropping a dragged row and placing the options
     val rows = remember { mutableMapOf<ULong, Rect>() }
+    // where layers held out of a panel drop: on its rows, within its box
+    DisposableEffect(rows) {
+        vm.layerRows = rows
+        onDispose {
+            vm.layerRows = emptyMap()
+            vm.layersBox = null
+        }
+    }
 
     // a model's meshes are pictured as the model is seen when the panel opens
     if (vm.modelOpen) LaunchedEffect(Unit) { vm.refreshSubmeshThumbnails() }
-    Popover(LayersWidth, arrowX, modifier) {
+    Popover(LayersWidth, arrowX, modifier.onGloballyPositioned { vm.layersBox = it.boundsInWindow() }) {
         // kept while they fade out
         val open = options?.let { id -> vm.layers.firstOrNull { it.id == id }?.let { l -> rows[id]?.let { l to it } } }
         val last = remember { arrayOfNulls<Pair<LayerInfo, Rect>>(1) }
@@ -219,6 +230,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         val rowGap = with(LocalDensity.current) { RowGap.toPx() }
         val dragEdge = with(LocalDensity.current) { DragEdge.toPx() }
         val dragScroll = with(LocalDensity.current) { DragScroll.toPx() }
+        val liftReach = with(LocalDensity.current) { LiftReach.toPx() }
         LaunchedEffect(dragId) {
             val id = dragId ?: return@LaunchedEffect
             var last = androidx.compose.runtime.withFrameNanos { it }
@@ -296,6 +308,14 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                 onDrag = { change, amount ->
                                     change.consume()
                                     dragOffset += amount.y
+                                    // dragged out past the panel's side, the row (with what goes with it) is
+                                    // lifted out, held by the finger from then on wherever it goes
+                                    val at = vm.fingersAt[change.id]
+                                    val box = vm.layersBox
+                                    if (at != null && box != null && (at.x < box.left - liftReach || at.x > box.right + liftReach)) {
+                                        val corner = (rows[l.id]?.topLeft ?: at) + Offset(0f, dragOffset)
+                                        vm.liftLayers(l, change.id, at, corner)
+                                    }
                                 },
                                 onDragEnd = {
                                     rows[l.id]?.let { drop(vm, l, it.center.y + dragOffset, rows) }
