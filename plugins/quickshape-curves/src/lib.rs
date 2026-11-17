@@ -27,7 +27,8 @@ kit::quickshape_curve!(offer);
 /// polyline (it bends more than once), a closed one for a round loop that bends in and out, or
 /// when a curve is asked for by name (none found: closed if the stroke comes back round), else none.
 fn offer(points: &[P], found: Option<kit::ShapeKind>) -> Option<Vec<P>> {
-    let pts: Vec<P> = points.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
+    let valid: Vec<P> = points.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
+    let pts = limit_samples(&valid);
     match found {
         None if closed(&pts) => fit_closed(&pts).map(|(nodes, _)| nodes),
         None | Some(kit::ShapeKind::Polyline) => Some(fit(&pts)).filter(|nodes| nodes.len() >= 4),
@@ -176,26 +177,44 @@ fn fit_closed(pts: &[P]) -> Option<(Vec<P>, bool)> {
 /// it can cut across a wave and even invent a bulge. Instead, measure each proposed cubic's
 /// distance from the original samples and insert another anchor where the deviation is greatest.
 /// The two controls at a shared anchor use the same tangent, so joins stay smooth.
-const MAX_OPEN_SPANS: usize = 96;
+const MAX_OPEN_SPANS: usize = 64;
+/// Bound the work per held stroke regardless of the stylus sampling rate.
+const MAX_FIT_POINTS: usize = 256;
 
 fn cubic_at(a: P, b: P, c: P, d: P, t: f32) -> P {
     let u = 1.0 - t;
     add(add(scale(a, u * u * u), scale(b, 3.0 * u * u * t)), add(scale(c, 3.0 * u * t * t), scale(d, t * t * t)))
 }
 
-fn tangent(pts: &[P], at: usize) -> P {
-    let before = pts[at.saturating_sub(3)];
-    let after = pts[(at + 3).min(pts.len() - 1)];
-    let direction = sub(after, before);
-    let len = length(direction);
-    if len > 1e-6 { scale(direction, 1.0 / len) } else { (0.0, 0.0) }
+/// Estimate directions over a distance along the stroke, not just three samples. Stylus
+/// sampling density varies with speed and otherwise makes the fitted handles wobble.
+fn stroke_tangents(pts: &[P], reach: f32) -> Vec<P> {
+    let mut along = Vec::with_capacity(pts.len());
+    along.push(0.0);
+    for pair in pts.windows(2) {
+        along.push(along.last().copied().unwrap_or(0.0) + length(sub(pair[1], pair[0])));
+    }
+    let (mut before, mut after) = (0, 0);
+    (0..pts.len())
+        .map(|i| {
+            while before + 1 < i && along[i] - along[before + 1] >= reach {
+                before += 1;
+            }
+            while after + 1 < pts.len() && along[after] - along[i] < reach {
+                after += 1;
+            }
+            let direction = sub(pts[after], pts[before]);
+            let magnitude = length(direction);
+            if magnitude > 1e-6 { scale(direction, 1.0 / magnitude) } else { (0.0, 0.0) }
+        })
+        .collect()
 }
 
-fn cubic_span(pts: &[P], a: usize, b: usize) -> [P; 4] {
+fn cubic_span(pts: &[P], tangents: &[P], a: usize, b: usize) -> [P; 4] {
     let start = pts[a];
     let end = pts[b];
     let reach = length(sub(end, start)) / 3.0;
-    [start, add(start, scale(tangent(pts, a), reach)), sub(end, scale(tangent(pts, b), reach)), end]
+    [start, add(start, scale(tangents[a], reach)), sub(end, scale(tangents[b], reach)), end]
 }
 
 /// Distance to the sampled cubic instead of matching parameter t: pointer samples have varying
@@ -219,58 +238,96 @@ fn cubic_deviation(pts: &[P], a: usize, b: usize, nodes: [P; 4]) -> (usize, f32)
     worst
 }
 
-/// Light, spatial Gaussian filtering before fitting: remove small hand jitter without
-/// tracing each wiggle with another Bezier anchor. The radius is measured in pixels along
-/// the stroke, not samples, because a slow pen can produce far more points than a fast one.
-/// Endpoints stay exactly where the user placed them; short strokes are not altered.
+/// Bound fitting time on dense stylus strokes by resampling at equal distances along the
+/// path. This preserves the stroke's ends and large bends, while removing redundant samples.
+/// Without this bound, adaptive curve fitting can exhaust the plugin's execution budget and
+/// ProCraft permanently switches off the curves plugin, falling back to polylines.
+fn limit_samples(pts: &[P]) -> Vec<P> {
+    if pts.len() <= MAX_FIT_POINTS {
+        return pts.to_vec();
+    }
+    let mut along = Vec::with_capacity(pts.len());
+    along.push(0.0_f32);
+    for pair in pts.windows(2) {
+        along.push(along.last().copied().unwrap_or(0.0) + length(sub(pair[1], pair[0])));
+    }
+    let length = along.last().copied().unwrap_or(0.0);
+    if length <= 1e-6 {
+        return vec![pts[0], pts[pts.len() - 1]];
+    }
+    let mut out = Vec::with_capacity(MAX_FIT_POINTS);
+    let mut after = 1;
+    for i in 0..MAX_FIT_POINTS {
+        let target = length * i as f32 / (MAX_FIT_POINTS - 1) as f32;
+        while after + 1 < pts.len() && along[after] < target {
+            after += 1;
+        }
+        let before = after - 1;
+        let span = along[after] - along[before];
+        let t = if span > 1e-6 { ((target - along[before]) / span).clamp(0.0, 1.0) } else { 0.0 };
+        out.push(add(pts[before], scale(sub(pts[after], pts[before]), t)));
+    }
+    out[0] = pts[0];
+    out[MAX_FIT_POINTS - 1] = pts[pts.len() - 1];
+    out
+}
+
+/// Create a fair centreline before fitting the Bezier spans. A narrow, fixed kernel only
+/// removes sensor jitter, and the adaptive fit otherwise traces every slight hand wobble.
+/// A wider kernel follows the intended sweep. It is sized in *stroke distance*, not samples,
+/// and bounded so smaller curls and deliberately tight turns are not erased.
+fn smoothing_radius(pts: &[P]) -> f32 {
+    (size(pts) * 0.021).clamp(5.5, 11.0)
+}
+
 fn smooth_stroke(pts: &[P]) -> Vec<P> {
     if pts.len() < 4 {
         return pts.to_vec();
     }
-    const SIGMA: f32 = 5.5;
-    const RADIUS: f32 = SIGMA * 2.5;
+    let sigma = smoothing_radius(pts);
+    let radius = sigma * 2.5;
     let mut along = Vec::with_capacity(pts.len());
     along.push(0.0f32);
     for pair in pts.windows(2) {
         along.push(along.last().copied().unwrap_or(0.0) + length(sub(pair[1], pair[0])));
     }
-    if along.last().copied().unwrap_or(0.0) < RADIUS * 2.0 {
+    if along.last().copied().unwrap_or(0.0) < radius * 2.0 {
         return pts.to_vec();
     }
     let mut out = pts.to_vec();
-    let mut left = 0;
-    let mut right = 0;
+    let (mut left, mut right) = (0, 0);
     for i in 1..pts.len() - 1 {
-        while along[i] - along[left] > RADIUS {
+        while left + 1 < i && along[i] - along[left] > radius {
             left += 1;
         }
-        while right + 1 < pts.len() && along[right + 1] - along[i] <= RADIUS {
+        while right + 1 < pts.len() && along[right + 1] - along[i] <= radius {
             right += 1;
         }
-        let mut total = 0.0;
-        let mut sum = (0.0, 0.0);
+        let (mut sum, mut weight_sum) = ((0.0, 0.0), 0.0);
         for j in left..=right {
-            let delta = (along[j] - along[i]) / SIGMA;
+            let delta = (along[j] - along[i]) / sigma;
             let weight = (-0.5 * delta * delta).exp();
             sum = add(sum, scale(pts[j], weight));
-            total += weight;
+            weight_sum += weight;
         }
-        if total > 0.0 {
-            out[i] = scale(sum, 1.0 / total);
+        if weight_sum > 0.0 {
+            out[i] = scale(sum, 1.0 / weight_sum);
         }
     }
+    // Holding a stroke should not move the places where the pen actually began and ended.
     out
 }
 
 fn fit(pts: &[P]) -> Vec<P> {
-    let pts: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
-    if pts.len() < 2 {
+    let valid: Vec<P> = pts.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
+    if valid.len() < 2 {
         return Vec::new();
     }
-    let pts = smooth_stroke(&pts);
-    // A bounded canvas-pixel error preserves the shape even for long multi-wave strokes.
-    // A small allowance avoids treating every tiny hand tremor as an intentional bend.
-    let tolerance = (size(&pts) * 0.006).clamp(1.8, 3.2);
+    let pts = smooth_stroke(&limit_samples(&valid));
+    let tangents = stroke_tangents(&pts, smoothing_radius(&pts) * 1.5);
+    // Fit the broad centreline, rather than approximating every small variation in it.
+    // This allows slightly more positional freedom in exchange for a fairer, simpler curve.
+    let tolerance = (size(&pts) * 0.012).clamp(3.0, 7.0);
     let mut anchors = vec![0, pts.len() - 1];
     loop {
         if anchors.len() > MAX_OPEN_SPANS {
@@ -282,7 +339,7 @@ fn fit(pts: &[P]) -> Vec<P> {
             if b - a < 2 {
                 continue;
             }
-            let (at, error) = cubic_deviation(&pts, a, b, cubic_span(&pts, a, b));
+            let (at, error) = cubic_deviation(&pts, a, b, cubic_span(&pts, &tangents, a, b));
             if error > worst.1 {
                 worst = (at, error);
             }
@@ -299,7 +356,7 @@ fn fit(pts: &[P]) -> Vec<P> {
     }
     let mut nodes = Vec::with_capacity(anchors.len() * 3);
     for pair in anchors.windows(2) {
-        let [a, b, c, _] = cubic_span(&pts, pair[0], pair[1]);
+        let [a, b, c, _] = cubic_span(&pts, &tangents, pair[0], pair[1]);
         nodes.extend([a, b, c]);
     }
     nodes.push(pts[*anchors.last().unwrap_or(&0)]);
@@ -425,6 +482,86 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         assert!(deviation < 4.0, "fit drifted {deviation} pixels from intended curve");
+    }
+
+    #[test]
+    fn a_hand_drawn_wave_becomes_a_clean_curve_without_fitting_its_wobbles() {
+        // Two intentional waves with short (17 px) and medium (43 px) wobbles superimposed.
+        // The output should follow the broad wave, not precisely reproduce those wobbles.
+        let ideal = |x: f32| 160.0 + 60.0 * (x * std::f32::consts::TAU / 300.0).sin();
+        let noisy: Vec<P> = (0..=300)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                let jitter = if i == 0 || i == 300 {
+                    0.0
+                } else {
+                    4.0 * (x * std::f32::consts::TAU / 17.0).sin() + 3.0 * (x * std::f32::consts::TAU / 43.0).sin()
+                };
+                (x, ideal(x) + jitter)
+            })
+            .collect();
+        let nodes = fit(&noisy);
+        assert_eq!(nodes.first(), noisy.first());
+        assert_eq!(nodes.last(), noisy.last());
+        let mut samples = Vec::new();
+        for base in (0..nodes.len() - 1).step_by(3) {
+            for i in 0..=24 {
+                samples.push(cubic_at(nodes[base], nodes[base + 1], nodes[base + 2], nodes[base + 3], i as f32 / 24.0));
+            }
+        }
+        let mean_drift = samples.iter().map(|&(x, y)| (y - ideal(x)).abs()).sum::<f32>() / samples.len() as f32;
+        let max_drift = samples.iter().map(|&(x, y)| (y - ideal(x)).abs()).fold(0.0_f32, f32::max);
+        eprintln!("mean drift {mean_drift:.2}, max drift {max_drift:.2}, segments {}", (nodes.len() - 1) / 3);
+        assert!(mean_drift < 5.0, "too far from the intended curve: {mean_drift:.2}");
+        assert!(max_drift < 11.0, "large unintended deviation: {max_drift:.2}");
+        assert!((nodes.len() - 1) / 3 <= 20, "overfitted tiny wobbles with {} segments", (nodes.len() - 1) / 3);
+    }
+
+    #[test]
+    fn smoothing_is_independent_of_pen_sampling_density() {
+        let stroke = |step: usize| -> Vec<P> {
+            (0..=600 / step)
+                .map(|i| {
+                    let x = (i * step) as f32;
+                    (
+                        x,
+                        100.0
+                            + 50.0 * (x * std::f32::consts::TAU / 300.0).sin()
+                            + 4.0 * (x * std::f32::consts::TAU / 23.0).sin(),
+                    )
+                })
+                .collect()
+        };
+        let coarse = smooth_stroke(&stroke(3));
+        let fine = smooth_stroke(&stroke(1));
+        let differences = coarse.iter().enumerate().map(|(i, p)| length(sub(*p, fine[i * 3]))).fold(0.0_f32, f32::max);
+        assert!(differences < 2.5, "different sampling densities drifted {differences}");
+    }
+
+    #[test]
+    fn dense_pen_samples_stay_bounded_without_losing_the_large_curve() {
+        // Real tablets can send thousands of samples during one long held stroke.
+        // None of their extra sample density should multiply the adaptive fitter's work.
+        let stroke: Vec<P> = (0..=4000)
+            .map(|i| {
+                let x = i as f32 * 0.15;
+                (
+                    x,
+                    170.0
+                        + 60.0 * (x * std::f32::consts::TAU / 300.0).sin()
+                        + 2.0 * (x * std::f32::consts::TAU / 21.0).sin(),
+                )
+            })
+            .collect();
+        let limited = limit_samples(&stroke);
+        assert_eq!(limited.len(), MAX_FIT_POINTS);
+        assert_eq!(limited[0], stroke[0]);
+        assert_eq!(limited[MAX_FIT_POINTS - 1], stroke[stroke.len() - 1]);
+        let nodes = offer(&stroke, Some(kit::ShapeKind::Polyline)).unwrap();
+        assert!(nodes.len() >= 10);
+        assert!(nodes.len() <= MAX_OPEN_SPANS * 3 + 1);
+        assert_eq!(nodes[0], stroke[0]);
+        assert_eq!(nodes[nodes.len() - 1], stroke[stroke.len() - 1]);
     }
 
     #[test]

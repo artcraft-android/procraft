@@ -1965,6 +1965,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quickshape_curves_survive_long_high_density_strokes() {
+        let dir = store("curves-dense-samples");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bundled) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bundled.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.quickshape-curves";
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let hooks = plugins.hooks();
+        // Dense pen input must not permanently stop QuickShape's WASM hook and turn all
+        // following held curves into polylines.
+        for count in [4_001_usize, 12_001] {
+            let points: Vec<(f32, f32)> = (0..count)
+                .map(|i| {
+                    let x = i as f32 * 600.0 / (count - 1) as f32;
+                    (
+                        x,
+                        120.0
+                            + 55.0 * (x * std::f32::consts::TAU / 300.0).sin()
+                            + 3.0 * (x * std::f32::consts::TAU / 23.0).sin(),
+                    )
+                })
+                .collect();
+            let nodes = hooks.quickshape_curve(&points, 1).expect("dense stroke should fit a curve without timing out");
+            assert!(nodes.len() >= 10 && nodes.len() % 3 == 1, "{count} samples: {} nodes", nodes.len());
+            assert!(hooks.is_on(ID), "plugin disabled after {count} samples");
+        }
+        assert!(plugins.plugins().iter().find(|p| p.id == ID).is_some_and(|p| p.on && p.problem.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_stroke_bending_twice_snaps_to_a_curve_while_a_plugin_says_so() {
         use crate::{QuickShapeAnchor, QuickShapeKind};
         let Some(s) = session() else { return };
