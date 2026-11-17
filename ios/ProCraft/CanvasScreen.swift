@@ -375,6 +375,12 @@ private struct BlockedDialog: View {
                 title: "Group is empty", message: "\u{201C}\(name)\u{201D} holds no layers to change.",
                 action: "Open Layers", icon: PcIcons.folder, destructive: false
             )
+        // an adjustment or a copy, which take one layer
+        case .several:
+            return AlertContent(
+                title: "Several layers are chosen", message: "This works on one layer at a time: choose just one.",
+                action: "Open Layers", icon: PcIcons.folder, destructive: false
+            )
         // only on a model, which this app doesn't open yet
         case .meshHidden:
             return AlertContent(

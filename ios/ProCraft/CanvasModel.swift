@@ -338,9 +338,6 @@ final class CanvasModel {
         applyPlugins()
         PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
         refreshCanvasSpace()
-        if !SystemSettings.orientationMemory {
-            session.forgetSavedView()
-        }
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setLightInterface(on: settings.lightInterface)
@@ -1996,7 +1993,7 @@ final class CanvasModel {
                     showNotice(said)
                 }
                 refresh()
-            case .emptyGroup, .group:
+            case .emptyGroup, .group, .several:
                 break
             case .meshHidden, .meshLocked:
                 session.freeMeantMeshes()

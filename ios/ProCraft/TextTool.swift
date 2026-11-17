@@ -132,7 +132,7 @@ final class TextTool {
             text: "Text", font: "sans-serif", style: "Medium", size: 0, kerning: 0, tracking: 0, leading: 0, baseline: 0,
             opacity: 1, align: .center, underline: false, outline: false, vertical: false, allCaps: false,
             r: Float((c >> 16) & 255) / 255, g: Float((c >> 8) & 255) / 255, b: Float(c & 255) / 255,
-            x: 0, y: 0, width: 0
+            x: 0, y: 0, width: 0, runs: []
         )
         let centre = model.screenCentre
         let placed = model.session.newTextPlaced(
