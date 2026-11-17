@@ -428,8 +428,19 @@ fn cursor_category(cursor: u32) -> Option<u32> {
     if cursor < CATEGORIES { Some(WTI_CURSORS + cursor) } else { None }
 }
 
-/// Opens a WinTab context on `hwnd` if a tablet's driver gives WinTab; nothing if none does.
+/// Opens a WinTab context on `hwnd` if a tablet's driver gives WinTab; nothing if none does, or if
+/// the driver crashed as the app last started it (see [`crate::startup::wintab_trying`]): the pen
+/// then comes through Windows Ink alone.
 pub fn open(hwnd: HWND) {
+    if !crate::startup::wintab_trying() {
+        return;
+    }
+    start(hwnd);
+    crate::startup::wintab_made();
+}
+
+/// [`open`]'s work.
+fn start(hwnd: HWND) {
     // SAFETY: the driver's library, if there is one, loaded by its fixed name
     let Ok(library) = (unsafe { LoadLibraryW(w!("wintab32.dll")) }) else { return };
     let Some((info, open, packet, overlap)) = calls(library) else {
