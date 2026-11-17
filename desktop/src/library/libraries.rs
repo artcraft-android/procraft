@@ -162,7 +162,7 @@ impl Library {
     }
 
     /// Brings library `i` into use and shows it.
-    fn open_library(&mut self, session: &CanvasSession, libraries: &[BrushLibraryInfo], i: usize) {
+    pub(super) fn open_library(&mut self, session: &CanvasSession, libraries: &[BrushLibraryInfo], i: usize) {
         self.showing_libraries = false;
         if libraries.get(i).is_some_and(|l| l.current) {
             return;

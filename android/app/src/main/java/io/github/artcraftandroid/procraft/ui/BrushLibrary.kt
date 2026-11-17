@@ -65,7 +65,16 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.boundsInWindow
@@ -228,8 +237,8 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 /**
  * The brush library: sets on the left, the set's brushes with a sample stroke on the right. Tap
  * the chosen set for its menu, swipe a brush left to share, duplicate or delete it, hold it for
- * its menu (and drag it on from there onto a set or to another place in its own), and add brushes
- * and sets with the plus.
+ * its menu (and drag it on from there onto a set or to another place in its own), pinch the lists
+ * in for every library's card, and add brushes and sets with the plus.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -268,6 +277,15 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var deleting by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
     // a brush held: its menu (by place, "set-index")
     var brushMenu by remember { mutableStateOf<String?>(null) }
+    // two fingers pinching on the lists: how far (their spread, a part of what it was); the lists
+    // follow, as far as the pinch can take them, and spring back when it isn't taken
+    var pinched by remember { mutableStateOf<Float?>(null) }
+    var listsOrigin by remember { mutableStateOf(Offset.Zero) }
+    val pinchShown = androidx.compose.animation.core.animateFloatAsState(
+        pinched?.coerceIn(PINCH_SHOWN_LEAST, PINCH_SHOWN_MOST) ?: 1f,
+        if (pinched != null) androidx.compose.animation.core.snap() else androidx.compose.animation.core.spring(),
+        label = "library pinch",
+    )
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
             vm.pickedBrushes.clear()
@@ -384,8 +402,27 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             }
         }
         // the search field scrolls away with the lists: out of sight at first, it comes down as a
-        // list is pulled down past its top, and goes again as the lists scroll up
-        Box(Modifier.weight(1f).clipToBounds().nestedScroll(searchScroll)) {
+        // list is pulled down past its top, and goes again as the lists scroll up. Two fingers
+        // pinched in on them shrink them, and let go small enough show every library's card
+        Box(
+            Modifier.weight(1f).clipToBounds().nestedScroll(searchScroll)
+                .onGloballyPositioned { listsOrigin = it.positionInWindow() }
+                .pointerInput(Unit) {
+                    awaitLibraryPinch({ listsOrigin }, { zoom, _ -> pinched = zoom }) { zoom, _ ->
+                        pinched = null
+                        if (zoom <= PINCH_TO_LIBRARIES) {
+                            brushMenu = null
+                            vm.renamingBrush = null
+                            vm.showingLibraries = true
+                        }
+                    }
+                }
+                .graphicsLayer {
+                    val k = pinchShown.value
+                    scaleX = k
+                    scaleY = k
+                },
+        ) {
         Column(
             Modifier.layout { measurable, constraints ->
                 val away = if (searching || query.isNotEmpty()) 0 else searchAway.roundToInt()
@@ -932,6 +969,60 @@ private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -
     }
 }
 
+/**
+ * Two fingers pinched on a library and let go at this much of their spread at the start (or less)
+ * go to every library's card; pinched out on a card past this much, that library opens. While they
+ * pinch, a library's lists shrink with them no further than the least here, and grow no further
+ * than the most.
+ */
+private const val PINCH_TO_LIBRARIES = 0.66f
+private const val PINCH_TO_LIBRARY = 2f
+private const val PINCH_SHOWN_LEAST = 0.6f
+private const val PINCH_SHOWN_MOST = 1.05f
+
+/**
+ * Two fingers pinching here (its corner in the window at [origin]): [onPinch] hears how far (their
+ * spread now, a part of what it was) and where they are (window pixels) as they go, and [onLet]
+ * both when the first of them lifts. While they pinch, and after until the last lifts, their
+ * touches go no further (the lists under them stay, and nothing is tapped or held); a lone
+ * finger's go on as ever.
+ */
+private suspend fun PointerInputScope.awaitLibraryPinch(
+    origin: () -> Offset,
+    onPinch: (Float, Offset) -> Unit,
+    onLet: (Float, Offset) -> Unit,
+) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        var zoom = 1f
+        var at: Offset? = null
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val down = event.changes.count { it.pressed }
+            val pinching = at
+            if (down >= 2) {
+                zoom *= event.calculateZoom()
+                val centre = event.calculateCentroid(useCurrent = true)
+                val now = if (centre.isSpecified) origin() + centre else pinching ?: origin()
+                at = now
+                onPinch(zoom, now)
+                event.changes.forEach { it.consume() }
+            } else if (pinching != null) {
+                event.changes.forEach { it.consume() }
+                onLet(zoom, pinching)
+                var rest = event
+                while (rest.changes.any { it.pressed }) {
+                    rest = awaitPointerEvent(PointerEventPass.Initial)
+                    rest.changes.forEach { it.consume() }
+                }
+                break
+            } else if (down == 0) {
+                break
+            }
+        }
+    }
+}
+
 private val CardHeight = 490.dp
 private val CardGap = 8.dp
 private val CardCorner = 16.dp
@@ -951,6 +1042,12 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
     var titleMenu by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
     var cardMenu by remember { mutableStateOf<Int?>(null) }
+    // the cards where they show and the grid's corner (window pixels); two fingers pinching out:
+    // the card they began on, and how far they have gone
+    val cardBounds = remember { mutableStateMapOf<Int, Rect>() }
+    var gridOrigin by remember { mutableStateOf(Offset.Zero) }
+    var pinchedCard by remember { mutableStateOf<Int?>(null) }
+    var cardZoom by remember { mutableFloatStateOf(1f) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importBrushes(it) } }
     Popover(LibraryWidth, arrowX, modifier) {
         val renaming = !showing && vm.renamingLibrary == vm.libraryPlace
@@ -1008,14 +1105,32 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
         if (showing) {
             LazyVerticalGrid(
                 GridCells.Fixed(2),
-                Modifier.weight(1f, fill = false),
+                Modifier.weight(1f, fill = false).onGloballyPositioned { gridOrigin = it.positionInWindow() }.pointerInput(Unit) {
+                    // two fingers pinched out on a card: it grows with them, and let go far enough apart it opens
+                    awaitLibraryPinch({ gridOrigin }, { zoom, at ->
+                        if (pinchedCard == null) pinchedCard = cardBounds.entries.firstOrNull { it.value.contains(at) }?.key
+                        cardZoom = zoom
+                    }) { zoom, _ ->
+                        val card = pinchedCard
+                        pinchedCard = null
+                        cardZoom = 1f
+                        if (zoom > PINCH_TO_LIBRARY && card != null) vm.openLibrary(card)
+                    }
+                },
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(CardGap),
                 verticalArrangement = Arrangement.spacedBy(CardGap),
             ) {
                 items(vm.brushLibraries.size) { i ->
                     val library = vm.brushLibraries[i]
-                    Box {
+                    androidx.compose.runtime.DisposableEffect(i) { onDispose { cardBounds.remove(i) } }
+                    Box(
+                        Modifier.onGloballyPositioned { cardBounds[i] = it.boundsInWindow() }.graphicsLayer {
+                            val k = if (pinchedCard == i) cardZoom.coerceIn(1f, PINCH_TO_LIBRARY) else 1f
+                            scaleX = k
+                            scaleY = k
+                        },
+                    ) {
                         LibraryCard(vm, i, library, onOpen = { vm.openLibrary(i) }, onMenu = { cardMenu = i })
                         LibraryMenu(cardMenu == i, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f), MenuPlace { a, size -> IntOffset(a.left + (a.width - size.width) / 2, a.top + a.height / 4) }, onDismiss = { cardMenu = null }) {
                             MenuItem(PcIcons.MenuRename, "Rename") {

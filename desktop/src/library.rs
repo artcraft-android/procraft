@@ -3,7 +3,8 @@
 //! (rename, duplicate, share, delete); tapping a brush chooses it; sliding one left shows Share,
 //! Duplicate and Delete; holding one shows its menu (Rename, Duplicate, Share, Delete; in the Recent
 //! set Find, Pin or Unpin, Share, Clear), and moving on from there drags it to another place or
-//! set. The plus makes a brush or a set, or brings brushes in from a file.
+//! set. The plus makes a brush or a set, or brings brushes in from a file. Two fingers pinched in
+//! on a library go to every library's card, and pinched out on a card open it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,6 +91,12 @@ const HOLD: Duration = Duration::from_millis(400);
 /// anything less plainly sideways is left to the list.
 const SLIDE_SLOP: f32 = 14.0;
 const SLIDE_LEAN: f32 = 2.0;
+/// Two fingers pinched on a library and let go at this much of their spread at the start (or
+/// less) go to every library's card; pinched out on a card past this much, that library opens. A
+/// trackpad's pinch is let go once it has been still this long.
+const PINCH_TO_LIBRARIES: f32 = 0.66;
+const PINCH_TO_LIBRARY: f32 = 2.0;
+const PINCH_QUIET: Duration = Duration::from_millis(200);
 
 /// A brush's sample stroke, and whether it runs under the name (which then sits on a dark pill).
 struct Preview {
@@ -157,6 +164,16 @@ struct SetPress {
     spent: bool,
 }
 
+/// Two fingers pinching on the library: how far (their spread now, a part of what it was), where
+/// (in the panel), when they last moved, and whether on a touch screen (else a trackpad).
+#[derive(Clone, Copy)]
+struct Pinch {
+    zoom: f32,
+    at: Pos2,
+    last: Instant,
+    touch: bool,
+}
+
 /// What Delete asks about.
 #[derive(Clone, Copy)]
 enum Deleting {
@@ -218,6 +235,7 @@ pub struct Library {
     card_drawing: Option<std::sync::mpsc::Receiver<libraries::CardStroke>>,
     press: Option<Press>,
     set_press: Option<SetPress>,
+    pinch: Option<Pinch>,
     /// How far each brush is slid (points, left negative), and the brush slid open.
     slid: HashMap<(u32, u32), f32>,
     swiped: Option<(u32, u32)>,
@@ -727,6 +745,7 @@ impl Library {
         self.brush_menu(ctx, look, session, backdrops);
         self.libraries_plus_menu(ctx, look, session, plus, backdrops);
         self.card_menu(ctx, look, session, &libraries, backdrops);
+        self.follow_pinch(ctx, session, rect, &libraries);
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
             match self.delete_what.take() {
                 Some(Deleting::Set(i)) => {
@@ -1155,6 +1174,77 @@ impl Library {
                 }
             }
             Way::Undecided | Way::Held | Way::Scroll => {}
+        }
+    }
+
+    /// Two fingers pinching on the library at `rect` (a touch screen's, or a trackpad's under the
+    /// pointer): let go pinched in to [`PINCH_TO_LIBRARIES`], every library's card shows; pinched
+    /// out past [`PINCH_TO_LIBRARY`] over a card, that library opens. Not while a menu is up.
+    fn follow_pinch(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        rect: Rect,
+        libraries: &[procraft_core::BrushLibraryInfo],
+    ) {
+        let (touch, trackpad, pointer) = ctx.input(|i| {
+            let zooms: Vec<f32> =
+                i.events.iter().filter_map(|e| if let egui::Event::Zoom(z) = e { Some(*z) } else { None }).collect();
+            let trackpad = (!zooms.is_empty()).then(|| zooms.iter().product::<f32>());
+            (i.multi_touch(), trackpad, i.pointer.hover_pos())
+        });
+        let now = Instant::now();
+        let modal = self.modal() || self.press.is_some() || self.set_press.is_some();
+        match (touch, trackpad) {
+            (Some(t), _) => {
+                let at = panel::in_panel(ctx, t.center_pos);
+                match self.pinch.as_mut().filter(|p| p.touch) {
+                    Some(p) => {
+                        p.zoom *= t.zoom_delta;
+                        p.at = at;
+                        p.last = now;
+                    }
+                    None if !modal && rect.contains(panel::in_panel(ctx, t.start_pos)) => {
+                        self.pinch = Some(Pinch { zoom: t.zoom_delta, at, last: now, touch: true });
+                    }
+                    None => {}
+                }
+                return;
+            }
+            (None, Some(z)) => {
+                let Some(at) = pointer.map(|p| panel::in_panel(ctx, p)) else { return };
+                match self.pinch.as_mut().filter(|p| !p.touch) {
+                    Some(p) => {
+                        p.zoom *= z;
+                        p.last = now;
+                    }
+                    None if !modal && rect.contains(at) => {
+                        self.pinch = Some(Pinch { zoom: z, at, last: now, touch: false });
+                    }
+                    None => {}
+                }
+                ctx.request_repaint_after(PINCH_QUIET);
+                return;
+            }
+            (None, None) => {}
+        }
+        // the fingers lifted (a trackpad's pinch still for a while): where it ended up
+        let Some(p) = self.pinch else { return };
+        if !p.touch && p.last.elapsed() < PINCH_QUIET {
+            ctx.request_repaint_after(PINCH_QUIET.saturating_sub(p.last.elapsed()));
+            return;
+        }
+        self.pinch = None;
+        if self.showing_libraries {
+            if p.zoom > PINCH_TO_LIBRARY
+                && let Some(&(i, _)) = self.card_rects.iter().find(|(_, r)| r.contains(p.at))
+            {
+                self.open_library(session, libraries, i);
+            }
+        } else if p.zoom <= PINCH_TO_LIBRARIES {
+            self.showing_libraries = true;
+            self.renaming_set = None;
+            self.renaming_brush = None;
         }
     }
 
@@ -1954,6 +2044,43 @@ mod tests {
         assert!(f.library.renaming_brush.is_none());
         let name = f.session.brush_library()[key.0 as usize].brushes[key.1 as usize].name.clone();
         assert_eq!(name, "My brush");
+    }
+
+    /// Two fingers on a touch screen pinched about `at`, from `from` apart to `to` apart over ten
+    /// frames, then lifted.
+    fn pinch(f: &mut Finger, at: Pos2, from: f32, to: f32) {
+        let touch =
+            |id, phase, pos| Event::Touch { device_id: TouchDeviceId(1), id: TouchId(id), phase, pos, force: None };
+        // (the first finger moving the pointer, as the window's touches do)
+        let pair = |spread: f32, phase| {
+            let first = at - vec2(spread / 2.0, 0.0);
+            vec![Event::PointerMoved(first), touch(1, phase, first), touch(2, phase, at + vec2(spread / 2.0, 0.0))]
+        };
+        f.frame(pair(from, TouchPhase::Start));
+        for k in 1..=10 {
+            f.frame(pair(from + (to - from) * k as f32 / 10.0, TouchPhase::Move));
+        }
+        f.frame(pair(to, TouchPhase::End));
+        f.frame(Vec::new());
+    }
+
+    #[test]
+    fn two_fingers_pinched_in_show_every_library_and_out_on_a_card_open_it() {
+        let mut f = Finger::new();
+        let at = f.on_a_brush();
+        // a little: nothing
+        pinch(&mut f, at, 200.0, 150.0);
+        assert!(!f.library.showing_libraries);
+        // to less than two thirds: every library's card
+        pinch(&mut f, at, 200.0, 120.0);
+        assert!(f.library.showing_libraries);
+        f.frame(Vec::new());
+        let card = f.library.card_rects.first().map(|(_, r)| r.center()).expect("a card");
+        // out a little on a card: nothing; past twice as far apart, it opens
+        pinch(&mut f, card, 60.0, 100.0);
+        assert!(f.library.showing_libraries);
+        pinch(&mut f, card, 60.0, 130.0);
+        assert!(!f.library.showing_libraries);
     }
 
     #[test]
