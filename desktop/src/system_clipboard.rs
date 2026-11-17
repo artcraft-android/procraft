@@ -49,15 +49,15 @@ pub fn own_copy_unless_replaced() -> Option<ThumbnailImage> {
     (!replaced).then(|| ThumbnailImage::clone(&image))
 }
 
-/// Puts `copy` (premultiplied) on the system's clipboard in place of what it held, as a picture
-/// other apps paste: PNG, which Krita, Photoshop and GIMP take first, then CF_DIBV5, both with the
-/// transparency. Both are made before the clipboard is opened, as other apps wait while it is.
-/// Whether it went.
+/// Puts `copy` (premultiplied, its colours in the profile `icc`) on the system's clipboard in
+/// place of what it held, as a picture other apps paste: PNG, which Krita, Photoshop and GIMP take
+/// first, carrying the profile, then CF_DIBV5, both with the transparency. Both are made before
+/// the clipboard is opened, as other apps wait while it is. Whether it went.
 #[cfg(windows)]
-fn put(_clipboard: &mut arboard::Clipboard, copy: &ThumbnailImage) -> bool {
+fn put(_clipboard: &mut arboard::Clipboard, copy: &ThumbnailImage, icc: &[u8]) -> bool {
     use clipboard_win::{formats, raw};
     let straight = procraft_core::copy_straight(copy);
-    let (Some(png), Some(dib)) = (procraft_core::picture_png(&straight), dibv5(&straight)) else { return false };
+    let (Some(png), Some(dib)) = (procraft_core::picture_png(&straight, icc), dibv5(&straight)) else { return false };
     let Some(png_format) = clipboard_win::register_format("PNG") else { return false };
     let Ok(_open) = clipboard_win::Clipboard::new_attempts(10) else { return false };
     raw::empty().is_ok()
@@ -66,9 +66,10 @@ fn put(_clipboard: &mut arboard::Clipboard, copy: &ThumbnailImage) -> bool {
 }
 
 /// Puts `copy` (premultiplied) on the system's clipboard in place of what it held, as a picture
-/// other apps paste with its transparency (PNG under X11, TIFF on a Mac). Whether it went.
+/// other apps paste with its transparency (PNG under X11, TIFF on a Mac; neither can carry a
+/// profile here). Whether it went.
 #[cfg(not(windows))]
-fn put(clipboard: &mut arboard::Clipboard, copy: &ThumbnailImage) -> bool {
+fn put(clipboard: &mut arboard::Clipboard, copy: &ThumbnailImage, _icc: &[u8]) -> bool {
     let straight = procraft_core::copy_straight(copy);
     let (width, height) = (straight.width as usize, straight.height as usize);
     clipboard.set_image(arboard::ImageData { width, height, bytes: straight.rgba.into() }).is_ok()
@@ -100,8 +101,11 @@ fn dibv5(straight: &ThumbnailImage) -> Option<Vec<u8>> {
     out.extend_from_slice(&32u16.to_le_bytes());
     out.extend_from_slice(&BI_BITFIELDS.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
-    // no resolution, no palette
-    out.extend_from_slice(&[0; 16]);
+    // 132 pixels an inch, no palette
+    let resolution = i32::try_from(procraft_core::COPY_PIXELS_A_METRE).ok()?;
+    out.extend_from_slice(&resolution.to_le_bytes());
+    out.extend_from_slice(&resolution.to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
     // red, green, blue and alpha
     for mask in MASKS {
         out.extend_from_slice(&mask.to_le_bytes());
@@ -219,11 +223,11 @@ impl SystemClipboard {
         result
     }
 
-    /// `copy` (premultiplied) was copied here: it goes on the system's clipboard in place of what
-    /// that held, as a picture other apps paste, on a thread of its own (here it is kept as it is,
-    /// for Paste). What the system holds once it is there is marked, to tell it from what another
-    /// app copies later.
-    pub fn copied_here(&mut self, copy: &ThumbnailImage) {
+    /// `copy` (premultiplied, its colours in the profile `icc`) was copied here: it goes on the
+    /// system's clipboard in place of what that held, as a picture other apps paste, on a thread
+    /// of its own (here it is kept as it is, for Paste). What the system holds once it is there is
+    /// marked, to tell it from what another app copies later.
+    pub fn copied_here(&mut self, copy: &ThumbnailImage, icc: Vec<u8>) {
         let turn = COPIES.fetch_add(1, Ordering::SeqCst) + 1;
         let copy = Arc::new(copy.clone());
         let picture = self.picture;
@@ -237,7 +241,7 @@ impl SystemClipboard {
                 if COPIES.load(Ordering::SeqCst) != turn {
                     return None;
                 }
-                if !put(clipboard, &copy) {
+                if !put(clipboard, &copy, &icc) {
                     log::warn!("a copy couldn't go on the system's clipboard");
                 }
                 Some(Held::on(clipboard, picture).mark())
@@ -375,6 +379,8 @@ mod tests {
         assert_eq!(dib.len(), 124 + 12 + 3 * 2 * 4);
         // after the header the masks again, then the bottom row first, blue green red alpha
         assert_eq!(&dib[124..136], &[0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0]);
+        // 132 pixels an inch, across and down
+        assert_eq!(&dib[24..32], &[0x4d, 0x14, 0, 0, 0x4d, 0x14, 0, 0]);
         assert_eq!(&dib[136..140], &[30, 20, 10, 40]);
         // read as other apps read it
         let decoder = image::codecs::bmp::BmpDecoder::new_without_file_header(std::io::Cursor::new(&dib)).unwrap();
@@ -385,7 +391,7 @@ mod tests {
         let copy = ThumbnailImage { width: 1, height: 1, rgba: vec![50, 25, 0, 128] };
         let straight = procraft_core::copy_straight(&copy);
         assert_eq!(straight.rgba, vec![100, 50, 0, 128]);
-        let png = procraft_core::picture_png(&straight).unwrap();
+        let png = procraft_core::picture_png(&straight, &[]).unwrap();
         assert_eq!(image::load_from_memory(&png).unwrap().into_rgba8().into_raw(), straight.rgba);
     }
 

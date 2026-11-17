@@ -1897,7 +1897,7 @@ impl Interface {
     /// The current layer (or what is selected of it) cut, to paste.
     fn cut_layer(&mut self, session: &CanvasSession) {
         if let Some(cut) = self.layer_cut(session) {
-            self.keep_copy(cut);
+            self.keep_copy(session, cut);
         }
     }
 
@@ -1917,7 +1917,7 @@ impl Interface {
     /// The current layer (or what is selected of it) copied, to paste.
     fn copy_layer(&mut self, session: &CanvasSession) {
         if let Some(copied) = self.layer_copied(session) {
-            self.keep_copy(copied);
+            self.keep_copy(session, copied);
         }
     }
 
@@ -1938,15 +1938,15 @@ impl Interface {
     fn copy_canvas(&mut self, session: &CanvasSession) {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
-            self.keep_copy(copied);
+            self.keep_copy(session, copied);
             self.overlays.notice("Canvas copied", false);
         }
     }
 
     /// What was cut or copied (`copy`), kept to paste in place of what was before: here as it is,
     /// and on the system's clipboard as a picture for other apps.
-    fn keep_copy(&mut self, copy: procraft_core::ThumbnailImage) {
-        self.system_clipboard.copied_here(&copy);
+    fn keep_copy(&mut self, session: &CanvasSession, copy: procraft_core::ThumbnailImage) {
+        self.system_clipboard.copied_here(&copy, session.copy_profile());
         self.clipboard = Some(copy);
     }
 
@@ -2426,7 +2426,7 @@ impl Interface {
                     self.overlays.notice(text, warning);
                 }
                 if let Some(copied) = self.layers.copied.take() {
-                    self.keep_copy(copied);
+                    self.keep_copy(session, copied);
                 }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));

@@ -1235,6 +1235,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun putOnSystemClipboard(copy: io.github.artcraftandroid.procraft.core.ThumbnailImage) {
         val turn = ++clipTurn
         val app = getApplication<Application>()
+        // the colour profile its colours are in, which the picture carries
+        val profile = session?.copyProfile() ?: ByteArray(0)
         viewModelScope.launch {
             clipWrites.withLock {
                 if (turn != clipTurn) return@launch
@@ -1242,7 +1244,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val file = File(dir, "copy-${System.currentTimeMillis()}.png")
                 val written = withContext(Dispatchers.Default) {
                     dir.mkdirs()
-                    io.github.artcraftandroid.procraft.core.writeCopyPng(copy, file.path)
+                    io.github.artcraftandroid.procraft.core.writeCopyPng(copy, profile, file.path)
                 }
                 val uri = if (written && turn == clipTurn) runCatching { androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file) }.getOrNull() else null
                 val board = systemClipboard

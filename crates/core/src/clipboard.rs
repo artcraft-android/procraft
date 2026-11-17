@@ -80,22 +80,41 @@ pub fn copy_straight(image: &ThumbnailImage) -> ThumbnailImage {
     ThumbnailImage { width: image.width, height: image.height, rgba: crate::project::straight_alpha(&image.rgba) }
 }
 
-/// A picture in straight colours as a PNG, its transparency kept; none if it can't be made (its
-/// pixels aren't the size it says).
-pub fn picture_png(straight: &ThumbnailImage) -> Option<Vec<u8>> {
+/// The resolution a copy's picture says it is, as other apps take it: 132 pixels an inch, in
+/// pixels a metre.
+pub const COPY_PIXELS_A_METRE: u32 = 5197;
+
+/// A picture in straight colours as a PNG for other apps: its transparency kept, carrying the
+/// colour profile `icc` its colours are in (none if empty) and 132 pixels an inch. None if it
+/// can't be made (its pixels aren't the size it says).
+pub fn picture_png(straight: &ThumbnailImage, icc: &[u8]) -> Option<Vec<u8>> {
     let (w, h) = (straight.width, straight.height);
     let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
     if len == 0 || straight.rgba.len() != len {
         return None;
     }
-    crate::project::png_of(w, h, &straight.rgba).ok()
+    let mut info = png::Info::with_size(w, h);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    info.pixel_dims =
+        Some(png::PixelDimensions { xppu: COPY_PIXELS_A_METRE, yppu: COPY_PIXELS_A_METRE, unit: png::Unit::Meter });
+    if !icc.is_empty() {
+        info.icc_profile = Some(std::borrow::Cow::Borrowed(icc));
+    }
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::with_info(&mut out, info).ok()?;
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(&straight.rgba).ok()?;
+    writer.finish().ok()?;
+    Some(out)
 }
 
-/// A copy (premultiplied) written at `path` as the PNG the system's clipboard hands other apps,
-/// its transparency kept: whole, or not at all. Whether it was.
+/// A copy (premultiplied) written at `path` as the PNG the system's clipboard hands other apps
+/// ([`picture_png`], carrying `icc`): whole, or not at all. Whether it was.
 #[uniffi::export]
-pub fn write_copy_png(image: ThumbnailImage, path: String) -> bool {
-    let Some(png) = picture_png(&copy_straight(&image)) else { return false };
+pub fn write_copy_png(image: ThumbnailImage, icc: Vec<u8>, path: String) -> bool {
+    let Some(png) = picture_png(&copy_straight(&image), &icc) else { return false };
     let written = crate::project::write_atomically(std::path::Path::new(&path), |p| {
         std::fs::write(p, &png).map_err(|e| crate::project::file_error("copying", e))
     });
@@ -187,6 +206,11 @@ impl CanvasSession {
         let st = &mut *guard;
         let rgba = st.selected_pixels()?;
         Some(ThumbnailImage { width: st.doc.width(), height: st.doc.height(), rgba })
+    }
+
+    /// The colour profile a copy's colours are in, which its picture for other apps carries.
+    pub fn copy_profile(&self) -> Vec<u8> {
+        self.shared.lock().doc.picture_icc()
     }
 
     /// The whole canvas as it shows, to paste later.
@@ -459,7 +483,7 @@ mod tests {
     #[test]
     fn a_copy_as_a_png_keeps_its_transparency() {
         let copy = every_premultiplied();
-        let png = picture_png(&copy_straight(&copy)).unwrap();
+        let png = picture_png(&copy_straight(&copy), &[]).unwrap();
         let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
         let mut out = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut out).unwrap();
@@ -475,17 +499,33 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_as_a_png_carries_its_profile_and_132_pixels_an_inch() {
+        let icc = procraft_engine::icc::icc(procraft_engine::profile::Profile::DisplayP3);
+        let copy = ThumbnailImage { width: 2, height: 1, rgba: vec![255, 0, 0, 255, 0, 0, 0, 0] };
+        let png = picture_png(&copy_straight(&copy), &icc).unwrap();
+        let reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let info = reader.info();
+        assert_eq!(info.icc_profile.as_deref(), Some(&icc[..]));
+        let dims = info.pixel_dims.unwrap();
+        assert_eq!((dims.xppu, dims.yppu, dims.unit), (5197, 5197, png::Unit::Meter));
+        assert_eq!((f64::from(dims.xppu) * 0.0254).round(), 132.0);
+        // none given, none carried
+        let png = picture_png(&copy_straight(&copy), &[]).unwrap();
+        assert!(png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap().info().icc_profile.is_none());
+    }
+
+    #[test]
     fn a_copy_that_isnt_its_size_makes_no_png() {
-        assert!(picture_png(&ThumbnailImage { width: 3, height: 3, rgba: vec![0; 8] }).is_none());
-        assert!(picture_png(&ThumbnailImage { width: 0, height: 0, rgba: vec![] }).is_none());
+        assert!(picture_png(&ThumbnailImage { width: 3, height: 3, rgba: vec![0; 8] }, &[]).is_none());
+        assert!(picture_png(&ThumbnailImage { width: 0, height: 0, rgba: vec![] }, &[]).is_none());
         let dir = std::env::temp_dir().join(format!("procraft-copy-png-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("copy.png");
         let bad = ThumbnailImage { width: 2, height: 2, rgba: vec![0; 4] };
-        assert!(!write_copy_png(bad, path.to_string_lossy().into_owned()));
+        assert!(!write_copy_png(bad, vec![], path.to_string_lossy().into_owned()));
         assert!(!path.exists());
         let good = ThumbnailImage { width: 2, height: 1, rgba: vec![255, 0, 0, 255, 0, 0, 0, 0] };
-        assert!(write_copy_png(good, path.to_string_lossy().into_owned()));
+        assert!(write_copy_png(good, vec![], path.to_string_lossy().into_owned()));
         assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
         let _ = std::fs::remove_dir_all(&dir);
     }
