@@ -36,6 +36,15 @@ fn swell(t: f32) -> f32 {
     1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()
 }
 
+/// The press along a file brush's sample stroke, as its own previews ship it: light at the ends,
+/// full across the middle, one value per pen sample.
+const PRESS: [f32; 36] = [
+    0.105925, 0.135983, 0.172023, 0.214441, 0.263420, 0.318866, 0.380352, 0.447077, 0.517842, 0.591058, 0.664786,
+    0.736804, 0.804713, 0.866061, 0.918489, 0.959884, 0.988511, 1.003143, 1.003143, 0.988511, 0.959884, 0.918489,
+    0.866061, 0.804713, 0.736804, 0.664786, 0.591058, 0.517842, 0.447077, 0.380352, 0.318866, 0.263420, 0.214441,
+    0.172023, 0.135983, 0.105925,
+];
+
 /// A texture brush's preview swatch: its grain tooth repeated fine across the tip, the weave whole
 /// as the preview shows it - valleys dark and ridges lit, not just its brightest specks on black.
 pub fn paper_swatch(pixels: &[u8], side: u32) -> Vec<u8> {
@@ -59,19 +68,33 @@ pub fn paper_swatch(pixels: &[u8], side: u32) -> Vec<u8> {
     out
 }
 
+/// The press the preview's pen lays at `t` (0..1 along): a file brush's own shipped press, turned
+/// up by its preview scale; ours the swell the library was tuned around.
+pub fn pressure_at(brush: &Brush, t: f32) -> f32 {
+    let scale = brush.setting("preview_pressure_scale");
+    // blending brushes (the pens) keep the swell their previews were matched with
+    if brush.setting("grain_mix") >= 1.0 && !brush.blends() {
+        let x = t.clamp(0.0, 1.0) * (PRESS.len() - 1) as f32;
+        let i = (x as usize).min(PRESS.len() - 2);
+        let a = PRESS.get(i).copied().unwrap_or(0.0);
+        let b = PRESS.get(i + 1).copied().unwrap_or(a);
+        // the shipped press runs to full; our laws call a quarter press full, so it lands there
+        ((a + (b - a) * (x - i as f32)) * 2.5 * scale).clamp(0.0, 1.0) * PRESSURE_GAIN
+    } else {
+        // the control's full travel doubles the pressure
+        (brush.setting("preview_pressure_min") + PRESSURE_GAIN * 2.0 * scale * swell(t)).clamp(0.0, 1.0)
+    }
+}
+
 /// The sample stroke for `brush`, in canvas pixels.
 pub fn samples(brush: &Brush) -> Vec<Sample> {
-    let least = brush.setting("preview_pressure_min");
-    // the control's full travel doubles the pressure
-    let gain = PRESSURE_GAIN * 2.0 * brush.setting("preview_pressure_scale");
     // the pen held a quarter turn round from upright, then turned by the preview's own offset (a
     // quarter turn at 1)
     let azimuth = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
     (0..SAMPLES)
         .map(|i| {
             let t = i as f32 / (SAMPLES - 1) as f32;
-            let pressure = (least + gain * swell(t)).clamp(0.0, 1.0);
-            Sample { azimuth, ..Sample::at(along(t), pressure, i as f64 * STEP_MS) }
+            Sample { azimuth, ..Sample::at(along(t), pressure_at(brush, t), i as f64 * STEP_MS) }
         })
         .collect()
 }

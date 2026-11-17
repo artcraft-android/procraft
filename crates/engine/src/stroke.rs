@@ -2536,17 +2536,7 @@ impl StrokeBuilder {
         // a glaze that keeps the strongest stamp, or builds only towards its transfer, has no
         // overlap to make up for a flow thinned by the preview's light swell. An amount below 0
         // falls the other way, four times as fast, reaching nothing partway up the press.
-        // a file brush's capped preview lays its wash evenly along the stroke: the flow reads a
-        // steady press so the transfer doesn't pool bright where the swell peaks in the middle
-        let flow_press = if self.steady
-            && self.brush.setting("grain_mix") >= 1.0
-            && self.brush.rendering == Rendering::Capped
-            && !self.brush.mixes_wet()
-        {
-            0.25
-        } else {
-            pressure
-        };
+        let flow_press = pressure;
         let flowing = curves.through(PC::Flow, flow_press);
         let pressure_flow = if x.pressure_flow < 0.0 {
             (1.0 + 4.0 * x.pressure_flow * flowing).clamp(0.0, 1.0)

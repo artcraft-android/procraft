@@ -1654,11 +1654,11 @@ fn dump_brush_strokes() {
         let shade = if std::env::var("DUMP_COLOUR").is_ok_and(|c| c == "black") { 0.0 } else { 1.0 };
         s.set_color(shade, shade, shade);
         // the slider at the size the brush's preview draws, the pen turned and pressed as there
-        let (start, lean, least, gain) = {
+        let (start, lean, press) = {
             let brush = s.shared.lock().brush(ToolKind::Paint).clone();
             let share = procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE);
             let lean = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
-            (share, lean, brush.setting("preview_pressure_min"), 2.0 * brush.setting("preview_pressure_scale"))
+            (share, lean, move |t: f32| procraft_engine::preview::pressure_at(&brush, t))
         };
         let sizes: Vec<f32> = match std::env::var("DUMP_SIZES") {
             Ok(listed) => listed.split(',').map(|v| if v == "start" { start } else { v.parse().unwrap() }).collect(),
@@ -1731,8 +1731,8 @@ fn dump_brush_strokes() {
                 let wave = if std::env::var_os("DUMP_STRAIGHT").is_some() { 0.0 } else { 25.0 };
                 let mut p = sample((100.0 + t * 820.0) * across, y + (t * 6.0).sin() * wave * across, i as f64 * step);
                 p.pressure = if size == start {
-                    // the preview's swell: light at the ends, full in the middle
-                    (least + gain * 1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()).clamp(0.0, 1.0)
+                    // the preview's own press along the stroke
+                    press(t)
                 } else {
                     (std::f32::consts::PI * t).sin().max(0.05)
                 };
