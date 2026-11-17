@@ -1831,6 +1831,8 @@ enum Op {
     LiquifyClear,
     /// The liquify field's open step closed: what it changed kept to undo, nothing left to redo.
     LiquifyMark,
+    /// The liquify field's open step taken back: the field as its last closed step left it.
+    LiquifyTakeBack,
     /// The liquify field's last closed step undone, or the last undone done again.
     LiquifyUndo,
     LiquifyRedo,
@@ -4812,6 +4814,12 @@ impl Canvas {
         self.ops.push(Op::LiquifyMark);
     }
 
+    /// Takes the liquify field's open step back: the field as its last closed step left it (see
+    /// [`Self::liquify_mark`]), its steps to undo and redo as they were.
+    pub fn liquify_take_back(&mut self) {
+        self.ops.push(Op::LiquifyTakeBack);
+    }
+
     /// The liquify field as it was before its last closed step (see [`Self::liquify_mark`]), or
     /// as the last one undone left it. The caller closes a step still open first.
     pub fn liquify_undo(&mut self) {
@@ -5937,6 +5945,7 @@ impl Canvas {
                     }
                 }
                 Op::LiquifyMark => self.mark_field(device, &mut encoder),
+                Op::LiquifyTakeBack => self.take_back_field(&mut encoder),
                 Op::LiquifyUndo => self.liquify_history(device, &mut encoder, true),
                 Op::LiquifyRedo => self.liquify_history(device, &mut encoder, false),
                 Op::LiquifyKeep => self.kept_liquify = self.liquify.take(),
@@ -7541,6 +7550,22 @@ impl Canvas {
         }
     }
 
+    /// Takes the liquify field's open step back (see [`Canvas::liquify_take_back`]): where it
+    /// changed, the field as it was marked.
+    fn take_back_field(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(field) = self.liquify.as_mut() else { return };
+        let (w, h) = (field.texture.width(), field.texture.height());
+        let area = std::mem::replace(&mut field.changed, IRect::EMPTY).intersect(IRect::from_size(w, h));
+        if !area.is_empty() {
+            encoder.copy_texture_to_texture(
+                copy_at(&field.marked, area.x0, area.y0),
+                copy_at(&field.texture, area.x0, area.y0),
+                extent(area.width(), area.height()),
+            );
+        }
+        self.dirty = self.full();
+    }
+
     /// The liquify field's last closed step undone (`undo`), or the last undone done again: the
     /// part it changed swapped with how it was on the step's other side.
     fn liquify_history(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, undo: bool) {
@@ -8531,6 +8556,7 @@ impl Canvas {
             | Op::LiquifyScale(_)
             | Op::LiquifyClear
             | Op::LiquifyMark
+            | Op::LiquifyTakeBack
             | Op::LiquifyUndo
             | Op::LiquifyRedo
             | Op::LiquifyKeep
