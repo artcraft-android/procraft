@@ -278,6 +278,7 @@ fn main() {
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
         interface_touches: input::InterfaceTouches::default(),
+        modifiers: winit::keyboard::ModifiersState::empty(),
         maximised_before_full_screen: false,
         closed: false,
     };
@@ -347,6 +348,8 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
     /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
     interface_touches: input::InterfaceTouches,
+    /// The keyboard's modifiers held now, for Alt+Enter.
+    modifiers: winit::keyboard::ModifiersState,
     /// The window was maximised as it went full screen, and is maximised again as it comes back.
     maximised_before_full_screen: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
@@ -359,6 +362,19 @@ fn window_icon() -> Option<winit::window::Icon> {
     let rgba = picture.into_rgba8();
     let (width, height) = rgba.dimensions();
     winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// Whether `key` pressed with `modifiers` held is the window's full screen key: F11, or off a Mac
+/// Alt+Enter as well (Ctrl with Alt is AltGr, typing).
+fn full_screen_key(key: &winit::keyboard::Key, modifiers: winit::keyboard::ModifiersState) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::F11) => true,
+        Key::Named(NamedKey::Enter) => {
+            !cfg!(target_os = "macos") && modifiers.alt_key() && !modifiers.control_key() && !modifiers.super_key()
+        }
+        _ => false,
+    }
 }
 
 /// The window fills its screen without its frame, or goes back to a window. On Windows a maximised
@@ -497,12 +513,15 @@ impl ApplicationHandler for App {
         if response.repaint && event != WindowEvent::RedrawRequested {
             redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
         }
-        // F11: the window fills its screen without its frame (a pen display's whole screen for
-        // the canvas, as the tablet's), or goes back to a window
+        // F11, or Alt+Enter off a Mac: the window fills its screen without its frame (a pen
+        // display's whole screen for the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = m.state();
+        }
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.state.is_pressed()
             && !key.repeat
-            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+            && full_screen_key(&key.logical_key, self.modifiers)
         {
             toggle_full_screen(&screen.window, &mut self.maximised_before_full_screen);
         }
