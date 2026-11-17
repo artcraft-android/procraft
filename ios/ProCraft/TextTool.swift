@@ -97,6 +97,9 @@ final class TextTool {
     /// The typefaces and styles on offer.
     private(set) var families: [TextTypeface] = []
     private(set) var styles: [String] = []
+    /// The look the style sheet shows for the letters chosen (the first one's; underline and outline
+    /// on only when all of them have it), or for what is typed next at the caret.
+    private(set) var look: TextRunInfo?
 
     /// The text as it was when the style sheet opened, for its Cancel.
     @ObservationIgnored private var beforeStyle: TextInfo?
@@ -117,6 +120,7 @@ final class TextTool {
         TextFonts.wait()
         families = textTypefaces()
         styles = textStyles()
+        refreshLook()
         render()
         model.refresh()
         // its box is drawn through the view
@@ -162,23 +166,82 @@ final class TextTool {
 
     /// The keyboard changed what the field holds.
     func fieldChanged(_ text: String, selection next: NSRange) {
+        let before = (field, selection)
         field = text
         selection = next
+        // what was typed is found against where the letters chosen were; then where they now are
         if text != info?.text {
             change { $0.text = text }
+        }
+        if text != before.0 || next != before.1 {
+            chooseInCore()
         }
     }
 
     func selectionChanged(_ next: NSRange) {
+        guard next != selection else { return }
         selection = next
+        chooseInCore()
+    }
+
+    /// The letters chosen in the field as the core counts them (not UTF-16): first and last.
+    private var chosen: (start: UInt32, end: UInt32) {
+        let start = max(selection.location, 0)
+        let end = start + max(selection.length, 0)
+        return (
+            textIndexFromUtf16(text: field, utf16: UInt32(start)),
+            textIndexFromUtf16(text: field, utf16: UInt32(end))
+        )
+    }
+
+    /// The core told where the letters chosen are: what is typed next goes there, in the look there.
+    private func chooseInCore() {
+        let (start, end) = chosen
+        model.session.textSelect(start: start, end: end)
+        refreshLook()
+    }
+
+    private func refreshLook() {
+        let (start, end) = chosen
+        look = model.session.textLook(start: start, end: end)
+    }
+
+    /// The look the style sheet shows: the letters chosen's, else the text's own.
+    func shownLook(_ info: TextInfo) -> TextRunInfo {
+        look ?? TextRunInfo(
+            len: 0, font: info.font, style: info.style, size: info.size, kerning: info.kerning, tracking: info.tracking,
+            baseline: info.baseline, opacity: info.opacity, underline: info.underline, outline: info.outline,
+            r: info.r, g: info.g, b: info.b
+        )
+    }
+
+    /// The look of the letters chosen changed by `change` (theirs alone); with only a caret, the
+    /// look of what is typed there next.
+    func restyle(_ change: TextStyleChange) {
+        let (start, end) = chosen
+        guard let now = model.session.textRestyle(start: start, end: end, change: change) else { return }
+        info = now
+        render()
+        refreshLook()
+    }
+
+    /// The colour chosen while editing: the core gave it to the letters chosen (and what is typed
+    /// next), so the text is read and drawn again.
+    func colourChosen() {
+        guard info != nil, let id = model.session.editingText(), let now = model.session.layerText(id: id) else { return }
+        if now != info {
+            info = now
+            render()
+        }
+        refreshLook()
     }
 
     func change(_ apply: (inout TextInfo) -> Void) {
         guard var next = info else { return }
         apply(&next)
-        info = next
-        _ = model.session.setText(info: next)
+        info = model.session.setText(info: next) ?? next
         render()
+        refreshLook()
     }
 
     /// Draws the text into its layer off the main thread (only where it was and now reaches), those
@@ -263,7 +326,7 @@ final class TextTool {
     func importFont(_ url: URL) {
         guard let bytes = url.readPicked(), let typeface = importTextFont(bytes: bytes, fileName: url.lastPathComponent) else { return }
         families = textTypefaces()
-        change { $0.font = typeface.family }
+        restyle(.font(family: typeface.family))
         model.showNotice("Font imported")
     }
 
@@ -822,22 +885,24 @@ private struct TextStyleSheet: View {
     }
 
     private var fontCard: some View {
-        SheetCard(title: "Font", shape: UnevenRoundedRectangle(topLeadingRadius: cardCorner, bottomLeadingRadius: cardCorner, style: .circular)) {
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Font", shape: UnevenRoundedRectangle(topLeadingRadius: cardCorner, bottomLeadingRadius: cardCorner, style: .circular)) {
             rows(tool.families.count) { i in
                 let f = tool.families[i]
-                return Cell(name: f.name, selected: f.family == info.font, font: .custom(f.name, size: 15)) {
-                    tool.change { $0.font = f.family }
+                return Cell(name: f.name, selected: f.family == look.font, font: .custom(f.name, size: 15)) {
+                    tool.restyle(.font(family: f.family))
                 }
             }
         }
     }
 
     private var styleCard: some View {
-        SheetCard(title: "Style", shape: UnevenRoundedRectangle(bottomTrailingRadius: cardCorner, topTrailingRadius: cardCorner, style: .circular)) {
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Style", shape: UnevenRoundedRectangle(bottomTrailingRadius: cardCorner, topTrailingRadius: cardCorner, style: .circular)) {
             rows(tool.styles.count) { i in
                 let s = tool.styles[i]
-                return Cell(name: s, selected: s == info.style, font: .system(size: 15)) {
-                    tool.change { $0.style = s }
+                return Cell(name: s, selected: s == look.style, font: .system(size: 15)) {
+                    tool.restyle(.style(name: s))
                 }
             }
         }
@@ -848,25 +913,27 @@ private struct TextStyleSheet: View {
     }
 
     private var designCard: some View {
-        SheetCard(title: "Design", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
+        // the letters chosen's, but the leading the whole text's
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Design", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
             VStack(spacing: 0) {
-                DesignRow(label: "Size", value: sizeToSlider(info.size), shown: String(format: "%.1fpt", pt(info.size)), fromMiddle: false) { v in
-                    tool.change { $0.size = sliderToSize(v) }
+                DesignRow(label: "Size", value: sizeToSlider(look.size), shown: String(format: "%.1fpt", pt(look.size)), fromMiddle: false) { v in
+                    tool.restyle(.size(size: sliderToSize(v)))
                 }
-                DesignRow(label: "Kerning", value: info.kerning / 2 + 0.5, shown: String(format: "%.1f%%", info.kerning * 100)) { v in
-                    tool.change { $0.kerning = v * 2 - 1 }
+                DesignRow(label: "Kerning", value: look.kerning / 2 + 0.5, shown: String(format: "%.1f%%", look.kerning * 100)) { v in
+                    tool.restyle(.kerning(value: v * 2 - 1))
                 }
-                DesignRow(label: "Tracking", value: info.tracking / 2 + 0.5, shown: String(format: "%.1f%%", info.tracking * 100)) { v in
-                    tool.change { $0.tracking = v * 2 - 1 }
+                DesignRow(label: "Tracking", value: look.tracking / 2 + 0.5, shown: String(format: "%.1f%%", look.tracking * 100)) { v in
+                    tool.restyle(.tracking(value: v * 2 - 1))
                 }
                 DesignRow(label: "Leading", value: info.leading / 2 + 0.5, shown: "\(wholeNumber(pt(info.leading * info.size)))pt") { v in
                     tool.change { $0.leading = v * 2 - 1 }
                 }
-                DesignRow(label: "Baseline", value: info.baseline / 2 + 0.5, shown: "\(wholeNumber(pt(info.baseline * info.size)))pt") { v in
-                    tool.change { $0.baseline = v * 2 - 1 }
+                DesignRow(label: "Baseline", value: look.baseline / 2 + 0.5, shown: "\(wholeNumber(pt(look.baseline * look.size)))pt") { v in
+                    tool.restyle(.baseline(value: v * 2 - 1))
                 }
-                DesignRow(label: "Opacity", value: info.opacity, shown: String(format: "%.1f%%", info.opacity * 100), fromMiddle: false) { v in
-                    tool.change { $0.opacity = v }
+                DesignRow(label: "Opacity", value: look.opacity, shown: String(format: "%.1f%%", look.opacity * 100), fromMiddle: false) { v in
+                    tool.restyle(.opacity(value: v))
                 }
             }
             .padding(.horizontal, 4)
@@ -888,6 +955,8 @@ private struct TextStyleSheet: View {
         ]
         let gridTall: CGFloat = wide ? 36 : 35
         let perRow = wide ? 4 : 2
+        // underline and outline the letters chosen's (on for all of them unless all have it already)
+        let look = tool.shownLook(info)
         return SheetCard(title: "Attributes", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
             VStack(spacing: wide ? 20 : 4) {
                 ForEach(Array(stride(from: 0, to: aligns.count, by: perRow)), id: \.self) { first in
@@ -900,8 +969,8 @@ private struct TextStyleSheet: View {
                     }
                 }
                 let looks = HStackOrStack(wide: wide) {
-                    attribute(PcIcons.textUnderline, on: info.underline, size: 38, tall: 36) { tool.change { $0.underline.toggle() } }
-                    attribute(PcIcons.textOutline, on: info.outline, size: 38, tall: 36) { tool.change { $0.outline.toggle() } }
+                    attribute(PcIcons.textUnderline, on: look.underline, size: 38, tall: 36) { tool.restyle(.underline(on: !look.underline)) }
+                    attribute(PcIcons.textOutline, on: look.outline, size: 38, tall: 36) { tool.restyle(.outline(on: !look.outline)) }
                     attribute(PcIcons.textVertical, on: info.vertical, size: 41, tall: 36) { tool.change { $0.vertical.toggle() } }
                 }
                 looks

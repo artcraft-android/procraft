@@ -1975,6 +1975,8 @@ final class CanvasModel {
         }
         // a transform's touch takes the node it lands on (the warp's inner points with the advanced mesh)
         session.setTouchTransforming(transforming: transforming ? TransformTouch(advancedMesh: transform.advancedMesh) : nil)
+        // the guide editor's touch drags a handle; fingers only move the view
+        session.setTouchGuideEditing(editing: guide.editing)
         // a touch on the canvas closes an adjustment's menu and liquify's popups
         closedAdjustMenu = adjustMenuAt != nil
         if adjustment != nil {
