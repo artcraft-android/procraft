@@ -22,7 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,15 +86,15 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             else -> vm.closeArtwork()
         }
     }
-    // panels over the canvas are frosted (where it is on the screen: the window's corner, and
-    // in from it by what the interface keeps clear of)
-    val window = androidx.compose.ui.platform.LocalView.current.rootView
-    androidx.compose.runtime.DisposableEffect(window, keptClear) {
-        vm.backdrops.windowOnScreen = {
-            val at = IntArray(2).also(window::getLocationOnScreen)
-            androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat()) + keptClear.corner
+    // panels over the canvas are frosted (where it is on the screen: the corner of the window's
+    // content, this view's, and in from it by what the interface keeps clear of; see canvasCorner)
+    val content = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(content, keptClear) {
+        vm.backdrops.canvasOnScreen = {
+            val at = IntArray(2).also(content::getLocationOnScreen)
+            canvasCorner(androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat()), keptClear)
         }
-        onDispose { vm.backdrops.windowOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
+        onDispose { vm.backdrops.canvasOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
     }
     CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
         // files dragged in from another app: pictures as layers, brushes into the library
@@ -182,7 +182,7 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR) {
                         SideBar(
                             vm,
-                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow().translate(-keptClear.corner) },
+                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInRoot().translate(-keptClear.corner) },
                             right = vm.rightHanded,
                             trackHeight = sideBar.track,
                             shown = barsShown,
