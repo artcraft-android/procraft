@@ -297,7 +297,7 @@ impl Shape {
             ShapeKind::Triangle => polygon(stroke, 3).unwrap_or_else(|| self.clone()),
             ShapeKind::EquilateralTriangle => equilateral(&polygon(stroke, 3).unwrap_or_else(|| self.clone())),
             ShapeKind::Line => line_of(stroke),
-            ShapeKind::Arc => fit_arc(stroke).unwrap_or_else(|| self.clone()),
+            ShapeKind::Arc => best_faithful_arc(stroke).or_else(|| fit_arc(stroke)).unwrap_or_else(|| self.clone()),
             // fitted by a plugin, never here
             ShapeKind::Curve => self.clone(),
             ShapeKind::Polyline => {
@@ -532,16 +532,18 @@ pub fn recognise(stroke: &[Vec2]) -> Vec<Shape> {
     if chord > CLOSED * length {
         // open: corners make a polyline; an even bend an arc
         let polyline = Shape { kind: ShapeKind::Polyline, nodes: simplify(&pts, CORNER_TOLERANCE * size(&pts)) };
-        let arc = fit_arc(&pts);
+        // An ellipse fit to a short, noisy circular arc can be unstable. Try a
+        // circle too, but only accept candidates that actually follow the pen.
+        let arc = best_faithful_arc(&pts);
         let arc_error = arc.as_ref().map_or(f32::MAX, |a| outline_error(a, &pts));
         // a sharp corner counts only where the corners fit clearly better than an even bend: a
         // hand's wobble along an arc can turn as sharply between a few points, but is no corner
         let cornered = || sharp_corner(&pts, &polyline.nodes) && arc_error > 2.0 * outline_error(&polyline, &pts);
-        // An S-shaped or otherwise reversing bend is not a single elliptical arc, even
-        // when a conic fit happens to have a small average distance to its outline.
-        // Keep it as a polyline so the QuickShape curves plugin can fit smooth cubics.
+        // A genuine arc curves in one direction, and small deliberate end bends must not
+        // be hidden by averaging them against the much longer, round-looking body.
         let reversing = reverses_bend(&pts);
-        if polyline.nodes.len() >= 3 && (reversing || arc_error > 0.025 || cornered()) {
+        if arc_misses_stroke_end(&pts) || (polyline.nodes.len() >= 3 && (reversing || arc_error > 0.025 || cornered()))
+        {
             return vec![polyline, line_of(&pts)];
         }
         return match arc {
@@ -859,7 +861,14 @@ impl Oval {
 /// The stretch of the ellipse fitted to the stroke that the stroke swept: from the least to the
 /// most of the way round the centre it got, the way it went, its middle halfway between.
 fn fit_arc(pts: &[Vec2]) -> Option<Shape> {
-    let oval = fit_oval(pts)?;
+    arc_with_oval(pts, fit_oval(pts)?)
+}
+
+fn fit_circle_arc(pts: &[Vec2]) -> Option<Shape> {
+    arc_with_oval(pts, fit_circle_oval(pts)?)
+}
+
+fn arc_with_oval(pts: &[Vec2], oval: Oval) -> Option<Shape> {
     let angle = |p: Vec2| (p - oval.centre).y.atan2((p - oval.centre).x);
     let first = angle(*pts.first()?);
     let (mut was, mut gone, mut least, mut most) = (first, 0.0f32, 0.0f32, 0.0f32);
@@ -1085,6 +1094,137 @@ fn fit_oval(pts: &[Vec2]) -> Option<Oval> {
         b: out(-sin * rb, cos * rb),
     };
     (oval.centre.is_finite() && oval.a.is_finite() && oval.b.is_finite()).then_some(oval)
+}
+
+/// The least-squares circle is more stable than a general conic for a short,
+/// near-circular arc, particularly if its input samples include pen jitter.
+fn fit_circle_oval(pts: &[Vec2]) -> Option<Oval> {
+    if pts.len() < 5 {
+        return None;
+    }
+    let scale = size(pts) as f64;
+    let mx = pts.iter().map(|p| p.x as f64).sum::<f64>() / pts.len() as f64;
+    let my = pts.iter().map(|p| p.y as f64).sum::<f64>() / pts.len() as f64;
+    let mut m = [[0.0f64; 3]; 3];
+    let mut rhs = [0.0f64; 3];
+    for p in pts {
+        let x = (p.x as f64 - mx) / scale;
+        let y = (p.y as f64 - my) / scale;
+        let (v, distance) = ([x, y, 1.0], x * x + y * y);
+        for i in 0..3 {
+            rhs[i] += v[i] * distance;
+            for j in 0..3 {
+                m[i][j] += v[i] * v[j];
+            }
+        }
+    }
+    let inverse = inverse(m)?;
+    let [dx, dy, constant] = inverse.map(|row| dot3(row, rhs));
+    let (cx, cy) = (dx / 2.0, dy / 2.0);
+    let radius = (cx * cx + cy * cy + constant).sqrt() * scale;
+    let oval = Oval {
+        centre: Vec2::new((mx + cx * scale) as f32, (my + cy * scale) as f32),
+        a: Vec2::new(radius as f32, 0.0),
+        b: Vec2::new(0.0, radius as f32),
+    };
+    (oval.centre.is_finite() && oval.a.is_finite() && oval.b.is_finite() && radius > 0.0).then_some(oval)
+}
+
+/// Prefer the original elliptical representation when fits are effectively equal, to
+/// keep roundtrip editing stable; a circle can rescue a short noisy arc where a general
+/// conic would move it away from the stroke. Reject both if geometry is too far away.
+fn best_faithful_arc(stroke: &[Vec2]) -> Option<Shape> {
+    let ellipse = fit_arc(stroke).filter(|a| arc_follows_stroke(a, stroke));
+    let circle = fit_circle_arc(stroke).filter(|a| arc_follows_stroke(a, stroke));
+    match (ellipse, circle) {
+        (Some(a), Some(b)) if outline_error(&a, stroke) <= outline_error(&b, stroke) + 0.001 => Some(a),
+        (Some(_), Some(b)) => Some(b),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+/// An overall mean error is not enough to recognise an arc: the fitted ellipse can
+/// pull the beginning or end far from the pen, or cut across a localized bend. Check
+/// individual deviations *in both directions* before replacing the drawn stroke.
+/// Slight stylus jitter is acceptable; a large local change should be fitted as a
+/// smooth freehand curve instead of being forced into the wrong elliptical arc.
+fn arc_follows_stroke(arc: &Shape, stroke: &[Vec2]) -> bool {
+    let (Some(&first), Some(&last)) = (stroke.first(), stroke.last()) else { return false };
+    if arc.nodes.len() < 3 {
+        return false;
+    }
+    let scale = size(stroke);
+    let end_limit = (scale * 0.028).clamp(3.5, 17.0);
+    if arc.nodes[0].distance(first) > end_limit || arc.nodes[2].distance(last) > end_limit {
+        return false;
+    }
+    let local_limit = (scale * 0.042).clamp(5.0, 24.0);
+    let outline = arc.outline();
+    let near_segments = |point: Vec2, path: &[Vec2]| {
+        path.windows(2).map(|w| distance_to_segment(point, w[0], w[1])).fold(f32::MAX, f32::min)
+    };
+    stroke.iter().all(|&p| near_segments(p, &outline) <= local_limit)
+        && outline.iter().all(|&p| near_segments(p, stroke) <= local_limit)
+}
+
+/// A very short intentional deviation at the end can get lost in the *average* error
+/// over a much longer arc. Fit an ellipse to the body, excluding its last short stretch,
+/// then check whether the end pulls consistently away from that ellipse. This leaves normal
+/// hand wobble alone: the allowable error scales with the body's own fitting noise.
+fn arc_misses_stroke_end(pts: &[Vec2]) -> bool {
+    if pts.len() < 12 {
+        return false;
+    }
+    let cutoff = (size(pts) * 0.08).clamp(14.0, 45.0);
+    let mut start = pts.len() - 1;
+    let mut covered = 0.0;
+    while start > 0 && covered < cutoff {
+        covered += pts[start].distance(pts[start - 1]);
+        start -= 1;
+    }
+    if start < 6 {
+        return false;
+    }
+    let candidates = [fit_oval(&pts[..=start]), fit_circle_oval(&pts[..=start])];
+    let Some(oval) = candidates.into_iter().flatten().min_by(|a, b| {
+        let error = |oval: &Oval| {
+            pts[..=start]
+                .iter()
+                .map(|&p| {
+                    let v = p - oval.centre;
+                    let angle = v.y.atan2(v.x);
+                    p.distance(oval.at_angle(angle))
+                })
+                .sum::<f32>()
+        };
+        error(a).total_cmp(&error(b))
+    }) else {
+        return false;
+    };
+    let miss = |p: Vec2| {
+        let v = p - oval.centre;
+        if v.dot(v) < 1e-8 {
+            return f32::MAX;
+        }
+        let angle = v.y.atan2(v.x);
+        p.distance(oval.at_angle(angle))
+    };
+    let body_error = pts[..=start].iter().map(|&p| miss(p)).sum::<f32>() / (start + 1) as f32;
+    let threshold = (size(pts) * 0.012).clamp(3.0, 7.0) + body_error * 1.5;
+    let tip = *pts.last().unwrap();
+    if miss(tip) <= threshold {
+        return false;
+    }
+    // Require a continuing deviation, not one off-path final sample from a pen lift.
+    let mut near = pts.len() - 1;
+    let near_reach = (size(pts) * 0.025).clamp(4.0, 12.0);
+    let mut walked = 0.0;
+    while near > start + 1 && walked < near_reach {
+        walked += pts[near].distance(pts[near - 1]);
+        near -= 1;
+    }
+    miss(pts[near]) > threshold * 0.45
 }
 
 /// Whether the stroke turns sharply at any of the corners it simplifies to: its direction just
@@ -1336,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_drawn_by_hand_is_a_curve_not_a_polyline() {
+    fn a_hand_drawn_hook_that_an_ellipse_would_distort_stays_freehand() {
         // a hand's hook: over the top, down the right side and away, far from a circle's bend
         let knots = [
             (270.0, 595.0),
@@ -1370,7 +1510,9 @@ mod tests {
             })
             .collect();
         let shape = &recognise(&hook)[0];
-        assert_eq!(shape.kind, ShapeKind::Arc);
+        // This hand-drawn hook is not close enough to one elliptical arc. Preserve the
+        // geometry for the curve plugin rather than pulling its end toward a conic.
+        assert_eq!(shape.kind, ShapeKind::Polyline);
     }
 
     #[test]
@@ -1461,6 +1603,79 @@ mod tests {
             .collect();
         assert!(!reverses_bend(&genuine_arc));
         assert_eq!(recognise(&genuine_arc)[0].kind, ShapeKind::Arc);
+    }
+
+    #[test]
+    fn a_nearly_round_stroke_with_a_local_bump_keeps_its_drawn_shape() {
+        let smooth: Vec<Vec2> = (0..=140)
+            .map(|i| {
+                let t = i as f32 / 140.0 * 2.0;
+                Vec2::new(200.0 + 150.0 * t.cos(), 200.0 + 150.0 * t.sin())
+            })
+            .collect();
+        assert_eq!(recognise(&smooth)[0].kind, ShapeKind::Arc);
+        // A localized deviation in the middle can be averaged out by a global ellipse fit,
+        // causing a recognizable bump to disappear after QuickShape snaps it.
+        let mut bumped = smooth.clone();
+        for (i, p) in bumped.iter_mut().enumerate() {
+            let distance = (i as f32 - 70.0).abs();
+            let bump = (1.0 - distance / 9.0).max(0.0) * 25.0;
+            let t = i as f32 / 140.0 * 2.0;
+            *p = *p + Vec2::new(t.cos(), t.sin()) * bump;
+        }
+        assert_eq!(recognise(&bumped)[0].kind, ShapeKind::Polyline, "an elliptical arc lost a meaningful local bump");
+        // Minor input noise should still be recognized as an arc.
+        let jittered: Vec<Vec2> = smooth
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let t = i as f32 / 140.0 * 2.0;
+                p + Vec2::new(t.cos(), t.sin()) * (if i % 2 == 0 { 1.5 } else { -1.5 })
+            })
+            .collect();
+        assert_eq!(recognise(&jittered)[0].kind, ShapeKind::Arc);
+    }
+
+    #[test]
+    fn small_deliberate_end_bend_is_not_classified_as_an_arc() {
+        // A nearly perfect round arc ending with a short intentional stroke in a different
+        // direction. The global average fitting error hides this small local change.
+        let arc: Vec<Vec2> = (0..=100)
+            .map(|i| {
+                let t = i as f32 / 100.0 * 2.0;
+                Vec2::new(200.0 + 150.0 * t.cos(), 200.0 + 150.0 * t.sin())
+            })
+            .collect();
+        assert_eq!(recognise(&arc)[0].kind, ShapeKind::Arc);
+        let t: f32 = 2.0;
+        let tangent = Vec2::new(-t.sin(), t.cos());
+        let outward = Vec2::new(t.cos(), t.sin());
+        for (length, angle) in [(12.0_f32, 1.1_f32), (20.0, 0.8)] {
+            let end_direction = tangent * angle.cos() + outward * angle.sin();
+            let mut stroke = arc.clone();
+            let start = *stroke.last().unwrap();
+            for k in 1..=8 {
+                stroke.push(start + end_direction * (length * k as f32 / 8.0));
+            }
+            assert_eq!(
+                without_end_hook(&stroke, end_hook_reach(&stroke, 30.0)).len(),
+                stroke.len(),
+                "deliberate end bend was trimmed"
+            );
+            assert_eq!(
+                recognise(&stroke)[0].kind,
+                ShapeKind::Polyline,
+                "end bend of {length} pixels at {angle} radians was treated as an arc"
+            );
+        }
+        // Tiny pen jitter at the end of a real arc should not make it a polyline.
+        let mut jittered = arc.clone();
+        let start = *jittered.last().unwrap();
+        for k in 1..=8 {
+            let delta = tangent * (k as f32 * 1.5) + outward * (if k % 2 == 0 { 1.0 } else { -1.0 });
+            jittered.push(start + delta);
+        }
+        assert_eq!(recognise(&jittered)[0].kind, ShapeKind::Arc);
     }
 
     #[test]
