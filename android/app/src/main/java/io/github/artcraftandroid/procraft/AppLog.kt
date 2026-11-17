@@ -200,6 +200,34 @@ object AppLog {
                     "the app's heap up to ${Runtime.getRuntime().maxMemory() shr 20} MB",
             )
             appendLine("screen: ${screen.widthPixels}×${screen.heightPixels}, ${screen.densityDpi} dpi")
+            appendLine(display(context))
         }
+    }
+
+    /**
+     * What a report of the screen showing the app wrongly needs: the chip (Android 12 on), whether
+     * the screen takes wide colour and HDR, the colour space a wide-colour window is drawn in there,
+     * and whether Wide Color is on.
+     */
+    private fun display(context: Context): String {
+        val config = context.resources.configuration
+        val chip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}" else "not told before Android 12"
+        val wideSpace = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                context.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.preferredWideGamutColorSpace?.name
+            }.getOrNull() ?: "none"
+        } else {
+            "not told before Android 10"
+        }
+        val wideColor = runCatching {
+            context.getSharedPreferences("interface", Context.MODE_PRIVATE).getBoolean(
+                io.github.artcraftandroid.procraft.canvas.CanvasViewModel.WIDE_COLOR,
+                io.github.artcraftandroid.procraft.canvas.wideColorByDefault(),
+            )
+        }.getOrNull()
+        return "chip: $chip; screen: wide colour ${if (config.isScreenWideColorGamut) "yes" else "no"}, " +
+            "HDR ${if (config.isScreenHdr) "yes" else "no"}, a wide window drawn in $wideSpace; " +
+            "Wide Color ${when (wideColor) { true -> "on"; false -> "off"; null -> "unknown" }}"
     }
 }
