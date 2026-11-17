@@ -273,7 +273,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let sharp = su.grain_sharp == 1u;
         // a brush file's own image has the fine detail itself; ours only stands in for it
         let own = su.grain_side > 256.0;
-        let g_lod = max(log2(su.grain_side / scale), 0.0);
+        let g_lod = select(max(log2(su.grain_side / scale), 0.0), 0.0, su.grain_blend >= GRAIN_REF);
         var raw = textureSampleLevel(grains, grain_smp, g_uv, su.grain, select(g_lod, 0.0, sharp && !own)).r;
         if (sharp) {
             if (own) {

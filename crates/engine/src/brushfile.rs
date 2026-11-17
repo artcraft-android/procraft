@@ -704,6 +704,11 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         };
         let own = [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT].into_iter().find(|&m| i64::from(m) == n);
         set("grain_blend", own.unwrap_or_else(|| crate::native::blend_from(n).id()) as f32);
+        // the engine mixes the grain its own way (the studio's thirteen, one past it here so none
+        // reads as zero); a mode it has not keeps the layers' blend above
+        if let Some(mix) = crate::native::grain_mix_from(n) {
+            set("grain_mix", (mix + 1) as f32);
+        }
     }
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
         set("burnt_blend", m as f32);

@@ -128,7 +128,9 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let sharp = lu.grain_sharp > 0.5;
         // a brush file's own image has the fine detail itself; ours only stands in for it
         let own = lu.grain_side > 256.0;
-        let level = max(log2(lu.grain_side / lu.grain_scale), 0.0);
+        // a file's own grain keeps its fine tooth crisp (the preview shows it sharp, not averaged
+        // down to grey by the mip the tile size would pick)
+        let level = select(max(log2(lu.grain_side / lu.grain_scale), 0.0), 0.0, lu.grain_blend >= GRAIN_REF);
         var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, select(level, 0.0, sharp && !own)).r;
         if (sharp) {
             if (own) {

@@ -41,6 +41,9 @@ const STROKE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SLOT: u64 = 256;
 /// The Multiply blend mode's number.
 const MULTIPLY_MODE: u32 = 1;
+/// Where the engine's own grain mix sits in a uniform's `grain_blend` (the shader's GRAIN_REF):
+/// thirteen ways past the layers' and the texture rules, a brush from a file mixed by its place.
+const GRAIN_REF_BASE: u32 = 64;
 /// Set in a layer uniform's `stroke_blend` (over the blend mode's number): luminance blending.
 const STROKE_LUMINANCE: u32 = 0x100;
 
@@ -397,7 +400,18 @@ impl StrokeStyle {
             wet_jitter: if wet { brush.setting("wet_jitter").clamp(0.0, 1.0) } else { 0.0 },
             blend: brush.setting("blend_mode").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
             blur_jitter: if wet { brush.setting("wet_blur_jitter").clamp(0.0, 1.0) } else { 0.0 },
-            grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
+            grain_blend: {
+                let mut mix = brush.setting("grain_mix").round().clamp(0.0, 13.0);
+                // a wet wash lifts over the tooth like the linear height, not cut bare by it
+                if mix == 12.0 && brush.mixes_wet() {
+                    mix = 13.0;
+                }
+                if mix >= 1.0 {
+                    GRAIN_REF_BASE + (mix as u32 - 1)
+                } else {
+                    brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32
+                }
+            },
             burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
             // a brush's rotation turns its grain the other way to the shaders' angle
             // the editors' turn of the image, the whole grain with it (the rotation control is

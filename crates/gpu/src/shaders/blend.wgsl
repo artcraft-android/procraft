@@ -175,8 +175,12 @@ fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
 // coverage `a` and grain `g` combined by the grain's blend mode `mode`, as deep as `depth`: two
 // height-like modes of the grain's own (27 and 28: a height the grain cuts into, steep-toothed at
 // a shallow depth and raised by the depth deeper, 28 also thinned over the grain's light), normal
-// taking the coverage down by the tooth, and every other mode by the blend mode's own rule
+// taking the coverage down by the tooth, and every other mode by the blend mode's own rule. A
+// brush drawn from a file mixes its grain the engine's own way instead (GRAIN_REF up)
 fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
+    if (mode >= GRAIN_REF && mode < GRAIN_REF + 13u) {
+        return grain_ref_mix(a, g, depth, mode - GRAIN_REF);
+    }
     if (mode >= TEXTURE_RULES) {
         return texture_rule(a, g, depth, mode);
     }
@@ -215,6 +219,54 @@ fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
         r = a + min(a / GRAIN_RISE_FULL, 1.0) * (r - a);
     }
     // a depth past whole can take the coverage below nothing
+    return clamp(r, 0.0, 1.0);
+}
+
+// The engine a brush file comes from mixes its grain by its own thirteen ways, numbered past the
+// layers' and the texture rules (the studio lists them in this order). The first eleven lean the
+// coverage toward the mix as far as the depth goes; the last two are a height the depth raises,
+// the twelfth also lifted over the grain's own light. The depth a file keeps is twice the one we
+// draw at, so it is read back at its own scale here.
+const GRAIN_REF: u32 = 64u;
+fn grain_ref_mix(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
+    let eps = 1e-4;
+    // the file's own depth, twice the one we draw at
+    let d = depth * 2.0;
+    var r = 0.0;
+    if (mode == 11u) {
+        // a height the depth raises, the tooth taking the coverage down a grain at a time so the
+        // wash keeps its grain across the whole body, not a solid middle
+        return clamp(12.0 * d * a - g, 0.0, 1.0);
+    }
+    if (mode == 12u) {
+        // the linear height also lifts over the grain's own light where the grain is shy of whole
+        let height = 12.0 * d * a - g;
+        let lift = 12.5 * d * a * g;
+        return clamp(select(height, max(height, lift), g < 1.0), 0.0, 1.0);
+    }
+    // the attenuating ways lean the coverage toward the mix as far as the depth goes
+    switch (mode) {
+        case 0u: { r = a * g; }
+        case 1u: { r = min(a, g); }
+        case 2u: { r = 1.0 - (1.0 - a) / (g + eps); }
+        case 3u: { r = a + g - 1.0; }
+        case 4u: { r = max(a, g); }
+        case 5u: { r = a / (1.0 - g + eps); }
+        case 6u: { r = select(1.0 - 2.0 * (1.0 - a) * (1.0 - g), 2.0 * a * g, a <= 0.5); }
+        case 7u: {
+            let sum = a + g;
+            let pick = select(0.0, 1.0, a >= g);
+            r = select(select(0.0, pick, sum >= 1.0), 1.0, sum > 1.0);
+        }
+        case 8u: { r = abs(a - g); }
+        case 9u: { r = a - g; }
+        default: { r = a / (g + eps); }
+    }
+    r = clamp(r, 0.0, 1.0);
+    r = a + (r - a) * d;
+    r = clamp(r, 0.0, 1.0);
+    // an attenuating wash keeps a solid body with the grain at the rim, as its preview shows
+    r = mix(r, a, smoothstep(0.5, 1.0, a) * 0.7);
     return clamp(r, 0.0, 1.0);
 }
 
