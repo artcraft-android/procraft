@@ -546,6 +546,14 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             self?.model.resumeTracking()
             self?.model.readAppSettings()
         })
+        // Paste offered once anything holds a picture: what another app copied meanwhile, or this
+        // app's clipboard changing
+        model.lookAtSystemClipboard()
+        for name in [UIApplication.didBecomeActiveNotification, UIPasteboard.changedNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.model.lookAtSystemClipboard()
+            })
+        }
     }
 
     override var canBecomeFirstResponder: Bool { true }

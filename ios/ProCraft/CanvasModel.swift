@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Which panel hangs from the top bar.
 enum Panel {
@@ -215,8 +216,17 @@ final class CanvasModel {
         get { AppSettings.shared.actionsTab }
         set { AppSettings.shared.actionsTab = newValue }
     }
-    /// What was last cut or copied, for pasting.
+    /// What was last cut or copied here, for pasting, kept as it is; it goes on the system's
+    /// clipboard too, in place of what that held, as a picture other apps paste.
     @ObservationIgnored private var clipboard: ThumbnailImage?
+    /// The system clipboard's count of changes when the last copy here was made, and once its
+    /// picture went on it: a count past both is another app's copy, made since.
+    @ObservationIgnored private var clipboardCount = -1
+    @ObservationIgnored private var clipboardOwnCount = -1
+    /// Which copy went to the system's clipboard last: one still on its way is left out once a
+    /// newer one is made.
+    @ObservationIgnored private var clipTurn = 0
+    /// Paste has something to take: a copy made here, or a picture on the system's clipboard.
     private(set) var canPaste = false
     /// The drawing guide is on.
     var guideOn: Bool {
@@ -1504,39 +1514,98 @@ final class CanvasModel {
 
     // MARK: Actions
 
-    func cutLayer() {
+    /// Keeps `copy` to paste, and puts it on the system's clipboard in place of what that held: a
+    /// PNG other apps paste, its transparency kept, in the colour profile its colours are in. Made
+    /// off the main thread, as a big canvas takes a moment.
+    private func keepCopy(_ copy: ThumbnailImage) {
+        clipboard = copy
+        canPaste = true
+        clipboardCount = UIPasteboard.general.changeCount
+        clipTurn += 1
+        let turn = clipTurn
+        let profile = session.copyProfile()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("copy-\(UUID().uuidString).png")
+            var png: Data?
+            if writeCopyPng(image: copy, icc: profile, path: file.path) {
+                png = try? Data(contentsOf: file)
+            }
+            try? FileManager.default.removeItem(at: file)
+            DispatchQueue.main.async {
+                guard let self, let png, turn == self.clipTurn else { return }
+                UIPasteboard.general.setItems([[UTType.png.identifier: png]])
+                self.clipboardOwnCount = UIPasteboard.general.changeCount
+            }
+        }
+    }
+
+    /// Looks again whether there is anything to paste: a copy made here, or a picture on the
+    /// system's clipboard, told by the kinds it holds (nothing is read from it, so the system
+    /// doesn't ask the user).
+    func lookAtSystemClipboard() {
+        canPaste = clipboard != nil || UIPasteboard.general.hasImages
+    }
+
+    /// The system's clipboard holds a picture copied after the last copy here (another app's, or
+    /// one copied here in another artwork).
+    private var systemPictureNewer: Bool {
+        let board = UIPasteboard.general
+        guard board.hasImages else { return false }
+        return clipboard == nil || (board.changeCount != clipboardCount && board.changeCount != clipboardOwnCount)
+    }
+
+    /// The picture on the system's clipboard as a file's bytes (its own kind first, which keeps
+    /// its transparency); none if it can't be read.
+    private func systemPictureBytes() -> Data? {
+        let board = UIPasteboard.general
+        for kind in [UTType.png, .heic, .tiff, .gif, .webP, .jpeg] where board.contains(pasteboardTypes: [kind.identifier]) {
+            if let bytes = board.data(forPasteboardType: kind.identifier) {
+                return bytes
+            }
+        }
+        return board.image?.pngData()
+    }
+
+    /// The current layer within the selection, cut; none if nothing was.
+    private func layerCut() -> ThumbnailImage? {
         guard currentTakesChanges() else {
             closePanels()
-            return
+            return nil
         }
         let cut = session.cutLayer()
-        if let cut {
-            clipboard = cut
-            canPaste = true
-        }
         closePanels()
         refresh()
         if cut != nil {
             showNotice("Layer cut")
         }
+        return cut
     }
 
-    func copyLayer() {
+    /// The current layer within the selection, copied; none if nothing was.
+    private func layerCopied() -> ThumbnailImage? {
         let copied = session.copyLayer()
-        if let copied {
-            clipboard = copied
-            canPaste = true
-        }
         closePanels()
         if copied != nil {
             showNotice("Layer copied")
+        }
+        return copied
+    }
+
+    func cutLayer() {
+        if let cut = layerCut() {
+            keepCopy(cut)
+        }
+    }
+
+    func copyLayer() {
+        if let copied = layerCopied() {
+            keepCopy(copied)
         }
     }
 
     func copyLayerContents(_ l: LayerInfo) {
         if let copied = session.copyLayerContents(id: l.id) {
-            clipboard = copied
-            canPaste = true
+            keepCopy(copied)
         }
     }
 
@@ -1548,16 +1617,54 @@ final class CanvasModel {
             let copied = session.copyCanvas()
             DispatchQueue.main.async {
                 guard let self, let copied else { return }
-                self.clipboard = copied
-                self.canPaste = true
+                self.keepCopy(copied)
                 self.showNotice("Canvas copied")
             }
         }
     }
 
-    /// What was cut or copied, on a new layer; a private one is left out of the gallery's thumbnail.
+    /// What was cut or copied last, here or in another app, on a new layer; a private one is left
+    /// out of the gallery's thumbnail. Another app's picture comes in as an inserted one does,
+    /// ready to transform.
     func paste(isPrivate: Bool = false) {
+        // a picture copied after the last copy here goes first (only then is the clipboard read)
+        if systemPictureNewer {
+            pasteSystemPicture(isPrivate: isPrivate)
+            return
+        }
         guard let image = clipboard else { return }
+        paste(image, isPrivate: isPrivate)
+    }
+
+    /// The system clipboard's picture, pasted: into the current mask if a plugin says so, else as
+    /// an inserted picture.
+    private func pasteSystemPicture(isPrivate: Bool) {
+        closePanels()
+        guard let bytes = systemPictureBytes() else {
+            showNotice("This picture can't be opened.", warning: true)
+            return
+        }
+        // a mask that takes what is pasted has no use for a copy of the picture
+        if !isPrivate, session.pastesIntoMask(), let image = GalleryModel.decode(bytes, p3: CanvasSpace.shared.p3)?.image {
+            let session = session
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let pasted = session.pastePictureIntoMask(image: image)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if pasted {
+                        self.refresh()
+                    } else {
+                        self.insertPicture(bytes, name: nil, isPrivate: isPrivate)
+                    }
+                }
+            }
+            return
+        }
+        insertPicture(bytes, name: nil, isPrivate: isPrivate)
+    }
+
+    /// A copy (`image`) on a new layer; a private one is left out of the gallery's thumbnail.
+    private func paste(_ image: ThumbnailImage, isPrivate: Bool) {
         // through a plugin it takes a moment on a big canvas: the screen doesn't wait for it
         if !isPrivate, session.pastesIntoMask() {
             closePanels()
@@ -1580,21 +1687,21 @@ final class CanvasModel {
         refresh()
     }
 
-    /// Cut & Paste: what is selected (or the layer) cut out and put back as a new layer.
+    /// Cut & Paste: what is selected (or the layer) cut out and put back as a new layer; what is
+    /// on the clipboard stays there.
     func cutAndPaste() {
-        guard currentTakesChanges() else {
-            closePanels()
-            return
+        if let cut = layerCut() {
+            paste(cut, isPrivate: false)
         }
-        cutLayer()
-        paste()
     }
 
-    /// Duplicate: the selection copied to a new layer, or without one the current layer.
+    /// Duplicate: the selection copied to a new layer (what is on the clipboard stays there), or
+    /// without one the current layer.
     func duplicateCurrent() {
         if session.hasSelection() {
-            copyLayer()
-            paste()
+            if let copied = layerCopied() {
+                paste(copied, isPrivate: false)
+            }
         } else if let l = layers.first(where: { $0.current }) {
             duplicate(l)
         }
