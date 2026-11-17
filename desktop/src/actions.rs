@@ -2113,8 +2113,12 @@ mod tests {
             let curves = plugin.id == "io.github.artcraftandroid.quickshape-curves";
             assert_eq!(plugin.on, curves, "{plugin:?}");
             assert_eq!(plugin.source, PluginSource::File);
-            let expected = if curves { CardRow::TurnOff } else { CardRow::TurnOn };
-            assert!(matches!(card_rows(plugin)[..], [row, CardRow::Remove] if row == expected), "{}", plugin.name);
+            let valid_rows = if curves {
+                matches!(card_rows(plugin)[..], [CardRow::TurnOff, CardRow::Remove])
+            } else {
+                matches!(card_rows(plugin)[..], [CardRow::TurnOn, CardRow::Remove])
+            };
+            assert!(valid_rows, "{}", plugin.name);
         }
         // A regular bundled plugin still starts off and can be turned on and off.
         let at = list.iter().position(|p| !p.on).expect("an optional plugin");
