@@ -178,22 +178,29 @@ object Pc {
 
     // the side bar
     // the bar and the tracks translucent, each straight over what is behind (#2d2d2d and #676767
-    // over white); the thumbs opaque (#a6a6a6 over white and over the dark surround alike)
+    // over white; light 235 and 244); the thumbs opaque (#a6a6a6 over white and over the dark
+    // surround alike; white on the light look), each with a soft shadow a point below it
     val SideBar: Color get() = pick(0xE7171717, 0xCFE5E5E5)
     val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0)
     // a lighter rim round each track, more of what is behind showing through it (#5a5a5a over the
-    // dark surround, #969696 over white)
-    val SliderRim: Color get() = pick(0xB96E6E6E, 0xFFE9E9E9)
+    // dark surround, #969696 over white; light 249 over white)
+    val SliderRim: Color get() = pick(0xB96E6E6E, 0xB9F7F7F7)
     val SliderRimWidth = 0.8.dp
-    val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFF8F8F8)
+    // a hairline round each track's window in the bar, a little darker than the bar (38 against
+    // the dark bar's 45 over white, about 220 against the light bar's 235)
+    val SliderEdge: Color get() = pick(0x28000000, 0x10000000)
+    val SliderEdgeWidth = 0.5.dp
+    val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFFFFFFF)
     /**
      * A value saved on a slider (a notch): a short bar across the track, mid grey and see-through
      * on either look, so that it shows on the dark track and the light one (119 over the dark
      * track's 103 and 162 over the light one's 244, over white).
      */
     val NotchMark = Color(0xB3808080)
-    val SideGlyph: Color get() = pick(0xFF969696, 0xFF646464)
-    val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x33000000)
+    // the modify outline and undo and redo: light, the dark look's grey turned over (105 and
+    // about 204 over the light bar)
+    val SideGlyph: Color get() = pick(0xFF969696, 0xFF696969)
+    val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x22000000)
     val SideBarWidth = 51.dp
     val SideBarHeight = 519.dp
     val SideBarCorner = 20.dp

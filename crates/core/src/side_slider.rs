@@ -1,5 +1,5 @@
-//! The side bar's size and opacity sliders: what a tap on one does, and how far a drag moves its
-//! thumb. Values run from 0 at the bottom to 1 at the top.
+//! The side bar's size and opacity sliders: what a tap on one does, how far a drag moves its
+//! thumb, and the thumb's shadow. Values run from 0 at the bottom to 1 at the top.
 
 /// Within this far of a slider's middle line (points) a drag moves the thumb with the finger.
 const FULL_REACH: f32 = 52.0;
@@ -47,9 +47,90 @@ pub fn side_slider_tap(at: f32, value: f32, thumb: f32, notches: Vec<f32>) -> Si
     SideSliderTap::Jump { value: near.unwrap_or(at).clamp(0.0, 1.0) }
 }
 
+/// One step of a side slider thumb's shadow: the thumb's pill grown by `grow` points (shrunk where
+/// negative, its ends as much rounder or tighter), moved `down` points, filled black at `alpha`
+/// over the steps drawn before it.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct ShadowStep {
+    pub grow: f32,
+    pub down: f32,
+    pub alpha: f32,
+}
+
+/// How far below its thumb the shadow falls (points).
+const SHADOW_DROP: f32 = 1.0;
+/// How soft its edge is: it fades as a Gaussian this wide (points).
+const SHADOW_SOFTNESS: f32 = 1.0;
+/// How dark it is at its heart.
+const SHADOW_DARKEST: f32 = 0.32;
+/// The steps reach this far out past the dropped thumb's edge (points), where it has faded away ...
+const SHADOW_REACH: f32 = 3.0;
+/// ... and are this far apart: a pixel on a screen of 2 pixels a point.
+const SHADOW_STEP: f32 = 0.5;
+/// ... down to a point inside the edge, the lowest the thumb's own edge leaves showing.
+const SHADOW_STEPS: usize = 9;
+
+/// The standard normal distribution's share below `x`.
+fn normal_below(x: f32) -> f32 {
+    // the error function, to within about 1e-7 (Abramowitz and Stegun's 7.1.26)
+    let z = x / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z.abs());
+    let poly = t * (0.254_829_6 + t * (-0.284_496_7 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    0.5 * (1.0 + if z < 0.0 { -erf } else { erf })
+}
+
+/// How dark a side slider thumb's shadow is `outside` points out past the edge of the thumb
+/// dropped [`SHADOW_DROP`] (inside where negative).
+fn shadow_darkness(outside: f32) -> f32 {
+    SHADOW_DARKEST * normal_below(-outside / SHADOW_SOFTNESS)
+}
+
+/// The steps that draw a side slider thumb's shadow, the widest first: the thumb dropped a point,
+/// black at 32% fading over about a point either side of its edge, as the thumb's shadow measures
+/// on either look. Drawn under the thumb, only the rim of it below and round the thumb shows.
+#[uniffi::export]
+pub fn side_thumb_shadow() -> Vec<ShadowStep> {
+    let mut steps = Vec::with_capacity(SHADOW_STEPS);
+    // how dark the steps so far show, over each other, inside the last one
+    let mut shown = 0.0;
+    for i in 0..SHADOW_STEPS {
+        let grow = SHADOW_REACH - i as f32 * SHADOW_STEP;
+        // inside this step's edge and outside the next's, the darkness halfway between them
+        let want = shadow_darkness(grow - SHADOW_STEP / 2.0);
+        let alpha = (1.0 - (1.0 - want) / (1.0 - shown)).clamp(0.0, 1.0);
+        steps.push(ShadowStep { grow, down: SHADOW_DROP, alpha });
+        shown = want;
+    }
+    steps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How dark `steps` show `below` points under the thumb's lower edge, at its middle.
+    fn darkness_below(steps: &[ShadowStep], below: f32) -> f32 {
+        let clear: f32 = steps.iter().filter(|s| below < s.down + s.grow).map(|s| 1.0 - s.alpha).product();
+        1.0 - clear
+    }
+
+    #[test]
+    fn a_thumb_s_shadow_falls_below_it_as_measured() {
+        let steps = side_thumb_shadow();
+        // widest first, every one a point down and see-through
+        assert_eq!(steps.len(), SHADOW_STEPS);
+        assert!(steps.windows(2).all(|w| w[0].grow > w[1].grow));
+        assert!(steps.iter().all(|s| s.down == 1.0 && s.alpha > 0.0 && s.alpha < 0.32));
+        // measured under the dark thumb (at 2 pixels a point): how much darker the track shows
+        for (below, measured) in [(0.25, 0.243), (0.75, 0.184), (1.25, 0.126), (1.75, 0.078), (2.25, 0.039)] {
+            let dark = darkness_below(&steps, below);
+            assert!((dark - measured).abs() < 0.015, "{below}: {dark} against {measured}");
+        }
+        // gone a few points down, never darker than its heart
+        assert_eq!(darkness_below(&steps, 4.5), 0.0);
+        assert!(darkness_below(&steps, -5.0) <= 0.32);
+    }
 
     #[test]
     fn a_drag_off_to_the_side_moves_the_thumb_less_as_measured() {

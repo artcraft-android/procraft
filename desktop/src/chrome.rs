@@ -7,6 +7,7 @@ use egui::layers::{PaintList, ShapeIdx};
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use procraft_core::{
     CanvasInfo, CanvasSession, InterfacePart, SideSliderTap, ToolKind, side_slider_drag_share, side_slider_tap,
+    side_thumb_shadow,
 };
 use resvg::tiny_skia;
 
@@ -336,14 +337,21 @@ impl SideBar {
                 let c = pc::SIDE_BAR_CORNER;
                 let corners = if right { [c, 0.0, 0.0, c] } else { [0.0, c, c, 0.0] };
                 round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), bar.size()), corners);
-                for (_, y, _) in tracks {
-                    let track = Rect::from_min_size(
-                        pos2(x(SLIDER_LEFT, pc::SLIDER_WIDTH), y),
-                        vec2(pc::SLIDER_WIDTH, track_height),
-                    );
-                    round_rect(&mut pb, track, [pc::SLIDER_CORNER; 4]);
+                let windows = tracks.map(|(_, y, _)| {
+                    Rect::from_min_size(pos2(x(SLIDER_LEFT, pc::SLIDER_WIDTH), y), vec2(pc::SLIDER_WIDTH, track_height))
+                });
+                for window in windows {
+                    round_rect(&mut pb, window, [pc::SLIDER_CORNER; 4]);
                 }
                 fill(pixmap, pb.finish(), argb(pc::SIDE_BAR), t);
+                // a darker hairline round each window
+                let mut ring = tiny_skia::PathBuilder::new();
+                for window in windows {
+                    let edge = pc::SLIDER_EDGE_WIDTH;
+                    round_rect(&mut ring, window.expand(edge), [pc::SLIDER_CORNER + edge; 4]);
+                    round_rect(&mut ring, window, [pc::SLIDER_CORNER; 4]);
+                }
+                fill(pixmap, ring.finish(), argb(pc::SLIDER_EDGE), t);
             });
             for (which, y, value) in tracks {
                 let rect = at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height);
@@ -501,6 +509,13 @@ impl SideBar {
                 let mut mark = tiny_skia::PathBuilder::new();
                 round_rect(&mut mark, Rect::from_center_size(pos2(size.x / 2.0, y), bar), [bar.y / 2.0; 4]);
                 fill(pixmap, mark.finish(), argb(pc::NOTCH_MARK), t);
+            }
+            // the thumb's soft shadow, a point below it: under the thumb, only its rim shows
+            for step in side_thumb_shadow() {
+                let mut shade = tiny_skia::PathBuilder::new();
+                let grown = knob.expand(step.grow).translate(vec2(0.0, step.down));
+                round_rect(&mut shade, grown, [thumb.y / 2.0 + step.grow; 4]);
+                fill(pixmap, shade.finish(), Color32::from_black_alpha((step.alpha * 255.0).round() as u8), t);
             }
             let mut thumb_path = tiny_skia::PathBuilder::new();
             round_rect(&mut thumb_path, knob, [thumb.y / 2.0; 4]);

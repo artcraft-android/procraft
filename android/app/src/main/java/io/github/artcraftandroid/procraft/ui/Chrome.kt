@@ -55,10 +55,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.Panel
+import io.github.artcraftandroid.procraft.core.ShadowStep
 import io.github.artcraftandroid.procraft.core.SideSliderTap
 import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.sideSliderDragShare
 import io.github.artcraftandroid.procraft.core.sideSliderTap
+import io.github.artcraftandroid.procraft.core.sideThumbShadow
 
 private val SliderLeft = 5.dp
 private val SizeTrackTop = 6.dp
@@ -196,6 +198,10 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 val r = Pc.SideBarCorner.toPx()
                 val track = Size(Pc.SliderWidth.toPx(), trackHeight.toPx())
                 val trackR = CornerRadius(Pc.SliderCorner.toPx())
+                val windows = listOf(SizeTrackTop, opacityTop).map { top ->
+                    val o = Offset(x(SliderLeft, Pc.SliderWidth).toPx(), top.toPx())
+                    RoundRect(o.x, o.y, o.x + track.width, o.y + track.height, trackR)
+                }
                 val body = Path().apply {
                     fillType = PathFillType.EvenOdd
                     val (inner, outer) = CornerRadius.Zero to CornerRadius(r)
@@ -203,12 +209,19 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                         if (right) RoundRect(0f, 0f, size.width, size.height, outer, inner, inner, outer)
                         else RoundRect(0f, 0f, size.width, size.height, inner, outer, outer, inner),
                     )
-                    for (top in listOf(SizeTrackTop, opacityTop)) {
-                        val o = Offset(x(SliderLeft, Pc.SliderWidth).toPx(), top.toPx())
-                        addRoundRect(RoundRect(o.x, o.y, o.x + track.width, o.y + track.height, trackR))
-                    }
+                    windows.forEach { addRoundRect(it) }
                 }
                 drawPath(body, Pc.SideBar)
+                // a darker hairline round each window
+                val edge = Pc.SliderEdgeWidth.toPx()
+                val ring = Path().apply {
+                    fillType = PathFillType.EvenOdd
+                    for (w in windows) {
+                        addRoundRect(RoundRect(w.left - edge, w.top - edge, w.right + edge, w.bottom + edge, CornerRadius(trackR.x + edge)))
+                        addRoundRect(w)
+                    }
+                }
+                drawPath(ring, Pc.SliderEdge)
             },
     ) {
         BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
@@ -446,6 +459,16 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                     val y = inset + thumb.height / 2f + travel * (1f - n)
                     drawRoundRect(Pc.NotchMark, Offset((size.width - bar.width) / 2f, y - bar.height / 2f), bar, CornerRadius(bar.height / 2f))
                 }
+                // the thumb's soft shadow, a point below it: under the thumb, only its rim shows
+                for (step in ThumbShadow) {
+                    val grow = step.grow.dp.toPx()
+                    drawRoundRect(
+                        Color.Black.copy(alpha = step.alpha),
+                        Offset(at.x - grow, at.y - grow + step.down.dp.toPx()),
+                        Size(thumb.width + grow * 2f, thumb.height + grow * 2f),
+                        CornerRadius(thumb.height / 2f + grow),
+                    )
+                }
                 drawPath(Path().apply { addRoundRect(knob) }, Pc.SliderThumb)
                 if (notches.any { kotlin.math.abs(it - value) < 1e-4f }) {
                     drawRoundRect(Pc.Accent, Offset((size.width - bar.width) / 2f, at.y + (thumb.height - bar.height) / 2f), bar, CornerRadius(bar.height / 2f))
@@ -471,6 +494,9 @@ private fun LiquifyRing(vm: CanvasViewModel) {
 
 private val NotchWidth = 20.dp
 private val NotchHeight = 4.dp
+
+/** How a side slider's thumb shadow is drawn: worked out once, the same on either look. */
+private val ThumbShadow: List<ShadowStep> by lazy { sideThumbShadow() }
 
 /**
  * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a

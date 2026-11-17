@@ -114,17 +114,28 @@ pub mod pc {
     pub const ACTION_DISC_SIZE: f32 = 32.0;
     pub const COLOR_DOT: f32 = 31.0;
 
+    // the bar and the tracks translucent, each straight over what is behind (#2d2d2d and #676767
+    // over white; light 235 and 244); the thumbs opaque (#a6a6a6, white on the light look), each
+    // with a soft shadow a point below it
     pub const SIDE_BAR: Themed = Themed(0xE7171717, 0xCFE5E5E5);
     pub const SLIDER_TRACK: Themed = Themed(0xC93E3E3E, 0xBFF0F0F0);
-    pub const SLIDER_RIM: Themed = Themed(0xB96E6E6E, 0xFFE9E9E9);
+    /// A lighter rim round each track, more of what is behind showing through it (150 over white;
+    /// light 249).
+    pub const SLIDER_RIM: Themed = Themed(0xB96E6E6E, 0xB9F7F7F7);
     pub const SLIDER_RIM_WIDTH: f32 = 0.8;
-    pub const SLIDER_THUMB: Themed = Themed(0xFFA6A6A6, 0xFFF8F8F8);
+    /// A hairline round each track's window in the bar, a little darker than the bar (38 against
+    /// the dark bar's 45 over white, about 220 against the light bar's 235).
+    pub const SLIDER_EDGE: Themed = Themed(0x28000000, 0x10000000);
+    pub const SLIDER_EDGE_WIDTH: f32 = 0.5;
+    pub const SLIDER_THUMB: Themed = Themed(0xFFA6A6A6, 0xFFFFFFFF);
     /// A value saved on a slider (a notch): a short bar across the track, mid grey and see-through
     /// on either look, so that it shows on the dark track and the light one (119 over the dark
     /// track's 103 and 162 over the light one's 244, over white).
     pub const NOTCH_MARK: u32 = 0xB3808080;
-    pub const SIDE_GLYPH: Themed = Themed(0xFF969696, 0xFF646464);
-    pub const SIDE_GLYPH_DISABLED: Themed = Themed(0x1AFFFFFF, 0x33000000);
+    /// The modify outline and undo and redo: light, the dark look's grey turned over (105, and
+    /// about 204 greyed out over the light bar).
+    pub const SIDE_GLYPH: Themed = Themed(0xFF969696, 0xFF696969);
+    pub const SIDE_GLYPH_DISABLED: Themed = Themed(0x1AFFFFFF, 0x22000000);
     pub const SIDE_BAR_WIDTH: f32 = 51.0;
     pub const SIDE_BAR_HEIGHT: f32 = 519.0;
     pub const SIDE_BAR_CORNER: f32 = 20.0;
@@ -816,6 +827,23 @@ mod tests {
         let (dark, light) = (over(pc::SLIDER_TRACK.0, 255.0), over(pc::SLIDER_TRACK.1, 255.0));
         assert!((dark - 103.0).abs() < 2.0 && (over(pc::NOTCH_MARK, dark) - 119.0).abs() < 2.0);
         assert!((light - 244.0).abs() < 2.0 && (over(pc::NOTCH_MARK, light) - 162.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn the_side_bar_s_tracks_thumbs_and_glyphs_are_as_measured_in_either_look() {
+        // over white: the rims 150 and 249, the hairlines round the windows 38 and about 220
+        for (light, rim, edge) in [(false, 150.0, 38.0), (true, 249.0, 220.0)] {
+            let pick = |c: super::Themed| if light { c.1 } else { c.0 };
+            let (bar, track) = (over(pick(pc::SIDE_BAR), 255.0), over(pick(pc::SLIDER_TRACK), 255.0));
+            let shown = over(pick(pc::SLIDER_RIM), 255.0);
+            assert!((shown - rim).abs() < 2.0 && shown > track + 4.0, "{light}: rim {shown}");
+            let shown = over(pick(pc::SLIDER_EDGE), bar);
+            assert!((shown - edge).abs() < 3.0 && shown < bar - 5.0, "{light}: edge {shown}");
+        }
+        // light: a white thumb, and the dark look's glyph grey turned over; greyed out, about 204
+        assert_eq!(pc::SLIDER_THUMB.1, 0xFFFFFFFF);
+        assert_eq!(pc::SIDE_GLYPH.1 & 0xFF, 0xFF - (pc::SIDE_GLYPH.0 & 0xFF));
+        assert!((over(pc::SIDE_GLYPH_DISABLED.1, over(pc::SIDE_BAR.1, 255.0)) - 204.0).abs() < 2.0);
     }
 
     #[test]
