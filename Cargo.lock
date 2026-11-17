@@ -3062,6 +3062,7 @@ dependencies = [
  "arboard",
  "block2 0.6.2",
  "chrono",
+ "clipboard-win",
  "drag",
  "egui",
  "egui-wgpu",

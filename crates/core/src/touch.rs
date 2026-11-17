@@ -2049,10 +2049,17 @@ impl CanvasSession {
         if t.mode == Mode::Finger {
             self.stroke_cancel();
         }
+        // so is a liquify stroke under way, what it did and all: two fingers tapped undo the last
+        // stroke before it, three redo, and nothing undone is lost to it
+        if t.mode == Mode::Adjust && self.take_back_liquify() {
+            t.liquify_due = None;
+            out.push(TouchCommand::AdjustChanged);
+        }
         self.end_stroke_tools(t);
         if matches!(
             t.mode,
             Mode::Finger
+                | Mode::Adjust
                 | Mode::Idle
                 | Mode::Pour
                 | Mode::Transform
@@ -2244,8 +2251,12 @@ impl CanvasSession {
                 let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
                 let liquifying = self.shared.lock().adjust.open().is_some_and(|o| o.0 == Adjustment::Liquify);
                 if liquifying {
-                    // still moving when it lifts, liquify carries on
+                    // still moving when it lifts, liquify carries on; called off, its stroke is
+                    // taken back
                     drop(t);
+                    if cancelled && self.take_back_liquify() {
+                        out.push(TouchCommand::AdjustChanged);
+                    }
                     let going = !cancelled && self.adjustment_liquify_lift();
                     self.touches().liquify_due = going.then_some(now + LIQUIFY_HELD_STEP_MS);
                 } else if !cancelled && !t.adjust_moved && now - t.tap_start <= TAP_MS {
