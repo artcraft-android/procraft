@@ -276,8 +276,30 @@ fn limit_samples(pts: &[P]) -> Vec<P> {
 /// removes sensor jitter, and the adaptive fit otherwise traces every slight hand wobble.
 /// A wider kernel follows the intended sweep. It is sized in *stroke distance*, not samples,
 /// and bounded so smaller curls and deliberately tight turns are not erased.
+/// Use a wider fairing kernel only for strokes with measurable short-scale jitter.
+/// Clean arcs and deliberate broad waves keep the narrower kernel (and their shape).
+/// Segment boundaries are hard corners, so no filter crosses a real turn.
 fn smoothing_radius(pts: &[P]) -> f32 {
-    (size(pts) * 0.021).clamp(5.5, 11.0)
+    let base = (size(pts) * 0.021).clamp(5.5, 11.0);
+    if pts.len() < 5 {
+        return base;
+    }
+    let narrow = smooth_stroke_with_sigma(pts, 4.0);
+    let rms = (pts
+        .iter()
+        .zip(&narrow)
+        .map(|(&a, &b)| {
+            let distance = length(sub(a, b));
+            distance * distance
+        })
+        .sum::<f32>()
+        / pts.len() as f32)
+        .sqrt();
+    // Very high residuals are typically fine, rapidly alternating digitizer jitter.
+    // The narrow kernel already removes those; a broader filter would unnecessarily
+    // flatten the intentional large-scale sweep underneath them.
+    let medium_wobble = ((rms - 0.28) / 0.55).clamp(0.0, 1.0) * ((2.0 - rms) / 0.9).clamp(0.0, 1.0);
+    base + medium_wobble * (size(pts) * 0.022).clamp(2.0, 9.0)
 }
 
 fn smooth_stroke(pts: &[P]) -> Vec<P> {
@@ -503,6 +525,66 @@ mod tests {
         let out = sub(nodes[at + 1], nodes[at]);
         let turn_cos = (into.0 * out.0 + into.1 * out.1) / (length(into) * length(out)).max(1e-6);
         assert!(turn_cos < 0.65, "intentionally sharp corner was rounded: {turn_cos}");
+    }
+
+    #[test]
+    fn sustained_medium_frequency_hand_wobble_does_not_survive_the_curve_fit() {
+        // Small but persistent waves in the pen path should be removed, while the large
+        // intended arc and endpoints survive. Wobbles at 32-70 canvas-pixel wavelengths
+        // were left visible by the old narrow Gaussian filter.
+        let centre = (300.0, 250.0);
+        let radius = 190.0;
+        let angle_at = |i: usize| 0.2 + i as f32 * 2.2 / 240.0;
+        let ideal = |a: f32| (centre.0 + radius * a.cos(), centre.1 + radius * a.sin());
+        let stroke: Vec<P> = (0..=240)
+            .map(|i| {
+                let a = angle_at(i);
+                let wobble = if i == 0 || i == 240 {
+                    0.0
+                } else {
+                    5.5 * (i as f32 * std::f32::consts::TAU / 18.0).sin()
+                        + 4.0 * (i as f32 * std::f32::consts::TAU / 36.0).sin()
+                };
+                (centre.0 + (radius + wobble) * a.cos(), centre.1 + (radius + wobble) * a.sin())
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        let mut errors = Vec::new();
+        for k in (0..nodes.len() - 1).step_by(3) {
+            for j in 0..=30 {
+                let p = cubic_at(nodes[k], nodes[k + 1], nodes[k + 2], nodes[k + 3], j as f32 / 30.0);
+                errors.push((length(sub(p, centre)) - radius).abs());
+            }
+        }
+        let mean = errors.iter().sum::<f32>() / errors.len() as f32;
+        let max = errors.into_iter().fold(0.0f32, f32::max);
+        assert!(mean < 2.0, "wobble survived the curve fit: mean {mean:.2} px");
+        assert!(max < 6.0, "curve has a pronounced residual bump: max {max:.2} px");
+        assert!(length(sub(nodes[0], ideal(angle_at(0)))) < 1e-3);
+        assert!(length(sub(*nodes.last().unwrap(), ideal(angle_at(240)))) < 1e-3);
+    }
+
+    #[test]
+    fn smoothing_keeps_a_broad_intentional_bulge_in_the_path() {
+        let ideal = |x: f32| 110.0 + 25.0 * (x * std::f32::consts::TAU / 400.0).sin();
+        let stroke: Vec<P> = (0..=200)
+            .map(|i| {
+                let x = i as f32 * 2.0;
+                let local = (1.0 - (x - 200.0).abs() / 47.0).max(0.0) * 19.0;
+                let wobble = if i == 0 || i == 200 { 0.0 } else { 3.0 * (x * std::f32::consts::TAU / 27.0).sin() };
+                (x, ideal(x) + local + wobble)
+            })
+            .collect();
+        let nodes = fit(&stroke);
+        let mut output = Vec::new();
+        for k in (0..nodes.len() - 1).step_by(3) {
+            for j in 0..=24 {
+                output.push(cubic_at(nodes[k], nodes[k + 1], nodes[k + 2], nodes[k + 3], j as f32 / 24.0));
+            }
+        }
+        let around_bulge =
+            output.iter().filter(|p| (p.0 - 200.0).abs() < 6.0).map(|p| p.1 - ideal(p.0)).fold(0.0f32, f32::max);
+        assert!(around_bulge > 10.0, "intentional bulge got erased: {around_bulge:.2} px");
     }
 
     #[test]
