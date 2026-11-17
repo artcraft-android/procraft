@@ -1972,7 +1972,12 @@ impl CanvasSession {
         st.note_recent(st.brush_ref(tool));
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
-        let whole_pixels = st.whole_pixels(&samples);
+        // input read in whole pixels is evened out over the steps a slow line goes in, which keeps
+        // what is laid for good a stretch behind the pen: only for a stroke the canvas shows on to
+        // the pen meanwhile (its tip), not for paint laid in place (a smudge, wet paint) or a dual
+        // brush, which show no more than is laid
+        let shown_ahead = !style.in_place() && second.is_none();
+        let whole_pixels = st.whole_pixels(&samples).filter(|_| shown_ahead);
         let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
             let preview_tilt = brush.setting("preview_tilt") >= 0.5;
             let mut builder = StrokeBuilder::with_seed(brush, diameter, pointer.into(), seed)

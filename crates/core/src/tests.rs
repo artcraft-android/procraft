@@ -15601,3 +15601,19 @@ fn a_stroke_begun_on_whole_pixels_is_read_finer_from_its_first_position_between_
     assert!(!reads_whole());
     s.stroke_cancel();
 }
+
+#[test]
+fn only_a_stroke_shown_on_to_the_pen_waits_to_even_out_whole_pixels() {
+    let Some(s) = session(256, 256) else { return };
+    let reads_whole = |tool| {
+        s.set_tool(tool);
+        s.stroke_begin(PointerKind::Mouse, vec![sample(40.0, 40.0, 0.0)]);
+        let whole = s.shared.lock().stroke.as_ref().is_some_and(|b| b.reads_whole_pixels());
+        s.stroke_cancel();
+        whole
+    };
+    // a painted stroke shows its tip on to the pointer while what is laid for good waits for the
+    // steps ahead; a smudge shows only what it has laid, so nothing of it waits
+    assert!(reads_whole(ToolKind::Paint));
+    assert!(!reads_whole(ToolKind::Smudge));
+}
