@@ -67,7 +67,7 @@ impl Flood {
         }
         let i = (seed.1 as usize * width as usize + seed.0 as usize) * 4;
         let colour: [u8; 4] = pixels.get(i..i + 4)?.try_into().ok()?;
-        let distance = Arc::new(pixels.as_chunks::<4>().0.iter().take(count).map(|p| distance(p, &colour)).collect());
+        let distance = Arc::new(pixels.as_chunks::<4>().0.iter().take(count).map(|p| fill_distance(p, &colour)).collect());
         Some(Flood {
             width,
             height,
@@ -475,6 +475,22 @@ fn distance(a: &[u8; 4], b: &[u8; 4]) -> u8 {
     a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
 }
 
+/// Distance used to find a ColorDrop boundary. A transparent seed is usually the
+/// empty space inside line art. In that case, ordinary premultiplied RGBA distance
+/// underestimates a faint stroke: an 8%-opaque line is only 8% different from empty
+/// and the default 50% threshold floods straight through it. Give differences in
+/// coverage more weight without changing the pixels or the colour poured under the
+/// stroke. Opaque/coloured seeds retain their original colour-distance behaviour.
+fn fill_distance(pixel: &[u8; 4], seed: &[u8; 4]) -> u8 {
+    let base = distance(pixel, seed);
+    if seed[3] > 16 {
+        return base;
+    }
+    let alpha_difference = pixel[3].abs_diff(seed[3]) as f32 / 255.0;
+    let coverage = (alpha_difference.powf(0.2) * 255.0).round() as u8;
+    base.max(coverage)
+}
+
 /// How far past a flood's bounds a soft edge is followed, pixels.
 const EDGE_MOST: usize = 32;
 
@@ -774,17 +790,40 @@ mod tests {
         // empty, a soft edge (alpha 0.31), the line's near-solid edge (0.91), the line, empty
         let px = row(&[[0, 0, 0, 0], [0, 0, 0, 79], [0, 0, 0, 232], [0, 0, 0, 255], [0, 0, 0, 0]]);
         let f = Flood::new(5, 1, &px, (0, 0)).unwrap();
-        let m = f.mask(0.867);
+        // The default threshold stops at the faint edge rather than leaking to
+        // the other side of the stroke.
+        let m = f.mask(0.5);
         assert_eq!(m.data[0], 255);
-        assert_eq!(m.data[1], 255);
-        // 0.91 is 0.043 past the threshold: about half way through the fade
-        assert!((110..=140).contains(&m.data[2]), "{}", m.data[2]);
+        assert_eq!(m.data[2], 0);
         assert_eq!(m.data[3], 0);
-        // beyond the line it is not joined
         assert_eq!(m.data[4], 0);
+        // The fade remains gradual when the threshold is intentionally raised.
+        let soft = f.mask(0.932);
+        assert!((110..=140).contains(&soft.data[2]), "{}", soft.data[2]);
         // at the most everything is joined
         assert!(f.mask(1.0).data.iter().all(|&v| v == 255));
         assert!(Flood::new(5, 1, &px, (5, 0)).is_none());
+    }
+
+    #[test]
+    fn faint_strokes_still_bound_a_transparent_fill() {
+        // Both outlines are far below the default threshold in ordinary RGBA distance.
+        // A transparent pixel behind either line must not join the seed's region.
+        for alpha in [22u8, 45, 80] {
+            let px = row(&[[0, 0, 0, 0], [0, 0, 0, alpha], [0, 0, 0, 0]]);
+            let flood = Flood::new(3, 1, &px, (0, 0)).unwrap();
+            let mask = flood.mask(0.5);
+            assert_eq!(mask.data[0], 255);
+            assert_eq!(mask.data[2], 0, "faint stroke alpha {alpha} leaked");
+            assert_eq!(flood.mask(1.0).data, vec![255; 3]);
+        }
+    }
+
+    #[test]
+    fn coloured_fills_preserve_their_original_distance() {
+        let seed = [90, 80, 70, 128];
+        let pixel = [95, 85, 75, 140];
+        assert_eq!(fill_distance(&pixel, &seed), distance(&pixel, &seed));
     }
 
     #[test]
