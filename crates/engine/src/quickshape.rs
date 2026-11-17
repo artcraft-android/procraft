@@ -174,21 +174,30 @@ impl Shape {
         self.kind == ShapeKind::Curve && n >= 7 && (n - 1).is_multiple_of(3) && self.nodes.first() == self.nodes.last()
     }
 
-    /// Moves one of the curve's nodes, a control taking the one the other side of its anchor with it
-    /// (mirrored, so the curve stays smooth through there) unless `mirror` is off. An anchor moves
-    /// alone.
+    /// Moves a curve's anchor *with its adjacent controls*, preserving handle offsets.
+    /// Controls may be mirrored for smooth joins or moved independently for broken joins.
     fn move_curve_handle(&mut self, index: usize, to: Vec2, mirror: bool) {
         let closed = self.closed_curve();
         let last = self.nodes.len().saturating_sub(1);
-        let Some(slot) = self.nodes.get_mut(index) else { return };
-        *slot = to;
-        if closed && (index == 0 || index == last) {
-            if let Some(other) = self.nodes.get_mut(if index == 0 { last } else { 0 }) {
-                *other = to;
+        let Some(&old) = self.nodes.get(index) else { return };
+        if index.is_multiple_of(3) {
+            let delta = to - old;
+            // In a closed curve the first and last anchors represent the same point.
+            // Both their control handles have to follow the shared anchor.
+            if closed && (index == 0 || index == last) {
+                for i in [0, 1, last - 1, last] {
+                    self.nodes[i] = self.nodes[i] + delta;
+                }
+            } else {
+                for i in [index.checked_sub(1), Some(index), (index < last).then_some(index + 1)].into_iter().flatten()
+                {
+                    self.nodes[i] = self.nodes[i] + delta;
+                }
             }
             return;
         }
-        if index.is_multiple_of(3) || !mirror {
+        self.nodes[index] = to;
+        if !mirror {
             return;
         }
         // a control starts the span after its anchor at 3i+1, or ends the one before it at 3i-1;
@@ -1331,6 +1340,63 @@ mod tests {
         // a stroke that is no polyline is left as it was
         let line = vec![Vec2::ZERO, Vec2::new(100.0, 1.0)];
         assert_eq!(with_curve(recognise(&line), &line), recognise(&line));
+    }
+
+    #[test]
+    fn moving_curve_anchors_moves_their_bezier_handles_together() {
+        let pts = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(20.0, 0.0),
+            Vec2::new(40.0, 0.0),
+            Vec2::new(60.0, 0.0),
+            Vec2::new(80.0, 0.0),
+            Vec2::new(100.0, 20.0),
+            Vec2::new(120.0, 40.0),
+        ];
+        let delta = Vec2::new(15.0, -10.0);
+        for anchor in [0, 3, 6] {
+            for free in [false, true] {
+                let mut curve = Shape { kind: ShapeKind::Curve, nodes: pts.to_vec() };
+                let original = curve.nodes.clone();
+                if free {
+                    curve.move_handle_free(anchor, original[anchor] + delta);
+                } else {
+                    curve.move_handle(anchor, original[anchor] + delta);
+                }
+                assert_eq!(curve.nodes[anchor], original[anchor] + delta);
+                let handle_indices = [anchor.checked_sub(1), (anchor + 1 < original.len()).then_some(anchor + 1)];
+                for control in handle_indices.into_iter().flatten() {
+                    assert_eq!(
+                        curve.nodes[control],
+                        original[control] + delta,
+                        "anchor {anchor} did not bring control {control}, free={free}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_a_closed_curve_seam_moves_both_controls_and_both_endpoints() {
+        let nodes = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(20.0, 0.0),
+            Vec2::new(40.0, 0.0),
+            Vec2::new(60.0, 20.0),
+            Vec2::new(80.0, 40.0),
+            Vec2::new(20.0, 60.0),
+            Vec2::new(0.0, 0.0),
+        ];
+        let delta = Vec2::new(10.0, 15.0);
+        for seam in [0, 6] {
+            let mut shape = Shape { kind: ShapeKind::Curve, nodes: nodes.clone() };
+            assert!(shape.closed_curve());
+            shape.move_handle(seam, nodes[seam] + delta);
+            for index in [0, 1, 5, 6] {
+                assert_eq!(shape.nodes[index], nodes[index] + delta, "seam {seam}: node {index}");
+            }
+            assert!(shape.closed_curve());
+        }
     }
 
     #[test]
