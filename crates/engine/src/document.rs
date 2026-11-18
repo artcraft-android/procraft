@@ -728,6 +728,16 @@ impl Document {
         self.next_id = self.next_id.max(other.next_id);
     }
 
+    /// Inserts `layers` (bottom first) at `at` in the stack, keeping the layer rules and handing no
+    /// id out again: another document's layers brought in (an asset placed).
+    pub fn insert_layers(&mut self, at: usize, layers: Vec<Layer>) {
+        let at = at.min(self.layers.len());
+        self.layers.splice(at..at, layers);
+        self.tidy();
+        let top = self.layers.iter().map(|l| l.id.0).max().unwrap_or(0);
+        self.next_id = self.next_id.max(top + 1);
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }

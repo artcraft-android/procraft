@@ -27,15 +27,15 @@ class ChromeFitTest {
 
     @Test
     fun theTopBarsEndsNeverMeet() {
-        for (width in widths(354, 2000)) assertTrue("$width", Pc.barFit(width).needs <= width)
+        for (width in widths(386, 2000)) assertTrue("$width", Pc.barFit(width).needs <= width)
     }
 
     @Test
     fun panelsStillHangFromTheirButtons() {
-        // the bar at 411: 8 margins and 36 buttons, nothing between them
-        assertEquals(26.dp, Pc.toolCentreFromRight(0, 411.dp))
-        assertEquals(170.dp, Pc.toolCentreFromRight(4, 411.dp))
-        assertEquals(84.dp, Pc.actionCentre(0, 411.dp))
+        // the bar at 411: 4 margins and 32 buttons, nothing between them (five actions now)
+        assertEquals(20.dp, Pc.toolCentreFromRight(0, 411.dp))
+        assertEquals(148.dp, Pc.toolCentreFromRight(4, 411.dp))
+        assertEquals(78.dp, Pc.actionCentre(0, 411.dp))
         // on a tablet, as ever
         assertEquals(62.dp, Pc.toolCentreFromRight(0, 1200.dp))
         assertEquals(342.dp, Pc.toolCentreFromRight(4, 1200.dp))

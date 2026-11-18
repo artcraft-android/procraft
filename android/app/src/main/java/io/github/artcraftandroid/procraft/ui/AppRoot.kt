@@ -225,9 +225,10 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                     Panel.ACTIONS -> 390.dp to 0
                     Panel.ADJUSTMENTS -> 330.dp to 1
+                    Panel.ASSETS -> 440.dp to 4
                     Panel.NONE -> 0.dp to 0
                 }
-                val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
+                val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS || shown == Panel.ASSETS
                 // its button where the top bar shows it, at the bar's size
                 val bar = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR)
                 val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth / bar) * bar else maxWidth - Pc.toolCentreFromRight(button, maxWidth / bar) * bar
@@ -274,6 +275,7 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                         // ending 25 above the screen's edge, their rows scrolling (as measured)
                         Panel.ACTIONS -> ActionsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
                         Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
+                        Panel.ASSETS -> AssetsPanel(vm, arrowX, at.height(room - Pc.BarHeight - 25.dp))
                         Panel.NONE -> Unit
                     }
                 }

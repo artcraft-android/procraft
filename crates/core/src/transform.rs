@@ -638,6 +638,9 @@ impl CanvasSession {
             let before = steps(st);
             st.end_transform(commit);
             st.flush();
+            if commit {
+                st.settle_place_return();
+            }
             if commit && st.selection.is_some() {
                 let made = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step).filter(|_| steps(st) > before);
                 st.drop_selection_with_step(made);

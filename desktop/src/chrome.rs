@@ -22,6 +22,7 @@ pub enum BarButton {
     Adjustments,
     Selection,
     Transform,
+    Assets,
     Paint,
     Smudge,
     Erase,
@@ -33,6 +34,7 @@ pub enum BarButton {
 #[derive(Default)]
 pub struct Lit {
     pub actions: bool,
+    pub assets: bool,
     pub adjustments: bool,
     pub selection: bool,
     pub transform: bool,
@@ -123,6 +125,7 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             (BarButton::Adjustments, &icons::ADJUSTMENTS, 36.0, lit.adjustments),
             (BarButton::Selection, &icons::SELECTION, 33.0, lit.selection),
             (BarButton::Transform, &icons::TRANSFORM, 44.0, lit.transform),
+            (BarButton::Assets, &icons::MENU_LIBRARIES, 36.0, lit.assets),
         ];
         for (which, icon, glyph, on) in actions {
             let rect = button(x, pc::BAR_BUTTON_WIDTH);

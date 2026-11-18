@@ -96,9 +96,10 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             // lit while the selection tool is open, or while something is selected
             ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting || vm.hasSelection, glyph = 33.dp) { vm.toggleSelecting() }
             ActionButton(PcIcons.Transform, "Transform", fit.button, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
+            ActionButton(PcIcons.MenuLibraries, "Assets", fit.button, selected = vm.panel == Panel.ASSETS) { vm.toggle(Panel.ASSETS) }
         }
         // the layers and colour panels take the highlight from the current tool while open
-        val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.transforming || vm.selecting || vm.adjustment != null
+        val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.panel == Panel.ASSETS || vm.transforming || vm.selecting || vm.adjustment != null
         Row(
             Modifier.align(Alignment.CenterEnd).padding(end = fit.margin),
             horizontalArrangement = Arrangement.spacedBy(fit.toolGap),

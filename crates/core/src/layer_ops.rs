@@ -29,6 +29,16 @@ impl State {
         canvas.read_composite_without_background(gpu, &mut self.doc).ok()
     }
 
+    /// The canvas flattened with its background colour kept (premultiplied RGBA8, rows top to
+    /// bottom), everything queued drawn first: what a whole-canvas asset capture takes.
+    pub(crate) fn composite_with_background(&mut self) -> Option<Vec<u8>> {
+        self.finish_stroke();
+        self.settle();
+        self.flush();
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
+        canvas.read_composite_without(gpu, &mut self.doc, &[]).ok()
+    }
+
     /// A layer's pixels inside `rect` (rows top to bottom), everything queued drawn first.
     pub(crate) fn layer_part(&mut self, id: LayerId, rect: IRect) -> Option<Vec<u8>> {
         self.finish_stroke();

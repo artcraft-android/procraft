@@ -73,6 +73,7 @@ pub enum Action {
 enum Popover {
     Actions,
     Adjustments,
+    Assets,
     Brushes,
     Layers,
     Colour,
@@ -140,6 +141,7 @@ pub struct Interface {
     pub(crate) colours: Colours,
     drop: ColourDrop,
     library: Library,
+    assets: crate::assets::Assets,
     overlays: Overlays,
     /// The Layers panel and the brush library floating in windows of their own.
     floating: crate::floating_panels::Floating,
@@ -280,6 +282,7 @@ impl Interface {
             colours: Colours::default(),
             drop: ColourDrop::default(),
             library: Library::default(),
+            assets: crate::assets::Assets::default(),
             overlays: Overlays::default(),
             floating: crate::floating_panels::Floating::kept(prefs.floating),
             bars_hidden: false,
@@ -375,12 +378,14 @@ impl Interface {
         self.lighting.forget();
         // brush files given while no canvas was open
         self.library.add_brushes(session, crate::files::take_pending_brushes(), true, &mut self.export_card);
+        self.assets.import_files(session, crate::files::take_pending_assets());
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
             self.model_warnings(session);
         }
         self.layers.forget();
+        self.assets.forget();
         self.background_pick = None;
         self.text.forget();
         crate::text::prepare_fonts();
@@ -597,6 +602,7 @@ impl Interface {
         }
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
+            assets: self.open == Some(Popover::Assets),
             transform: self.transform.on,
             // while the selection tool is open, or while something is selected
             selection: self.selection.on || session.has_selection(),
@@ -605,7 +611,7 @@ impl Interface {
                 || session.recolor_on()
                 || session.touch_layer_opacity().is_some(),
             layers: self.open == Some(Popover::Layers),
-            panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
+            panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour | Popover::Assets)),
         };
         let colour = srgb(self.colours.rgb());
         self.time_lapse.record(&ctx, session, input.idle());
@@ -745,6 +751,7 @@ impl Interface {
             Some(BarButton::Transform) => self.toggle_transform(session),
             Some(BarButton::Selection) => self.toggle_selection(session),
             Some(BarButton::Adjustments) => self.adjustments_pressed(session),
+            Some(BarButton::Assets) => self.toggle(session, Popover::Assets),
             Some(BarButton::Colour) | None => {}
         }
         // the colour button: tapped it opens the colours, held it goes back to the previous
@@ -831,6 +838,7 @@ impl Interface {
         let anchor = |p: Popover| match p {
             Popover::Actions => bar.rect(BarButton::Actions),
             Popover::Adjustments => bar.rect(BarButton::Adjustments),
+            Popover::Assets => bar.rect(BarButton::Assets),
             Popover::Brushes => bar.rect(tool_button),
             Popover::Layers => bar.rect(BarButton::Layers),
             Popover::Colour => bar.rect(BarButton::Colour),
@@ -1674,10 +1682,11 @@ impl Interface {
     }
 
     /// Files dropped on the canvas: a picture inserted as Insert a file does (several each a layer,
-    /// in turn); brushes (ours or another app's) added to the library.
+    /// in turn); brushes (ours or another app's) added to the library; asset files to the shelf.
     pub fn dropped(&mut self, session: &Arc<CanvasSession>, paths: &[std::path::PathBuf]) {
         let mut brushes = Vec::new();
         let mut pictures = Vec::new();
+        let mut assets = Vec::new();
         for path in paths {
             let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
             if PICTURES.contains(&extension.as_str()) || VIDEOS.contains(&extension.as_str()) {
@@ -1686,9 +1695,14 @@ impl Interface {
                 // read where it is, a brush at a time: a big set is never held whole
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 brushes.push(crate::library::BrushFileIn { path: path.clone(), name, taken: false });
+            } else if crate::files::is_asset_file(path)
+                && let Ok(bytes) = std::fs::read(path)
+            {
+                assets.push(bytes);
             }
         }
         self.library.add_brushes(session, brushes, true, &mut self.export_card);
+        self.assets.import_files(session, assets);
         if !pictures.is_empty() {
             self.open = None;
             self.insert_files(session, pictures, false);
@@ -2508,6 +2522,17 @@ impl Interface {
         crate::panel::drawing_panel(ctx, Some(space));
         let (on_window, button) = (button, space.to_window.inverse().mul_rect(button));
         let shown = match which {
+            Popover::Assets => {
+                let shown = self.assets.show(ctx, &mut self.look, session, button, backdrops);
+                if let Some((text, warning)) = self.assets.notice.take() {
+                    self.overlays.notice(text, warning);
+                }
+                // an asset placed lands ready to transform
+                if std::mem::take(&mut self.assets.placed) {
+                    self.toggle_transform(session);
+                }
+                shown
+            }
             Popover::Brushes => {
                 self.library.floats = self.floating.allowed(procraft_core::FloatingPanel::Brushes);
                 let shown =
@@ -2826,6 +2851,7 @@ impl Interface {
         match which {
             Popover::Layers if self.background_pick.is_some() => self.colours.modal(),
             Popover::Layers => self.layers.modal(),
+            Popover::Assets => self.assets.modal(),
             Popover::Brushes => self.library.modal(),
             Popover::Colour => self.colours.modal(),
             Popover::Actions => self.licences || self.actions_panel.modal(),
