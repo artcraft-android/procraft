@@ -2575,6 +2575,63 @@ fn what_runs_ahead_of_a_predicted_stroke_shows_as_worked_out_at_each_sample() {
     assert!(tipped > 0, "a pen showing its tip among them");
 }
 
+/// A stroke's end made after the stamps it has laid is what making it whole gives after them, and
+/// those are as they were laid: every brush the app comes with, by a pen drawing with its tip and
+/// without, and a finger.
+#[test]
+fn a_strokes_end_made_after_what_it_laid_is_its_end_made_whole() {
+    use procraft_engine::input::{Pointer, Sample};
+    use procraft_engine::stroke::StrokeBuilder;
+    let at = |k: usize| Sample {
+        pos: procraft_engine::geom::Vec2::new(20.0 + k as f32 * 1.5, 200.0 + (k as f32 * 0.04).sin() * 90.0),
+        pressure: 0.3 + 0.6 * (k as f32 * 0.07).sin().abs(),
+        tilt: 0.5,
+        azimuth: 0.3,
+        roll: 0.0,
+        time_ms: k as f64 * 4.17,
+    };
+    let (mut tried, mut cut) = (0, 0);
+    for set in crate::stock_library::shipped().iter() {
+        for brush in &set.brushes {
+            for (pointer, tipped) in [(Pointer::Stylus, true), (Pointer::Stylus, false), (Pointer::Finger, false)] {
+                let mut b = StrokeBuilder::with_seed(brush.clone(), 26.0, pointer, 11);
+                if tipped && !b.shows_tip() {
+                    continue;
+                }
+                // laid as the canvas lays it: what is drawn for good (with its tip), or each stamp
+                // as it comes, the first few again once they turn the way the stroke goes
+                let mut laid = Vec::new();
+                for e in 0..90 {
+                    let samples = [at(2 * e), at(2 * e + 1)];
+                    if tipped {
+                        laid.extend(b.add_kept(&samples));
+                        b.preview_tip(&[at(2 * e + 2)]);
+                    } else {
+                        let stamps = b.add(&samples);
+                        if b.take_turned() {
+                            laid = b.placed_stamps();
+                        } else {
+                            laid.extend(stamps);
+                        }
+                    }
+                }
+                let lifted = b.add(&[at(180)]);
+                if !tipped {
+                    laid.extend(lifted);
+                }
+                let all = b.clone().finish();
+                tried += 1;
+                if let Some(rest) = b.finish_after(laid.len()) {
+                    cut += 1;
+                    assert!(all.get(..laid.len()) == Some(laid.as_slice()), "{}: what was laid changed", brush.name);
+                    assert!(all.get(laid.len()..) == Some(rest.as_slice()), "{}: its end made differently", brush.name);
+                }
+            }
+        }
+    }
+    assert!(cut * 4 > tried * 3, "{cut} of {tried} strokes' ends made after what they laid");
+}
+
 /// A dual brush's stroke ends laying only what follows the stamps it and its second have laid (a
 /// long stroke of wet paint laid whole again held the next stroke up), and comes out as laid whole:
 /// wet and dry paint laid in place, with a second inside the stroke or reaching past it, and paint

@@ -1350,24 +1350,35 @@ fn lay_stroke(
     second: Option<StrokeBuilder>,
     guide: &procraft_engine::guide::Guide,
 ) {
+    // where nothing laid changes, only the rest of the stroke is made and laid (a long stroke's
+    // end took a while to work out whole, and longer to lay); not with a symmetry guide's copies,
+    // which come after each lot of stamps rather than in the stroke's order
+    let in_order = guide.copies(Vec2::ZERO).is_empty();
     if let Some(mut second) = second {
-        canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish()));
+        match canvas.laid_second_count().filter(|_| in_order).and_then(|n| second.finish_after(n)) {
+            Some(rest) => canvas.end_second_with(&rest),
+            None => canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish())),
+        }
     }
-    let drawn = builder.stamp_count();
-    let for_good = if canvas.shows_tip() { builder.drawn_for_good() } else { None };
     // a smudge, or an adjustment painted on, has laid its stamps for good as they came
-    let laid = canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil();
-    if laid {
+    if canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() {
+        let drawn = builder.stamp_count();
         builder.hold_laid();
-    }
-    let all = builder.finish();
-    if laid {
-        canvas.add_stamps(&guide::mirrored(guide, all.get(drawn..).unwrap_or(&[])));
-    } else if let Some(rest) = for_good.and_then(|stamps| all.strip_prefix(stamps.as_slice())) {
-        // nothing laid changes: a long stroke's end needn't lay it all again
-        canvas.add_stamps(&guide::mirrored(guide, rest));
+        canvas.add_stamps(&guide::mirrored(guide, &builder.finish_from(drawn)));
     } else {
-        canvas.replace_stamps(&guide::mirrored(guide, &all));
+        // (a stroke shown with its tip keeps what it drew for good, as it stood before it ended,
+        // for when that can't be told without it; a brush engine's stamps stay as they came)
+        let before = (canvas.shows_tip() && !builder.is_outside()).then(|| builder.clone());
+        let rest = canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n));
+        if !rest.is_some_and(|rest| canvas.end_with(&rest)) {
+            let for_good = before.and_then(|b| b.drawn_for_good());
+            let all = builder.finish();
+            match for_good.as_deref().and_then(|stamps| all.strip_prefix(stamps)) {
+                // nothing drawn for good changes: only the rest is laid
+                Some(rest) => canvas.add_stamps(&guide::mirrored(guide, rest)),
+                None => canvas.replace_stamps(&guide::mirrored(guide, &all)),
+            }
+        }
     }
     canvas.end_stroke();
 }

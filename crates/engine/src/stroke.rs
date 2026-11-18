@@ -1067,6 +1067,16 @@ pub struct StrokeBuilder {
     /// The stamps placed before the path had a direction turned with it after they were handed
     /// out (see [`StrokeBuilder::take_turned`]).
     turned: bool,
+    /// The stamps placed are kept, not made into the stamps handed out: nothing takes those (a
+    /// copy that works out the tip, the path walked again, the walk on to where the pen lifted).
+    quiet: bool,
+    /// Drawn with its tip ([`StrokeBuilder::add_kept`]): what it has handed out for good is its
+    /// first `kept` stamps, else every stamp placed. And the first of those changed since it was
+    /// handed out (`usize::MAX`: none), for [`StrokeBuilder::finish_after`].
+    tipped: bool,
+    changed: usize,
+    /// Once it has ended: the path's length and the end taper's span its stamps take.
+    ended: Option<(f32, f32)>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -1364,6 +1374,10 @@ impl StrokeBuilder {
             spacing_end: None,
             laid_held: false,
             turned: false,
+            quiet: false,
+            tipped: false,
+            changed: usize::MAX,
+            ended: None,
         }
         .reading_extras()
     }
@@ -1533,7 +1547,11 @@ impl StrokeBuilder {
     /// The first half of [`StrokeBuilder::add_tipped`]: the stamps to draw for good now, the tip
     /// left to [`StrokeBuilder::tip_now`] (or [`StrokeBuilder::preview_tip`]) when it is wanted.
     pub fn add_kept(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        self.tipped = true;
+        // (what `add` would hand out isn't wanted: those drawn for good are made below)
+        let quiet = std::mem::replace(&mut self.quiet, true);
         self.add(samples);
+        self.quiet = quiet;
         let start = self.start_span();
         let reach = match self.start_settled {
             // the start's reach still moving: nothing is drawn for good yet
@@ -1556,6 +1574,7 @@ impl StrokeBuilder {
     /// for good, walked on to the input.
     pub fn tip_now(&mut self) -> Vec<Stamp> {
         let mut ended = self.open_copy(self.kept);
+        ended.quiet = true;
         ended.reach_input(&mut Vec::new());
         ended.respace_tip();
         ended.tip_from(0)
@@ -1568,6 +1587,7 @@ impl StrokeBuilder {
             return Vec::new();
         }
         let mut ahead = self.open_copy(self.kept);
+        ahead.quiet = true;
         ahead.add(samples);
         ahead.reach_input(&mut Vec::new());
         ahead.respace_tip();
@@ -1613,7 +1633,12 @@ impl StrokeBuilder {
     /// laid again with them as they are now ([`StrokeBuilder::placed_stamps`]), while it is a few
     /// stamps long, or the stroke's end would find them changed and lay all of it again.
     pub fn take_turned(&mut self) -> bool {
-        std::mem::take(&mut self.turned)
+        let turned = std::mem::take(&mut self.turned);
+        // (laid again as they are now, they are handed out anew)
+        if turned && !self.tipped {
+            self.changed = usize::MAX;
+        }
+        turned
     }
 
     /// The stamps placed so far, as they are handed out while the stroke is drawn.
@@ -1667,6 +1692,7 @@ impl StrokeBuilder {
         line.brush.streamline = 0.0;
         line.brush.pen_taper = Taper::NONE;
         line.brush.touch_taper = Taper::NONE;
+        line.quiet = true;
         line.add(samples);
         line.finish();
         line.placed.iter().map(|p| p.center - p.thrown).collect()
@@ -1675,15 +1701,62 @@ impl StrokeBuilder {
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
+        let stamps = self.finish_from(0);
+        self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
+        stamps
+    }
+
+    /// Ends the stroke as [`StrokeBuilder::finish`] does, returning its final stamps from the
+    /// `from`th on (none past its last).
+    pub fn finish_from(&mut self, from: usize) -> Vec<Stamp> {
         if let Some(outside) = self.outside.0.as_mut() {
             if !outside.ended {
                 outside.ended = true;
                 let last = outside.engine.finish();
                 outside.stamps.extend(last);
             }
-            self.bounds = outside.stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
-            return outside.stamps.clone();
+            return outside.stamps.get(from..).unwrap_or_default().to_vec();
         }
+        self.walk_to_end();
+        let Some(end) = self.ended else { return Vec::new() };
+        let start = self.start_span();
+        let rest = self.placed.get(from..).unwrap_or_default();
+        rest.iter().map(|p| self.finish_stamp(p, start, Some(end))).collect()
+    }
+
+    /// Ends the stroke as [`StrokeBuilder::finish`] does, returning only its final stamps after the
+    /// first `laid`, if those are sure to be as they were handed out for good (by
+    /// [`StrokeBuilder::add`], or [`StrokeBuilder::add_kept`] for a stroke drawn with its tip): a
+    /// long stroke's end then makes only the rest. None if they may not be (the stroke is then laid
+    /// whole: [`StrokeBuilder::finish_from`] gives it, ended).
+    pub fn finish_after(&mut self, laid: usize) -> Option<Vec<Stamp>> {
+        if self.outside.0.is_some() {
+            return Some(self.finish_from(laid));
+        }
+        self.walk_to_end();
+        let (length, end) = self.ended?;
+        // a tap's stamp is drawn whole; and a start taper changes stamps handed out while its reach
+        // grew, or (handed out as they were placed) before the points either side of them came
+        let start_kept = match self.tipped {
+            true => self.start_settled.is_some() || self.taper().start <= 0.0,
+            false => self.taper().start <= 0.0,
+        };
+        let unchanged = laid <= self.placed.len() && self.changed >= laid && length > 0.0 && start_kept;
+        // nor does the end taper (eased over the points around) reach the last of them
+        let reach = self.eased_before(length - end);
+        let last = laid.checked_sub(1).and_then(|i| self.placed.get(i));
+        let untapered = end <= 0.0 || last.is_none_or(|p| p.distance < reach);
+        (unchanged && untapered).then(|| self.finish_from(laid))
+    }
+
+    /// Walks on to where the pen lifted, as the stroke ends (once): the path catches up with the
+    /// pen, a classic taper runs on, and what the tapers reach is walked again now they are known.
+    fn walk_to_end(&mut self) {
+        if self.ended.is_some() {
+            return;
+        }
+        // nothing walked here is handed out: the stamps are made once it has all been walked
+        let quiet = std::mem::replace(&mut self.quiet, true);
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
         self.average_on(&mut ignored);
@@ -1706,16 +1779,25 @@ impl StrokeBuilder {
         // a tap, which never went anywhere, lays one stamp whatever the brush's count, as a dot
         if length <= 0.0 && run_on <= 0.0 {
             self.placed.truncate(1);
+            self.touched(0);
         }
-        let (start, end) = (self.start_span(), self.end_span(run_on));
+        let end = self.end_span(run_on);
         // what the tapers reach walked again now they are known, so its stamps lie as close as
         // they are small
         if length > 0.0 && !self.laid_held {
             self.respace(Some((length, end)));
         }
-        let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect();
-        self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
-        stamps
+        self.quiet = quiet;
+        self.ended = Some((length, end));
+    }
+
+    /// The stamps from the `from`th on have changed since they were placed: of those handed out
+    /// for good (see [`StrokeBuilder::finish_after`]), the first such is noted.
+    fn touched(&mut self, from: usize) {
+        let handed = if self.tipped { self.kept } else { self.placed.len() };
+        if from < handed {
+            self.changed = self.changed.min(from);
+        }
     }
 
     fn push(&mut self, s: Sample, out: &mut Vec<Stamp>) {
@@ -2329,6 +2411,10 @@ impl StrokeBuilder {
             return;
         }
         let timed = self.taper().start > 0.0 && !self.classic();
+        if timed {
+            // (the stamps drawn while it grew took its reach as it then stood)
+            self.touched(0);
+        }
         self.start_settled = Some(if timed { self.start_input() } else { self.start_span() });
     }
 
@@ -2435,6 +2521,9 @@ impl StrokeBuilder {
         // it now, as the rest will
         if self.length <= 0.0 {
             let turn = self.follow() * (self.direction - self.dab_direction);
+            if turn != 0.0 {
+                self.touched(0);
+            }
             for p in &mut self.placed {
                 p.angle += turn;
             }
@@ -2608,9 +2697,11 @@ impl StrokeBuilder {
         let at = self.walked.iter().rposition(|w| w.before.length <= from).filter(|&i| i >= first).unwrap_or(first);
         let again = self.walked.split_off(at);
         let Some(&Walked { before: b, .. }) = again.first() else { return };
-        self.placed.truncate(b.stamps.saturating_sub(self.left_out));
+        let keep = b.stamps.saturating_sub(self.left_out);
         // the stamps placed before the path had a direction turn with it again
         let undo = b.dab_turn - self.dab_turn;
+        self.touched(if undo != 0.0 { 0 } else { keep });
+        self.placed.truncate(keep);
         if undo != 0.0 {
             for p in &mut self.placed {
                 p.angle += undo;
@@ -2621,11 +2712,14 @@ impl StrokeBuilder {
         (self.heading, self.direction, self.random, self.grain_last, self.dab_turn) =
             (b.heading, b.direction, b.random, b.grain_last, b.dab_turn);
         let now = self.now_ms;
+        // (nothing walked again is handed out here)
+        let quiet = std::mem::replace(&mut self.quiet, true);
         let mut ignored = Vec::new();
         for w in again {
             self.now_ms = w.now_ms;
             self.walk_piece(w.to, w.whole, &mut ignored);
         }
+        self.quiet = quiet;
         self.now_ms = now;
     }
 
@@ -3022,9 +3116,11 @@ impl StrokeBuilder {
                 overlap,
             };
             self.placed.push(placed);
-            let stamp = self.finish_stamp(&placed, start_span, None);
-            self.bounds = self.bounds.union(stamp.bounds());
-            out.push(stamp);
+            if !self.quiet {
+                let stamp = self.finish_stamp(&placed, start_span, None);
+                self.bounds = self.bounds.union(stamp.bounds());
+                out.push(stamp);
+            }
         }
     }
 
