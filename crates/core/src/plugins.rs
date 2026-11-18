@@ -1737,6 +1737,11 @@ impl Plugins {
         }
     }
 
+    /// Whether a plugin lets `panel` be torn off into a window of its own.
+    pub fn floats(&self, panel: crate::floating::FloatingPanel) -> bool {
+        self.hooks().floating_panel(panel as i32)
+    }
+
     /// The choices the menus at `place` offer, of each plugin on that has one there (in order of
     /// id), as their manifests list them. None: the app shows no button for them.
     pub fn menu_choices(&self, place: PluginMenuPlace) -> Vec<PluginChoice> {
@@ -3235,6 +3240,28 @@ mod tests {
         assert_eq!(shown(&next), [false, false, true]);
         assert!(next.set_on(INTERFACE.to_owned(), false));
         assert_eq!(shown(&next), [true; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panels_float_while_the_floating_panels_switches_say() {
+        use crate::floating::FloatingPanel;
+        const FLOATING: &str = "io.github.artcraftandroid.floating-panels";
+        let dir = store("bundled-floating");
+        let plugins = app_at(&dir);
+        let floats = |plugins: &Plugins| [FloatingPanel::Layers, FloatingPanel::Brushes].map(|p| plugins.floats(p));
+        // with it off nothing floats; on, both do at once, each while its switch is
+        assert_eq!(floats(&plugins), [false; 2]);
+        assert!(plugins.set_on(FLOATING.to_owned(), true));
+        assert_eq!(floats(&plugins), [true, true]);
+        assert!(plugins.set_switch(format!("{FLOATING}.layers"), false));
+        assert_eq!(floats(&plugins), [false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(floats(&next), [false, true]);
+        assert!(next.set_on(FLOATING.to_owned(), false));
+        assert_eq!(floats(&next), [false; 2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -149,7 +149,7 @@ private val OptionsTop = 57.dp
  * current one (the title's menu then groups, merges, shares, duplicates or deletes them).
  */
 @Composable
-fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
+fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, floating: FloatingFrame? = null) {
     var options by remember { mutableStateOf<ULong?>(null) }
     var blendFor by remember { mutableStateOf<ULong?>(null) }
     // blend modes opening under a layer: the rows under it go at once and the panel grows over where
@@ -196,39 +196,51 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     DisposableEffect(rows) {
         vm.layerRows = rows
         onDispose {
-            vm.layerRows = emptyMap()
-            vm.layersBox = null
+            // (a panel torn off shows floating as it goes from where it hung: that one's rows stay)
+            if (vm.layerRows === rows) {
+                vm.layerRows = emptyMap()
+                vm.layersBox = null
+            }
         }
     }
 
     // a model's meshes are pictured as the model is seen when the panel opens
     if (vm.modelOpen) LaunchedEffect(Unit) { vm.refreshSubmeshThumbnails() }
-    Popover(LayersWidth, arrowX, modifier.onGloballyPositioned { vm.layersBox = it.boundsInWindow() }) {
+    // floating in a window of its own: as wide as the window, no arrow, a strip over it and under it
+    val side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP
+    Popover(floating?.width ?: LayersWidth, arrowX, modifier.onGloballyPositioned { vm.layersBox = it.boundsInWindow() }, side = side) {
+        floating?.let { FloatingTop(it) }
         // kept while they fade out
         val open = options?.let { id -> vm.layers.firstOrNull { it.id == id }?.let { l -> rows[id]?.let { l to it } } }
         val last = remember { arrayOfNulls<Pair<LayerInfo, Rect>>(1) }
         if (open != null) last[0] = open
         last[0]?.let { (l, row) -> LayerOptions(open != null, vm, l, row.center.y, onRename = { renaming = l.id }, onDone = { options = null }) }
-        PanelHeader(
-            "Layers",
-            chevronOn = vm.anyPicked,
-            onTitle = { titleMenu = !titleMenu },
-            menu = {
-                LayersTitleMenu(titleMenu, vm, onDismiss = { titleMenu = false }, onShare = {
-                    scope.launch {
-                        val files = vm.chosenLayerFiles()
-                        if (files.isNotEmpty()) shareFiles(context, files, "image/png")
-                    }
-                }, onDelete = { deletingChosen = true })
-            },
-        ) {
-            val kinds = vm.layerKinds()
-            Box(
-                Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { if (kinds.isEmpty()) vm.addLayer() else addMenu = true },
-                contentAlignment = Alignment.Center,
+        Box {
+            PanelHeader(
+                "Layers",
+                chevronOn = vm.anyPicked,
+                onTitle = { titleMenu = !titleMenu },
+                menu = {
+                    LayersTitleMenu(titleMenu, vm, onDismiss = { titleMenu = false }, onShare = {
+                        scope.launch {
+                            val files = vm.chosenLayerFiles()
+                            if (files.isNotEmpty()) shareFiles(context, files, "image/png")
+                        }
+                    }, onDelete = { deletingChosen = true })
+                },
             ) {
-                Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
-                NewLayerMenu(addMenu && kinds.isNotEmpty(), kinds, vm, onDismiss = { addMenu = false })
+                val kinds = vm.layerKinds()
+                Box(
+                    Modifier.padding(top = 12.dp).size(40.dp, 41.dp).clickable { if (kinds.isEmpty()) vm.addLayer() else addMenu = true },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(PcIcons.PlusMedium, contentDescription = "New layer", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                    NewLayerMenu(addMenu && kinds.isNotEmpty(), kinds, vm, onDismiss = { addMenu = false })
+                }
+            }
+            // hanging from its button, its grabber tears it off into a window of its own, while a plugin lets it
+            if (floating == null && io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS in Pc.floatingPanels) {
+                PanelGrabber(vm, io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS)
             }
         }
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
@@ -285,7 +297,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         // two rows being pinched, each following its finger part of the way
         var squeeze by remember { mutableStateOf<Squeeze?>(null) }
         LazyColumn(
-            Modifier.weight(1f, fill = false).padding(horizontal = 12.dp)
+            // (floating, it fills its window)
+            Modifier.weight(1f, fill = floating != null).padding(horizontal = 12.dp)
                 .onGloballyPositioned {
                     listAt = it.positionInWindow()
                     listBox[0] = it.boundsInWindow()
@@ -499,6 +512,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 ) { BackgroundRow(vm) }
             }
         }
+        floating?.let { FloatingBottom(it) }
     }
     // Delete on a locked layer's row: why not, OK alone
     Alert(

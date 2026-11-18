@@ -31,6 +31,7 @@ mod colour_models;
 mod crop;
 mod crop_edit;
 mod device;
+mod floating;
 mod frame;
 mod gallery;
 mod gestures;
@@ -151,6 +152,10 @@ pub use colour_models::{
 };
 pub use crop_edit::{CropReadout, CropShown};
 pub use device::keep_device;
+pub use floating::{
+    FloatingPanel, FloatingRoom, FloatingSizes, FloatingWindow, floating_at, floating_fitted, floating_kept,
+    floating_key, floating_moved, floating_read, floating_resized, floating_sizes,
+};
 pub use frame::{configure, screen_profile};
 pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry, ZipKind, zip_file_kind};
 pub use gestures::{

@@ -141,6 +141,8 @@ pub struct Interface {
     drop: ColourDrop,
     library: Library,
     overlays: Overlays,
+    /// The Layers panel and the brush library floating in windows of their own.
+    floating: crate::floating_panels::Floating,
     /// The interface is hidden (full screen).
     bars_hidden: bool,
     /// A layer copied or cut, to paste.
@@ -279,6 +281,7 @@ impl Interface {
             drop: ColourDrop::default(),
             library: Library::default(),
             overlays: Overlays::default(),
+            floating: crate::floating_panels::Floating::kept(prefs.floating),
             bars_hidden: false,
             clipboard: None,
             system_clipboard: SystemClipboard::new(is_picture),
@@ -500,8 +503,9 @@ impl Interface {
         self.style_once(&ctx);
         // how big each part of the interface shows, as the plugins on say, before any of it draws
         crate::panel::set_part_scales(&ctx, &self.prefs.plugins);
-        // and which notices show
+        // and which notices show, and which panels float
         self.overlays.follow_plugins(&self.prefs.plugins);
+        self.floating.follow(&self.prefs.plugins);
         self.ended_export = None;
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
@@ -839,7 +843,8 @@ impl Interface {
             self.popover(&ctx, session, open, anchor(open), &mut backdrops);
         }
         // its rows not showing, held layers find none to drop on
-        if self.open != Some(Popover::Layers) || self.background_pick.is_some() {
+        let layers_floating = self.floating.shown(procraft_core::FloatingPanel::Layers).is_some();
+        if (self.open != Some(Popover::Layers) || self.background_pick.is_some()) && !layers_floating {
             self.layers.closed();
         }
         // the background's colour is kept, however its panel closed
@@ -855,6 +860,8 @@ impl Interface {
         }
         self.colours.set_floating_look(&self.prefs.plugins);
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
+        // the Layers panel and the brush library torn off into windows of their own, likewise
+        self.floating_panels(&ctx, session, &mut backdrops);
         // the colour model chosen on the panel, kept; the panel works in the one kept
         if let Some(model) = self.colours.model_chosen.take() {
             self.prefs.colour_model = model;
@@ -2361,6 +2368,17 @@ impl Interface {
         if popover == Popover::Colour && self.colours.floating.take().is_some() {
             self.open = None;
         }
+        // as do the Layers and the brush library's with theirs floating
+        let floating = match popover {
+            Popover::Layers => Some(procraft_core::FloatingPanel::Layers),
+            Popover::Brushes => Some(procraft_core::FloatingPanel::Brushes),
+            _ => None,
+        };
+        if let Some(panel) = floating.filter(|&p| self.floating.shown(p).is_some()) {
+            self.floating.close(panel);
+            self.keep_floating();
+            self.open = None;
+        }
         self.open = if self.open == Some(popover) { None } else { Some(popover) };
     }
 
@@ -2487,42 +2505,32 @@ impl Interface {
         let (on_window, button) = (button, space.to_window.inverse().mul_rect(button));
         let shown = match which {
             Popover::Brushes => {
-                let shown = self.library.show(ctx, &mut self.look, session, button, backdrops);
+                self.library.floats = self.floating.allowed(procraft_core::FloatingPanel::Brushes);
+                let shown =
+                    self.library.show(ctx, &mut self.look, session, crate::panel::Hang::Button(button), backdrops);
                 // what was done in the library is kept
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
+                // its grabber dragged out: it floats instead
+                if let Some((from, to)) = self.library.undock.take()
+                    && self.floating.undock(ctx, procraft_core::FloatingPanel::Brushes, from, to)
+                {
+                    self.open = None;
+                }
                 shown
             }
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
                 self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
-                let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
-                if let Some(key) = self.layers.run_action.take() {
-                    self.run_plugin_action(ctx, session, key);
-                }
-                if let Some((text, warning, kind)) = self.layers.notice.take() {
-                    self.overlays.notice_of(text, warning, kind);
-                }
-                if let Some(id) = self.layers.lifted.take() {
-                    self.lift_layers(ctx, session, id);
-                }
-                if let Some(copied) = self.layers.copied.take() {
-                    self.keep_copy(session, copied);
-                }
-                if std::mem::take(&mut self.layers.share) {
-                    self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
-                }
-                if let Some(id) = self.layers.edit_text.take() {
+                self.layers.floats = self.floating.allowed(procraft_core::FloatingPanel::Layers);
+                let hang = crate::panel::Hang::Button(button);
+                let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, hang, backdrops);
+                self.layers_asked(ctx, session);
+                // its grabber dragged out: it floats instead
+                if let Some((from, to)) = self.layers.undock.take()
+                    && self.floating.undock(ctx, procraft_core::FloatingPanel::Layers, from, to)
+                {
                     self.open = None;
-                    self.text.edit(session, id);
-                }
-                if std::mem::take(&mut self.layers.layer_opacity) {
-                    self.start_layer_opacity(session);
-                }
-                // its background row tapped: the colour panel in its place, on the background's
-                if std::mem::take(&mut self.layers.pick_background) {
-                    let b = session.background();
-                    self.background_pick = Some(BackgroundPick::new(to_hex([b.r, b.g, b.b]), self.colours.hsv[0]));
                 }
                 shown
             }
@@ -2722,6 +2730,90 @@ impl Interface {
         crate::panel::drawing_panel(ctx, None);
         if !modal {
             self.close_outside(ctx, space.to_window.mul_rect(shown), on_window);
+        }
+    }
+
+    /// What the Layers panel asked of the app as it showed (hanging or floating): a plugin's action
+    /// run, a notice, layers lifted out, a layer copied, sharing, text edited, a layer's opacity,
+    /// the background's colour.
+    fn layers_asked(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>) {
+        if let Some(key) = self.layers.run_action.take() {
+            self.run_plugin_action(ctx, session, key);
+        }
+        if let Some((text, warning, kind)) = self.layers.notice.take() {
+            self.overlays.notice_of(text, warning, kind);
+        }
+        if let Some(id) = self.layers.lifted.take() {
+            self.lift_layers(ctx, session, id);
+        }
+        if let Some(copied) = self.layers.copied.take() {
+            self.keep_copy(session, copied);
+        }
+        if std::mem::take(&mut self.layers.share) {
+            self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
+        }
+        if let Some(id) = self.layers.edit_text.take() {
+            self.open = None;
+            self.text.edit(session, id);
+        }
+        if std::mem::take(&mut self.layers.layer_opacity) {
+            self.start_layer_opacity(session);
+        }
+        // its background row tapped: the colour panel in its place (hanging from the Layers
+        // button, from a floating one too), on the background's
+        if std::mem::take(&mut self.layers.pick_background) {
+            let b = session.background();
+            self.background_pick = Some(BackgroundPick::new(to_hex([b.r, b.g, b.b]), self.colours.hsv[0]));
+            self.open = Some(Popover::Layers);
+        }
+    }
+
+    /// The Layers panel and the brush library, each in its window while it floats: where it was
+    /// left, at the floating windows' size, under the panels hanging from the bar. A window's strip
+    /// moves it and its corner sizes it, with the pointer until let go; its Close closes it.
+    fn floating_panels(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, backdrops: &mut Vec<f32>) {
+        use crate::floating_panels::{Floating, PANELS};
+        use procraft_core::FloatingPanel;
+        self.floating.follow_pointer(ctx);
+        for panel in PANELS {
+            let Some(window) = self.floating.shown(panel) else { continue };
+            let (rect, space) = Floating::space(ctx, panel, window);
+            crate::panel::drawing_panel(ctx, Some(space));
+            let hang = crate::panel::Hang::Floating(rect);
+            let chrome = match panel {
+                FloatingPanel::Layers => {
+                    self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                    self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
+                    self.layers.show(ctx, &mut self.look, session, &mut self.colours, hang, backdrops);
+                    self.layers_asked(ctx, session);
+                    std::mem::take(&mut self.layers.chrome)
+                }
+                FloatingPanel::Brushes => {
+                    self.library.show(ctx, &mut self.look, session, hang, backdrops);
+                    self.keep_brushes |= std::mem::take(&mut self.library.changed);
+                    std::mem::take(&mut self.library.chrome)
+                }
+            };
+            crate::panel::drawing_panel(ctx, None);
+            if chrome.closed {
+                self.floating.close(panel);
+            } else if (chrome.moving || chrome.sizing)
+                && let Some(from) = ctx.input(|i| i.pointer.press_origin())
+            {
+                self.floating.hold(panel, chrome.sizing, from);
+            }
+        }
+        if std::mem::take(&mut self.floating.changed) {
+            self.keep_floating();
+        }
+    }
+
+    /// The floating panels' windows kept with the preferences, as they are now.
+    fn keep_floating(&mut self) {
+        self.floating.changed = false;
+        if self.prefs.floating != self.floating.windows {
+            self.prefs.floating = self.floating.windows;
+            self.prefs.keep();
         }
     }
 

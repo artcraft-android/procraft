@@ -43,6 +43,9 @@ object Pc {
     /** Plugins' menus with choices for Classic's corner, while any has: a button there opens them. */
     var classicMenu by mutableStateOf<ClassicMenu?>(null)
 
+    /** The panels a plugin lets be torn off into windows of their own. */
+    var floatingPanels by mutableStateOf(emptySet<io.github.artcraftandroid.procraft.core.FloatingPanel>())
+
     /** The notices that show, as the plugins say: one of something done may not; one of something gone wrong always does. */
     var noticesShown by mutableStateOf(io.github.artcraftandroid.procraft.core.NoticeKind.entries.toSet())
 

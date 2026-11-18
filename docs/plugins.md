@@ -25,9 +25,9 @@ The samples are in [`plugins/`](../plugins). `touch-offset` is the smallest with
 the largest. `effects` lists three filters, each under a switch of its own. `layer-fills` has an
 action beside a filter, `colour-triangle` is a picker, `vector-layers` adds layers of its own, and
 `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds. `interface`,
-`layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches, and
+`layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches,
 `colour-triangle`'s picture draws its hue ring as its switch says and its [menu](#a-menu-of-its-own)
-switches its shape.
+switches its shape, and `floating-panels` lets panels float in windows of their own.
 
 ## What you write
 
@@ -69,7 +69,7 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
 the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
 5, more than eight controls, or a picker's picture that reads its controls, 6, and the `hide_notices`
-hook 7.
+and `floating_panels` hooks 7.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -302,7 +302,7 @@ number:
 
 | `part` | The part |
 |---|---|
-| 0 | Floating panels: the colour panel dragged out by its grabber, and a plugin's own panel |
+| 0 | Floating panels: the colour panel dragged out by its grabber, the panels the [`floating_panels`](#floating_panels) hook lets float, and a plugin's own panel |
 | 1 | Popovers and menus: what drops down from a button or a row |
 | 2 | The side bar |
 | 3 | The top bar (what hangs from it hangs from it as it shows) |
@@ -424,6 +424,24 @@ procraft_hide_notice(kind: i32) -> i32
 Answer 0 for a kind you don't know: more may come. A notice that something went wrong, or that
 something couldn't be saved, is never asked about: it always shows. With several plugins on this
 hook, one that hides a kind hides it.
+
+### `floating_panels`
+
+Whether a panel can be torn off into a window of its own (not 0) (interface 7):
+
+```
+procraft_floating_panel(panel: i32) -> i32
+```
+
+`panel` is 0 for the Layers panel and 1 for the brush library; answer 0 for one you don't know.
+While a plugin says yes, the panel shows a grabber at its top where it hangs from its button.
+Dragged out by it, the panel floats in a window over the canvas, which stays open while you draw:
+moved by the strip at its top, sized from its lower right corner (within what the panel allows) and
+closed by its Close. The panel's own button hangs it from the bar again. Inside, the panel is the
+same as where it hangs. The canvas takes every touch around the window and none on it, and the app
+keeps where it was left and how big from one start to the next. With the plugin off the window goes,
+and comes back where it was when it is on again. With several plugins on this hook, one that lets a
+panel float lets it.
 
 ### `interface_colour`
 
@@ -1500,10 +1518,9 @@ keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.d
 the utilities, interface 5 several filters in one plugin, interface 6 up to sixteen controls, a
 picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its own,
 a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks, and
-interface 7 the `hide_notices` hook.
-What comes under a switch at the top of the list, taking the place of other plugins, and a menu of
-its own need no newer interface: an older app shows every control, leaves the others where they are,
-and shows no menu. What a
+interface 7 the `hide_notices` and `floating_panels` hooks. What comes under a switch at the top of
+the list, taking the place of other plugins, and a menu of its own need no newer interface: an older
+app shows every control, leaves the others where they are, and shows no menu. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin
 goes on working as it was written.
 

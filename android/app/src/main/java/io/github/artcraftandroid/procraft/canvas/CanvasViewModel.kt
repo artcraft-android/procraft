@@ -554,7 +554,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     // the interface's accent as the plugins give it
     init { followPluginLooks() }
 
-    /** What the plugins change in how the interface looks: its accent, Classic's picker, the floating colours; and whether strokes are heard. */
+    /** What the plugins change in how the interface looks: its accent, Classic's picker and menu, the floating colours and panels, the notices; and whether strokes are heard. */
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
@@ -573,6 +573,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.floatingPickerOnly = plugins.floatingPickerOnly()
         val choices = plugins.menuChoices(io.github.artcraftandroid.procraft.core.PluginMenuPlace.CLASSIC)
         io.github.artcraftandroid.procraft.ui.Pc.classicMenu = choices.takeIf { it.isNotEmpty() }?.let { io.github.artcraftandroid.procraft.ui.ClassicMenu(it, ::choosePluginChoice) }
+        io.github.artcraftandroid.procraft.ui.Pc.floatingPanels = io.github.artcraftandroid.procraft.core.FloatingPanel.entries.filter { plugins.floats(it) }.toSet()
         io.github.artcraftandroid.procraft.ui.Pc.noticesShown = io.github.artcraftandroid.procraft.core.NoticeKind.entries.filter { plugins.showsNotice(it) }.toSet()
         tweensOn = plugins.tweens()
         followStrokeSound()
@@ -1187,6 +1188,84 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The colour panel's grabber is being dragged out: the panel stays, unseen, until let go. */
     var colorsUndocking by mutableStateOf(false)
+
+    /**
+     * The Layers panel and the brush library, each as its window was last left when torn off into one of its own
+     * (shown or closed), kept with the interface settings. A window shows while a plugin lets its panel float.
+     */
+    var floatingWindows by mutableStateOf(readFloatingWindows())
+        private set
+
+    /** A panel's grabber is being dragged out: the panel stays, unseen, until let go, its window following the finger. */
+    var panelUndocking by mutableStateOf<io.github.artcraftandroid.procraft.core.FloatingPanel?>(null)
+        private set
+
+    /** Where the floating windows may go now (dp of the interface): the window, clear of the side bar. */
+    var floatingRoom = io.github.artcraftandroid.procraft.core.FloatingRoom(0f, 0f, 1f, 1f)
+
+    private fun readFloatingWindows(): Map<io.github.artcraftandroid.procraft.core.FloatingPanel, io.github.artcraftandroid.procraft.core.FloatingWindow> =
+        io.github.artcraftandroid.procraft.core.FloatingPanel.entries.mapNotNull { p ->
+            interfacePrefs.getString(io.github.artcraftandroid.procraft.core.floatingKey(p), null)?.let { io.github.artcraftandroid.procraft.core.floatingRead(it) }?.let { p to it }
+        }.toMap()
+
+    /** [panel]'s window, while it shows: torn off and not closed, and a plugin lets the panel float. */
+    fun floatingWindow(panel: io.github.artcraftandroid.procraft.core.FloatingPanel): io.github.artcraftandroid.procraft.core.FloatingWindow? =
+        floatingWindows[panel]?.takeIf { it.open && panel in io.github.artcraftandroid.procraft.ui.Pc.floatingPanels }
+
+    /** The Layers panel shows: hanging from its button, or floating. */
+    val layersShown: Boolean get() = panel == Panel.LAYERS || floatingWindow(io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS) != null
+
+    private fun setFloating(panel: io.github.artcraftandroid.procraft.core.FloatingPanel, window: io.github.artcraftandroid.procraft.core.FloatingWindow) {
+        floatingWindows = floatingWindows + (panel to window)
+    }
+
+    /** [panel]'s window as it is now, kept for the next start. */
+    fun keepFloatingWindow(panel: io.github.artcraftandroid.procraft.core.FloatingPanel) {
+        val window = floatingWindows[panel] ?: return
+        interfacePrefs.edit().putString(io.github.artcraftandroid.procraft.core.floatingKey(panel), io.github.artcraftandroid.procraft.core.floatingKept(window)).apply()
+    }
+
+    /**
+     * [panel]'s grabber dragged out past its start, the finger at ([x], [y]) (dp of the interface): its window follows it,
+     * as big as it was last left, its grabber under the finger.
+     */
+    fun undockPanel(panel: io.github.artcraftandroid.procraft.core.FloatingPanel, x: Float, y: Float) {
+        panelUndocking = panel
+        val k = io.github.artcraftandroid.procraft.ui.Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+        val first = io.github.artcraftandroid.procraft.core.floatingAt(panel, x, y - io.github.artcraftandroid.procraft.ui.FloatingGrabY * k, k)
+        val sized = floatingWindows[panel]?.let { was -> first.copy(x = x - was.width * k / 2, width = was.width, height = was.height) } ?: first
+        setFloating(panel, io.github.artcraftandroid.procraft.core.floatingFitted(panel, sized, floatingRoom, k))
+    }
+
+    /** [panel]'s grabber let go: it floats where it is, kept, and the panel that hung from its button closes. */
+    fun undockedPanel(panel: io.github.artcraftandroid.procraft.core.FloatingPanel) {
+        if (panelUndocking != panel) return
+        panelUndocking = null
+        keepFloatingWindow(panel)
+        closePanels()
+        if (panel == io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS) refreshThumbnails()
+    }
+
+    /** [panel]'s window moved by ([dx], [dy]) (dp of the interface), inside its room. */
+    fun moveFloating(panel: io.github.artcraftandroid.procraft.core.FloatingPanel, dx: Float, dy: Float) {
+        val window = floatingWindows[panel] ?: return
+        val k = io.github.artcraftandroid.procraft.ui.Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+        setFloating(panel, io.github.artcraftandroid.procraft.core.floatingMoved(panel, window, dx, dy, floatingRoom, k))
+    }
+
+    /** [panel]'s window sized from its corner, dragged by ([dx], [dy]) (dp of the interface), within what it may be. */
+    fun resizeFloating(panel: io.github.artcraftandroid.procraft.core.FloatingPanel, dx: Float, dy: Float) {
+        val window = floatingWindows[panel] ?: return
+        val k = io.github.artcraftandroid.procraft.ui.Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+        setFloating(panel, io.github.artcraftandroid.procraft.core.floatingResized(panel, window, dx, dy, floatingRoom, k))
+    }
+
+    /** [panel]'s window closed by its Close: where it was and its size kept for when it floats again. */
+    fun closeFloating(panel: io.github.artcraftandroid.procraft.core.FloatingPanel) {
+        val window = floatingWindows[panel] ?: return
+        setFloating(panel, window.copy(open = false))
+        keepFloatingWindow(panel)
+    }
 
     /** The panel just closed fades away (an adjustment picked from its list) instead of going at once. */
     var panelFading by mutableStateOf(false)
@@ -1966,7 +2045,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** What undo or redo changed on a model, in the pictures the open Layers panel shows of it. */
     private fun refreshModelThumbnails() {
-        if (!modelOpen || panel != Panel.LAYERS) return
+        if (!modelOpen || !layersShown) return
         channelTrayFor?.let { refreshChannelThumbnails(it) }
         refreshSubmeshThumbnails()
     }
@@ -3240,7 +3319,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if ((if (private) s?.pastePrivate(image) else s?.paste(image)) == null) message = noRoom()
         closePanels()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     /** Layer Select: the layers drawn under a point (top first), listed there to choose from. */
@@ -4224,7 +4303,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         refresh()
         refreshView()
-        if (changed && panel == Panel.LAYERS) refreshThumbnails()
+        if (changed && layersShown) refreshThumbnails()
     }
 
     // ---- the reference window ----
@@ -4731,7 +4810,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             job?.join()
             s.textEnd(keep)
             refresh()
-            if (panel == Panel.LAYERS) refreshThumbnails()
+            if (layersShown) refreshThumbnails()
         }
     }
 
@@ -4849,7 +4928,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        if (openLayers) panel = Panel.LAYERS
+        if (openLayers && floatingWindow(io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS) == null) panel = Panel.LAYERS
     }
 
     fun rasterize(l: LayerInfo) {
@@ -6592,8 +6671,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             floatingColorsAt = null
             panel = Panel.NONE
         }
+        // as do the Layers and the brush library's buttons with theirs floating
+        val floating = when (p) {
+            Panel.LAYERS -> io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS
+            Panel.BRUSHES -> io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES
+            else -> null
+        }
+        if (floating != null && floatingWindow(floating) != null) {
+            closeFloating(floating)
+            panel = Panel.NONE
+        }
         panel = if (panel == p) Panel.NONE else p
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     /** The modes open now, as the core's [modeSwitch] takes them. */
@@ -6670,7 +6759,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         followAdjustmentStep()
         refresh()
         // the thumbnails of the layers it put back (only those) read again
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
         refreshModelThumbnails()
     }
 
@@ -6735,7 +6824,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         followQuickShape()
         if (modelOpen) followModelChannel()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
         refreshModelThumbnails()
         followAdjustmentStep()
         text?.let { resumeText(it) }
@@ -6871,7 +6960,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         perspectivePuck = null
         if (painted) readSliders()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     /**
@@ -7089,7 +7178,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         showDone("Adjustment applied")
         readAdjust()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     /** Takes back the adjustment's changes, or with none, the last one kept. */
@@ -7098,7 +7187,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         session?.adjustmentUndo()
         readAdjust()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     fun togglePreview() {
@@ -7180,7 +7269,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         freehand = emptyList()
         if (s != null && s.closeSelectionTool(colorFill)) {
             refresh()
-            if (panel == Panel.LAYERS) refreshThumbnails()
+            if (layersShown) refreshThumbnails()
         }
         selecting = false
         selectionPopup = SelectionPopup.NONE
@@ -7626,7 +7715,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.selectNone()
         selectionChanged()
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     /** The feather popover's amount (0..1): the selection's edges softened from how they were before. */
@@ -7768,7 +7857,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         transformPopup = TransformPopup.NONE
         transformNumeric = null
         refresh()
-        if (panel == Panel.LAYERS) refreshThumbnails()
+        if (layersShown) refreshThumbnails()
     }
 
     fun chooseTransformKind(kind: TransformKind) {
@@ -7879,7 +7968,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         recordFrame()
         // the stroke's colour went into the history (painting with the brush, not an adjustment on)
         history = colourHistory.colours().map { it.toInt() }
-        if (panel == Panel.LAYERS) layers.firstOrNull { it.current }?.let { loadThumbnail(it.id) }
+        if (layersShown) layers.firstOrNull { it.current }?.let { loadThumbnail(it.id) }
     }
 
     // ---- Animation Assist ----
@@ -8271,7 +8360,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val s = session ?: return
             if (!(screen == Screen.CANVAS && !modelOpen)) return
             val same = artworkDir != null && artworkDir == h.from
-            val overRows = panel == Panel.LAYERS && layersBox?.contains(at) == true
+            val overRows = layersShown && layersBox?.contains(at) == true
             if (same && overRows) {
                 val l = layers.firstOrNull { it.id == h.layer } ?: return
                 dropRow(l, rowDrop(l.id, layerRows, at.y, null))
@@ -8288,7 +8377,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 return
             }
             refresh()
-            if (panel == Panel.LAYERS) refreshThumbnails()
+            if (layersShown) refreshThumbnails()
             if (place == io.github.artcraftandroid.procraft.core.LayerDrop.AboveCurrent && h.items == 1) toggleTransform()
         }
     }
@@ -8420,6 +8509,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pickBackground() {
         backgroundPicking = true
+        // from the Layers panel floating: the background's colours hang from the Layers button
+        panel = Panel.LAYERS
     }
 
     /** The background's colour as 0xRRGGBB. */
@@ -8446,7 +8537,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         f(s)
         refresh()
-        if (thumbs && panel == Panel.LAYERS) refreshThumbnails()
+        if (thumbs && layersShown) refreshThumbnails()
     }
 
     /** Re-reads the layers and undo state from the session. */
@@ -8480,6 +8571,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have none). */
+    /** The layers' thumbnails drawn again, while the Layers panel shows (a floating one opening). */
+    fun refreshThumbnailsShown() {
+        if (layersShown) refreshThumbnails()
+    }
+
     private fun refreshThumbnails() {
         val s = session ?: return
         viewModelScope.launch {

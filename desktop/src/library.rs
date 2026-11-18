@@ -185,6 +185,12 @@ enum Deleting {
 
 #[derive(Default)]
 pub struct Library {
+    /// Floating in a window of its own: what its strips had done to them this frame.
+    pub chrome: panel::FloatingChrome,
+    /// Hanging from its button, whether a plugin lets it float (its grabber then shows), and while
+    /// the grabber is dragged, where the press began and where the pointer is (the window's points).
+    pub floats: bool,
+    pub undock: Option<(egui::Pos2, egui::Pos2)>,
     /// The set shown, once one is tapped (else the current brush's).
     shown_set: Option<usize>,
     /// The Recent set is shown instead (the brushes last painted with, and those pinned there);
@@ -379,16 +385,26 @@ impl Library {
         ctx: &egui::Context,
         look: &mut Look,
         session: &Arc<CanvasSession>,
-        button: Rect,
+        hang: panel::Hang,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = panel::screen(ctx);
-        let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
-        let rect = Rect::from_min_size(
-            pos2(left, top),
-            vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
-        );
+        let (rect, arrow_x, area) = match hang {
+            panel::Hang::Button(button) => {
+                let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
+                let rect = Rect::from_min_size(
+                    pos2(left, top),
+                    vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
+                );
+                (rect, arrow_x, panel::area(ctx, egui::Id::unique("brush library"), rect))
+            }
+            panel::Hang::Floating(window) => (
+                panel::floating_rect(window),
+                0.0,
+                panel::floating_area(ctx, egui::Id::unique("floating brush library"), window),
+            ),
+        };
         // the cards' strokes forgotten last frame are drawn no more
         self.card_retired.clear();
         if std::mem::take(&mut self.stale) {
@@ -434,10 +450,20 @@ impl Library {
         let mut brush_tapped = None;
         let mut swipe_chose = None;
         let mut title_row = Rect::NOTHING;
-        panel::area(ctx, egui::Id::unique("brush library"), rect).show(ctx, |ui| {
+        area.show(ctx, |ui| {
             // nothing under the panel takes a touch
-            ui.allocate_rect(rect, Sense::click());
-            panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
+            match hang {
+                panel::Hang::Button(_) => {
+                    ui.allocate_rect(rect, Sense::click());
+                    panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
+                    self.undock = if self.floats { panel::undock_grabber(ui, panel::body(rect)) } else { None };
+                }
+                panel::Hang::Floating(window) => {
+                    ui.allocate_rect(window, Sense::click());
+                    panel::floating_panel_frame(ui, look, "floating library frame", window, backdrops);
+                    self.chrome = panel::floating_chrome(ui, window);
+                }
+            }
             let body = panel::body(rect);
             // the library in use's name (typed over while it is renamed), or every library's
             let name = libraries.get(place).map_or("Brush library", |l| l.name.as_str());
@@ -772,7 +798,10 @@ impl Library {
                 Some(Deleting::Brush(..) | Deleting::Library(_)) | None => {}
             }
         }
-        rect
+        match hang {
+            panel::Hang::Button(_) => rect,
+            panel::Hang::Floating(window) => window,
+        }
     }
 
     /// In the place of the `plus`: Delete for the picked brushes, and Combine beside it
@@ -1839,7 +1868,7 @@ mod tests {
             let Finger { ctx, look, library, session, .. } = self;
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
-                library.show(ui.ctx(), look, session, button, &mut Vec::new());
+                library.show(ui.ctx(), look, session, crate::panel::Hang::Button(button), &mut Vec::new());
             });
             output.textures_delta.clear();
         }

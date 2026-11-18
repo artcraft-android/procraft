@@ -595,6 +595,13 @@ impl Hooks {
             && self.through(Hook::HideNotices, false, |running, said| Ok(said || running.hide_notice(kind)?))
     }
 
+    /// The floating panels hook: whether panel `panel` (by [`crate::floating::FloatingPanel`]) can be
+    /// torn off into a window of its own, as any plugin on it says.
+    pub(crate) fn floating_panel(&self, panel: i32) -> bool {
+        self.has(Hook::FloatingPanels)
+            && self.through(Hook::FloatingPanels, false, |running, said| Ok(said || running.floating_panel(panel)?))
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {

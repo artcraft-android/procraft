@@ -23,6 +23,12 @@ pub enum CursorStyle {
     Brush,
 }
 
+/// Which floating panel's window is kept under `name`, by its place in
+/// [`crate::floating_panels::PANELS`].
+fn floating_at(name: &str) -> Option<usize> {
+    crate::floating_panels::PANELS.iter().position(|&panel| procraft_core::floating_key(panel) == name)
+}
+
 /// What an artwork dragged out of the gallery becomes, and a picture's format when one is wanted.
 pub const DRAG_FORMATS: [&str; 5] = ["ProCraft", "PSD", "JPEG", "PNG", "TIFF"];
 pub const DRAG_IMAGE_FORMATS: [&str; 3] = ["JPEG", "PNG", "TIFF"];
@@ -58,6 +64,9 @@ pub struct Prefs {
     pub curve: Vec<[f32; 2]>,
     /// The Actions panel's tab open.
     pub actions_tab: usize,
+    /// The Layers panel's and the brush library's windows as last left, while a plugin let them
+    /// float (by their place in [`crate::floating_panels::PANELS`]).
+    pub floating: [Option<procraft_core::FloatingWindow>; 2],
     /// The brush studio's pad a sphere on every page.
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
@@ -110,6 +119,7 @@ impl Default for Prefs {
             tip_attached: true,
             curve: straight(),
             actions_tab: 0,
+            floating: [None, None],
             pad_3d: false,
             project_canvas: false,
             plugins: Plugins::new(),
@@ -189,6 +199,11 @@ impl Prefs {
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
+                name if floating_at(name).is_some() => {
+                    if let Some(slot) = floating_at(name).and_then(|at| p.floating.get_mut(at)) {
+                        *slot = procraft_core::floating_read(value.to_owned());
+                    }
+                }
                 "curve" => {
                     let numbers: Vec<f32> = value.split(',').filter_map(|v| v.parse().ok()).collect();
                     let points: Vec<[f32; 2]> = numbers.as_chunks::<2>().0.to_vec();
@@ -240,7 +255,10 @@ impl Prefs {
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
         ];
-        let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
+        let floating = crate::floating_panels::PANELS.into_iter().zip(self.floating).filter_map(|(panel, window)| {
+            Some(format!("{} {}", procraft_core::floating_key(panel), procraft_core::floating_kept(window?)))
+        });
+        let lines: Vec<String> = lines.into_iter().chain(floating).chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
     }
 

@@ -24,6 +24,7 @@ mod export_card;
 mod files;
 #[cfg(target_os = "macos")]
 mod finder;
+mod floating_panels;
 mod gallery;
 mod gesture_controls;
 mod gradient_map;

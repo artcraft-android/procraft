@@ -210,6 +210,8 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             // the colour panel dragged out by its grabber: a window over the canvas until closed,
             // under the panels, which open over it
             FloatingColors(vm, maxWidth, maxHeight)
+            // the Layers panel and the brush library torn off into windows of their own, likewise
+            FloatingPanels(vm, maxWidth, maxHeight)
             // each panel hangs from its button: colour, layers, then the tool that opened the library;
             // it grows out of its arrow as it opens and fades as it closes
             PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -240,8 +242,15 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 }
                 val left = with(density) { place.left.roundToPx() }
                 val top = with(density) { Pc.barShown.roundToPx() }
+                // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
+                val undocking = when (shown) {
+                    Panel.LAYERS -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS
+                    Panel.BRUSHES -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES
+                    else -> false
+                }
+                val seen = if (undocking) 0f else alpha
                 val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.graphicsLayer {
-                    this.alpha = alpha
+                    this.alpha = seen
                     scaleX = scale
                     scaleY = scale
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / (width * k), 0f)
@@ -251,7 +260,7 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 val room = (maxHeight - Pc.barShown) / k + Pc.BarHeight
                 val arrowX = place.arrowX / k
                 PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS) {
-                ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
+                ProvidePanelLook(PanelLook(seen, scale, pivot)) {
                     when (shown) {
                         Panel.LAYERS -> if (vm.backgroundPicking) {
                             ColorPanel(vm, arrowX, room, at, background = true)

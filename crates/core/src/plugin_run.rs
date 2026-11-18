@@ -62,6 +62,9 @@
 //! - `procraft_hide_notice(kind: i32) -> i32`: for the hook `hide_notices` (interface 7), whether
 //!   the notice of something done goes by unseen (not 0), `kind` by [`crate::plugins::NoticeKind`]:
 //!   0 what undo and redo did, 1 anything else done. A notice of something gone wrong is never asked.
+//! - `procraft_floating_panel(panel: i32) -> i32`: for the hook `floating_panels` (interface 7),
+//!   whether a panel can be torn off into a window of its own (not 0), `panel` by
+//!   [`crate::floating::FloatingPanel`].
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -219,6 +222,7 @@ const PICKER_HUE_POINT: &str = "procraft_picker_hue_point";
 const INTERFACE_PART_SCALE: &str = "procraft_interface_part_scale";
 const FLOATING_PICKER_ONLY: &str = "procraft_floating_picker_only";
 const HIDE_NOTICE: &str = "procraft_hide_notice";
+const FLOATING_PANEL: &str = "procraft_floating_panel";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -359,6 +363,8 @@ pub(crate) enum Hook {
     FloatingPickerOnly,
     /// The notices of things done (interface 7).
     HideNotices,
+    /// Panels torn off into windows of their own (interface 7).
+    FloatingPanels,
 }
 
 impl Hook {
@@ -388,6 +394,7 @@ impl Hook {
             "interface_part_scale" => Some(Hook::InterfacePartScale),
             "floating_picker_only" => Some(Hook::FloatingPickerOnly),
             "hide_notices" => Some(Hook::HideNotices),
+            "floating_panels" => Some(Hook::FloatingPanels),
             _ => None,
         }
     }
@@ -421,6 +428,7 @@ impl Hook {
             Hook::InterfacePartScale => "This plugin can make parts of the interface bigger or smaller.",
             Hook::FloatingPickerOnly => "This plugin can show the floating colour window with its picker alone.",
             Hook::HideNotices => "This plugin can hide the notices shown when something is done.",
+            Hook::FloatingPanels => "This plugin can let panels float in windows of their own.",
         }
     }
 
@@ -443,6 +451,7 @@ impl Hook {
             Hook::InterfacePartScale => exports(module, INTERFACE_PART_SCALE, &[ValType::I32], &[ValType::F32]),
             Hook::FloatingPickerOnly => exports(module, FLOATING_PICKER_ONLY, &[], &[ValType::I32]),
             Hook::HideNotices => exports(module, HIDE_NOTICE, &[ValType::I32], &[ValType::I32]),
+            Hook::FloatingPanels => exports(module, FLOATING_PANEL, &[ValType::I32], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -804,6 +813,7 @@ pub(crate) struct Running {
     interface_part_scale: Option<TypedFunc<i32, f32>>,
     floating_picker_only: Option<TypedFunc<(), i32>>,
     hide_notice: Option<TypedFunc<i32, i32>>,
+    floating_panel: Option<TypedFunc<i32, i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -951,6 +961,7 @@ impl Running {
             let interface_part_scale = instance.get_typed_func(&store, INTERFACE_PART_SCALE).ok();
             let floating_picker_only = instance.get_typed_func(&store, FLOATING_PICKER_ONLY).ok();
             let hide_notice = instance.get_typed_func(&store, HIDE_NOTICE).ok();
+            let floating_panel = instance.get_typed_func(&store, FLOATING_PANEL).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1051,6 +1062,7 @@ impl Running {
                 interface_part_scale,
                 floating_picker_only,
                 hide_notice,
+                floating_panel,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -1969,6 +1981,17 @@ impl Running {
         Ok(said != 0)
     }
 
+    /// Whether it says panel `panel` can be torn off into a window of its own.
+    pub(crate) fn floating_panel(&mut self, panel: i32) -> Result<bool, Stop> {
+        let Running { store, floating_panel, .. } = self;
+        let Some(floating_panel) = floating_panel else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            floating_panel.call(&mut *store, panel).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
     pub(crate) fn randomise(&mut self, setting: i32, seed: i32) -> Result<Option<f32>, Stop> {
         let Running { store, randomise, .. } = self;
@@ -2573,6 +2596,36 @@ pub(crate) mod tests {
         assert!(can_run(&bytes, &[Hook::FloatingPickerOnly], false));
         assert_eq!(started(&bytes).floating_picker_only(), Ok(true));
         assert!(!can_run(&bytes, &[Hook::InterfacePartScale], false), "not what that hook calls");
+    }
+
+    #[test]
+    fn notices_and_floating_panels_are_asked_by_their_number() {
+        // kind or panel 1 yes, any other no
+        for (export, hook) in
+            [("procraft_hide_notice", Hook::HideNotices), ("procraft_floating_panel", Hook::FloatingPanels)]
+        {
+            let text = format!(
+                r#"(module (func (export "{export}") (param i32) (result i32) (i32.eq (local.get 0) (i32.const 1))))"#
+            );
+            let bytes = wat::parse_str(text).unwrap();
+            assert!(can_run(&bytes, &[hook], false), "{export}");
+            let mut running = started(&bytes);
+            let ask = |running: &mut Running, n| match hook {
+                Hook::HideNotices => running.hide_notice(n),
+                _ => running.floating_panel(n),
+            };
+            assert_eq!(
+                (ask(&mut running, 0), ask(&mut running, 1), ask(&mut running, 7)),
+                (Ok(false), Ok(true), Ok(false))
+            );
+            assert!(!can_run(&bytes, &[Hook::FloatingPickerOnly], false), "{export}: not what that hook calls");
+        }
+        // a module without them says no to each
+        let none =
+            wat::parse_str(r#"(module (func (export "procraft_pin_panels") (result i32) (i32.const 1)))"#).unwrap();
+        let mut running = started(&none);
+        assert_eq!((running.hide_notice(0), running.floating_panel(0)), (Ok(false), Ok(false)));
+        assert!(!can_run(&none, &[Hook::HideNotices], false) && !can_run(&none, &[Hook::FloatingPanels], false));
     }
 
     #[test]

@@ -499,7 +499,7 @@ private fun FloatingPicker(vm: CanvasViewModel, c: ColorPick, m: ModelColor, max
 
 /** Close: a disc with a cross cut out of it. */
 @Composable
-private fun FloatingClose(modifier: Modifier, onClose: () -> Unit) {
+internal fun FloatingClose(modifier: Modifier, onClose: () -> Unit) {
     Box(
         modifier.size(40.dp).clickable(onClick = onClose).drawBehind {
             val r = 8.5.dp.toPx()

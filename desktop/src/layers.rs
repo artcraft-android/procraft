@@ -146,6 +146,12 @@ struct Blend {
 
 #[derive(Default)]
 pub struct Layers {
+    /// Floating in a window of its own: what its strips had done to them this frame.
+    pub chrome: panel::FloatingChrome,
+    /// Hanging from its button, whether a plugin lets it float (its grabber then shows), and while
+    /// the grabber is dragged, where the press began and where the pointer is (the window's points).
+    pub floats: bool,
+    pub undock: Option<(egui::Pos2, egui::Pos2)>,
     /// Each layer's thumbnail and the pixels' version it shows.
     thumbnails: HashMap<u64, (u64, TextureHandle)>,
     /// The current layer's options: whose (kept while they fade), and their coming and going.
@@ -323,18 +329,22 @@ impl Layers {
             || self.locked.is_open()
     }
 
-    /// Shows the panel hanging from `button`; returns where it is (points).
+    /// Shows the panel hanging from its button, or floating in a window of its own, as `hang`
+    /// says; returns where it is (points).
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
         session: &CanvasSession,
         colours: &mut Colours,
-        button: Rect,
+        hang: panel::Hang,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = panel::screen(ctx);
-        let (left, arrow_x) = panel::place(ctx, LAYERS_WIDTH, button.center().x);
+        let (left, arrow_x) = match hang {
+            panel::Hang::Button(button) => panel::place(ctx, LAYERS_WIDTH, button.center().x),
+            panel::Hang::Floating(window) => (window.left(), 0.0),
+        };
         // on a model: its meshes pictured as it is seen when the panel opens
         let model = session.model_info();
         let chosen_tile = model.is_some() && session.channel_tile_chosen();
@@ -405,7 +415,16 @@ impl Layers {
         // as tall as its rows, up to the window's bottom less a gap
         let most = screen.bottom() - panel::POPOVER_GAP - top;
         let height = (panel::ARROW_HEIGHT + HEADER_HEIGHT + rows).min(most);
-        let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+        let (rect, area) = match hang {
+            panel::Hang::Button(_) => {
+                let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+                (rect, panel::area(ctx, egui::Id::unique("layers panel"), rect))
+            }
+            // floating, as big as its window, whatever its rows
+            panel::Hang::Floating(window) => {
+                (panel::floating_rect(window), panel::floating_area(ctx, egui::Id::unique("floating layers"), window))
+            }
+        };
         let any_picked = layers.iter().any(|l| l.picked);
         let current_mask_parent = layers.iter().find(|l| l.current && l.kind == LayerType::Mask).and_then(|l| l.parent);
         let current = layers.iter().find(|l| l.current).map(|l| l.id);
@@ -418,9 +437,19 @@ impl Layers {
         // the only layer (masks aside) is cleared rather than deleted
         let alone = layers.iter().filter(|l| l.kind != LayerType::Mask).count() == 1;
 
-        panel::area(ctx, egui::Id::unique("layers panel"), rect).show(ctx, |ui| {
-            ui.allocate_rect(rect, Sense::click());
-            panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
+        area.show(ctx, |ui| {
+            match hang {
+                panel::Hang::Button(_) => {
+                    ui.allocate_rect(rect, Sense::click());
+                    panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
+                    self.undock = if self.floats { panel::undock_grabber(ui, panel::body(rect)) } else { None };
+                }
+                panel::Hang::Floating(window) => {
+                    ui.allocate_rect(window, Sense::click());
+                    panel::floating_panel_frame(ui, look, "floating layers frame", window, backdrops);
+                    self.chrome = panel::floating_chrome(ui, window);
+                }
+            }
             let body = panel::body(rect);
             // the chevron turns blue while layers are picked
             let (title_tapped, row) = panel::header_title(ui, look, body, "Layers", 24.0, true, any_picked);
@@ -638,7 +667,10 @@ impl Layers {
             _ = session.delete_layer(id);
         }
         self.locked.show(ctx, look);
-        rect
+        match hang {
+            panel::Hang::Button(_) => rect,
+            panel::Hang::Floating(window) => window,
+        }
     }
 
     /// The title's menu, under it: Select All; Group and Merge (with layers picked); Share and
@@ -2359,7 +2391,14 @@ mod tests {
             };
             step += 1;
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                layers.show(ui.ctx(), &mut look, &session, &mut colours, button, &mut Vec::new());
+                layers.show(
+                    ui.ctx(),
+                    &mut look,
+                    &session,
+                    &mut colours,
+                    crate::panel::Hang::Button(button),
+                    &mut Vec::new(),
+                );
             });
             output.textures_delta.clear();
         };
