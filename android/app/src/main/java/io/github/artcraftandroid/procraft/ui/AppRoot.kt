@@ -24,6 +24,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.input.pointer.changedToDownIgnoreConsumed
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -108,11 +110,30 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 }
             }
         }
+        // where this box is on the window, for touches on it to be told from the side bar's
+        val boxAt = androidx.compose.runtime.remember { floatArrayOf(0f, 0f) }
         BoxWithConstraints(
             Modifier.fillMaxSize().background(Pc.Surround).dragAndDropTarget(
                 shouldStartDragAndDrop = { it.fromElsewhere() },
                 target = dropped,
-            ),
+            )
+                .onGloballyPositioned { it.positionInWindow().let { at -> boxAt[0] = at.x; boxAt[1] = at.y } }
+                // a slider's panel stays up after its slider is let go, and goes with the next
+                // touch anywhere but on it and the side bar; that touch goes on to do what it
+                // does there (a stroke on the canvas is drawn), so it is only seen here
+                .pointerInput(vm) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                            if (vm.sliderPanel == null) continue
+                            val off = event.changes.any { c ->
+                                c.changedToDownIgnoreConsumed() &&
+                                    !vm.keepsSliderPanel(androidx.compose.ui.geometry.Offset(boxAt[0] + c.position.x, boxAt[1] + c.position.y))
+                            }
+                            if (off) vm.sliderPanel = null
+                        }
+                    }
+                },
         ) {
             AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
             // the drawing guide is the canvas's: under every bar and panel
@@ -142,18 +163,6 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                         modifier = Modifier.offset(y = 0.3.dp).requiredSize(36.7.dp, 32.dp),
                     )
                 }
-            }
-            // a slider's panel kept up goes with the next touch anywhere else
-            if (vm.sliderPanelKept && vm.sliderPanel != null) {
-                Box(
-                    Modifier.fillMaxSize().pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown().consume()
-                            vm.sliderPanel = null
-                            vm.sliderPanelKept = false
-                        }
-                    },
-                )
             }
             if (barsShown > 0f) {
                 // the top bar slides up off the screen and the side bar out to its side as they fade

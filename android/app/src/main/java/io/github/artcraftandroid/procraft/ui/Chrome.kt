@@ -49,6 +49,8 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -193,6 +195,8 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     val track = BarGlass(shown, moved, window = true)
     Box(
         Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
+            // a touch on it keeps a slider's panel up
+            .onGloballyPositioned { vm.sideBarOnWindow = it.boundsInWindow() }
             .drawBehind {
                 // translucent, with windows where the slider tracks are: they show what is behind
                 val r = Pc.SideBarCorner.toPx()
@@ -275,15 +279,16 @@ private fun SideButton(icon: ImageVector, label: String, enabled: Boolean, modif
     }
 }
 
-/** What a slider's panel does: shown while it is dragged ([held] false), kept up when it is held still. */
-class SliderPanelHooks(val show: (held: Boolean) -> Unit, val hide: () -> Unit)
+/**
+ * What a slider does with its panel: [show] it (dragged or held, it comes up and stays up when the
+ * slider is let go, for its + to be tapped), [hide] it, and whether a slider's panel is [up].
+ */
+class SliderPanelHooks(val show: () -> Unit, val hide: () -> Unit, val up: () -> Boolean)
 
 private fun panel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel) = SliderPanelHooks(
-    show = { held ->
-        vm.sliderPanel = which
-        vm.sliderPanelKept = held
-    },
-    hide = { if (!vm.sliderPanelKept) vm.sliderPanel = null },
+    show = { vm.sliderPanel = which },
+    hide = { vm.sliderPanel = null },
+    up = { vm.sliderPanel != null },
 )
 
 private val SliderPanelSide = 190.dp
@@ -313,6 +318,8 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
     // its own size, past the bar's edge (the bar's width would otherwise squeeze it)
     Box(
         modifier.wrapContentSize(Alignment.TopStart, unbounded = true).size(SliderPanelSide)
+            // a touch on it keeps it up
+            .onGloballyPositioned { vm.sliderPanelOnWindow = it.boundsInWindow() }
             .then(if (Pc.light) Modifier else rememberFrost(22.dp))
             .clip(RoundedCornerShape(22.dp)).background(SliderPanelFill)
             // a hairline rim, as measured (about 25 over the glass)
@@ -361,11 +368,11 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
 
 /**
  * An upright slider moved by dragging anywhere on it: the thumb follows the finger (relative,
- * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved, its
- * [panel] shows while it moves; held still or its thumb tapped, it stays up; a tap elsewhere on
- * the track takes the thumb there. Its [notches] (saved values) show as marks on the track; a
- * value dragged near one is pulled onto it, and a tap on one goes there. On a notch, the thumb
- * shows a blue bar.
+ * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved or
+ * held still, its [panel] comes up, and stays up when the finger lifts; its thumb tapped brings
+ * the panel up, or takes it away; a tap elsewhere on the track takes the thumb there (and the
+ * panel away). Its [notches] (saved values) show as marks on the track; a value dragged near one
+ * is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
  */
 @Composable
 fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier, panel: SliderPanelHooks? = null, notches: List<Float> = emptyList(), height: Dp = Pc.SliderHeight) {
@@ -401,7 +408,7 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                         }
                         val dy = c.position.y - last
                         if (dy != 0f) {
-                            if (!moved) hooks?.show(false)
+                            if (!moved) hooks?.show()
                             moved = true
                             last = c.position.y
                             // the farther out to the side the finger is, the finer the thumb follows
@@ -415,19 +422,25 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                     withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                         while (!lifted && !moved) lifted = !follow()
                     }
-                    if (!lifted && !moved) hooks?.show(true)
-                    // a tap on the thumb opens the panel and keeps it up; elsewhere the thumb goes
-                    // there (or onto a notch's mark there)
+                    if (!lifted && !moved) hooks?.show()
+                    // a tap on the thumb brings up the panel (or takes it away); elsewhere the
+                    // thumb goes there (or onto a notch's mark there) and the panel goes
                     if (lifted && !moved && !taken) {
                         val inset = Pc.ThumbInset.toPx()
                         val at = 1f - (down.position.y - inset - Pc.ThumbHeight.toPx() / 2f) / travel
-                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks)) {
-                            is SideSliderTap.Panel -> hooks?.show(true)
-                            is SideSliderTap.Jump -> change(tap.value)
+                        val up = hooks?.up?.invoke() == true
+                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks, up)) {
+                            is SideSliderTap.Panel -> hooks?.show()
+                            is SideSliderTap.ClosePanel -> hooks?.hide()
+                            is SideSliderTap.Jump -> {
+                                change(tap.value)
+                                hooks?.hide()
+                            }
                         }
                     }
                     while (!lifted) lifted = !follow()
-                    if (taken) hooks?.show(true) else if (moved) hooks?.hide()
+                    // let go, the panel stays up for its + (and so does it for a touch the pen took)
+                    if (taken) hooks?.show()
                 }
             }
             .drawBehind {

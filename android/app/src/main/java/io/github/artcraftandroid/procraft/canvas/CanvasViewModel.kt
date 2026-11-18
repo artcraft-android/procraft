@@ -111,6 +111,14 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
     else -> set
 }
 
+/**
+ * Whether a touch at [at] leaves a slider's panel up: on the side bar ([bar]) or the panel beside
+ * it ([panel]), which reaches past the bar. Anywhere else the panel goes, and the touch goes on to
+ * do what it does there (a stroke on the canvas is drawn).
+ */
+internal fun sliderPanelKeeps(at: androidx.compose.ui.geometry.Offset, bar: androidx.compose.ui.geometry.Rect, panel: androidx.compose.ui.geometry.Rect): Boolean =
+    bar.contains(at) || panel.contains(at)
+
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
 /**
@@ -6249,11 +6257,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Which slider's panel shows beside it: the size's or the opacity's. */
     enum class SliderPanel { SIZE, OPACITY }
 
-    /** The panel beside a slider: shown while it is dragged, and kept up after it is held still. */
+    /**
+     * The panel beside a slider: it comes up as the slider is dragged or held, and stays up when
+     * the finger lifts, for its + to be tapped, until the next touch off it and the side bar
+     * ([keepsSliderPanel]), a tap on the slider's thumb or a tap elsewhere on its track.
+     */
     var sliderPanel by mutableStateOf<SliderPanel?>(null)
 
-    /** The panel stays up (the slider was held still) until the next touch elsewhere. */
-    var sliderPanelKept by mutableStateOf(false)
+    /** Where the side bar and a slider's panel last were on the window (its own pixels, from its corner). */
+    var sideBarOnWindow = androidx.compose.ui.geometry.Rect.Zero
+    var sliderPanelOnWindow = androidx.compose.ui.geometry.Rect.Zero
+
+    /** Whether a touch at [at] (on the window) leaves a slider's panel up: on it or the side bar. */
+    fun keepsSliderPanel(at: androidx.compose.ui.geometry.Offset): Boolean =
+        sliderPanelKeeps(at, sideBarOnWindow, sliderPanelOnWindow)
 
     /** The brush's diameter on the screen now, window pixels. */
     fun brushScreenDiameter(): Float = session?.info()?.let { it.brushDiameter * it.zoom } ?: 0f

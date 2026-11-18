@@ -7896,6 +7896,57 @@ fn slider_notches_are_kept_with_the_library() {
     assert!(!t.remove_slider_notch(true, 0.3));
 }
 
+/// The size slider's panel saves a size, a tap on its mark goes back to it, and on it the panel's
+/// button takes it away; each brush, and each tool, keeps its own.
+#[test]
+fn a_size_saved_from_the_panel_is_gone_back_to_from_its_mark_and_taken_away_on_it() {
+    use crate::{SideSliderTap, side_slider_tap};
+    let s = CanvasSession::new(64, 64);
+    let size = |s: &CanvasSession| s.info().size;
+    // a size of its own, which the panel offers to save, then saved
+    s.set_brush_size(0.3);
+    let saved = size(&s);
+    assert!(s.can_save_slider_notch(true));
+    s.toggle_slider_notch(true);
+    assert_eq!(s.slider_notches(true), vec![saved]);
+    // on it now, the panel offers to take it away, not to save it again
+    assert!(!s.can_save_slider_notch(true));
+    assert_eq!(s.slider_notch_at(true, size(&s)), Some(saved));
+    // moved off it, a tap near its mark (within the thumb's reach) goes back onto it
+    s.set_brush_size(0.7);
+    assert!(s.can_save_slider_notch(true));
+    let tap = side_slider_tap(saved + 0.03, size(&s), 0.06, s.slider_notches(true), true);
+    assert_eq!(tap, SideSliderTap::Jump { value: saved });
+    if let SideSliderTap::Jump { value } = tap {
+        s.set_brush_size(value);
+    }
+    assert!((size(&s) - saved).abs() < 1e-6);
+    // another brush has none of it, and its own back on the first
+    let first = s.current_brush();
+    assert!(s.select_brush(first.set, first.index + 1));
+    assert!(s.slider_notches(true).is_empty());
+    assert!(s.select_brush(first.set, first.index));
+    assert_eq!(s.slider_notches(true), vec![saved]);
+    // erasing with the same brush keeps its own saved sizes
+    s.set_tool(ToolKind::Erase);
+    assert!(s.select_brush(first.set, first.index));
+    assert!(s.slider_notches(true).is_empty());
+    s.set_tool(ToolKind::Paint);
+    // on it, the panel's button takes it away
+    s.set_brush_size(saved);
+    s.toggle_slider_notch(true);
+    assert!(s.slider_notches(true).is_empty());
+    assert!(s.can_save_slider_notch(true));
+    // four at most: the panel offers no fifth
+    for v in [0.1, 0.3, 0.5, 0.7] {
+        s.set_brush_size(v);
+        s.toggle_slider_notch(true);
+    }
+    assert_eq!(s.slider_notches(true).len(), crate::brushes::NOTCH_MOST);
+    s.set_brush_size(0.9);
+    assert!(!s.can_save_slider_notch(true));
+}
+
 #[test]
 fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
     use procraft_engine::brush::Brush;

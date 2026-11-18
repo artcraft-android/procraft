@@ -1,6 +1,6 @@
 //! The bars over the canvas, as the Android app's (ui/Chrome.kt): the top bar (Gallery, the
 //! action buttons, the tools, Layers and the colour) and the side bar (brush size, the modify
-//! button, opacity, undo and redo, and a slider's panel while it is dragged).
+//! button, opacity, undo and redo, and a slider's panel).
 
 use egui::emath::TSTransform;
 use egui::layers::{PaintList, ShapeIdx};
@@ -249,12 +249,12 @@ pub struct SideTaps {
 }
 
 /// The side bar's own state: the slider pressed (its value before a notch pulls it in, when, and
-/// whether it moved), the slider whose panel shows (kept up when it was held still), and whether
-/// the brush's settings changed this frame.
+/// whether it moved), the slider whose panel shows, and whether the brush's settings changed this
+/// frame.
 #[derive(Default)]
 pub struct SideBar {
     pressed: Option<Press>,
-    panel: Option<(Slider, bool)>,
+    panel: Option<Slider>,
     changed: bool,
 }
 
@@ -264,9 +264,11 @@ struct Press {
     raw: f32,
     since: std::time::Instant,
     moved: bool,
+    /// Held still long enough to bring up the panel: let go, it is no tap.
+    held: bool,
 }
 
-/// A slider held still this long keeps its panel up.
+/// A slider held still this long brings up its panel.
 const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 const NOTCH_WIDTH: f32 = 20.0;
 const NOTCH_HEIGHT: f32 = 4.0;
@@ -357,10 +359,11 @@ impl SideBar {
                 let rect = at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height);
                 self.slider(ui, look, session, which, rect, value);
             }
-            // a slider held still keeps its panel up, until the next press elsewhere
-            if let Some(press) = self.pressed.filter(|p| !p.moved) {
+            // a slider held still brings up its panel too
+            if let Some(press) = self.pressed.as_mut().filter(|p| !p.moved && !p.held) {
                 if press.since.elapsed() >= HOLD {
-                    self.panel = Some((press.which, true));
+                    press.held = true;
+                    self.panel = Some(press.which);
                 } else {
                     ui.ctx().request_repaint_after(HOLD - press.since.elapsed());
                 }
@@ -403,19 +406,20 @@ impl SideBar {
                 }
             }
         });
-        if let Some((which, kept)) = self.panel {
+        if let Some(which) = self.panel {
             let y = if which == Slider::Size { SIZE_TRACK_TOP } else { opacity_top };
             let left = x(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, SLIDER_PANEL_SIDE);
             let min = bar.min + vec2(left, y - SLIDER_PANEL_RISE);
             let rect = Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE));
             self.changed |= slider_panel(&ctx, look, session, which, rect, info, to_window, backdrops);
-            // kept up, it goes at the next press anywhere but on it and its slider
+            // it stays up after the slider is let go, for its + to be pressed, and goes at the next
+            // press anywhere but on it and the side bar (which goes on to do what it does there)
             let panel = to_window.mul_rect(rect);
             let pressed_elsewhere = ctx.input(|i| {
                 i.pointer.any_pressed()
                     && i.pointer.interact_pos().is_some_and(|p| !panel.contains(p) && !shown.contains(p))
             });
-            if kept && pressed_elsewhere {
+            if pressed_elsewhere {
                 self.panel = None;
             }
         }
@@ -424,11 +428,11 @@ impl SideBar {
     }
 
     /// An upright slider moved by dragging anywhere on it: the thumb follows the pointer (not
-    /// jumping to it), finer the farther out to the side the pointer goes, 1 at the top. Moved,
-    /// its panel shows while it moves; held still or its thumb tapped, it stays up; a tap
-    /// elsewhere on the track takes the thumb there. Its notches (saved values) show as marks on
-    /// the track; a value dragged near one is pulled onto it, and a tap on one goes there. On a
-    /// notch, the thumb shows a blue bar.
+    /// jumping to it), finer the farther out to the side the pointer goes, 1 at the top. Moved or
+    /// held still, its panel comes up and stays up when it is let go; its thumb tapped brings the
+    /// panel up or takes it away; a tap elsewhere on the track takes the thumb there (and the
+    /// panel away). Its notches (saved values) show as marks on the track; a value dragged near
+    /// one is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
     fn slider(&mut self, ui: &Ui, look: &mut Look, session: &CanvasSession, which: Slider, rect: Rect, value: f32) {
         let size = which == Slider::Size;
         let travel = rect.height() - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
@@ -438,13 +442,14 @@ impl SideBar {
             Slider::Opacity => session.set_brush_opacity(v),
         };
         if response.is_pointer_button_down_on() && self.pressed.is_none_or(|p| p.which != which) {
-            self.pressed = Some(Press { which, raw: value, since: std::time::Instant::now(), moved: false });
+            self.pressed =
+                Some(Press { which, raw: value, since: std::time::Instant::now(), moved: false, held: false });
         }
         if let Some(press) = self.pressed.as_mut().filter(|p| p.which == which) {
             let dy = response.drag_delta().y;
             if dy != 0.0 {
                 if !press.moved {
-                    self.panel = Some((which, false));
+                    self.panel = Some(which);
                 }
                 press.moved = true;
                 // the farther out to the side the pointer is, the finer the thumb follows it
@@ -453,23 +458,25 @@ impl SideBar {
                 set(session.slider_notch_at(size, press.raw).unwrap_or(press.raw));
             }
         }
-        // a tap on the thumb opens the panel and keeps it up; elsewhere the thumb goes there (or
-        // onto a notch's mark there)
+        // a tap on the thumb brings up the panel (or takes it away); elsewhere the thumb goes
+        // there (or onto a notch's mark there)
         if response.clicked()
+            && !self.pressed.is_some_and(|p| p.held)
             && let Some(p) = response.interact_pointer_pos()
         {
             let at = 1.0 - (p.y - rect.top() - pc::THUMB_INSET - pc::THUMB_HEIGHT / 2.0) / travel;
             let reach = pc::THUMB_HEIGHT / 2.0 / travel;
-            match side_slider_tap(at, value, reach, session.slider_notches(size)) {
-                SideSliderTap::Panel => self.panel = Some((which, true)),
-                SideSliderTap::Jump { value } => set(value),
+            match side_slider_tap(at, value, reach, session.slider_notches(size), self.panel.is_some()) {
+                SideSliderTap::Panel => self.panel = Some(which),
+                SideSliderTap::ClosePanel => self.panel = None,
+                SideSliderTap::Jump { value } => {
+                    set(value);
+                    self.panel = None;
+                }
             }
         }
+        // let go, the panel stays up
         if !response.is_pointer_button_down_on() && self.pressed.is_some_and(|p| p.which == which) {
-            // let go after moving, the panel goes (one held up stays)
-            if self.pressed.is_some_and(|p| p.moved) && self.panel == Some((which, false)) {
-                self.panel = None;
-            }
             self.pressed = None;
             self.changed = true;
         }
@@ -621,11 +628,155 @@ pub fn stamp_key(stamp: &[u8], side: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use egui::emath::TSTransform;
-    use egui::{Pos2, Rect, pos2, vec2};
+    use std::sync::Arc;
 
-    use super::fit_side_bar;
-    use crate::look::pc;
+    use egui::emath::TSTransform;
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
+    use procraft_core::CanvasSession;
+
+    use super::{
+        HOLD, SIZE_TRACK_TOP, SLIDER_LEFT, SLIDER_PANEL_GAP, SLIDER_PANEL_RISE, SideBar, Slider, fit_side_bar,
+    };
+    use crate::look::{Look, pc};
+
+    /// The side bar over a canvas, with a pointer on it as the window's reach the interface.
+    struct Hand {
+        ctx: egui::Context,
+        look: Look,
+        side: SideBar,
+        session: Arc<CanvasSession>,
+        time: f64,
+    }
+
+    const WINDOW: egui::Vec2 = vec2(1200.0, 900.0);
+
+    impl Hand {
+        fn new() -> Hand {
+            let session = CanvasSession::new(64, 64);
+            let mut hand = Hand {
+                ctx: egui::Context::default(),
+                look: Look::default(),
+                side: SideBar::default(),
+                session,
+                time: 0.0,
+            };
+            hand.frame(Vec::new());
+            hand
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, WINDOW)),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Hand { ctx, look, side, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let info = session.info();
+                side.show(ui, look, session, &info, false, false, &mut Vec::new(), &mut Vec::new());
+            });
+            output.textures_delta.clear();
+        }
+
+        fn button(at: Pos2, pressed: bool) -> Event {
+            Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+        }
+
+        fn down(&mut self, at: Pos2) {
+            self.frame(vec![Event::PointerMoved(at), Self::button(at, true)]);
+        }
+
+        fn up(&mut self, at: Pos2) {
+            self.frame(vec![Self::button(at, false)]);
+            self.frame(Vec::new());
+        }
+
+        fn tap(&mut self, at: Pos2) {
+            self.down(at);
+            self.up(at);
+        }
+
+        /// Pressed at `from`, dragged to `to` in steps, and let go there.
+        fn drag(&mut self, from: Pos2, to: Pos2) {
+            self.down(from);
+            for k in 1..=8 {
+                let at = from + (to - from) * (k as f32 / 8.0);
+                self.frame(vec![Event::PointerMoved(at)]);
+            }
+            self.up(to);
+        }
+
+        fn bar(&self) -> Rect {
+            fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT).shown()
+        }
+
+        /// Where the size slider's thumb sits for `value`.
+        fn on_size(&self, value: f32) -> Pos2 {
+            let fit = fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT);
+            let travel = fit.track - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
+            let top = self.bar().top() + SIZE_TRACK_TOP + pc::THUMB_INSET + pc::THUMB_HEIGHT / 2.0;
+            pos2(self.bar().left() + SLIDER_LEFT + pc::SLIDER_WIDTH / 2.0, top + travel * (1.0 - value))
+        }
+
+        /// The size panel's button: "+" saves the size, "-" takes away the saved size it is on.
+        fn panel_button(&self) -> Pos2 {
+            let left = self.bar().left() + SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP;
+            pos2(left + 150.0 + 16.0, self.bar().top() + SIZE_TRACK_TOP - SLIDER_PANEL_RISE + 6.0 + 16.0)
+        }
+
+        fn size(&self) -> f32 {
+            self.session.info().size
+        }
+    }
+
+    /// The size slider dragged and let go: its panel stays up, and its "+" saves the size as a mark
+    /// on the track. A press on the canvas takes the panel away (and goes on to the canvas); a tap
+    /// on the mark goes back to the size; on it, the thumb tapped brings up the panel, whose "-"
+    /// takes the saved size away; the thumb tapped again takes the panel away. Held still, the
+    /// slider brings the panel up too, and let go it stays.
+    #[test]
+    fn a_size_is_saved_from_the_panel_left_up_after_a_drag_gone_back_to_and_taken_away() {
+        let mut h = Hand::new();
+        h.session.set_brush_size(0.5);
+        h.frame(Vec::new());
+        // dragged down and let go: a smaller size, and the panel still up
+        h.drag(h.on_size(0.5), h.on_size(0.5) + vec2(0.0, 40.0));
+        let saved = h.size();
+        assert!(saved < 0.45, "the drag left the size at {saved}");
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        // its "+" pressed: the size saved, and the panel stays
+        h.tap(h.panel_button());
+        assert_eq!(h.session.slider_notches(true), vec![saved]);
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        // a press on the canvas takes it away
+        h.tap(pos2(700.0, 500.0));
+        assert_eq!(h.side.panel, None);
+        // dragged back up, then a tap on the saved size's mark: back on it, and no panel
+        h.drag(h.on_size(saved), h.on_size(saved) - vec2(0.0, 60.0));
+        assert!(h.size() > saved + 0.1);
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        h.tap(h.on_size(saved));
+        assert!((h.size() - saved).abs() < 1e-6, "{} against {saved}", h.size());
+        assert_eq!(h.side.panel, None);
+        // on it, the thumb tapped: the panel, offering "-", which takes the saved size away
+        h.tap(h.on_size(saved));
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        assert!(!h.session.can_save_slider_notch(true));
+        h.tap(h.panel_button());
+        assert!(h.session.slider_notches(true).is_empty());
+        // the thumb tapped with the panel up: it goes
+        h.tap(h.on_size(saved));
+        assert_eq!(h.side.panel, None);
+        // held still: the panel comes up, and let go it stays
+        h.down(h.on_size(saved));
+        std::thread::sleep(HOLD + std::time::Duration::from_millis(50));
+        h.frame(Vec::new());
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        h.up(h.on_size(saved));
+        assert_eq!(h.side.panel, Some(Slider::Size));
+    }
 
     #[test]
     fn the_side_bar_as_big_as_the_rest_is_where_it_was_measured() {

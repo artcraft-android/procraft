@@ -24,21 +24,28 @@ pub fn side_slider_drag_share(across: f32) -> f32 {
 }
 
 /// What a tap on a side bar slider does.
+///
+/// A slider's panel (its value, the "+" that saves it as a notch, the brush's stamp) comes up as
+/// the slider is dragged or held, and stays up once the finger lifts, for its "+" to be tapped. It
+/// goes with a touch anywhere off the side bar and the panel, or as these say.
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Enum)]
 pub enum SideSliderTap {
-    /// On the thumb: the slider's panel opens and stays up.
+    /// On the thumb with no panel up: the slider's panel comes up.
     Panel,
-    /// Elsewhere on the track: the thumb goes to this value.
+    /// On the thumb with a panel up: the panel goes.
+    ClosePanel,
+    /// Elsewhere on the track: the thumb goes to this value, and a panel up goes.
     Jump { value: f32 },
 }
 
 /// A tap at `at` (the value under the finger, the thumb's middle there) on a slider at `value`,
-/// whose thumb reaches `thumb` (in value units) either side of its middle: on the thumb it opens
-/// the panel; elsewhere the thumb goes to the tap, or onto a saved notch the tap is as close to.
+/// whose thumb reaches `thumb` (in value units) either side of its middle, with a slider's panel
+/// up or not (`panel_up`): on the thumb it brings up the panel, or takes it away; elsewhere the
+/// thumb goes to the tap, or onto a saved notch the tap is as close to.
 #[uniffi::export]
-pub fn side_slider_tap(at: f32, value: f32, thumb: f32, notches: Vec<f32>) -> SideSliderTap {
+pub fn side_slider_tap(at: f32, value: f32, thumb: f32, notches: Vec<f32>, panel_up: bool) -> SideSliderTap {
     if (at - value).abs() <= thumb {
-        return SideSliderTap::Panel;
+        return if panel_up { SideSliderTap::ClosePanel } else { SideSliderTap::Panel };
     }
     let near = notches
         .into_iter()
@@ -149,12 +156,19 @@ mod tests {
 
     #[test]
     fn a_tap_on_the_thumb_opens_the_panel_and_elsewhere_the_thumb_goes_there() {
-        assert_eq!(side_slider_tap(0.52, 0.5, 0.06, vec![]), SideSliderTap::Panel);
-        assert_eq!(side_slider_tap(0.2, 0.5, 0.06, vec![]), SideSliderTap::Jump { value: 0.2 });
+        assert_eq!(side_slider_tap(0.52, 0.5, 0.06, vec![], false), SideSliderTap::Panel);
+        assert_eq!(side_slider_tap(0.2, 0.5, 0.06, vec![], false), SideSliderTap::Jump { value: 0.2 });
         // onto a notch the tap is close to, the nearest of two
-        assert_eq!(side_slider_tap(0.21, 0.5, 0.06, vec![0.25, 0.18]), SideSliderTap::Jump { value: 0.18 });
-        assert_eq!(side_slider_tap(0.9, 0.5, 0.06, vec![0.25]), SideSliderTap::Jump { value: 0.9 });
+        assert_eq!(side_slider_tap(0.21, 0.5, 0.06, vec![0.25, 0.18], false), SideSliderTap::Jump { value: 0.18 });
+        assert_eq!(side_slider_tap(0.9, 0.5, 0.06, vec![0.25], false), SideSliderTap::Jump { value: 0.9 });
         // past the ends it holds to them
-        assert_eq!(side_slider_tap(1.02, 0.5, 0.01, vec![]), SideSliderTap::Jump { value: 1.0 });
+        assert_eq!(side_slider_tap(1.02, 0.5, 0.01, vec![], false), SideSliderTap::Jump { value: 1.0 });
+    }
+
+    #[test]
+    fn a_tap_on_the_thumb_with_the_panel_up_takes_it_away_and_on_the_track_still_jumps() {
+        assert_eq!(side_slider_tap(0.48, 0.5, 0.06, vec![], true), SideSliderTap::ClosePanel);
+        // on a saved size's mark: the thumb goes onto it (and the panel goes)
+        assert_eq!(side_slider_tap(0.27, 0.5, 0.06, vec![0.25], true), SideSliderTap::Jump { value: 0.25 });
     }
 }
