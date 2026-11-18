@@ -2550,11 +2550,12 @@ fn prediction_is_drawn_but_never_kept() {
 /// two, are those of a stroke that works it out at each sample.
 #[test]
 fn what_runs_ahead_of_a_predicted_stroke_shows_as_worked_out_at_each_sample() {
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let mut tipped = 0;
     for name in ["Merlin", "Tundra", "Belvedere", "Shannon", "Studio Pen", "Soft Airbrush"] {
         let mut shows_tip = false;
         let pictures = [true, false].map(|predicting| {
-            let Some(s) = session(300, 120) else { return Vec::new() };
+            let s = session_on(gpu.clone(), 300, 120);
             let Some((set, index)) = library_brush(&s, |b| b.name == name) else { return Vec::new() };
             assert!(s.select_brush(set, index));
             s.set_brush_size(0.3);
