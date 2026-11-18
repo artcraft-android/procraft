@@ -16287,6 +16287,44 @@ fn framed(s: &CanvasSession, texture: &procraft_gpu::wgpu::Texture, gpu: &procra
     procraft_gpu::read_texture(gpu, texture, side, side).unwrap()
 }
 
+#[test]
+fn the_window_shows_canvas_pixels_as_squares_from_100_percent_and_smoothed_short_of_it() {
+    // a canvas striped black and white a pixel wide
+    let Some(s) = session(16, 64) else { return };
+    let stripes: Vec<u8> = (0..16 * 16).flat_map(|i| if i % 2 == 0 { [0, 0, 0, 255] } else { [255; 4] }).collect();
+    {
+        let mut st = s.shared.lock();
+        let layer = st.doc.current();
+        st.canvas.as_mut().unwrap().put_layer(layer, stripes);
+    }
+    let side = 64;
+    let (texture, gpu) = frame_target(&s, side);
+    // the greys across the middle row, inside the canvas (clear of its smoothed edges), at `percent`
+    // (canvas pixels a point) on a screen of `per_point` pixels a point
+    let greys = |per_point: f32, percent: f32| {
+        s.set_display_scale(per_point);
+        let zoom = per_point * percent / 100.0;
+        s.shared.lock().view = View::centred(procraft_engine::geom::Vec2::new(8.0, 8.0), zoom, 0.0, (side, side));
+        let shown = framed(&s, &texture, &gpu, side);
+        let half = 8.0 * zoom;
+        let (from, to) = ((32.0 - half) as u32 + 2, (32.0 + half).min(64.0) as u32 - 2);
+        (from..to).filter(|&x| !matches!(shown[((32 * side + x) * 4) as usize], 0 | 255)).count()
+    };
+    // as the reference shows them: squares at 100% and the zooms measured over it, smoothed at
+    // the two measured under it
+    for percent in [100.0, 105.0, 113.0, 122.0, 200.0] {
+        assert_eq!(greys(2.0, percent), 0, "{percent}%: squares");
+    }
+    for percent in [97.0, 73.0] {
+        assert!(greys(2.0, percent) > 0, "{percent}%: smoothed");
+    }
+    // by the point, not the window pixel: on a screen of three a point too
+    assert!(greys(3.0, 97.0) > 0, "97% at 3x: smoothed");
+    assert_eq!(greys(3.0, 100.0), 0, "100% at 3x: squares");
+    // and at the 46x measured
+    assert_eq!(greys(1.0, 4600.0), 0, "46x: squares");
+}
+
 /// Whether the canvas shows its plugins' layers drawn sharp now.
 fn shows_sharp(s: &CanvasSession) -> bool {
     s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::shows_sharp)
