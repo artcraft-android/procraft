@@ -3,9 +3,9 @@
 
 use procraft_engine::document::Document;
 use procraft_engine::geom::Vec2;
-use procraft_engine::input::Pointer;
+use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::preview;
-use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
+use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, StrokeBuilder};
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::CanvasSession;
@@ -346,13 +346,13 @@ impl CanvasSession {
         if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref()) {
             let pixels = self.shared.lock().grain_store.pixels(full);
             if let Some(pixels) = pixels {
-                canvas.use_full_grain(gpu, style, full.id, full.side, &pixels);
+                canvas.use_grain_image(gpu, style, full.id, [full.side, full.height], &pixels);
             }
         }
         if let Some(full) = brush.shape_file_now().map(|f| &f.full) {
             let pixels = self.shared.lock().grain_store.pixels(full);
             if let Some(pixels) = pixels {
-                canvas.use_full_shape(gpu, style, full.id, full.side, &pixels);
+                canvas.use_shape_image(gpu, style, full.id, [full.side, full.height], &pixels);
             }
         }
     }
@@ -362,6 +362,30 @@ impl CanvasSession {
         brush: procraft_engine::brush::Brush,
         width: u32,
         height: u32,
+    ) -> Option<ThumbnailImage> {
+        self.render_brush_sample(brush, width, height, None)
+    }
+
+    /// Draws a library sample. A recorded grain origin replays the generated
+    /// stroke directly, even when the brush carries a saved thumbnail.
+    pub fn render_brush_sample(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        width: u32,
+        height: u32,
+        grain_origin: Option<Vec2>,
+    ) -> Option<ThumbnailImage> {
+        self.replay_brush_sample(brush, width, height, grain_origin, None)
+    }
+
+    /// Draw the generated stroke with optional session values for its grain and randomized head.
+    pub fn replay_brush_sample(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        width: u32,
+        height: u32,
+        grain_origin: Option<Vec2>,
+        head_turn: Option<f32>,
     ) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
@@ -374,8 +398,11 @@ impl CanvasSession {
             .filter(|h| brush.engine.as_ref().is_some_and(|e| h.engine(&e.engine).is_some()));
         // the preview it came with, while it is as it came: a blank file preview (some imported
         // brushes ship one) is no preview, so the brush draws its own
-        if let Some((tw, th, rgba)) =
-            brush.thumbnail.as_deref().filter(|_| hooks.is_none()).and_then(crate::brush_files::thumbnail_pixels)
+        if let Some((tw, th, rgba)) = brush
+            .thumbnail
+            .as_deref()
+            .filter(|_| hooks.is_none() && grain_origin.is_none() && head_turn.is_none())
+            .and_then(crate::brush_files::thumbnail_pixels)
         {
             let (pixels, _) = rgba.as_chunks::<4>();
             if pixels.iter().any(|p| p[3] > 0) {
@@ -414,74 +441,74 @@ impl CanvasSession {
             style = style.dry();
         }
         style.preview = true;
+        style.secondary = [0.75; 3];
+        style.grain_origin_y = ch as f32;
         canvas.use_sources(&gpu, &mut style, &brush);
         self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
-        // a texture brush's preview is its grain tooth laid full-bleed as a swatch, not a solid tip
-        if stamp_only
-            && brush.grain.source.is_some()
-            && brush.stock.shape.as_ref().is_some_and(|s| s.name.starts_with("Brush-Preset"))
-            && let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref())
-            && let Some(pixels) = self.shared.lock().grain_store.pixels(full)
-        {
-            let swatch = preview::paper_swatch(&pixels, full.side);
-            canvas.use_full_shape(&gpu, &mut style, full.id, full.side, &swatch);
-            style.grain = None;
-            style.full_grain = None;
-        }
-        let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
+        let size_share = if stamp_only { preview::pad_size_share(&brush) } else { preview::size_share(&brush) };
+        let diameter_of = |part: &procraft_engine::brush::Brush| {
+            let diameter = preview::diameter_at_share(part, size_share);
+            if stamp_only { diameter.max(1.0) } else { diameter }
+        };
+        let diameter = diameter_of(&brush);
+        let second = brush.secondary.as_deref().filter(|_| style.takes_second()).and_then(|second| {
             let second = second.clone().as_second();
             let mut second_style =
                 StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
+            second_style.grain_origin_y = ch as f32;
             canvas.use_sources(&gpu, &mut second_style, &second);
             self.use_full_sources(&gpu, &mut canvas, &mut second_style, &second);
-            let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             let classic = brush.setting("classic_combine") >= 0.5;
             (!second_style.in_place()).then(|| {
                 let threshold = second_style.alpha_threshold;
                 let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
-                (second, dual, preview::diameter(&brush) * ratio)
+                let diameter = diameter_of(&second);
+                (second, dual, diameter)
             })
         });
         match &second {
             Some((_, dual, _)) => canvas.begin_dual_stroke(layer, style, *dual),
             None => canvas.begin_stroke(layer, style),
         }
-        if stamp_only {
-            // the brush's stamp on its own in the middle, its preview size of the way from its
-            // least size to its most (a big one reaching past the preview, as there)
-            let (most, share) = (brush.biggest(), brush.setting("preview_size").clamp(0.0, 1.0));
-            let least = brush.min_size.clamp(0.0, most);
-            let side = (least + (most - least) * share).max(1.0);
-            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
+        let samples = if stamp_only {
+            vec![Sample::at(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), 1.0, 0.0)]
         } else {
-            let samples = preview::samples(&brush);
-            if let Some((second, _, diameter)) = second {
-                let tilts = brush.setting("preview_tilt") >= 0.5;
-                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts);
-                canvas.add_second_stamps(&stroke.add(&samples));
-                canvas.replace_second_stamps(&stroke.finish());
+            preview::samples(&brush)
+        };
+        let tilts = brush.setting("preview_tilt") >= 0.5;
+        let sample_stroke = |part, size| {
+            let stroke = StrokeBuilder::for_thumbnail_with_turn(part, size, head_turn).on_pad(tilts);
+            match grain_origin {
+                Some(origin) => stroke.with_grain_origin(origin),
+                None => stroke,
             }
-            // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
-            // no stamps
-            let tilts = brush.setting("preview_tilt") >= 0.5;
-            let mut stroke =
-                StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady().on_pad(tilts);
-            // (its first stamps as they turned to the way it goes, so its end lays only the rest)
-            let added = stroke.add(&samples);
-            canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });
-            canvas.replace_stamps(&stroke.finish());
+        };
+        if let Some((second, _, diameter)) = second {
+            let mut stroke = sample_stroke(second, diameter);
+            canvas.add_second_stamps(&stroke.add(&samples));
+            canvas.replace_second_stamps(&stroke.finish());
         }
+        let mut stroke = sample_stroke(brush, diameter);
+        let added = stroke.add(&samples);
+        canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });
+        canvas.replace_stamps(&stroke.finish());
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);
         canvas.forget_history();
         let rgba = canvas.read_composite(&gpu).ok();
         // kept for the next (one drawn meanwhile elsewhere already is)
         self.shared.lock().preview.get_or_insert((canvas, doc));
-        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+        let mut rgba = preview::fit(&rgba?, w, h);
+        // The library thumbnail is presented in a gray colour space with alpha.
+        for pixel in rgba.chunks_exact_mut(4) {
+            let gray = (54 * u32::from(pixel[0]) + 183 * u32::from(pixel[1]) + 19 * u32::from(pixel[2]) + 128) >> 8;
+            pixel[..3].fill(gray as u8);
+        }
+        Some(ThumbnailImage { width: w, height: h, rgba })
     }
 
     /// `brush`'s sample stroke drawn by the brush engine that made it, white, at its preview size,

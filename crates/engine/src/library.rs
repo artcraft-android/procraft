@@ -310,39 +310,8 @@ pub fn library() -> Vec<BrushSet> {
     sets
 }
 
-/// Keeps a stock brush drawing as it did before the pressure law changed: the size and opacity
-/// curves turn the new law back into the old one over the whole press, and the preview's swell
-/// reaches full pressure as it used to. A grain cuts as deep as it says; the grain tile needs
-/// holding too, which the new model reads differently.
+/// Keep the shelf's lateral jitter at its authored reach.
 fn retune(b: &mut Brush) {
-    // the opacity used to ease the pressure to the power 2.5 within the flow; the new law takes it
-    // straight, so the curve carries the ease over the whole press
-    let a = b.pressure_opacity;
-    if a > 0.0 {
-        let amount = 1.0 - (1.0 - a).powf(2.5);
-        let pts: Vec<Vec2> = (0..=32)
-            .map(|i| {
-                let x = i as f32 / 32.0;
-                let eased = (1.0 - a * (1.0 - x)).powf(2.5);
-                Vec2::new(x, 0.25 + (eased - 1.0) / (4.0 * amount))
-            })
-            .collect();
-        b.pressure_opacity = amount;
-        b.opacity_curve = Curve::new(&pts);
-    }
-    // the quarter line turns the new size law into the old one at every pressure, straight or bent
-    // pressure curve alike, so a stock brush never draws boosted
-    if b.pressure_size > 0.0 {
-        b.size_curve = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.25)]);
-    }
-    // the preview's swell used to reach full pressure; the shared gain only reaches the law's
-    // neutral point now, and the control's clamp stops at 1, so the scale goes straight in
-    b.extra.insert("preview_pressure_scale".to_owned(), 2.0);
-    // a grain fixed to the canvas used to tile at its scale alone; now it goes by the file's scale
-    // (360 times 16 times its square over the control's reach), so hold the tile to what it was
-    if b.grain.image.is_some() && b.grain.mode == GrainMode::Texturized {
-        b.grain.scale = crate::studio::MAX_GRAIN_SCALE * (b.grain.scale / 5760.0).sqrt();
-    }
     // the side jitter keeps its amount's reach under the new squared law
     let lateral = b.setting("jitter_lateral");
     if lateral > 0.0 {
@@ -3002,16 +2971,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stock_brush_s_opacity_keeps_its_ease_over_the_whole_press() {
+    fn a_brush_maps_its_opacity_pressure_before_easing_the_deposit() {
         for b in library().iter().flat_map(|s| &s.brushes).filter(|b| b.pressure_opacity > 0.0) {
-            // the old amount, back out of the eased fall retune keeps
-            let a = 1.0 - (1.0 - b.pressure_opacity).powf(1.0 / 2.5);
             for i in 0..=10 {
                 let p = i as f32 / 10.0;
-                let x = b.pressure_curve.eval(p);
-                let old = (1.0 - a * (1.0 - x)).powf(2.5);
-                let (_, opacity) = b.pressure_factors(p);
-                assert!((opacity - old).abs() < 2e-3, "{} at {p}: {opacity} vs {old}", b.name);
+                let x = b.opacity_curve.eval(b.pressure_curve.eval(p));
+                let expected = 1.0 - b.pressure_opacity * (1.0 - x);
+                assert!((b.pressure_factors(p).1 - expected).abs() < 1e-5, "{} at {p}", b.name);
             }
         }
     }

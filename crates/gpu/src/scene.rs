@@ -55,16 +55,25 @@ pub struct GrainLook<'a> {
 /// A brush's material source (`side` square grey pixels) as [`MaterialLook`] takes it; none if
 /// the pixels aren't that size.
 pub fn material_source(gpu: &Gpu, side: u32, pixels: &[u8]) -> Option<wgpu::TextureView> {
-    (side > 0 && pixels.len() == (side as usize) * (side as usize)).then(|| grey_view(gpu, side, pixels))
+    material_image(gpu, [side, side], pixels)
+}
+
+pub fn material_image(gpu: &Gpu, [width, height]: [u32; 2], pixels: &[u8]) -> Option<wgpu::TextureView> {
+    let limit = gpu.device.limits().max_texture_dimension_2d;
+    (width > 0
+        && height > 0
+        && width.max(height) <= limit
+        && pixels.len() as u64 == u64::from(width) * u64::from(height))
+    .then(|| grey_view(gpu, [width, height], pixels))
 }
 
 /// `side` square grey `pixels` as a texture.
-fn grey_view(gpu: &Gpu, side: u32, pixels: &[u8]) -> wgpu::TextureView {
+fn grey_view(gpu: &Gpu, [width, height]: [u32; 2], pixels: &[u8]) -> wgpu::TextureView {
     let texture = gpu.device.create_texture_with_data(
         &gpu.queue,
         &wgpu::TextureDescriptor {
             label: Some("material source"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -2939,7 +2948,7 @@ impl Projector {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let white = grey_view(gpu, 1, &[255]);
+        let white = grey_view(gpu, [1, 1], &[255]);
         // a stroke's grain: read as the materials' sources are, then grown into its own format
         let grain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("stroke grain"),

@@ -38,8 +38,8 @@ struct LayerUniform {
     grain_rotation: f32,
     grain_blend: u32,
     burnt_blend: u32,
-    // 1: the grain read unfiltered (sharp)
-    grain_sharp: f32,
+    // Grain filter mode: original texel, classic or improved.
+    grain_filter: f32,
     // a dual brush's second stroke (second_tex): how its coverage combines with the first's (a
     // blend mode's number + 1; 0: none), and where it is cut first (negative: not cut)
     dual: u32,
@@ -83,12 +83,6 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
 }
 
-// the stroke's coverage at p moved by o, held at the edges
-fn stroke_alpha(p: vec2<i32>, o: vec2<i32>) -> f32 {
-    let dims = vec2<i32>(textureDimensions(stroke_tex));
-    return textureLoad(stroke_tex, clamp(p + o, vec2<i32>(0), dims - 1), 0).a;
-}
-
 // a grain's value made lighter or darker and of more or less contrast
 fn grain_look(g: f32) -> f32 {
     return clamp((g - 0.5) * (1.0 + lu.grain_contrast) + 0.5 + lu.grain_brightness, 0.0, 1.0);
@@ -103,19 +97,11 @@ struct StrokePixel {
 // the stroke at a pixel: its build-up, its edges, the paper grain fixed to the canvas, its
 // threshold and its opacity
 fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
-    var s = textureLoad(stroke_tex, p, 0);
+    let deposit = textureLoad(stroke_tex, p, 0);
+    var s = deposit;
     // what the stamps laid, before the edges, grain and second change it
     let laid = s.a;
-    if (lu.wet < 0.0 && s.a > 0.0) {
-        // a preview: how much of an edge the pixel is (its coverage above its neighbours' a few
-        // pixels away), the edges a little stronger and the inside as it is (as measured: at
-        // full, a wide brush's rim 4% stronger, its middle and a thin line unchanged)
-        let d = 3;
-        let around = 0.25 * (stroke_alpha(p, vec2<i32>(d, 0)) + stroke_alpha(p, vec2<i32>(-d, 0)) + stroke_alpha(p, vec2<i32>(0, d)) + stroke_alpha(p, vec2<i32>(0, -d)));
-        let edge = clamp((s.a - around) * 2.0, 0.0, 1.0);
-        let wet_a = min(s.a * (1.0 - lu.wet * 0.1 * edge), 1.0);
-        s = s * (wet_a / s.a);
-    } else if (lu.wet > 0.0 && s.a > 0.0) {
+    if (lu.wet > 0.0 && s.a > 0.0) {
         // on the canvas the paint pools (see pooled_over)
         s = s * mix(1.0, pooled_over(s.a), lu.wet);
     }
@@ -124,32 +110,19 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let at = (vec2<f32>(p) + 0.5) / lu.scaled.x + lu.scaled.yz;
         let gc = cos(lu.grain_rotation);
         let gs = sin(lu.grain_rotation);
-        let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / lu.grain_scale;
-        let sharp = lu.grain_sharp > 0.5;
-        // a brush file's own image has the fine detail itself; ours only stands in for it
-        let own = lu.grain_side > 256.0;
-        // a file's own grain keeps its fine tooth crisp (the preview shows it sharp, not averaged
-        // down to grey by the mip the tile size would pick)
-        let level = select(max(log2(lu.grain_side / lu.grain_scale), 0.0), 0.0, lu.grain_blend >= GRAIN_REF);
-        var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, select(level, 0.0, sharp && !own)).r;
-        if (sharp) {
-            if (own) {
-                // unfiltered: the texel under it at its level
-                let l = i32(round(level));
-                raw = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), lu.grain, l).r;
-            } else {
-                raw = sharp_grain(raw, uv);
-            }
-        }
+        let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) * vec2<f32>(1.0, f32(textureDimensions(grains).x) / f32(textureDimensions(grains).y)) / lu.grain_scale;
+        let raw = grain_texel(grains, grain_smp, uv, lu.grain, lu.grain_scale, u32(lu.grain_filter));
         let g = grain_look(raw);
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and
         // only where the stroke is
-        let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
+        var a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
+        if (lu.dual == 0u) { a = dual_rise(a, laid, 1u); }
         // scaled by the ratio, the colour can round a hair past the coverage it is scaled to
         s = vec4<f32>(min(s.rgb * (a / max(s.a, 1e-6)), vec3<f32>(a)), a);
     }
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
+    var coverage = s.a;
     if (lu.dual != 0u) {
         let t = textureLoad(second_tex, p, 0);
         var b = t.a;
@@ -157,7 +130,8 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
         let mode = dual_mode(lu.dual);
-        let a = dual_rise(dual_combine(s.a, b, mode), built, mode);
+        let a = dual_rise(dual_combine(s.a, b, mode), laid, mode);
+        coverage = a;
         // the first's colour; by Normal turned toward the second's (drawn in the stroke's colour)
         // as far as the second shows where the first laid little, so where the first fades out
         // the two meet smoothly, not at a seam of whatever colour the first's faintest paint
@@ -171,12 +145,27 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
             colour = (first_colour + second_colour * toward) / (1.0 + toward);
         }
         s = vec4<f32>(colour * a, a);
+        if (mode == 0u && (lu.dual & DUAL_RECURSIVE) != 0u) {
+            let extra = (1.0 - laid) * b;
+            if ((lu.dual & DUAL_CLASSIC) == 0u) {
+                let combined = mix(deposit, vec4<f32>(second_colour, 1.0), extra);
+                let shown = laid + extra * (1.0 - laid);
+                s = combined * (a / max(shown, 1e-6));
+            } else if (laid > 0.0) {
+                let combined = vec4<f32>(deposit.rgb + second_colour * extra, laid + extra);
+                s = combined * (a / laid);
+            } else {
+                s = vec4<f32>(0.0);
+            }
+        } else if (mode == 0u && laid == 0.0) {
+            s *= b;
+        }
     }
     // burnt edges show where the stroke is thin: where its paper grain or its second took paint
     // away, or without either wherever it is less than full
     var burn = 0.0;
     if (lu.burnt > 0.0 && built > 0.0) {
-        burn = lu.burnt * select(1.0 - s.a, abs(built - s.a), lu.grain >= 0 || lu.dual != 0u);
+        burn = lu.burnt * select(1.0 - coverage, abs(built - coverage), lu.grain >= 0 || lu.dual != 0u);
     }
     if (lu.threshold >= 0.0 && s.a > 0.0) {
         let on = select(0.0, 1.0, s.a > lu.threshold);

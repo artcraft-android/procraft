@@ -3303,9 +3303,10 @@ impl State {
             canvas.begin_drawn_stroke(layer, plain);
             let cached = scene.material_sources.get(k).and_then(|c| c.as_ref()).map(|(key, _)| *key);
             if key.is_some() && cached != key {
-                let made = crate::brush_files::material_pixels(source).and_then(|pixels| {
-                    procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels)
-                });
+                let made = self
+                    .grain_store
+                    .material(source)
+                    .and_then(|(size, pixels)| procraft_gpu::material_image(gpu, size, &pixels));
                 if let Some(slot) = scene.material_sources.get_mut(k) {
                     *slot = key.zip(made);
                 }

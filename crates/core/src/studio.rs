@@ -3,9 +3,7 @@
 
 use std::sync::Arc;
 
-use procraft_engine::brush::{
-    Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ResetPoint, ShapeFile, Source, StockImage,
-};
+use procraft_engine::brush::{Brush, FullGrain, GrainFile, MaterialSource, ResetPoint, ShapeFile, Source, StockImage};
 use procraft_engine::curve::Curve;
 use procraft_engine::geom::{Affine, Vec2};
 use procraft_engine::studio::{MAX_GRAIN_SCALE, SliderCurve};
@@ -72,7 +70,7 @@ pub fn repeatable_source(
 #[uniffi::export]
 pub fn small_source(pixels: Vec<u8>) -> Vec<u8> {
     let n = pixels.len().isqrt();
-    if n <= textures::TEXTURE_SIZE || n * n != pixels.len() {
+    if n == 0 || n == textures::TEXTURE_SIZE || n * n != pixels.len() {
         return pixels;
     }
     crate::brush_files::gray_square((n, n, 1), &pixels, false, textures::TEXTURE_SIZE)
@@ -84,10 +82,13 @@ pub fn small_source(pixels: Vec<u8>) -> Vec<u8> {
 /// pixels aren't that size.
 #[uniffi::export]
 pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
-    if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+    if width == 0 || height == 0 || (u64::from(width) * u64::from(height)).checked_mul(4) != Some(rgba.len() as u64) {
         return Vec::new();
     }
-    let n = crate::brush_files::image_side(width.max(height) as usize) as u32;
+    let n = width.max(height).max(textures::TEXTURE_SIZE as u32);
+    if u64::from(n) * u64::from(n) > crate::brush_files::MOST_PNG_BYTES as u64 {
+        return Vec::new();
+    }
     let lightness: Vec<u8> = rgba
         .as_chunks::<4>()
         .0
@@ -118,7 +119,7 @@ pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
 #[uniffi::export]
 pub fn source_from_copy(image: crate::layers::ThumbnailImage) -> Vec<u8> {
     let (w, h) = (image.width as usize, image.height as usize);
-    if w == 0 || h == 0 || image.rgba.len() != w * h * 4 {
+    if w == 0 || h == 0 || w.checked_mul(h).and_then(|pixels| pixels.checked_mul(4)) != Some(image.rgba.len()) {
         return Vec::new();
     }
     // where it is painted
@@ -412,9 +413,26 @@ impl CanvasSession {
             let full = st.studio_brush().and_then(|b| match kind {
                 SourceKind::Shape => b.shape_file_now().map(|f| f.full.clone()),
                 SourceKind::Grain => b.grain_file_now().and_then(|f| f.full.clone()),
-                SourceKind::Metallic | SourceKind::Roughness => None,
+                SourceKind::Metallic => b.metallic.full().cloned(),
+                SourceKind::Roughness => b.roughness.full().cloned(),
             });
-            full.and_then(|f| st.grain_store.pixels(&f))
+            full.and_then(|f| {
+                let pixels = st.grain_store.pixels(&f)?;
+                if f.side == f.height {
+                    return Some(pixels);
+                }
+                // The editor accepts a square. Fit the image for display without changing its stored dimensions.
+                let side = f.side.max(f.height) as usize;
+                if side.checked_mul(side)? > crate::brush_files::MOST_PNG_BYTES {
+                    return None;
+                }
+                Some(Arc::new(crate::brush_files::gray_square(
+                    (f.side as usize, f.height as usize, 1),
+                    &pixels,
+                    false,
+                    side,
+                )))
+            })
         };
         own.map_or_else(|| self.studio_source(kind), |pixels| pixels.to_vec())
     }
@@ -425,8 +443,7 @@ impl CanvasSession {
     /// uses now (a brush left as it was keeps what its file gave it).
     pub fn set_studio_source(&self, kind: SourceKind, pixels: Vec<u8>) -> bool {
         let n = pixels.len().isqrt();
-        let fits = n * n == pixels.len() && n.is_power_of_two();
-        if !fits || !(textures::TEXTURE_SIZE..=FULL_GRAIN_MOST).contains(&n) {
+        if n == 0 || n * n != pixels.len() || pixels.len() > crate::brush_files::MOST_PNG_BYTES {
             return false;
         }
         if pixels == self.studio_source_picture(kind) {
@@ -434,7 +451,7 @@ impl CanvasSession {
         }
         let Some(source) = Source::new(small_source(pixels.clone())) else { return false };
         let id = source.id;
-        let mut full = (n > textures::TEXTURE_SIZE).then(|| FullGrain::new(n as u32, pixels)).flatten();
+        let mut full = (n != textures::TEXTURE_SIZE).then(|| FullGrain::new(n as u32, pixels)).flatten();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let Some(full) = &mut full {
@@ -449,7 +466,8 @@ impl CanvasSession {
             match kind {
                 SourceKind::Shape => brush.shape_file = Some(ShapeFile { source: id, full }),
                 SourceKind::Grain => brush.grain_file = Some(GrainFile { source: id, width: 0, full: Some(full) }),
-                SourceKind::Metallic | SourceKind::Roughness => {}
+                SourceKind::Metallic => brush.metallic.file = Some(ShapeFile { source: id, full }),
+                SourceKind::Roughness => brush.roughness.file = Some(ShapeFile { source: id, full }),
             }
         }
         true
@@ -819,6 +837,12 @@ fn material<'a>(
     (&mut m.source, &mut m.image, stock)
 }
 
+struct MaterialImage {
+    key: u64,
+    size: [u32; 2],
+    pixels: Arc<Vec<u8>>,
+}
+
 /// The drawing pad while it is a sphere: the flat pad's strokes set aside (and whether they were
 /// its sample scribble), the preview once drawn, and the brush's material sources as last given
 /// to it (a key for each and its pixels).
@@ -827,12 +851,15 @@ pub(crate) struct SpherePad {
     flat: Vec<(PointerKind, Vec<PenSample>)>,
     flat_sample: bool,
     preview: Option<SpherePreview>,
-    sources: [Option<(u64, Arc<Vec<u8>>)>; 2],
+    sources: [Option<MaterialImage>; 2],
 }
 
 /// What tells a material source's image from another's: its own image's, else the shipped one's.
 pub(crate) fn source_key(m: &MaterialSource) -> Option<u64> {
-    m.source.as_ref().map(|s| s.id).or_else(|| m.image.map(|i| (1 << 63) | u64::from(i)))
+    m.full()
+        .map(|f| f.id)
+        .or_else(|| m.source.as_ref().map(|s| s.id))
+        .or_else(|| m.image.map(|i| (1 << 63) | u64::from(i)))
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -865,12 +892,16 @@ impl State {
         canvas.render(gpu, &mut self.doc, None);
         for (slot, m) in sphere.sources.iter_mut().zip(&materials) {
             let key = source_key(m);
-            if slot.as_ref().map(|(k, _)| *k) != key {
-                *slot = key.zip(crate::brush_files::material_pixels(m)).map(|(k, p)| (k, Arc::new(p)));
+            if slot.as_ref().map(|image| image.key) != key {
+                *slot = key.zip(self.grain_store.material(m)).map(|(key, (size, pixels))| MaterialImage {
+                    key,
+                    size,
+                    pixels,
+                });
             }
         }
         let [metallic_source, roughness_source] =
-            sphere.sources.each_ref().map(|s| s.as_ref().map(|(k, p)| (*k, p.as_slice())));
+            sphere.sources.each_ref().map(|s| s.as_ref().map(|image| (image.key, image.size, image.pixels.as_slice())));
         let look = SphereLook {
             metallic,
             roughness,

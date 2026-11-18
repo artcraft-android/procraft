@@ -3242,6 +3242,11 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
     s.studio_begin();
     s.set_studio_setting("spacing".to_owned(), 0.3);
     assert_eq!(alpha(&s).0, 0);
+    s.studio_end(true);
+    let redrawn = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
+    let (width, height, pixels) = crate::brush_files::thumbnail_pixels(redrawn.thumbnail.as_deref().unwrap()).unwrap();
+    assert_eq!((width, height), (1060, 324));
+    assert!(pixels == s.brush_preview(set, 0, width, height).unwrap().rgba, "the exported pixels differ");
 }
 
 #[test]
@@ -5409,9 +5414,9 @@ fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
     };
     use procraft_engine::brush::GrainMode;
     assert_eq!(grain_of(file(vec![])), (1.0, GrainMode::Moving));
-    // a file that names them keeps its own (the file keeps depth twice as deep as we draw it)
+    // a file that names them keeps its own depth and mode
     let kept = grain_of(file(vec![("grainDepth", Value::Real(0.3)), ("textureApplication", Value::Int(1))]));
-    assert!((kept.0 - 0.15).abs() < 1e-6 && kept.1 == GrainMode::Texturized, "{kept:?}");
+    assert!((kept.0 - 0.3).abs() < 1e-6 && kept.1 == GrainMode::Texturized, "{kept:?}");
 }
 
 #[test]
@@ -8422,11 +8427,7 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         // as Krita masks, in its wash mode: the stroke builds up to its opacity and no further
         assert_eq!((second.rendering, second.max_opacity), (procraft_engine::brush::Rendering::Capped, 1.0));
         let most = second.pressure_curves.get(procraft_engine::brush::PressureCurve::Flow).unwrap();
-        // the transfer is the flow channel, eased now: its curve unwound by that power
-        assert!(
-            (most.eval(0.2).powf(procraft_engine::brush::FLOW_POWER) - 0.9).abs() < 5e-3
-                && (most.eval(1.0).powf(procraft_engine::brush::FLOW_POWER) - 0.9).abs() < 5e-3
-        );
+        assert!((most.eval(0.2) - 0.9).abs() < 5e-3 && (most.eval(1.0) - 0.9).abs() < 5e-3);
         assert_eq!(second.setting("pressure_flow"), 1.0);
     }
     // written out it is a dual brush that comes back the same
@@ -11257,6 +11258,7 @@ fn a_dual_brush_keeps_its_second_through_the_library_and_its_file() {
     let again = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
     let second_again = again.secondary.unwrap();
     assert_eq!(second_again.name, "Dabs");
+    assert_eq!(second_again.thumbnail.as_deref(), Some(png.as_slice()));
     assert!(again.settings.iter().any(|(k, v)| k == "dual_blend" && *v == 1.0));
     // a brush without a second has none, and its file no folder for one
     let plain = brushfile::write(&Brush::round_pen(), "", &pictures(None));

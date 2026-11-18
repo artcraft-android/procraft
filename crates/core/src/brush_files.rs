@@ -4,7 +4,7 @@
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
 use procraft_engine::brush::{
-    Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, MaterialSource, ShapeFile, Source, StockImage, StockImages,
+    Author, Brush, FullGrain, GrainFile, MaterialSource, ShapeFile, Source, StockImage, StockImages,
 };
 use procraft_engine::brushfile::{self, BrushFile, Pick, Pictures, StandIn, Texture};
 use procraft_engine::brushlibrary;
@@ -19,11 +19,8 @@ use crate::brush_library::LibrarySet;
 /// The set brushes from single brush files go into.
 const IMPORTED: &str = "Imported";
 
-/// The size of the preview a brush file carries.
-const THUMBNAIL: (u32, u32) = (327, 100);
-
 /// The most a brush file's picture may decode to (8192 × 8192 in colour), bytes.
-const MOST_PNG_BYTES: usize = 256 << 20;
+pub(crate) const MOST_PNG_BYTES: usize = 256 << 20;
 
 /// A Photoshop preset's most size (as brush files keep it) for each pixel of its tip: 3.28% of
 /// the scale a pixel, as 35 presets of a real file come in elsewhere (8 px reading 26%, 442 px
@@ -67,59 +64,47 @@ fn author_name(brush: &Brush) -> &str {
 }
 
 impl CanvasSession {
-    /// The image of a brush file's grain at its own size, and pixels a side, if it can be had.
-    fn full_grain(&self, brush: &Brush) -> Option<(u32, std::sync::Arc<Vec<u8>>)> {
-        let full = brush.grain_file_now()?.full.as_ref()?;
-        Some((full.side, self.shared.lock().grain_store.pixels(full)?))
-    }
-
-    /// The image of a brush file's shape at its own size, as a PNG of that size, else the brush's own.
-    fn shape_png(&self, brush: &Brush) -> Vec<u8> {
-        let full = brush.shape_file_now().map(|f| &f.full);
-        let pixels = full.and_then(|f| Some((f.side, self.shared.lock().grain_store.pixels(f)?)));
-        match pixels {
-            Some((side, pixels)) => sized_gray_png(side, side, &pixels),
-            None => gray_png(&shape_pixels(brush)),
+    fn texture_png(&self, full: Option<&FullGrain>, fallback: impl FnOnce() -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+        if let Some(image) = full
+            && let Some(pixels) = self.shared.lock().grain_store.pixels(image)
+        {
+            return Some(sized_gray_png(image.side, image.height, &pixels));
         }
+        fallback().map(|p| gray_png(&p))
     }
 
-    /// `brush` as a file with the grain image [`Self::brush_pictures`] writes keeps it.
-    fn as_written(&self, brush: Brush) -> Brush {
-        let side = self.full_grain(&brush).map_or(TEXTURE_SIZE as u32, |(side, _)| side);
-        brush.with_grain_image_width(side)
+    fn as_written(&self, mut brush: Brush) -> Brush {
+        if let Some(second) = brush.secondary.take() {
+            brush.secondary = Some(Box::new(self.as_written(*second)));
+        }
+        let width = brush
+            .grain_file_now()
+            .and_then(|f| f.full.as_ref())
+            .and_then(|f| self.shared.lock().grain_store.pixels(f).map(|_| f.side))
+            .unwrap_or(TEXTURE_SIZE as u32);
+        brush.with_grain_image_width(width)
     }
 
-    fn brush_pictures(&self, brush: &Brush, set: u32, index: u32) -> Made {
+    fn brush_pictures(&self, brush: &Brush) -> Made {
         // the preview it came with, else one drawn
         let thumbnail = brush.thumbnail.as_deref().map(<[u8]>::to_vec).unwrap_or_else(|| {
-            self.brush_preview(set, index, THUMBNAIL.0, THUMBNAIL.1)
+            let (width, height) = procraft_engine::preview::CANVAS;
+            self.drawn_preview(brush.clone(), width as u32, height as u32)
                 .map(|t| crate::project::rgba_png(t.width, t.height, &t.rgba))
                 .unwrap_or_else(|| crate::project::rgba_png(1, 1, &[0, 0, 0, 0]))
         });
         let author = brush.author.as_ref();
         Made {
-            shape: self.shape_png(brush),
-            grain: match self.full_grain(brush) {
-                Some((side, pixels)) => Some(sized_gray_png(side, side, &pixels)),
-                None => grain_pixels(brush).map(|p| gray_png(&p)),
-            },
-            metallic: material_pixels(&brush.metallic).map(|p| gray_png(&p)),
-            roughness: material_pixels(&brush.roughness).map(|p| gray_png(&p)),
+            shape: self
+                .texture_png(brush.shape_file_now().map(|f| &f.full), || Some(shape_pixels(brush)))
+                .unwrap_or_default(),
+            grain: self.texture_png(brush.grain_file_now().and_then(|f| f.full.as_ref()), || grain_pixels(brush)),
+            metallic: self.texture_png(brush.metallic.full(), || material_pixels(&brush.metallic)),
+            roughness: self.texture_png(brush.roughness.full(), || material_pixels(&brush.roughness)),
             thumbnail,
             author: author.and_then(|a| a.picture.clone()),
             signature: author.and_then(|a| a.signature.clone()),
-            secondary: brush.secondary.as_ref().map(|second| {
-                Box::new(Made {
-                    shape: self.shape_png(second),
-                    grain: grain_pixels(second).map(|p| gray_png(&p)),
-                    metallic: material_pixels(&second.metallic).map(|p| gray_png(&p)),
-                    roughness: material_pixels(&second.roughness).map(|p| gray_png(&p)),
-                    thumbnail: Vec::new(),
-                    author: None,
-                    signature: None,
-                    secondary: None,
-                })
-            }),
+            secondary: brush.secondary.as_deref().map(|b| Box::new(self.brush_pictures(b))),
         }
     }
 }
@@ -385,7 +370,7 @@ impl CanvasSession {
             let st = self.shared.lock();
             st.with_sliders(st.library.get(set as usize)?.brushes.get(index as usize)?, set as usize, index as usize)
         };
-        let made = self.brush_pictures(&brush, set, index);
+        let made = self.brush_pictures(&brush);
         let brush = self.as_written(brush);
         Some(brushfile::write(&brush, author_name(&brush), &made.pictures()))
     }
@@ -399,7 +384,7 @@ impl CanvasSession {
                 entry.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, set as usize, i)).collect();
             (entry.name.clone(), brushes)
         };
-        let made: Vec<Made> = brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, set, i as u32)).collect();
+        let made: Vec<Made> = brushes.iter().map(|b| self.brush_pictures(b)).collect();
         let brushes: Vec<Brush> = brushes.into_iter().map(|b| self.as_written(b)).collect();
         let list: Vec<(&Brush, &str, Pictures<'_>)> =
             brushes.iter().zip(&made).map(|(b, m)| (b, author_name(b), m.pictures())).collect();
@@ -432,13 +417,8 @@ impl CanvasSession {
         if sets.iter().all(|(_, _, brushes)| brushes.is_empty()) {
             return None;
         }
-        let made: Vec<Vec<Made>> = sets
-            .iter()
-            .enumerate()
-            .map(|(s, (_, _, brushes))| {
-                brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, s as u32, i as u32)).collect()
-            })
-            .collect();
+        let made: Vec<Vec<Made>> =
+            sets.iter().map(|(_, _, brushes)| brushes.iter().map(|b| self.brush_pictures(b)).collect()).collect();
         let out: Vec<brushlibrary::SetOut<'_>> = sets
             .iter()
             .zip(&made)
@@ -820,9 +800,8 @@ fn csp_curve_at(points: &[(f32, f32)], x: f32) -> f32 {
 /// Speed is left out: how fast the file's own fastest is isn't known, and taken as ours a pen
 /// fades to its least on any quick stroke. Of tilt, only fading the opacity and flattening the tip
 /// as the pen leans are ours (as far as tilt takes them, its curve left out); tilt growing or
-/// shrinking the size is not. The opacity lays straight, its curve a quarter of the file's (the
-/// factor reaches four times it); the flow and the lean are eased (by the power
-/// [`procraft_engine::brush::FLOW_POWER`]), so theirs are unwound by it to lay what the file says.
+/// shrinking the size is not. Stamp opacity and lean are eased after the pen controls are
+/// combined, so their curves use the inverse power to preserve the file's response.
 fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
     use procraft_engine::brush::{FLOW_POWER, PressureCurve};
     let taken = |least: Option<f32>| least.map_or(0.0, |l| 1.0 - l.clamp(0.0, 1.0));
@@ -845,10 +824,10 @@ fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
     let mut chance = 0.0f32;
     if let Some(d) = &pen.opacity {
         match &d.pressure {
-            // all of the opacity follows the curve, from what it leaves at none up, a quarter as high
+            // all of the opacity follows the curve, from its floor at zero pressure up
             Some(p) => {
                 b.pressure_opacity = if p.least < 1.0 { 1.0 } else { 0.0 };
-                b.opacity_curve = quartered(&csp_curve(&p.points, p.least));
+                b.opacity_curve = eased_root(&csp_curve(&p.points, p.least));
             }
             None => b.pressure_opacity = 0.0,
         }
@@ -856,9 +835,9 @@ fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
         chance = chance.max(taken(d.random));
     }
     if let Some(d) = &pen.flow {
-        // the flow channel is eased, so its curve is unwound by that power, floor and all
+        // the transfer curve includes its pressure floor
         let (amount, curve) = match &d.pressure {
-            Some(p) if p.least < 1.0 => (1.0, Some(eased_root(&csp_curve(&p.points, p.least)))),
+            Some(p) if p.least < 1.0 => (1.0, Some(csp_curve(&p.points, p.least))),
             _ => (0.0, None),
         };
         b.set_setting("pressure_flow", amount);
@@ -1031,10 +1010,10 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     if let Some(px) = abr_pixels(a) {
         procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
     }
-    // the shape dynamics: pressure or tilt (controls 2, 3) on the size, half of what it lets go
+    // the shape dynamics: pressure or tilt (controls 2, 3) on the size, as much as it lets go
     // of; tilt to the full; its size jitter
     let sized = d.tip && matches!(d.size_control, 2 | 3);
-    b.set_setting("pressure_size", if sized { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
+    b.set_setting("pressure_size", if sized { 1.0 - d.min_diameter } else { 0.0 });
     b.set_setting("tilt_size", if d.tip && d.size_control == 3 { 1.0 } else { 0.0 });
     b.set_setting("jitter_size", if d.tip { d.size_jitter } else { 0.0 });
     if d.tip {
@@ -1060,17 +1039,17 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     // caps the stroke (the flow channel), its flow lays each stamp (the opacity channel).
     let pressed = |control: i32| d.paint && control == BY_PRESSURE;
     if pressed(d.opacity_control) {
-        // the cap is eased now: unwound so it reaches from the least up to all of it
+        // transfer rises from the minimum opacity to full
         b.set_setting("pressure_flow", 1.0);
         let cap = Curve::new(&[Vec2::new(0.0, d.opacity_min), Vec2::new(1.0, 1.0)]);
-        b.pressure_curves.set(PressureCurve::Flow, Some(eased_root(&cap)));
+        b.pressure_curves.set(PressureCurve::Flow, Some(cap));
     } else {
         b.set_setting("pressure_flow", 0.0);
     }
     if pressed(d.flow_control) {
-        // each stamp lays straight, a quarter as high, from the flow's least up to the tool's
+        // invert the stamp opacity curve so the deposit follows the file's flow
         b.pressure_opacity = 1.0;
-        b.opacity_curve = quartered(&Curve::new(&[Vec2::new(0.0, d.flow_min), Vec2::new(1.0, 1.0)]));
+        b.opacity_curve = eased_root(&Curve::new(&[Vec2::new(0.0, d.flow_min), Vec2::new(1.0, 1.0)]));
     } else {
         b.pressure_opacity = 0.0;
     }
@@ -1405,14 +1384,13 @@ fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
     b
 }
 
-/// A tip larger than a `Source` holds, fitted into a square as [`fitted`] fits it, as large as the
-/// tip goes (a power of two no larger than its longer side, up to [`FULL_GRAIN_MOST`]): drawn large,
-/// a stamp then shows the tip's own detail rather than the small square's blown up. None for a
-/// tip no larger than a `Source`.
+/// A sampled tip at its original scale, centered in a square like the working copy.
 fn full_tip(t: &procraft_engine::abr::AbrTip) -> Option<FullGrain> {
-    let longest = t.width.max(t.height) as usize;
-    let side = (1usize << longest.max(1).ilog2()).min(FULL_GRAIN_MOST);
-    (side > TEXTURE_SIZE).then(|| FullGrain::new(side as u32, fitted_at(t, side))).flatten()
+    let side = t.width.max(t.height) as usize;
+    if side <= TEXTURE_SIZE || side.checked_mul(side)? > MOST_PNG_BYTES {
+        return None;
+    }
+    FullGrain::new(side as u32, fitted_at(t, side))
 }
 
 /// `b`'s shape as the sampled tip `t`: the small square, and the tip at its own size beside it.
@@ -1716,7 +1694,7 @@ fn multiplied(
     }
 }
 
-/// The curve that, eased as the flow channel is (to the power
+/// The curve that, eased as stamp opacity is (to the power
 /// [`procraft_engine::brush::FLOW_POWER`]), lays what `curve` says: its root, taken across it (at 17
 /// places and at its own points, so a straight one bends as it should).
 fn eased_root(curve: &Curve) -> Curve {
@@ -1724,13 +1702,6 @@ fn eased_root(curve: &Curve) -> Curve {
     use procraft_engine::geom::Vec2;
     let places = (0..=16).map(|i| i as f32 / 16.0).chain(curve.points().iter().map(|p| p.x));
     Curve::new(&places.map(|x| Vec2::new(x, curve.eval(x).max(0.0).powf(1.0 / FLOW_POWER))).collect::<Vec<_>>())
-}
-
-/// A curve a quarter as high: the opacity channel lays straight now, four times its curve at full
-/// amount, so a quarter of the file's lays what it says.
-fn quartered(curve: &Curve) -> Curve {
-    use procraft_engine::geom::Vec2;
-    Curve::new(&curve.points().iter().map(|p| Vec2::new(p.x, p.y * 0.25)).collect::<Vec<_>>())
 }
 
 /// Gives `b` a Krita preset's scatter as jitter along the stroke and across it: as far at most
@@ -1773,17 +1744,17 @@ fn krita_paint(
     b.pressure_opacity = 0.0;
     if !wash {
         b.flow = opacity * flow;
-        // both curves at once, multiplied across; the opacity lays straight, a quarter as high
+        // apply both pressure curves to the deposit
         if let Some(points) = multiplied(opacity_pressure, flow_pressure) {
             b.pressure_opacity = 1.0;
-            b.opacity_curve = quartered(&Curve::new(&points));
+            b.opacity_curve = eased_root(&Curve::new(&points));
         }
         return;
     }
     b.flow = flow;
     if let Some(points) = flow_pressure {
         b.pressure_opacity = 1.0;
-        b.opacity_curve = quartered(&Curve::new(points));
+        b.opacity_curve = eased_root(&Curve::new(points));
     }
     // the stroke builds up towards what its transfer lets through: the opacity, by the pressure
     let most = match opacity_pressure {
@@ -1791,9 +1762,8 @@ fn krita_paint(
         None => vec![Vec2::new(0.0, opacity), Vec2::new(1.0, opacity)],
     };
     if opacity_pressure.is_some() || opacity < 1.0 {
-        // the transfer is the flow channel, eased now: unwound so the stroke reaches the opacity
         b.set_setting("pressure_flow", 1.0);
-        b.pressure_curves.set(PressureCurve::Flow, Some(eased_root(&Curve::new(&most))));
+        b.pressure_curves.set(PressureCurve::Flow, Some(Curve::new(&most)));
     }
     b.set_setting("rendering_mode", 1.0);
 }
@@ -1885,15 +1855,15 @@ pub(crate) fn brush_from(file: &BrushFile) -> Brush {
     }
     b.notches = file.notches.clone();
     b.sliders = file.sliders;
-    // (a second's grain goes on stamp by stamp, so by the grain's own tile)
-    b.secondary = file.secondary.as_deref().map(|second| Box::new(Brush { grain_file: None, ..brush_from(second) }));
+    b.secondary = file.secondary.as_deref().map(|second| Box::new(brush_from(second)));
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
     b.grain_file = grain_file_for(&file.grain, source.as_ref());
     b.grain.source = source;
     for (texture, material) in [(&file.metallic, &mut b.metallic), (&file.roughness, &mut b.roughness)] {
         let (image, source) = material_for(texture);
-        *material = MaterialSource { image, source };
+        let file = shape_file_for(texture, source.as_ref());
+        *material = MaterialSource { image, source, file };
     }
     // the stock images it names, to name again when it is written out
     let stock = |t: &Texture| match t {
@@ -2352,11 +2322,8 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             None => (Some(grain::PAPER), None),
         },
         Texture::Stock { name, inverted } => {
-            let n = name.to_lowercase();
-            if n.contains("blank") {
-                return (None, None);
-            }
-            // the stock library's own grain, where we hold it, with its tooth as it is
+            // Even a uniform source matters: its level, brightness and contrast
+            // are inputs to the grain blend (for example, Hard Mix).
             if let Some(bytes) = stock_images::stock_image_bytes(name)
                 && let Some(s) = real_stock(textures::stock_key(name), *inverted, bytes)
             {
@@ -2365,9 +2332,7 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             drawn_grain(&grain_stand_in(name, *inverted, preview))
         }
         Texture::Drawn(s) => {
-            // the stock library's own grain, where we hold it (a blank one is as good as none)
-            if let Some((name, bytes)) = stock_images::stock_image_by_key(s.key)
-                && !name.contains("blank")
+            if let Some((_, bytes)) = stock_images::stock_image_by_key(s.key)
                 && let Some(src) = real_stock(s.key, s.inverted, bytes)
             {
                 return (None, Some(src));
@@ -2541,8 +2506,8 @@ fn texture_bytes(t: &Texture) -> Option<(&[u8], bool)> {
     }
 }
 
-/// What the image of a brush file's grain gives it beyond `source`: its width, and the image at up
-/// to [`FULL_GRAIN_MOST`] a side if it has more than `source` holds.
+/// What the image of a brush file's grain gives it beyond `source`: its width, and the image at
+/// its native dimensions if the standard source has been resampled.
 fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
     let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
     let (w, h, channels, buf) = decode_picture(bytes)?;
@@ -2550,40 +2515,44 @@ fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
 }
 
 /// What the image of a brush file's shape gives it beyond `source`, if it has more than that holds.
-fn shape_file_for(t: &Texture, source: Option<&Source>) -> Option<ShapeFile> {
+pub(crate) fn shape_file_for(t: &Texture, source: Option<&Source>) -> Option<ShapeFile> {
     let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
     let (w, h, channels, buf) = decode_picture(bytes)?;
     Some(ShapeFile { source: source.id, full: full_image((w, h, channels), &buf, inverted)? })
 }
 
-/// The side of the square an image `longest` pixels across is kept in: as much of it as is kept of
-/// any, and never less than a `Source` holds.
-pub(crate) fn image_side(longest: usize) -> usize {
-    longest.next_power_of_two().clamp(TEXTURE_SIZE, FULL_GRAIN_MOST)
+/// The source at its decoded dimensions. The ordinary square already preserves a 256px square exactly.
+fn full_image((w, h, channels): (usize, usize, usize), buf: &[u8], inverted: bool) -> Option<FullGrain> {
+    if (w, h) == (TEXTURE_SIZE, TEXTURE_SIZE) {
+        return None;
+    }
+    let pixels = buf
+        .chunks_exact(channels)
+        .map(|px| {
+            let grey = gray_value(px).round() as u8;
+            if inverted { 255 - grey } else { grey }
+        })
+        .collect();
+    FullGrain::from_image(w as u32, h as u32, pixels)
 }
 
-/// A decoded image (as [`gray_square`] takes it) at up to [`FULL_GRAIN_MOST`] a side, if it has more
-/// than a `Source` holds.
-fn full_image(size: (usize, usize, usize), buf: &[u8], inverted: bool) -> Option<FullGrain> {
-    let longest = size.0.max(size.1);
-    (longest > TEXTURE_SIZE)
-        .then(|| image_side(longest))
-        .and_then(|side| FullGrain::new(side as u32, gray_square(size, buf, inverted, side)))
+fn gray_value(pixel: &[u8]) -> f32 {
+    match pixel {
+        &[grey] => f32::from(grey),
+        &[grey, alpha] => f32::from(grey) * f32::from(alpha) / 255.0,
+        [r, g, b, rest @ ..] => {
+            let luma = 0.299 * f32::from(*r) + 0.587 * f32::from(*g) + 0.114 * f32::from(*b);
+            luma * f32::from(rest.first().copied().unwrap_or(255)) / 255.0
+        }
+        _ => 0.0,
+    }
 }
 
 /// A decoded image (`buf`, `w` x `h`, of `channels`) as grey, `n` square, white for paint.
 pub(crate) fn gray_square((w, h, channels): (usize, usize, usize), buf: &[u8], inverted: bool, n: usize) -> Vec<u8> {
     let value = |x: usize, y: usize| -> f32 {
         let at = (y * w + x) * channels;
-        let px = buf.get(at..at + channels).unwrap_or(&[]);
-        let get = |k: usize| f32::from(px.get(k).copied().unwrap_or(0));
-        let (lum, alpha) = match channels {
-            1 => (get(0), 255.0),
-            2 => (get(0), get(1)),
-            3 => (0.299 * get(0) + 0.587 * get(1) + 0.114 * get(2), 255.0),
-            _ => (0.299 * get(0) + 0.587 * get(1) + 0.114 * get(2), get(3)),
-        };
-        lum * alpha / 255.0
+        gray_value(buf.get(at..at + channels).unwrap_or(&[]))
     };
     // a smaller image is blown up smoothly, between its pixels' centres
     let between = |fx: f32, fy: f32| -> f32 {
@@ -3166,13 +3135,12 @@ mod tests {
         assert!(b.pressure_size == 1.0 && near(b.size_curve.eval(0.0), 0.2) && near(b.size_curve.eval(1.0), 1.0));
         // built up: each stamp lays the opacity times the flow, by the opacity's curve straight
         assert!(near(b.flow, 0.4) && b.pressure_opacity == 1.0);
-        assert!(near(4.0 * b.opacity_curve.eval(0.5), 0.5));
+        assert!(near(b.opacity_curve.eval(0.5).powf(FLOW_POWER), 0.5));
         // washed: each stamp lays the flow, the stroke building up to the opacity by the pressure
         let w = krita_brush(&KritaBrush { wash: true, ..built.clone() });
         assert!(near(w.flow, 0.5) && w.pressure_opacity == 0.0 && w.setting("rendering_mode") == 1.0);
-        // the transfer is the flow channel, eased: its curve unwound by that power
         let most = w.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(near(most.eval(0.5).powf(FLOW_POWER), 0.4) && near(most.eval(1.0).powf(FLOW_POWER), 0.8));
+        assert!(near(most.eval(0.5), 0.4) && near(most.eval(1.0), 0.8));
         // no pressure on the size: it stays as set
         assert_eq!(krita_brush(&KritaBrush { size_pressure: None, ..built }).pressure_size, 0.0);
     }
@@ -3281,14 +3249,13 @@ mod tests {
         let mut second = Brush::round_pen();
         masking_paint(&mut second, &m);
         assert_eq!((second.rendering, second.max_opacity, second.flow), (Rendering::Capped, 1.0, 0.3));
-        // the stroke reaches the opacity times its curve: none under 0.6, 0.8 x 0.75 from 0.9;
-        // the transfer is the flow channel, eased, so its curve is unwound by that power
+        // the stroke reaches opacity times its curve: none under 0.6, 0.8 x 0.75 from 0.9
         let most = second.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(most.eval(0.5).powf(FLOW_POWER) < 5e-3 && (most.eval(1.0).powf(FLOW_POWER) - 0.6).abs() < 5e-3);
+        assert!(most.eval(0.5) < 5e-3 && (most.eval(1.0) - 0.6).abs() < 5e-3);
         assert_eq!(second.setting("pressure_flow"), 1.0);
-        // a stamp lays the flow's curve straight: its opacity's pressure, four times the curve
+        // a stamp deposits the flow specified by its pressure curve
         assert_eq!(second.pressure_opacity, 1.0);
-        let laid = |p: f32| 4.0 * second.opacity_curve.eval(p);
+        let laid = |p: f32| second.opacity_curve.eval(p).powf(FLOW_POWER);
         assert!(laid(0.5) < 1e-3 && (laid(1.0) - 0.75).abs() < 5e-3);
         // without pressure, a constant: none at full opacity, else the opacity
         let fixed = KritaMasking { opacity_pressure: None, flow_pressure: None, ..m.clone() };
@@ -3296,7 +3263,7 @@ mod tests {
         masking_paint(&mut second, &fixed);
         assert_eq!(second.pressure_opacity, 0.0);
         let fixed_most = second.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!((fixed_most.eval(0.1).powf(FLOW_POWER) - 0.8).abs() < 5e-3);
+        assert!((fixed_most.eval(0.1) - 0.8).abs() < 5e-3);
         let mut second = Brush::round_pen();
         masking_paint(&mut second, &KritaMasking { opacity: 1.0, ..fixed });
         assert!(second.pressure_curves.get(PressureCurve::Flow).is_none());
@@ -3325,7 +3292,8 @@ mod tests {
         assert_eq!(shape("Old-Square-Dots.jpg"), Some(shape::STOCK_SQUARE_DOTS));
         // a stock blot keeps its drops close, not ours that are pushed out for stamps that turn
         assert_eq!(shape("Old-Ink-Blot.jpg"), Some(shape::STOCK_BLOT));
-        assert_eq!(grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None), (None, None));
+        let (_, blank) = grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None);
+        assert!(blank.unwrap().pixels.iter().all(|&v| v >= 254));
         assert_eq!(
             grain_for(&Texture::Stock { name: "Old-Canvas.jpg".into(), inverted: false }, None).0,
             Some(grain::ROUGH_CANVAS)
@@ -3394,11 +3362,9 @@ mod tests {
         assert!(image.is_none() && source.is_some());
         let file = grain_file_for(&grain, source.as_ref()).unwrap();
         assert_eq!((file.width, file.full.unwrap().side), (1024, 1024));
-        // blank stays no grain at all
-        assert_eq!(
-            grain_for(&Texture::Stock { name: "Brush-Preset-Blank.png".into(), inverted: false }, None),
-            (None, None)
-        );
+        let blank = Texture::Stock { name: "Brush-Preset-Blank.png".into(), inverted: false };
+        let (_, source) = grain_for(&blank, None);
+        assert!(source.unwrap().pixels.iter().all(|&level| level == 255));
     }
 
     #[test]
@@ -3475,19 +3441,19 @@ mod tests {
         };
         let b = tip_brush(&tip(600, 300));
         let full = &b.shape_file.as_ref().expect("a full shape").full;
-        assert_eq!(full.side, 512);
+        assert_eq!(full.side, 600);
         assert_eq!(b.shape_file.as_ref().unwrap().source, b.shape.source.as_ref().unwrap().id);
         // framed as the small square is: the tip across the middle, as wide as the square
         let small = &b.shape.source.as_ref().unwrap().pixels;
         let pixels = full.pixels.as_deref().unwrap();
-        let (n, m) = (TEXTURE_SIZE, 512usize);
+        let (n, m) = (TEXTURE_SIZE, full.side as usize);
         for (x, y) in [(10, 70), (128, 100), (250, 120), (128, 20), (128, 200), (60, 160)] {
-            let big = (0..4).map(|k| u32::from(pixels[(y * 2 + k / 2) * m + x * 2 + k % 2])).sum::<u32>() / 4;
+            let big = pixels[(y * m / n) * m + x * m / n];
             assert!((big as i32 - i32::from(small[y * n + x])).abs() <= 2, "({x}, {y}): {big} {}", small[y * n + x]);
         }
         // no larger than a `Source` holds: none; very large: as large as is kept
         assert!(tip_brush(&tip(200, 100)).shape_file.is_none());
-        assert_eq!(tip_brush(&tip(3000, 1500)).shape_file.unwrap().full.side, 1024);
+        assert_eq!(tip_brush(&tip(3000, 1500)).shape_file.unwrap().full.side, 3000);
     }
 
     #[test]
@@ -3621,8 +3587,8 @@ mod tests {
             assert!(near(b.size_curve.eval(x), y), "{x}: {}", b.size_curve.eval(x));
         }
         let (none, full) = (b.pressure_factors(0.0).0, b.pressure_factors(1.0).0);
-        // down to 30% at no pressure, boosting past whole at full
-        assert!(near(none, 0.3) && full > 3.0, "{none} {full}");
+        // The file's size curve covers its minimum up to the full brush diameter.
+        assert!(near(none, 0.3) && near(full, 1.0), "{none} {full}");
         assert!(near(b.setting("jitter_size"), 0.4));
         // no pressure on the opacity; leaning fades it to 20 % and chance (the flow's) takes a
         // tenth: tilt scales it before it is eased, so by its root; speed is left out
@@ -3638,8 +3604,8 @@ mod tests {
             },
             ..Default::default()
         });
-        let laid = |p: f32| pressed.pressure_factors(p).1;
-        assert!(near(laid(0.0), 0.3) && near(laid(1.0), 1.0), "{} {}", laid(0.0), laid(1.0));
+        let laid = |p: f32| pressed.pressure_factors(p).1.powf(procraft_engine::brush::FLOW_POWER);
+        assert!(near(laid(0.0), 0.3) && (laid(1.0) - 1.0).abs() < 0.002, "{} {}", laid(0.0), laid(1.0));
         // and between, not only at its ends
         let want = csp_curve(&bent.points, 0.3).eval(0.5);
         assert!((laid(0.5) - want).abs() < 0.01, "{} {want}", laid(0.5));
@@ -3647,9 +3613,8 @@ mod tests {
         assert!(near(b.setting("pressure_flow"), 1.0) && near(b.setting("pressure_roundness"), 1.0));
         assert!(b.pressure_curves.get(PressureCurve::Flow).is_some());
         assert!(b.pressure_curves.get(PressureCurve::Roundness).is_some());
-        // the flow channel is eased, so its curve is the file's unwound by that power
         let flow = b.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(near(flow.eval(0.5).powf(procraft_engine::brush::FLOW_POWER), 0.5));
+        assert!(near(flow.eval(0.5), 0.5));
         // the texture shows from 40 % at no pressure to all of it at full
         assert!(near(b.pressure_curves.at(PressureCurve::GrainDepth, 0.0), 0.4));
         assert!(near(b.pressure_curves.at(PressureCurve::GrainDepth, 1.0), 1.0));
@@ -3736,7 +3701,7 @@ mod tests {
     #[test]
     fn a_photoshop_preset_comes_in_at_its_size_with_its_dynamics() {
         use procraft_engine::abr::{AbrBrush, AbrDynamics, AbrTip};
-        use procraft_engine::brush::{FLOW_POWER, PressureCurve};
+        use procraft_engine::brush::PressureCurve;
         let shown = |b: &Brush, key: &str| (b.setting(key) * 100.0).round();
         let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
         // a computed 10 px round, pressure on its size (down to 87%) and opacity
@@ -3769,12 +3734,12 @@ mod tests {
             ((b.max_size / b.size_unit() * 100.0).round(), (b.min_size / b.size_unit() * 100.0).round()),
             (33.0, 1.0)
         );
-        // pressure: size 6.5% (half of what the dynamics let go), the stylus page's opacity full
-        assert!((b.setting("pressure_size") - 0.065).abs() < 1e-6);
+        // pressure reduces size by 13% and controls the full opacity
+        assert!((b.setting("pressure_size") - 0.13).abs() < 1e-6);
         assert_eq!((shown(&b, "pressure_flow"), shown(&b, "pressure_opacity")), (100.0, 0.0));
-        // the opacity caps the stroke through the eased flow channel: from nothing up to all of it
+        // the opacity caps the stroke through the flow channel: from nothing up to all of it
         let cap = b.pressure_curves.get(PressureCurve::Flow).unwrap();
-        assert!(near(cap.eval(0.5).powf(FLOW_POWER), 0.5));
+        assert!(near(cap.eval(0.5), 0.5));
         // untapered, no StreamLine, a uniformed glaze; turned the other way
         assert_eq!(
             (b.setting("pen_taper_size"), b.setting("touch_taper_size"), b.setting("streamline")),
@@ -3839,8 +3804,11 @@ mod tests {
             (76.0, 100.0, 0.0)
         );
         // the flow lays each stamp straight, from its least (20%) up to the tool's at full
-        assert!(near(kyle.pressure_factors(0.0).1, 0.2) && near(kyle.pressure_factors(1.0).1, 1.0));
-        assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (50.0, 100.0));
+        assert!(
+            near(kyle.pressure_factors(0.0).1.powf(procraft_engine::brush::FLOW_POWER), 0.2)
+                && near(kyle.pressure_factors(1.0).1, 1.0)
+        );
+        assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (100.0, 100.0));
         assert_eq!((shown(&kyle, "jitter_size"), shown(&kyle, "jitter_opacity")), (9.0, 10.0));
         assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::document::BlendMode::Multiply.id());
         assert_eq!((shown(&kyle, "grain_brightness"), shown(&kyle, "grain_contrast")), (12.0, 20.0));
@@ -4120,11 +4088,12 @@ mod tests {
             let bytes = sized_gray_png(n as u32, n as u32, &vec![128; n * n]);
             shape_file_for(&Texture::Image { bytes, inverted: false }, Some(&source))
         };
-        // no more than the brush's own image holds, none kept apart
-        assert!(file(200).is_none() && file(TEXTURE_SIZE).is_none());
-        // a side that isn't a power of two takes the next, as far as the most
-        assert_eq!(file(400).unwrap().full.side, 512);
-        assert_eq!(file(1500).unwrap().full.side, FULL_GRAIN_MOST as u32);
+        // images at the ordinary texture size already have every pixel
+        assert_eq!(file(200).unwrap().full.side, 200);
+        assert!(file(TEXTURE_SIZE).is_none());
+        // original dimensions survive import
+        assert_eq!(file(400).unwrap().full.side, 400);
+        assert_eq!(file(1500).unwrap().full.side, 1500);
         assert_eq!(file(400).unwrap().source, source.id);
         // nothing without an image in the file or the stock library
         let stock = Texture::Stock { name: "Acrylic-Stamp-9.png".into(), inverted: false };
@@ -4138,14 +4107,14 @@ mod tests {
             let bytes = sized_gray_png(n as u32, n as u32, &vec![128; n * n]);
             grain_file_for(&Texture::Image { bytes, inverted: false }, Some(&source)).unwrap()
         };
-        // no more than the brush's own image holds, none kept apart
+        // images at the ordinary texture size already have every pixel
         let small = file(200);
-        assert_eq!((small.width, small.full.is_none()), (200, true));
-        // a side that isn't a power of two takes the next, as far as the most
+        assert_eq!((small.width, small.full.unwrap().side), (200, 200));
+        // original dimensions survive import
         let middle = file(400);
-        assert_eq!((middle.width, middle.full.unwrap().side), (400, 512));
+        assert_eq!((middle.width, middle.full.unwrap().side), (400, 400));
         let large = file(1500);
-        assert_eq!((large.width, large.full.unwrap().side), (1500, FULL_GRAIN_MOST as u32));
+        assert_eq!((large.width, large.full.unwrap().side), (1500, 1500));
         // nothing without an image in the file
         let stock = Texture::Stock { name: "Paper".into(), inverted: false };
         assert!(grain_file_for(&stock, Some(&source)).is_none());

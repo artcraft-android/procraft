@@ -764,28 +764,6 @@ pub(crate) fn older_blends(id: i64) -> (i64, i64) {
     }
 }
 
-/// A grain's blend as the engine it comes from mixes it: the file numbers it as the layers' (its
-/// two heights past them), the engine by its own thirteen in the studio's order. None for a mode
-/// that mix has not, which is kept and drawn as the layers' blend then.
-pub(crate) fn grain_mix_from(n: i64) -> Option<u32> {
-    let id = match n {
-        27 | 28 => n as u32,
-        1 => BlendMode::Multiply.id(),
-        34 => BlendMode::Darken.id(),
-        10 => BlendMode::ColorBurn.id(),
-        8 => BlendMode::LinearBurn.id(),
-        4 => BlendMode::Lighten.id(),
-        9 => BlendMode::ColorDodge.id(),
-        11 => BlendMode::Overlay.id(),
-        20 => BlendMode::HardMix.id(),
-        6 => BlendMode::Difference.id(),
-        7 => BlendMode::Subtract.id(),
-        26 => BlendMode::Divide.id(),
-        _ => return None,
-    };
-    crate::brush::grain_blends().iter().position(|(m, _)| *m == id).map(|i| i as u32)
-}
-
 /// What an export writes besides the document: each paint layer's pixels (premultiplied RGBA)
 /// and each mask's (its brightness as grey), the flattened picture (premultiplied, background
 /// included) and the preview PNG.

@@ -24,7 +24,8 @@ pub use canvas::{
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{
-    GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
+    GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_image,
+    material_source,
 };
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;

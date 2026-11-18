@@ -148,18 +148,13 @@ fn image_id(pixels: &[u8]) -> u64 {
     pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// The most pixels a side of a grain or shape image is kept at. A grain fixed to the canvas is read
-/// once a canvas pixel, so a tile's width in pixels is the most of an image it can use: this holds
-/// all of it for most tiles, a little soft past that, at a quarter of the memory of twice the side.
-pub const FULL_GRAIN_MOST: usize = 1024;
-
-/// A grain or shape image at more than `TEXTURE_SIZE`, square, from a brush file or the user's own
-/// picture: its pixels are kept in a file of their own, and held here only until then.
+/// A brush texture at its original dimensions. The library keeps its pixels in a separate file.
 #[derive(Clone, Debug)]
 pub struct FullGrain {
     pub id: u64,
-    /// Pixels a side (a power of two).
+    /// Pixel width and height of the decoded source image.
     pub side: u32,
+    pub height: u32,
     pub pixels: Option<Arc<Vec<u8>>>,
 }
 
@@ -172,9 +167,19 @@ impl PartialEq for FullGrain {
 impl FullGrain {
     /// The image, or none if it isn't `side` square.
     pub fn new(side: u32, pixels: Vec<u8>) -> Option<FullGrain> {
-        (pixels.len() == (side as usize).pow(2)).then(|| FullGrain {
-            id: image_id(&pixels),
-            side,
+        Self::from_image(side, side, pixels)
+    }
+
+    /// Keeps the decoded image at its original dimensions.
+    pub fn from_image(width: u32, height: u32, pixels: Vec<u8>) -> Option<FullGrain> {
+        if width == 0 || height == 0 || u64::from(width) * u64::from(height) != pixels.len() as u64 {
+            return None;
+        }
+        let id = image_id(&pixels);
+        Some(FullGrain {
+            id: if width == height { id } else { id ^ ((u64::from(width) << 32) | u64::from(height)).rotate_left(17) },
+            side: width,
+            height,
             pixels: Some(Arc::new(pixels)),
         })
     }
@@ -396,8 +401,7 @@ pub const SIZE_CURVE: f32 = 2.2;
 /// range, to this power: light touches fall away fast.
 pub const FLOW_POWER: f32 = 2.5;
 
-/// The pressure's flow channel is eased to this power on its own: a preview's light swell must
-/// still lay a visible stroke, so it falls away gentler than the opacity range does.
+/// Pressure flow is a linear stroke transfer after the ranged stamp opacity has been eased.
 pub const FLOW_TRANSFER_POWER: f32 = 1.0;
 
 /// The stroke length (canvas pixels) by which an amount of 1 has run out (see [`run_out`]).
@@ -539,10 +543,18 @@ impl Default for Shape {
 /// the brush's amount, black none of it. Neither image: the amount all over.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MaterialSource {
+    /// The native image belonging to the current source, kept beside the library.
+    pub file: Option<ShapeFile>,
     /// A grain image (see `textures::grain`), or none.
     pub image: Option<u32>,
     /// An image of the user's own, in place of `image`.
     pub source: Option<Source>,
+}
+
+impl MaterialSource {
+    pub fn full(&self) -> Option<&FullGrain> {
+        self.file.as_ref().filter(|f| Some(f.source) == self.source.as_ref().map(|s| s.id)).map(|f| &f.full)
+    }
 }
 
 /// The texture inside the stroke.
@@ -590,15 +602,15 @@ impl Grain {
     /// A moving grain's tile on the canvas (pixels) under a stamp `diameter` pixels across, its
     /// zoom `zoom` (0 follows the stamp's size, 1 crops) and its scale times `scale_by` (the
     /// scale's pressure curve): following the size, the stamp times the file's scale times root
-    /// two, floored so fine tooth doesn't wash out; cropped, [`CROPPED_GRAIN_TILE`] times it. In
+    /// two; cropped, [`CROPPED_GRAIN_TILE`] times it. In
     /// between the zoom goes by how much of the tile the stamp spans.
     pub fn moving_tile(&self, diameter: f32, zoom: f32, scale_by: f32) -> f32 {
         let scale = self.file_scale() * scale_by;
         let (zoom, diameter) = (zoom.clamp(0.0, 1.0), diameter.max(1e-3));
         let least = 1.0 / 32.0;
-        let follow = (std::f32::consts::SQRT_2 * scale.max(least) * diameter).max(10.0);
-        let cropped = (CROPPED_GRAIN_TILE * scale).max(10.0);
-        (1.0 / ((1.0 - zoom) / follow + zoom / cropped)).max(10.0)
+        let follow = std::f32::consts::SQRT_2 * scale.max(least) * diameter;
+        let cropped = CROPPED_GRAIN_TILE * scale.max(least / 128.0);
+        1.0 / ((1.0 - zoom) / follow + zoom / cropped)
     }
 
     /// The scale for a moving grain whose cropped tile is `tile` canvas pixels.
@@ -920,7 +932,10 @@ impl Brush {
     pub fn full_grains(&self) -> Vec<&FullGrain> {
         let own = self.grain_file.iter().filter_map(|f| f.full.as_ref()).chain(self.shape_file.iter().map(|f| &f.full));
         let others = self.secondary.iter().map(|b| &**b).chain(self.reset_point.iter().map(|r| &*r.brush));
-        own.chain(others.flat_map(Brush::full_grains)).collect()
+        own.chain(self.metallic.full())
+            .chain(self.roughness.full())
+            .chain(others.flat_map(Brush::full_grains))
+            .collect()
     }
 
     /// Whether its grain, fixed to the canvas, goes on stamp by stamp, each stamp combined with it
@@ -931,48 +946,75 @@ impl Brush {
         self.grain.mode == GrainMode::Texturized && self.setting("grain_each_stamp") >= 0.5
     }
 
-    /// The grain's tile on the canvas (pixels): fixed to the canvas it goes by the file's scale
-    /// alone now, whatever the image's width; a moving grain reads its own scale. Tuned to the
-    /// previews.
+    /// Rotation from canvas coordinates into the grain image. A rolling patch reads the
+    /// image relative to the particle, while a fixed grain is projected across the stroke.
+    pub fn grain_image_rotation(&self) -> f32 {
+        let turn = self.setting("grain_turn").clamp(-1.0, 1.0) * std::f32::consts::PI;
+        if self.grain.mode == GrainMode::Moving { -turn } else { turn }
+    }
+
+    /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
+    /// wide as the file's own times its scale over root two; else what the grain says.
     pub fn grain_tile(&self) -> f32 {
-        match self.grain.mode {
-            GrainMode::Texturized => self.texturized_tile() * self.stand_in_tile(),
+        match self.grain_file_now() {
+            Some(f) if self.grain.mode == GrainMode::Texturized && f.width > 0 => {
+                // A named grain spans the original tile even when our image of it has fewer texels.
+                let width = self
+                    .stock
+                    .grain
+                    .as_ref()
+                    .and_then(|s| crate::textures::stock_grain_octaves(&s.name))
+                    .map_or(f.width as f32, |(width, _)| width);
+                width * self.grain.file_scale() / std::f32::consts::SQRT_2
+            }
             _ => self.grain.scale * self.stand_in_tile(),
         }
     }
 
-    /// A texturized tile before the stand-in's share: width-independent, with a floor so a fine
-    /// grain still shows. Tuned to the previews.
-    fn texturized_tile(&self) -> f32 {
-        (360.0 * self.grain.file_scale()).max(10.0)
-    }
-
-    /// How a stock grain's stand-in is tiled against the tile the stock image would have, so its
-    /// features come out the right size: their feature size there over ours, as measured, held to
-    /// an eighth to four times. 1 for any other grain, or where either isn't known.
+    /// How a stock grain's stand-in is tiled against the scale, so that its features come out the
+    /// size the stock image's would at a tile that size: their feature size there over ours, as
+    /// measured, held to an eighth to four times. 1 for any other grain, or where either isn't
+    /// known.
     fn stand_in_tile(&self) -> f32 {
         // the stock image its file names, or (a stock brush of ours, which names none) the one its
         // grain's image stands in for
         let stock = self.stock.grain.as_ref().map(|s| crate::textures::stock_key(&s.name));
         let stock = stock.or_else(|| self.grain.source.as_ref().and_then(|s| s.stand_in_for));
         let (Some(stock), Some(index)) = (stock, self.grain.image) else { return 1.0 };
-        // a paper or a wash drawn by the stock image's own octaves of noise: a share of that image
-        if crate::textures::drawn_by_octaves(index) && crate::textures::stock_grain_octaves_of(stock).is_some() {
-            return crate::textures::OCTAVE_SHARE;
+        // a paper or a wash drawn by the stock image's own octaves of noise: a share of that image,
+        // fixed to the canvas as wide as it times the file's scale over root two (as a brush
+        // file's own image is), moving read as the image is stamp by stamp
+        if crate::textures::drawn_by_octaves(index)
+            && let Some((width, _)) = crate::textures::stock_grain_octaves_of(stock)
+        {
+            let share = crate::textures::OCTAVE_SHARE;
+            if self.grain.mode == GrainMode::Moving {
+                return share;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 * share / self.grain.scale.max(1e-3);
         }
-        // a pattern drawn to the stock image's own proportions keeps the tile that image would have
-        if crate::textures::drawn_to_stock_width(index).is_some() {
-            return 1.0;
+        // a pattern drawn to the stock image's own proportions: fixed to the canvas, the tile that
+        // image would have, as wide as it times the file's scale over root two, as a brush file's
+        // own image is; moving, read as the image is stamp by stamp, whose tile doesn't go by its
+        // width
+        if let Some(width) = crate::textures::drawn_to_stock_width(index) {
+            if self.grain.mode == GrainMode::Moving {
+                return 1.0;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 / self.grain.scale.max(1e-3);
         }
-        let base = if self.grain.mode == GrainMode::Texturized { self.texturized_tile() } else { self.grain.scale };
         let theirs = crate::textures::stock_grain_features_of(stock)
-            .map(|levels| crate::textures::feature_at_tile(&levels, base));
+            .map(|levels| crate::textures::feature_at_tile(&levels, self.grain.scale));
         stand_in_tile(theirs, crate::textures::grain_feature(index))
     }
 
-    /// The brush as a file whose grain image is `width` pixels wide keeps it: the tile no longer
-    /// goes by the image's width, so the scale stays as it is.
-    pub fn with_grain_image_width(self, _width: u32) -> Brush {
+    /// The brush as a file whose grain image is `width` pixels wide keeps it: the same tile, by a
+    /// scale to suit. Only a grain fixed to the canvas goes by its image's width.
+    pub fn with_grain_image_width(mut self, width: u32) -> Brush {
+        if self.stock.grain.is_none() && self.grain.mode == GrainMode::Texturized && self.grain_file_now().is_some() {
+            let scale = self.grain_tile() * std::f32::consts::SQRT_2 / width.max(1) as f32;
+            self.grain.scale = crate::studio::MAX_GRAIN_SCALE * (scale / 16.0).sqrt();
+        }
         self
     }
 
@@ -1016,13 +1058,13 @@ impl Brush {
         ]
     }
 
-    /// The (size, opacity) multipliers for the size's and the opacity's own pressures. A positive
-    /// amount is neutral at a quarter pressure and can boost past whole above it; a negative one
-    /// falls four times as fast, reaching nothing partway up the press. Tuned to the previews.
+    /// The (size, opacity) multipliers for the size's and the opacity's own pressures: a positive
+    /// amount leaves that much less at no press and reaches whole at full press; a negative one
+    /// falls from whole towards nothing as the press rises.
     pub fn factors(&self, size: f32, opacity: f32) -> (f32, f32) {
         let factor = |amount: f32, p: f32| {
             let amount = amount.clamp(-1.0, 1.0);
-            if amount >= 0.0 { 1.0 + amount * (4.0 * p - 1.0) } else { 1.0 + 4.0 * amount * p }
+            if amount >= 0.0 { 1.0 - amount + amount * p } else { 1.0 + amount * p }
         };
         (factor(self.pressure_size, size), factor(self.pressure_opacity, opacity))
     }
@@ -1064,25 +1106,26 @@ mod tests {
         assert_eq!(stand_in_tile(Some(0.1), Some(0.01)), STAND_IN_TILE_MOST);
         assert_eq!(stand_in_tile(None, Some(0.01)), 1.0);
         assert_eq!(stand_in_tile(Some(0.01), None), 1.0);
-        // a texturized tile goes by the file's scale alone now (360 times it), whatever the image
+        // only a stock grain's stand-in: our own grain, or one named in no table, keeps its scale
         let mut b = Brush::round_pen();
         b.grain = Grain { image: Some(crate::textures::grain::FINE_NOISE), scale: 300.0, ..Grain::default() };
-        let tile = 360.0 * b.grain.file_scale();
-        assert!((b.grain_tile() - tile).abs() < 0.01, "{}", b.grain_tile());
+        assert_eq!(b.grain_tile(), 300.0);
         b.stock.grain = Some(StockImage { name: "no such grain.png".into(), inverted: false });
-        assert!((b.grain_tile() - tile).abs() < 0.01, "{}", b.grain_tile());
-        // a pattern drawn to a stock image's proportions keeps the tile that image would have
+        assert_eq!(b.grain_tile(), 300.0);
+        // a pattern drawn to a stock image's proportions: that image's tile (2048 pixels wide at a
+        // file scale of 0.1024: 148 pixels)
         b.grain.image = Some(crate::textures::grain::GRAPH_PAPER);
         b.grain.scale = 81.92;
-        assert!((b.grain_tile() - 360.0 * 0.1024).abs() < 0.01, "{}", b.grain_tile());
-        // moving, it goes by the moving grain's own scale
+        assert!((b.grain_tile() - 2048.0 * 0.1024 / std::f32::consts::SQRT_2).abs() < 0.01, "{}", b.grain_tile());
+        // moving, it goes by the moving grain's own tile, as the image's would
         b.grain.mode = GrainMode::Moving;
         assert_eq!(b.grain_tile(), 81.92);
     }
 
     #[test]
     fn a_paper_drawn_by_its_octaves_is_tiled_as_a_share_of_the_stock_image() {
-        // a quarter of the paper's tile at a file scale of 0.6728, fixed to the canvas
+        // a quarter of the paper (2048 pixels wide) at a file scale of 0.6728: fixed to the canvas
+        // 2048 x 0.6728 / root two / 4
         let mut b = Brush::round_pen();
         b.grain = Grain {
             mode: GrainMode::Texturized,
@@ -1091,8 +1134,7 @@ mod tests {
             ..Grain::default()
         };
         b.stock.grain = Some(StockImage { name: "Wax-Crayon-Paper.jpg".into(), inverted: false });
-        // a quarter of the tile the paper would have (360 times the file's scale)
-        let tile = 360.0 * 0.6728 / 4.0;
+        let tile = 2048.0 * 0.6728 / std::f32::consts::SQRT_2 / 4.0;
         assert!((b.grain_tile() - tile).abs() < 0.5, "{} {tile}", b.grain_tile());
         // moving, a quarter of the moving grain's own tile
         b.grain.mode = GrainMode::Moving;
@@ -1104,14 +1146,26 @@ mod tests {
         let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
         let mut b = Brush::round_pen();
         b.grain = Grain { mode: GrainMode::Texturized, scale: 100.0, source: Some(source.clone()), ..Grain::default() };
-        let tile = 360.0 * b.grain.file_scale();
-        assert!((b.grain_tile() - tile).abs() < 0.01, "{}", b.grain_tile());
+        assert_eq!(b.grain_tile(), 100.0);
         b.grain_file = Some(GrainFile { source: source.id, width: 0, full: None });
-        assert!((b.grain_tile() - tile).abs() < 0.01, "{}", b.grain_tile());
-        // written with its image, the tile no longer goes by the width: the same size
+        assert_eq!(b.grain_tile(), 100.0);
+        // written with its image, it comes back a file's grain, the same size
         let mut written = b.clone().with_grain_image_width(1024);
         written.grain_file = Some(GrainFile { source: source.id, width: 1024, full: None });
-        assert!((written.grain_tile() - tile).abs() < 0.01, "{}", written.grain_tile());
+        assert!((written.grain_tile() - 100.0).abs() < 0.01, "{}", written.grain_tile());
+    }
+
+    #[test]
+    fn an_imported_named_grain_repeats_at_its_original_width() {
+        let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.grain = Grain { mode: GrainMode::Texturized, source: Some(source.clone()), ..Grain::default() };
+        brush.grain_file = Some(GrainFile { source: source.id, width: 1024, full: None });
+        brush.stock.grain = Some(StockImage { name: "Gouache-Wash.jpg".into(), inverted: false });
+        let tile = 2048.0 * brush.grain.file_scale() / std::f32::consts::SQRT_2;
+        assert!((brush.grain_tile() - tile).abs() < 1e-3);
+        let scale = brush.grain.scale;
+        assert_eq!(brush.with_grain_image_width(1024).grain.scale, scale);
     }
 
     #[test]
@@ -1120,18 +1174,18 @@ mod tests {
         let scale = crate::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
         let mut b = Brush::round_pen();
         b.grain = Grain { mode: GrainMode::Texturized, scale, source: Some(source.clone()), ..Grain::default() };
-        // the tile goes by the file's scale (0.75), not the image's width
-        let tile = 360.0 * 0.75;
-        assert!((b.grain_tile() - tile).abs() < 0.5, "{}", b.grain_tile());
+        // without a file's width: what the grain says
+        assert_eq!(b.grain_tile(), scale);
         b.grain_file = Some(GrainFile { source: source.id, width: 2048, full: None });
+        let tile = 2048.0 * 0.75 / std::f32::consts::SQRT_2;
         assert!((b.grain_tile() - tile).abs() < 0.5, "{}", b.grain_tile());
-        // written with a smaller image the scale stays as it is
+        // written with a smaller image it comes back the same size
         let written = b.clone().with_grain_image_width(1024);
-        assert!((written.grain.file_scale() - 0.75).abs() < 1e-3);
+        assert!((written.grain.file_scale() - 1.5).abs() < 1e-3);
         // a grain changed since leaves the file's behind
         b.grain.source = Source::new(vec![8; TEXTURE_SIZE * TEXTURE_SIZE]);
         assert!(b.grain_file_now().is_none());
-        assert!((b.grain_tile() - tile).abs() < 0.5, "{}", b.grain_tile());
+        assert_eq!(b.grain_tile(), scale);
     }
 
     #[test]
@@ -1178,9 +1232,11 @@ mod tests {
         assert!((grain.moving_tile(100.0, 1.0, 0.5) - 181.019).abs() < 1e-2);
         let wanted = Grain { scale: Grain::scale_for_cropped_tile(90.0), ..Grain::default() };
         assert!((wanted.moving_tile(30.0, 1.0, 1.0) - 90.0).abs() < 1e-3);
-        // a fine grain keeps a ten pixel floor instead of washing out
-        let fine = Grain { scale: 4.0, ..Grain::default() };
-        assert!(fine.moving_tile(2.0, 0.0, 1.0) >= 10.0);
+        // The floor is on file scale before conversion to pixels. Fine patterns can be a
+        // fraction of a pixel, and must keep their period under nearest-neighbour sampling.
+        let fine = Grain { scale: 0.0, ..Grain::default() };
+        assert!((fine.moving_tile(125.44, 0.0, 1.0) - 5.54372).abs() < 1e-3);
+        assert!((fine.moving_tile(20.0, 1.0, 1.0) - 0.088388).abs() < 1e-5);
     }
 
     #[test]
@@ -1223,29 +1279,24 @@ mod tests {
         assert!(b.diameter(0.5) < (b.min_size + b.max_size) / 2.0);
         assert_eq!(b.diameter(f32::NAN), b.diameter(0.5));
         assert_eq!(b.opacity(1.0), 1.0);
-        // neutral at a quarter pressure, boosting past whole above it
-        let (s, o) = b.pressure_factors(0.25);
+        let (s, o) = b.pressure_factors(1.0);
         assert!((s - 1.0).abs() < 1e-5 && (o - 1.0).abs() < 1e-5);
-        let (s, _) = b.pressure_factors(1.0);
-        assert!((s - (1.0 + 0.85 * 3.0)).abs() < 1e-5, "{s}");
         let (s0, _) = b.pressure_factors(0.0);
         assert!((s0 - 0.15).abs() < 1e-5);
     }
 
     #[test]
-    fn pressure_factors_follow_the_preview_law() {
+    fn positive_and_negative_amounts_span_the_full_pen_pressure() {
         let mut b = Brush::round_pen();
         b.pressure_size = 0.5;
         b.pressure_opacity = 0.5;
-        // 1 + a(4p - 1): neutral at a quarter, boosting above, shrinking below
-        for (p, want) in [(0.0, 0.5), (0.25, 1.0), (0.5, 1.5), (1.0, 2.5)] {
+        for (p, want) in [(0.0, 0.5), (0.25, 0.625), (0.5, 0.75), (1.0, 1.0)] {
             let (s, o) = b.pressure_factors(p);
             assert!((s - want).abs() < 1e-5, "p {p}: {s}");
             assert!((o - want).abs() < 1e-5, "p {p}: {o}");
         }
-        // a negative amount falls four times as fast: 1 + 4ap
         b.pressure_size = -0.5;
-        assert!(b.pressure_factors(0.5).0.abs() < 1e-5);
+        assert!((b.pressure_factors(0.5).0 - 0.75).abs() < 1e-5);
         assert!((b.pressure_factors(0.0).0 - 1.0).abs() < 1e-5);
     }
 

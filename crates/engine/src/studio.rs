@@ -329,10 +329,6 @@ impl Brush {
             "grain_blend" | "dual_blend" => {
                 self.extra.insert(key.to_owned(), value.round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32));
             }
-            // the engine's grain mix, by its place in the studio's list (one past it; none as zero)
-            "grain_mix" => {
-                self.extra.insert(key.to_owned(), value.round().clamp(0.0, 13.0));
-            }
             "flow" => self.flow = unit.powf(FLOW_POWER),
             "jitter_size" => self.shape.size_jitter = unit,
             "jitter_opacity" => self.shape.opacity_jitter = unit,

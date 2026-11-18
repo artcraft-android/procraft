@@ -948,7 +948,7 @@ impl State {
             && let Some(pixels) = self.grain_store.pixels(full)
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
         {
-            canvas.use_full_grain(gpu, &mut style, full.id, full.side, &pixels);
+            canvas.use_grain_image(gpu, &mut style, full.id, [full.side, full.height], &pixels);
         }
         self.use_full_shape(&mut style, &brush);
         (brush, style, diameter)
@@ -960,7 +960,7 @@ impl State {
             && let Some(pixels) = self.grain_store.pixels(full)
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
         {
-            canvas.use_full_shape(gpu, style, full.id, full.side, &pixels);
+            canvas.use_shape_image(gpu, style, full.id, [full.side, full.height], &pixels);
         }
     }
 

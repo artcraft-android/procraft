@@ -52,8 +52,8 @@ struct SmudgeStamp {
     // grain turned (radians)
     grain_offset: vec2<f32>,
     grain_rotation: f32,
-    // 1: the grain read unfiltered (sharp)
-    grain_sharp: f32,
+    // Grain filter mode: original texel, classic or improved.
+    grain_filter: f32,
     // 1: the shape read unfiltered (sharp)
     shape_sharp: f32,
     // how hard the paint is pressed into a moving grain, and how much that counts
@@ -98,8 +98,8 @@ struct SmudgeStamp {
     // wet paint with luminance blending: 1 when its colours mix squared, 2 when they do as it goes
     // over the layer too (paint that mixes only with the layer as it was)
     luminance: u32,
-    // pixels a side of the image the grain is read from
-    grain_side: f32,
+    // threshold on the finished paint, or negative when disabled
+    alpha_threshold: f32,
     // how far paint laid apart burns the paint it goes over, and by what blend mode
     burnt: f32,
     burnt_blend: u32,
@@ -505,9 +505,8 @@ fn mask(t: vec2<f32>) -> f32 {
         let texel = textureLoad(shapes, at, st.shape, 0);
         return select(texel.r, texel.a, st.tip_kind > 0u);
     }
-    // (a brush file's own image is bigger than the brush images, by as many levels)
-    let side = f32(textureDimensions(shapes).x);
-    let lod = clamp(log2(0.5 * side / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap + log2(side / 256.0));
+    let steps = shape_uv_steps(half + QUAD_REACH, cos(st.angle), sin(st.angle));
+    let lod = shape_lod(textureDimensions(shapes), steps, st.shape_lod_cap);
     let texel = textureSampleLevel(shapes, shape_smp, uv, st.shape, lod);
     return select(texel.r, texel.a, st.tip_kind > 0u);
 }
@@ -528,29 +527,16 @@ fn grain_plain(p: vec2<f32>) -> f32 {
         return 1.0;
     }
     let scale = abs(st.grain_scale);
-    var at = p;
+    var at = p + st.grain_offset;
     if (st.grain_scale < 0.0) {
-        // a moving grain: read as far from where the stamp's middle is in it as the pixel is from
-        // the middle on the canvas, so a rolling grain stays put as the stamps move over it
-        at = p - st.center + st.grain_offset;
+        let half = stamp_half();
+        let grain_scale = vec2<f32>(st.flip_x, st.flip_y) * half / (half + QUAD_REACH);
+        at = moving_grain_delta(p - st.center, vec2<f32>(cos(st.angle), sin(st.angle)), grain_scale) + st.grain_offset;
     }
     let gc = cos(st.grain_rotation);
     let gs = sin(st.grain_rotation);
-    let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
-    let sharp = st.grain_sharp > 0.5;
-    // a brush file's own image has the fine detail itself; ours only stands in for it
-    let own = st.grain_side > 256.0;
-    let level = max(log2(st.grain_side / scale), 0.0);
-    var g = textureSampleLevel(grains, grain_smp, uv, st.grain, select(level, 0.0, sharp && !own)).r;
-    if (sharp) {
-        if (own) {
-            // unfiltered: the texel under it at its level
-            let l = i32(round(level));
-            g = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), st.grain, l).r;
-        } else {
-            g = sharp_grain(g, uv);
-        }
-    }
+    let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) * vec2<f32>(1.0, f32(textureDimensions(grains).x) / f32(textureDimensions(grains).y)) / scale;
+    let g = grain_texel(grains, grain_smp, uv, st.grain, scale, u32(st.grain_filter));
     return clamp((g - 0.5) * (1.0 + st.grain_contrast) + 0.5 + st.grain_brightness, 0.0, 1.0);
 }
 
@@ -563,9 +549,7 @@ fn wet_weight(p: vec2<f32>, t: vec2<f32>) -> f32 {
     if (st.grain >= 0 && st.grain_once <= 0.5) {
         through = grain_combine(through, grain_plain(p), st.grain_depth, st.grain_blend);
     }
-    let b = 8.0 * st.grain_bleed;
-    let bled = (1.0 + b) * through - b / sqrt(max(b * st.grain_press, 1e-4));
-    return clamp(bled, 0.0, 1.0) * st.alpha;
+    return tip_bleed(through, st.grain_bleed, st.grain_press) * st.alpha;
 }
 
 @compute @workgroup_size(8, 8)
@@ -588,6 +572,10 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let shape = mask(t);
     if (shape * st.alpha <= 0.0) {
+        return;
+    }
+    let selection = selected_at(p);
+    if (selection == 0.0) {
         return;
     }
     // the grain lets each stamp through as far as it stands: stamps over a pixel build up past
@@ -637,8 +625,7 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
     }
-    // outside the selection the layer stays as it is
-    out = mix(w, out, selected_at(p));
+    out = mix(w, out, selection);
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
     // add up as they should instead of rounding away
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
@@ -666,6 +653,13 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = window_index(p);
     let laid = amount[st.stride * st.rows + k];
     let was = before_at(p);
+    let selection = selected_at(p);
+    let recursive = (st.dual & DUAL_RECURSIVE) != 0u;
+    let modern_normal = recursive && dual_mode(st.dual) == 0u && (st.dual & DUAL_CLASSIC) == 0u;
+    if (selection == 0.0 || (recursive && !modern_normal && laid == 0.0)) {
+        work[k] = pack4x8unorm(was);
+        return;
+    }
     // how much shows: what the stamps laid, or as far as the stroke's glaze built up by its own
     // rule (the paint kept as laid, shown only that far)
     let built = select(laid, min(amount[k], laid), st.rule != 0u);
@@ -699,6 +693,12 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
+    // Recursive Normal puts the second's paint into the space left by the first,
+    // then recovers the source relative to the first deposit before applying coverage.
+    let recursive_normal = (st.dual & DUAL_RECURSIVE) != 0u && toward > 0.0;
+    if (recursive_normal && !modern_normal && st.laid_apart != 2u) {
+        out += (vec4<f32>(st.paint.rgb, 1.0) - was) * (a * toward / laid);
+    }
     if ((st.dual & DUAL_CLASSIC) != 0u && st.laid_apart == 2u && laid <= 0.0 && toward > 0.0) {
         // the classic combine where the wet first laid nothing: the stroke's colour, by the
         // second's share, added to the layer as it was (all of it kept, as its paint starts out),
@@ -724,7 +724,14 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             first = over_layer(was, burning, laid);
         }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
-        if (toward > 0.0) {
+        if (recursive_normal && modern_normal) {
+            let shown = laid + toward * (1.0 - laid);
+            let turned = mix(first, vec4<f32>(st.paint.rgb, 1.0), toward);
+            out = was + (turned - was) * (a / max(shown, 1e-6));
+        } else if (recursive_normal) {
+            let from_second = (vec4<f32>(st.paint.rgb, 1.0) - was) * toward;
+            out = was + ((first - was) + from_second) * (a / laid);
+        } else if (toward > 0.0) {
             // a Normal second: the paint as laid turned toward the stroke's own colour as far as
             // the second shows where the first laid little, then shown as far as the two together
             // (where the first laid nothing, the second's colour over the layer)
@@ -740,10 +747,24 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             out = over_layer(was, turned, min(a / max(shown, 1e-6), LAID_MOST_SCALE));
         }
     }
+    if (st.alpha_threshold >= 0.0) {
+        // Test the paint and the combined amount separately. A wet dab can
+        // carry transparent paint even where its shape fully covers the layer.
+        var paint_alpha = a;
+        if (was.a < 1.0) {
+            paint_alpha = clamp((out.a - was.a) / (1.0 - was.a), 0.0, 1.0);
+        }
+        var deposited = paint_alpha;
+        if (st.laid_apart == 2u) {
+            deposited = unpack4x8unorm(grained[k]).a;
+        }
+        let survives = a > st.alpha_threshold && deposited > st.alpha_threshold;
+        out = select(was, over_layer(was, out, 1.0 / max(paint_alpha, 1e-6)), survives);
+    }
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));
     }
-    out = mix(was, out, selected_at(p));
+    out = mix(was, out, selection);
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
     work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
