@@ -302,11 +302,17 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         }
     }
 
-    // the shared touches' waits (a hold, a repeat), run when they run out
+    // the shared touches' waits (a hold, a repeat, an airbrush held still), run when they run out;
+    // a fault in the core then costs that touch, not the app, as one while it takes a touch does
     private val touchTick = Runnable {
         val s = session ?: return@Runnable
-        obey(s.touchTick(android.os.SystemClock.uptimeMillis().toDouble()))
-        scheduleTouchTick(s)
+        try {
+            obey(s.touchTick(android.os.SystemClock.uptimeMillis().toDouble()))
+            scheduleTouchTick(s)
+        } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+            AppLog.e("touch", "a touch's wait failed in the core; its touches let go", fault)
+            runCatching { s.touchCancel() }
+        }
     }
 
     private fun scheduleTouchTick(s: CanvasSession) {
@@ -412,8 +418,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         return own
     }
 
-    /** A side button went down with the pen at ([x], [y]). */
-    private fun penPressed(s: CanvasSession, second: Boolean, x: Float, y: Float) {
+    /** A side button went down with the pen at ([x], [y]); a fault in the core costs the press, not the app. */
+    private fun penPressed(s: CanvasSession, second: Boolean, x: Float, y: Float) = penFault {
         // as they are now: nothing has told the session if no touch has come since they were set
         s.setTouchSettings(vm.touchSettings())
         obey(s.touchPenButton(second, x, y))
@@ -421,8 +427,17 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     /** A side button let go: one held to erase gives the eraser back. */
-    private fun penLetGo(s: CanvasSession, second: Boolean) {
+    private fun penLetGo(s: CanvasSession, second: Boolean) = penFault {
         if (s.touchPenButtonUp(second)) vm.penButtonDone()
+    }
+
+    /** Runs [act], a pen button's: a fault in the core goes in the log, as one in a touch does. */
+    private inline fun penFault(act: () -> Unit) {
+        try {
+            act()
+        } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+            AppLog.e("touch", "a pen button failed in the core", fault)
+        }
     }
 
     /**
@@ -436,7 +451,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             when (action) {
                 PenKeyAction.PRESSED -> penPressed(s, second, at.x, at.y)
                 PenKeyAction.LET_GO -> penLetGo(s, second)
-                PenKeyAction.DOUBLE_TAPPED -> {
+                PenKeyAction.DOUBLE_TAPPED -> penFault {
                     s.setTouchSettings(vm.touchSettings())
                     obey(s.touchPenDoubleTap(PenPreferred.SWITCH_ERASER, at.x, at.y))
                     vm.penButtonDone()

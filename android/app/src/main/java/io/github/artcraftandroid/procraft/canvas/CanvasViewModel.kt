@@ -4208,8 +4208,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             do {
                 frameStale = false
                 // read back at the size frames are kept, private layers left out, and kept by the
-                // core without the picture coming here: a frame after each stroke
-                withContext(Dispatchers.Default) { t.recordFrom(s) }
+                // core without the picture coming here: a frame after each stroke (one the core
+                // fails to read is left out, and goes in the log)
+                withContext(Dispatchers.Default) {
+                    try {
+                        t.recordFrom(s)
+                    } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+                        AppLog.e("timelapse", "a time-lapse frame failed in the core", fault)
+                    }
+                }
                 // one that couldn't be kept (the storage full) is told once
                 t.takeProblem()?.let { message = it }
             } while (frameStale)
@@ -6313,7 +6320,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 pendingPick = null
                 val s = session ?: break
                 val seen = withContext(Dispatchers.Default) {
-                    s.pick(px, py, side.toUInt())?.let { p ->
+                    // a fault in the core reading it (a model's picture, say) picks nothing, and goes in the log
+                    val read = try {
+                        s.pick(px, py, side.toUInt())
+                    } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+                        AppLog.e("pick", "reading the colour under the eyedropper failed in the core", fault)
+                        null
+                    }
+                    read?.takeIf { it.pixels.size >= it.side.toInt() * it.side.toInt() * 4 }?.let { p ->
                         val n = p.side.toInt()
                         val bytes = p.pixels
                         val argb = IntArray(n * n) { i ->
@@ -8788,7 +8802,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         viewModelScope.launch {
             val image = withContext(Dispatchers.Default) {
-                val t = s.layerThumbnail(id, THUMB_SIDE.toUInt()) ?: return@withContext null
+                // one the core fails to read keeps the one shown, and goes in the log
+                val t = try {
+                    s.layerThumbnail(id, THUMB_SIDE.toUInt())
+                } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+                    AppLog.e("layers", "a layer's thumbnail failed in the core", fault)
+                    null
+                }
+                if (t == null || t.width == 0u || t.height == 0u || t.rgba.size < t.width.toInt() * t.height.toInt() * 4) return@withContext null
                 val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
