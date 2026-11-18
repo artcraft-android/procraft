@@ -2028,7 +2028,7 @@ fn drawn_shape(s: &StandIn) -> (Option<u32>, Option<Source>, Option<f32>) {
     // they were measured: all of the stock one as its brush shows it (inverted, for one that
     // inverts it: most stock tips are drawn dark on white), our shape as it is
     let Some(tones) = textures::stock_shape_tones_of(key, inverted) else { return (Some(i), None, None) };
-    if textures::shape_image(i).is_none() {
+    if i >= textures::SHAPE_COUNT {
         return (Some(i), None, None);
     }
     let retoned = drawn(SHAPE, s, move || {
@@ -2345,7 +2345,7 @@ fn drawn_grain(s: &StandIn) -> (Option<u32>, Option<Source>) {
         // a paper or a wash: noise as strong at each size as the stock image is, with its tones
         // (tiled as a share of that image is)
         Some(drawn(GRAIN, s, move || Some(invert(textures::octave_grain(&octaves, &tones)))))
-    } else if textures::grain_image(i).is_some() && (textures::drawn_to_stock_size(i) || tones.is_some()) {
+    } else if i < textures::GRAIN_COUNT && (textures::drawn_to_stock_size(i) || tones.is_some()) {
         Some(drawn(GRAIN, s, move || {
             let pattern = textures::grain_image(i)?;
             let pixels = match tones.filter(|_| !textures::drawn_to_stock_size(i)) {
@@ -2531,7 +2531,7 @@ fn shape_pixels(b: &Brush) -> Vec<u8> {
     if let Some(s) = &b.shape.source {
         return s.pixels.to_vec();
     }
-    if let Some(img) = b.shape.image.and_then(|i| textures::shapes().into_iter().nth(i as usize)) {
+    if let Some(img) = b.shape.image.and_then(textures::shape_image) {
         return img.pixels;
     }
     // the round tip filling the image, its edge as soft as the brush's hardness says
@@ -2552,7 +2552,7 @@ pub(crate) fn grain_pixels(b: &Brush) -> Option<Vec<u8>> {
     if let Some(s) = &b.grain.source {
         return Some(s.pixels.to_vec());
     }
-    b.grain.image.and_then(|i| textures::grains().into_iter().nth(i as usize)).map(|g| g.pixels)
+    b.grain.image.and_then(textures::grain_image).map(|g| g.pixels)
 }
 
 /// A metalness or roughness source as an image, if it has one.
@@ -2560,7 +2560,7 @@ pub(crate) fn material_pixels(m: &MaterialSource) -> Option<Vec<u8>> {
     if let Some(s) = &m.source {
         return Some(s.pixels.to_vec());
     }
-    m.image.and_then(|i| textures::grains().into_iter().nth(i as usize)).map(|g| g.pixels)
+    m.image.and_then(textures::grain_image).map(|g| g.pixels)
 }
 
 /// A square grey PNG of `pixels`.

@@ -713,10 +713,11 @@ impl State {
                     .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
                     .collect()
             }),
-            // a stock shape's is made again from its name when the brush comes back
-            shape_source: own(&brush.shape.source, &base.shape.source).filter(|_| brush.stock.shape.is_none()),
+            // a stock shape's is made again from its name when the brush comes back (so it isn't
+            // drawn, nor written out, to be kept)
+            shape_source: brush.stock.shape.is_none().then(|| own(&brush.shape.source, &base.shape.source)).flatten(),
             // a stock grain's is made again from its name when the brush comes back
-            grain_source: own(&brush.grain.source, &base.grain.source).filter(|_| brush.stock.grain.is_none()),
+            grain_source: brush.stock.grain.is_none().then(|| own(&brush.grain.source, &base.grain.source)).flatten(),
             grain_file: brush
                 .grain_file_now()
                 .map(|f| SavedGrainFile { width: f.width, full: f.full.as_ref().map(|g| (g.id, g.side)) }),

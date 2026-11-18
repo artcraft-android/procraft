@@ -112,8 +112,7 @@ impl CanvasSession {
         let side = procraft_engine::textures::TEXTURE_SIZE;
         let traced = match (pixels, image) {
             (Some(own), _) => procraft_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
-            (None, Some(i)) => procraft_engine::textures::shapes()
-                .get(i as usize)
+            (None, Some(i)) => procraft_engine::textures::shape_image(i)
                 .map(|shape| procraft_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
                 .unwrap_or_default(),
             (None, None) => Vec::new(),
@@ -165,7 +164,7 @@ impl CanvasSession {
         let (hardness, roundness, turn) = (f32::from_bits(hardness), f32::from_bits(roundness), f32::from_bits(turn));
         let pixels = match (source, image) {
             (Some(own), _) => Some(own.to_vec()),
-            (None, Some(i)) => procraft_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
+            (None, Some(i)) => procraft_engine::textures::shape_image(i).map(|s| s.pixels),
             (None, None) => None,
         };
         let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
