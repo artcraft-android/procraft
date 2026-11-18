@@ -6065,4 +6065,101 @@ f 1/1 2/2",
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// What a model holds on the GPU as it is turned and painted (two texture sets at the default
+    /// size, in a window of a tablet's size): turning it a hundred frames takes nothing more after
+    /// the first few (a frame left anything behind, a tablet would soon run out as a finger turns
+    /// it); the first stroke makes the screen's canvas and the roughness and metalness it paints,
+    /// and later strokes keep only their undo steps. How much each takes is printed.
+    #[test]
+    fn turning_a_model_holds_no_more_gpu_memory_and_painting_it_little() {
+        let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        let held = || {
+            gpu.flush();
+            gpu.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        };
+        if held() == 0 {
+            return eprintln!("skipped: the device can't say what it holds");
+        }
+        const TWO_PARTS: &str = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nv -1 -1 1\nv 1 -1 1\nv 1 1 1\n\
+                                 vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n\
+                                 usemtl a\nf 1/1 2/2 3/3 4/4\nusemtl b\nf 5/1 6/2 7/3\n";
+        let s = CanvasSession::open_model(TWO_PARTS.into(), "two.obj".into(), Vec::new(), "Two".into(), 0).unwrap();
+        let window = (1600u32, 1000u32);
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test window"),
+            size: wgpu::Extent3d { width: window.0, height: window.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut st = s.shared.lock();
+            st.window_size = window;
+            st.gpu = Some(gpu.clone());
+            st.ensure_canvas();
+        }
+        let draw = || s.shared.lock().render_scene(&view, format, window, None);
+        let mut t = 0.0;
+        let turn = |frames: usize, t: &mut f64| {
+            *t += 100.0;
+            s.touch_down(1, PointerKind::Finger, vec![sample(600.0, 500.0, *t)]);
+            for i in 0..frames {
+                *t += 16.0;
+                s.touch_move(1, vec![sample(600.0 + (i % 40) as f32 * 10.0, 500.0 + (i % 7) as f32 * 3.0, *t)]);
+                draw();
+            }
+            s.touch_up(1, vec![sample(600.0, 500.0, *t + 16.0)]);
+        };
+        let stroke = |t: &mut f64| {
+            *t += 100.0;
+            s.touch_down(2, PointerKind::Stylus, vec![sample(500.0, 500.0, *t)]);
+            for i in 1..30 {
+                *t += 8.0;
+                s.touch_move(2, vec![sample(500.0 + i as f32 * 8.0, 500.0, *t)]);
+                if i % 5 == 0 {
+                    draw();
+                }
+            }
+            s.touch_up(2, vec![sample(740.0, 500.0, *t + 8.0)]);
+            draw();
+        };
+        let mb = |b: u64| b as f64 / 1e6;
+        let more = |after: u64, before: u64| (after as f64 - before as f64) / 1e6;
+        draw();
+        let opened = held();
+        turn(10, &mut t);
+        let settled = held();
+        turn(100, &mut t);
+        let turned = held();
+        stroke(&mut t);
+        let first_stroke = held();
+        turn(100, &mut t);
+        let turned_after = held();
+        for _ in 0..5 {
+            stroke(&mut t);
+        }
+        let five_more = held();
+        eprintln!(
+            "model on the GPU: opened {:.1} MB, turned {:+.1}, then 100 frames {:+.1}; first stroke {:+.1}, 100 frames {:+.1}, five strokes {:+.1}",
+            mb(opened),
+            more(settled, opened),
+            more(turned, settled),
+            more(first_stroke, turned),
+            more(turned_after, first_stroke),
+            more(five_more, turned_after),
+        );
+        assert!(turned <= settled, "turning held {:.1} MB more", more(turned, settled));
+        assert!(
+            turned_after <= first_stroke,
+            "turning after a stroke held {:.1} MB more",
+            more(turned_after, first_stroke)
+        );
+        assert_eq!(gpu.errors(), 0);
+    }
 }
