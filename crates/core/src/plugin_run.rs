@@ -203,6 +203,10 @@ const FILL_OUT: &str = "procraft_fill_out";
 const FILL_ALL_LAYERS: &str = "procraft_fill_all_layers";
 const RADIAL_SEGMENTS: &str = "procraft_radial_segments";
 const HIDE_UNDO_NOTICE: &str = "procraft_hide_undo_notice";
+const MACOS_TOP_BAR: &str = "procraft_macos_top_bar";
+const FULLSCREEN: &str = "procraft_fullscreen";
+const EXCLUSIVE_FULLSCREEN: &str = "procraft_exclusive_fullscreen";
+const FULLSCREEN_SHORTCUTS: &str = "procraft_fullscreen_shortcuts";
 const INTERFACE_COLOUR: &str = "procraft_interface_colour";
 const PIN_PANELS: &str = "procraft_pin_panels";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
@@ -353,6 +357,10 @@ pub(crate) enum Hook {
     InterfacePartScale,
     /// The floating colour window with Classic's picker alone.
     FloatingPickerOnly,
+    /// Window top bar and controls styled as macOS traffic lights.
+    MacosTopBar,
+    /// Fullscreen mode and window display controls.
+    Fullscreen,
 }
 
 impl Hook {
@@ -379,6 +387,8 @@ impl Hook {
             "layer_added" => Some(Hook::LayerAdded),
             "key_shortcut" => Some(Hook::KeyShortcut),
             "keep_clear" => Some(Hook::KeepClear),
+            "macos_top_bar" => Some(Hook::MacosTopBar),
+            "fullscreen" => Some(Hook::Fullscreen),
             "interface_part_scale" => Some(Hook::InterfacePartScale),
             "floating_picker_only" => Some(Hook::FloatingPickerOnly),
             _ => None,
@@ -409,6 +419,10 @@ impl Hook {
             Hook::LayerAdded => "This plugin can act on your artwork each time you add a layer.",
             Hook::KeyShortcut => "This plugin can change what your keyboard's keys do.",
             Hook::KeepClear => "This plugin can keep the interface clear of the status bar and the camera.",
+            Hook::MacosTopBar => {
+                "This plugin can change the window top bar style to macOS style with traffic light controls."
+            }
+            Hook::Fullscreen => "This plugin can control fullscreen display and window shortcuts.",
             Hook::Layers => "This plugin can add kinds of layer whose strokes it keeps, and draw them again.",
             Hook::Brushes => "This plugin can read brush files and draw their brushes its own way.",
             Hook::InterfacePartScale => "This plugin can make parts of the interface bigger or smaller.",
@@ -432,6 +446,8 @@ impl Hook {
             Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
             Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
             Hook::KeepClear => exports(module, KEEP_CLEAR, &[], &[ValType::I32]),
+            Hook::MacosTopBar => exports(module, MACOS_TOP_BAR, &[], &[ValType::I32]),
+            Hook::Fullscreen => exports(module, FULLSCREEN, &[], &[ValType::I32]),
             Hook::InterfacePartScale => exports(module, INTERFACE_PART_SCALE, &[ValType::I32], &[ValType::F32]),
             Hook::FloatingPickerOnly => exports(module, FLOATING_PICKER_ONLY, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
@@ -784,6 +800,10 @@ pub(crate) struct Running {
     interface_colour: Option<TypedFunc<i32, i32>>,
     pin_panels: Option<TypedFunc<(), i32>>,
     keep_clear: Option<TypedFunc<(), i32>>,
+    macos_top_bar: Option<TypedFunc<(), i32>>,
+    fullscreen: Option<TypedFunc<(), i32>>,
+    exclusive_fullscreen: Option<TypedFunc<(), i32>>,
+    fullscreen_shortcuts: Option<TypedFunc<(), i32>>,
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
@@ -930,6 +950,10 @@ impl Running {
             let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
             let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
             let keep_clear = instance.get_typed_func(&store, KEEP_CLEAR).ok();
+            let macos_top_bar = instance.get_typed_func(&store, MACOS_TOP_BAR).ok();
+            let fullscreen = instance.get_typed_func(&store, FULLSCREEN).ok();
+            let exclusive_fullscreen = instance.get_typed_func(&store, EXCLUSIVE_FULLSCREEN).ok();
+            let fullscreen_shortcuts = instance.get_typed_func(&store, FULLSCREEN_SHORTCUTS).ok();
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
@@ -1029,6 +1053,10 @@ impl Running {
                 interface_colour,
                 pin_panels,
                 keep_clear,
+                macos_top_bar,
+                fullscreen,
+                exclusive_fullscreen,
+                fullscreen_shortcuts,
                 opacity_together,
                 randomise,
                 colour_triangle,
@@ -1992,6 +2020,50 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             keep_clear.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says the top bar uses macOS style window controls.
+    pub(crate) fn macos_top_bar(&mut self) -> Result<bool, Stop> {
+        let Running { store, macos_top_bar, .. } = self;
+        let Some(macos_top_bar) = macos_top_bar else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            macos_top_bar.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says fullscreen mode features are active.
+    pub(crate) fn fullscreen(&mut self) -> Result<bool, Stop> {
+        let Running { store, fullscreen, .. } = self;
+        let Some(fullscreen) = fullscreen else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            fullscreen.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says exclusive fullscreen mode is enabled.
+    pub(crate) fn exclusive_fullscreen(&mut self) -> Result<bool, Stop> {
+        let Running { store, exclusive_fullscreen, .. } = self;
+        let Some(exclusive_fullscreen) = exclusive_fullscreen else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            exclusive_fullscreen.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says keyboard shortcuts (F11 / Alt+Enter) are enabled.
+    pub(crate) fn fullscreen_shortcuts(&mut self) -> Result<bool, Stop> {
+        let Running { store, fullscreen_shortcuts, .. } = self;
+        let Some(fullscreen_shortcuts) = fullscreen_shortcuts else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            fullscreen_shortcuts.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
     }

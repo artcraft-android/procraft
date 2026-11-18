@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.macos-topbar",
+  "name": "macOS Style",
+  "version": "1.0.1",
+  "holds": ["hooks"],
+  "publisher": { "name": "raba7" },
+  "description": "Transforms ProCraft's window into a clean macOS style with traffic light controls by raba7. When disabled, standard window decorations are restored.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["macos_top_bar"],
+  "controls": [
+    { "key": "enabled", "type": "switch", "label": "macOS style top bar", "starts": true }
+  ]
+}

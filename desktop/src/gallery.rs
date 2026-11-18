@@ -501,7 +501,8 @@ impl Gallery {
             .show(ctx, |ui| {
                 ui.multiply_opacity(alpha);
                 ui.allocate_rect(screen, Sense::hover());
-                ui.painter().rect_filled(screen, 0, argb(BACKGROUND));
+                let corner = if crate::window_controls::is_macos_topbar() { 12.0 } else { 0.0 };
+                ui.painter().rect_filled(screen, corner, argb(BACKGROUND));
                 let tapped = self.header(ui, look, screen);
                 let grid = Rect::from_min_max(pos2(screen.left(), screen.top() + HEADER), screen.max);
                 let asked = if self.entries.is_empty() {

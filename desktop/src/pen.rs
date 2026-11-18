@@ -722,9 +722,10 @@ mod system {
         POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, MINMAXINFO, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW,
-        SetPropW, SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetWindowRect, IsZoomed, MINMAXINFO, POINTER_INPUT_TYPE, PT_PEN,
+        PT_TOUCH, RemovePropW, SetPropW, SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_GETMINMAXINFO,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP,
+        WM_POINTERUPDATE, WNDPROC,
     };
     use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -891,6 +892,48 @@ mod system {
                 sizes.ptMaxSize = size;
                 sizes.ptMaxTrackSize = size;
                 return LRESULT(0);
+            }
+        }
+        // For custom undecorated windows (macOS-style titlebar), provide native border resize hit-testing
+        if msg == WM_NCHITTEST
+            && crate::window_controls::is_macos_topbar()
+            && !FULL_SCREEN.load(Ordering::Relaxed)
+            && unsafe { !IsZoomed(hwnd).as_bool() }
+        {
+            let mut rect = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut rect).is_ok() } {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let border = 8;
+                let on_left = x >= rect.left && x < rect.left + border;
+                let on_right = x < rect.right && x >= rect.right - border;
+                let on_top = y >= rect.top && y < rect.top + border;
+                let on_bottom = y < rect.bottom && y >= rect.bottom - border;
+
+                if on_top && on_left {
+                    return LRESULT(13);
+                } // HTTOPLEFT
+                if on_top && on_right {
+                    return LRESULT(14);
+                } // HTTOPRIGHT
+                if on_bottom && on_left {
+                    return LRESULT(16);
+                } // HTBOTTOMLEFT
+                if on_bottom && on_right {
+                    return LRESULT(17);
+                } // HTBOTTOMRIGHT
+                if on_top {
+                    return LRESULT(12);
+                } // HTTOP
+                if on_bottom {
+                    return LRESULT(15);
+                } // HTBOTTOM
+                if on_left {
+                    return LRESULT(10);
+                } // HTLEFT
+                if on_right {
+                    return LRESULT(11);
+                } // HTRIGHT
             }
         }
         // the pen's gestures, as the window's property has them (a system that asks)
