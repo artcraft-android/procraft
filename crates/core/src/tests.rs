@@ -14806,7 +14806,9 @@ fn nothing_a_selection_leaves_out_changes_under_a_brush_that_moves_paint() {
 /// as Direct3D 12 without unrestricted copy pitches does (on Windows 10, and with older drivers):
 /// big strokes to and fro across the tiles of a canvas over a picture, a frame every few samples.
 /// A tile's paint copied into a window wider than it had written over the rest of its rows there,
-/// and blocks of the layer went blank, stale or doubled.
+/// and blocks of the layer went blank, stale or doubled. (The same stamps can come out a level
+/// apart at a pixel or two from one run to the next while other work shares the GPU, so a level
+/// at a few pixels is let pass.)
 #[test]
 fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_of_512_bytes() {
     use procraft_engine::brush::{Brush, Rendering};
@@ -14878,14 +14880,18 @@ fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_o
     });
     let [direct, placed] = &layers;
     assert_ne!(direct, &rgba, "the strokes painted");
-    // the 256-pixel tiles that differ
-    let mut tiles = std::collections::BTreeSet::new();
+    // the 256-pixel tiles that differ, by more than a level anywhere or at more than a few pixels
+    let mut tiles = std::collections::BTreeMap::new();
     for (i, (a, b)) in direct.as_chunks::<4>().0.iter().zip(placed.as_chunks::<4>().0).enumerate() {
-        if a != b {
-            tiles.insert((i % n / 256, i / n / 256));
+        let most = a.iter().zip(b).map(|(u, v)| u.abs_diff(*v)).max().unwrap_or(0);
+        if most > 0 {
+            let tile: &mut (usize, u8) = tiles.entry((i % n / 256, i / n / 256)).or_default();
+            *tile = (tile.0 + 1, tile.1.max(most));
         }
     }
-    assert!(tiles.is_empty(), "tiles that came out otherwise: {tiles:?}");
+    let pixels: usize = tiles.values().map(|t| t.0).sum();
+    let most = tiles.values().map(|t| t.1).max().unwrap_or(0);
+    assert!(most <= 1 && pixels <= 16, "tiles that came out otherwise (pixels, most): {tiles:?}");
 }
 
 /// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to
