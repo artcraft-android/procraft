@@ -417,7 +417,7 @@ mod tests {
             ("Painting", "Rasmus Roll") => {
                 &[("grain_brightness", -0.28), ("grain_scale", 0.96), ("grain_contrast", 0.185)]
             }
-            ("Textures", "Mosaic") => &[("grain_scale", 0.171)],
+            ("Textures", "Mosaic") => &[("grain_scale", 0.12038)],
             ("Textures", "Cubes") => &[("grain_turn", 1.0), ("grain_scale", 0.278)],
             ("Charcoals", "6B Compressed") => &[("grain_brightness", 0.064), ("grain_scale", 0.57)],
             ("Elements", "Smoke") => {
@@ -427,8 +427,8 @@ mod tests {
                 file.max_size = 1.08;
                 &[("pressure_opacity", 0.955)]
             }
-            ("Materials", "Kerguelen") => &[("grain_scale", 0.2705), ("grain_brightness", 0.056)],
-            ("Vintage", "Toscana") => &[("grain_scale", 0.1605), ("grain_brightness", 0.23), ("preview_size", 0.288)],
+            ("Materials", "Kerguelen") => &[("grain_scale", 0.19043), ("grain_brightness", 0.056)],
+            ("Vintage", "Toscana") => &[("grain_scale", 0.11363), ("grain_brightness", 0.23), ("preview_size", 0.288)],
             ("Vintage", "Flower Power") => {
                 &[("spacing", 0.175), ("jitter_size", 0.4137), ("jitter_opacity", 0.79), ("jitter_lateral", 0.88)]
             }

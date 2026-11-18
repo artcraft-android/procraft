@@ -124,13 +124,16 @@ impl GrainStore {
             self.held.push(entry);
             return Some(pixels);
         }
-        let bytes = fs::read(file(self.folder.as_deref()?, grain.id)).ok()?;
+        let pixels = if let Some(bytes) = self.folder.as_ref().and_then(|dir| fs::read(file(dir, grain.id)).ok()) {
+            Arc::new(bytes)
+        } else {
+            crate::brush_files::stock_picture_pixels(grain.id)?
+        };
         // cut short or not this grain: as good as none
-        if bytes.len() as u64 != u64::from(grain.side) * u64::from(grain.height) {
+        if pixels.len() as u64 != u64::from(grain.side) * u64::from(grain.height) {
             log::warn!("a brush's grain file is damaged: using its smaller image");
             return None;
         }
-        let pixels = Arc::new(bytes);
         if self.held.len() >= HELD_MOST {
             self.held.remove(0);
         }
@@ -347,6 +350,39 @@ mod tests {
         }
         assert_eq!(state.library[0].brushes[1].shape_file_now().unwrap().full.id, old[0]);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reopening_a_library_uses_the_native_stock_images_for_all_four_texture_slots() {
+        let session = CanvasSession::new(16, 16);
+        let sets = crate::stock_library::shipped();
+        let set =
+            sets.iter().position(|s| s.name == "Textures" && s.brushes.iter().any(|b| b.name == "Mosaic")).unwrap();
+        let i = sets[set].brushes.iter().position(|b| b.name == "Mosaic").unwrap();
+        let older_grain = serde_json::json!({"width": 1024, "full": [123, 1024]});
+        let library = serde_json::json!([{"name": "Test", "brushes": [
+            {"name": "Inherited", "from": [set, i], "grain_file": older_grain},
+            {"name": "Named", "shape_stock": ["Brush-Preset-Ink-Sponge.png", false], "shape_full": [124, 512],
+             "grain_stock": ["OSB.jpg", false], "grain_file": older_grain,
+             "metallic_stock": ["OSB.jpg", false], "roughness_stock": ["OSB.jpg", true]}
+        ]}]);
+        assert!(session.load_brush_library(library.to_string()));
+        let mut state = session.shared.lock();
+        let brushes = state.library[0].brushes.clone();
+        for brush in &brushes {
+            let f = brush.grain_file_now().unwrap();
+            let full = f.full.as_ref().unwrap();
+            assert_eq!((f.width, full.side, full.height), (2048, 2048, 2048));
+            assert_ne!(full.id, 123);
+        }
+        let inherited = brushes[0].grain_file_now().unwrap().full.as_ref().unwrap();
+        assert!(inherited.pixels.is_none());
+        assert_eq!(state.grain_store.pixels(inherited).unwrap().len(), 2048 * 2048);
+        let named = &brushes[1];
+        assert_eq!(named.shape_file_now().unwrap().full.side, 1024);
+        assert_eq!(named.metallic.full().unwrap().side, 2048);
+        assert_eq!(named.roughness.full().unwrap().side, 2048);
+        assert_ne!(named.metallic.full().unwrap().id, named.roughness.full().unwrap().id);
     }
 
     fn strip(value: &mut serde_json::Value) {

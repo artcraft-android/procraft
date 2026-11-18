@@ -518,7 +518,9 @@ pub(crate) fn read_library(
             let icon = set.icon_now();
             let origins = set.brushes.iter().map(|b| b.from).collect();
             let mut keep_image = |image: &mut FullGrain| session.shared.lock().grain_store.keep(image);
-            let brushes = set.brushes.into_iter()
+            let brushes = set
+                .brushes
+                .into_iter()
                 .map(|b| State::restored_from(&shipped, b, &pictures, &mut keep_image))
                 .collect();
             LibrarySet { name: set.name, brushes, origins, icon }
@@ -726,7 +728,7 @@ impl State {
         // a shape or grain image of its own where its origin has another or none (one its origin
         // has comes back from there; none where its origin has one is kept as nothing)
         let own = |mine: &Option<Source>, theirs: &Option<Source>| match (mine, theirs) {
-            (Some(m), Some(t)) if m == t => None,
+            (Some(m), Some(t)) if m == t && m.stand_in_for == t.stand_in_for => None,
             (Some(m), _) => Some(source(m)),
             (None, Some(_)) => Some(String::new()),
             (None, None) => None,
@@ -888,45 +890,64 @@ impl State {
             let data = picture(text)?;
             Some(procraft_engine::brush::OutsideBrush { engine: engine.clone(), data })
         });
-        let mut updated_shape = None;
+        // A stock reference follows the bundled artwork across updates. Saved full-size
+        // pictures still belong to the brush when the user supplied a custom source.
+        let inherited = |source: Option<&Source>| source.is_some_and(|s| s.stand_in_for.is_some());
+        let saved_shape = |saved: Option<SavedImage>, source: Option<&Source>| {
+            saved.zip(source).map(|(image, s)| ShapeFile { source: s.id, full: image.image() })
+        };
+        let saved_grain = |source: Option<&Source>| {
+            b.grain_file.as_ref().zip(source).map(|(f, s)| GrainFile {
+                source: s.id,
+                width: f.width,
+                full: f.full.map(SavedImage::image),
+            })
+        };
+        if !inherited(brush.shape.source.as_ref()) || brush.shape_file_now().is_none() {
+            brush.shape_file = saved_shape(b.shape_full, brush.shape.source.as_ref());
+        }
+        if !inherited(brush.grain.source.as_ref()) || brush.grain_file_now().is_none() {
+            brush.grain_file = saved_grain(brush.grain.source.as_ref());
+        }
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
             (brush.shape.image, brush.shape.source, _) = crate::brush_files::shape_for(&texture);
-            // Old libraries cached the hard round tip with six stray corner texels.
-            // Replace only that named asset's obsolete full-size copy, in either polarity.
-            let old_id = if s.inverted { 0x23c0_c99e_1761_be1b } else { 0x3bc8_d034_1c17_a3fb };
-            if matches!(b.shape_full, Some(SavedImage::Square(id, 1024)) if id == old_id)
-                && s.name.rsplit(['/', '\\']).next().is_some_and(|name| name.eq_ignore_ascii_case("Brush-Preset-Hard.png"))
-                && let Some(mut shape) = crate::brush_files::shape_file_for(&texture, brush.shape.source.as_ref())
-            {
+            brush.shape_file = crate::brush_files::shape_file_for(&texture, brush.shape.source.as_ref());
+            if let Some(shape) = &mut brush.shape_file {
                 keep_image(&mut shape.full);
-                updated_shape = Some(shape);
+            } else {
+                brush.shape_file = saved_shape(b.shape_full, brush.shape.source.as_ref());
             }
         }
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
             (brush.grain.image, brush.grain.source) =
                 crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref());
+            brush.grain_file = crate::brush_files::grain_file_for(&texture, brush.grain.source.as_ref());
+            if let Some(full) = brush.grain_file.as_mut().and_then(|f| f.full.as_mut()) {
+                keep_image(full);
+            }
+            if brush.grain_file.is_none() {
+                brush.grain_file = saved_grain(brush.grain.source.as_ref());
+            }
         }
-        for (stock, material) in
-            [(&brush.stock.metallic, &mut brush.metallic), (&brush.stock.roughness, &mut brush.roughness)]
-        {
+        for (stock, material, saved) in [
+            (&brush.stock.metallic, &mut brush.metallic, b.metallic_full),
+            (&brush.stock.roughness, &mut brush.roughness, b.roughness_full),
+        ] {
             if let Some(s) = stock {
                 let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
                 (material.image, material.source) = crate::brush_files::material_for(&texture);
+                material.file = crate::brush_files::shape_file_for(&texture, material.source.as_ref());
+                if let Some(file) = &mut material.file {
+                    keep_image(&mut file.full);
+                } else {
+                    material.file = saved_shape(saved, material.source.as_ref());
+                }
+            } else if !inherited(material.source.as_ref()) || material.full().is_none() {
+                material.file = saved_shape(saved, material.source.as_ref());
             }
         }
-        brush.grain_file = b.grain_file.as_ref().zip(brush.grain.source.as_ref()).map(|(f, source)| GrainFile {
-            source: source.id,
-            width: f.width,
-            full: f.full.map(SavedImage::image),
-        });
-        let attached = |image: Option<SavedImage>, source: Option<&Source>| {
-            image.zip(source).map(|(image, source)| ShapeFile { source: source.id, full: image.image() })
-        };
-        brush.shape_file = updated_shape.or_else(|| attached(b.shape_full, brush.shape.source.as_ref()));
-        brush.metallic.file = attached(b.metallic_full, brush.metallic.source.as_ref());
-        brush.roughness.file = attached(b.roughness_full, brush.roughness.source.as_ref());
         brush.set_settings(b.settings.iter().map(|(k, v)| (k.as_str(), *v)));
         // a size left out sits where its origin's did: with a shape of its own (another unit) or
         // another spacing (another most), that place is other pixels than its origin's
@@ -965,9 +986,8 @@ impl State {
             picture: png(&a.picture),
             signature: png(&a.signature),
         });
-        brush.reset_point = b.reset.map(|r| {
-            ResetPoint::of(&Self::restored_from(shipped, *r.brush, pictures, keep_image), r.made)
-        });
+        brush.reset_point =
+            b.reset.map(|r| ResetPoint::of(&Self::restored_from(shipped, *r.brush, pictures, keep_image), r.made));
         brush.secondary = b.secondary.map(|s| {
             let second = match (s.from, origin_second) {
                 (None, Some(second)) => *second,

@@ -12,9 +12,10 @@ set of their own, Legacy, after them.
   with ProCraft's textures.
 - **Names.** Brushes with plain descriptive names (pencil grades, Technical Pen, Soft Airbrush,
   Charcoal Block and the like) keep them. Every brush with a distinctive name has a name of its own.
-- **Shapes and grains.** The app bundles 288 remade shapes and grains from
-  [`assets/stock`](../assets/stock). Their full-resolution sources have matching filenames in
-  [`assets/stock-sources`](../assets/stock-sources). Other stock textures are drawn in code.
+- **Shapes and grains.** The app loads its 288 remade shapes and grains at their original
+  dimensions from [`assets/stock-sources`](../assets/stock-sources). Three have full-resolution
+  edits in [`assets/stock`](../assets/stock) for the water flicks' black level, the chipboard
+  grain's midtones and the hard tip's stray edge pixels. Other stock textures are drawn in code.
   Brushes that use the same stock texture share its pixels.
 - **Previews.** The library draws each brush's preview with ProCraft's own engine, from the brush's
   own settings.

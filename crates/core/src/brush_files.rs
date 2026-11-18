@@ -2508,17 +2508,62 @@ fn texture_bytes(t: &Texture) -> Option<(&[u8], bool)> {
 
 /// What the image of a brush file's grain gives it beyond `source`: its width, and the image at
 /// its native dimensions if the standard source has been resampled.
-fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
-    let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
-    let (w, h, channels, buf) = decode_picture(bytes)?;
-    Some(GrainFile { source: source.id, width: w as u32, full: full_image((w, h, channels), &buf, inverted) })
+pub(crate) fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
+    let source = source?;
+    let (width, full) = native_image(t)?;
+    Some(GrainFile { source: source.id, width, full })
 }
 
 /// What the image of a brush file's shape gives it beyond `source`, if it has more than that holds.
 pub(crate) fn shape_file_for(t: &Texture, source: Option<&Source>) -> Option<ShapeFile> {
-    let (Some((bytes, inverted)), Some(source)) = (texture_bytes(t), source) else { return None };
+    let source = source?;
+    let (_, full) = native_image(t)?;
+    Some(ShapeFile { source: source.id, full: full? })
+}
+
+/// The shipped catalog lives for the whole session. Keep the dimensions and encoded artwork
+/// there so opening the library doesn't pin every decoded full-size texture in memory.
+struct StockPicture {
+    bytes: &'static [u8],
+    width: u32,
+    full: Option<FullGrain>,
+}
+
+type StockPictures = std::collections::HashMap<(u64, bool), StockPicture>;
+static STOCK_PICTURES: std::sync::LazyLock<std::sync::Mutex<StockPictures>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn native_image(texture: &Texture) -> Option<(u32, Option<FullGrain>)> {
+    let read = |bytes: &[u8], inverted| {
+        let (w, h, channels, buf) = decode_picture(bytes)?;
+        Some((w as u32, full_image((w, h, channels), &buf, inverted)))
+    };
+    let Texture::Drawn(stock) = texture else {
+        let (bytes, inverted) = texture_bytes(texture)?;
+        return read(bytes, inverted);
+    };
+    let key = (stock.key, stock.inverted);
+    let mut pictures = STOCK_PICTURES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = pictures.get(&key) {
+        return Some((existing.width, existing.full.clone()));
+    }
+    let (_, bytes) = stock_images::stock_image_by_key(stock.key)?;
+    let (width, mut full) = read(bytes, stock.inverted)?;
+    if let Some(f) = &mut full {
+        f.pixels = None;
+    }
+    pictures.insert(key, StockPicture { bytes, width, full: full.clone() });
+    Some((width, full))
+}
+
+pub(crate) fn stock_picture_pixels(id: u64) -> Option<std::sync::Arc<Vec<u8>>> {
+    let (bytes, inverted) = STOCK_PICTURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find_map(|(&(_, inverted), p)| p.full.as_ref().filter(|f| f.id == id).map(|_| (p.bytes, inverted)))?;
     let (w, h, channels, buf) = decode_picture(bytes)?;
-    Some(ShapeFile { source: source.id, full: full_image((w, h, channels), &buf, inverted)? })
+    full_image((w, h, channels), &buf, inverted)?.pixels
 }
 
 /// The source at its decoded dimensions. The ordinary square already preserves a 256px square exactly.
@@ -3345,6 +3390,8 @@ mod tests {
         let tip = Texture::Stock { name: "Brush-Preset-Ink-Sponge.png".into(), inverted: false };
         let (image, source, _) = shape_for(&tip);
         assert!(image.is_none() && source.is_some());
+        let shape = shape_file_for(&tip, source.as_ref()).unwrap().full;
+        assert_eq!((shape.side, shape.height), (1024, 1024));
         // inverted reads it turned over, as its own image would
         let back = Texture::Stock { name: "Brush-Preset-Ink-Sponge.png".into(), inverted: true };
         let (_, inverted, _) = shape_for(&back);
@@ -3362,6 +3409,11 @@ mod tests {
         assert!(image.is_none() && source.is_some());
         let file = grain_file_for(&grain, source.as_ref()).unwrap();
         assert_eq!((file.width, file.full.unwrap().side), (1024, 1024));
+        let chipboard = Texture::Stock { name: "OSB.jpg".into(), inverted: false };
+        let (_, source) = grain_for(&chipboard, None);
+        let file = grain_file_for(&chipboard, source.as_ref()).unwrap();
+        let full = file.full.unwrap();
+        assert_eq!((file.width, full.side, full.height), (2048, 2048, 2048));
         let blank = Texture::Stock { name: "Brush-Preset-Blank.png".into(), inverted: false };
         let (_, source) = grain_for(&blank, None);
         assert!(source.unwrap().pixels.iter().all(|&level| level == 255));
