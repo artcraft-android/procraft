@@ -1,8 +1,10 @@
 package io.github.artcraftandroid.procraft.canvas
 
+import android.os.Build
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import io.github.artcraftandroid.procraft.core.PointerKind
 
 /** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
 internal const val PEN_DOUBLE_TAP_KEY = 718
@@ -35,6 +37,38 @@ internal fun penButtonsIn(buttonState: Int): Int =
 
 /** Whether a pointer of [toolType] is a pen's (its tip or its eraser end). */
 internal fun isPen(toolType: Int) = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+
+/**
+ * A touchpad's gestures, as an event's classification says (Android 14's
+ * `CLASSIFICATION_TWO_FINGER_SWIPE`, `CLASSIFICATION_MULTI_FINGER_SWIPE` and `CLASSIFICATION_PINCH`):
+ * fingers on the pad moving the view, not the pointer.
+ */
+private val TOUCHPAD_GESTURES = setOf(3, 4, 5)
+
+/**
+ * What a pointer is to the canvas, by its [toolType], the [source] its event came from and the
+ * event's [classification] (0 where the system has none): a pen's tip or eraser end; a mouse, or a
+ * touchpad moving the pointer (Android gives that one a finger's tool type), which does what a
+ * touch is set to do, with no pressure, and is never taken for a hand resting by the pen; else a
+ * finger. A touchpad's own swipes and pinches stay fingers'.
+ */
+internal fun pointerKind(toolType: Int, source: Int, classification: Int = 0): PointerKind = when {
+    toolType == MotionEvent.TOOL_TYPE_STYLUS -> PointerKind.STYLUS
+    toolType == MotionEvent.TOOL_TYPE_ERASER -> PointerKind.STYLUS_ERASER
+    toolType == MotionEvent.TOOL_TYPE_MOUSE -> PointerKind.MOUSE
+    source and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE && classification !in TOUCHPAD_GESTURES -> PointerKind.MOUSE
+    else -> PointerKind.FINGER
+}
+
+/** What pointer [index] of [e] is to the canvas (see [pointerKind]). */
+internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
+    pointerKind(e.getToolType(index), e.source, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) e.classification else 0)
+
+/**
+ * Whether a mouse's press with [buttonState] held paints: its primary button's does (and a press
+ * that says of no button, as a touchpad's tap may), its others' do nothing on the canvas.
+ */
+internal fun mousePressPaints(buttonState: Int): Boolean = buttonState == 0 || buttonState and MotionEvent.BUTTON_PRIMARY != 0
 
 /** The pen's side buttons as its events say they are held, from one event to the next. */
 internal class PenButtons {

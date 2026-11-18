@@ -22,6 +22,7 @@ import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.keyPress
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
+import io.github.artcraftandroid.procraft.canvas.pointerKindOf
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
 
@@ -165,7 +166,8 @@ class MainActivity : ComponentActivity() {
      * as they are.
      */
     override fun dispatchTouchEvent(e: android.view.MotionEvent): Boolean {
-        if (!vm.tapAssistance || e.getToolType(0) != android.view.MotionEvent.TOOL_TYPE_FINGER) return super.dispatchTouchEvent(e)
+        // (a mouse or a touchpad moving the pointer is no finger, though a touchpad's says it is)
+        if (!vm.tapAssistance || pointerKindOf(e, 0) != io.github.artcraftandroid.procraft.core.PointerKind.FINGER) return super.dispatchTouchEvent(e)
         when (e.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
                 heldAt = android.graphics.PointF(e.x, e.y)

@@ -173,7 +173,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     /** Whether pointer [i] of [e] is a finger's contact [PALM_MM] or more across. */
     private fun palmSized(e: MotionEvent, i: Int): Boolean {
-        if (e.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) return false
+        if (kindOf(e, i) != PointerKind.FINGER) return false
         val dpi = resources.displayMetrics.xdpi.takeIf { it > 0f } ?: return false
         return e.getTouchMajor(i) / dpi * 25.4f >= PALM_MM
     }
@@ -214,7 +214,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             }
             MotionEvent.ACTION_CANCEL -> {
                 // the tablet taking three fingers for its own gesture: said once, with what to do
-                val fingers = (0 until e.pointerCount).count { e.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
+                val fingers = (0 until e.pointerCount).count { kindOf(e, it) == PointerKind.FINGER }
                 if (systemTookFingers(fingers, e.eventTime - landedAt, hasWindowFocus())) vm.systemTookFingers()
                 palms.clear()
                 s.touchCancel()
@@ -326,7 +326,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 skipping = true
                 return true
             }
-            skipping = false
+            // a mouse's other buttons do nothing on the canvas: only its primary button paints
+            skipping = kindOf(e, 0) == PointerKind.MOUSE && !mousePressPaints(e.buttonState)
+            if (skipping) return true
             // a touch on the canvas closes an adjustment's menu, its Layer / Pencil choice and liquify's popups
             closedAdjustMenu = vm.adjustMenuAt != null
             if (vm.adjustment != null) {
@@ -460,7 +462,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean = penButton(e) || super.onGenericMotionEvent(e)
 
-    /** The pen hovering over the canvas shows the brush cursor where it would paint. */
+    /** The pen or the mouse hovering over the canvas shows the brush cursor where it would paint. */
     override fun onHoverEvent(e: MotionEvent): Boolean = try {
         hoverEvent(e)
     } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
@@ -471,6 +473,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private fun hoverEvent(e: MotionEvent): Boolean {
         if (penButton(e)) return true
+        if (kindOf(e, 0) == PointerKind.MOUSE) return mouseHover(e)
         if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return super.onHoverEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
@@ -485,6 +488,19 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 vm.showLiquifyRing(null)
             }
         }
+        return true
+    }
+
+    /**
+     * A mouse (or a touchpad's pointer) moving over the canvas with no button held: the brush
+     * cursor follows it, as it does the pen held over the glass, but it is no pen near (a hand
+     * landing then still paints, and Hover's touch stays the pen's).
+     */
+    private fun mouseHover(e: MotionEvent): Boolean {
+        val at = Offset(e.x, e.y)
+        val gone = e.actionMasked == MotionEvent.ACTION_HOVER_EXIT || vm.overBars(at)
+        if (gone || !painting()) vm.showCursor(null) else vm.showCursor(at, hovering = true)
+        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { gone })
         return true
     }
 
@@ -520,12 +536,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         postDelayed(predictionOver, PREDICTION_LASTS_MS)
     }
 
-    private fun kindOf(e: MotionEvent, index: Int): PointerKind = when (e.getToolType(index)) {
-        MotionEvent.TOOL_TYPE_STYLUS -> PointerKind.STYLUS
-        MotionEvent.TOOL_TYPE_ERASER -> PointerKind.STYLUS_ERASER
-        MotionEvent.TOOL_TYPE_MOUSE -> PointerKind.MOUSE
-        else -> PointerKind.FINGER
-    }
+    private fun kindOf(e: MotionEvent, index: Int): PointerKind = pointerKindOf(e, index)
 
     /** The pointer's samples in this event: the batched ones since the last event, then the latest. */
     private fun samples(e: MotionEvent, i: Int): List<PenSample> {

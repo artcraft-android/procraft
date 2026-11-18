@@ -3,6 +3,7 @@ package io.github.artcraftandroid.procraft.canvas
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import io.github.artcraftandroid.procraft.core.PointerKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -172,6 +173,34 @@ class PenKeysTest {
         for (a in listOf(MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_EXIT, MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE, MotionEvent.ACTION_CANCEL)) {
             assertEquals(false, penTouching(a))
             assertEquals(false, penLifting(a))
+        }
+    }
+
+    @Test
+    fun a_mouse_and_a_touchpads_pointer_are_the_mouse_and_a_touchpads_swipes_fingers() {
+        val screen = InputDevice.SOURCE_TOUCHSCREEN
+        val mouse = InputDevice.SOURCE_MOUSE
+        assertEquals(PointerKind.STYLUS, pointerKind(MotionEvent.TOOL_TYPE_STYLUS, screen or InputDevice.SOURCE_STYLUS))
+        assertEquals(PointerKind.STYLUS_ERASER, pointerKind(MotionEvent.TOOL_TYPE_ERASER, InputDevice.SOURCE_STYLUS))
+        assertEquals(PointerKind.FINGER, pointerKind(MotionEvent.TOOL_TYPE_FINGER, screen))
+        assertEquals(PointerKind.MOUSE, pointerKind(MotionEvent.TOOL_TYPE_MOUSE, mouse))
+        // a touchpad moving the pointer comes as a finger from the mouse's source
+        assertEquals(PointerKind.MOUSE, pointerKind(MotionEvent.TOOL_TYPE_FINGER, mouse or InputDevice.SOURCE_TOUCHPAD))
+        assertEquals(PointerKind.MOUSE, pointerKind(MotionEvent.TOOL_TYPE_UNKNOWN, mouse))
+        // its two-finger swipe, its three-finger swipe and its pinch move the view as fingers do
+        for (gesture in listOf(3, 4, 5)) assertEquals(PointerKind.FINGER, pointerKind(MotionEvent.TOOL_TYPE_FINGER, mouse, gesture))
+        // a pen's own source says nothing of a mouse
+        assertEquals(PointerKind.STYLUS, pointerKind(MotionEvent.TOOL_TYPE_STYLUS, mouse))
+    }
+
+    @Test
+    fun only_a_mouses_primary_button_paints() {
+        assertEquals(true, mousePressPaints(MotionEvent.BUTTON_PRIMARY))
+        assertEquals(true, mousePressPaints(MotionEvent.BUTTON_PRIMARY or MotionEvent.BUTTON_SECONDARY))
+        // a touchpad's tap, or a press made up by the system, says of no button
+        assertEquals(true, mousePressPaints(0))
+        for (other in listOf(MotionEvent.BUTTON_SECONDARY, MotionEvent.BUTTON_TERTIARY, MotionEvent.BUTTON_BACK, MotionEvent.BUTTON_FORWARD)) {
+            assertEquals(false, mousePressPaints(other))
         }
     }
 }
