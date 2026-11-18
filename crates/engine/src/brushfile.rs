@@ -797,6 +797,18 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     {
         pressure_curves.push((PressureCurve::LinearJitter, c.clone()));
     }
+    let secondary =
+        if prefix.ends_with(SECONDARY) { None } else { read_in(zip, &format!("{prefix}{SECONDARY}")).map(Box::new) };
+    // Older combined brushes predate the Normal blend switch and use the classic rule.
+    if secondary.is_some() && f.num("legacyNormalDual").is_none() && f.num("dualBlendMode").unwrap_or(0.0) == 0.0 {
+        set("classic_combine", 1.0);
+    }
+    let inverted = f.flag("textureInverted") && !older_grain;
+    let grain = texture("bundledGrainPath", "Grain.png", inverted);
+    if matches!(grain, Texture::None) {
+        // An empty grain slot supplies a uniform white sample before inversion.
+        set("empty_grain_inverted", f32::from(inverted));
+    }
     Some(BrushFile {
         name: f.text("name").unwrap_or_else(|| "Imported Brush".to_owned()),
         author: f.text("authorName").unwrap_or_default(),
@@ -810,7 +822,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         opacity_curve: f.curve("dynamicsPressureOpacityCurve").filter(|c| !is_straight(c)),
         pressure_curves,
         shape: texture("bundledShapePath", "Shape.png", f.flag("shapeInverted")),
-        grain: texture("bundledGrainPath", "Grain.png", f.flag("textureInverted") && !older_grain),
+        grain,
         metallic: texture("bundledMetallicPath", "Metallic.png", f.flag("metallicGrainInverted")),
         roughness: texture("bundledRoughnessPath", "Roughness.png", f.flag("roughnessGrainInverted")),
         sliders: SLIDERS.map(|(size, opacity)| {
@@ -822,11 +834,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         thumbnail: zip.read(&format!("{prefix}QuickLook/Thumbnail.png")),
         author_picture: zip.read(&format!("{prefix}{AUTHOR_PICTURE}")),
         signature: zip.read(&format!("{prefix}{SIGNATURE}")),
-        secondary: if prefix.ends_with(SECONDARY) {
-            None
-        } else {
-            read_in(zip, &format!("{prefix}{SECONDARY}")).map(Box::new)
-        },
+        secondary,
         engine: zip
             .read(&format!("{prefix}{ENGINE_KEY}"))
             .and_then(|key| String::from_utf8(key).ok())
@@ -994,7 +1002,10 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
             }
             None => {
                 put(path, Builder::null());
-                put(inverted, Value::Bool(false));
+                let empty_inverted = path == "bundledGrainPath"
+                    && pictures.grain_png.is_none()
+                    && brush.setting("empty_grain_inverted") > 0.5;
+                put(inverted, Value::Bool(empty_inverted));
             }
         }
     }
@@ -1098,6 +1109,7 @@ mod tests {
         brush.set_setting("roughness_scale", 0.3);
         brush.notches.sizes[0] = vec![0.25, 0.5];
         brush.size_curve = crate::curve::Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.42, 0.2), Vec2::new(1.0, 1.0)]);
+        brush.opacity_curve = crate::curve::Curve::new(&[Vec2::new(0.0, 0.2), Vec2::new(1.0, 1.0)]);
         let file = write(
             &brush,
             "Someone",
@@ -1124,7 +1136,11 @@ mod tests {
         assert_eq!(back.notches.sizes[0], vec![0.25, 0.5]);
         let size_curve = back.size_curve.as_ref().unwrap();
         assert!((size_curve[1] - Vec2::new(0.42, 0.2)).length() < 1e-5);
-        assert!(back.opacity_curve.is_none());
+        let opacity_curve = back.opacity_curve.as_ref().unwrap();
+        assert_eq!(opacity_curve.len(), brush.opacity_curve.points().len());
+        for (got, want) in opacity_curve.iter().zip(brush.opacity_curve.points()) {
+            assert!((*got - *want).length() < 1e-4, "{got:?} {want:?}");
+        }
         assert!((back.shape_angle - brush.shape.rotation).abs() < 1e-6);
         let mut again = Brush::round_pen();
         for (k, v) in &back.settings {
@@ -1190,6 +1206,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_dual_normal_switch_uses_the_classic_rule() {
+        let cases = [(0, None, true), (0, Some(false), false), (0, Some(true), true), (1, None, false)];
+        for (mode, classic, expected) in cases {
+            let mut builder = Builder::new();
+            let root = builder.reserve();
+            let mut fields = vec![("dualBlendMode", Value::Real(f64::from(mode)))];
+            if let Some(value) = classic {
+                fields.push(("legacyNormalDual", Value::Bool(value)));
+            }
+            builder.fill(&root, &["ValkyrieBrush", "NSObject"], fields);
+            let archive = builder.finish(root);
+            let mut zip = ZipWriter::new();
+            zip.add("Brush.archive", &archive);
+            zip.add("Sub01/Brush.archive", &archive);
+            let brush = read(&zip.finish()).unwrap();
+            assert!(brush.secondary.is_some());
+            assert_eq!(brush.settings.iter().any(|(k, v)| k == "classic_combine" && *v > 0.0), expected);
+        }
+    }
+
+    #[test]
     fn a_dual_brush_s_blend_mode_is_kept_whatever_its_number() {
         // a layer mode past Multiply and the grain's own heights, as the setting and as read
         for mode in [BlendMode::ColorBurn.id(), BlendMode::Divide.id(), GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT] {
@@ -1213,6 +1250,31 @@ mod tests {
             }
             assert_eq!(again.setting("dual_blend"), mode as f32);
         }
+    }
+
+    #[test]
+    fn missing_grain_preserves_its_inversion_when_the_brush_is_shared() {
+        let mut brush = Brush::round_pen();
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+            secondary: None,
+        };
+        for inverted in [0.0, 1.0] {
+            brush.set_setting("empty_grain_inverted", inverted);
+            let back = read(&write(&brush, "", &pictures)).unwrap();
+            assert!(matches!(back.grain, Texture::None));
+            assert!(back.settings.iter().any(|(k, v)| k == "empty_grain_inverted" && *v == inverted));
+        }
+        let supplied = Pictures { grain_png: Some(b"g"), ..pictures };
+        let back = read(&write(&brush, "", &supplied)).unwrap();
+        assert!(matches!(back.grain, Texture::Image { inverted: false, .. }));
+        assert!(!back.settings.iter().any(|(k, _)| k == "empty_grain_inverted"));
     }
 
     #[test]

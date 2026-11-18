@@ -5,7 +5,6 @@
 use std::f32::consts::PI;
 
 use procraft_engine::environment::Equirect;
-use procraft_engine::textures::TEXTURE_SIZE;
 
 use crate::lighting::{CUBE_LEVELS, Lighting};
 use crate::{Canvas, Gpu};
@@ -38,9 +37,9 @@ pub struct SphereLook<'a> {
     pub metallic: f32,
     pub roughness: f32,
     /// Each through its source, if it has one: a key that changes with it and the image
-    /// (`TEXTURE_SIZE` square grey, white = the amount), tiled every so many canvas pixels.
-    pub metallic_source: Option<(u64, &'a [u8])>,
-    pub roughness_source: Option<(u64, &'a [u8])>,
+    /// (native width and height, grey pixels), tiled every so many canvas pixels.
+    pub metallic_source: Option<(u64, [u32; 2], &'a [u8])>,
+    pub roughness_source: Option<(u64, [u32; 2], &'a [u8])>,
     pub metallic_tile: f32,
     pub roughness_tile: f32,
     /// Around the sphere (as stored, 0..1).
@@ -237,10 +236,8 @@ impl SpherePreview {
     ) {
         for (slot, source) in self.sources.iter_mut().zip([look.metallic_source, look.roughness_source]) {
             match source {
-                Some((key, pixels))
-                    if slot.as_ref().is_none_or(|s| s.key != key) && pixels.len() == TEXTURE_SIZE * TEXTURE_SIZE =>
-                {
-                    *slot = Some(SourceTexture { key, view: grey_texture(gpu, TEXTURE_SIZE as u32, pixels) });
+                Some((key, size, pixels)) if slot.as_ref().is_none_or(|s| s.key != key) => {
+                    *slot = crate::material_image(gpu, size, pixels).map(|view| SourceTexture { key, view });
                 }
                 None => *slot = None,
                 _ => {}

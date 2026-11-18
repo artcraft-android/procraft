@@ -15,39 +15,73 @@ const SAMPLES: usize = 36;
 /// The time between samples (milliseconds): a pen reporting 240 times a second.
 const STEP_MS: f64 = 1000.0 / 240.0;
 
-/// The wave, across and down the canvas (shares of its width and height) for 0..1 along it, as
-/// polynomial coefficients (lowest power first).
-const ACROSS: [f32; 6] = [0.11003, 0.74916, 0.032273, 0.045396, -0.087172, 0.03133];
-const DOWN: [f32; 6] = [0.57235, 0.59775, -1.0046, -1.413, 2.7134, -0.97521];
-
-/// The pressure the pen's swell is turned into: the brush's preview minimum plus this many times
-/// the swell (times its preview pressure scale).
-const PRESSURE_GAIN: f32 = 1.0;
-
-/// Where along the wave `t` (0..1) is, in canvas pixels.
-fn along(t: f32) -> Vec2 {
-    let poly = |c: &[f32; 6]| c.iter().rev().fold(0.0, |acc, k| acc * t + k);
-    Vec2::new(poly(&ACROSS) * CANVAS.0, poly(&DOWN) * CANVAS.1)
+/// Randomized heads share the first turn of the preview session, including on redraw.
+pub(crate) fn randomized_head_turn() -> f32 {
+    static TURN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *TURN.get_or_init(|| {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |elapsed| elapsed.as_secs() as u32);
+        first_head_turn(seconds)
+    })
 }
 
-/// The pen's swell at `t` (0..1 along): light at the ends, full in the middle.
-fn swell(t: f32) -> f32 {
-    1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()
+fn first_head_turn(seed: u32) -> f32 {
+    // The session draws two 31-bit Park–Miller values for one fractional sample.
+    let next = |value: u32| {
+        let seed = if value == 0 { 123_459_876 } else { value };
+        (u64::from(seed) * 16_807 % 2_147_483_647) as u32
+    };
+    let high = next(seed);
+    let scale = 1.0 / 2_147_483_648.0_f32;
+    let unit = high as f32 * scale + next(high) as f32 * scale * scale;
+    unit.mul_add(std::f32::consts::TAU, -std::f32::consts::PI)
+}
+
+/// The recorded preview advances along a line tilted six degrees, with a sine wave across it.
+fn along(t: f32) -> Vec2 {
+    let (sin, cos) = 6.000_014_f32.to_radians().sin_cos();
+    let forward = 810.0 * t;
+    let across = 60.005_41 * (std::f32::consts::FRAC_PI_3 + 3.759_170_7 * t).sin();
+    Vec2::new(122.068_92 + cos * forward - sin * across, 133.711_85 + sin * forward + cos * across)
+}
+
+/// The press along a brush's sample stroke, as the previews ship it: light at the ends,
+/// full across the middle, one value per pen sample.
+const PRESS: [f32; 36] = [
+    0.105925, 0.135983, 0.172023, 0.214441, 0.263420, 0.318866, 0.380352, 0.447077, 0.517842, 0.591058, 0.664786,
+    0.736804, 0.804713, 0.866061, 0.918489, 0.959884, 0.988511, 1.003143, 1.003143, 0.988511, 0.959884, 0.918489,
+    0.866061, 0.804713, 0.736804, 0.664786, 0.591058, 0.517842, 0.447077, 0.380352, 0.318866, 0.263420, 0.214441,
+    0.172023, 0.135983, 0.105925,
+];
+
+/// The press the preview's pen lays at `t` (0..1 along): the shipped press, turned up by the
+/// brush's preview scale and clamped at full.
+pub fn pressure_at(brush: &Brush, t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0) * (PRESS.len() - 1) as f32;
+    let i = (x as usize).min(PRESS.len() - 2);
+    let a = PRESS.get(i).copied().unwrap_or(0.0);
+    let b = PRESS.get(i + 1).copied().unwrap_or(a);
+    // The thumbnail uses the recorded pen pressure. Half travel on the studio scale
+    // represents the file's unit multiplier.
+    let recorded = a + (b - a) * (x - i as f32);
+    (recorded * 2.0 * brush.setting("preview_pressure_scale") + brush.setting("preview_pressure_min")).clamp(0.0, 1.0)
 }
 
 /// The sample stroke for `brush`, in canvas pixels.
 pub fn samples(brush: &Brush) -> Vec<Sample> {
-    let least = brush.setting("preview_pressure_min");
-    // the control's full travel doubles the pressure
-    let gain = PRESSURE_GAIN * 2.0 * brush.setting("preview_pressure_scale");
-    // the pen held a quarter turn round from upright, then turned by the preview's own offset (a
-    // quarter turn at 1)
-    let azimuth = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
+    use std::f32::consts::FRAC_PI_2;
+    let rotation = (brush.setting("preview_tilt_offset") - 1.0) * FRAC_PI_2;
+    let tilted = brush.setting("preview_tilt") >= 0.5;
     (0..SAMPLES)
         .map(|i| {
             let t = i as f32 / (SAMPLES - 1) as f32;
-            let pressure = (least + gain * swell(t)).clamp(0.0, 1.0);
-            Sample { azimuth, ..Sample::at(along(t), pressure, i as f64 * STEP_MS) }
+            // The recorded vector's length is altitude in quarter turns. Its heading
+            // is constant after the initial zero vector. Input measures lean from upright.
+            let altitude = 0.0473245 * t.powi(3);
+            let tilt = if tilted { FRAC_PI_2 * (1.0 - altitude) } else { 0.0 };
+            let azimuth = rotation + if i == 0 { 0.0 } else { 0.053381 };
+            Sample { tilt, azimuth, ..Sample::at(along(t), pressure_at(brush, t), i as f64 * STEP_MS) }
         })
         .collect()
 }
@@ -81,9 +115,14 @@ fn share(brush: &Brush, units: f32, small: f32) -> f32 {
 
 /// The diameter the sample stroke is drawn at (canvas pixels).
 pub fn diameter(brush: &Brush) -> f32 {
+    diameter_at_share(brush, size_share(brush))
+}
+
+/// Both parts of a combined preview receive the same size input and apply their own size range.
+pub fn diameter_at_share(brush: &Brush, share: f32) -> f32 {
     let most = brush.biggest();
     let least = brush.min_size.min(most);
-    (least + (most - least) * size_share(brush)).max(0.5)
+    (least + (most - least) * share).max(0.5)
 }
 
 /// The canvas (premultiplied RGBA8, [`CANVAS`] in size) fitted into a `width` × `height` preview:
@@ -147,22 +186,41 @@ mod tests {
         let s = samples(&Brush::round_pen());
         assert_eq!(s.len(), SAMPLES);
         let (first, last) = (s.first().unwrap(), s.last().unwrap());
-        assert!((first.pos.x - 116.6).abs() < 0.5 && (last.pos.x - 933.9).abs() < 0.5);
+        assert!(first.pos.distance(Vec2::new(116.636_96, 185.393_37)) < 0.001);
+        assert!(s[10].pos.distance(Vec2::new(346.883_88, 208.764_57)) < 0.001);
+        assert!(last.pos.distance(Vec2::new(933.876_2, 158.966_75)) < 0.001);
         assert!(s.iter().all(|p| p.pos.y > 0.4 * CANVAS.1 && p.pos.y < 0.7 * CANVAS.1));
-        // light at the ends, swelling to full in the middle
-        assert!(first.pressure < 0.15 && last.pressure < 0.15);
-        assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.6);
-        assert_eq!(s.get(SAMPLES / 2).unwrap().pressure, 1.0);
+        assert!((first.pressure - 0.105925).abs() < 1e-5);
+        assert_eq!(first.pressure, last.pressure);
+        assert!((s[SAMPLES / 4].pressure - 0.591058).abs() < 1e-5);
+        assert_eq!(s[SAMPLES / 2].pressure, 1.0);
         assert!((last.time_ms - 35.0 * STEP_MS).abs() < 1e-9);
+    }
+
+    #[test]
+    fn preview_minimum_is_added_after_scaling_the_recorded_pressure() {
+        let mut brush = Brush::round_pen();
+        brush.set_setting("preview_pressure_scale", 0.75);
+        brush.set_setting("preview_pressure_min", 0.2);
+        assert!((pressure_at(&brush, 0.0) - (0.105925 * 1.5 + 0.2)).abs() < 1e-5);
+        assert_eq!(pressure_at(&brush, 0.5), 1.0);
     }
 
     #[test]
     fn the_preview_s_pen_is_held_a_quarter_turn_round_then_turned_by_its_offset() {
         use std::f32::consts::FRAC_PI_2;
         let mut b = Brush::round_pen();
-        assert!(samples(&b).iter().all(|p| (p.azimuth + FRAC_PI_2).abs() < 1e-6));
+        assert!((samples(&b)[0].azimuth + FRAC_PI_2).abs() < 1e-6);
         b.set_setting("preview_tilt_offset", 1.0);
-        assert!(samples(&b).iter().all(|p| p.azimuth.abs() < 1e-6));
+        b.set_setting("preview_tilt", 0.0);
+        let flat = samples(&b);
+        assert_eq!(flat[0].azimuth, 0.0);
+        assert!(flat[1..].iter().all(|p| (p.azimuth - 0.053381).abs() < 1e-6));
+        assert!(flat.iter().all(|p| p.tilt == 0.0));
+        b.set_setting("preview_tilt", 1.0);
+        let tilted = samples(&b);
+        assert_eq!(tilted[0].tilt, FRAC_PI_2);
+        assert!((tilted[SAMPLES - 1].tilt - FRAC_PI_2 * (1.0 - 0.0473245)).abs() < 1e-6);
     }
 
     #[test]

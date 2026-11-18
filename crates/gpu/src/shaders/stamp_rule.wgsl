@@ -42,8 +42,11 @@ fn rule_stamp(k: u32, p: vec2<f32>, out: ptr<function, StampOut>) -> bool {
     (*out).q = q;
     (*out).radius = r;
     (*out).alpha = rule_float(b + 3u);
-    (*out).grain_at = grain_offset + vec2<f32>(d.x * gc - d.y * gs, d.x * gs + d.y * gc);
     (*out).fill = flip * half / (half + QUAD_REACH);
+    let grain_scale = select((*out).fill, vec2<f32>(1.0), su.fixed_grain_per_stamp != 0u);
+    let delta = moving_grain_delta(d, vec2<f32>(c, s), grain_scale);
+    (*out).grain_at = grain_offset + vec2<f32>(delta.x * gc - delta.y * gs, delta.x * gs + delta.y * gc);
+    (*out).shape_steps = shape_uv_steps(half + QUAD_REACH, c, s);
     (*out).color = mix(tinted(su.color.rgb, tint, rule_float(b + 22u)), su.secondary.rgb, look.z);
     (*out).look = look;
     (*out).grain_press = more.x;

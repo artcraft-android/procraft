@@ -2,6 +2,13 @@
 // the separable and non-separable modes as usually defined for compositing, numbered as the
 // layers' blend modes are.
 
+// Interpolate the unpadded grain patch across the particle's padded, possibly mirrored quad.
+fn moving_grain_delta(d: vec2<f32>, axis: vec2<f32>, corner_scale: vec2<f32>) -> vec2<f32> {
+    if (all(corner_scale == vec2<f32>(1.0))) { return d; }
+    let across = vec2<f32>(-axis.y, axis.x);
+    return axis * (dot(d, axis) * corner_scale.x) + across * (dot(d, across) * corner_scale.y);
+}
+
 // How much of a grain the paint takes when pressed into it at `press` (0..1): what stands above
 // a level that sinks as the pen presses harder, nothing at no pressure and all of it at full,
 // the grain's highest parts first.
@@ -26,13 +33,32 @@ fn pooled_over(c: f32) -> f32 {
     return (1.0 - abs(sin(x) / x)) / max(c, 1e-6);
 }
 
-// a grain read unfiltered: the grain's own images are a quarter of the size of what they stand
-// for, so the finer texels a pixel would land on (four to each of ours, tied to the grain so they
-// move with it) are made up around the value read
-fn sharp_grain(v: f32, uv: vec2<f32>) -> f32 {
-    let cell = floor(uv * 1024.0);
-    let n = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.547);
-    return clamp(v + (n - 0.5) * 0.22, 0.0, 1.0);
+// Filtering stops while the shorter side still has eight texels (improved) or sixteen (classic).
+fn texture_lod_cap(size: vec2<u32>, minimum_log_size: f32) -> f32 {
+    return max(log2(f32(min(size.x, size.y))) - minimum_log_size, 0.0);
+}
+
+// Changes in tip coordinates per screen pixel along x and y. Flipping the tip leaves their lengths unchanged.
+fn shape_uv_steps(extent: vec2<f32>, c: f32, s: f32) -> vec4<f32> {
+    let scale = 0.5 / extent;
+    return vec4<f32>(vec2<f32>(c, -s) * scale, vec2<f32>(s, c) * scale);
+}
+
+fn shape_lod(size: vec2<u32>, steps: vec4<f32>, cap: f32) -> f32 {
+    let texels = vec2<f32>(size);
+    let footprint = max(length(steps.xy * texels), length(steps.zw * texels));
+    return clamp(log2(footprint), 0.0, texture_lod_cap(size, 8.0 - cap));
+}
+
+fn grain_texel(image: texture_2d_array<f32>, smp: sampler, uv: vec2<f32>, layer: i32, tile: f32, filter_mode: u32) -> f32 {
+    let size = textureDimensions(image);
+    if (filter_mode == 0u) {
+        let pixel = min(vec2<u32>(fract(uv) * vec2<f32>(size)), size - 1u);
+        return textureLoad(image, vec2<i32>(pixel), layer, 0).r;
+    }
+    let cap = texture_lod_cap(size, select(3.0, 4.0, filter_mode == 1u));
+    let level = clamp(log2(f32(size.x) / tile), 0.0, cap);
+    return textureSampleLevel(image, smp, uv, layer, level).r;
 }
 
 fn blend_rgb(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
@@ -162,9 +188,26 @@ fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
         case 5u, 10u, 22u, 23u, 24u, 25u: {
             return a;
         }
+        case 8u: {
+            // Coverage Dodge uses the same half-float floor as Divide.
+            return min(1.0, a / max(1.0 - b, 0.00006103515625));
+        }
         case 12u: {
             let k = 0.5 * a + 0.25;
             return clamp(select(1.0 - 2.0 * (1.0 - b) * (1.0 - k), 2.0 * b * k, b < 0.5), 0.0, 1.0);
+        }
+        case 17u: {
+            // The hard mix cutoff is taken after vivid light in half precision.
+            let base = quantizeToF16(a);
+            let blend = quantizeToF16(b);
+            let burn = 1.0 - clamp(quantizeToF16((1.0 - base) / max(2.0 * blend, 0.00006103515625)), 0.0, 1.0);
+            let dodge = base / max(quantizeToF16(2.0 * (1.0 - blend)), 0.00006103515625);
+            let channel = quantizeToF16(select(burn, dodge, blend >= 0.5));
+            return select(0.0, 1.0, channel >= 0.5);
+        }
+        case 21u: {
+            // Coverage Divide floors its divisor at the smallest normal half float.
+            return min(1.0, a / max(b, 0.00006103515625));
         }
         default: {
             return blend_value(a, b, mode);
@@ -172,37 +215,35 @@ fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
     }
 }
 
-// coverage `a` and grain `g` combined by the grain's blend mode `mode`, as deep as `depth`: two
-// height-like modes of the grain's own (27: the coverage raised twelvefold, less the grain; 28:
-// the same or as much again over the grain's light), normal laying the coverage over the grain,
-// and every other mode by the blend mode's own rule
+// Both moving and fixed grain use the authored depth on the adjusted grain sample.
 fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
     if (mode >= TEXTURE_RULES) {
         return texture_rule(a, g, depth, mode);
     }
-    let h = 12.0 * a * depth;
-    var r = 0.0;
-    if (mode == 27u) {
-        r = clamp(h - g, 0.0, 1.0);
-    } else if (mode == 28u) {
-        r = clamp(max(h * (1.0 - g), clamp(h - g, 0.0, 1.0)), 0.0, 1.0);
-    } else {
-        var blended = g + a * (1.0 - g);
-        if (mode != 0u) {
-            blended = clamp(blend_amount(a, g, mode), 0.0, 1.0);
+    let height = 12.0 * a * depth;
+    var result: f32;
+    switch mode {
+        case 27u: { result = clamp(height - g, 0.0, 1.0); }
+        case 28u: { result = clamp(max(height - g, height * (1.0 - g)), 0.0, 1.0); }
+        default: {
+            var channel = blend_amount(a, g, mode);
+            if (mode == 0u) { channel = a; }
+            result = mix(a, clamp(channel, 0.0, 1.0), depth);
         }
-        r = mix(a, blended, depth);
     }
-    // where the grain raises the coverage, faint coverage takes only part of the rise (all of it
-    // from GRAIN_RISE_FULL up; none where there is none)
-    if (r > a) {
-        r = a + min(a / GRAIN_RISE_FULL, 1.0) * (r - a);
-    }
-    return r;
+    return clamp(result, 0.0, 1.0);
 }
 
 // The coverage from which a grain raises it fully (a sixty-fourth, as 1/63.75).
 const GRAIN_RISE_FULL: f32 = 0.015686275;
+
+// The pen's bleed increases the tip's contrast. Its offset follows the stamp's
+// pressure and tilt, while its gain uses the full bleed amount.
+fn tip_bleed(coverage: f32, amount: f32, press: f32) -> f32 {
+    let gain = 8.0 * amount;
+    let offset = gain / sqrt(max(gain * press, 0.0001));
+    return clamp((1.0 + gain) * coverage - offset, 0.0, 1.0);
+}
 
 // Texture rules (a plugin's brush engine names them for its dabs' texture): from 32, the texture's
 // value `m` combined with a dab's coverage `a` at a strength `s` by one of fourteen ways (multiply,
@@ -307,6 +348,7 @@ fn sixth(x: f32) -> f32 {
 // set in a dual mode (over its number + 1): the classic Normal combine, where the first's colour
 // is kept whole beside the second's share of it
 const DUAL_CLASSIC: u32 = 65536u;
+const DUAL_RECURSIVE: u32 = 131072u;
 
 // a dual mode as set (its number + 1, perhaps with DUAL_CLASSIC): its number
 fn dual_mode(dual: u32) -> u32 {

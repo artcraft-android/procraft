@@ -47,7 +47,9 @@ impl GrainStore {
     pub(crate) fn take(&mut self, brush: &mut Brush) {
         let grain = brush.grain_file.as_mut().and_then(|f| f.full.as_mut());
         let shape = brush.shape_file.as_mut().map(|f| &mut f.full);
-        for full in grain.into_iter().chain(shape) {
+        let metallic = brush.metallic.file.as_mut().map(|f| &mut f.full);
+        let roughness = brush.roughness.file.as_mut().map(|f| &mut f.full);
+        for full in grain.into_iter().chain(shape).chain(metallic).chain(roughness) {
             self.keep(full);
         }
         if let Some(second) = brush.secondary.as_deref_mut() {
@@ -62,6 +64,19 @@ impl GrainStore {
         if !kept && !self.unkept.iter().any(|(id, _)| *id == full.id) {
             self.unkept.push((full.id, pixels));
         }
+    }
+
+    pub(crate) fn material(
+        &mut self,
+        source: &procraft_engine::brush::MaterialSource,
+    ) -> Option<([u32; 2], Arc<Vec<u8>>)> {
+        if let Some(full) = source.full()
+            && let Some(pixels) = self.pixels(full)
+        {
+            return Some(([full.side, full.height], pixels));
+        }
+        crate::brush_files::material_pixels(source)
+            .map(|p| ([procraft_engine::textures::TEXTURE_SIZE as u32; 2], Arc::new(p)))
     }
 
     /// Takes the files of grains nothing can want any more out of the folder, as a brush that was
@@ -109,13 +124,16 @@ impl GrainStore {
             self.held.push(entry);
             return Some(pixels);
         }
-        let bytes = fs::read(file(self.folder.as_deref()?, grain.id)).ok()?;
+        let pixels = if let Some(bytes) = self.folder.as_ref().and_then(|dir| fs::read(file(dir, grain.id)).ok()) {
+            Arc::new(bytes)
+        } else {
+            crate::brush_files::stock_picture_pixels(grain.id)?
+        };
         // cut short or not this grain: as good as none
-        if bytes.len() != (grain.side as usize).pow(2) {
+        if pixels.len() as u64 != u64::from(grain.side) * u64::from(grain.height) {
             log::warn!("a brush's grain file is damaged: using its smaller image");
             return None;
         }
-        let pixels = Arc::new(bytes);
         if self.held.len() >= HELD_MOST {
             self.held.remove(0);
         }
@@ -151,7 +169,7 @@ fn write(folder: &Path, id: u64, pixels: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use procraft_engine::brush::{FULL_GRAIN_MOST, GrainFile, GrainMode, ResetPoint, Source};
+    use procraft_engine::brush::{GrainFile, GrainMode, ResetPoint, Source};
     use procraft_engine::brushfile::{self, Pictures};
     use procraft_engine::textures::TEXTURE_SIZE;
 
@@ -254,6 +272,119 @@ mod tests {
         st.library.iter().find_map(|set| set.brushes.iter().find(|b| b.name == "Grainy")).unwrap().clone()
     }
 
+    #[test]
+    fn native_brush_textures_survive_library_reload_and_export_at_their_original_dimensions() {
+        let sizes = [(3001, 17), (901, 123), (17, 3001), (256, 256), (123, 901), (37, 37), (128, 64), (64, 128)];
+        let data = sizes.map(|(w, h)| {
+            let pixels: Vec<u8> = (0..w * h).map(|n| ((n + w) % 251) as u8).collect();
+            (sized_gray_png(w, h, &pixels), pixels)
+        });
+        let pictures = |offset: usize| Pictures {
+            shape_png: &data[offset].0,
+            grain_png: Some(&data[offset + 1].0),
+            metallic_png: Some(&data[offset + 2].0),
+            roughness_png: Some(&data[offset + 3].0),
+            thumbnail_png: &[],
+            author_png: None,
+            signature_png: None,
+            secondary: None,
+        };
+        let source =
+            Brush { name: "Rectangle".into(), secondary: Some(Box::new(Brush::round_pen())), ..Brush::round_pen() };
+        let mut pair = pictures(0);
+        pair.secondary = Some(Box::new(pictures(4)));
+        let dir = folder("rectangular");
+        let library = dir.join("library.json").to_string_lossy().into_owned();
+        let session = CanvasSession::new(16, 16);
+        let set = session.import_brushes(brushfile::write(&source, "", &pair)).unwrap();
+        assert!(session.save_brush_library_file(library.clone()));
+        drop(session);
+        let reopened = CanvasSession::new(16, 16);
+        assert!(reopened.load_brush_library_file(library));
+        let result = brushfile::read(&reopened.brush_as_file(set, 0).unwrap()).unwrap();
+        let textures = [&result, result.secondary.as_deref().unwrap()]
+            .into_iter()
+            .flat_map(|brush| [&brush.shape, &brush.grain, &brush.metallic, &brush.roughness]);
+        for ((texture, (w, h)), (_, pixels)) in textures.zip(sizes).zip(&data) {
+            let brushfile::Texture::Image { bytes, .. } = texture else { panic!("missing native image") };
+            let (width, height, channels, actual) = crate::brush_files::decode_picture(bytes).unwrap();
+            assert_eq!((width, height, channels), (w as usize, h as usize, 1));
+            assert_eq!(&actual, pixels);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reopened_named_hard_tip_drops_its_old_corner_specks() {
+        let dir = folder("updated-hard-tip");
+        let path = dir.join("library.json").to_string_lossy().into_owned();
+        let name = "Brush-Preset-Hard.png";
+        let old = [0x3bc8_d034_1c17_a3fbu64, 0x23c0_c99e_1761_be1b];
+        let saved = serde_json::json!([{"name": "Imported", "brushes": [
+            {"name": "Pair", "shape_stock": [name, false], "shape_full": [old[0], 1024],
+             "secondary": {"name": "Inverted", "shape_stock": [name, true], "shape_full": [old[1], 1024]}},
+            {"name": "Custom", "shape_source": Source::new(vec![0; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap().to_text(),
+             "shape_full": [old[0], 1024]}
+        ]}]);
+        let session = CanvasSession::new(16, 16);
+        assert!(session.load_brush_library(saved.to_string()));
+        assert!(session.save_brush_library_file(path.clone()));
+        drop(session);
+        let reopened = CanvasSession::new(16, 16);
+        assert!(reopened.load_brush_library_file(path));
+        let mut state = reopened.shared.lock();
+        let pair = state.library[0].brushes[0].clone();
+        let png = procraft_engine::stock_images::stock_image_bytes(name).unwrap();
+        let (_, _, _, mask) = crate::brush_files::decode_picture(png).unwrap();
+        for (i, brush) in [&pair, pair.secondary.as_ref().unwrap()].into_iter().enumerate() {
+            let full = &brush.shape_file_now().unwrap().full;
+            assert_ne!(full.id, old[i]);
+            assert!(file(&dir.join(FOLDER), full.id).is_file());
+            let pixels = state.grain_store.pixels(full).unwrap();
+            let outside = if i == 0 { 0 } else { 255 };
+            for (x, y) in [(0, 0), (1022, 0), (1007, 1022), (1014, 1022), (1021, 1022), (0, 1023)] {
+                assert_eq!(pixels[y * 1024 + x], outside);
+            }
+            assert_eq!(pixels.len(), mask.len());
+            assert!(pixels.iter().zip(&mask).all(|(&p, &m)| p == (m ^ outside)));
+        }
+        assert_eq!(state.library[0].brushes[1].shape_file_now().unwrap().full.id, old[0]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reopening_a_library_uses_the_native_stock_images_for_all_four_texture_slots() {
+        let session = CanvasSession::new(16, 16);
+        let sets = crate::stock_library::shipped();
+        let set =
+            sets.iter().position(|s| s.name == "Textures" && s.brushes.iter().any(|b| b.name == "Mosaic")).unwrap();
+        let i = sets[set].brushes.iter().position(|b| b.name == "Mosaic").unwrap();
+        let older_grain = serde_json::json!({"width": 1024, "full": [123, 1024]});
+        let library = serde_json::json!([{"name": "Test", "brushes": [
+            {"name": "Inherited", "from": [set, i], "grain_file": older_grain},
+            {"name": "Named", "shape_stock": ["Brush-Preset-Ink-Sponge.png", false], "shape_full": [124, 512],
+             "grain_stock": ["OSB.jpg", false], "grain_file": older_grain,
+             "metallic_stock": ["OSB.jpg", false], "roughness_stock": ["OSB.jpg", true]}
+        ]}]);
+        assert!(session.load_brush_library(library.to_string()));
+        let mut state = session.shared.lock();
+        let brushes = state.library[0].brushes.clone();
+        for brush in &brushes {
+            let f = brush.grain_file_now().unwrap();
+            let full = f.full.as_ref().unwrap();
+            assert_eq!((f.width, full.side, full.height), (2048, 2048, 2048));
+            assert_ne!(full.id, 123);
+        }
+        let inherited = brushes[0].grain_file_now().unwrap().full.as_ref().unwrap();
+        assert!(inherited.pixels.is_none());
+        assert_eq!(state.grain_store.pixels(inherited).unwrap().len(), 2048 * 2048);
+        let named = &brushes[1];
+        assert_eq!(named.shape_file_now().unwrap().full.side, 1024);
+        assert_eq!(named.metallic.full().unwrap().side, 2048);
+        assert_eq!(named.roughness.full().unwrap().side, 2048);
+        assert_ne!(named.metallic.full().unwrap().id, named.roughness.full().unwrap().id);
+    }
+
     fn strip(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(map) => {
@@ -321,7 +452,7 @@ mod tests {
         s.import_brushes(shaped_file()).unwrap();
         let brought = shaped(&s);
         let full = brought.shape_file_now().map(|f| f.full.clone()).unwrap();
-        assert!(full.pixels.is_none() && full.side == 1024);
+        assert!(full.pixels.is_none() && full.side == 1500);
         let second = brought.secondary.as_ref().and_then(|b| b.shape_file_now()).map(|f| f.full.clone()).unwrap();
         assert!(second.pixels.is_none() && second.id != full.id, "taken for keeping, the second's too");
         assert_eq!(brought.full_grains().len(), 2);
@@ -368,7 +499,7 @@ mod tests {
         assert!(s.select_brush(set, index as u32));
         s.studio_begin();
         let side = procraft_engine::textures::TEXTURE_SIZE;
-        assert_eq!(s.studio_source_picture(crate::studio::SourceKind::Shape).len(), 1024 * 1024);
+        assert_eq!(s.studio_source_picture(crate::studio::SourceKind::Shape).len(), 1500 * 1500);
         assert_eq!(s.studio_source(crate::studio::SourceKind::Shape).len(), side * side);
         // what isn't a file's shape goes on as it was
         assert_eq!(
@@ -407,9 +538,9 @@ mod tests {
             |w: u32, h: u32| crate::studio::source_from_picture(vec![200; (w * h * 4) as usize], w, h).len().isqrt();
         assert_eq!(side(100, 40), TEXTURE_SIZE);
         assert_eq!(side(256, 256), TEXTURE_SIZE);
-        assert_eq!(side(300, 100), 512);
-        assert_eq!(side(100, 700), 1024);
-        assert_eq!(side(2000, 1000), FULL_GRAIN_MOST);
+        assert_eq!(side(300, 100), 300);
+        assert_eq!(side(100, 700), 700);
+        assert_eq!(side(2000, 1000), 2000);
         assert!(crate::studio::source_from_picture(vec![1; 7], 2, 2).is_empty());
     }
 
@@ -418,7 +549,7 @@ mod tests {
         let (w, h) = (1000u32, 500u32);
         let out = crate::studio::source_from_picture(vec![255; (w * h * 4) as usize], w, h);
         let n = out.len().isqrt();
-        assert_eq!(n, 1024);
+        assert_eq!(n, 1000);
         let row = |y: usize| out[y * n + n / 2];
         assert_eq!((row(n / 8), row(n / 2), row(n - n / 8)), (0, 255, 0));
         // half the square's height, as the picture is half as high as it is wide
@@ -504,7 +635,7 @@ mod tests {
         let s = CanvasSession::new(64, 64);
         s.studio_begin();
         assert!(s.set_studio_source(Metallic, vec![90; 1024 * 1024]));
-        assert_eq!(s.studio_source_picture(Metallic), vec![90; TEXTURE_SIZE * TEXTURE_SIZE]);
+        assert_eq!(s.studio_source_picture(Metallic), vec![90; 1024 * 1024]);
         s.studio_end(false);
     }
 
@@ -514,7 +645,7 @@ mod tests {
         let s = CanvasSession::new(64, 64);
         s.studio_begin();
         for side in [128, 300, 2048] {
-            assert!(!s.set_studio_source(Shape, vec![9; side * side]), "{side}");
+            assert!(s.set_studio_source(Shape, vec![9; side * side]), "{side}");
         }
         assert!(!s.set_studio_source(Shape, vec![9; 5]));
         s.studio_end(false);
@@ -549,7 +680,8 @@ mod tests {
         s.studio_end(true);
         let b = imported(&s);
         assert_eq!(b.grain_file_now().map(|f| f.width), Some(0));
-        assert_eq!(b.grain_tile(), b.grain.scale);
+        // a texturized tile goes by the file's scale now, not the image's width
+        assert!((b.grain_tile() - b.grain.scale).abs() < 0.01, "{}", b.grain_tile());
     }
 
     #[test]
@@ -584,8 +716,8 @@ mod tests {
         let other = CanvasSession::new(64, 64);
         other.import_brushes(bytes).unwrap();
         let back = shaped(&other);
-        // the same pixels: 1024 written, 1024 read, none lost
-        assert_eq!(back.shape_file_now().map(|f| (f.full.side, f.full.id)), Some((1024, id)));
+        // the full image survives export and import
+        assert_eq!(back.shape_file_now().map(|f| (f.full.side, f.full.id)), Some((1500, id)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -599,7 +731,7 @@ mod tests {
         let brought = imported(&s);
         assert!((brought.grain_tile() - tile).abs() < 0.5, "{}", brought.grain_tile());
         let full = brought.grain_file.as_ref().and_then(|f| f.full.clone()).unwrap();
-        assert!(full.pixels.is_none() && full.side == 1024);
+        assert!(full.pixels.is_none() && full.side == 1500);
         let json = s.saved_brush_library();
         assert!(json.len() < 400_000, "the image stayed out of the library: {}", json.len());
 
@@ -616,7 +748,7 @@ mod tests {
         assert!(s.load_brush_library(old.to_string()));
         let before = imported(&s);
         assert!(before.grain_file.is_none() && before.grain.source.is_some());
-        assert_eq!(before.grain_tile(), before.grain.scale);
+        assert!((before.grain_tile() - before.grain.scale).abs() < 0.01);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -631,7 +763,7 @@ mod tests {
             let mut st = s.shared.lock();
             let layer = st.doc.current();
             let (_, style, _) = st.stroke_brush(crate::ToolKind::Paint, layer);
-            assert!(style.full_grain.is_some() && style.grain_side == 1024.0, "{mode:?}");
+            assert!(style.full_grain.is_some() && style.grain_side == 1500.0, "{mode:?}");
         }
     }
 
@@ -647,7 +779,7 @@ mod tests {
         other.import_brushes(bytes).unwrap();
         let back = imported(&other);
         assert!((back.grain.file_scale() - scale).abs() < 1e-3, "{} {scale}", back.grain.file_scale());
-        assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1024));
+        assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1500));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -663,7 +795,7 @@ mod tests {
         other.import_brushes(bytes).unwrap();
         let back = imported(&other);
         assert!((back.grain_tile() - tile).abs() < 1.0, "{} {tile}", back.grain_tile());
-        assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1024));
+        assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1500));
         let _ = fs::remove_dir_all(&dir);
     }
 

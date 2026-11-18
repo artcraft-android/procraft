@@ -1136,7 +1136,8 @@ impl State {
             secondary: self.secondary,
             size: sliders.size,
             opacity: sliders.opacity,
-            width: raw.diameter(sliders.size) * scale,
+            // the width it draws at full pressure, so hit tests reach a boosted stroke
+            width: raw.diameter(sliders.size) * scale * raw.pressure_factors(1.0).0,
             brush: Arc::new(self.brush_snapshot(tool)),
             sizes: [Some(&raw), raw.secondary.as_deref()]
                 .into_iter()
@@ -1678,7 +1679,8 @@ impl State {
                     if let ([least, most, ..], false) = (item.sizes.as_slice(), brush) {
                         (drawn.min_size, drawn.max_size) = (*least, *most);
                     }
-                    r.floats(field::WIDTH, &[drawn.diameter(slider) * item.scale]);
+                    let full = drawn.pressure_factors(1.0).0;
+                    r.floats(field::WIDTH, &[drawn.diameter(slider) * item.scale * full]);
                 }
             }
             out.push(Change { id, delete: false, fields: r.bytes() });

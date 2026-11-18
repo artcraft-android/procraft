@@ -6,18 +6,17 @@ set of their own, Legacy, after them.
 ## How the stock brushes are made
 
 - **Settings.** Each stock brush is ProCraft's own variant of a familiar default brush type. Its
-  settings are the brush studio's controls, modelled on that type, and every value is then moved by
-  1% to 3%, up or down, so that no two brushes share a setting by chance and none copies another's.
-  How far each value moves is fixed by the brush's name, so the library is the same in every build.
-  Switches and choices stay as they are: blend modes, rendering modes and the like. So do curves,
-  values of none, and values at either end of their control, where moving would change what the
-  control does (no jitter stays no jitter). The brushes therefore draw a little differently from
-  the types they are modelled on, as far as those small changes take them.
+  settings use the brush studio's controls. The stock builder varies the initial slider values by
+  1% to 3%, up or down, using the brush name to keep each build reproducible. It preserves blend
+  modes and rendering modes. Individual presets have further adjustments based on how they draw
+  with ProCraft's textures.
 - **Names.** Brushes with plain descriptive names (pencil grades, Technical Pen, Soft Airbrush,
   Charcoal Block and the like) keep them. Every brush with a distinctive name has a name of its own.
-- **Shapes and grains.** Every shape and grain is drawn for ProCraft, in code: our own shapes and
-  patterns, given the proportions, tones and coverage each brush needs. Each is drawn the first time
-  a brush needs it, and brushes that use the same one share it.
+- **Shapes and grains.** The app loads its 288 remade shapes and grains at their original
+  dimensions from [`assets/stock-sources`](../assets/stock-sources). Three have full-resolution
+  edits in [`assets/stock`](../assets/stock) for the water flicks' black level, the chipboard
+  grain's midtones and the hard tip's stray edge pixels. Other stock textures are drawn in code.
+  Brushes that use the same stock texture share its pixels.
 - **Previews.** The library draws each brush's preview with ProCraft's own engine, from the brush's
   own settings.
 

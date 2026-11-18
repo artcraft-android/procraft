@@ -181,6 +181,8 @@ pub struct StrokeStyle {
     /// A grain image, or none.
     pub grain: Option<u32>,
     pub grain_mode: GrainMode,
+    /// A canvas-fixed grain applied to individual stamps.
+    pub fixed_grain_per_stamp: bool,
     /// One grain tile on the canvas, pixels.
     pub grain_scale: f32,
     pub grain_depth: f32,
@@ -196,6 +198,8 @@ pub struct StrokeStyle {
     pub alpha_threshold: f32,
     /// The grain made lighter or darker, and of more or less contrast, −1..1.
     pub grain_brightness: f32,
+    /// Canvas Y coordinate where a fixed grain's first row starts.
+    pub grain_origin_y: f32,
     pub grain_contrast: f32,
     /// Wet mix: how much of the colour under the brush mixes into its paint, 0..1; none paints
     /// plainly.
@@ -233,8 +237,10 @@ pub struct StrokeStyle {
     pub burnt_blend: u32,
     /// The grain turned, radians.
     pub grain_rotation: f32,
-    /// No grain filtering: the grain read pixel by pixel, sharp, as from a finer image.
+    /// Read the original grain texels without filtering.
     pub grain_sharp: bool,
+    /// Keep at least sixteen texels across the smallest filtered grain level.
+    pub grain_classic: bool,
     /// A brush file's grain to read in place of the brush images (see
     /// [`Canvas::use_full_grain`]), and pixels a side of the image the grain is read from.
     pub full_grain: Option<u64>,
@@ -259,6 +265,8 @@ pub struct StrokeStyle {
     /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
     /// `Brush::laid_in_place`).
     pub laid_in_place: bool,
+    /// The primary mixes with paint it has already deposited in this stroke.
+    pub recursive: bool,
     /// What a smudge's stroke keeps with its layer between strokes, painting into that rather than
     /// the layer (see [`LayerStore`]): a store's kind ([`STORE_LIT`]), or 0 for none.
     pub store: u32,
@@ -275,6 +283,16 @@ impl StrokeStyle {
     /// place, dry or wet, is put together with it, see `cs_synthesize`).
     pub fn takes_second(&self) -> bool {
         self.tool != StrokeTool::Smudge
+    }
+
+    fn grain_filter(&self) -> u32 {
+        if self.grain_sharp {
+            0
+        } else if self.grain_classic {
+            1
+        } else {
+            2
+        }
     }
 
     /// The style as a dual brush's second: only coverage, drawn apart into its own texture, so
@@ -316,6 +334,7 @@ impl StrokeStyle {
             shape: None,
             grain: None,
             grain_mode: GrainMode::Texturized,
+            fixed_grain_per_stamp: false,
             grain_scale: 256.0,
             grain_depth: 0.0,
             rendering: Rendering::BuildUp,
@@ -324,6 +343,7 @@ impl StrokeStyle {
             burnt_edges: 0.0,
             alpha_threshold: -1.0,
             grain_brightness: 0.0,
+            grain_origin_y: 0.0,
             grain_contrast: 0.0,
             wet_pull: None,
             wet_from_before: false,
@@ -342,6 +362,7 @@ impl StrokeStyle {
             burnt_blend: MULTIPLY_MODE,
             grain_rotation: 0.0,
             grain_sharp: false,
+            grain_classic: false,
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
@@ -352,6 +373,7 @@ impl StrokeStyle {
             preview: false,
             luminance: false,
             laid_in_place: false,
+            recursive: false,
             store: 0,
         }
     }
@@ -376,18 +398,22 @@ impl StrokeStyle {
             // a grain fixed to the canvas going on stamp by stamp goes the moving grain's way, each
             // stamp reading it where it lands
             grain_mode: if brush.grain_each_stamp() { GrainMode::Moving } else { brush.grain.mode },
-            grain_scale: brush.grain_tile().max(1.0),
-            grain_depth: brush.grain.depth.clamp(0.0, 1.0),
+            fixed_grain_per_stamp: brush.grain_each_stamp(),
+            grain_scale: brush.grain_tile().max(1e-6),
+            // depth runs past whole now (a re-tuned native grain goes up to twice the old full)
+            grain_depth: brush.grain.depth.clamp(0.0, 2.0),
             rendering: brush.rendering,
             pull: brush.setting("smudge_pull").clamp(0.0, 1.0),
             wet_edges: brush.setting("wet_edges").clamp(0.0, 1.0),
             burnt_edges: brush.setting("burnt_edges").clamp(0.0, 1.0),
             alpha_threshold: if brush.setting("alpha_threshold") >= 0.5 {
-                brush.setting("alpha_threshold_amount").clamp(0.0, 1.0)
+                // Full threshold still admits a fully covered pixel.
+                brush.setting("alpha_threshold_amount").clamp(0.0, 1.0) * (254.0 / 255.0)
             } else {
                 -1.0
             },
             grain_brightness: brush.setting("grain_brightness").clamp(-1.0, 1.0),
+            grain_origin_y: 0.0,
             grain_contrast: brush.setting("grain_contrast").clamp(-1.0, 1.0),
             // wet mix once any of its settings is set
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
@@ -409,8 +435,9 @@ impl StrokeStyle {
             // a brush's rotation turns its grain the other way to the shaders' angle
             // the editors' turn of the image, the whole grain with it (the rotation control is
             // each stamp's own: `Stamp::grain_turn`)
-            grain_rotation: brush.setting("grain_turn").clamp(-1.0, 1.0) * std::f32::consts::PI,
+            grain_rotation: brush.grain_image_rotation(),
             grain_sharp: brush.setting("grain_filtering") < 0.5,
+            grain_classic: brush.setting("grain_filtering").round() == 1.0,
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             full_shape: None,
@@ -425,6 +452,7 @@ impl StrokeStyle {
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
+            recursive: tool == StrokeTool::Paint && brush.mixes_with_stroke(),
             store: 0,
         }
     }
@@ -1014,15 +1042,14 @@ struct StampUniform {
     /// How the grain combines with the shape (a blend mode's number).
     grain_blend: u32,
     /// 1 when the grain is read unfiltered (sharp).
-    grain_sharp: u32,
+    grain_filter: u32,
     /// The secondary colour (straight sRGB), which stamps mix in as far as they say.
     secondary: [f32; 4],
     /// 1 when the shape is read unfiltered (sharp).
     shape_sharp: u32,
     /// The coarsest mip level the shape is read from.
     shape_lod_cap: f32,
-    /// Pixels a side of the image a moving grain is read from.
-    grain_side: f32,
+    fixed_grain_per_stamp: u32,
     /// What its shapes are (see [`TipKind`]).
     tip_kind: u32,
 }
@@ -1057,7 +1084,7 @@ struct LayerUniform {
     grain_blend: u32,
     burnt_blend: u32,
     /// 1 when the grain is read unfiltered (sharp).
-    grain_sharp: f32,
+    grain_filter: f32,
     /// A dual brush's second stroke: how its coverage combines with the first's (a blend mode's
     /// number + 1, with [`DUAL_CLASSIC`]; 0: no second), and where it is cut first (0..1;
     /// negative: not cut).
@@ -1097,7 +1124,7 @@ impl Default for LayerUniform {
             grain_rotation: 0.0,
             grain_blend: MULTIPLY_MODE,
             burnt_blend: MULTIPLY_MODE,
-            grain_sharp: 0.0,
+            grain_filter: 2.0,
             dual: 0,
             dual_threshold: -1.0,
             clip_masked: 0.0,
@@ -1121,17 +1148,17 @@ impl Look {
 impl LayerUniform {
     /// With the stroke's second, if it has one (a dual brush's).
     fn with_dual(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
-        match stroke.and_then(|s| s.second) {
-            Some(d) => LayerUniform { dual: d.uniform_mode(), dual_threshold: d.threshold, ..self },
-            None => self,
-        }
+        let Some(s) = stroke else { return self };
+        let Some(d) = s.second else { return self };
+        LayerUniform { dual: d.uniform_mode(s.style.recursive), dual_threshold: d.threshold, ..self }
     }
 
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
     fn with_grain(self, style: Option<&StrokeStyle>) -> LayerUniform {
         let Some(s) = style else { return self };
         let look = LayerUniform {
-            wet: if s.preview { -s.wet_edges } else { s.wet_edges },
+            scaled: [self.scaled[0], self.scaled[1], self.scaled[2] - s.grain_origin_y, self.scaled[3]],
+            wet: s.wet_edges,
             burnt: if s.preview { 0.0 } else { s.burnt_edges },
             threshold: s.alpha_threshold,
             grain_brightness: s.grain_brightness,
@@ -1140,7 +1167,7 @@ impl LayerUniform {
             grain_rotation: s.grain_rotation,
             grain_blend: s.grain_blend,
             burnt_blend: s.burnt_blend,
-            grain_sharp: if s.grain_sharp { 1.0 } else { 0.0 },
+            grain_filter: s.grain_filter() as f32,
             grain_side: s.grain_side,
             ..self
         };
@@ -1431,17 +1458,25 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         blur: 0.0,
         grain: style.grain.map_or(-1, |g| g as i32),
         // a moving grain sized and as deep as this stamp says
-        grain_scale: if moving { -(style.grain_scale * s.look[1]).max(1.0) } else { style.grain_scale },
-        grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 1.0) } else { style.grain_depth },
+        grain_scale: if moving && !style.fixed_grain_per_stamp {
+            -(style.grain_scale * s.look[1]).max(1e-6)
+        } else {
+            style.grain_scale
+        },
+        grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 2.0) } else { style.grain_depth },
         // only the patch turns by the stamp's own turn, where it is read from staying put: the
         // wet shader turns all it reads, so that is turned back first
-        grain_offset: {
+        grain_offset: if style.fixed_grain_per_stamp {
+            [0.0; 2]
+        } else if moving {
             let (sin, cos) = s.grain_turn.sin_cos();
             let [x, y] = s.grain_offset;
             [x * cos + y * sin, y * cos - x * sin]
+        } else {
+            [0.0, -style.grain_origin_y]
         },
         grain_rotation: style.grain_rotation + s.grain_turn,
-        grain_sharp: if style.grain_sharp { 1.0 } else { 0.0 },
+        grain_filter: style.grain_filter() as f32,
         shape_sharp: if style.shape_sharp { 1.0 } else { 0.0 },
         shape_lod_cap: style.shape_lod_cap,
         grain_press: s.more[0],
@@ -1468,7 +1503,7 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
             (true, false) => 1,
             (true, true) => 2,
         },
-        grain_side: style.grain_side,
+        alpha_threshold: style.alpha_threshold,
         burnt: if style.preview { 0.0 } else { style.burnt_edges },
         burnt_blend: style.burnt_blend,
         flip: s.flip,
@@ -1521,7 +1556,7 @@ struct SmudgeUniform {
     grain_offset: [f32; 2],
     grain_rotation: f32,
     /// 1 when the grain is read unfiltered (sharp).
-    grain_sharp: f32,
+    grain_filter: f32,
     /// 1 when the shape is read unfiltered (sharp).
     shape_sharp: f32,
     /// How hard the paint is pressed into a moving grain and how much that counts (see
@@ -1563,8 +1598,8 @@ struct SmudgeUniform {
     wet_edges: f32,
     /// Wet paint with luminance blending: 1 when its colours mix squared.
     luminance: u32,
-    /// Pixels a side of the image the grain is read from.
-    grain_side: f32,
+    /// Cutoff for the final deposited paint, or negative when disabled.
+    alpha_threshold: f32,
     /// How far paint laid apart burns the paint it goes over, and by what blend mode.
     burnt: f32,
     burnt_blend: u32,
@@ -1784,13 +1819,20 @@ fn grain_once(style: &StrokeStyle) -> bool {
 struct ActiveStroke {
     layer: LayerId,
     style: StrokeStyle,
-    bounds: IRect,
+    primary_bounds: IRect,
+    second_bounds: IRect,
     /// Painting an adjustment on: the stamps go into the adjustment's mask, not a layer.
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
     second: Option<SecondStroke>,
     /// Lays its pixels only within this (see [`Canvas::lay_within`]).
     within: Option<IRect>,
+}
+
+impl ActiveStroke {
+    fn bounds(&self) -> IRect {
+        self.primary_bounds.union(self.second_bounds)
+    }
 }
 
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
@@ -1808,11 +1850,14 @@ pub struct SecondStroke {
 
 /// Set in a uniform's `dual` (over the dual mode's number + 1): the classic Normal combine.
 const DUAL_CLASSIC: u32 = 1 << 16;
+const DUAL_RECURSIVE: u32 = 1 << 17;
 
 impl SecondStroke {
-    /// The dual mode's number + 1, with [`DUAL_CLASSIC`] for the classic Normal combine.
-    fn uniform_mode(&self) -> u32 {
-        (self.mode + 1) | if self.classic { DUAL_CLASSIC } else { 0 }
+    /// Pack the blend mode with the options for combining the two deposits.
+    fn uniform_mode(&self, recursive: bool) -> u32 {
+        let classic = if self.classic { DUAL_CLASSIC } else { 0 };
+        let recursive = if recursive { DUAL_RECURSIVE } else { 0 };
+        (self.mode + 1) | classic | recursive
     }
 }
 
@@ -3136,13 +3181,30 @@ impl Canvas {
     /// Points `style` at `brush`'s own shape and grain images, if it has them, putting them in
     /// the arrays' spare layers first if they aren't there.
     pub fn use_sources(&mut self, gpu: &Gpu, style: &mut StrokeStyle, brush: &Brush) {
-        if brush.shape.source.is_some() || brush.grain.source.is_some() {
+        let grain = brush.grain.source.as_ref().or_else(|| {
+            let inverted = brush.setting("empty_grain_inverted") > 0.5;
+            let level = if inverted { 0.0 } else { 1.0 };
+            let adjusted = (level - 0.5) * (1.0 + style.grain_contrast) + 0.5 + style.grain_brightness;
+            if style.grain.is_some()
+                || brush.grain.image.is_some()
+                || style.grain_depth == 0.0
+                || style.grain_blend == 0
+                || (style.grain_blend == MULTIPLY_MODE && adjusted >= 1.0)
+            {
+                return None;
+            }
+            static WHITE: OnceLock<Option<Source>> = OnceLock::new();
+            static BLACK: OnceLock<Option<Source>> = OnceLock::new();
+            let (slot, pixel) = if inverted { (&BLACK, 0) } else { (&WHITE, 255) };
+            slot.get_or_init(|| Source::new(vec![pixel; TEXTURE_SIZE * TEXTURE_SIZE])).as_ref()
+        });
+        if brush.shape.source.is_some() || grain.is_some() {
             self.prepare_brush_images(gpu);
         }
         if let Some(source) = brush.shape.source.as_ref() {
             style.shape = Some(self.shape_sources.layer(gpu, &self.shapes, source));
         }
-        if let Some(source) = brush.grain.source.as_ref() {
+        if let Some(source) = grain {
             style.grain = Some(self.grain_sources.layer(gpu, &self.grains, source));
         }
     }
@@ -3205,17 +3267,25 @@ impl Canvas {
     /// `style` reads the brush file's grain `id` (`pixels`, `side` square) in place of the brush
     /// images: each stroke its own, kept on the GPU while it is among the last few used.
     pub fn use_full_grain(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
-        if self.full_grains.hold(gpu, id, side, pixels) {
+        self.use_grain_image(gpu, style, id, [side, side], pixels);
+    }
+
+    pub fn use_grain_image(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, size: [u32; 2], pixels: &[u8]) {
+        if self.full_grains.hold_set(gpu, id, size, &[pixels], 1) {
             style.grain = Some(0);
             style.full_grain = Some(id);
-            style.grain_side = side as f32;
+            style.grain_side = size[0] as f32;
         }
     }
 
     /// `style` reads the brush file's shape `id` (`pixels`, `side` square) in place of the brush
     /// images: each stroke its own, kept on the GPU while it is among the last few used.
     pub fn use_full_shape(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
-        if self.full_shapes.hold(gpu, id, side, pixels) {
+        self.use_shape_image(gpu, style, id, [side, side], pixels);
+    }
+
+    pub fn use_shape_image(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, size: [u32; 2], pixels: &[u8]) {
+        if self.full_shapes.hold_set(gpu, id, size, &[pixels], 1) {
             style.shape = Some(0);
             style.full_shape = Some(id);
         }
@@ -3234,7 +3304,7 @@ impl Canvas {
         tips: &[&[u8]],
         kind: TipKind,
     ) {
-        if self.full_shapes.hold_set(gpu, id, side, tips, kind.channels()) {
+        if self.full_shapes.hold_set(gpu, id, [side, side], tips, kind.channels()) {
             style.shape = Some(0);
             style.full_shape = Some(id);
             style.tip_kind = kind;
@@ -3466,7 +3536,15 @@ impl Canvas {
         self.prediction.clear();
         self.laid = Some(Vec::new());
         let within = self.lay_within;
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
+        self.active = Some(ActiveStroke {
+            layer,
+            style,
+            primary_bounds: IRect::EMPTY,
+            second_bounds: IRect::EMPTY,
+            pencil: false,
+            second: None,
+            within,
+        });
     }
 
     /// How a laid stroke is marked in this canvas's stroke (see `STROKE_LAID`).
@@ -3510,7 +3588,8 @@ impl Canvas {
         if let Some(active) = self.active.as_mut()
             && active.second.take().is_some()
         {
-            self.dirty = self.dirty.union(active.bounds);
+            self.dirty = self.dirty.union(active.bounds());
+            active.second_bounds = IRect::EMPTY;
             self.ops.push(Op::DropSecond);
         }
     }
@@ -3545,7 +3624,7 @@ impl Canvas {
         let full = self.full();
         let Some(active) = self.active.as_mut() else { return };
         let bounds = bounds.intersect(full);
-        active.bounds = active.bounds.union(bounds);
+        active.primary_bounds = active.primary_bounds.union(bounds);
         self.dirty = self.dirty.union(bounds);
     }
 
@@ -3654,13 +3733,14 @@ impl Canvas {
         let within = active.within.filter(|_| !style.in_place());
         let drawn: Vec<&Stamp> =
             drawn.into_iter().filter(|s| within.is_none_or(|w| !reach(s).intersect(w).is_empty())).collect();
-        if clear && !second {
+        let part = if second { &mut active.second_bounds } else { &mut active.primary_bounds };
+        if clear {
             if !self.measuring {
-                self.dirty = self.dirty.union(active.bounds);
+                self.dirty = self.dirty.union(*part);
             }
-            active.bounds = bounds;
+            *part = bounds;
         } else {
-            active.bounds = active.bounds.union(bounds);
+            *part = part.union(bounds);
         }
         if self.measuring {
             return bounds;
@@ -3781,7 +3861,7 @@ impl Canvas {
         self.laid = None;
         self.untip();
         if let Some(active) = self.active.take() {
-            self.last_ended = Some((active.bounds, active.style.in_place()));
+            self.last_ended = Some((active.bounds(), active.style.in_place()));
             if !self.measuring {
                 self.ops.push(Op::Commit(active));
             }
@@ -4146,7 +4226,7 @@ impl Canvas {
         if let Some(active) = self.active.take()
             && !self.measuring
         {
-            self.dirty = self.dirty.union(active.bounds);
+            self.dirty = self.dirty.union(active.bounds());
             self.ops.push(Op::Cancel);
         }
     }
@@ -5008,8 +5088,15 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active =
-            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, within: None });
+        self.active = Some(ActiveStroke {
+            layer,
+            style,
+            primary_bounds: IRect::EMPTY,
+            second_bounds: IRect::EMPTY,
+            pencil: true,
+            second: None,
+            within: None,
+        });
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -5530,10 +5617,10 @@ impl Canvas {
                         grain_contrast: style.grain_contrast,
                         grain_rotation: style.grain_rotation,
                         grain_blend: style.grain_blend,
-                        grain_sharp: u32::from(style.grain_sharp),
+                        grain_filter: style.grain_filter(),
                         shape_sharp: u32::from(style.shape_sharp),
                         shape_lod_cap: style.shape_lod_cap,
-                        grain_side: style.grain_side,
+                        fixed_grain_per_stamp: u32::from(style.fixed_grain_per_stamp),
                         tip_kind: style.tip_kind as u32,
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
@@ -5627,15 +5714,15 @@ impl Canvas {
                     self.lay_wet(gpu, &mut encoder, uniforms, &held, &stroke.style);
                     // a dual brush's paint laid apart, put together over the whole stroke once more
                     // (its second's first stamps may have come before the paint laid apart began)
-                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, stroke.bounds);
-                    self.finish_smudge(device, &mut encoder, stroke.bounds, false);
+                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, stroke.bounds());
+                    self.finish_smudge(device, &mut encoder, stroke.bounds(), false);
                     history_changed = true;
                 }
                 // painting an adjustment on leaves the layer to the adjustment
                 Op::Commit(stroke) if stroke.pencil => {
                     self.within = None;
                     if let Some(mask) = self.pencil.as_mut() {
-                        mask.bounds = mask.bounds.union(stroke.bounds);
+                        mask.bounds = mask.bounds.union(stroke.bounds());
                     }
                 }
                 Op::Commit(stroke) => {
@@ -6530,8 +6617,12 @@ impl Canvas {
             let wet_paint = style.paints_in_place();
             // paint laid in place with a second, a texturized grain, wet or burnt edges, or a
             // glaze of its own over its wet paint is laid apart, and put together with them
-            let second = self.queued_second.map(|d| (d.uniform_mode(), d.threshold));
-            let alone = grain_once(style) || style.wet_edges > 0.0 || style.burnt_edges > 0.0 || wet_rule(style) != 0;
+            let second = self.queued_second.map(|d| (d.uniform_mode(style.recursive), d.threshold));
+            let alone = grain_once(style)
+                || style.wet_edges > 0.0
+                || style.burnt_edges > 0.0
+                || style.alpha_threshold >= 0.0
+                || wet_rule(style) != 0;
             let apart = second
                 .or(alone.then_some((0, -1.0)))
                 .filter(|_| wet_paint)
@@ -7167,7 +7258,7 @@ impl Canvas {
         uniforms: &mut UniformData,
         stroke: ActiveStroke,
     ) {
-        let rect = stroke.bounds.intersect(self.full());
+        let rect = stroke.bounds().intersect(self.full());
         // laid only within part of the layer (never one laid in place: it has changed it already)
         let rect = stroke.within.filter(|_| !stroke.style.in_place()).map_or(rect, |w| rect.intersect(w));
         let within = self.within.take();
@@ -12055,36 +12146,34 @@ struct FullGrains {
 }
 
 impl FullGrains {
-    /// Has the image `id` ready; false if `pixels` aren't `side` square.
-    fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
-        self.hold_set(gpu, id, side, &[pixels], 1)
-    }
-
     /// Has the images `id` ready, one to a layer in their order, `channels` bytes a pixel (1 grey,
-    /// 4 RGBA straight, held premultiplied); false if any isn't `side` square, there are none or
+    /// 4 RGBA straight, held premultiplied); false if the dimensions disagree, there are none or
     /// more than [`MOST_TIPS`].
-    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]], channels: u32) -> bool {
+    fn hold_set(&mut self, gpu: &Gpu, id: u64, [width, height]: [u32; 2], images: &[&[u8]], channels: u32) -> bool {
         self.clock += 1;
         let clock = self.clock;
         if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
             slot.2 = clock;
             return true;
         }
-        let square = (side as usize).pow(2) * channels as usize;
+        let length = u64::from(width) * u64::from(height);
+        let limit = gpu.device.limits().max_texture_dimension_2d;
         let most = MOST_TIPS.min(gpu.device.limits().max_texture_array_layers.saturating_sub(1)) as usize;
-        if !side.is_power_of_two()
+        if width == 0
+            || height == 0
+            || width.max(height) > limit
             || !matches!(channels, 1 | 4)
             || images.is_empty()
             || images.len() > most
-            || images.iter().any(|i| i.len() != square)
+            || images.iter().any(|i| i.len() as u64 != length * u64::from(channels))
         {
             return false;
         }
         let layers = gpu.array_layers(images.len() as u32).max(gpu.array_layers_least());
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("full grain"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
-            mip_level_count: side.ilog2() + 1,
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: layers },
+            mip_level_count: width.max(height).ilog2() + 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: if channels == 4 { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::R8Unorm },
@@ -12103,9 +12192,9 @@ impl FullGrains {
                         [by(r), by(g), by(b), a]
                     })
                     .collect();
-                write_image_levels_of(gpu, &texture, layer as u32, side, &premultiplied, 4);
+                write_image_levels_of(gpu, &texture, layer as u32, [width, height], &premultiplied, 4);
             } else {
-                write_image_levels(gpu, &texture, layer as u32, side, pixels);
+                write_image_levels_of(gpu, &texture, layer as u32, [width, height], pixels, 1);
             }
         }
         if self.held.len() >= FULL_GRAINS_HELD
@@ -12212,14 +12301,14 @@ fn write_brush_image(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, pixels: &[u
 
 /// A greyscale image `n` square into `layer` of `texture`, every mip level.
 fn write_image_levels(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pixels: &[u8]) {
-    write_image_levels_of(gpu, texture, layer, n, pixels, 1);
+    write_image_levels_of(gpu, texture, layer, [n, n], pixels, 1);
 }
 
 /// [`write_image_levels`] for an image of `channels` bytes a pixel.
-fn write_image_levels_of(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pixels: &[u8], channels: u32) {
-    let mut level = pixels.to_vec();
-    let mut size = n;
-    for mip in 0..n.ilog2() + 1 {
+fn write_image_levels_of(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, size: [u32; 2], pixels: &[u8], channels: u32) {
+    let [mut width, mut height] = size;
+    let mut level = std::borrow::Cow::Borrowed(pixels);
+    for mip in 0..=width.max(height).ilog2() {
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -12228,51 +12317,58 @@ fn write_image_levels_of(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32,
                 aspect: wgpu::TextureAspect::All,
             },
             &level,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * channels), rows_per_image: Some(size) },
-            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * channels),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        if size > 1 {
-            level = if channels == 1 {
-                half_size(&level, size as usize)
-            } else {
-                half_size_of(&level, size as usize, channels as usize)
-            };
-            size /= 2;
+        if width > 1 || height > 1 {
+            let (w, h) = ((width / 2).max(1), (height / 2).max(1));
+            let next = brush_mip_level(&level, width, height, channels);
+            level = std::borrow::Cow::Owned(next);
+            (width, height) = (w, h);
         }
     }
 }
 
-/// [`half_size`] for an image of `channels` bytes a pixel, each channel on its own.
-fn half_size_of(pixels: &[u8], size: usize, channels: usize) -> Vec<u8> {
-    let half = size / 2;
-    let at = |x: usize, y: usize, c: usize| u32::from(pixels.get((y * size + x) * channels + c).copied().unwrap_or(0));
-    let mut out = Vec::with_capacity(half * half * channels);
-    for y in 0..half {
-        for x in 0..half {
-            for c in 0..channels {
-                let sum = at(2 * x, 2 * y, c)
-                    + at(2 * x + 1, 2 * y, c)
-                    + at(2 * x, 2 * y + 1, c)
-                    + at(2 * x + 1, 2 * y + 1, c);
-                out.push(((sum + 2) / 4) as u8);
+/// Filter at the destination texel centers in normalized image coordinates. This
+/// keeps an asymmetric brush head registered even when an odd dimension is halved.
+fn brush_mip_level(pixels: &[u8], width: u32, height: u32, channels: u32) -> Vec<u8> {
+    let samples = |source: u32| {
+        let target = (source / 2).max(1);
+        let divisor = 2 * target;
+        // The source coordinate is (i + 0.5) * source / target - 0.5.
+        let samples = (0..target)
+            .map(|i| {
+                let position = (2 * i + 1) * source - target;
+                let first = position / divisor;
+                let weight = u64::from(position % divisor);
+                [(first, u64::from(divisor) - weight), ((first + 1).min(source - 1), weight)]
+            })
+            .collect::<Vec<_>>();
+        (samples, u64::from(divisor))
+    };
+    let (columns, x_unit) = samples(width);
+    let (rows, y_unit) = samples(height);
+    let area = x_unit * y_unit;
+    let mut next = Vec::with_capacity(rows.len() * columns.len() * channels as usize);
+    for row in rows {
+        for column in &columns {
+            for channel in 0..channels {
+                let mut sum = 0;
+                for (y, wy) in row {
+                    for &(x, wx) in column {
+                        let i = ((y * width + x) * channels + channel) as usize;
+                        sum += u64::from(pixels.get(i).copied().unwrap_or(0)) * wx * wy;
+                    }
+                }
+                next.push(((sum + area / 2) / area) as u8);
             }
         }
     }
-    out
-}
-
-/// A square greyscale image at half the size: each pixel the average of four.
-fn half_size(pixels: &[u8], size: usize) -> Vec<u8> {
-    let half = size / 2;
-    let at = |x: usize, y: usize| u32::from(pixels.get(y * size + x).copied().unwrap_or(0));
-    let mut out = Vec::with_capacity(half * half);
-    for y in 0..half {
-        for x in 0..half {
-            let sum = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
-            out.push(((sum + 2) / 4) as u8);
-        }
-    }
-    out
+    next
 }
 
 /// The stamp shader's shapes, grains and selection, and its two samplers.
@@ -12624,6 +12720,19 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odd_brush_mip_levels_keep_a_centered_mark_centered() {
+        let mark = [0, 80, 0, 80, 0];
+        assert_eq!(brush_mip_level(&mark, 5, 1, 1), [60, 60]);
+        assert_eq!(brush_mip_level(&mark, 1, 5, 1), [60, 60]);
+        let mut rgba = vec![0; 5 * 5 * 4];
+        for i in [6, 8, 16, 18] {
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&[16, 32, 48, 64]);
+        }
+        assert_eq!(brush_mip_level(&rgba, 5, 5, 4), [9, 18, 27, 36].repeat(4));
+        assert_eq!(brush_mip_level(&[10, 20, 30, 40], 2, 2, 1), [25]);
+    }
 
     /// Pictures of every size up to a few dozen, painted in patches with clear between (as a
     /// layer is), the shrunken ones and the painted bounds as the old pixel-at-a-time ways give.
@@ -13515,6 +13624,14 @@ mod tests {
         canvas.undo();
         canvas.render(&gpu, &mut doc, None);
         assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+    }
+
+    #[test]
+    fn stroke_style_keeps_a_grain_repeat_smaller_than_a_pixel() {
+        let mut brush = Brush::round_pen();
+        brush.grain.scale = 0.75;
+        let style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0; 3], 1.0, false);
+        assert_eq!(style.grain_scale, 0.75);
     }
 
     #[test]
