@@ -5,6 +5,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.TouchSettings
 
 /** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
 internal const val PEN_DOUBLE_TAP_KEY = 718
@@ -63,6 +64,14 @@ internal fun pointerKind(toolType: Int, source: Int, classification: Int = 0): P
 /** What pointer [index] of [e] is to the canvas (see [pointerKind]). */
 internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
     pointerKind(e.getToolType(index), e.source, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) e.classification else 0)
+
+/**
+ * [settings] as the tablet takes them: a mouse, or a touchpad moving the pointer, does what a finger
+ * is set to do. With painting with a finger off it paints nothing (a drag does what a finger's
+ * does), and on a model it turns the model; it still has no pressure and is never taken for a hand
+ * resting by the pen.
+ */
+internal fun tabletTouchSettings(settings: TouchSettings): TouchSettings = settings.copy(pointerFollowsTouch = true)
 
 /**
  * Whether a mouse's press with [buttonState] held paints: its primary button's does (and a press

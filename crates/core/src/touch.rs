@@ -199,6 +199,13 @@ pub struct TouchSettings {
     pub hold_ms: f64,
     pub quickshape_ms: f64,
     pub rapid_undo_ms: f64,
+    /// A mouse, or a touchpad moving the pointer, does what a finger is set to do (a tablet's
+    /// way): with painting with a finger off it paints nothing, on a shown model it turns the
+    /// model, and an adjustment's Pencil leaves it to drag the amount. Off, it paints as the pen
+    /// does (a desktop's drawing tool). Either way it has no pressure and is never taken for a
+    /// hand resting by the pen.
+    #[uniffi(default = false)]
+    pub pointer_follows_touch: bool,
 }
 
 impl Default for TouchSettings {
@@ -225,6 +232,7 @@ impl Default for TouchSettings {
             hold_ms: 400.0,
             quickshape_ms: 650.0,
             rapid_undo_ms: 650.0,
+            pointer_follows_touch: false,
         }
     }
 }
@@ -727,6 +735,12 @@ fn is_pen(kind: PointerKind) -> bool {
     matches!(kind, PointerKind::Stylus | PointerKind::StylusEraser)
 }
 
+/// Whether a touch of `kind` does what a finger is set to: a finger's, and the mouse's where it
+/// follows Touch (see [`TouchSettings::pointer_follows_touch`]).
+fn as_finger(kind: PointerKind, settings: &TouchSettings) -> bool {
+    kind == PointerKind::Finger || (kind == PointerKind::Mouse && settings.pointer_follows_touch)
+}
+
 impl CanvasSession {
     fn touches(&self) -> std::sync::MutexGuard<'_, Touches> {
         self.shared.touches.lock().unwrap_or_else(|e| e.into_inner())
@@ -1167,7 +1181,7 @@ impl CanvasSession {
         // a touch made while the modify button is held does what □ + Touch (□ + Pen) is set to
         if t.modify_held && t.modify_pointer.is_none() && (t.down.len() == 1 || t.mode == Mode::None) {
             // on a model painted with a finger, the button held makes a finger turn it
-            if kind == PointerKind::Finger && t.settings.model_finger_paint && self.shared.lock().scene_shown() {
+            if as_finger(kind, &t.settings) && t.settings.model_finger_paint && self.shared.lock().scene_shown() {
                 t.modify_used = true;
                 t.stroke_pointer = id;
                 t.turn_last = (first.x, first.y);
@@ -1814,7 +1828,7 @@ impl CanvasSession {
         }
         self.end_shape_with(t, out);
         let adjusting = self.shared.lock().adjust.open();
-        let draws = is_pen(kind) || kind == PointerKind::Mouse;
+        let draws = is_pen(kind) || (kind == PointerKind::Mouse && !t.settings.pointer_follows_touch);
         if let Some((open, pencil)) = adjusting
             && (open == Adjustment::Clone || (pencil && draws))
         {
@@ -1861,7 +1875,7 @@ impl CanvasSession {
         // a picture being placed on a model is moved by what lands on it (a pen or mouse, anywhere);
         // otherwise a finger turns the model under it
         let placing = self.shared.lock().scene_picture_under(at);
-        if placing == Some(true) || (placing.is_some() && kind != PointerKind::Finger) {
+        if placing == Some(true) || (placing.is_some() && !as_finger(kind, &t.settings)) {
             t.stroke_pointer = id;
             t.turn_last = at;
             t.mode = Mode::Picture;
@@ -1903,7 +1917,7 @@ impl CanvasSession {
         }
         // on a shown model a finger turns it, unless set to paint; the pen paints. Held still, it
         // does what a hold does anywhere
-        let on_model = kind == PointerKind::Finger && self.shared.lock().scene_shown();
+        let on_model = as_finger(kind, &t.settings) && self.shared.lock().scene_shown();
         if on_model && !t.settings.model_finger_paint {
             t.stroke_pointer = id;
             t.turn_last = at;
@@ -1942,8 +1956,9 @@ impl CanvasSession {
                 _ => {}
             }
         }
-        // a finger set not to paint (a mouse, a desktop's drawing tool, paints as the pen does)
-        if kind == PointerKind::Finger && does.is_none() && !t.settings.finger_paint && !on_model {
+        // a finger set not to paint (a mouse, a desktop's drawing tool, paints as the pen does
+        // unless it follows Touch)
+        if as_finger(kind, &t.settings) && does.is_none() && !t.settings.finger_paint && !on_model {
             t.mode = Mode::Idle;
             // set to move the canvas: it does once it moves past a tap's slop
             if t.settings.one_finger_pan {
@@ -1986,7 +2001,7 @@ impl CanvasSession {
 
     /// Whether a touch of `kind` on the screen turns a shown model.
     fn finger_turns_model(&self, kind: PointerKind, t: &Touches) -> bool {
-        kind == PointerKind::Finger && !t.settings.model_finger_paint && self.shared.lock().scene_shown()
+        as_finger(kind, &t.settings) && !t.settings.model_finger_paint && self.shared.lock().scene_shown()
     }
 
     fn another_down(&self, t: &mut Touches, kind: PointerKind, now: f64, out: &mut Vec<TouchCommand>) {
@@ -3414,6 +3429,32 @@ mod tests {
             out.extend(s.touch_up(1, at(100.0, 100.0, ms + 90.0)));
             assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
         }
+    }
+
+    #[test]
+    fn a_mouse_following_touch_does_what_a_finger_does_and_is_never_a_resting_hand() {
+        let s = session();
+        let off = TouchSettings { finger_paint: false, one_finger_pan: true, ..TouchSettings::default() };
+        // a tablet's: with painting with a finger off, the mouse moves the canvas as a finger does
+        s.set_touch_settings(TouchSettings { pointer_follows_touch: true, ..off.clone() });
+        s.touch_down(1, PointerKind::Mouse, at(100.0, 100.0, 0.0));
+        assert!(!painting(&s));
+        assert!(s.touch_move(1, at(200.0, 100.0, 20.0)).contains(&TouchCommand::ViewMoved));
+        assert!(!s.touch_up(1, at(200.0, 100.0, 40.0)).contains(&TouchCommand::StrokeEnded));
+        // painting with a finger on, it paints, at full pressure, the pen just gone
+        s.set_touch_settings(TouchSettings { pointer_follows_touch: true, ..TouchSettings::default() });
+        s.touch_down(2, PointerKind::Stylus, vec![pressed(10.0, 10.0, 0.5, 100.0)]);
+        s.touch_up(2, vec![pressed(10.0, 10.0, 0.5, 120.0)]);
+        s.touch_down(1, PointerKind::Mouse, at(100.0, 100.0, 150.0));
+        assert!(painting(&s), "a mouse is no hand resting by the pen");
+        s.touch_move(1, at(160.0, 100.0, 170.0));
+        assert!(s.touch_up(1, at(160.0, 100.0, 190.0)).contains(&TouchCommand::StrokeEnded));
+        // a desktop's: it paints as the pen does, whatever a finger does
+        s.set_touch_settings(off);
+        s.touch_down(1, PointerKind::Mouse, at(100.0, 100.0, 1000.0));
+        assert!(painting(&s));
+        s.touch_move(1, at(160.0, 100.0, 1020.0));
+        assert!(s.touch_up(1, at(160.0, 100.0, 1040.0)).contains(&TouchCommand::StrokeEnded));
     }
 
     #[test]

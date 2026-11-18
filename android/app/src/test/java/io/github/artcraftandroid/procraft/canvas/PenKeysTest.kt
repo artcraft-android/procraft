@@ -3,7 +3,9 @@ package io.github.artcraftandroid.procraft.canvas
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import io.github.artcraftandroid.procraft.core.GestureAction
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.TouchSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -201,6 +203,34 @@ class PenKeysTest {
         assertEquals(true, mousePressPaints(0))
         for (other in listOf(MotionEvent.BUTTON_SECONDARY, MotionEvent.BUTTON_TERTIARY, MotionEvent.BUTTON_BACK, MotionEvent.BUTTON_FORWARD)) {
             assertEquals(false, mousePressPaints(other))
+        }
+    }
+
+    /** The touch settings as the shared touches ship them: a mouse paints as the pen does. */
+    private fun shipped(fingerPaint: Boolean, oneFingerPan: Boolean, modelFingerPaint: Boolean) = TouchSettings(
+        fingerPaint = fingerPaint, oneFingerPan = oneFingerPan, undoTaps = true, rotate = true, modelFingerPaint = modelFingerPaint,
+        drawAndHold = true, touch = null, pen = null, hold = GestureAction.EYEDROPPER, modifyTouch = null, modifyPen = null,
+        fourTap = null, threeSwipe = null, penButton = null, penSecondButton = null, scrub = true, hoverTouch = false,
+        holdMs = 400.0, quickshapeMs = 650.0, rapidUndoMs = 650.0,
+    )
+
+    @Test
+    fun on_the_tablet_with_painting_with_a_finger_off_the_mouse_paints_nothing_as_a_finger() {
+        assertEquals(false, shipped(fingerPaint = false, oneFingerPan = true, modelFingerPaint = false).pointerFollowsTouch)
+        for ((paint, pan) in listOf(false to true, false to false, true to false)) {
+            val tablet = tabletTouchSettings(shipped(paint, pan, modelFingerPaint = false))
+            // the mouse does what a finger is set to: the finger's settings kept as they were
+            assertEquals(true, tablet.pointerFollowsTouch)
+            assertEquals(shipped(paint, pan, modelFingerPaint = false), tablet.copy(pointerFollowsTouch = false))
+        }
+    }
+
+    @Test
+    fun on_the_tablet_the_mouse_turns_a_model_as_a_finger_unless_a_finger_paints_it() {
+        for (modelPaint in listOf(false, true)) {
+            val tablet = tabletTouchSettings(shipped(fingerPaint = true, oneFingerPan = false, modelFingerPaint = modelPaint))
+            assertEquals(true, tablet.pointerFollowsTouch)
+            assertEquals(modelPaint, tablet.modelFingerPaint)
         }
     }
 }

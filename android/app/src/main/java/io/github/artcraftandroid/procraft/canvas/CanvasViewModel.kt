@@ -2988,7 +2988,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
-    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings = gestures.touchSettings(rapidUndoDelay * 1000.0)
+    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings = tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0))
 
     /** The middle of the screen (window pixels), for menus a button opens. */
     var screenCentre = Offset(800f, 1280f)

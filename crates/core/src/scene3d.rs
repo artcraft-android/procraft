@@ -4079,6 +4079,50 @@ mod tests {
         assert_eq!(painted(&s), kept);
     }
 
+    #[test]
+    fn a_mouse_following_touch_turns_a_model_as_a_finger_does() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let orbit = |s: &CanvasSession| s.shared.lock().scene.as_ref().and_then(|c| c.view.as_ref()).map(|v| v.orbit);
+        let drag = |s: &CanvasSession, t: f64| {
+            s.touch_down(1, PointerKind::Mouse, vec![sample(70.0, 100.0, t)]);
+            frame(s, 200);
+            s.touch_move(1, (1..16).map(|i| sample(70.0 + i as f32 * 4.0, 100.0, t + f64::from(i) * 8.0)).collect());
+            frame(s, 200);
+            let out = s.touch_up(1, vec![sample(134.0, 100.0, t + 140.0)]);
+            frame(s, 200);
+            out
+        };
+        // a tablet's: the mouse turns it, painting nothing
+        s.set_touch_settings(crate::TouchSettings { pointer_follows_touch: true, ..Default::default() });
+        let before = orbit(&s);
+        let out = drag(&s, 0.0);
+        assert!(!out.contains(&crate::TouchCommand::StrokeEnded), "{out:?}");
+        assert_ne!(orbit(&s), before);
+        assert_eq!(painted(&s), 0);
+        // set to paint the model with a finger, it paints it as a finger would
+        s.set_touch_settings(crate::TouchSettings {
+            pointer_follows_touch: true,
+            model_finger_paint: true,
+            ..Default::default()
+        });
+        let turned = orbit(&s);
+        drag(&s, 1000.0);
+        assert_eq!(orbit(&s), turned);
+        let kept = painted(&s);
+        assert!(kept > 100, "{kept}");
+        // a desktop's: the mouse paints it as the pen does
+        s.set_touch_settings(crate::TouchSettings::default());
+        let _ = s.undo();
+        assert_eq!(painted(&s), 0);
+        drag(&s, 2000.0);
+        assert_eq!(orbit(&s), turned);
+        assert!(painted(&s) > 100);
+    }
+
     /// Two squares facing the camera side by side, Left and Right, one material: Left on the left
     /// half of the texture, Right on the right.
     const TWO_MESHES: &str = "v -2 -1 0\nv -0.2 -1 0\nv -0.2 1 0\nv -2 1 0\n\
