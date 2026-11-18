@@ -3454,6 +3454,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A session on a window, its canvas fitted in it.
+    fn viewed() -> Arc<crate::CanvasSession> {
+        let s = crate::CanvasSession::new(100, 100);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (400, 400);
+            st.view = Some(procraft_engine::view::View::fit((100, 100), (400, 400)));
+        }
+        s
+    }
+
+    fn press(plugins: &Plugins, text: &str) -> Option<PluginPressed> {
+        plugins.plugin_press(KeyCombo::read(text).unwrap())
+    }
+
+    #[test]
+    fn rotation_reset_turns_the_canvas_from_the_canvas_tab_or_its_press_and_locks_pinching() {
+        const ROTATION: &str = "io.github.artcraftandroid.rotation-reset";
+        let dir = store("bundled-rotation");
+        let plugins = app_at(&dir);
+        // off, the Canvas tab has nothing of it and its press is no one's
+        assert!(
+            plugins.controls_in(PluginPlace::Canvas).is_empty() && plugins.actions_in(PluginPlace::Canvas).is_empty()
+        );
+        assert_eq!(press(&plugins, "alt+r"), None);
+        assert!(plugins.set_on(ROTATION.to_owned(), true));
+        let reset = format!("{ROTATION}.reset");
+        let keys = |controls: Vec<PluginControl>| controls.iter().map(|c| c.key().to_owned()).collect::<Vec<_>>();
+        assert_eq!(keys(plugins.controls_in(PluginPlace::Canvas)), [format!("{ROTATION}.lock")]);
+        let actions: Vec<String> = plugins.actions_in(PluginPlace::Canvas).into_iter().map(|a| a.key).collect();
+        assert_eq!(actions, [reset.clone()]);
+        assert!(plugins.controls_in(PluginPlace::Card).is_empty());
+        // Alt+R runs it, and the keyboard's list says so
+        assert_eq!(press(&plugins, "alt+r"), Some(PluginPressed::Action { key: reset.clone() }));
+        assert_eq!(press(&plugins, "r"), None);
+        let list = plugins.key_shortcut_list(false, false);
+        let ours = list.iter().find(|g| g.heading == "Plugins").unwrap();
+        assert_eq!(ours.rows.iter().map(|r| r.does.as_str()).collect::<Vec<_>>(), ["Reset rotation"]);
+        // run on a turned canvas: upright, or the nearest right angle, the middle staying put
+        let s = viewed();
+        s.view_gesture(200.0, 200.0, 0.0, 0.0, 2.0, 1.2);
+        let middle = s.shared.lock().view.unwrap().screen_to_canvas(procraft_engine::geom::Vec2::new(200.0, 200.0));
+        let settled = |s: &crate::CanvasSession| {
+            let mut st = s.shared.lock();
+            st.view = st.view_motion.take().map(|m| m.to).or(st.view);
+            st.view.unwrap()
+        };
+        assert!(plugins.run_action(reset.clone(), Arc::clone(&s)));
+        let v = settled(&s);
+        assert!(
+            v.rotation().abs() < 1e-5
+                && (v.zoom() / 2.0 - procraft_engine::view::View::fit((100, 100), (400, 400)).zoom()).abs() < 1e-3
+        );
+        assert_eq!(
+            v.screen_to_canvas(procraft_engine::geom::Vec2::new(200.0, 200.0)).map(|p| (p.x.round(), p.y.round())),
+            middle.map(|p| (p.x.round(), p.y.round()))
+        );
+        assert!(plugins.set_slider(format!("{ROTATION}.to"), 1.0).is_some());
+        s.view_gesture(200.0, 200.0, 0.0, 0.0, 1.0, 1.2);
+        assert!(plugins.run_action(reset, Arc::clone(&s)));
+        assert!((settled(&s).rotation() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        // the switch keeps two fingers from turning the canvas
+        assert!(!plugins.hooks().gesture_lock(crate::hooks::GESTURE_TURN) && !s.gesture_turn_locked());
+        assert!(plugins.set_switch(format!("{ROTATION}.lock"), true));
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.hooks().gesture_lock(crate::hooks::GESTURE_TURN) && s.gesture_turn_locked());
+        // asked as each finger lands, and each key that isn't the app's: quick
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(hooks.gesture_lock(crate::hooks::GESTURE_TURN));
+        }
+        let asked = t.elapsed() / 1000;
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            assert!(press(&plugins, "alt+r").is_some());
+        }
+        let pressed = t.elapsed() / 200;
+        println!("the gesture lock asked in {asked:?}, a plugin's press found in {pressed:?}");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
+        assert!(pressed < std::time::Duration::from_millis(1), "{pressed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();
