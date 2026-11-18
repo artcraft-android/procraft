@@ -104,6 +104,9 @@ const GUIDE_SLOP: f32 = 10.0;
 /// apart (points).
 const FREEHAND_CLOSE: f32 = 22.0;
 const FREEHAND_STEP: f32 = 2.0;
+/// How far above a finger (or a mouse) the eyedropper's loupe is centred (points), so the finger
+/// doesn't hide it; a pen's is centred on its tip (see [`CanvasSession::pick_loupe_lift`]).
+pub const LOUPE_LIFT: f32 = 40.0;
 
 /// How the selection tool selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -485,6 +488,8 @@ pub(crate) struct Touches {
     rapid_due: Option<f64>,
     /// The modify button: tapped, the next touch picks a colour; held, touches do what it sets.
     pick_next: bool,
+    /// The eyedropper open now was opened by a pen (its loupe on the pen's tip).
+    pick_pen: bool,
     modify_held: bool,
     modify_used: bool,
     /// The touch made while the modify button is held, and what it does.
@@ -618,6 +623,7 @@ impl Default for Touches {
             quickshape_due: None,
             rapid_due: None,
             pick_next: false,
+            pick_pen: false,
             modify_held: false,
             modify_used: false,
             modify_pointer: None,
@@ -846,6 +852,13 @@ impl CanvasSession {
 
     pub fn pick_next(&self) -> bool {
         self.touches().pick_next
+    }
+
+    /// How far above the point it picks the eyedropper's loupe is centred (points), for the one
+    /// just opened: opened by a pen, none (the colour aimed at is the one in its middle, under
+    /// the tip); by a finger or a mouse, [`LOUPE_LIFT`], clear of it.
+    pub fn pick_loupe_lift(&self) -> f32 {
+        if self.touches().pick_pen { 0.0 } else { LOUPE_LIFT }
     }
 
     /// The modify button is held (or let go). Let go, true if a touch used it meanwhile (so its
@@ -1601,6 +1614,7 @@ impl CanvasSession {
                 let painting = t.mode == Mode::Finger;
                 let at = t.down_at;
                 t.mode = if purpose == GestureAction::Eyedropper { Mode::Pick } else { Mode::Idle };
+                t.pick_pen = false;
                 let tool = t.tool_before.take();
                 drop(t);
                 if painting {
@@ -1729,6 +1743,7 @@ impl CanvasSession {
         // this touch picks a colour
         if t.pick_next || (is_pen(kind) && t.pen.squeeze_takes_touch()) {
             t.mode = Mode::Pick;
+            t.pick_pen = is_pen(kind);
             out.push(TouchCommand::Pick { x: at.0, y: at.1 });
             return;
         }
@@ -1903,6 +1918,7 @@ impl CanvasSession {
             match does {
                 Some(GestureAction::Eyedropper) => {
                     t.mode = Mode::Pick;
+                    t.pick_pen = false;
                     out.push(TouchCommand::Pick { x: at.0, y: at.1 });
                     return;
                 }
@@ -2381,7 +2397,10 @@ impl CanvasSession {
         let Some(first) = samples.last() else { return };
         let at = (first.x, first.y);
         match purpose {
-            GestureAction::Eyedropper => out.push(TouchCommand::Pick { x: at.0, y: at.1 }),
+            GestureAction::Eyedropper => {
+                self.touches().pick_pen = is_pen(kind);
+                out.push(TouchCommand::Pick { x: at.0, y: at.1 });
+            }
             GestureAction::Smudge | GestureAction::Erase | GestureAction::Assisted => {
                 match purpose {
                     GestureAction::Erase => self.touches().tool_before = Some(self.swap_tool(ToolKind::Erase)),
@@ -2639,6 +2658,7 @@ impl CanvasSession {
             4 => {
                 if let Some(a) = t.settings.four_tap {
                     // in the middle of the screen, not under the fingers
+                    t.pick_pen &= a != GestureAction::Eyedropper;
                     Self::act(a, t.down_at, out);
                 }
             }
@@ -2736,6 +2756,7 @@ impl CanvasSession {
                 t.swiped = true;
                 t.scrub_turns = -1;
                 if let Some(a) = t.settings.three_swipe {
+                    t.pick_pen &= a != GestureAction::Eyedropper;
                     Self::act(a, c, out);
                 }
             }
@@ -3927,6 +3948,41 @@ mod tests {
         // a touch used it: its tap does nothing
         assert!(s.set_modify_held(false));
         assert!(!s.set_modify_held(false));
+    }
+
+    #[test]
+    fn the_loupe_sits_on_a_pens_tip_and_clear_above_a_finger() {
+        let s = session();
+        // the modify button tapped, the next touch picks: a finger's loupe above it, a pen's on its tip
+        s.set_pick_next(true);
+        assert!(
+            s.touch_down(1, PointerKind::Finger, at(50.0, 60.0, 0.0))
+                .contains(&TouchCommand::Pick { x: 50.0, y: 60.0 })
+        );
+        assert_eq!(s.pick_loupe_lift(), 40.0);
+        s.touch_up(1, at(50.0, 60.0, 50.0));
+        s.set_pick_next(true);
+        assert!(
+            s.touch_down(1, PointerKind::Stylus, at(50.0, 60.0, 100.0))
+                .contains(&TouchCommand::Pick { x: 50.0, y: 60.0 })
+        );
+        assert_eq!(s.pick_loupe_lift(), 0.0);
+        s.touch_up(1, at(50.0, 60.0, 150.0));
+        // the modify button held, the pen picking
+        s.set_modify_held(true);
+        assert!(
+            s.touch_down(1, PointerKind::Stylus, at(70.0, 80.0, 200.0))
+                .contains(&TouchCommand::Pick { x: 70.0, y: 80.0 })
+        );
+        assert_eq!(s.pick_loupe_lift(), 0.0);
+        s.touch_up(1, at(70.0, 80.0, 250.0));
+        s.set_modify_held(false);
+        // the pen long gone, a finger held still: above it
+        s.touches().pen_left = None;
+        s.touch_down(1, PointerKind::Finger, at(200.0, 200.0, 1000.0));
+        assert!(s.touch_tick(1400.0).contains(&TouchCommand::Pick { x: 200.0, y: 200.0 }));
+        assert_eq!(s.pick_loupe_lift(), 40.0);
+        s.touch_up(1, at(200.0, 200.0, 1500.0));
     }
 
     #[test]

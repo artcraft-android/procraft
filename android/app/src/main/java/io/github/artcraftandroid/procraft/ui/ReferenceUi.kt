@@ -288,7 +288,7 @@ private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, pictu
             fun pickAt(p: Offset) {
                 val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
                 val at = io.github.artcraftandroid.procraft.core.referencePicturePoint(view, sizes, p.x, p.y) ?: return
-                vm.pickReference(picture, at[0], at[1], at[2], toScreen(p))
+                vm.pickReference(picture, at[0], at[1], at[2], toScreen(p), pen = first.type == androidx.compose.ui.input.pointer.PointerType.Stylus)
             }
             pickAt(first.position)
             while (true) {

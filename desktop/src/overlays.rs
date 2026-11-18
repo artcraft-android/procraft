@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, Pick, QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
+use procraft_core::{CanvasSession, LOUPE_LIFT, Pick, QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -20,7 +20,6 @@ const MESSAGE_BAR: Themed = Themed(0xFF606060, 0xFFD0D0D0);
 const MESSAGE_TEXT: Themed = Themed(0xFFB5B5B5, 0xFF3B3B3B);
 const LOUPE_OUTER: f32 = 69.0;
 const LOUPE_INNER: f32 = 53.5;
-const LOUPE_LIFT: f32 = 41.0;
 const LOUPE_EDGE: u32 = 0xFF808080;
 const MODE_BAR: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
 const MODE_TEXT: u32 = 0xFFC5C5C5;
@@ -42,6 +41,8 @@ pub struct Picking {
     pub rgb: Option<u32>,
     /// On the reference window's picture, not the canvas.
     from_reference: bool,
+    /// How far above `at` the loupe is centred (points): none on a pen's tip.
+    lift: f32,
 }
 
 pub struct Overlays {
@@ -208,11 +209,14 @@ impl Overlays {
         };
         let rgb = seen.and_then(|p| p.rgb);
         let ppp = ctx.pixels_per_point();
+        // on a pen's tip, or clear above a mouse, as the touches say it was opened
+        let lift = kept.as_ref().map_or_else(|| session.pick_loupe_lift(), |k| k.lift);
         self.picking = Some(Picking {
             at: pos2(x, y) / ppp,
             image,
             rgb: rgb.or_else(|| kept.and_then(|k| k.rgb)),
             from_reference: false,
+            lift,
         });
     }
 
@@ -220,7 +224,7 @@ impl Overlays {
     /// `rgb`, the `side` x `side` pixels (RGBA) around it shown.
     pub fn pick_reference(&mut self, ctx: &egui::Context, at: Pos2, side: usize, rgba: &[u8], rgb: u32) {
         let image = Some(loupe_texture(ctx, self.picking.as_ref(), side, rgba));
-        self.picking = Some(Picking { at, image, rgb: Some(rgb), from_reference: true });
+        self.picking = Some(Picking { at, image, rgb: Some(rgb), from_reference: true, lift: LOUPE_LIFT });
     }
 
     /// Draws them; `bar_shown` when the interface shows (the bands hang under the top bar).
@@ -468,8 +472,6 @@ fn strip_area(name: &'static str, rect: Rect, ctx: &egui::Context, show: impl Fn
         });
 }
 
-/// The eyedropper's loupe, centred `LOUPE_LIFT` above the pointer: a ring whose top half is the
-/// colour under it and bottom half the current colour, round what is shown there at twice the size.
 /// What the loupe shows, the `side` x `side` pixels (RGBA) `rgba`: in the texture it showed
 /// before, if there was one (a new texture each move frees the one still being drawn).
 fn loupe_texture(ctx: &egui::Context, before: Option<&Picking>, side: usize, rgba: &[u8]) -> TextureHandle {
@@ -486,8 +488,11 @@ fn loupe_texture(ctx: &egui::Context, before: Option<&Picking>, side: usize, rgb
     }
 }
 
+/// The eyedropper's loupe, centred its lift above the pointer (on a pen's tip, `LOUPE_LIFT` above a
+/// mouse): a ring whose top half is the colour under it and bottom half the current colour, round
+/// what is shown there at twice the size.
 fn loupe(ui: &Ui, p: &Picking, current: Color32) {
-    let c = p.at - vec2(0.0, LOUPE_LIFT);
+    let c = p.at - vec2(0.0, p.lift);
     let painter = ui.painter();
     let shadow = egui::epaint::Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_black_alpha(0x40) };
     painter.add(shadow.as_shape(Rect::from_center_size(c, vec2(LOUPE_OUTER * 2.0, LOUPE_OUTER * 2.0)), LOUPE_OUTER));

@@ -113,8 +113,17 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
 
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
-/** The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick. */
-class PickState(val x: Float, val y: Float, val image: ImageBitmap?, val rgb: Int?, val fromReference: Boolean = false)
+/**
+ * The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick, and
+ * how far above the point its loupe is centred (dp: none for a pen, so its middle is under the tip).
+ */
+class PickState(val x: Float, val y: Float, val image: ImageBitmap?, val rgb: Int?, val fromReference: Boolean = false, val lift: Float = LOUPE_LIFT_DP)
+
+/** How far above a finger the eyedropper's loupe is centred (dp), clear of it. */
+const val LOUPE_LIFT_DP = 40f
+
+/** How far above the point a [pen]'s eyedropper loupe is centred, or a finger's (dp). */
+fun loupeLift(pen: Boolean) = if (pen) 0f else LOUPE_LIFT_DP
 
 /** The colour panel's ways of choosing a colour. */
 enum class ColorMode { DISC, CLASSIC, HARMONY, VALUE, PALETTES }
@@ -4631,9 +4640,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * The eyedropper over the window's [picture] at its point ([px], [py]) (a window pixel spanning
-     * [per] of its pixels), the finger at window point [at]: the colour there and what is around it.
+     * [per] of its pixels), the finger (or the [pen]) at window point [at]: the colour there and what is around it.
      */
-    fun pickReference(picture: ImageBitmap, px: Float, py: Float, per: Float, at: Offset) {
+    fun pickReference(picture: ImageBitmap, px: Float, py: Float, per: Float, at: Offset, pen: Boolean = false) {
         val bitmap = picture.asAndroidBitmap()
         val x = px.toInt().coerceIn(0, bitmap.width - 1)
         val y = py.toInt().coerceIn(0, bitmap.height - 1)
@@ -4641,7 +4650,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // as much of the picture as the loupe's window shows, around the point
         val n = (PICK_WINDOW_DP * density * per).roundToInt().coerceIn(1, minOf(bitmap.width, bitmap.height))
         val around = Bitmap.createBitmap(bitmap, (x - n / 2).coerceIn(0, bitmap.width - n), (y - n / 2).coerceIn(0, bitmap.height - n), n, n)
-        picking = PickState(at.x, at.y, around.asImageBitmap(), rgb, fromReference = true)
+        picking = PickState(at.x, at.y, around.asImageBitmap(), rgb, fromReference = true, lift = loupeLift(pen))
     }
 
     /** Reads the canvas again for the window, at most every so often while changes come. */
@@ -6193,7 +6202,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun pickAt(x: Float, y: Float, side: Int) {
         pendingPick = x to y
-        if (picking == null) picking = PickState(x, y, null, null)
+        // its loupe on a pen's tip, or clear above a finger, as the touches say it was opened
+        if (picking == null) picking = PickState(x, y, null, null, lift = session?.pickLoupeLift() ?: LOUPE_LIFT_DP)
         if (pickJob?.isActive == true) return
         pickJob = viewModelScope.launch {
             while (true) {
@@ -6211,7 +6221,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val now = picking ?: break
-                picking = PickState(px, py, seen?.first ?: now.image, seen?.second ?: now.rgb)
+                picking = PickState(px, py, seen?.first ?: now.image, seen?.second ?: now.rgb, lift = now.lift)
             }
         }
     }

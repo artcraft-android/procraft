@@ -237,8 +237,8 @@ pub use timelapse::{
     time_lapse_setting_names, time_lapse_side,
 };
 pub use touch::{
-    COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, PenHover, PenPreferred, SelectKind,
-    SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
+    COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, LOUPE_LIFT, PenHover, PenPreferred,
+    SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
 };
 pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
