@@ -486,6 +486,9 @@ impl Interface {
     /// page sees to it, taking it with [`escape`]); one nothing took turns the canvas back upright,
     /// unless it only let go of a field (egui drops the field's keys as the frame begins).
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
+        // the moves heard since the last frame go to the canvas together, before anything looks at
+        // what the touches asked
+        input.flush(session);
         let typing = self.typing;
         self.gallery_button = None;
         self.show_frame(ui, session, input);

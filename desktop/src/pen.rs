@@ -278,7 +278,7 @@ fn keep_reading(reading: Reading) {
 /// What moves the mouse pointer now: a tablet's pen with its lean (none: its tablet doesn't say),
 /// or (none) something else.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
+pub(crate) fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
     }
@@ -378,7 +378,7 @@ fn pen_flags(id: u64, flags: u32) {
 /// The lean of a pen tilted `tilt_x` degrees towards the right and `tilt_y` towards the user
 /// (each −90..90): its angle from upright and the direction its top leans, clockwise from up.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
+pub(crate) fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
     // short of flat, where the tangent runs off
     let tangent = |degrees: f32| degrees.clamp(-89.9, 89.9).to_radians().tan();
     let (x, y) = (tangent(tilt_x), tangent(tilt_y));
@@ -984,7 +984,7 @@ mod system {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     /// The tests of what moves the mouse pointer, one at a time: it is the app's, not a test's.
-    pub(super) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
         static ONE: Mutex<()> = Mutex::new(());
         ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }

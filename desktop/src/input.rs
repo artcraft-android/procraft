@@ -5,6 +5,12 @@
 //! held it zooms the canvas, with R held it turns it (with Shift in 15° steps), and R tapped turns
 //! it a step (the core's key drags, keys.rs). A pen with those keys held does as the mouse does;
 //! otherwise a pen and fingers go on as they do.
+//!
+//! What paints (the mouse pointer, which a tablet's pen moves under X11 and on a Mac, and a pen's
+//! touches) reports hundreds of moves a second, each its own window event. Their samples wait,
+//! each read as it came, and go to the canvas together once a frame (see [`Input::flush`]), as a
+//! tablet's batched samples do: a stroke's step, and the tip it shows, then cost once a frame
+//! rather than once a move.
 
 use std::time::{Duration, Instant};
 
@@ -202,6 +208,23 @@ pub struct Input {
     /// A model is shown (not its 2D texture): dragging the view turns it, as one finger does (the
     /// touches').
     pub turns_model: bool,
+    /// The moves of what paints heard since the canvas last took them: each pointer's samples in
+    /// order, each read as its move came (where, its pressure and lean then, and when).
+    waiting: Vec<(u64, Vec<PenSample>)>,
+    /// How many times moves went to the canvas, and how many samples they took there.
+    #[cfg_attr(not(test), allow(dead_code))]
+    handed: Handed,
+    /// The time samples are read at in place of the clock's, milliseconds: a test's own.
+    #[cfg(test)]
+    test_clock: Option<f64>,
+}
+
+/// Moves handed to the canvas: how many times, and how many samples in all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Handed {
+    pub batches: usize,
+    pub samples: usize,
 }
 
 impl Default for Input {
@@ -232,6 +255,10 @@ impl Default for Input {
             shift: false,
             keys_taken: false,
             turns_model: false,
+            waiting: Vec::new(),
+            handed: Handed::default(),
+            #[cfg(test)]
+            test_clock: None,
         }
     }
 }
@@ -314,6 +341,10 @@ impl Input {
     }
 
     fn now_ms(&self) -> f64 {
+        #[cfg(test)]
+        if let Some(ms) = self.test_clock {
+            return ms;
+        }
         self.clock.elapsed().as_secs_f64() * 1000.0
     }
 
@@ -323,10 +354,54 @@ impl Input {
         Some(self.clock + Duration::from_secs_f64((due / 1000.0).max(0.0)))
     }
 
-    /// Runs the touches' waits that have run out. True if anything happened.
+    /// Runs the touches' waits that have run out. True if anything happened. The moves waiting go
+    /// first when one has, as they came before now: a pen still moving holds no QuickShape, and an
+    /// airbrush held still lays its latest again, not one from before them.
     pub fn tick(&mut self, session: &CanvasSession) -> bool {
-        let out = session.touch_tick(self.now_ms());
-        self.take(out)
+        let now = self.now_ms();
+        let due = !self.waiting.is_empty() && session.touch_deadline().is_some_and(|due| due <= now);
+        let flushed = due && self.flush(session);
+        let out = session.touch_tick(now);
+        self.take(out) || flushed
+    }
+
+    /// The moves waiting go to the canvas, each pointer's samples together, as a tablet's batched
+    /// samples do: once a frame, before the interface looks at what the touches asked, and before
+    /// anything else the input does, so all of it comes in the order it was made. True if there
+    /// were any.
+    pub fn flush(&mut self, session: &CanvasSession) -> bool {
+        if self.waiting.is_empty() {
+            return false;
+        }
+        for (id, samples) in std::mem::take(&mut self.waiting) {
+            self.handed.batches += 1;
+            self.handed.samples += samples.len();
+            let out = session.touch_move(id, samples);
+            self.take(out);
+        }
+        true
+    }
+
+    /// The moves handed to the canvas so far.
+    #[cfg(test)]
+    pub fn handed(&self) -> Handed {
+        self.handed
+    }
+
+    /// Whether `event` leaves the moves waiting as they are: a move of what paints (which waits
+    /// too), or one nothing here heeds (X11 gives each axis of a pen's move as an event of its own).
+    fn waits(&self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::CursorMoved { .. } => self.down.contains(&MOUSE) && self.key_drag.is_none() && !self.panning,
+            WindowEvent::Touch(t) => {
+                t.phase == TouchPhase::Moved
+                    && self.down.contains(&t.id)
+                    && self.pen_panning != Some(t.id)
+                    && pen_pressure(t).is_some()
+            }
+            WindowEvent::AxisMotion { .. } => true,
+            _ => false,
+        }
     }
 
     fn take(&mut self, out: Vec<TouchCommand>) -> bool {
@@ -366,6 +441,8 @@ impl Input {
             return;
         }
         let (kind, pressure) = self.mouse_kind(at);
+        // (the moves waiting were the stroke taken back)
+        self.waiting.retain(|(id, _)| *id != MOUSE);
         let out = session.touch_cancel_one(MOUSE);
         self.take(out);
         self.pen_pressure = Some(pressure);
@@ -375,11 +452,11 @@ impl Input {
     /// A sample of pointer `id` at `at`: a pen's with its lean, if the system gave one, and a
     /// tablet's pen moving the mouse pointer where its tablet says it was, finer than the pointer's
     /// whole pixels (with no smoothing a slow line through them goes in steps).
-    fn sample(&self, id: u64, at: (f32, f32), pressure: f32) -> Vec<PenSample> {
+    fn sample(&self, id: u64, at: (f32, f32), pressure: f32) -> PenSample {
         let (x, y) = if id == MOUSE { crate::pen::mouse_pen_fine_at(at).unwrap_or(at) } else { at };
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
         let roll = crate::pen::roll(id).unwrap_or(0.0);
-        vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }]
+        PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }
     }
 
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {
@@ -390,19 +467,27 @@ impl Input {
         if matches!(kind, PointerKind::Stylus | PointerKind::StylusEraser) {
             session.set_pen_tilt_known(crate::pen::lean(id).is_some());
         }
-        let out = session.touch_down(id, kind, self.sample(id, at, pressure));
+        let out = session.touch_down(id, kind, vec![self.sample(id, at, pressure)]);
         self.take(out);
     }
 
-    fn moved(&mut self, session: &CanvasSession, id: u64, at: (f32, f32), pressure: f32) {
-        let out = session.touch_move(id, self.sample(id, at, pressure));
-        self.take(out);
+    /// What paints, pointer `id`, moved to `at`: its sample, read now, waits for the frame (see
+    /// [`Input::flush`]).
+    fn moved(&mut self, id: u64, at: (f32, f32), pressure: f32) {
+        let sample = self.sample(id, at, pressure);
+        match self.waiting.iter_mut().find(|(waiting, _)| *waiting == id) {
+            Some((_, samples)) => samples.push(sample),
+            None => self.waiting.push((id, vec![sample])),
+        }
     }
 
     fn lifted(&mut self, session: &CanvasSession, id: u64, at: (f32, f32), pressure: f32, cancelled: bool) {
         self.down.retain(|d| *d != id);
-        let out =
-            if cancelled { session.touch_cancel_one(id) } else { session.touch_up(id, self.sample(id, at, pressure)) };
+        let out = if cancelled {
+            session.touch_cancel_one(id)
+        } else {
+            session.touch_up(id, vec![self.sample(id, at, pressure)])
+        };
         self.take(out);
     }
 
@@ -417,6 +502,10 @@ impl Input {
         consumed: bool,
         over: impl Fn((f32, f32)) -> bool,
     ) -> bool {
+        // what paints moving waits for the frame; anything else comes after the moves before it
+        if !self.waits(event) {
+            self.flush(session);
+        }
         match event {
             WindowEvent::ModifiersChanged(m) => {
                 let state = m.state();
@@ -504,7 +593,7 @@ impl Input {
                 if self.down.contains(&MOUSE) {
                     self.pen_came(session, p);
                     let pressure = self.mouse_pressure(p);
-                    self.moved(session, MOUSE, p, pressure);
+                    self.moved(MOUSE, p, pressure);
                     return true;
                 }
                 // a spray can's sound (a plugin's) rattles shaken above the canvas
@@ -628,15 +717,7 @@ impl Input {
             }
             phase => phase,
         };
-        // a pen with its pressure, or a finger: as the system says which (a touch screen may give
-        // its fingers a pressure too), else a pressure means a pen
-        let force = touch.force.map(|f| f.normalized() as f32);
-        // (a pen landing or lifting has no force, its pressure being nothing: its own is taken)
-        let pen = match crate::pen::is_pen(touch.id) {
-            Some(true) => Some(force.or_else(|| crate::pen::pressure(touch.id)).unwrap_or(1.0)),
-            Some(false) => None,
-            None => force,
-        };
+        let pen = pen_pressure(touch);
         // a pen turned over rubs out with its eraser end
         let kind = match pen {
             Some(_) if crate::pen::eraser_end(touch.id) => PointerKind::StylusEraser,
@@ -692,8 +773,15 @@ impl Input {
                 self.pressed(session, touch.id, kind, p, pressure);
                 true
             }
+            // a pen's moves wait for the frame; a finger's go on at once, for the gestures fingers
+            // make together
+            TouchPhase::Moved if known && pen.is_some() => {
+                self.moved(touch.id, p, pressure);
+                true
+            }
             TouchPhase::Moved if known => {
-                self.moved(session, touch.id, p, pressure);
+                let out = session.touch_move(touch.id, vec![self.sample(touch.id, p, pressure)]);
+                self.take(out);
                 true
             }
             TouchPhase::Ended if known => {
@@ -710,6 +798,18 @@ impl Input {
             }
             _ => false,
         }
+    }
+}
+
+/// A touch's pressure if it is a pen's (none: a finger's), as the system says which it is (a touch
+/// screen may give its fingers a pressure too), else a pressure meaning a pen. A pen landing or
+/// lifting has no force, its pressure being nothing: its own is taken.
+fn pen_pressure(touch: &Touch) -> Option<f32> {
+    let force = touch.force.map(|f| f.normalized() as f32);
+    match crate::pen::is_pen(touch.id) {
+        Some(true) => Some(force.or_else(|| crate::pen::pressure(touch.id)).unwrap_or(1.0)),
+        Some(false) => None,
+        None => force,
     }
 }
 
@@ -996,6 +1096,8 @@ mod tests {
             send(&mut input, &session, &pen(7005, TouchPhase::Started, 100.0, 100.0));
             input.commands.clear();
             send(&mut input, &session, &pen(7005, TouchPhase::Moved, 140.0, 100.0));
+            // (handed on with the frame)
+            input.flush(&session);
             assert!(painted(&input), "{keys:?}");
         }
     }
@@ -1098,6 +1200,325 @@ mod tests {
         let finger = WindowEvent::Touch(Touch { device_id, phase, location, force: None, id: 7011 });
         send(&mut input, &session, &finger);
         assert!(input.pressing() && !input.pressing_from_afar());
+    }
+
+    /// A window on a headless GPU showing a `side` square canvas fitted in it, at the report's scale
+    /// (1.2); none without a GPU.
+    struct Window {
+        session: Arc<CanvasSession>,
+        gpu: procraft_gpu::Gpu,
+        target: procraft_gpu::wgpu::Texture,
+        size: (u32, u32),
+        started: Instant,
+    }
+
+    impl Window {
+        fn open(side: u32) -> Option<Window> {
+            use procraft_gpu::wgpu;
+            let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
+            let size = (1728, 1080);
+            let session = CanvasSession::new(side, side);
+            session.set_display_scale(1.2);
+            session.use_gpu(gpu.clone());
+            session.show_in(size.0, size.1);
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("window"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let window = Window { session, gpu, target, size, started: Instant::now() };
+            window.settle();
+            Some(window)
+        }
+
+        /// A frame drawn, the GPU waited for; whether another is wanted at once.
+        fn frame(&self) -> bool {
+            let view = self.target.create_view(&Default::default());
+            let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+            let again =
+                self.session.draw(&view, format, self.size, procraft_engine::profile::Profile::Srgb, self.started);
+            self.gpu.flush();
+            again == Some(Duration::ZERO)
+        }
+
+        /// Frames drawn until the canvas wants no more at once.
+        fn settle(&self) {
+            for _ in 0..100 {
+                if !self.frame() {
+                    break;
+                }
+            }
+        }
+
+        /// What the window shows, the canvas settled.
+        fn picture(&self) -> Vec<u8> {
+            self.settle();
+            procraft_gpu::read_texture(&self.gpu, &self.target, self.size.0, self.size.1).unwrap()
+        }
+
+        /// The library's brush named `name` chosen.
+        fn brush(&self, name: &str) -> bool {
+            let library = self.session.brush_library();
+            let found = library
+                .iter()
+                .enumerate()
+                .find_map(|(set, s)| s.brushes.iter().position(|b| b.name == name).map(|i| (set as u32, i as u32)));
+            found.is_some_and(|(set, i)| self.session.select_brush(set, i))
+        }
+    }
+
+    /// What a stroke through the input cost and handed the canvas.
+    struct Stroke {
+        /// The pointer's moves (winit's `CursorMoved`s), and what the canvas was handed of them.
+        moves: usize,
+        handed: Handed,
+        /// Each move's handling, and each frame's (the moves waiting handed over, then drawn).
+        per_move: Vec<Duration>,
+        per_frame: Vec<Duration>,
+        picture: Vec<u8>,
+    }
+
+    impl Stroke {
+        /// The main thread's time for the stroke's second: every move's and every frame's.
+        fn busy(&self) -> Duration {
+            self.per_move.iter().chain(&self.per_frame).sum()
+        }
+
+        fn median(times: &[Duration]) -> Duration {
+            let mut sorted = times.to_vec();
+            sorted.sort();
+            sorted.get(sorted.len() / 2).copied().unwrap_or_default()
+        }
+
+        fn said(&self, what: &str) -> String {
+            format!(
+                "{what:<27} {:4} moves, {:4} samples handed in {:4} batches, {:2} frames; a move {:6.1} us, \
+                 a frame {:5.2} ms (medians); busy {:4.0} ms for the second",
+                self.moves,
+                self.handed.samples,
+                self.handed.batches,
+                self.per_frame.len(),
+                Stroke::median(&self.per_move).as_secs_f64() * 1e6,
+                Stroke::median(&self.per_frame).as_secs_f64() * 1e3,
+                self.busy().as_secs_f64() * 1e3,
+            )
+        }
+    }
+
+    /// A second's stroke at 1000 moves a second through the desktop's input on `window`, as X11
+    /// gives one: the mouse pointer, moved by a tablet's pen (`pen`: finer than a pixel, read with
+    /// its pressure and lean, each move followed by the events X11 makes of its other axes) or by
+    /// the mouse (in whole pixels, a move only on reaching another). A frame each 1/60 s hands the
+    /// canvas the moves waiting, as the interface does, and draws it; with `each_move` they are
+    /// handed on as each comes, as before they waited. The clock is the test's own, a move a
+    /// millisecond, so a stroke drawn twice is drawn alike. Undone after.
+    fn stroke_at_1000_hz(window: &Window, pen: bool, each_move: bool) -> Stroke {
+        let session = &window.session;
+        let mut input = Input { read_mouse_pen: tablet_pen, test_clock: Some(0.0), ..Input::default() };
+        let device_id = DeviceId::dummy();
+        let reading =
+            |k: usize| crate::pen::MousePen { pressure: 0.25 + 0.6 * (k as f32 / 170.0).sin().abs(), eraser: false };
+        let read = |k: usize| {
+            let pen = pen.then(|| reading(k));
+            TABLET_PEN.with(|p| p.set(pen));
+            let lean = crate::pen::lean_of(25.0 * (k as f32 / 300.0).sin(), 20.0);
+            crate::pen::set_mouse_pen(pen.map(|p| (p, Some(lean))));
+        };
+        // across the canvas, waving up and down, at about 1500 window pixels a second
+        let at = |k: usize| {
+            let t = k as f64 / 1000.0;
+            let (x, y) = (300.0 + 1100.0 * t, 540.0 + 250.0 * (t * 6.0).sin());
+            if pen { (x, y) } else { (x.round(), y.round()) }
+        };
+        let moved = |(x, y): (f64, f64)| WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x, y) };
+        let press = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        read(0);
+        send(&mut input, session, &moved(at(0)));
+        send(&mut input, session, &press(ElementState::Pressed));
+        let (mut per_move, mut per_frame, mut last) = (Vec::new(), Vec::new(), at(0));
+        for k in 1..=1000 {
+            input.test_clock = Some(k as f64);
+            read(k);
+            let p = at(k);
+            if p != last {
+                last = p;
+                let took = Instant::now();
+                send(&mut input, session, &moved(p));
+                // its pressure and tilts (X11's axes 2 to 4), which nothing reads
+                if pen {
+                    for axis in 2..5 {
+                        send(&mut input, session, &WindowEvent::AxisMotion { device_id, axis, value: k as f64 });
+                    }
+                }
+                if each_move {
+                    input.flush(session);
+                }
+                per_move.push(took.elapsed());
+            }
+            if k * 60 / 1000 != (k - 1) * 60 / 1000 {
+                let took = Instant::now();
+                input.flush(session);
+                window.frame();
+                per_frame.push(took.elapsed());
+            }
+        }
+        input.test_clock = Some(1001.0);
+        send(&mut input, session, &press(ElementState::Released));
+        let picture = window.picture();
+        let handed = input.handed();
+        crate::pen::set_mouse_pen(None);
+        session.undo();
+        window.settle();
+        Stroke { moves: per_move.len(), handed, per_move, per_frame, picture }
+    }
+
+    /// How far apart two pictures are at most, in any channel of any pixel.
+    fn most_apart(a: &[u8], b: &[u8]) -> u8 {
+        assert_eq!(a.len(), b.len());
+        a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
+    }
+
+    /// A tablet's pen as X11 gives it, at 1000 moves a second with its pressure and lean: every
+    /// sample reaches the stroke, the canvas is handed them at most once a frame (and once more as
+    /// it lifts), and it lays just what it laid when each move went on as it came. A move then
+    /// costs a few microseconds where it cost a stroke's step and tip, and the pen's second costs
+    /// the main thread about what the mouse's does. The mouse, drawn alike, lays what it did too.
+    /// The brush is one that shows its tip, the costly kind; what each costs is printed.
+    #[test]
+    fn a_1000_hz_pen_reaches_the_stroke_whole_once_a_frame() {
+        let _one = crate::pen::tests::mouse_pointer_tests();
+        let Some(window) = Window::open(2048) else { return };
+        assert!(window.brush("Studio Pen"));
+        let blank = window.picture();
+        let mut strokes = Vec::new();
+        for (pen, what) in [(true, "a tablet's pen"), (false, "the mouse")] {
+            let each = stroke_at_1000_hz(&window, pen, true);
+            let waiting = stroke_at_1000_hz(&window, pen, false);
+            println!("{}", each.said(&format!("{what}, each move")));
+            println!("{}", waiting.said(&format!("{what}, once a frame")));
+            assert!(most_apart(&blank, &waiting.picture) > 100, "{what}: nothing was drawn");
+            let apart = most_apart(&each.picture, &waiting.picture);
+            println!("{what}: the pictures {apart} apart at most");
+            assert!(apart <= 2, "{what}: once a frame, the stroke came out otherwise ({apart} apart)");
+            // every move reached the stroke, at most once a frame and once more as it lifted
+            assert_eq!(each.handed, Handed { batches: each.moves, samples: each.moves }, "{what}");
+            assert_eq!(waiting.handed.samples, waiting.moves, "{what}: samples were lost");
+            assert!(waiting.handed.batches <= waiting.per_frame.len() + 1, "{what}: {:?}", waiting.handed);
+            strokes.push((each, waiting));
+        }
+        let [(pen_each, pen), (_, mouse)] = strokes.as_slice() else { return };
+        // a move waiting costs microseconds: no stroke's step, no tip, no wait on the canvas
+        let a_move = Stroke::median(&pen.per_move);
+        assert!(a_move < Duration::from_micros(MOVE_BUDGET_US), "a pen's move took {a_move:?}");
+        // the pen's second costs at most half what it did, and about what the mouse's does
+        assert!(pen.busy() * 2 <= pen_each.busy(), "{:?} once a frame, {:?} each move", pen.busy(), pen_each.busy());
+        assert!(
+            pen.busy() <= mouse.busy() * 2 + Duration::from_millis(50),
+            "the pen {:?}, the mouse {:?}",
+            pen.busy(),
+            mouse.busy()
+        );
+    }
+
+    /// What a pen's move may cost the main thread while it waits for the frame (microseconds; one
+    /// handed on at once cost hundreds, a tip's brush a thousand, in a test build).
+    const MOVE_BUDGET_US: u64 = 50;
+
+    /// What a stroke through the desktop's input costs with each brush in `PEN_COST_BRUSHES`
+    /// (names, `,` between; "Studio Pen,Gouache,Soft Airbrush,Technical Pencil"), on a canvas
+    /// `PEN_COST_SIDE` (3600) square: a tablet's pen and the mouse under X11, at 1000 moves a
+    /// second, each move handed on as it came and once a frame.
+    /// `cargo test -p procraft-desktop pen_cost_by_brush -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pen_cost_by_brush() {
+        let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+        let _one = crate::pen::tests::mouse_pointer_tests();
+        let side = env("PEN_COST_SIDE", "3600").parse().unwrap_or(3600);
+        let Some(window) = Window::open(side) else { return };
+        let info = window.gpu.adapter.get_info();
+        println!("{} ({:?}), canvas {side} square", info.name, info.backend);
+        for name in env("PEN_COST_BRUSHES", "Studio Pen,Gouache,Soft Airbrush,Technical Pencil").split(',') {
+            if !window.brush(name) {
+                println!("no {name}");
+                continue;
+            }
+            for (pen, what) in [(true, "pen"), (false, "mouse")] {
+                for (each_move, how) in [(true, "each move"), (false, "once a frame")] {
+                    println!("{}", stroke_at_1000_hz(&window, pen, each_move).said(&format!("{name}, {what}, {how}")));
+                }
+            }
+        }
+    }
+
+    /// A pen's touches (Windows Ink's, the tablet protocol's on Wayland) wait for the frame as its
+    /// moves of the mouse pointer do; a finger's go on at once, for the gestures fingers make
+    /// together.
+    #[test]
+    fn a_pens_touch_moves_wait_for_the_frame_and_a_fingers_go_on_at_once() {
+        let (session, mut input) = (shown(), Input::default());
+        send(&mut input, &session, &pen(7030, TouchPhase::Started, 100.0, 100.0));
+        input.commands.clear();
+        for x in [110.0, 120.0, 130.0] {
+            send(&mut input, &session, &pen(7030, TouchPhase::Moved, x, 100.0));
+        }
+        assert!(!painted(&input) && input.handed() == Handed::default());
+        // the frame hands them on together
+        assert!(input.flush(&session));
+        assert!(painted(&input));
+        assert_eq!(input.handed(), Handed { batches: 1, samples: 3 });
+        // and the lift comes after them, as anything else does
+        send(&mut input, &session, &pen(7030, TouchPhase::Moved, 140.0, 100.0));
+        send(&mut input, &session, &pen(7030, TouchPhase::Ended, 140.0, 100.0));
+        assert_eq!(input.handed(), Handed { batches: 2, samples: 4 });
+        assert!(input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        // a finger painting (on a canvas no pen has been near, which would take it for a hand)
+        let (session, mut input) = (shown(), Input::default());
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        send(&mut input, &session, &finger(9030, TouchPhase::Started, 300.0, 300.0));
+        input.commands.clear();
+        send(&mut input, &session, &finger(9030, TouchPhase::Moved, 340.0, 320.0));
+        assert!(painted(&input), "{:?}", input.commands);
+        assert_eq!(input.handed(), Handed::default());
+        send(&mut input, &session, &finger(9030, TouchPhase::Ended, 340.0, 320.0));
+    }
+
+    /// A pen drawing a line for a second while no frame comes (a slow one): its moves wait, and
+    /// when the QuickShape wait its press set runs out they go first, so the pen still moving snaps
+    /// no shape; held still past the wait it snaps, as ever.
+    #[test]
+    fn a_pen_still_moving_snaps_no_shape_however_long_its_moves_wait() {
+        let _one = crate::pen::tests::mouse_pointer_tests();
+        let Some(window) = Window::open(1024) else { return };
+        let session = &window.session;
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        let mut input = Input { read_mouse_pen: tablet_pen, test_clock: Some(0.0), ..Input::default() };
+        TABLET_PEN.with(|p| p.set(Some(crate::pen::MousePen { pressure: 0.5, eraser: false })));
+        let device_id = DeviceId::dummy();
+        let moved = |x: f64| WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x, 500.0) };
+        send(&mut input, session, &moved(400.0));
+        send(
+            &mut input,
+            session,
+            &WindowEvent::MouseInput { device_id, state: ElementState::Pressed, button: MouseButton::Left },
+        );
+        for k in 1..=1000 {
+            input.test_clock = Some(k as f64);
+            send(&mut input, session, &moved(400.0 + k as f64 * 0.5));
+        }
+        assert_eq!(input.handed(), Handed::default(), "no frame came");
+        input.tick(session);
+        assert_eq!(input.handed(), Handed { batches: 1, samples: 1000 });
+        assert!(!input.commands.contains(&TouchCommand::ShapeSnapped), "{:?}", input.commands);
+        input.test_clock = Some(1000.0 + 700.0);
+        input.tick(session);
+        assert!(input.commands.contains(&TouchCommand::ShapeSnapped), "{:?}", input.commands);
+        TABLET_PEN.with(|p| p.set(None));
     }
 
     /// A brush file (`BRUSH_FILE`) drawn through the desktop's input by a tablet's pen moving the

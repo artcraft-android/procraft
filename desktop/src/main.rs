@@ -543,6 +543,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 screen.resize(size.width, size.height);
                 if let Some(session) = &session {
+                    // the moves waiting were made in the window as it was
+                    self.input.flush(session);
                     session.resize_window(size.width, size.height);
                     // minimised, time on the artwork stops counting; back, it counts again
                     session.set_tracking(!screen.minimised());
@@ -551,6 +553,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(session) = &session {
+                    self.input.flush(session);
                     session.set_display_scale(scale_factor as f32);
                     let interface = scale_factor as f32 * screen.egui.egui_ctx().zoom_factor();
                     self.ui.place_canvas(session, interface);
@@ -568,12 +571,13 @@ impl ApplicationHandler for App {
                 // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
                 // started)
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
-                let blocked = (self.ui.popover_open && !through)
-                    || files::exporting_since().is_some()
-                    || session.pour_finishing();
                 session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
-                let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
+                // asked only of a press (a stroke's moves would wait on the canvas each)
+                let blocked = || {
+                    (self.ui.popover_open && !through) || files::exporting_since().is_some() || session.pour_finishing()
+                };
+                let over = |p: (f32, f32)| blocked() || screen.over_interface(p, canvas);
                 if self.input.on_event(&session, &event, response.consumed, over) {
                     redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
                 }
