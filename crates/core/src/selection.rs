@@ -218,16 +218,6 @@ impl State {
         let view = self.view?;
         window.iter().map(|&p| view.screen_to_canvas(p).filter(|c| c.is_finite())).collect()
     }
-
-    /// The current layer's pixels, after any queued work.
-    pub(crate) fn current_pixels(&mut self) -> Option<Vec<u8>> {
-        self.finish_stroke();
-        self.settle();
-        self.flush();
-        let current = self.doc.current();
-        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
-        canvas.read_layer(gpu, current).ok()
-    }
 }
 
 #[uniffi::export]

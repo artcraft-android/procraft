@@ -33,18 +33,27 @@ impl Mask {
     /// The smallest rectangle holding everything it takes (x, y, width, height); none when it
     /// takes nothing.
     pub fn bounds(&self) -> Option<[u32; 4]> {
+        self.bounds_within([0, 0, self.width, self.height])
+    }
+
+    /// [`Mask::bounds`] of a mask that takes nothing outside `within` (x, y, width, height), looked
+    /// for only there: a small part of a large canvas is found without going over all of it.
+    pub fn bounds_within(&self, within: [u32; 4]) -> Option<[u32; 4]> {
         let w = self.width as usize;
         if w == 0 {
             return None;
         }
+        let [x, y, bw, bh] = within.map(|v| v as usize);
+        let (x0, x1) = (x.min(w), x.saturating_add(bw).min(w));
         let (mut top, mut bottom, mut left, mut right) = (None, 0, usize::MAX, 0);
-        for (y, row) in self.data.chunks(w).enumerate() {
+        for (j, row) in self.data.chunks(w).enumerate().skip(y).take(bh) {
+            let row = row.get(x0..x1).unwrap_or_default();
             let Some(first) = row.iter().position(|&v| v > 0) else { continue };
             let last = row.iter().rposition(|&v| v > 0).unwrap_or(first);
-            top.get_or_insert(y);
-            bottom = y;
-            left = left.min(first);
-            right = right.max(last);
+            top.get_or_insert(j);
+            bottom = j;
+            left = left.min(x0 + first);
+            right = right.max(x0 + last);
         }
         let top = top?;
         let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);

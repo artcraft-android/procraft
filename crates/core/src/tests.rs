@@ -8272,6 +8272,119 @@ fn recolor_follows_its_point_and_colour_and_is_a_named_step() {
     assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
 }
 
+/// On a canvas larger than the part of it a pour reads first, every kind of pour leaves the layer
+/// as a pour reading the whole canvas at once does: a small fill, one that reaches past that part
+/// (at once, as its threshold slides up, and as Recolor's point moves off it), soft edges a fill
+/// goes under, a selection, and a reference layer.
+#[test]
+fn a_pour_on_a_part_of_a_large_canvas_pours_as_one_on_all_of_it() {
+    let side = 2600;
+    let Some(s) = session(side, side) else { return };
+    let line = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+    s.set_color(0.0, 0.0, 0.0);
+    // a small ring, a ring past the part read about it, and a soft line through the big one
+    s.set_brush_size(0.15);
+    let ring = |c: (f32, f32), r: f32| {
+        let n = (r / 4.0).max(24.0) as u32;
+        for i in 0..n {
+            let a = |k: u32| k as f32 / n as f32 * std::f32::consts::TAU;
+            let (p, q) = (a(i), a(i + 1));
+            stroke_line(&s, (c.0 + r * p.cos(), c.1 + r * p.sin()), (c.0 + r * q.cos(), c.1 + r * q.sin()));
+        }
+    };
+    ring((1300.0, 1300.0), 40.0);
+    ring((1300.0, 1300.0), 900.0);
+    s.set_brush_size(0.6);
+    stroke_line(&s, (700.0, 1900.0), (1900.0, 1700.0));
+    // a layer to pour on that refers to the line layer
+    let fills = s.add_layer();
+    // each case's layers, then undone back to how they were
+    let poured = |whole: bool, act: &dyn Fn()| {
+        let before = (layer_rgba(&s, line), layer_rgba(&s, fills));
+        crate::pour::WHOLE_AT_ONCE.with(|w| w.set(whole));
+        act();
+        crate::pour::WHOLE_AT_ONCE.with(|w| w.set(false));
+        let layers = (layer_rgba(&s, line), layer_rgba(&s, fills));
+        for _ in 0..8 {
+            if (layer_rgba(&s, line), layer_rgba(&s, fills)) == before {
+                break;
+            }
+            s.undo();
+        }
+        assert!((layer_rgba(&s, line), layer_rgba(&s, fills)) == before);
+        s.select_none();
+        s.set_layer_reference(line, false);
+        layers
+    };
+    type Case<'a> = (&'a str, Box<dyn Fn() + 'a>);
+    let cases: Vec<Case> = vec![
+        (
+            "small",
+            Box::new(|| {
+                s.select_layer(line);
+                assert!(s.pour_begin(1300.0, 1300.0, 0.9, 0.2, 0.1, 0.3));
+                s.pour_threshold(0.35);
+                s.pour_end(true, None);
+            }),
+        ),
+        (
+            "past the part read",
+            Box::new(|| {
+                s.select_layer(line);
+                assert!(s.pour_drop(1300.0, 1500.0, 0.2, 0.6, 0.9, 0.3));
+                s.pour_end(true, None);
+            }),
+        ),
+        (
+            "slid past it",
+            Box::new(|| {
+                s.select_layer(line);
+                assert!(s.pour_begin(1300.0, 1300.0, 0.2, 0.9, 0.3, 0.05));
+                s.pour_threshold(0.2);
+                s.pour_threshold(1.0);
+                s.pour_threshold(0.1);
+                s.pour_end(true, None);
+            }),
+        ),
+        (
+            "moved off it",
+            Box::new(|| {
+                s.select_layer(line);
+                assert!(s.pour_begin(1300.0, 1300.0, 0.9, 0.9, 0.1, 0.3));
+                assert!(s.pour_move(300.0, 300.0));
+                assert!(s.pour_move(1310.0, 1300.0));
+                s.pour_end(true, None);
+            }),
+        ),
+        (
+            "within a selection",
+            Box::new(|| {
+                s.select_layer(line);
+                s.select_shape(false, 1150.0, 1150.0, 1310.0, 1290.0, crate::selection::SelectionJoin::Add);
+                assert!(s.pour_begin(1300.0, 1300.0, 0.5, 0.1, 0.9, 0.4));
+                s.pour_end(true, None);
+            }),
+        ),
+        (
+            "by the reference layer",
+            Box::new(|| {
+                s.set_layer_reference(line, true);
+                s.select_layer(fills);
+                assert!(s.pour_begin(1300.0, 1300.0, 0.1, 0.5, 0.5, 0.3));
+                s.pour_end(true, None);
+                assert!(s.pour_begin(1300.0, 1500.0, 0.6, 0.5, 0.1, 0.3));
+                s.pour_end(true, None);
+            }),
+        ),
+    ];
+    for (what, act) in &cases {
+        let part = poured(false, act.as_ref());
+        let whole = poured(true, act.as_ref());
+        assert!(part.0 == whole.0 && part.1 == whole.1, "{what}");
+        assert!(part.0.iter().chain(&part.1).any(|&v| v != 0), "{what}");
+    }
+}
+
 #[test]
 fn a_layered_psd_comes_in_as_an_artwork() {
     use procraft_engine::document::BlendMode;
