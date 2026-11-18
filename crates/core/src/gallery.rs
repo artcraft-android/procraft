@@ -46,6 +46,25 @@ impl GalleryEntry {
     }
 }
 
+/// Under this wide a window the gallery's columns go by its width, not by which way it is turned.
+const GALLERY_NARROW: f32 = 600.0;
+/// The width a column takes in a narrow window, one column more than fit.
+const GALLERY_COLUMN: f32 = 256.0;
+
+/// How many columns the gallery's grid has in a window `width` wide (`landscape`: wider than
+/// tall): three upright and four on its side; a narrower window (beside another, or a phone) one
+/// more than fit 256 wide, so its artworks stay a size to see: two on a phone upright.
+#[uniffi::export]
+pub fn gallery_columns(width: f32, landscape: bool) -> u32 {
+    if width < GALLERY_NARROW {
+        (width / GALLERY_COLUMN).floor().max(0.0) as u32 + 1
+    } else if landscape {
+        4
+    } else {
+        3
+    }
+}
+
 /// One of the buttons in the gallery's title row (in its capsule, or More's list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum GalleryAction {
@@ -1344,6 +1363,40 @@ mod tests {
                 }
                 assert!(fit.capsule_left + fit.capsule_width + 44.0 + 20.0 <= width + 13.01);
             }
+        }
+    }
+
+    #[test]
+    fn a_tablet_gallery_keeps_its_columns_and_a_narrow_window_gets_bigger_cells() {
+        // tablets as always: three across upright, four on their side
+        for (width, landscape, columns) in [
+            (640.0, false, 3),
+            (744.0, false, 3),
+            (800.0, false, 3),
+            (1024.0, true, 4),
+            (1133.0, true, 4),
+            (1280.0, true, 4),
+        ] {
+            assert_eq!(gallery_columns(width, landscape), columns, "{width}");
+        }
+        // a phone upright (and a window as narrow): two across, each cell's picture box (the
+        // pitch less 40 across, less 82 down) a usable size, where three left it tiny
+        for width in [320.0, 360.0, 393.0, 411.0, 480.0] {
+            let columns = gallery_columns(width, false);
+            assert_eq!(columns, 2, "{width}");
+            let pitch = width / columns as f32;
+            assert!(pitch - 40.0 >= 120.0 && pitch - 82.0 >= 78.0, "{width}");
+        }
+        // half a tablet: three; very narrow: one; a phone on its side: four
+        assert_eq!(gallery_columns(560.0, false), 3);
+        assert_eq!(gallery_columns(240.0, false), 1);
+        assert_eq!(gallery_columns(851.0, true), 4);
+        // never fewer columns for a wider window, upright
+        let mut last = 0;
+        for w in (200..1400).step_by(10) {
+            let n = gallery_columns(w as f32, false);
+            assert!(n >= last, "{w}");
+            last = n;
         }
     }
 

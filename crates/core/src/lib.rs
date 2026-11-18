@@ -163,8 +163,8 @@ pub use floating::{
 pub use frame::{configure, screen_profile};
 pub use gallery::{
     ArtworkStore, DragRest, GALLERY_MORE_ALONE, GALLERY_SPRING_MS, GalleryAction, GalleryArtwork, GalleryButton,
-    GalleryEntry, GalleryHeaderFit, GalleryPick, ZipKind, gallery_header_fit, gallery_pick, gallery_spring_ms,
-    zip_file_kind,
+    GalleryEntry, GalleryHeaderFit, GalleryPick, ZipKind, gallery_columns, gallery_header_fit, gallery_pick,
+    gallery_spring_ms, zip_file_kind,
 };
 pub use gestures::{
     GestureOption, GesturePurpose, GestureSettings, KeptGestures, MAX_DELAY_S, MIN_DELAY_S, Trigger, gesture_options,

@@ -15,7 +15,7 @@ use egui::{
 };
 use procraft_core::{
     ArtworkStore, CanvasPreset, DragRest, GalleryAction, GalleryArtwork, GalleryEntry, GalleryHeaderFit, GalleryPick,
-    P3, gallery_header_fit, gallery_pick, preset_label, presets_from_json, profile_chip,
+    P3, gallery_columns, gallery_header_fit, gallery_pick, preset_label, presets_from_json, profile_chip,
 };
 
 use crate::animated_export::Animated;
@@ -1296,9 +1296,10 @@ impl Gallery {
         asked
     }
 
-    /// The artworks and stacks, three across (four on a wide window), scrolling.
+    /// The artworks and stacks, three across (four on a wide window, fewer and bigger on a narrow
+    /// one), scrolling.
     fn grid(&mut self, ui: &mut Ui, rect: Rect) -> Option<Asked> {
-        let columns = if rect.width() > rect.height() + HEADER { 4 } else { 3 };
+        let columns = gallery_columns(rect.width(), rect.width() > rect.height() + HEADER).max(1) as usize;
         let pitch = rect.width() / columns as f32;
         let rows = self.entries.len().div_ceil(columns);
         let mut asked = None;

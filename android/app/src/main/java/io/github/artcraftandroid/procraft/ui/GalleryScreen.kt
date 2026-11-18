@@ -113,7 +113,8 @@ import io.github.artcraftandroid.procraft.core.GalleryAction
 
 /**
  * A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
- * and four on its side), the content's width (40 less) and the thumbnail box's height (82 less).
+ * and four on its side, two on a phone: [galleryColumns]), the content's width (40 less) and the
+ * thumbnail box's height (82 less).
  */
 private data class CellSize(val pitch: Dp, val width: Dp, val thumb: Dp)
 
@@ -201,7 +202,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
             if (renaming != null || renamingStack != null || about) tween(300) else tween(150),
             label = "blur",
         )
-        val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
+        // the shared core's columns: by the way the screen is turned, or in a narrow window by its width
+        val columns = io.github.artcraftandroid.procraft.core.galleryColumns(screenWidth.value, screenWidth > screenHeight).toInt()
+        val dropCell = cellSize(screenWidth, columns)
         // the title row laid out for the window (the shared core's rules): the buttons that fit,
         // the rest under More, and the title on one line, shrunk to fit beside them
         val titleText = vm.openStack?.name ?: "ProCraft"
@@ -313,7 +316,6 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         Text("Tap + to start a new canvas", color = Pc.GalleryText, fontSize = 17.sp)
                     }
                 } else {
-                    val columns = if (screenWidth > screenHeight) 4 else 3
                     val cell = cellSize(screenWidth, columns)
                     androidx.compose.runtime.CompositionLocalProvider(LocalCell provides cell) {
                     // the whole screen under the header, so artworks flying in from a stack lower down
