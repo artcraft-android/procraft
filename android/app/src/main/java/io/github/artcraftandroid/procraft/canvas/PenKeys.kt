@@ -40,23 +40,39 @@ internal fun isPen(toolType: Int) = toolType == MotionEvent.TOOL_TYPE_STYLUS || 
 internal class PenButtons {
     private var held = 0
 
+    /** The pen's touch events have shown a button held: its driver puts them in, so one missing as it lifts was let go. */
+    private var touchesShowButtons = false
+
     /**
      * The buttons pressed and let go ([FIRST_BUTTON], [SECOND_BUTTON]) since the last event, by this
      * one's [buttonState]. An event without the pen in it ([penIn] false: a hand's touch, whose buttons read
      * as none held) changes nothing, or a hand landing while a button is held would let it go. While
      * the pen is [touching], a button that goes missing isn't let go yet: some pens' touch events
      * leave out a button their hover shows held, which would hand the eraser back as the stroke
-     * begins. It is let go as the pen lifts or hovers without it (a stroke begun with it held
-     * erases to its end either way).
+     * begins. As the pen [lifting] lifts it is let go, unless its touches have never shown a button:
+     * then the lift leaves it out too, and the next hover says whether it is still held (let go
+     * there and pressed again as the pen hovers on, one press would switch to the eraser and
+     * straight back, and the size slider with it).
      */
-    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false): Pair<Int, Int> {
+    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false, lifting: Boolean = false): Pair<Int, Int> {
         if (!penIn) return 0 to 0
-        val now = penButtonsIn(buttonState) or (if (touching) held else 0)
+        val shown = penButtonsIn(buttonState)
+        if ((touching || lifting) && shown != 0) touchesShowButtons = true
+        val kept = touching || (lifting && !touchesShowButtons)
+        val now = shown or (if (kept) held else 0)
         val change = (now and held.inv()) to (held and now.inv())
         held = now
         return change
     }
 }
+
+/** Whether a motion event of [action] is the pen on the glass ([PenButtons.next]'s touching), or lifting from it (its lifting). */
+internal fun penTouching(action: Int): Boolean = when (action) {
+    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_POINTER_UP -> true
+    else -> false
+}
+
+internal fun penLifting(action: Int): Boolean = action == MotionEvent.ACTION_UP
 
 /** Tells a pen's next double-tap from the second press of the one just heard. */
 internal class PenDoubleTaps {
