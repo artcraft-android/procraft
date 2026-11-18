@@ -1391,44 +1391,65 @@ mod tests {
     /// A tablet's pen as X11 gives it, at 1000 moves a second with its pressure and lean: every
     /// sample reaches the stroke, the canvas is handed them at most once a frame (and once more as
     /// it lifts), and it lays just what it laid when each move went on as it came. A move then
-    /// costs a few microseconds where it cost a stroke's step and tip, and the pen's second costs
+    /// costs a small share of what it cost (a stroke's step and tip), and the pen's second costs
     /// the main thread about what the mouse's does. The mouse, drawn alike, lays what it did too.
-    /// The brush is one that shows its tip, the costly kind; what each costs is printed.
+    /// The brush is one that shows its tip, the costly kind. The four strokes are drawn in turn
+    /// `ROUNDS` times, so a busy machine slows each alike, and each is timed by its quickest round
+    /// (other work only adds); what each costs is printed. `pen_cost_by_brush` holds a move to
+    /// `MOVE_BUDGET_US`.
     #[test]
     fn a_1000_hz_pen_reaches_the_stroke_whole_once_a_frame() {
         let _one = crate::pen::tests::mouse_pointer_tests();
         let Some(window) = Window::open(2048) else { return };
         assert!(window.brush("Studio Pen"));
         let blank = window.picture();
-        let mut strokes = Vec::new();
-        for (pen, what) in [(true, "a tablet's pen"), (false, "the mouse")] {
-            let each = stroke_at_1000_hz(&window, pen, true);
-            let waiting = stroke_at_1000_hz(&window, pen, false);
-            println!("{}", each.said(&format!("{what}, each move")));
-            println!("{}", waiting.said(&format!("{what}, once a frame")));
-            assert!(most_apart(&blank, &waiting.picture) > 100, "{what}: nothing was drawn");
-            let apart = most_apart(&each.picture, &waiting.picture);
-            println!("{what}: the pictures {apart} apart at most");
-            assert!(apart <= 2, "{what}: once a frame, the stroke came out otherwise ({apart} apart)");
-            // every move reached the stroke, at most once a frame and once more as it lifted
-            assert_eq!(each.handed, Handed { batches: each.moves, samples: each.moves }, "{what}");
-            assert_eq!(waiting.handed.samples, waiting.moves, "{what}: samples were lost");
-            assert!(waiting.handed.batches <= waiting.per_frame.len() + 1, "{what}: {:?}", waiting.handed);
-            strokes.push((each, waiting));
+        // each round's main-thread time for the second and median move: a pen's strokes each move
+        // and once a frame, then the mouse's
+        let mut timed = [(); 4].map(|()| Vec::new());
+        for round in 1..=ROUNDS {
+            for (k, (pen, what)) in [(true, "a tablet's pen"), (false, "the mouse")].into_iter().enumerate() {
+                let each = stroke_at_1000_hz(&window, pen, true);
+                let waiting = stroke_at_1000_hz(&window, pen, false);
+                println!("{}", each.said(&format!("{round}: {what}, each move")));
+                println!("{}", waiting.said(&format!("{round}: {what}, once a frame")));
+                assert!(most_apart(&blank, &waiting.picture) > 100, "{what}: nothing was drawn");
+                let apart = most_apart(&each.picture, &waiting.picture);
+                assert!(apart <= 2, "{what}: once a frame, the stroke came out otherwise ({apart} apart)");
+                // every move reached the stroke, at most once a frame and once more as it lifted
+                assert_eq!(each.handed, Handed { batches: each.moves, samples: each.moves }, "{what}");
+                assert_eq!(waiting.handed.samples, waiting.moves, "{what}: samples were lost");
+                assert!(waiting.handed.batches <= waiting.per_frame.len() + 1, "{what}: {:?}", waiting.handed);
+                for (i, stroke) in [(2 * k, each), (2 * k + 1, waiting)] {
+                    timed[i].push((stroke.busy(), Stroke::median(&stroke.per_move)));
+                }
+            }
         }
-        let [(pen_each, pen), (_, mouse)] = strokes.as_slice() else { return };
-        // a move waiting costs microseconds: no stroke's step, no tip, no wait on the canvas
-        let a_move = Stroke::median(&pen.per_move);
-        assert!(a_move < Duration::from_micros(MOVE_BUDGET_US), "a pen's move took {a_move:?}");
+        let quickest = |times: &[(Duration, Duration)]| {
+            let busy = times.iter().map(|t| t.0).min().unwrap_or_default();
+            (busy, times.iter().map(|t| t.1).min().unwrap_or_default())
+        };
+        let [(each_busy, each_move), (pen_busy, a_move), _, (mouse_busy, _)] = timed.map(|t| quickest(&t));
+        println!(
+            "quickest: a pen's move {a_move:?} once a frame, {each_move:?} each move; its second {pen_busy:?} \
+             once a frame, {each_busy:?} each move; the mouse's {mouse_busy:?} once a frame"
+        );
+        // a move waiting costs a small share of one handed on: no stroke's step, no tip, no wait on
+        // the canvas
+        assert!(a_move * MOVE_SHARE <= each_move, "a pen's move took {a_move:?} once a frame, {each_move:?} each move");
         // the pen's second costs at most half what it did, and about what the mouse's does
-        assert!(pen.busy() * 2 <= pen_each.busy(), "{:?} once a frame, {:?} each move", pen.busy(), pen_each.busy());
+        assert!(pen_busy * 2 <= each_busy, "{pen_busy:?} once a frame, {each_busy:?} each move");
         assert!(
-            pen.busy() <= mouse.busy() * 2 + Duration::from_millis(50),
-            "the pen {:?}, the mouse {:?}",
-            pen.busy(),
-            mouse.busy()
+            pen_busy <= mouse_busy * 2 + Duration::from_millis(50),
+            "the pen {pen_busy:?}, the mouse {mouse_busy:?}"
         );
     }
+
+    /// The rounds of `a_1000_hz_pen_reaches_the_stroke_whole_once_a_frame`.
+    const ROUNDS: usize = 3;
+
+    /// How many times less a pen's move costs the main thread while it waits for the frame than
+    /// one handed on at once (a stroke's step and its tip).
+    const MOVE_SHARE: u32 = 10;
 
     /// What a pen's move may cost the main thread while it waits for the frame (microseconds; one
     /// handed on at once cost hundreds, a tip's brush a thousand, in a test build).
@@ -1437,7 +1458,9 @@ mod tests {
     /// What a stroke through the desktop's input costs with each brush in `PEN_COST_BRUSHES`
     /// (names, `,` between; "Studio Pen,Gouache,Soft Airbrush,Technical Pencil"), on a canvas
     /// `PEN_COST_SIDE` (3600) square: a tablet's pen and the mouse under X11, at 1000 moves a
-    /// second, each move handed on as it came and once a frame.
+    /// second, each move handed on as it came and once a frame. Fails if a pen's move waiting for
+    /// the frame costs past `MOVE_BUDGET_US` (the median); run alone (other work on the machine
+    /// slows it).
     /// `cargo test -p procraft-desktop pen_cost_by_brush -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -1448,6 +1471,7 @@ mod tests {
         let Some(window) = Window::open(side) else { return };
         let info = window.gpu.adapter.get_info();
         println!("{} ({:?}), canvas {side} square", info.name, info.backend);
+        let mut slow = Vec::new();
         for name in env("PEN_COST_BRUSHES", "Studio Pen,Gouache,Soft Airbrush,Technical Pencil").split(',') {
             if !window.brush(name) {
                 println!("no {name}");
@@ -1455,10 +1479,16 @@ mod tests {
             }
             for (pen, what) in [(true, "pen"), (false, "mouse")] {
                 for (each_move, how) in [(true, "each move"), (false, "once a frame")] {
-                    println!("{}", stroke_at_1000_hz(&window, pen, each_move).said(&format!("{name}, {what}, {how}")));
+                    let stroke = stroke_at_1000_hz(&window, pen, each_move);
+                    println!("{}", stroke.said(&format!("{name}, {what}, {how}")));
+                    let a_move = Stroke::median(&stroke.per_move);
+                    if pen && !each_move && a_move > Duration::from_micros(MOVE_BUDGET_US) {
+                        slow.push(format!("{name} {a_move:?}"));
+                    }
                 }
             }
         }
+        assert!(slow.is_empty(), "a pen's move past {MOVE_BUDGET_US} us waiting for the frame: {slow:?}");
     }
 
     /// A pen's touches (Windows Ink's, the tablet protocol's on Wayland) wait for the frame as its
