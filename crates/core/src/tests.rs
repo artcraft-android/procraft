@@ -5397,16 +5397,43 @@ fn brushes_and_sets_are_made_copied_and_deleted() {
     assert_eq!(other.brush_library()[0].brushes.len(), s.brush_library()[start.set as usize + 1].brushes.len());
     assert_eq!(other.duplicate_brush_set(0), Some(0));
     assert_eq!(other.brush_library()[1].name, other.brush_library()[0].name);
-    // deleting a set takes its brushes; the last set stays
+    // deleting a set takes its brushes; the only one goes too, leaving none
     assert!(s.delete_brush_set(start.set + 1));
     assert!(s.brush_library().iter().all(|set| set.name != set_name));
-    while s.brush_library().len() > 1 {
+    while !s.brush_library().is_empty() {
         assert!(s.delete_brush_set(0));
     }
     assert!(!s.delete_brush_set(0));
+    assert!(s.recent_brushes().is_empty());
     // a tool still draws with something
     s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
     s.stroke_end(vec![]);
+    // and a set made then holds the next brush
+    assert_eq!(s.new_brush_set(), 0);
+    assert_eq!(s.new_brush(0), Some(0));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (0, 0));
+}
+
+/// The library in use left with no sets is kept so, the first library too: it comes back empty,
+/// not as the library the app ships.
+#[test]
+fn a_library_whose_last_set_was_deleted_comes_back_empty() {
+    let dir = std::env::temp_dir().join(format!("procraft-empty-library-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.to_string_lossy().into_owned();
+    let s = CanvasSession::new(32, 32);
+    s.open_brushes(path.clone());
+    assert!(!s.brush_library().is_empty());
+    while !s.brush_library().is_empty() {
+        assert!(s.delete_brush_set(0));
+    }
+    assert!(s.keep_brushes(path.clone()));
+    let back = CanvasSession::new(32, 32);
+    assert!(back.open_brushes(path.clone()));
+    assert!(back.brush_library().is_empty());
+    // read ahead too, as the gallery does
+    crate::prepare_brushes(path);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

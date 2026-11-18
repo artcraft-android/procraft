@@ -455,12 +455,12 @@ struct LastLibrary {
 pub fn prepare_brushes(dir: String) {
     // the brushes the app comes with first, kept or not
     crate::stock_library::prepare();
-    let (library, first) = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
+    let library = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
     if holds(&LAST_LIBRARY, &library) || !library.is_file() {
         return;
     }
     let started = std::time::Instant::now();
-    if CanvasSession::new(1, 1).load_library_file(&library, !first) {
+    if CanvasSession::new(1, 1).load_library_file(&library, true) {
         log::info!("the brushes read ahead in {} ms", started.elapsed().as_millis());
     }
 }
@@ -1342,11 +1342,12 @@ impl CanvasSession {
         }
     }
 
-    /// Removes a set and its brushes (not the last set).
+    /// Removes a set and its brushes; the last one too, leaving the library with none (it shows
+    /// as a library with no brushes yet, a set made with its "+").
     pub fn delete_brush_set(&self, set: u32) -> bool {
         let mut st = self.shared.lock();
         let s = set as usize;
-        if s >= st.library.len() || st.library.len() <= 1 {
+        if s >= st.library.len() {
             return false;
         }
         st.library.remove(s);

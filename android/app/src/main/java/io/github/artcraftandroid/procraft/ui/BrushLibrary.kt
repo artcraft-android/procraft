@@ -590,12 +590,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                 setMenu = null
                                 share(null)
                             }
-                            if (sets.size > 1) {
-                                MenuDivider()
-                                MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
-                                    setMenu = null
-                                    deleting = "Delete this set and its brushes?" to { vm.deleteBrushSet(i) }
-                                }
+                            // the only set too: the library is then left with none
+                            MenuDivider()
+                            MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
+                                setMenu = null
+                                deleting = "Delete this set and its brushes?" to { vm.deleteBrushSet(i) }
                             }
                         }
                     }

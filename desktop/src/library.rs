@@ -917,17 +917,16 @@ impl Library {
         let ink = menu::INK;
         let own = library.get(i).map_or(0, |s| s.icon as usize);
         let set_icon = icons::SET_ICONS.get(own).unwrap_or(&icons::BRUSH_SET);
-        let mut entries = vec![
+        let entries = [
             Entry::Item(&icons::MENU_RENAME, "Rename", ink),
             Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink),
             Entry::More(set_icon, "Customize icon", ink),
             menu::DIVIDER,
             Entry::Item(&icons::MENU_SHARE, "Share", ink),
+            // the only set too: the library is then left with none
+            menu::DIVIDER,
+            Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER),
         ];
-        if library.len() > 1 {
-            entries.push(menu::DIVIDER);
-            entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
-        }
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = panel::screen(ctx);
         let top = (set_rect.center().y - size.y / 2.0)
