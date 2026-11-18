@@ -2313,7 +2313,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(8)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(9)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
