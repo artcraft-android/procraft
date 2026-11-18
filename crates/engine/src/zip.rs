@@ -270,12 +270,17 @@ fn u64le(b: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(at..at.checked_add(8)?)?.try_into().ok()?))
 }
 
-/// Writes an archive entry by entry.
+/// Writes an archive entry by entry: into memory ([`ZipWriter::new`]), or into a writer as it
+/// goes ([`ZipWriter::to`]), so that a big archive is never all in memory.
 #[derive(Default)]
-pub struct ZipWriter {
-    out: Vec<u8>,
+pub struct ZipWriter<W: std::io::Write = Vec<u8>> {
+    out: W,
+    /// How many bytes are written.
+    at: u64,
     central: Vec<u8>,
     count: u16,
+    /// The first write that failed, or what its caller said went wrong: the archive isn't whole.
+    failed: Option<std::io::Error>,
 }
 
 /// An entry made ready to add with [`ZipWriter::add_ready`] (on any thread, for adding in order):
@@ -307,6 +312,43 @@ impl ZipWriter {
         ZipWriter::default()
     }
 
+    /// The finished archive.
+    pub fn finish(mut self) -> Vec<u8> {
+        self.end();
+        self.out
+    }
+}
+
+impl<W: std::io::Write> ZipWriter<W> {
+    /// An archive written into `out` as its entries are added.
+    pub fn to(out: W) -> ZipWriter<W> {
+        ZipWriter { out, at: 0, central: Vec::new(), count: 0, failed: None }
+    }
+
+    /// The archive can't be made whole (`e`, what went wrong): [`ZipWriter::finish_to`] fails.
+    pub fn fail(&mut self, e: std::io::Error) {
+        self.failed.get_or_insert(e);
+    }
+
+    /// Ends an archive written into a writer: the writer, or why the archive isn't whole.
+    pub fn finish_to(mut self) -> std::io::Result<W> {
+        self.end();
+        match self.failed {
+            Some(e) => Err(e),
+            None => Ok(self.out),
+        }
+    }
+
+    /// `bytes` written next (nothing more once a write failed).
+    fn put(&mut self, bytes: &[u8]) {
+        if self.failed.is_none()
+            && let Err(e) = self.out.write_all(bytes)
+        {
+            self.failed = Some(e);
+        }
+        self.at += bytes.len() as u64;
+    }
+
     /// Adds `data` as entry `name`, deflated (or stored, if deflating doesn't make it smaller).
     pub fn add(&mut self, name: &str, data: &[u8]) {
         self.add_ready(name, Ready::of(data, true));
@@ -321,7 +363,7 @@ impl ZipWriter {
     /// the archive (as USDZ packages ask: the local header padded with an extra field).
     pub fn add_aligned(&mut self, name: &str, data: &[u8], align: usize) {
         let align = align.max(1);
-        let at = self.out.len() + 30 + name.len();
+        let at = self.at as usize + 30 + name.len();
         let mut pad = (align - at % align) % align;
         // an extra field needs four bytes for its id and size
         if pad > 0 && pad < 4 {
@@ -332,7 +374,7 @@ impl ZipWriter {
 
     /// An entry whose data (`size` bytes, checksum `crc`) is written as `body` by `method`.
     fn entry(&mut self, name: &str, crc: u32, size: usize, method: u16, body: &[u8], pad: usize) {
-        let local = self.out.len() as u32;
+        let local = self.at as u32;
         let name = name.as_bytes();
         let header = |sig: u32, central: bool| {
             let mut h = Vec::with_capacity(46 + name.len());
@@ -367,25 +409,28 @@ impl ZipWriter {
             }
             h
         };
-        self.out.extend_from_slice(&header(0x0403_4B50, false));
-        self.out.extend_from_slice(body);
+        let local_header = header(0x0403_4B50, false);
+        self.put(&local_header);
+        self.put(body);
         self.central.extend_from_slice(&header(0x0201_4B50, true));
         self.count = self.count.saturating_add(1);
     }
 
-    /// The finished archive.
-    pub fn finish(mut self) -> Vec<u8> {
-        let start = self.out.len() as u32;
-        let size = self.central.len() as u32;
-        self.out.append(&mut self.central);
-        self.out.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
-        self.out.extend_from_slice(&[0; 4]);
-        self.out.extend_from_slice(&self.count.to_le_bytes());
-        self.out.extend_from_slice(&self.count.to_le_bytes());
-        self.out.extend_from_slice(&size.to_le_bytes());
-        self.out.extend_from_slice(&start.to_le_bytes());
-        self.out.extend_from_slice(&0u16.to_le_bytes());
-        self.out
+    /// The central directory and its end, after the entries.
+    fn end(&mut self) {
+        let start = self.at as u32;
+        let central = std::mem::take(&mut self.central);
+        let size = central.len() as u32;
+        self.put(&central);
+        let mut tail = Vec::with_capacity(22);
+        tail.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
+        tail.extend_from_slice(&[0; 4]);
+        tail.extend_from_slice(&self.count.to_le_bytes());
+        tail.extend_from_slice(&self.count.to_le_bytes());
+        tail.extend_from_slice(&size.to_le_bytes());
+        tail.extend_from_slice(&start.to_le_bytes());
+        tail.extend_from_slice(&0u16.to_le_bytes());
+        self.put(&tail);
     }
 }
 
