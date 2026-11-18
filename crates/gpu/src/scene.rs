@@ -3280,9 +3280,11 @@ impl Projector {
     }
 }
 
-/// The pixels round a point, one to spare each way.
+/// The pixels round a point, one to spare each way (a point past the integers' reach, as texture
+/// coordinates far out of the texture put one, kept at its edge).
 fn pixels_round(x: f32, y: f32) -> IRect {
-    IRect::new(x.floor() as i32 - 1, y.floor() as i32 - 1, x.ceil() as i32 + 1, y.ceil() as i32 + 1)
+    let (low, high) = (|v: f32| (v.floor() as i32).saturating_sub(1), |v: f32| (v.ceil() as i32).saturating_add(1));
+    IRect::new(low(x), low(y), high(x), high(y))
 }
 
 /// `m` (columns) applied to point `p`: clip coordinates.
@@ -3385,6 +3387,15 @@ fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_point_past_the_integers_reach_rounds_to_their_edge() {
+        let at = |r: IRect| (r.x0, r.y0, r.x1, r.y1);
+        assert_eq!(at(pixels_round(2.5, 3.0)), (1, 2, 4, 4));
+        // texture coordinates of ±1e30 (a model's file may hold them), and none at all
+        assert_eq!(at(pixels_round(1e30, -1e30)), (i32::MAX - 1, i32::MIN, i32::MAX, i32::MIN + 1));
+        assert_eq!(at(pixels_round(f32::NAN, f32::INFINITY)), (-1, i32::MAX - 1, 1, i32::MAX));
+    }
 
     #[test]
     fn marked_tiles_become_rectangles_joined_down_their_runs() {

@@ -5847,4 +5847,222 @@ f 1/1 2/2",
             assert!(all(&opened) == end, "seed {seed}: reopened, after {done:?}");
         }
     }
+
+    /// Models of every awkward shape (no texture coordinates, none of a triangle's area, a flat
+    /// one, ones far too big or small, coordinates that are no numbers, texture coordinates far
+    /// outside the texture, several materials with no file for them) opened and then turned,
+    /// pinched, held, painted with the pen, a finger, the mouse and the eraser, on each channel and
+    /// texture set, undone, redone and saved, a frame drawn after each: on this GPU, and as an old
+    /// GPU's. Each either opens and takes all of it, or is refused as it opens; none fails.
+    #[test]
+    fn models_of_every_shape_take_turning_and_painting_without_failing() {
+        const SQUARE: &str = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n";
+        let models: Vec<(&str, String)> = vec![
+            ("cube", CUBE.to_owned()),
+            ("no texture coordinates", "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nf 1 2 3 4\n".to_owned()),
+            ("normals", format!("{SQUARE}vn 0 0 1\nf 1/1/1 2/2/1 3/3/1 4/4/1\n")),
+            ("facing away", format!("{SQUARE}f 4/4 3/3 2/2 1/1\n")),
+            ("one point", "v 0 0 0\nv 0 0 0\nv 0 0 0\nvt 0 0\nvt 0 0\nvt 0 0\nf 1/1 2/2 3/3\n".to_owned()),
+            ("a line", "v 0 0 0\nv 1 0 0\nv 2 0 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n".to_owned()),
+            (
+                "huge",
+                "v -1e30 -1e30 0\nv 1e30 -1e30 0\nv 1e30 1e30 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n".to_owned(),
+            ),
+            ("past f32", "v -1e39 -1 0\nv 1e39 -1 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n".to_owned()),
+            (
+                "tiny",
+                "v -1e-30 -1e-30 0\nv 1e-30 -1e-30 0\nv 1e-30 1e-30 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n"
+                    .to_owned(),
+            ),
+            ("no numbers", format!("{SQUARE}v nan inf 0\nvt nan inf\nf 1/1 2/2 3/3 4/4\nf 5/5 1/1 2/2\n")),
+            (
+                "far texture coordinates",
+                "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt -3 -2\nvt 5 -2\nvt 5 7\nvt -3 7\nf 1/1 2/2 3/3 4/4\n"
+                    .to_owned(),
+            ),
+            (
+                "huge texture coordinates",
+                "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nvt -1e30 0\nvt 1e30 0\nvt 0 1e30\nf 1/1 2/2 3/3\n".to_owned(),
+            ),
+            (
+                "two materials",
+                format!("{SQUARE}v -1 -1 1\nv 1 -1 1\nv 1 1 1\nusemtl a\nf 1/1 2/2 3/3 4/4\nusemtl b\nf 5/1 6/2 7/3\n"),
+            ),
+            ("no faces", "v 0 0 0\nv 1 0 0\nv 0 1 0\n".to_owned()),
+            ("nothing", String::new()),
+        ];
+        let (Ok(_), Ok(_)) = (Gpu::headless(), Gpu::headless_old()) else { return eprintln!("skipped: no GPU") };
+        let mut failed = Vec::new();
+        for old in [false, true] {
+            for (name, text) in &models {
+                for side in [64, 2048].into_iter().filter(|&side| side == 64 || *name == "cube") {
+                    let gpu = if old { Gpu::headless_old() } else { Gpu::headless() }.unwrap();
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        work_a_model(text, gpu.clone(), side);
+                    }));
+                    let errors = gpu.errors();
+                    let what = format!("{name} at {side}{}", if old { ", old GPU" } else { "" });
+                    if let Err(panic) = run {
+                        failed.push(format!("{what}: {}", procraft_gpu::panic_message(panic.as_ref())));
+                    } else if errors > 0 {
+                        failed.push(format!("{what}: {errors} GPU errors"));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    /// `text`, an OBJ, opened with `side` texture sets on `gpu` and put through what a hand does
+    /// to a model (see `models_of_every_shape_take_turning_and_painting_without_failing`).
+    fn work_a_model(text: &str, gpu: Gpu, side: u32) {
+        let Ok(s) = CanvasSession::open_model(text.into(), "model.obj".into(), Vec::new(), "Model".into(), side) else {
+            return;
+        };
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let draw = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let target = st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("test frame"),
+                size: wgpu::Extent3d { width: 200, height: 200, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            st.render_scene(&view, format, (200, 200), None);
+        };
+        let settings =
+            crate::TouchSettings { hold: Some(crate::GestureAction::Eyedropper), ..crate::TouchSettings::default() };
+        s.set_touch_settings(settings.clone());
+        draw(&s);
+        let mut t = 0.0;
+        // a finger turns it, a long way
+        s.touch_down(1, PointerKind::Finger, vec![sample(70.0, 100.0, t)]);
+        for i in 1..12 {
+            t += 16.0;
+            s.touch_move(1, vec![sample(70.0 + i as f32 * 25.0, 100.0 + i as f32 * 9.0, t)]);
+            draw(&s);
+        }
+        t += 16.0;
+        s.touch_up(1, vec![sample(345.0, 199.0, t)]);
+        s.turn_model(5000.0, -3000.0);
+        draw(&s);
+        // two fingers pinch it nearer, then far away, and move it
+        for (from, to) in [(40.0, 5.0), (5.0, 400.0)] {
+            t += 100.0;
+            s.touch_down(2, PointerKind::Finger, vec![sample(100.0 - from, 100.0, t)]);
+            t += 5.0;
+            s.touch_down(3, PointerKind::Finger, vec![sample(100.0 + from, 100.0, t)]);
+            for i in 1..=8 {
+                t += 16.0;
+                let gap = from + (to - from) * i as f32 / 8.0;
+                s.touch_moves(vec![
+                    crate::touch::TouchMove { id: 2, samples: vec![sample(100.0 - gap, 100.0 + i as f32, t)] },
+                    crate::touch::TouchMove { id: 3, samples: vec![sample(100.0 + gap, 100.0 + i as f32, t)] },
+                ]);
+                draw(&s);
+            }
+            t += 16.0;
+            s.touch_up(3, vec![sample(100.0 + to, 108.0, t)]);
+            s.touch_up(2, vec![sample(100.0 - to, 108.0, t)]);
+        }
+        draw(&s);
+        // a finger held still picks a colour off it
+        t += 100.0;
+        s.touch_down(4, PointerKind::Finger, vec![sample(100.0, 100.0, t)]);
+        t += settings.hold_ms + 10.0;
+        for c in s.touch_tick(t) {
+            if let crate::TouchCommand::Pick { x, y } = c {
+                let _ = s.pick(x, y, 11);
+            }
+        }
+        t += 16.0;
+        s.touch_up(4, vec![sample(100.0, 100.0, t)]);
+        draw(&s);
+        // painted across the middle by the pen (pausing long enough to snap a shape), a finger set
+        // to paint the model, the mouse, and the pen's eraser end, on each channel
+        let across = |s: &CanvasSession, id: u64, kind: PointerKind, t: &mut f64| {
+            s.touch_down(id, kind, vec![sample(20.0, 100.0, *t)]);
+            draw(s);
+            for i in 1..20 {
+                *t += 8.0;
+                s.touch_move(id, vec![sample(20.0 + i as f32 * 8.0, 100.0 + (i % 5) as f32 * 4.0, *t)]);
+                if i == 10 {
+                    *t += 1000.0;
+                    let _ = s.touch_tick(*t);
+                }
+                draw(s);
+            }
+            *t += 8.0;
+            s.touch_up(id, vec![sample(180.0, 100.0, *t)]);
+            draw(s);
+        };
+        // (a panel open over half of it, frosted)
+        s.shared.lock().backdrops = vec![[0.0, 0.0, 100.0, 200.0, 0.0, 1.0]];
+        for channel in 0..3 {
+            s.set_model_channel(channel);
+            across(&s, 5, PointerKind::Stylus, &mut t);
+            across(&s, 6, PointerKind::Mouse, &mut t);
+            s.set_touch_settings(crate::TouchSettings { model_finger_paint: true, ..settings.clone() });
+            across(&s, 7, PointerKind::Finger, &mut t);
+            s.set_touch_settings(settings.clone());
+            across(&s, 8, PointerKind::StylusEraser, &mut t);
+            s.set_tool(crate::ToolKind::Smudge);
+            across(&s, 9, PointerKind::Stylus, &mut t);
+            s.set_tool(crate::ToolKind::Paint);
+        }
+        s.set_model_channel(0);
+        // on each texture set
+        let sets = s.model_info().map_or(0, |info| info.texture_sets.len());
+        for set in 0..sets {
+            s.choose_texture_set(set as u32);
+            draw(&s);
+            across(&s, 10, PointerKind::Stylus, &mut t);
+        }
+        for _ in 0..4 {
+            let _ = s.undo();
+            draw(&s);
+        }
+        for _ in 0..2 {
+            let _ = s.redo();
+            draw(&s);
+        }
+        // saved (as the autosave does) and opened again
+        let dir = std::env::temp_dir().join(format!("procraft-awkward-model-{}-{side}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let gpu = s.shared.lock().gpu.clone();
+        if s.save(dir.to_string_lossy().into_owned()).is_ok()
+            && let (Ok(opened), Some(gpu)) = (CanvasSession::open(dir.to_string_lossy().into_owned()), gpu)
+        {
+            // and turned and painted there too
+            {
+                let mut st = opened.shared.lock();
+                st.window_size = (200, 200);
+                st.gpu = Some(gpu);
+                st.ensure_canvas();
+            }
+            opened.set_touch_settings(settings.clone());
+            draw(&opened);
+            t += 100.0;
+            opened.touch_down(1, PointerKind::Finger, vec![sample(70.0, 100.0, t)]);
+            t += 16.0;
+            opened.touch_move(1, vec![sample(150.0, 130.0, t)]);
+            draw(&opened);
+            t += 16.0;
+            opened.touch_up(1, vec![sample(150.0, 130.0, t)]);
+            across(&opened, 11, PointerKind::Stylus, &mut t);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
