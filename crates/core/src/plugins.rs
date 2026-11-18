@@ -3484,7 +3484,7 @@ mod tests {
         let keys = |controls: Vec<PluginControl>| controls.iter().map(|c| c.key().to_owned()).collect::<Vec<_>>();
         assert_eq!(keys(plugins.controls_in(PluginPlace::Canvas)), [format!("{ROTATION}.lock")]);
         let actions: Vec<String> = plugins.actions_in(PluginPlace::Canvas).into_iter().map(|a| a.key).collect();
-        assert_eq!(actions, [reset.clone()]);
+        assert_eq!(actions, [reset.as_str()]);
         assert!(plugins.controls_in(PluginPlace::Card).is_empty());
         // Alt+R runs it, and the keyboard's list says so
         assert_eq!(press(&plugins, "alt+r"), Some(PluginPressed::Action { key: reset.clone() }));
