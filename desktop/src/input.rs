@@ -1493,6 +1493,46 @@ mod tests {
         send(&mut input, &session, &finger(9030, TouchPhase::Ended, 340.0, 320.0));
     }
 
+    /// The mouse alone (no tablet pen moving it) shows where it hovers, paints at full pressure
+    /// with its moves waiting for the frame, and hovers again once let go; its right button and
+    /// the wheel paint nothing.
+    #[test]
+    fn the_mouse_hovers_and_paints_with_its_moves_handed_on_once_a_frame() {
+        fn no_pen(_: (f32, f32)) -> Option<crate::pen::MousePen> {
+            None
+        }
+        let session = shown();
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        let mut input = Input { read_mouse_pen: no_pen, test_clock: Some(0.0), ..Input::default() };
+        let device_id = DeviceId::dummy();
+        let moved = |x: f64| WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x, 200.0) };
+        let button = |button, state| WindowEvent::MouseInput { device_id, state, button };
+        send(&mut input, &session, &moved(200.0));
+        assert_eq!(input.hovering(), Some((200.0, 200.0)));
+        // the right button pressed and dragged: nothing
+        send(&mut input, &session, &button(MouseButton::Right, ElementState::Pressed));
+        send(&mut input, &session, &moved(220.0));
+        send(&mut input, &session, &button(MouseButton::Right, ElementState::Released));
+        assert!(!painted(&input) && input.idle(), "{:?}", input.commands);
+        // pressed, it paints at once, at the mouse's full pressure
+        send(&mut input, &session, &button(MouseButton::Left, ElementState::Pressed));
+        assert!(painted(&input) && input.pressing_from_afar() && input.hovering().is_none());
+        input.commands.clear();
+        for (k, x) in [230.0, 260.0, 290.0, 320.0].into_iter().enumerate() {
+            input.test_clock = Some(8.0 * (k + 1) as f64);
+            send(&mut input, &session, &moved(x));
+        }
+        assert_eq!(input.handed(), Handed::default(), "waiting for the frame");
+        assert!(input.flush(&session));
+        assert_eq!(input.handed(), Handed { batches: 1, samples: 4 });
+        // let go: the stroke ends after the moves before it, and the mouse hovers again
+        send(&mut input, &session, &moved(330.0));
+        send(&mut input, &session, &button(MouseButton::Left, ElementState::Released));
+        assert_eq!(input.handed(), Handed { batches: 2, samples: 5 });
+        assert!(input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        assert_eq!(input.hovering(), Some((330.0, 200.0)));
+    }
+
     /// A pen drawing a line for a second while no frame comes (a slow one): its moves wait, and
     /// when the QuickShape wait its press set runs out they go first, so the pen still moving snaps
     /// no shape; held still past the wait it snaps, as ever.
