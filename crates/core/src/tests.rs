@@ -875,6 +875,287 @@ fn preview_cost() {
     );
 }
 
+/// What opening an artwork costs in its brush library: a session made with the library it ships,
+/// the library kept in a folder, and opened from there by the next session, as the apps do with
+/// each artwork. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn library_cost() {
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let dir = std::env::temp_dir().join(format!("procraft-library-cost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.to_string_lossy().into_owned();
+    for round in 0..3 {
+        let t = std::time::Instant::now();
+        let s = CanvasSession::new(2048, 2048);
+        let made = ms(t);
+        let t = std::time::Instant::now();
+        s.open_brushes(path.clone());
+        let opened = ms(t);
+        let t = std::time::Instant::now();
+        s.keep_brushes(path.clone());
+        let kept = ms(t);
+        let brushes: usize = s.brush_library().iter().map(|set| set.brushes.len()).sum();
+        println!("round {round}: {brushes} brushes; made {made:.0} ms, opened {opened:.0} ms, kept {kept:.0} ms");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the brushes' pictures cost the first time they are wanted: the shapes and grains made, then
+/// each library brush's own pictures (stand-ins drawn for stock ones), the slowest named. Run with
+/// `--ignored --nocapture`, alone (what was drawn stays drawn for the rest of the run).
+#[test]
+#[ignore]
+fn texture_cost() {
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let t = std::time::Instant::now();
+    let shapes = procraft_engine::textures::shapes().len();
+    println!("{shapes} shapes made in {:.0} ms", ms(t));
+    let t = std::time::Instant::now();
+    let grains = procraft_engine::textures::grains().len();
+    println!("{grains} grains made in {:.0} ms", ms(t));
+    let t = std::time::Instant::now();
+    let s = CanvasSession::new(64, 64);
+    println!("a session and its library in {:.0} ms", ms(t));
+    let library: Vec<(String, procraft_engine::brush::Brush)> = {
+        let st = s.shared.lock();
+        st.library.iter().flat_map(|set| set.brushes.iter().map(|b| (set.name.to_owned(), b.clone()))).collect()
+    };
+    let mut each = Vec::new();
+    let whole = std::time::Instant::now();
+    for (set, brush) in &library {
+        let t = std::time::Instant::now();
+        let parts = [Some(brush), brush.secondary.as_deref()];
+        for b in parts.into_iter().flatten() {
+            for source in [&b.shape.source, &b.grain.source].into_iter().flatten() {
+                let _ = source.pixels.shared();
+            }
+        }
+        each.push((ms(t), format!("{set}/{}", brush.name)));
+    }
+    let whole = ms(whole);
+    each.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let slow = each.iter().filter(|(t, _)| *t >= 16.0).count();
+    println!("{} brushes' pictures in {whole:.0} ms; {slow} took a frame (16 ms) or more", each.len());
+    for (t, name) in each.iter().take(15) {
+        println!("  {t:7.1} ms  {name}");
+    }
+}
+
+/// What a stroke costs with every brush in the library (or the sets `STROKE_COST_SETS` names, `,`
+/// between), on a 2048 square canvas already painted on: the stroke's start (its pictures drawn
+/// the first time), each event's work and each frame's, and the whole stroke with the GPU done, an
+/// event's share; the slowest named, and each set's middle. `STROKE_COST_EVENTS` (150) is a
+/// stroke's length. Run on a device with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn stroke_cost_all() {
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let events: usize = env("STROKE_COST_EVENTS", "150").parse().unwrap_or(150);
+    let sets = env("STROKE_COST_SETS", "");
+    let Some(s) = session(2048, 1600) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let at = |v: &mut Vec<f64>, q: f64| {
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
+    };
+    let point = |k: usize| {
+        let t = k as f32 / (2 * events) as f32;
+        PenSample {
+            x: 100.0 + t * 1400.0,
+            y: 800.0 + (t * 12.0).sin() * 400.0,
+            pressure: 0.3 + 0.6 * (t * 20.0).sin().abs(),
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: k as f64 * 4.17,
+            roll: 0.0,
+        }
+    };
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+        }
+    };
+    let flush = |s: &CanvasSession| {
+        if let Some(g) = s.shared.lock().gpu.as_ref() {
+            g.flush();
+        }
+    };
+    let t = std::time::Instant::now();
+    procraft_engine::textures::prepare();
+    println!("shapes and grains made in {:.0} ms", ms(t));
+    let library = s.brush_library();
+    // paint to mix into
+    if let Some((set, index)) = library
+        .iter()
+        .enumerate()
+        .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == "Soft Airbrush").map(|j| (i as u32, j as u32)))
+    {
+        s.select_brush(set, index);
+        s.set_brush_size(1.0);
+        for (k, y) in [300.0_f32, 700.0, 1100.0, 1400.0].into_iter().enumerate() {
+            s.set_color(k as f32 / 3.0, 0.4, 1.0 - k as f32 / 3.0);
+            s.stroke_begin(PointerKind::Stylus, vec![sample(80.0, y, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(80.0 + i as f32 * 50.0, y, i as f64 * 8.0)).collect());
+            s.stroke_end(vec![]);
+            frame(&s);
+        }
+        flush(&s);
+    }
+    s.set_color(0.8, 0.2, 0.1);
+    let mut rows = Vec::new();
+    for set in &library {
+        if !sets.is_empty() && !sets.split(',').any(|n| n == set.name) {
+            continue;
+        }
+        for b in &set.brushes {
+            s.select_brush(b.set, b.index);
+            s.set_brush_size(0.4);
+            flush(&s);
+            let started = std::time::Instant::now();
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            let begin = ms(started);
+            let (mut adds, mut frames) = (Vec::new(), Vec::new());
+            for e in 1..=events {
+                let t = std::time::Instant::now();
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                adds.push(ms(t));
+                if e % 2 == 0 {
+                    let t = std::time::Instant::now();
+                    frame(&s);
+                    frames.push(ms(t));
+                }
+            }
+            s.stroke_end(vec![]);
+            frame(&s);
+            flush(&s);
+            let whole = ms(started) / events as f64;
+            let (event, frame_ms) = (at(&mut adds, 0.5), at(&mut frames, 0.5));
+            println!(
+                "row\t{}\t{}\t{begin:.2}\t{event:.3}\t{frame_ms:.3}\t{whole:.3}\t{:.3}",
+                set.name,
+                b.name,
+                at(&mut adds, 0.99),
+            );
+            rows.push((set.name.clone(), b.name.clone(), begin, event, frame_ms, whole));
+            s.undo();
+            frame(&s);
+            flush(&s);
+        }
+    }
+    let mut by_whole: Vec<_> = rows.iter().collect();
+    by_whole.sort_by(|a, b| b.5.total_cmp(&a.5));
+    println!("slowest, the whole stroke an event (start, event, frame):");
+    for (set, name, begin, event, frame_ms, whole) in by_whole.iter().take(25) {
+        println!("  {whole:7.3} ms  {set}/{name}  ({begin:.1}, {event:.3}, {frame_ms:.3})");
+    }
+    by_whole.sort_by(|a, b| b.2.total_cmp(&a.2));
+    println!("slowest starts:");
+    for (set, name, begin, ..) in by_whole.iter().take(15) {
+        println!("  {begin:7.1} ms  {set}/{name}");
+    }
+    let mut names: Vec<&String> = rows.iter().map(|r| &r.0).collect();
+    names.dedup();
+    for name in names {
+        let mut whole: Vec<f64> = rows.iter().filter(|r| &r.0 == name).map(|r| r.5).collect();
+        let mut begin: Vec<f64> = rows.iter().filter(|r| &r.0 == name).map(|r| r.2).collect();
+        println!(
+            "set {name:<16} {:3} brushes: whole {:.3} ms an event (90th {:.3}), start {:.1} ms (90th {:.1})",
+            whole.len(),
+            at(&mut whole, 0.5),
+            at(&mut whole, 0.9),
+            at(&mut begin, 0.5),
+            at(&mut begin, 0.9)
+        );
+    }
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+}
+
+/// What ColorDrop costs on a large canvas (`POUR_COST_SIDE`, 4096 square): a colour dropped into a
+/// small ring, its threshold slid, and let go, each timed as the app waits for it; then the same
+/// into the whole empty layer. Run on a device with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn pour_cost() {
+    let side: u32 = std::env::var("POUR_COST_SIDE").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+    let Some(s) = session(side, side) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let drawn = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+            g.flush();
+        }
+    };
+    // a ring 60 across, closed
+    s.set_brush_size(0.15);
+    s.set_color(0.0, 0.0, 0.0);
+    let (cx, cy) = (side as f32 / 2.0, side as f32 / 2.0);
+    let ring: Vec<PenSample> = (0..=72)
+        .map(|i| i as f32 / 72.0 * std::f32::consts::TAU)
+        .map(|a| (cx + 30.0 * a.cos(), cy + 30.0 * a.sin()))
+        .enumerate()
+        .map(|(i, (x, y))| sample(x, y, i as f64 * 8.0))
+        .collect();
+    s.stroke_begin(PointerKind::Stylus, ring.get(..1).unwrap().to_vec());
+    s.stroke_add(ring.get(1..).unwrap().to_vec());
+    s.stroke_end(vec![]);
+    drawn(&s);
+    // its parts, for the small ring
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let t = std::time::Instant::now();
+        let current = st.doc.current();
+        let pixels = st.layer_pixels(current).unwrap();
+        let read = ms(t);
+        let t = std::time::Instant::now();
+        let flood = procraft_engine::fill::Flood::new(side, side, &pixels, (cx as u32, cy as u32)).unwrap();
+        let measured = ms(t);
+        let t = std::time::Instant::now();
+        let mut mask = flood.mask(0.3);
+        let masked = ms(t);
+        let t = std::time::Instant::now();
+        procraft_engine::fill::under_edges(&mut mask, &pixels);
+        let edges = ms(t);
+        let t = std::time::Instant::now();
+        let bounds = mask.bounds();
+        let bounded = ms(t);
+        println!(
+            "parts: read {read:.1} ms | distances {measured:.1} | mask {masked:.1} | under edges {edges:.1} | bounds {bounded:.1} ({bounds:?})"
+        );
+    }
+    for (what, at) in [("a small ring", (cx, cy)), ("the whole layer", (40.0, 40.0))] {
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let poured = s.pour_drop(at.0, at.1, 0.9, 0.2, 0.1, 0.3);
+            let drop = ms(t);
+            let mut slides = Vec::new();
+            for k in 0..5 {
+                let t = std::time::Instant::now();
+                s.pour_threshold(0.3 + k as f32 * 0.05);
+                slides.push(ms(t));
+            }
+            let t = std::time::Instant::now();
+            s.pour_end(true, None);
+            let end = ms(t);
+            let t = std::time::Instant::now();
+            drawn(&s);
+            let frame = ms(t);
+            println!(
+                "{what} ({round}): poured {poured} | drop {drop:.1} ms | slides {} | let go {end:.1} ms | its frame {frame:.1} ms",
+                slides.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" ")
+            );
+            s.undo();
+            drawn(&s);
+        }
+    }
+}
+
 /// Real files damaged (cut short, bytes changed) never bring a reader down: each brush file, PSD,
 /// layered package, model, palette and colour profile in the folders `READER_FUZZ` lists (`;` between), each damaged in
 /// `READER_FUZZ_ROUNDS` ways (12 unless said). Run with `--ignored --nocapture`.
