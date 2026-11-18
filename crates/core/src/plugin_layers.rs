@@ -1575,7 +1575,7 @@ impl State {
             let samples = timed.get(at..at + n).unwrap_or_default();
             at += n;
             if batch & LIFTED == 0 {
-                crate::draw_samples(canvas, &mut builder, second_builder.as_mut(), samples, &guide);
+                crate::draw_samples(canvas, &mut builder, second_builder.as_mut(), samples, &guide, false);
             } else {
                 crate::lift_samples(canvas, &mut builder, second_builder.as_mut(), samples, &guide);
             }

@@ -294,7 +294,7 @@ impl State {
         let mut builder = self.engine_again(kept.stroke.builder.clone(), kept.stroke.layer, kept.stroke.seed);
         let guide = self.doc.stroke_guide();
         let Some(canvas) = self.canvas.as_mut() else { return false };
-        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide);
+        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide, false);
         crate::close_stroke(canvas, builder, None, &guide);
         self.flush();
         kept.steps = self.canvas.as_ref().map_or(0, Canvas::steps_made);

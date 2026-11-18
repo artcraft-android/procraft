@@ -2520,6 +2520,61 @@ fn prediction_is_drawn_but_never_kept() {
     s.stroke_predict(vec![sample(50.0, 50.0, 0.0)]);
 }
 
+/// While the platform predicts input, what runs ahead of a stroke (a pen's shown taper, or the
+/// path on to the input) is worked out for each prediction, not again for the samples before it,
+/// and shows as it did: the pictures after each sample's prediction, and at a frame between the
+/// two, are those of a stroke that works it out at each sample.
+#[test]
+fn what_runs_ahead_of_a_predicted_stroke_shows_as_worked_out_at_each_sample() {
+    let mut tipped = 0;
+    for name in ["Merlin", "Tundra", "Belvedere", "Shannon", "Studio Pen", "Soft Airbrush"] {
+        let mut shows_tip = false;
+        let pictures = [true, false].map(|predicting| {
+            let Some(s) = session(300, 120) else { return Vec::new() };
+            let Some((set, index)) = library_brush(&s, |b| b.name == name) else { return Vec::new() };
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(0.3);
+            s.set_color(0.0, 0.0, 0.0);
+            let at = |i: usize| PenSample {
+                pressure: 0.5 + 0.4 * (i as f32 * 0.3).sin().abs(),
+                ..sample(20.0 + i as f32 * 6.0, 60.0 + (i as f32 * 0.4).sin() * 20.0, i as f64 * 8.0)
+            };
+            let mut shots = Vec::new();
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            {
+                let st = s.shared.lock();
+                shows_tip = st.stroke.as_ref().is_some_and(procraft_engine::stroke::StrokeBuilder::shows_tip)
+                    && st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::shows_tip);
+            }
+            for i in 1..40 {
+                // (without, each sample works out what runs ahead at once, as before)
+                if !predicting {
+                    s.shared.lock().predicting = false;
+                }
+                s.stroke_add(vec![at(i)]);
+                if i % 5 == 0 {
+                    // a frame drawn between the samples and their prediction
+                    s.shared.lock().draw_ahead();
+                    shots.push(picture(&s));
+                }
+                s.stroke_predict(vec![at(i + 1), at(i + 2)]);
+                shots.push(picture(&s));
+            }
+            s.stroke_end(vec![at(40)]);
+            shots.push(picture(&s));
+            shots
+        });
+        if pictures[0].is_empty() {
+            continue;
+        }
+        tipped += usize::from(shows_tip);
+        for (k, (a, b)) in pictures[0].iter().zip(&pictures[1]).enumerate() {
+            assert_eq!(differ(a, b), (0, 0), "{name}, picture {k}");
+        }
+    }
+    assert!(tipped > 0, "a pen showing its tip among them");
+}
+
 #[test]
 fn a_finger_strokes_head_is_drawn_in_its_layer_under_those_above() {
     let Some(s) = session(100, 100) else { return };

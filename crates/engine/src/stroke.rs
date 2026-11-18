@@ -1516,6 +1516,13 @@ impl StrokeBuilder {
     /// longer reaches, and the tip, the stamps after them as they would be drawn were the stroke
     /// to end here.
     pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
+        let kept = self.add_kept(samples);
+        (kept, self.tip_now())
+    }
+
+    /// The first half of [`StrokeBuilder::add_tipped`]: the stamps to draw for good now, the tip
+    /// left to [`StrokeBuilder::tip_now`] (or [`StrokeBuilder::preview_tip`]) when it is wanted.
+    pub fn add_kept(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         self.add(samples);
         let start = self.start_span();
         let reach = match self.start_settled {
@@ -1532,11 +1539,16 @@ impl StrokeBuilder {
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
-        // the tip as if the stroke ended here: walked on to the input
-        let mut ended = self.open_copy(to);
+        kept
+    }
+
+    /// The tip of a stroke shown with its tip, as if it ended here: the stamps after those drawn
+    /// for good, walked on to the input.
+    pub fn tip_now(&mut self) -> Vec<Stamp> {
+        let mut ended = self.open_copy(self.kept);
         ended.reach_input(&mut Vec::new());
         ended.respace_tip();
-        (kept, ended.tip_from(0))
+        ended.tip_from(0)
     }
 
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke

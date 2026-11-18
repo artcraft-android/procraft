@@ -611,6 +611,13 @@ pub(crate) struct State {
     /// The open stroke's brush engine wanting the pen again while it holds still (an airbrush):
     /// every how many ms, the pen as it last was, and when next.
     pub(crate) airbrush: Option<(f64, PenSample, f64)>,
+    /// What runs ahead of the open stroke (its tip, or the path on to the input) as its last
+    /// samples left it, still to be drawn: left by them while the platform predicts input
+    /// (`predicting`), as the prediction that follows draws it again; drawn at the next frame if
+    /// none came (see [`State::draw_ahead`]).
+    pub(crate) ahead: bool,
+    /// The platform sends predicted input after the stroke's samples.
+    pub(crate) predicting: bool,
     /// The open stroke's brush engine, as it is told the colours under the dabs it asks about.
     pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
@@ -1238,21 +1245,27 @@ impl State {
 
 /// Draws `samples` into the canvas's open stroke: their stamps as they come or, for a stroke shown
 /// with its tip, those the end taper no longer reaches for good and the rest as the tip. Whether
-/// anything was drawn.
+/// anything was drawn. With `ahead_later`, what runs ahead of the stroke (its tip, or the path on
+/// to the input) is left to [`State::draw_ahead`] (and drawn, as far as this says).
 fn draw_samples(
     canvas: &mut Canvas,
     builder: &mut StrokeBuilder,
     second: Option<&mut StrokeBuilder>,
     samples: &[Sample],
     guide: &procraft_engine::guide::Guide,
+    ahead_later: bool,
 ) -> bool {
     // a dual brush's second, as its stamps come (no tip of its own)
     if let Some(second) = second {
         canvas.add_second_stamps(&guide::mirrored(guide, &second.add(samples)));
     }
     if canvas.shows_tip() && builder.shows_tip() {
-        let (kept, tip) = builder.add_tipped(samples);
+        let kept = builder.add_kept(samples);
         canvas.add_stamps(&guide::mirrored(guide, &kept));
+        if ahead_later {
+            return true;
+        }
+        let tip = builder.tip_now();
         canvas.set_tip(&guide::mirrored(guide, &tip));
         return !kept.is_empty() || !tip.is_empty();
     }
@@ -1265,6 +1278,9 @@ fn draw_samples(
     }
     // the stretch to the newest point waits for the point after it to curve by: shown meanwhile
     // (as predicted input is, until the next)
+    if ahead_later {
+        return true;
+    }
     show_ahead(canvas, builder, &[], guide);
     !stamps.is_empty()
 }
@@ -1301,6 +1317,23 @@ fn show_ahead(
         canvas.set_tip(&guide::mirrored(guide, &builder.preview_to_input(samples)));
     } else {
         canvas.set_prediction(&guide::mirrored(guide, &builder.preview(samples)));
+    }
+}
+
+impl State {
+    /// Draws what runs ahead of the open stroke as its last samples left it, if no prediction drew
+    /// it since (see [`State::ahead`]).
+    pub(crate) fn draw_ahead(&mut self) {
+        if !std::mem::take(&mut self.ahead) {
+            return;
+        }
+        let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
+        let guide = self.doc.stroke_guide();
+        if canvas.shows_tip() && builder.shows_tip() {
+            canvas.set_tip(&guide::mirrored(&guide, &builder.tip_now()));
+        } else {
+            show_ahead(canvas, builder, &[], &guide);
+        }
     }
 }
 
@@ -1742,6 +1775,8 @@ impl CanvasSession {
             frames: 0,
             pad_strokes: None,
             airbrush: None,
+            ahead: false,
+            predicting: false,
             engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
@@ -2071,9 +2106,10 @@ impl CanvasSession {
             Some(second) => canvas.begin_dual_stroke(current, style, second),
             None => canvas.begin_stroke(current, style),
         }
-        draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide());
+        draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
         st.stroke = Some(builder);
         st.second = second_builder;
+        st.ahead = false;
         self.shared.frame(st);
     }
 
@@ -2115,7 +2151,11 @@ impl CanvasSession {
         // a brush engine told the colours under the dabs it asked about before its next samples
         st.tell_under();
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide()) {
+        // while the platform predicts input, what runs ahead waits for the frame (its prediction
+        // follows these samples): on to the input, until a prediction comes
+        let later = st.predicting;
+        if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
+            st.ahead = later;
             st.redraw_painted_on();
             self.shared.frame(st);
         }
@@ -2134,6 +2174,9 @@ impl CanvasSession {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
+        // (what the samples before left to run ahead is drawn again here)
+        st.predicting = !canvas_samples.is_empty();
+        st.ahead = false;
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
         let guide = st.doc.stroke_guide();
         // a stroke shown with its tip ends it where the input is predicted to go
@@ -2185,6 +2228,7 @@ impl CanvasSession {
         st.tell_under();
         st.engine_asking = plugin_brushes::Asking::default();
         st.read_finer(&samples);
+        st.ahead = false;
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let mut second = st.second.take();
         lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
@@ -2225,6 +2269,7 @@ impl CanvasSession {
             kept.pop();
         }
         st.stroke = None;
+        st.ahead = false;
         st.second = None;
         st.shape = None;
         st.began = None;
