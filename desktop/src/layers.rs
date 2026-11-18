@@ -16,8 +16,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
     BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind, RowDrop,
-    ShownRow,
-    ThumbnailImage,
+    ShownRow, ThumbnailImage,
 };
 use resvg::tiny_skia;
 
@@ -2530,7 +2529,14 @@ mod tests {
             };
             step += 1;
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                layers.show(ui.ctx(), &mut look, &session, &mut colours, button, &mut Vec::new());
+                layers.show(
+                    ui.ctx(),
+                    &mut look,
+                    &session,
+                    &mut colours,
+                    crate::panel::Hang::Button(button),
+                    &mut Vec::new(),
+                );
             });
             output.textures_delta.clear();
         };
