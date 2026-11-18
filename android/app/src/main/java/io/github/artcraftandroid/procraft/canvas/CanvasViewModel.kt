@@ -687,7 +687,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
-    /** Removes an imported plugin, its folder and its values; it goes at once. */
+    /** Removes an imported plugin, its folder and its values (the page asks first); it goes at once. */
     fun removePlugin(plugin: io.github.artcraftandroid.procraft.core.PluginInfo) {
         val forget = plugins.remove(plugin.id)
         if (forget == null) {

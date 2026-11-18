@@ -12,6 +12,7 @@ use procraft_core::{
     plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown,
 };
 
+use crate::alert::{Alert, Answer};
 use crate::animated_export::Animated;
 use crate::files::Format;
 use crate::icons;
@@ -499,6 +500,9 @@ pub struct Actions {
     /// A plugin's choice menu, and the setting it picks for.
     plugin_menu: Menu,
     plugin_choice: Option<PluginChoice>,
+    /// Remove tapped on a plugin's card: the question it asks, and the plugin's id.
+    removing: Alert,
+    remove_what: Option<String>,
 }
 
 /// A plugin's setting whose every step has a name, as a row that opens a menu of them: the
@@ -717,6 +721,9 @@ impl Actions {
         if self.plugin_menu(ctx, look, prefs, backdrops) {
             act = Some(Act::Prefs);
         }
+        if self.remove_question(ctx, look, prefs) {
+            act = Some(Act::Prefs);
+        }
         if self.page != Page::Pressure {
             self.curve.close();
         }
@@ -781,7 +788,7 @@ impl Actions {
 
     /// One of its menus is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.scaling.is_open() || self.plugin_menu.is_open() || self.curve.menu_open()
+        self.scaling.is_open() || self.plugin_menu.is_open() || self.curve.menu_open() || self.removing.is_open()
     }
 
     /// The panel's pages go back to the tabs (as it closes).
@@ -912,6 +919,33 @@ impl Actions {
         prefs.plugins.set_slider(slider.key.clone(), plugin_slider_choice(slider, picked as u32)).is_some()
     }
 
+    /// The question Remove on a plugin's card asks, while it is up: answered Remove, the plugin
+    /// goes. True when it went.
+    fn remove_question(&mut self, ctx: &egui::Context, look: &mut Look, prefs: &mut Prefs) -> bool {
+        match self.removing.show(ctx, look) {
+            Some(Answer::Action) => {
+                let Some(id) = self.remove_what.take() else { return false };
+                if prefs.plugins.remove(id).is_some() {
+                    return true;
+                }
+                crate::files::say("This couldn't be removed.");
+                false
+            }
+            Some(_) => {
+                self.remove_what = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Asks before `plugin` goes, its name in the question.
+    fn ask_remove(&mut self, plugin: &PluginInfo) {
+        self.remove_what = Some(plugin.id.clone());
+        let message = format!("\u{201c}{}\u{201d} goes, and its settings with it.", plugin.name);
+        self.removing.open("Remove this plugin?", &message, "Remove", Some(&icons::TRASH));
+    }
+
     /// A page's header: the back chevron and its title. True when Back was tapped.
     fn page_header(&mut self, ui: &Ui, look: &mut Look, body: Rect, title: &str) -> bool {
         let back = Rect::from_min_size(pos2(body.left() + 8.0, body.top() + 12.0 + 5.0), vec2(44.0, 34.0));
@@ -942,6 +976,7 @@ impl Actions {
         );
         let shown = prefs.plugins.plugins();
         let mut changed = false;
+        let mut remove = None;
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ScrollArea::vertical()
                 .id_salt("plugin cards")
@@ -968,11 +1003,15 @@ impl Actions {
                             &mut self.plugin_moved,
                             &mut self.plugin_action,
                             &mut self.plugin_choice,
+                            &mut remove,
                         );
                     }
                     ui.add_space(13.0);
                 });
         });
+        if let Some(plugin) = remove {
+            self.ask_remove(&plugin);
+        }
         if !ui.input(|i| i.pointer.any_down())
             && let Some((key, value)) = self.plugin_moved.take()
         {
@@ -1129,7 +1168,9 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
 /// whatever they are, its actions, and the rows that apply or remove it. A switch flips at once, a
 /// live slider goes in as it moves, another leaves where it has gone in `moved`; a slider named at
 /// every step is a row whose click leaves it in `choice` for its menu (as does its row while that
-/// is open); an action tapped leaves its key in `action`. Returns whether a value changed.
+/// is open); an action tapped leaves its key in `action`, and Remove the plugin in `remove`, to be
+/// asked about. Returns whether a value changed.
+#[allow(clippy::too_many_arguments)]
 fn plugin_card(
     ui: &mut Ui,
     plugin: &PluginInfo,
@@ -1138,6 +1179,7 @@ fn plugin_card(
     moved: &mut Option<(String, f32)>,
     action: &mut Option<String>,
     choice: &mut Option<PluginChoice>,
+    remove: &mut Option<PluginInfo>,
 ) -> bool {
     let width = ui.available_width();
     let (area, _) = ui.allocate_exact_size(vec2(width, plugin_height(ui.painter(), plugin, width)), Sense::hover());
@@ -1260,8 +1302,7 @@ fn plugin_card(
                 CardRow::TurnOn | CardRow::TurnOff => {
                     changed |= plugins.set_on(plugin.id.clone(), !plugin.on);
                 }
-                CardRow::Remove if plugins.remove(plugin.id.clone()).is_some() => changed = true,
-                CardRow::Remove => crate::files::say("This couldn't be removed."),
+                CardRow::Remove => *remove = Some(plugin.clone()),
             }
         }
         y += 1.0 + ROW_HEIGHT;
@@ -1995,6 +2036,9 @@ mod tests {
                 if actions.plugin_menu(&ui.ctx().clone(), look, prefs, &mut Vec::new()) {
                     asked = Some(Act::Prefs);
                 }
+                if actions.remove_question(&ui.ctx().clone(), look, prefs) {
+                    asked = Some(Act::Prefs);
+                }
             });
             output.textures_delta.clear();
             (asked, output.shapes)
@@ -2040,6 +2084,24 @@ mod tests {
         /// The middle of a card's row, `up` rows from its last.
         fn on_row(&self, card: usize, up: f32) -> Pos2 {
             pos2(body().center().x, self.cards()[card].1 - ROW_HEIGHT / 2.0 - up * (ROW_HEIGHT + 1.0))
+        }
+
+        /// The middle of the words `label` on the question Remove asks, once it has come in full.
+        fn on_question(&mut self, label: &str) -> Pos2 {
+            assert!(self.actions.removing.is_open(), "no question");
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            let shapes = self.run(Vec::new()).1;
+            // (its button is right of the card's row of the same words)
+            drawn_all(&shapes, label).into_iter().max_by(|a, b| a.x.total_cmp(&b.x)).expect(label)
+        }
+
+        /// Card `card`'s Remove tapped, and the question answered Remove.
+        fn remove(&mut self, card: usize) {
+            let at = self.on_row(card, 0.0);
+            assert!(!self.tap(at), "it asks first");
+            let at = self.on_question("Remove");
+            assert!(self.tap(at));
+            assert!(!self.actions.removing.is_open());
         }
 
         /// A point on the first card's slider, `along` its way (0..1): over its two action rows.
@@ -2155,8 +2217,7 @@ mod tests {
         assert!(page.tap(at));
         assert!(!page.list()[0].on);
         assert!(page.prefs.plugins.filters().is_empty(), "off, it isn't under Adjustments");
-        let at = page.on_row(0, 0.0);
-        assert!(page.tap(at));
+        page.remove(0);
         assert!(page.cards().is_empty());
         assert!(!dir.join("org.example.filter").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -2177,8 +2238,7 @@ mod tests {
         let at = page.on_row(0, 1.0);
         assert!(page.tap(at));
         assert!(!page.list()[0].on);
-        let at = page.on_row(0, 0.0);
-        assert!(page.tap(at));
+        page.remove(0);
         assert!(page.cards().is_empty());
         assert!(!dir.join("org.example.plugin").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -2205,13 +2265,52 @@ mod tests {
         assert!(page.tap(at));
         assert!(!page.list()[0].on);
         // its last removes it, and it isn't added again on the next start
-        let at = page.on_row(0, 0.0);
-        assert!(page.tap(at));
+        page.remove(0);
         let gone = |plugins: &Plugins| plugins.plugins().iter().all(|p| p.id != list[0].id);
         assert!(gone(&page.prefs.plugins));
         let next = Plugins::with_bundled(store);
         assert!(gone(&next));
         assert_eq!(next.plugins().len(), list.len() - 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The middle of each place `words` were drawn among a frame's `shapes`.
+    fn drawn_all(shapes: &[egui::epaint::ClippedShape], words: &str) -> Vec<Pos2> {
+        fn find(shape: &egui::Shape, words: &str, found: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == words => found.push(t.pos + t.galley.size() / 2.0),
+                egui::Shape::Vec(all) => all.iter().for_each(|s| find(s, words, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        shapes.iter().for_each(|c| find(&c.shape, words, &mut found));
+        found
+    }
+
+    #[test]
+    fn remove_asks_first_with_the_plugin_s_name_and_cancel_keeps_it() {
+        let (mut page, dir) = with_store("remove-asks");
+        assert_eq!(page.prefs.plugins.install(filter_file()), None);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let at = page.on_row(0, 0.0);
+        assert!(!page.tap(at));
+        assert_eq!(page.cards().len(), 1, "nothing goes before it is answered");
+        assert!(page.actions.modal(), "a press elsewhere only answers it");
+        let asked = page.actions.removing.asking().cloned().unwrap();
+        assert_eq!(asked.title, "Remove this plugin?");
+        assert!(asked.message.contains("\u{201c}A filter\u{201d}"), "{}", asked.message);
+        assert_eq!(asked.action, "Remove");
+        assert!(asked.destructive);
+        // Cancel keeps it, and the next Remove asks again
+        let cancel = page.on_question("Cancel");
+        assert!(!page.tap(cancel));
+        assert!(!page.actions.removing.is_open());
+        assert_eq!(page.cards().len(), 1);
+        assert!(dir.join("org.example.filter").exists());
+        page.remove(0);
+        assert!(page.cards().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2324,7 +2423,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None));
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None, &mut None));
             });
             output.textures_delta.clear();
         };

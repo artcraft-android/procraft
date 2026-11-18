@@ -604,18 +604,32 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
         }
     }
     val shown = vm.pluginList
+    // the plugin whose Remove was tapped, while it is asked about
+    var removing by remember { mutableStateOf<PluginInfo?>(null) }
     Column(
         Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
     ) {
         if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
-        for (plugin in shown) PluginCard(plugin, vm)
+        for (plugin in shown) PluginCard(plugin, vm, onRemove = { removing = plugin })
     }
+    Alert(
+        removing,
+        title = { "Remove this plugin?" },
+        message = { "“${it.name}” goes, and its settings with it." },
+        action = "Remove",
+        icon = PcIcons.Trash,
+        onCancel = { removing = null },
+        onAction = {
+            removing = null
+            vm.removePlugin(it)
+        },
+    )
 }
 
-/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it. */
+/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it ([onRemove], which asks). */
 @Composable
-private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
+private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, onRemove: () -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -646,7 +660,7 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
         ActionRowView(Act(if (plugin.on) "Turn off" else "Turn on") { vm.setPluginOn(plugin, !plugin.on) })
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-            ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
+            ActionRowView(Act("Remove", onClick = onRemove))
         }
     }
 }
