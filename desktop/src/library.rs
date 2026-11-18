@@ -84,8 +84,8 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
 };
 /// A press moved this far (points) has gone somewhere; held still this long, it shows the brush's
 /// menu (and moved on from there, drags the brush).
-const SLOP: f32 = 8.0;
-const HOLD: Duration = Duration::from_millis(400);
+pub(crate) const SLOP: f32 = 8.0;
+pub(crate) const HOLD: Duration = Duration::from_millis(400);
 /// A press slides its brush once this far sideways (points), going this many times further
 /// sideways than up or down: a hand scrolling swings in an arc, and a slide opens onto Delete, so
 /// anything less plainly sideways is left to the list.

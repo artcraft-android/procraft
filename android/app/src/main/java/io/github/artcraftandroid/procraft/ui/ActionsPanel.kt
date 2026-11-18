@@ -5,6 +5,9 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
@@ -43,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -51,6 +55,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -586,7 +594,11 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** The plugins, a page of the panel: a card each, drawn from what the list says of them. */
+/**
+ * The plugins, a page of the panel: a card each, drawn from what the list says of them, in the
+ * order they were put in. A card held by its name lifts and follows the finger or pen, faint where
+ * it was; let go over another card, it takes that one's place. Remove asks first.
+ */
 @Composable
 private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
@@ -606,12 +618,90 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     val shown = vm.pluginList
     // the plugin whose Remove was tapped, while it is asked about
     var removing by remember { mutableStateOf<PluginInfo?>(null) }
-    Column(
-        Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
-    ) {
-        if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
-        for (plugin in shown) PluginCard(plugin, vm, onRemove = { removing = plugin })
+    // a card held and dragged: whose, where the finger is and where on the card it took hold
+    var dragged by remember { mutableStateOf<String?>(null) }
+    var dragAt by remember { mutableStateOf(Offset.Zero) }
+    var grab by remember { mutableStateOf(Offset.Zero) }
+    // where the cards are (window pixels), for a dragged one to land, and how tall their heads are
+    val cardBounds = remember { androidx.compose.runtime.mutableStateMapOf<String, androidx.compose.ui.geometry.Rect>() }
+    val headHeights = remember { androidx.compose.runtime.mutableStateMapOf<String, Int>() }
+    var listBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    // let go over another card: to its place
+    fun drop() {
+        val id = dragged ?: return
+        dragged = null
+        val to = shown.indexOfFirst { cardBounds[it.id]?.contains(dragAt) == true }
+        if (to >= 0 && shown.getOrNull(to)?.id != id) vm.movePlugin(id, to)
+    }
+    // (for a hold that began before the list last changed)
+    val dropNow by rememberUpdatedState(::drop)
+    Box(Modifier.onGloballyPositioned { listBounds = it.boundsInWindow() }) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
+        ) {
+            if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
+            for (plugin in shown) androidx.compose.runtime.key(plugin.id) {
+                val id = plugin.id
+                // gone from the list, it is nowhere: where it last was may be under another card
+                androidx.compose.runtime.DisposableEffect(id) {
+                    onDispose {
+                        cardBounds.remove(id)
+                        headHeights.remove(id)
+                    }
+                }
+                PluginCard(
+                    plugin,
+                    vm,
+                    Modifier.onGloballyPositioned { cardBounds[id] = it.boundsInWindow() }.alpha(if (dragged == id) 0.3f else 1f),
+                    head = Modifier.onSizeChanged { headHeights[id] = it.height }.pointerInput(id) {
+                        // held still, the card lifts; the rest of the press is its drag's, taken before
+                        // the list under it sees it (moved first, the list scrolls instead)
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val long = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            grab = long.position
+                            dragAt = (cardBounds[id]?.topLeft ?: Offset.Zero) + long.position
+                            dragged = id
+                            try {
+                                while (true) {
+                                    val change = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
+                                    if (change == null || change.isConsumed) {
+                                        dragged = null
+                                        break
+                                    }
+                                    val by = change.positionChangeIgnoreConsumed()
+                                    change.consume()
+                                    if (!change.pressed) {
+                                        dropNow()
+                                        break
+                                    }
+                                    dragAt += by
+                                }
+                            } catch (gone: kotlinx.coroutines.CancellationException) {
+                                dragged = null
+                                throw gone
+                            }
+                        }
+                    },
+                    onRemove = { removing = plugin },
+                )
+            }
+        }
+        // the dragged card follows the finger: its name and what it does
+        dragged?.let { id ->
+            val plugin = shown.firstOrNull { it.id == id } ?: return@let
+            val width = cardBounds[id]?.width ?: 0f
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val at = dragAt - grab - listBounds.topLeft
+            Box(
+                Modifier.offset { androidx.compose.ui.unit.IntOffset(at.x.roundToInt(), at.y.roundToInt()) }
+                    .size(with(density) { width.toDp() }, with(density) { (headHeights[id] ?: 0).toDp() })
+                    .clip(RoundedCornerShape(22.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
+            ) {
+                PluginHead(plugin, lifted = true)
+            }
+        }
     }
     Alert(
         removing,
@@ -627,17 +717,26 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     )
 }
 
-/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it ([onRemove], which asks). */
+/** A plugin card's head: its name, what it does and what is the matter with it; all in white while it is [lifted] and dragged. */
 @Composable
-private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, onRemove: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            }
-            Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
-            plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
+private fun PluginHead(plugin: PluginInfo, modifier: Modifier = Modifier, lifted: Boolean = false) {
+    Column(modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(plugin.name, color = if (lifted) Color.White else Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
+        Text(plugin.description, color = if (lifted) Color.White else Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+        plugin.problem?.let { Text(it, color = if (lifted) Color.White else Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
+    }
+}
+
+/**
+ * A plugin: its head ([head] where it is held to drag it), its controls whatever they are, what it
+ * does when tapped, and the rows that turn it on or off and remove it ([onRemove], which asks).
+ */
+@Composable
+private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifier, head: Modifier, onRemove: () -> Unit) {
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
+        PluginHead(plugin, modifier = head)
         if (plugin.on && plugin.problem == null) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))

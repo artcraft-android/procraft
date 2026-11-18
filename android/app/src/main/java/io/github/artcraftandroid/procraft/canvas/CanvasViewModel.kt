@@ -687,6 +687,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
+    /** Moves plugin [id] to place [to] on the Plugins page, the order kept for the next start; said once if it couldn't be. */
+    fun movePlugin(id: String, to: Int) {
+        plugins.movePlugin(id, to.coerceAtLeast(0).toUInt())?.let { message = it }
+        pluginList = plugins.plugins()
+    }
+
     /** Removes an imported plugin, its folder and its values (the page asks first); it goes at once. */
     fun removePlugin(plugin: io.github.artcraftandroid.procraft.core.PluginInfo) {
         val forget = plugins.remove(plugin.id)

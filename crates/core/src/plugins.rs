@@ -57,6 +57,8 @@ fn moved_and_changed(key: &str, value: &str) -> bool {
 pub(crate) const STOPPED_DRIVER: &str = "Switched off: it stopped the graphics driver.";
 /// Why a filter whose files no longer hold up can't open.
 const FILTER_DAMAGED: &str = "This filter's files don't hold up.";
+/// What is told when the plugins' order couldn't be kept.
+const ORDER_UNKEPT: &str = "The plugins' order couldn't be saved.";
 
 /// Where one came from. The route decides this, never the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -551,9 +553,25 @@ struct Listed {
     read: HashSet<String>,
     /// The switches set as the on or off of a plugin they stand for was read back.
     flag_switched: HashSet<String>,
+    /// The order someone put the plugins in on the Plugins page, by id, as written down in the
+    /// store; those not in it come after, as they are listed.
+    order: Vec<String>,
+    /// That the order couldn't be kept has been said, since it last could be.
+    order_unkept_said: bool,
 }
 
 impl Listed {
+    /// The plugins in the order the Plugins page shows them: those put in an order first, in it,
+    /// then the rest as they are listed. Only the page goes by it: the hooks go through what is on
+    /// in id order, whatever it is.
+    fn in_order(&self) -> Vec<&PluginInfo> {
+        let place = |p: &PluginInfo| self.order.iter().position(|id| *id == p.id).unwrap_or(usize::MAX);
+        let mut shown: Vec<&PluginInfo> = self.files.iter().collect();
+        // (stable: those in no order keep theirs)
+        shown.sort_by_key(|p| place(p));
+        shown
+    }
+
     /// Whether plugin `id` is one the app added that starts off until someone turns it on.
     fn added_off(&self, id: &str) -> bool {
         self.added.iter().any(|added| added.off && added.id == id)
@@ -658,6 +676,7 @@ impl Plugins {
             files.push(plugin);
         }
         let added = store.as_deref().map(plugin_file::read_added).unwrap_or_default();
+        let order = store.as_deref().map(plugin_file::read_order).unwrap_or_default();
         if let Some(store) = &store {
             plugin_file::settle_trying(store, STOPPED_DRIVER);
             for plugin in &mut files {
@@ -680,6 +699,8 @@ impl Plugins {
             carried: HashSet::new(),
             read: HashSet::new(),
             flag_switched: HashSet::new(),
+            order,
+            order_unkept_said: false,
         };
         // what one here takes the place of goes, once, if it is still here
         if let Some(store) = &store {
@@ -1077,7 +1098,30 @@ impl Plugins {
     /// under a switch that is off left out).
     pub fn plugins(&self) -> Vec<PluginInfo> {
         let list = self.listed();
-        list.files.iter().map(|p| list.shown(p)).collect()
+        list.in_order().into_iter().map(|p| list.shown(p)).collect()
+    }
+
+    /// Moves plugin `id` to place `to` on the Plugins page (past the end: the last), the order
+    /// written down whole in the store for the next start. Only the page goes by it. What to tell
+    /// if it couldn't be kept, said once until it can be (the page shows the order meanwhile);
+    /// nothing for an id that isn't here.
+    pub fn move_plugin(&self, id: String, to: u32) -> Option<String> {
+        let mut list = self.listed();
+        let shown: Vec<String> = list.in_order().into_iter().map(|p| p.id.clone()).collect();
+        let mut order = shown.clone();
+        let from = order.iter().position(|o| *o == id)?;
+        let moved = order.remove(from);
+        order.insert((to as usize).min(order.len()), moved);
+        if order == shown {
+            return None;
+        }
+        let kept = self.store.as_deref().is_none_or(|store| plugin_file::note_order(store, &order));
+        list.order = order;
+        if kept {
+            list.order_unkept_said = false;
+            return None;
+        }
+        (!std::mem::replace(&mut list.order_unkept_said, true)).then(|| ORDER_UNKEPT.to_owned())
     }
 
     /// The actions listed in `place` now, of the plugins that are on.
@@ -3033,6 +3077,102 @@ mod tests {
         // a value kept for it finds nothing to go to
         next.read_kept("org.example.filter.cut".to_owned(), "0.1".to_owned());
         assert!(filters(&next).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const A: &str = "org.example.a";
+    const B: &str = "org.example.b";
+    const C: &str = "org.example.c";
+
+    /// The ids on the Plugins page, the top first.
+    fn page(plugins: &Plugins) -> Vec<String> {
+        plugins.plugins().into_iter().map(|p| p.id).collect()
+    }
+
+    /// A store holding filters `ids`, imported in that order.
+    fn store_of(name: &str, ids: &[&str]) -> String {
+        let dir = store(name);
+        let plugins = at(&dir);
+        for id in ids {
+            assert_eq!(plugins.install(filter_file(&filter(id))), None);
+        }
+        dir
+    }
+
+    /// What is left half written in `dir`.
+    fn left_beside(dir: &str) -> Vec<String> {
+        let names = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        names.filter(|n| n.starts_with('.')).collect()
+    }
+
+    #[test]
+    fn plugins_moved_on_the_page_stay_in_that_order_through_a_restart() {
+        let dir = store_of("order", &[A, B, C]);
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        // the last to the top, then the first of the others past the end: the last
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None);
+        assert_eq!(page(&plugins), [C, A, B]);
+        assert_eq!(plugins.move_plugin(A.to_owned(), 99), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // nothing for one that isn't here, nor for one put where it is
+        assert_eq!(plugins.move_plugin("org.example.gone".to_owned(), 0), None);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 1), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // kept whole, nothing left beside it
+        let next = at(&dir);
+        assert_eq!(page(&next), [C, B, A]);
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // only the page goes by it: the Adjustments menu lists them as ever
+        let menu: Vec<String> = next.filters().into_iter().map(|p| p.id).collect();
+        assert_eq!(menu, [A, B, C]);
+        // one imported since comes after them; one removed leaves the rest as they were
+        assert_eq!(next.install(filter_file(&filter("org.example.d"))), None);
+        assert!(next.remove(B.to_owned()).is_some());
+        assert_eq!(page(&next), [C, A, "org.example.d"]);
+        assert_eq!(page(&at(&dir)), [C, A, "org.example.d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_kept_before_the_order_was_reads_as_it_did() {
+        // imported in no order: listed by id, as before
+        let dir = store_of("no-order", &[C, A, B]);
+        assert!(!dir_holds(&dir, "order"));
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_order_damaged_anyhow_keeps_what_it_can_and_the_rest_come_after() {
+        let dir = store_of("order-damaged", &[A, B, C]);
+        let note = std::path::Path::new(&dir).join("order");
+        // junk, an id twice, one gone, blank lines and spaces: C, then the rest as listed
+        std::fs::write(
+            &note,
+            "not an id\n\n  org.example.c  \nORG.EXAMPLE.A\norg.example.gone\norg.example.c\n\u{fffd}",
+        )
+        .unwrap();
+        assert_eq!(page(&at(&dir)), [C, A, B]);
+        // too big to be one: none
+        std::fs::write(&note, format!("{B}\n").repeat(10_000)).unwrap();
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        // not a file: none, and moving one says once that it isn't kept
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None, "said once");
+        assert_eq!(page(&plugins), [C, B, A], "shown meanwhile");
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // kept again once it can be, and said again if it can't afterwards
+        std::fs::remove_dir_all(&note).unwrap();
+        assert_eq!(plugins.move_plugin(A.to_owned(), 0), None);
+        assert_eq!(page(&at(&dir)), [A, C, B]);
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

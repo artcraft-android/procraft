@@ -503,6 +503,25 @@ pub struct Actions {
     /// Remove tapped on a plugin's card: the question it asks, and the plugin's id.
     removing: Alert,
     remove_what: Option<String>,
+    /// A press on a plugin card's head, followed until let go.
+    card_press: Option<CardPress>,
+    /// Where each card was last drawn, by its place on the page, for a lifted card to land.
+    card_rects: Vec<(usize, Rect)>,
+}
+
+/// A press on a plugin card's head, followed until let go: whose card (its place and id), where and
+/// when it went down, where on the card it took hold, where the pointer is now, whether it was held
+/// still long enough to lift the card, and whether it moved first (then the list has it, to scroll).
+#[derive(Clone)]
+struct CardPress {
+    card: usize,
+    id: String,
+    origin: Pos2,
+    since: Instant,
+    grab: egui::Vec2,
+    last: Pos2,
+    lifted: bool,
+    spent: bool,
 }
 
 /// A plugin's setting whose every step has a name, as a row that opens a menu of them: the
@@ -802,6 +821,7 @@ impl Actions {
         self.plugin_menu.close();
         self.curve.close();
         self.swipes.clear();
+        self.card_press = None;
     }
 
     /// The tabs page: the title, the tabs, and the open tab's groups.
@@ -946,6 +966,41 @@ impl Actions {
         self.removing.open("Remove this plugin?", &message, "Remove", Some(&icons::TRASH));
     }
 
+    /// Follows the press on a plugin card's head: moved first, it is left to the list; held still,
+    /// the card lifts and follows the pointer and, let go over another card, takes its place.
+    fn follow_card_press(&mut self, ctx: &egui::Context, prefs: &Prefs) {
+        let Some(mut p) = self.card_press.take() else { return };
+        let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        let at = at.map_or(p.last, |at| panel::in_panel(ctx, at));
+        if down {
+            if p.lifted {
+                ctx.request_repaint();
+            } else if !p.spent {
+                if (at - p.origin).length() > crate::library::SLOP {
+                    p.spent = true;
+                } else if p.since.elapsed() >= crate::library::HOLD {
+                    p.lifted = true;
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(crate::library::HOLD.saturating_sub(p.since.elapsed()));
+                }
+            }
+            p.last = at;
+            self.card_press = Some(p);
+            return;
+        }
+        if !p.lifted {
+            return;
+        }
+        if let Some(&(to, _)) = self.card_rects.iter().find(|(_, r)| r.contains(at))
+            && to != p.card
+            && let Some(words) = prefs.plugins.move_plugin(p.id, to as u32)
+        {
+            crate::files::say(&words);
+        }
+        ctx.request_repaint();
+    }
+
     /// A page's header: the back chevron and its title. True when Back was tapped.
     fn page_header(&mut self, ui: &Ui, look: &mut Look, body: Rect, title: &str) -> bool {
         let back = Rect::from_min_size(pos2(body.left() + 8.0, body.top() + 12.0 + 5.0), vec2(44.0, 34.0));
@@ -977,10 +1032,19 @@ impl Actions {
         let shown = prefs.plugins.plugins();
         let mut changed = false;
         let mut remove = None;
+        // a card held still lifts, and is dragged rather than the list
+        let lifted = self.card_press.clone().filter(|p| p.lifted);
+        let mut card_rects = Vec::new();
+        let mut head_heights = Vec::new();
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ScrollArea::vertical()
                 .id_salt("plugin cards")
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .scroll_source(if lifted.is_some() {
+                    egui::scroll_area::ScrollSource::NONE
+                } else {
+                    egui::scroll_area::ScrollSource::default()
+                })
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     if shown.is_empty() {
@@ -995,20 +1059,64 @@ impl Actions {
                         if g > 0 {
                             ui.add_space(GROUP_GAP);
                         }
-                        changed |= plugin_card(
-                            ui,
-                            plugin,
-                            g,
-                            &prefs.plugins,
-                            &mut self.plugin_moved,
-                            &mut self.plugin_action,
-                            &mut self.plugin_choice,
-                            &mut remove,
-                        );
+                        // a lifted card is faint where it was
+                        let faint = lifted.as_ref().is_some_and(|p| p.card == g);
+                        let (card_changed, head, area) = ui
+                            .scope(|ui| {
+                                if faint {
+                                    ui.multiply_opacity(0.3);
+                                }
+                                plugin_card(
+                                    ui,
+                                    plugin,
+                                    g,
+                                    &prefs.plugins,
+                                    &mut self.plugin_moved,
+                                    &mut self.plugin_action,
+                                    &mut self.plugin_choice,
+                                    &mut remove,
+                                )
+                            })
+                            .inner;
+                        changed |= card_changed;
+                        card_rects.push((g, area));
+                        head_heights.push(head.rect.height());
+                        if self.card_press.is_none()
+                            && head.is_pointer_button_down_on()
+                            && let Some(p) = head.interact_pointer_pos()
+                        {
+                            self.card_press = Some(CardPress {
+                                card: g,
+                                id: plugin.id.clone(),
+                                origin: p,
+                                since: Instant::now(),
+                                grab: p - area.min,
+                                last: p,
+                                lifted: false,
+                                spent: false,
+                            });
+                        }
                     }
                     ui.add_space(13.0);
                 });
+            // the lifted card follows the pointer, over the list: its name and what it does
+            if let Some(p) = &lifted
+                && let (Some(plugin), Some(&(_, area)), Some(&height)) =
+                    (shown.get(p.card), card_rects.get(p.card), head_heights.get(p.card))
+            {
+                let at = Rect::from_min_size(p.last - p.grab, vec2(area.width(), height));
+                let painter = ui.painter_at(list);
+                painter.rect_filled(at, 22, argb(pc::ACCENT).gamma_multiply(0.9));
+                let left = at.left() + PLUGIN_INSET;
+                let name_at = pos2(left, at.top() + 12.0);
+                text(&painter, name_at, Align2::LEFT_TOP, &plugin.name, 17.0, Weight::SemiBold, Color32::WHITE);
+                let inside = at.width() - 2.0 * PLUGIN_INSET;
+                let said = wrapped(&painter, &plugin.description, 14.0, Weight::Regular, Color32::WHITE, inside);
+                painter.galley(pos2(left, at.top() + PLUGIN_HEAD), said, Color32::WHITE);
+            }
         });
+        self.card_rects = card_rects;
+        self.follow_card_press(ui.ctx(), prefs);
         if let Some(plugin) = remove {
             self.ask_remove(&plugin);
         }
@@ -1169,7 +1277,8 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
 /// live slider goes in as it moves, another leaves where it has gone in `moved`; a slider named at
 /// every step is a row whose click leaves it in `choice` for its menu (as does its row while that
 /// is open); an action tapped leaves its key in `action`, and Remove the plugin in `remove`, to be
-/// asked about. Returns whether a value changed.
+/// asked about. Returns whether a value changed, its head (its name and words, held to lift the
+/// card) and where it is.
 #[allow(clippy::too_many_arguments)]
 fn plugin_card(
     ui: &mut Ui,
@@ -1180,7 +1289,7 @@ fn plugin_card(
     action: &mut Option<String>,
     choice: &mut Option<PluginChoice>,
     remove: &mut Option<PluginInfo>,
-) -> bool {
+) -> (bool, egui::Response, Rect) {
     let width = ui.available_width();
     let (area, _) = ui.allocate_exact_size(vec2(width, plugin_height(ui.painter(), plugin, width)), Sense::hover());
     let painter = ui.painter().clone();
@@ -1198,6 +1307,8 @@ fn plugin_card(
         y += PLUGIN_PROBLEM;
     }
     y += PLUGIN_FOOT;
+    let head_rect = Rect::from_min_max(area.min, pos2(area.right(), y));
+    let head = ui.interact(head_rect, ui.scope_id().with(("plugin head", g)), Sense::click());
     let line = |y: f32| Rect::from_min_size(pos2(area.left(), y), vec2(width, 1.0));
     let mut changed = false;
     for (i, control) in plugin.controls.iter().enumerate().filter(|_| controls_show(plugin)) {
@@ -1307,7 +1418,7 @@ fn plugin_card(
         }
         y += 1.0 + ROW_HEIGHT;
     }
-    changed
+    (changed, head, area)
 }
 
 /// What a plugin's panel was asked.
@@ -2314,6 +2425,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_plugin_card_held_by_its_name_and_dragged_onto_another_takes_its_place_for_good() {
+        let (mut page, dir) = with_store("reorder");
+        assert_eq!(page.prefs.plugins.install(filter_file()), None);
+        assert_eq!(page.prefs.plugins.install(code_file()), None);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let ids = |page: &Page| page.list().into_iter().map(|p| p.id).collect::<Vec<_>>();
+        assert_eq!(ids(&page), ["org.example.filter", "org.example.plugin"]);
+        // on a card's name and words
+        let head = |page: &Page, card: usize| pos2(body().center().x, page.cards()[card].0 + 30.0);
+        let (from, onto) = (head(&page, 1), head(&page, 0));
+        // moved at once, it is no hold: nothing lifts, nothing moves
+        page.frame(vec![Event::PointerMoved(from)]);
+        page.frame(vec![press(from, true)]);
+        for i in 1..=6 {
+            page.frame(vec![Event::PointerMoved(from + (onto - from) * (i as f32 / 6.0))]);
+        }
+        page.frame(vec![press(onto, false)]);
+        page.frame(Vec::new());
+        assert_eq!(ids(&page), ["org.example.filter", "org.example.plugin"]);
+        // held still, it lifts; dragged onto the first and let go there, it takes its place
+        page.frame(vec![Event::PointerMoved(from)]);
+        page.frame(vec![press(from, true)]);
+        std::thread::sleep(crate::library::HOLD + std::time::Duration::from_millis(50));
+        page.frame(Vec::new());
+        assert!(page.actions.card_press.as_ref().is_some_and(|p| p.lifted && p.card == 1));
+        for i in 1..=6 {
+            page.frame(vec![Event::PointerMoved(from + (onto - from) * (i as f32 / 6.0))]);
+        }
+        page.frame(vec![press(onto, false)]);
+        page.frame(Vec::new());
+        assert!(page.actions.card_press.is_none());
+        assert_eq!(ids(&page), ["org.example.plugin", "org.example.filter"]);
+        // and so it is on the next start
+        let next = Plugins::with_store(dir.to_string_lossy().into_owned());
+        let again: Vec<String> = next.plugins().into_iter().map(|p| p.id).collect();
+        assert_eq!(again, ["org.example.plugin", "org.example.filter"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Where `words` were drawn among a frame's `shapes` (their top left), if they were.
     fn drawn(shapes: &[egui::epaint::ClippedShape], words: &str) -> Option<Pos2> {
         fn find(shape: &egui::Shape, words: &str) -> Option<Pos2> {
@@ -2423,7 +2575,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None, &mut None));
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None, &mut None).0);
             });
             output.textures_delta.clear();
         };

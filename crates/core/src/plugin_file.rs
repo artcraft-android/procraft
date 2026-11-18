@@ -1459,6 +1459,39 @@ pub(crate) fn note_added(dir: &Path, added: &[Added]) -> bool {
     written.map_err(|e| log::warn!("couldn't note what the app added: {e}")).is_ok()
 }
 
+/// Where the order someone put the plugins in on the Plugins page is written down: an id a line,
+/// the first at the top.
+fn order_note(dir: &Path) -> PathBuf {
+    dir.join("order")
+}
+
+/// The order the plugins were put in, each line that reads as an id, each id once (its first
+/// place); none if it was never written down, or can't be read.
+pub(crate) fn read_order(dir: &Path) -> Vec<String> {
+    let text = read_capped(&order_note(dir), MOST_ADDED).unwrap_or_default();
+    let mut order: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&text).lines().map(str::trim) {
+        if valid_id(line) && !order.iter().any(|id| id == line) {
+            order.push(line.to_owned());
+        }
+    }
+    order
+}
+
+/// Writes down `order`, whole, as [`note_added`] writes its list. False if it couldn't be.
+pub(crate) fn note_order(dir: &Path, order: &[String]) -> bool {
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        let beside = spare(dir, "order");
+        let moved =
+            write_new(&beside, order.join("\n").as_bytes()).and_then(|()| std::fs::rename(&beside, order_note(dir)));
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&beside);
+        }
+        moved
+    });
+    written.map_err(|e| log::warn!("couldn't note the plugins' order: {e}")).is_ok()
+}
+
 /// `path`, if it is a plain file of at most `most` bytes.
 fn read_capped(path: &Path, most: usize) -> Option<Vec<u8>> {
     let facts = std::fs::symlink_metadata(path).ok()?;
