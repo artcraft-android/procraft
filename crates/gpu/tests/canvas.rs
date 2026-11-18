@@ -5134,19 +5134,20 @@ fn shown_on<'a>(
     }
 }
 
-/// The middle of `each` (milliseconds), its first few (warming up) left out.
-fn middle_ms(mut each: Vec<f64>) -> f64 {
+/// The quickest of `each` (milliseconds), its first few (warming up) left out: other work on the
+/// machine only adds to a frame, now and then many times what it costs.
+fn quickest_ms(mut each: Vec<f64>) -> f64 {
     each.drain(..each.len().min(5));
-    each.sort_by(f64::total_cmp);
-    each.get(each.len() / 2).copied().unwrap_or(0.0)
+    each.into_iter().reduce(f64::min).unwrap_or(0.0)
 }
 
 /// What a paper costs a frame against none, on a canvas of a tablet's size shown in its window,
 /// waiting for the GPU each time: a stroke drawn across it (its live part composited each frame),
 /// and the whole canvas composited again (as after a change to every layer). The three canvases (no
 /// paper, one that takes nothing, a paper) take turns frame by frame, so a busy machine slows each
-/// alike. A paper that takes nothing is, pixel for pixel, none. The times are printed; a frame with
-/// a paper may take at most half again as long, and a little.
+/// alike, and each is timed by its quickest frame. A paper that takes nothing is, pixel for pixel,
+/// none. The times are printed; a frame with a paper may take at most half again as long, and a
+/// little.
 #[test]
 fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
     let Some(gpu) = gpu() else { return };
@@ -5196,7 +5197,7 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
         canvas.render(&gpu, doc, Some(shown_on(&view, format, size, to_screen, None)));
         shown.push((read(&gpu, &texture, size.0, size.1), canvas.read_layer(&gpu, doc.current()).unwrap()));
     }
-    for _ in 0..25 {
+    for _ in 0..45 {
         for ((doc, canvas), times) in canvases.iter_mut().zip(whole.iter_mut()) {
             canvas.invalidate();
             let t = std::time::Instant::now();
@@ -5207,8 +5208,8 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
     }
     assert!(shown[0] == shown[1], "a paper that takes nothing changes no pixel");
     assert!(shown[2].0 != shown[0].0 && shown[2].1 != shown[0].1, "a paper shows");
-    let [none_drawing, off_drawing, on_drawing] = drawing.map(middle_ms);
-    let [none_whole, off_whole, on_whole] = whole.map(middle_ms);
+    let [none_drawing, off_drawing, on_drawing] = drawing.map(quickest_ms);
+    let [none_whole, off_whole, on_whole] = whole.map(quickest_ms);
     println!(
         "a frame drawing: no paper {none_drawing:.3} ms, off {off_drawing:.3} ms, paper {on_drawing:.3} ms; \
          the whole canvas again: no paper {none_whole:.3} ms, off {off_whole:.3} ms, paper {on_whole:.3} ms"
@@ -5221,8 +5222,8 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
 }
 
 /// What a look on the screen costs a frame against none, on a canvas of a tablet's size in its
-/// window, waiting for the GPU each time, the two taking turns frame by frame; printed, and at most
-/// half again as long (and a little).
+/// window, waiting for the GPU each time, the two taking turns frame by frame and each timed by its
+/// quickest; printed, and at most half again as long (and a little).
 #[test]
 fn a_view_look_costs_a_frame_little_more_than_none() {
     let Some(gpu) = gpu() else { return };
@@ -5243,7 +5244,7 @@ fn a_view_look_costs_a_frame_little_more_than_none() {
             each.push(t.elapsed().as_secs_f64() * 1000.0);
         }
     }
-    let [none, grey] = times.map(middle_ms);
+    let [none, grey] = times.map(quickest_ms);
     println!("a frame: no look {none:.3} ms, values {grey:.3} ms");
     assert!(grey <= none * 1.5 + 1.0, "{grey:.3} ms with a look, {none:.3} without");
 }
