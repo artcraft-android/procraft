@@ -43,6 +43,10 @@ pub struct Stamp {
     pub grain_bleed: f32,
     /// The shape mirrored across its own vertical and horizontal axes.
     pub flip: [bool; 2],
+    /// Its moving grain read mirrored: each point's way from the middle turned over top to bottom
+    /// on the canvas before the grain's patch turns. A symmetry's mirrored copy is so, its grain
+    /// mirroring with its shape.
+    pub grain_mirrored: bool,
     /// How its colour moves from the brush's.
     pub tint: Tint,
     /// How much of the secondary colour it paints with, 0..1.
@@ -102,6 +106,7 @@ impl Stamp {
             grain_press: 1.0,
             grain_bleed: 0.0,
             flip: [false; 2],
+            grain_mirrored: false,
             tint: Tint::NONE,
             secondary: 0.0,
             grain_depth: 1.0,
@@ -3227,6 +3232,7 @@ impl StrokeBuilder {
             grain_press,
             grain_bleed,
             flip: p.flip,
+            grain_mirrored: false,
             tint: p.tint,
             secondary: p.secondary,
             grain_depth: p.grain_depth,

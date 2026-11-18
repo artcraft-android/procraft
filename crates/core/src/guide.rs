@@ -120,7 +120,10 @@ fn length_label(px: f32, unit: LengthUnit, dpi: f32) -> String {
     format!("{}{mark}", length_text(px, unit, dpi))
 }
 
-/// `stamps` and the copies the guide's symmetry draws of them.
+/// `stamps` and the copies the guide's symmetry draws of them: each the stamp itself, the same
+/// randomness and all, moved as the canvas is by the copy's mirror or turn, its shape and its
+/// moving grain with it (the grain each copy's own reflection or turn of the stamp's, not read
+/// afresh where the copy lands).
 pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
     let mut out = stamps.to_vec();
     for s in stamps {
@@ -128,10 +131,17 @@ pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
             let mut copy = *s;
             copy.center = at;
             if mirror {
+                // mirrored across a line at half `turn`: the shape drawn at the turn less its own
+                // and turned over top to bottom in its own frame; the grain's way from the middle
+                // turned over on the canvas, then the patch turned by the line's turn on its own
                 copy.angle = turn - s.angle;
-                copy.flip = [!s.flip[0], s.flip[1]];
+                copy.flip = [s.flip[0], !s.flip[1]];
+                copy.grain_turn = s.grain_turn + turn;
+                copy.grain_mirrored = !s.grain_mirrored;
             } else {
+                // turned: the shape with it, and the grain read turned back by as much
                 copy.angle = s.angle + turn;
+                copy.grain_turn = s.grain_turn - turn;
             }
             out.push(copy);
         }
@@ -612,5 +622,135 @@ mod tests {
         s.guide_edit_begin();
         s.set_guide_length("3".into(), GuideUnit::Centimeters);
         assert_eq!(s.guide_edit_end(true).size_label, "3cm");
+    }
+
+    /// A symmetry's copies of a stroke are its own stamps moved as the canvas is, pixel for pixel:
+    /// mirrored copies are the stroke mirrored and turned ones the stroke turned, shapes that read
+    /// differently each way round, turned, squashed and flipped, and their moving grain with them
+    /// (each copy's grain the stroke's own, mirrored or turned, not the grain where it lands).
+    #[test]
+    fn a_symmetry_s_copies_are_the_stroke_mirrored_or_turned_pixel_for_pixel() {
+        use procraft_engine::brush::{Brush, GrainMode, Shape, Source};
+        use procraft_engine::document::Document;
+        use procraft_engine::textures::TEXTURE_SIZE;
+        use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+        let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        let side = 128u32;
+        let n = TEXTURE_SIZE;
+        // a shape with its ink in its top left and a fainter blot low right; a grain of uneven
+        // bands that reads differently mirrored or turned
+        let shape: Vec<u8> = (0..n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f32 / n as f32, (i / n) as f32 / n as f32);
+                if x < 0.55 && y < 0.45 {
+                    255
+                } else if (x - 0.75).powi(2) + (y - 0.7).powi(2) < 0.015 {
+                    150
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let grain: Vec<u8> =
+            (0..n * n).map(|i| ((i % n / 7 * 37 + i / n / 3 * 11 + i % n * (i / n) / 97) % 256) as u8).collect();
+        let brush =
+            Brush { shape: Shape { source: Source::new(shape), ..Brush::round_pen().shape }, ..Brush::round_pen() };
+        let brush = Brush {
+            grain: procraft_engine::brush::Grain {
+                source: Source::new(grain),
+                mode: GrainMode::Moving,
+                ..brush.grain.clone()
+            },
+            ..brush
+        };
+        // stamps turned, squashed, flipped and reading the grain from places of their own
+        let stamps: Vec<Stamp> = (0..7)
+            .map(|i| {
+                let t = i as f32;
+                Stamp {
+                    angle: 0.4 + 0.9 * t,
+                    roundness: if i % 3 == 0 { 0.6 } else { 1.0 },
+                    flip: [i % 2 == 1, i % 4 == 2],
+                    grain_offset: Vec2::new(11.0 * t, 5.0 + 3.0 * t),
+                    grain_turn: 0.3 * t,
+                    grain_size: 0.8 + 0.1 * t,
+                    ..Stamp::round(Vec2::new(18.0 + 5.0 * t, 20.0 + 11.0 * t), 9.0 + t, 0.7)
+                }
+            })
+            .collect();
+        let drawn = |guide: &Guide| {
+            let mut doc = Document::new(side, side);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let mut style = StrokeStyle {
+                grain_mode: GrainMode::Moving,
+                grain_depth: 1.0,
+                grain_scale: 40.0,
+                grain_blend: 1,
+                ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.2, 0.3], 1.0)
+            };
+            canvas.use_sources(&gpu, &mut style, &brush);
+            canvas.begin_stroke(doc.current(), style);
+            canvas.add_stamps(&mirrored(guide, &stamps));
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_layer(&gpu, doc.current()).unwrap()
+        };
+        let at = |px: &[u8], x: u32, y: u32| px.get(((y * side + x) * 4 + 3) as usize).copied().unwrap_or(0);
+        let last = side - 1;
+        let symmetry = |symmetry: SymmetryKind, rotational: bool| Guide {
+            on: true,
+            kind: GuideKind::Symmetry,
+            assisted: true,
+            symmetry,
+            rotational,
+            ..Guide::new(side, side)
+        };
+        // where a pixel lands mirrored across the upright line, the level one and the diagonals,
+        // and turned a quarter and a half round (the guide's centre is the canvas's)
+        type Map = fn(u32, u32, u32) -> (u32, u32);
+        let across: Map = |l, x, y| (l - x, y);
+        let down: Map = |l, x, y| (x, l - y);
+        let diagonal: Map = |_, x, y| (y, x);
+        let quarter: Map = |l, x, y| (l - y, x);
+        let half: Map = |l, x, y| (l - x, l - y);
+        // each guide, and the moves of the canvas its copies make of the stroke (whose ink is
+        // all top left)
+        type Way<'a> = (&'a str, Guide, &'a [(&'a str, Map)]);
+        let ways: [Way<'_>; 6] = [
+            ("vertical", symmetry(SymmetryKind::Vertical, false), &[("across", across)]),
+            ("horizontal", symmetry(SymmetryKind::Horizontal, false), &[("down", down)]),
+            (
+                "quadrant",
+                symmetry(SymmetryKind::Quadrant, false),
+                &[("across", across), ("down", down), ("half", half)],
+            ),
+            ("vertical turned", symmetry(SymmetryKind::Vertical, true), &[("half", half)]),
+            (
+                "radial",
+                symmetry(SymmetryKind::Radial, false),
+                &[("across", across), ("down", down), ("diagonal", diagonal), ("quarter", quarter)],
+            ),
+            ("radial turned", symmetry(SymmetryKind::Radial, true), &[("quarter", quarter), ("half", half)]),
+        ];
+        for (name, guide, moves) in ways {
+            let px = drawn(&guide);
+            for (how, copy) in moves {
+                let (mut off, mut inked, mut most) = (0, 0, 0u8);
+                for y in 0..side {
+                    for x in 0..side {
+                        let (cx, cy) = copy(last, x, y);
+                        let (a, b) = (at(&px, x, y), at(&px, cx, cy));
+                        inked += usize::from(a > 0);
+                        let d = a.abs_diff(b);
+                        off += usize::from(d > 1);
+                        most = most.max(d);
+                    }
+                }
+                eprintln!("{name}, {how}: {inked} inked pixels, {off} off by more than 1, at most {most}");
+                assert!(inked > 1000, "{name}: the stroke and its copies painted ({inked})");
+                assert!(most <= 2 && off <= inked / 500, "{name}, {how}: {off} pixels off, at most {most}");
+            }
+        }
     }
 }

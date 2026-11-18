@@ -768,8 +768,9 @@ struct StampInstance {
     /// The tint (see [`stamp_extras`]): the hue's turn, the saturation's keep and add, the
     /// brightness's keep.
     tint: [f32; 4],
-    /// A moving grain's depth and tile size as multiples of the brush's, the share of the
-    /// secondary colour, and how far it fades down its shape's height (tilt gradation).
+    /// A moving grain's depth and tile size as multiples of the brush's (the size below 0 where
+    /// the grain is read mirrored, see `Stamp::grain_mirrored`), the share of the secondary colour,
+    /// and how far it fades down its shape's height (tilt gradation).
     look: [f32; 4],
     /// How hard the paint is pressed into a moving grain and how much that counts, and room for
     /// more.
@@ -1015,6 +1016,15 @@ fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32) -> f32 {
     let taper = if taper.is_finite() { taper.clamp(0.0, 1.0) } else { 1.0 };
     let (scale, growth) = round_tip_reach(style.hardness, if taper > 0.0 { r / taper } else { r });
     r * scale + growth * taper
+}
+
+/// A stamp's moving grain's depth and tile size, its share of the secondary colour and its tilt
+/// gradation, as its instance takes them: the tile size below 0 for a grain read mirrored.
+fn stamp_look(s: &Stamp) -> [f32; 4] {
+    let [depth, size, secondary, gradation] = [s.grain_depth, s.grain_size, s.secondary, s.gradation]
+        .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 });
+    let size = if s.grain_mirrored { -size.max(1e-3) } else { size };
+    [depth, size, secondary, gradation]
 }
 
 /// A stamp's mirroring and colour shift for the GPU, kept finite.
@@ -1497,7 +1507,7 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         blur: 0.0,
         grain: style.grain.map_or(-1, |g| g as i32),
         // a moving grain sized and as deep as this stamp says
-        grain_scale: if moving { -(style.grain_scale * s.look[1]).max(1.0) } else { style.grain_scale },
+        grain_scale: if moving { -(style.grain_scale * s.look[1].abs()).max(1.0) } else { style.grain_scale },
         grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 1.0) } else { style.grain_depth },
         // only the patch turns by the stamp's own turn, where it is read from staying put: the
         // wet shader turns all it reads, so that is turned back first
@@ -3873,8 +3883,7 @@ impl Canvas {
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
                     grain_turn: if s.grain_turn.is_finite() { s.grain_turn } else { 0.0 },
-                    look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
+                    look: stamp_look(s),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
@@ -3938,8 +3947,7 @@ impl Canvas {
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
                     grain_turn: 0.0,
-                    look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
+                    look: stamp_look(s),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
