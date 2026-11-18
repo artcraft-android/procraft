@@ -504,15 +504,19 @@ impl CanvasSession {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
                 let tilts = brush.setting("preview_tilt") >= 0.5;
-                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts);
+                let mut stroke =
+                    StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts).without_azimuth();
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }
             // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
-            // no stamps
+            // no stamps; the sample stroke tells no pen's turn, so a brush turned as the pen is held
+            // turns its stamps with the stroke, as a finger's do
             let tilts = brush.setting("preview_tilt") >= 0.5;
-            let mut stroke =
-                StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady().on_pad(tilts);
+            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus)
+                .steady()
+                .on_pad(tilts)
+                .without_azimuth();
             // (its first stamps as they turned to the way it goes, so its end lays only the rest)
             let added = stroke.add(&samples);
             canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });

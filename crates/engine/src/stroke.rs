@@ -1002,6 +1002,8 @@ pub struct StrokeBuilder {
     exact: bool,
     /// Drawn on the studio's pad, and whether the brush previews tilt there.
     pad: Option<bool>,
+    /// The samples say nothing of how the pen is turned (the library's sample stroke).
+    no_azimuth: bool,
     /// A gap drawn that the last input segment ended before reaching: the next one goes on
     /// with it.
     pending_gap: Option<f32>,
@@ -1215,6 +1217,13 @@ impl StrokeBuilder {
         self
     }
 
+    /// The samples say nothing of how the pen is turned (the library's sample stroke): a brush
+    /// whose stamps turn as the pen is held turns them with the stroke instead, as under a finger.
+    pub fn without_azimuth(mut self) -> StrokeBuilder {
+        self.no_azimuth = true;
+        self
+    }
+
     pub fn exact_path(mut self) -> StrokeBuilder {
         self.exact = true;
         self
@@ -1329,6 +1338,7 @@ impl StrokeBuilder {
             steady: false,
             exact: false,
             pad: None,
+            no_azimuth: false,
             pending_gap: None,
             stroke_shift: Tint::NONE,
             stroke_secondary: 0.0,
@@ -2263,8 +2273,13 @@ impl StrokeBuilder {
     /// How far stamps turn with the stroke: a pen turns them as it is held (its azimuth) in place
     /// of following the stroke, which is for touch.
     fn follow(&self) -> f32 {
-        let held = self.brush.shape.follow_azimuth && self.pointer.has_pressure();
-        if held { 0.0 } else { self.brush.shape.follow }
+        if self.turned_by_pen() { 0.0 } else { self.brush.shape.follow }
+    }
+
+    /// The stamps turn as the pen is held, not with the stroke: a brush that says so, under a pen
+    /// that tells how it is turned.
+    fn turned_by_pen(&self) -> bool {
+        self.brush.shape.follow_azimuth && self.pointer.has_pressure() && !self.no_azimuth
     }
 
     fn classic(&self) -> bool {
@@ -2895,7 +2910,7 @@ impl StrokeBuilder {
             }
             let turned = self.stroke_turn - self.screen_turn + follow * self.direction;
             let mut own = shape.rotation;
-            if shape.follow_azimuth {
+            if shape.follow_azimuth && !self.no_azimuth {
                 own += p.azimuth;
             }
             if let Some(from) = self.roll_from {
@@ -2973,7 +2988,7 @@ impl StrokeBuilder {
             // the patch read takes the rotation control's share of the stamp's whole turn, which
             // counts from an eighth of a turn, from a pen's lean the other way (kept to the
             // screen, the grain is too)
-            let held = if shape.follow_azimuth && self.pointer.has_pressure() { std::f32::consts::PI } else { 0.0 };
+            let held = if self.turned_by_pen() { std::f32::consts::PI } else { 0.0 };
             let from_eighth = wrapped(std::f32::consts::FRAC_PI_4 + turned) + own - held;
             let grain_turn = x.grain_rotation * from_eighth + self.screen_turn;
             let placed = Placed {
@@ -5183,6 +5198,38 @@ mod tests {
         assert!((angle(Pointer::Stylus, 0.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 0.0));
         assert!((angle(Pointer::Finger, 0.0) - quarter).abs() < 1e-4, "{}", angle(Pointer::Finger, 0.0));
         assert!((angle(Pointer::Stylus, 1.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 1.0));
+    }
+
+    /// The library's sample stroke tells no pen's turn: a brush turned as the pen is held turns its
+    /// stamps along the stroke there, as a finger does, each stamp with the stroke's way where it is.
+    #[test]
+    fn a_sample_stroke_without_the_pen_s_turn_turns_stamps_along_its_way() {
+        let angles = |azimuth: bool, follow: f32| {
+            let mut b = plain();
+            b.set_setting("shape_rotation", follow);
+            b.set_setting("input_style", if azimuth { 1.0 } else { 0.0 });
+            // a quarter circle from heading right to heading down, the pen held turned 0.3 radians
+            let at = |i: u32| {
+                let a = i as f32 / 20.0 * std::f32::consts::FRAC_PI_2;
+                let p = Vec2::new(200.0 * a.sin(), 200.0 * (1.0 - a.cos()));
+                Sample { azimuth: 0.3, ..Sample::at(p, 1.0, f64::from(i) * 4.0) }
+            };
+            let samples: Vec<Sample> = (0..=20).map(at).collect();
+            // the stroke as it ends, its first stamps turned to the way it went
+            let mut stroke = StrokeBuilder::new(b, 10.0, Pointer::Stylus).steady().on_pad(false).without_azimuth();
+            stroke.add(&samples);
+            let stamps = stroke.finish();
+            (stamps.first().map_or(f32::NAN, |s| s.angle), stamps.last().map_or(f32::NAN, |s| s.angle))
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        for azimuth in [true, false] {
+            let (first, last) = angles(azimuth, 1.0);
+            assert!(first.abs() < 0.2, "azimuth {azimuth}: the first stamp heads right, {first}");
+            assert!((last - quarter).abs() < 0.2, "azimuth {azimuth}: the last heads down, {last}");
+        }
+        // a fixed one stays as it is set, the pen's turn not added
+        let (first, last) = angles(true, 0.0);
+        assert!(first.abs() < 1e-4 && last.abs() < 1e-4, "{first} {last}");
     }
 
     #[test]
