@@ -13811,8 +13811,14 @@ fn picture_follows_the_panel(seed: u32, side: u32, resident: u64, steps: usize) 
                 format!("move {id} to {to}: {}", s.move_layer(id, to))
             }
             10 => {
-                let (id, by, above) = (any(next(64)), any(next(64)), next(2) == 0);
-                format!("move {id} next to {by} (above {above}): {}", s.move_next_to(id, by, above))
+                let (id, target) = (any(next(64)), any(next(64)));
+                let place = match next(4) {
+                    0 => crate::RowDrop::Above { target },
+                    1 => crate::RowDrop::Below { target },
+                    2 => crate::RowDrop::Onto { target },
+                    _ => crate::RowDrop::Bottom,
+                };
+                format!("drop {id} at {place:?}: {}", s.drop_row(id, place))
             }
             11 => {
                 let id = group(next(8)).filter(|_| next(2) == 0).unwrap_or_else(|| any(next(64)));
@@ -16768,7 +16774,7 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
     // onto a bigger canvas they keep their size, in the middle
     let Some(c) = session(400, 400) else { return };
     let first = c.layers()[0].id;
-    let top = c.drop_layers(bundle, LayerDrop::NextTo { target: first, above: false }).unwrap();
+    let top = c.drop_layers(bundle, LayerDrop::Row { place: crate::RowDrop::Below { target: first } }).unwrap();
     let layers = c.layers();
     // below the row it was dropped on, the top one current
     assert_eq!((layers[0].id, layers[1].id), (first, top));

@@ -93,8 +93,8 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.LayerOption
 import io.github.artcraftandroid.procraft.core.LayerType
+import io.github.artcraftandroid.procraft.core.RowDrop
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val LayersWidth = 384.dp
@@ -112,6 +112,8 @@ private val ListCorner = 8.dp
 private val GroupHeight = 44.dp
 private val GroupIndent = 21.dp
 private val GroupLine = Color(0xFF4E4E4E)
+/** A row's thumbnail (a group's line) held over by a dragged row long enough to take it. */
+private val HeldOutline = Color.White
 private val MaskOwnerRow = Color(0xFF2C5281)
 /** Swiping a row left shows these buttons, each this wide, this far apart. */
 private val SwipeButton = 82.dp
@@ -172,6 +174,10 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     var dragOffset by remember { mutableFloatStateOf(0f) }
     // the rows that go with the dragged one (its mask, a group's layers)
     var dragUnit by remember { mutableStateOf(emptySet<ULong>()) }
+    // where the dragged row lands if let go now, and the row it has been held over long enough to
+    // go onto it (its thumbnail outlined)
+    var dropAt by remember { mutableStateOf<RowDrop?>(null) }
+    var heldOver by remember { mutableStateOf<ULong?>(null) }
     // where each row is in the window: for dropping a dragged row and placing the options
     val rows = remember { mutableMapOf<ULong, Rect>() }
     // where layers held out of a panel drop: on its rows, within its box
@@ -234,11 +240,27 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         LaunchedEffect(dragId) {
             val id = dragId ?: return@LaunchedEffect
             var last = androidx.compose.runtime.withFrameNanos { it }
+            // the row under the dragged one's middle, and since when
+            var over: ULong? = null
+            var overSince = last
+            // placed again only when it moves or a hold comes due
+            var placedFor: Pair<Float, ULong?>? = null
             while (true) {
                 val now = androidx.compose.runtime.withFrameNanos { it }
                 val seconds = (now - last) / 1e9f
                 last = now
                 val y = (rows[id] ?: continue).center.y + dragOffset
+                // held over one row a moment, it goes onto it when let go
+                val under = rows.entries.firstOrNull { (k, r) -> k !in dragUnit && y >= r.top && y < r.bottom }?.key
+                if (under != over) {
+                    over = under
+                    overSince = now
+                }
+                heldOver = over.takeIf { (now - overSince) / 1e9f >= vm.rowHoldSeconds }
+                if (placedFor != y to heldOver) {
+                    placedFor = y to heldOver
+                    dropAt = vm.rowDrop(id, rows, y, heldOver)
+                }
                 val box = listBox[0]
                 val towards = when {
                     y < box.top + dragEdge -> (y - box.top - dragEdge) / dragEdge
@@ -274,7 +296,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 val pinnable = androidx.compose.ui.layout.LocalPinnableContainer.current
                 val pinned = remember { arrayOfNulls<androidx.compose.ui.layout.PinnableContainer.PinnedHandle>(1) }
                 val aside by androidx.compose.animation.core.animateFloatAsState(
-                    remember(l.id) { androidx.compose.runtime.derivedStateOf { dragId?.let { makingWay(l.id, it, dragUnit, dragOffset, rows, rowGap) } ?: 0f } }.value,
+                    remember(l.id) { androidx.compose.runtime.derivedStateOf { if (dragId == null) 0f else makingWay(l.id, dragUnit, dropAt, rows, rowGap) } }.value,
                     Motion.rowFade(),
                 )
                 Column(
@@ -302,6 +324,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                     dragId = l.id
                                     dragOffset = 0f
                                     dragUnit = vm.movingWith(l) + l.id
+                                    dropAt = null
+                                    heldOver = null
                                     swiped = null
                                     pinned[0] = pinnable?.pin()
                                 },
@@ -318,10 +342,13 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                     }
                                 },
                                 onDragEnd = {
-                                    rows[l.id]?.let { drop(vm, l, it.center.y + dragOffset, rows) }
+                                    // where its middle came to rest, placed as the core places it
+                                    rows[l.id]?.let { vm.dropRow(l, vm.rowDrop(l.id, rows, it.center.y + dragOffset, heldOver)) }
                                     dragId = null
                                     dragOffset = 0f
                                     dragUnit = emptySet()
+                                    dropAt = null
+                                    heldOver = null
                                     pinned[0]?.release()
                                     pinned[0] = null
                                 },
@@ -329,6 +356,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                     dragId = null
                                     dragOffset = 0f
                                     dragUnit = emptySet()
+                                    dropAt = null
+                                    heldOver = null
                                     pinned[0]?.release()
                                     pinned[0] = null
                                 },
@@ -365,8 +394,10 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                         }
                     }
                     SwipeRow(vm, l, open = swiped == l.id, enabled = dragId == null, onOpen = { swiped = if (it) l.id else null }, onPick = { vm.pickLayer(l) }) {
+                        // held over long enough to go onto it: its thumbnail (a group's line) outlined
+                        val held = (dropAt as? RowDrop.Onto)?.target == l.id
                         if (l.kind == LayerType.GROUP) {
-                            GroupRow(vm, l, shape, name, onTap, indent) { vm.toggleCollapsed(l) }
+                            GroupRow(vm, l, shape, name, onTap, indent, held) { vm.toggleCollapsed(l) }
                         } else LayerRow(
                             vm,
                             l,
@@ -387,6 +418,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                             onCube = if (vm.modelOpen && l.kind != LayerType.MASK) ({ vm.toggleChannelTray(l.id) }) else null,
                             cubeLit = vm.modelOpen && l.current && vm.channelTileChosen,
                             selected = l.current && !(vm.modelOpen && vm.channelTileChosen),
+                            held = held,
                         )
                     }
                     if (vm.modelOpen && vm.channelTrayFor == l.id) ChannelTray(vm, l)
@@ -564,33 +596,30 @@ private val MenuBadgeWidth = 28.8.dp
 private val MenuBadgeHeight = 22.4.dp
 private val MenuBadgeLine = 2.4.dp
 
-/** Drops [l] where its row's middle came to rest: just above or below the row it is over. */
 /**
- * How far row [id] stands aside while [dragged] (with the rest of [unit]) is dragged [offset] from
- * its place: past the row's middle, the row takes the room the dragged rows left, so the gap shows
- * where they will land.
+ * How far row [id] stands aside while the rows of [unit] are dragged: the rows between where they
+ * were and where they land ([place]) take the room they left, so the gap shows where they will
+ * land; held onto a row ([RowDrop.Onto]), or over their own place, none moves.
  */
-private fun makingWay(id: ULong, dragged: ULong, unit: Set<ULong>, offset: Float, rows: Map<ULong, Rect>, gap: Float): Float {
+internal fun makingWay(id: ULong, unit: Set<ULong>, place: RowDrop?, rows: Map<ULong, Rect>, gap: Float): Float {
     if (id in unit) return 0f
     val row = rows[id] ?: return 0f
-    val y = (rows[dragged] ?: return 0f).center.y + offset
     val moved = unit.mapNotNull { rows[it] }
+    if (moved.isEmpty()) return 0f
     val (top, bottom) = moved.minOf { it.top } to moved.maxOf { it.bottom }
     val room = bottom - top + gap
+    // the line between the rows they land between
+    val slot = when (place) {
+        is RowDrop.Above -> rows[place.target]?.top ?: return 0f
+        is RowDrop.Below -> rows[place.target]?.bottom ?: return 0f
+        is RowDrop.Bottom -> Float.POSITIVE_INFINITY
+        else -> return 0f
+    }
     return when {
-        row.bottom <= top && y < row.center.y -> room
-        row.top >= bottom && y > row.center.y -> -room
+        row.bottom <= top && row.top >= slot -> room
+        row.top >= bottom && row.bottom <= slot -> -room
         else -> 0f
     }
-}
-
-private fun drop(vm: CanvasViewModel, l: LayerInfo, y: Float, rows: Map<ULong, Rect>) {
-    val unit = vm.movingWith(l)
-    val others = vm.layers.filter { it.id !in unit && !vm.hidden(it) }.mapNotNull { o -> rows[o.id]?.let { o to it } }
-    val (target, row) = others.firstOrNull { (_, r) -> y >= r.top && y < r.bottom }
-        ?: others.minByOrNull { (_, r) -> abs(r.center.y - y) }
-        ?: return
-    vm.moveNextTo(l, target, above = y < row.center.y)
 }
 
 /**
@@ -714,7 +743,10 @@ private fun LockedName(l: LayerInfo, ink: Color, name: @Composable (Color, Modif
     }
 }
 
-/** A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box. */
+/**
+ * A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box.
+ * Held over by a dragged row long enough to take it ([held]), the line is outlined.
+ */
 @Composable
 private fun GroupRow(
     vm: CanvasViewModel,
@@ -723,6 +755,7 @@ private fun GroupRow(
     name: @Composable (Color, Modifier) -> Unit,
     onTap: () -> Unit,
     indent: Dp,
+    held: Boolean,
     onToggle: () -> Unit,
 ) {
     Row(
@@ -733,7 +766,11 @@ private fun GroupRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
-        Box(Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(RoundedCornerShape(2.dp)).background(GroupLine))
+        val line = RoundedCornerShape(2.dp)
+        Box(
+            Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(line).background(GroupLine)
+                .then(if (held) Modifier.border(2.dp, HeldOutline, line) else Modifier),
+        )
         LockedName(l, ink, name, Modifier.weight(1f))
         Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
@@ -759,6 +796,7 @@ private fun LayerRow(
     onCube: (() -> Unit)? = null,
     cubeLit: Boolean = false,
     selected: Boolean = l.current,
+    held: Boolean = false,
 ) {
     val mask = l.kind == LayerType.MASK
     val masked = vm.hasMask(l)
@@ -784,7 +822,7 @@ private fun LayerRow(
             masked -> (-2).dp
             else -> 0.dp
         }
-        Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape) }
+        Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape, held) }
         // what the layer is, under its name (which stays in the middle): the reference layer, one
         // drawing assist is on for, a private one, a model's layer shared by its texture set's meshes
         val tag = when {
@@ -893,9 +931,11 @@ private fun CheckBox(checked: Boolean, fill: Color) {
 }
 
 @Composable
-private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
+private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape, held: Boolean = false) {
     Box(
         Modifier.size(width = 93.dp, height = 61.dp).clip(shape)
+            // held over by a dragged row long enough to take it
+            .then(if (held) Modifier.border(2.dp, HeldOutline, shape) else Modifier)
             // a mask's thumbnail sits on white
             .then(
                 when {

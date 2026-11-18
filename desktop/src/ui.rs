@@ -1805,16 +1805,13 @@ impl Interface {
     /// ready to transform as a picture brought in is; over the canvas they came from, copied to
     /// the top.
     fn drop_held(&mut self, session: &CanvasSession, held: &crate::held_layers::Held, at: egui::Pos2) {
-        let row = self.layers.row_at(&session.layers(), at);
         let same = held.from.is_some() && held.from == self.artwork_dir;
-        if same && let Some((target, above)) = row {
-            if target != held.layer && !session.moving_with(held.layer).contains(&target) {
-                session.move_next_to(held.layer, target, above);
-            }
+        if same && let Some(place) = self.layers.drop_at(session, Some(held.layer), at) {
+            session.drop_row(held.layer, place);
             return;
         }
-        let place = match row {
-            Some((target, above)) => procraft_core::LayerDrop::NextTo { target, above },
+        let place = match self.layers.drop_at(session, None, at) {
+            Some(place) => procraft_core::LayerDrop::Row { place },
             None if same => procraft_core::LayerDrop::Top,
             None => procraft_core::LayerDrop::AboveCurrent,
         };

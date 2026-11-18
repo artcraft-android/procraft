@@ -8153,10 +8153,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun movingWith(l: LayerInfo): Set<ULong> = session?.movingWith(l.id)?.toSet() ?: setOf(l.id)
 
     /**
-     * Moves [l] (with what goes with it) just above or below [target]'s row; a chosen layer with
+     * Where layer [id] (with what goes with it), dragged in the layers panel, lands if let go with
+     * its middle at window height [y], by the panel's [rows] where they are laid out; [held]: the
+     * row it has been held over for [rowHoldSeconds] (the shared core decides). With no [id],
+     * layers brought in from elsewhere.
+     */
+    fun rowDrop(id: ULong?, rows: Map<ULong, androidx.compose.ui.geometry.Rect>, y: Float, held: ULong?): io.github.artcraftandroid.procraft.core.RowDrop {
+        val shown = rows.map { (k, r) -> io.github.artcraftandroid.procraft.core.ShownRow(k, r.top, r.bottom) }
+        return session?.rowDrop(id, shown, y, held) ?: io.github.artcraftandroid.procraft.core.RowDrop.Stays
+    }
+
+    /** How long a dragged row is held over another to go onto it when let go, seconds. */
+    val rowHoldSeconds = io.github.artcraftandroid.procraft.core.rowHoldSeconds()
+
+    /**
+     * Moves [l] (with what goes with it) to [place], as [rowDrop] placed it; a chosen layer with
      * others picked takes them along, in their order (the shared core decides).
      */
-    fun moveNextTo(l: LayerInfo, target: LayerInfo, above: Boolean) = layerChange(thumbs = false) { it.moveNextTo(l.id, target.id, above) }
+    fun dropRow(l: LayerInfo, place: io.github.artcraftandroid.procraft.core.RowDrop) = layerChange(thumbs = false) { it.dropRow(l.id, place) }
 
     /**
      * Layers lifted out of the layers panel by a finger ([pointer]) that holds them while it goes
@@ -8224,15 +8238,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val s = session ?: return
             if (!(screen == Screen.CANVAS && !modelOpen)) return
             val same = artworkDir != null && artworkDir == h.from
-            val row = heldRow(at)
-            if (same && row != null) {
+            val overRows = panel == Panel.LAYERS && layersBox?.contains(at) == true
+            if (same && overRows) {
                 val l = layers.firstOrNull { it.id == h.layer } ?: return
-                val target = layers.firstOrNull { it.id == row.first } ?: return
-                if (target.id != l.id && target.id !in movingWith(l)) moveNextTo(l, target, row.second)
+                dropRow(l, rowDrop(l.id, layerRows, at.y, null))
                 return
             }
             val place = when {
-                row != null -> io.github.artcraftandroid.procraft.core.LayerDrop.NextTo(row.first, row.second)
+                overRows -> io.github.artcraftandroid.procraft.core.LayerDrop.Row(rowDrop(null, layerRows, at.y, null))
                 same -> io.github.artcraftandroid.procraft.core.LayerDrop.Top
                 else -> io.github.artcraftandroid.procraft.core.LayerDrop.AboveCurrent
             }
@@ -8251,16 +8264,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelHeld() {
         heldLayers?.bundle?.close()
         heldLayers = null
-    }
-
-    /** The row of the layers panel open under window point [at] (or the nearest, over the panel), and whether [at] is in its top half. */
-    private fun heldRow(at: Offset): Pair<ULong, Boolean>? {
-        if (panel != Panel.LAYERS || layersBox?.contains(at) != true) return null
-        val shown = layers.filter { !hidden(it) }.mapNotNull { l -> layerRows[l.id]?.let { l.id to it } }
-        val (id, row) = shown.firstOrNull { (_, r) -> at.y >= r.top && at.y < r.bottom }
-            ?: shown.minByOrNull { (_, r) -> kotlin.math.abs(r.center.y - at.y) }
-            ?: return null
-        return id to (at.y < row.center.y)
     }
 
     fun addMask(l: LayerInfo) = layerChange { if (it.addMask(l.id) == null && !hasMask(l)) message = noRoom() }

@@ -558,9 +558,22 @@ pub enum Landing {
     AboveCurrent,
     /// At the top of the stack, in no group.
     Top,
-    /// At position `to` of the stack (0 = bottom), joining the group they land in, as a moved
-    /// layer does.
-    At(usize),
+    /// Where rows let go in the layers panel go ([`Place`]).
+    Row(Place),
+}
+
+/// Where rows dragged in the layers panel land, by the rows they were let go by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// Just above `id`'s row (over its mask), in the group it is in.
+    Above(LayerId),
+    /// Just below `id`'s row (under everything in it, for a group), in the group it is in.
+    Below(LayerId),
+    /// At the bottom of the stack, in no group.
+    Bottom,
+    /// Onto `id`'s row: into a group at its top; with a layer, both go in a new group where it
+    /// was, the rows let go on top.
+    Onto(LayerId),
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1139,19 +1152,7 @@ impl Document {
                 None => (self.layers.len(), None),
             },
             Landing::Top => (self.layers.len(), None),
-            Landing::At(to) => {
-                let mut to = to.min(self.layers.len());
-                // never between a layer and its mask
-                if self.layers.get(to).is_some_and(|l| l.kind == LayerKind::Mask) {
-                    to += 1;
-                }
-                // landing below a group's entry, or among its layers, it joins that group
-                let parent = self.layers.get(to).and_then(|above| match above.kind {
-                    LayerKind::Group => Some(above.id),
-                    _ => self.group_of(above.id),
-                });
-                (to, parent)
-            }
+            Landing::Row(place) => self.slot(place)?,
         };
         at = at.min(self.layers.len());
         let mut made = std::collections::HashMap::new();
@@ -1177,12 +1178,133 @@ impl Document {
             })
             .collect();
         self.layers.splice(at..at, copies);
+        if let Landing::Row(Place::Onto(target)) = landing {
+            self.combine_onto(target, &items);
+        }
         if let Some(top) = items.last() {
             self.current = *top;
         }
         self.picked = items.iter().rev().skip(1).copied().collect();
         self.fix_clips();
         Some(given.iter().map(|g| (*g, renamed(*g))).collect())
+    }
+
+    /// Where rows let go at `place` go in the stack as it is (those moved already taken out):
+    /// the position (0 = bottom) and the group they join. None if the row it names isn't there.
+    fn slot(&self, place: Place) -> Option<(usize, Option<LayerId>)> {
+        // a mask's row stands for its layer
+        let owner = |id: LayerId| {
+            let l = self.layer(id)?;
+            if l.kind == LayerKind::Mask { l.parent } else { Some(id) }
+        };
+        Some(match place {
+            Place::Above(id) => {
+                let id = owner(id)?;
+                (self.unit(id)?.end, self.group_of(id))
+            }
+            Place::Below(id) => {
+                let id = owner(id)?;
+                (self.unit(id)?.start, self.group_of(id))
+            }
+            Place::Bottom => (0, None),
+            Place::Onto(id) => {
+                let id = owner(id)?;
+                if self.layer(id)?.kind == LayerKind::Group {
+                    // just under its entry: at the top of what is in it
+                    (self.index_of(id)?, Some(id))
+                } else {
+                    (self.unit(id)?.end, self.group_of(id))
+                }
+            }
+        })
+    }
+
+    /// Rows let go onto `target`, `items` put in just above it already (in its group): into a
+    /// group they are in it at its top already; with a layer, both go in a new group there, it
+    /// at the bottom (so clipping nothing). Returns the group.
+    fn combine_onto(&mut self, target: LayerId, items: &[LayerId]) -> Option<LayerId> {
+        let t = self.layer(target)?;
+        // a mask's row stands for its layer
+        let target = if t.kind == LayerKind::Mask { t.parent? } else { target };
+        if self.layer(target)?.kind == LayerKind::Group {
+            return Some(target);
+        }
+        let top = items.iter().filter_map(|id| self.unit(*id)).map(|u| u.end).max()?;
+        let group = self.blank(LayerKind::Group, "New group".to_owned(), self.group_of(target));
+        let gid = group.id;
+        self.layers.insert(top, group);
+        for id in items.iter().chain(std::iter::once(&target)) {
+            if let Some(l) = self.layer_mut(*id) {
+                l.parent = Some(gid);
+            }
+        }
+        if let Some(l) = self.layer_mut(target) {
+            l.clipped = false;
+        }
+        Some(gid)
+    }
+
+    /// Moves a paint layer (with its mask) or a group (with everything in it) to `place`, as a row
+    /// dragged in the layers panel and let go there. False if nothing changed, or `place` names
+    /// one of the rows moved.
+    pub fn move_to(&mut self, id: LayerId, place: Place) -> bool {
+        if self.layer(id).is_none_or(|l| l.kind == LayerKind::Mask) {
+            return false;
+        }
+        self.move_items_to(&[id], place)
+    }
+
+    /// Moves what is chosen (each with what goes with it, in its order) together to `place`, as
+    /// [`Document::move_to`] moves one.
+    pub fn move_chosen_to(&mut self, place: Place) -> bool {
+        let items = self.chosen_items();
+        self.move_items_to(&items, place)
+    }
+
+    /// Moves `items` (bottom first, each with what goes with it) together to `place`.
+    fn move_items_to(&mut self, items: &[LayerId], place: Place) -> bool {
+        if items.is_empty() {
+            return false;
+        }
+        let named = match place {
+            Place::Above(t) | Place::Below(t) | Place::Onto(t) => Some(t),
+            Place::Bottom => None,
+        };
+        // never next to or into a row that goes with them
+        if named.is_some_and(|t| {
+            items
+                .iter()
+                .any(|i| *i == t || self.is_inside(t, *i) || self.layer(t).is_some_and(|l| l.parent == Some(*i)))
+        }) {
+            return false;
+        }
+        let before = self.layers.clone();
+        let mut moved: Vec<Layer> = Vec::new();
+        for id in items.iter().rev() {
+            let Some(unit) = self.unit(*id) else {
+                self.layers = before;
+                return false;
+            };
+            let mut part: Vec<Layer> = self.layers.drain(unit).collect();
+            part.append(&mut moved);
+            moved = part;
+        }
+        let Some((at, parent)) = self.slot(place) else {
+            self.layers = before;
+            return false;
+        };
+        for l in &mut moved {
+            if items.contains(&l.id) {
+                l.parent = parent;
+            }
+        }
+        let at = at.min(self.layers.len());
+        self.layers.splice(at..at, moved);
+        if let Place::Onto(target) = place {
+            self.combine_onto(target, items);
+        }
+        self.fix_clips();
+        self.layers != before
     }
 
     /// Moves what is chosen (each with what goes with it, in its order) together to position `to`
@@ -2614,6 +2736,10 @@ mod tests {
         d.layers().iter().map(|l| l.name.clone()).collect()
     }
 
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
     #[test]
     fn picks_toggle_and_never_hold_the_current_layer() {
         let (mut d, ids) = stack(4);
@@ -2714,17 +2840,86 @@ mod tests {
         let pairs = e.insert_copies(&lifted, Landing::Top).unwrap();
         assert_eq!(e.layers().last().map(|l| l.id), Some(pairs[0].1));
         assert_eq!(e.group_of(pairs[0].1), None);
-        // dropped under a group's row, it joins the group
+        // dropped onto a group's row, it goes in at its top
         let at = e.index_of(group).unwrap();
-        let pairs = e.insert_copies(&lifted, Landing::At(at)).unwrap();
+        let pairs = e.insert_copies(&lifted, Landing::Row(Place::Onto(group))).unwrap();
         assert_eq!(e.group_of(pairs[0].1), Some(group));
         assert_eq!(e.index_of(pairs[0].1), Some(at));
+        // by the row under the group, it goes there, out of it
+        let pairs = e.insert_copies(&lifted, Landing::Row(Place::Below(group))).unwrap();
+        assert_eq!(e.group_of(pairs[0].1), None);
+        assert_eq!(e.index_of(pairs[0].1), Some(e.unit(group).unwrap().start - 1));
         // a mask without its layer, or nothing, isn't put in
         let mut m = Document::new(10, 10);
         let mask = m.add_mask(m.current()).unwrap();
         let alone: Vec<Layer> = m.items_layers(&[mask]).into_iter().filter(|l| l.id == mask).collect();
         assert!(e.insert_copies(&alone, Landing::Top).is_none());
         assert!(e.insert_copies(&[], Landing::Top).is_none());
+    }
+
+    #[test]
+    fn rows_let_go_by_a_group_go_in_only_among_its_layers_or_onto_its_row() {
+        // top down: 4, the group (3, 2), 1
+        let (mut d, ids) = stack(4);
+        let [one, two, three, four]: [LayerId; 4] = ids.try_into().unwrap();
+        d.set_current(three);
+        d.toggle_pick(two);
+        let group = d.group_chosen().unwrap();
+        d.rename(group, "G");
+        d.set_current(four);
+        assert_eq!(names(&d), ["1", "2", "3", "G", "4"]);
+        // under the group's row and its layers, or above the row under it: out of it
+        assert!(d.move_to(four, Place::Below(group)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "4", "2", "3", "G"]), None));
+        assert!(d.move_to(four, Place::Above(group)));
+        assert!(d.move_to(four, Place::Above(one)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "4", "2", "3", "G"]), None));
+        // by its layers: in it
+        assert!(d.move_to(four, Place::Below(two)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "4", "2", "3", "G"]), Some(group)));
+        assert!(d.move_to(four, Place::Above(three)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "2", "3", "4", "G"]), Some(group)));
+        // above the group's row: out of it, over it
+        assert!(d.move_to(four, Place::Above(group)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "2", "3", "G", "4"]), None));
+        // onto its row: in it at its top
+        assert!(d.move_to(four, Place::Onto(group)));
+        assert_eq!((names(&d), d.group_of(four)), (strings(&["1", "2", "3", "4", "G"]), Some(group)));
+        assert!(!d.move_to(four, Place::Onto(group)), "where it is already, nothing changes");
+        // a group never goes in itself, nor next to its own layers
+        assert!(!d.move_to(group, Place::Below(two)));
+        assert!(!d.move_to(group, Place::Onto(group)));
+        // the whole group moves with what is in it, out of it at the bottom
+        assert!(d.move_to(group, Place::Bottom));
+        assert_eq!(names(&d), ["2", "3", "4", "G", "1"]);
+        // a layer let go onto another: both in a new group there, the layer let go on top
+        assert!(d.move_to(two, Place::Onto(one)));
+        let new = d.group_of(one).unwrap();
+        assert_eq!(d.group_of(two), Some(new));
+        assert_eq!(names(&d), ["3", "4", "G", "1", "2", "New group"]);
+        assert_eq!(d.group_of(new), None);
+        // a mask's row stands for its layer: above it is above the mask
+        let mask = d.add_mask(one).unwrap();
+        assert!(d.move_to(three, Place::Above(mask)));
+        assert_eq!(d.index_of(three), d.index_of(mask).map(|m| m + 1));
+        assert_eq!(d.group_of(three), Some(new));
+    }
+
+    #[test]
+    fn picked_layers_let_go_onto_a_layer_make_a_group_with_it() {
+        let (mut d, ids) = stack(4);
+        let [one, two, three, four]: [LayerId; 4] = ids.try_into().unwrap();
+        d.set_current(four);
+        d.toggle_pick(two);
+        assert!(d.move_chosen_to(Place::Onto(one)));
+        let group = d.group_of(one).unwrap();
+        assert_eq!(names(&d), ["1", "2", "4", "New group", "3"]);
+        assert!([two, four].iter().all(|id| d.group_of(*id) == Some(group)));
+        assert_eq!(d.group_of(three), None);
+        // picked again and let go under the group's row: out of it, in their order
+        assert!(d.move_chosen_to(Place::Below(group)));
+        assert_eq!(names(&d), ["2", "4", "1", "New group", "3"]);
+        assert!([two, four].iter().all(|id| d.group_of(*id).is_none()));
     }
 
     #[test]

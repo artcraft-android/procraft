@@ -18,8 +18,9 @@ pub enum LayerDrop {
     AboveCurrent,
     /// At the top of the stack: let go over the canvas of the artwork they came from.
     Top,
-    /// Just above or below layer `target`'s row: let go over a row of the layers panel.
-    NextTo { target: u64, above: bool },
+    /// By the rows of the layers panel, where [`CanvasSession::row_drop`] (with no layer dragged)
+    /// placed them: let go over the panel.
+    Row { place: crate::RowDrop },
 }
 
 /// A layer's pixels where it is painted: the rectangle on its canvas and that rectangle's rows
@@ -270,10 +271,8 @@ impl CanvasSession {
         let landing = match place {
             LayerDrop::AboveCurrent => Landing::AboveCurrent,
             LayerDrop::Top => Landing::Top,
-            LayerDrop::NextTo { target, above } => {
-                let at = st.doc.index_of(LayerId(target))?;
-                Landing::At(if above { at + 1 } else { at })
-            }
+            // nothing of theirs is here to stay by: at the top then
+            LayerDrop::Row { place } => place.engine().map_or(Landing::Top, Landing::Row),
         };
         let before = st.doc.clone();
         let pairs = st.doc.insert_copies(&layers, landing)?;
