@@ -62,6 +62,7 @@ import io.github.artcraftandroid.procraft.core.TextRunInfo
 import io.github.artcraftandroid.procraft.core.TextSide
 import io.github.artcraftandroid.procraft.core.TextStyleChange
 import io.github.artcraftandroid.procraft.core.textIndexFromUtf16
+import io.github.artcraftandroid.procraft.core.textIndexToUtf16
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.SelectionDisplay
@@ -4833,6 +4834,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshTextLook()
         renderText()
         refresh()
+    }
+
+    /**
+     * Letters chosen by [taps] quick taps in a row at window point [at] on the text being edited:
+     * one puts the caret at the place nearest it, two choose the word there, three all of it. The
+     * field's too, so what is typed goes there.
+     */
+    fun tapText(at: Offset, taps: Int) {
+        val p = windowToCanvas(at) ?: return
+        val chosen = session?.textTap(p.x, p.y, taps.coerceAtLeast(1).toUInt()) ?: return
+        val text = textField.text
+        val (start, end) = chosen.map { textIndexToUtf16(text, it).toInt() }.takeIf { it.size == 2 } ?: return
+        changeTextField(TextFieldValue(text, TextRange(start, end)))
     }
 
     fun changeTextField(v: TextFieldValue) {
