@@ -5249,6 +5249,33 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- assets ----
 
+    /** All of [uri]'s bytes, read into one array of the file's own size when it is known. */
+    private fun readAssetBytes(uri: android.net.Uri): ByteArray {
+        val resolver = getApplication<Application>().contentResolver
+        val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: -1L
+        val stream = resolver.openInputStream(uri) ?: throw java.io.IOException("no stream")
+        return stream.use { input ->
+            if (size in 0..Int.MAX_VALUE.toLong()) {
+                val out = ByteArray(size.toInt())
+                var at = 0
+                while (at < out.size) {
+                    val n = input.read(out, at, out.size - at)
+                    if (n < 0) break
+                    at += n
+                }
+                if (at < out.size) {
+                    out.copyOf(at)
+                } else {
+                    // a file that grew since its size was read
+                    val more = input.readBytes()
+                    if (more.isEmpty()) out else out + more
+                }
+            } else {
+                input.readBytes()
+            }
+        }
+    }
+
     /** Every asset library, the one in use among them: for the libraries' cards and the title. */
     var assetLibraries by mutableStateOf<List<AssetLibraryInfo>>(emptyList())
         private set
@@ -5429,7 +5456,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A picture picked to be asset [id]'s thumbnail, in place of the one made from what was added. */
     fun setAssetThumbnail(id: String, uri: android.net.Uri) {
         viewModelScope.launch {
-            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAssetBytes(uri) }.getOrNull() }
             if (bytes == null) {
                 message = "This file could not be read."
                 return@launch
@@ -5483,7 +5510,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val folder = shownAssetFolder
         viewModelScope.launch {
             val name = withContext(Dispatchers.IO) { fileName(uri)?.substringBeforeLast('.') }
-            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAssetBytes(uri) }.getOrNull() }
             if (bytes == null) {
                 message = "This file could not be read."
                 return@launch
@@ -5499,7 +5526,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val librariesBefore = assetLibraries.size
         val foldersBefore = assetLibraries.getOrNull(lib)?.folders?.size ?: 0
         viewModelScope.launch {
-            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAssetBytes(uri) }.getOrNull() }
             if (bytes == null) {
                 message = "This file could not be read."
                 return@launch
@@ -5520,7 +5547,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun pickPsd(uri: android.net.Uri) {
         viewModelScope.launch {
             val name = withContext(Dispatchers.IO) { fileName(uri)?.substringBeforeLast('.') }
-            val bytes = withContext(Dispatchers.IO) { runCatching { readAll(uri) }.getOrNull() }
+            val bytes = withContext(Dispatchers.IO) { runCatching { readAssetBytes(uri) }.getOrNull() }
             if (bytes == null) {
                 message = "This file could not be read."
                 return@launch
