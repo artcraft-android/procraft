@@ -46,6 +46,73 @@ impl GalleryEntry {
     }
 }
 
+/// What Select's actions act on, the same in every app.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryPick {
+    /// The entries picked (folders), in the order shown: what Duplicate and Delete act on, a stack
+    /// whole.
+    pub dirs: Vec<String>,
+    /// What Preview shows and Share shares: the artworks picked in the order shown, a picked
+    /// stack's all of them in its own order.
+    pub artworks: Vec<GalleryArtwork>,
+    /// How many of those picked are stacks.
+    pub stacks: u32,
+    /// Stack puts two or more together (artworks or stacks); a stack has no Stack of its own.
+    pub can_stack: bool,
+    /// Delete asks first: its question and what it says.
+    pub delete_title: String,
+    pub delete_message: String,
+}
+
+fn artworks_told(n: usize) -> String {
+    if n == 1 { "1 artwork".to_owned() } else { format!("{n} artworks") }
+}
+
+/// Of the `entries` shown (the gallery's, or `in_stack` a stack's), those `picked` (by folder) as
+/// Select's actions take them; folders no longer shown are left out.
+#[uniffi::export]
+pub fn gallery_pick(entries: Vec<GalleryEntry>, picked: Vec<String>, in_stack: bool) -> GalleryPick {
+    let chosen: Vec<&GalleryEntry> = entries.iter().filter(|e| picked.iter().any(|p| p == e.dir())).collect();
+    let artworks: Vec<GalleryArtwork> = chosen
+        .iter()
+        .flat_map(|e| match e {
+            GalleryEntry::Artwork { artwork } => vec![artwork.clone()],
+            GalleryEntry::Stack { artworks, .. } => artworks.clone(),
+        })
+        .collect();
+    let stacks: Vec<(&str, usize)> = chosen
+        .iter()
+        .filter_map(|e| match e {
+            GalleryEntry::Stack { name, artworks, .. } => Some((name.as_str(), artworks.len())),
+            GalleryEntry::Artwork { .. } => None,
+        })
+        .collect();
+    let n = chosen.len();
+    let undone = "This can't be undone.";
+    let (delete_title, delete_message) = match stacks.as_slice() {
+        [] => (format!("Delete {}?", artworks_told(n)), undone.to_owned()),
+        [(name, count)] if n == 1 => {
+            let go = if *count == 1 { "goes" } else { "go" };
+            (format!("Delete \u{201c}{name}\u{201d}?"), format!("Its {} {go} with it. {undone}", artworks_told(*count)))
+        }
+        _ if stacks.len() == n => {
+            (format!("Delete {n} stacks?"), format!("Their {} go with them. {undone}", artworks_told(artworks.len())))
+        }
+        _ => (
+            format!("Delete {n} items?"),
+            format!("The stacks' artworks go with them, {} in all. {undone}", artworks_told(artworks.len())),
+        ),
+    };
+    GalleryPick {
+        dirs: chosen.iter().map(|e| e.dir().to_owned()).collect(),
+        artworks,
+        stacks: stacks.len() as u32,
+        can_stack: !in_stack && n >= 2,
+        delete_title,
+        delete_message,
+    }
+}
+
 /// The order of the folders `present` (name and time changed), given the order `saved` before:
 /// those not placed yet first, newest first, then the rest as they were.
 fn arrange(present: &[(String, i64)], saved: &[String]) -> Vec<String> {
@@ -452,6 +519,49 @@ impl ArtworkStore {
         self.make_stack(&artworks, None).to_string_lossy().into_owned()
     }
 
+    /// The entries in `dirs` (artworks and stacks of the gallery, as Select picks them) put
+    /// together in one stack where the first of them was, holding all their artworks in the
+    /// gallery's order (a stack's in its own). Stacks never nest, so the first stack picked takes
+    /// in the rest and keeps its name; the others go once emptied. With no stack picked it is a
+    /// new stack, as `stack` makes. Returns its folder.
+    pub fn stack_picked(&self, dirs: Vec<String>) -> String {
+        let order = self.order(&self.root);
+        let wanted: Vec<String> =
+            dirs.iter().map(PathBuf::from).filter(|d| self.parent_of(d) == self.root).map(|d| name_of(&d)).collect();
+        let picked: Vec<PathBuf> = order.iter().filter(|n| wanted.contains(n)).map(|n| self.root.join(n)).collect();
+        let Some(into) = picked.iter().find(|p| p.join(STACK_FILE).is_file()).cloned() else {
+            return self.make_stack(&picked, None).to_string_lossy().into_owned();
+        };
+        // each moved whole or left where it is (a folder of that name there already, or a move
+        // that failed): nothing is lost either way
+        let take_in = |from: &Path| {
+            let to = into.join(name_of(from));
+            !to.exists() && fs::rename(from, &to).is_ok()
+        };
+        let mut inside: Vec<String> = Vec::new();
+        for p in &picked {
+            if *p == into {
+                inside.extend(self.order(p));
+            } else if p.join(STACK_FILE).is_file() {
+                inside.extend(self.order(p).into_iter().filter(|name| take_in(&p.join(name))));
+                // emptied: no artwork's folder left in it
+                if folders(p).is_empty() {
+                    let _ = fs::remove_dir_all(p);
+                }
+            } else if take_in(p) {
+                inside.push(name_of(p));
+            }
+        }
+        write_order(&into, &inside);
+        // where the first picked was, the others out of the gallery's order
+        let gone = |n: &String| picked.iter().any(|p| name_of(p) == *n && *p != into && !p.exists());
+        let at = picked.first().and_then(|f| order.iter().position(|n| *n == name_of(f))).unwrap_or(0);
+        let to = order.iter().take(at).filter(|n| !picked.iter().any(|p| name_of(p) == **n)).count();
+        let rest: Vec<String> = order.iter().filter(|n| !gone(n)).cloned().collect();
+        write_order(&self.root, &moved(&rest, &name_of(&into), to as i64));
+        into.to_string_lossy().into_owned()
+    }
+
     /// The stack in `dir` named `name` ("Stack" if it is empty).
     pub fn rename_stack(&self, dir: String, name: String) {
         write_stack_name(Path::new(&dir), &name);
@@ -826,6 +936,125 @@ mod tests {
             }
             let _ = fs::remove_dir_all(&root);
         }
+    }
+
+    /// A gallery holding, in this order: A, "One"[B, C], D, "Two"[E]; and their folders by name.
+    fn mixed_gallery() -> (PathBuf, Arc<ArtworkStore>, HashMap<&'static str, String>) {
+        let root = std::env::temp_dir().join(format!("procraft-pick-{}-{}", std::process::id(), fresh_name()));
+        let store = ArtworkStore::open(root.to_string_lossy().into_owned());
+        let mut dirs = HashMap::new();
+        for name in ["A", "B", "C", "D", "E"] {
+            dirs.insert(name, artwork(&store, name, None));
+        }
+        let one = store.stack(vec![dirs["B"].clone(), dirs["C"].clone()]);
+        store.rename_stack(one.clone(), "One".into());
+        let two = store.stack(vec![dirs["E"].clone()]);
+        store.rename_stack(two.clone(), "Two".into());
+        for (i, d) in [&dirs["A"], &one, &dirs["D"], &two].into_iter().enumerate() {
+            store.move_entry(d.clone(), i as i64, None);
+        }
+        // B and C in that order in their stack
+        let inside: Vec<String> = store.list(Some(one.clone())).iter().map(|e| e.dir().to_owned()).collect();
+        let b = inside.iter().find(|d| name_in(d) == "B").unwrap().clone();
+        store.move_entry(b, 0, None);
+        dirs.insert("One", one);
+        dirs.insert("Two", two);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C]", "D", "Two[E]"]));
+        (root, store, dirs)
+    }
+
+    use std::collections::HashMap;
+
+    #[test]
+    fn select_takes_stacks_and_artworks_together() {
+        let (root, store, dirs) = mixed_gallery();
+        let entries = store.list(None);
+        let pick = |p: &[&str], in_stack: bool| {
+            gallery_pick(entries.clone(), p.iter().map(|n| dirs[n].clone()).collect(), in_stack)
+        };
+        let artwork_names = |p: &GalleryPick| p.artworks.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        // picked in any order, they act in the order shown, a stack's artworks all of them
+        let both = pick(&["Two", "A", "One"], false);
+        assert_eq!(both.dirs, [dirs["A"].clone(), dirs["One"].clone(), dirs["Two"].clone()]);
+        assert_eq!(artwork_names(&both), names(&["A", "B", "C", "E"]));
+        assert_eq!(both.stacks, 2);
+        assert!(both.can_stack);
+        assert_eq!(both.delete_title, "Delete 3 items?");
+        assert_eq!(both.delete_message, "The stacks' artworks go with them, 4 artworks in all. This can't be undone.");
+        // a stack and an artwork can be stacked; one alone can't, nor anything inside a stack
+        assert!(pick(&["One", "D"], false).can_stack);
+        assert!(!pick(&["One"], false).can_stack);
+        assert!(!pick(&["A", "D"], true).can_stack);
+        // what Delete asks
+        let one = pick(&["One"], false);
+        assert_eq!(
+            (one.delete_title.as_str(), one.delete_message.as_str()),
+            ("Delete \u{201c}One\u{201d}?", "Its 2 artworks go with it. This can't be undone.")
+        );
+        let two = pick(&["Two"], false);
+        assert_eq!(two.delete_message, "Its 1 artwork goes with it. This can't be undone.");
+        let stacks = pick(&["One", "Two"], false);
+        assert_eq!(
+            (stacks.delete_title.as_str(), stacks.delete_message.as_str()),
+            ("Delete 2 stacks?", "Their 3 artworks go with them. This can't be undone.")
+        );
+        assert_eq!(pick(&["D"], false).delete_title, "Delete 1 artwork?");
+        assert_eq!(pick(&["A", "D"], false).delete_title, "Delete 2 artworks?");
+        // a folder no longer shown is left out
+        let mut gone = vec![dirs["A"].clone(), root.join("not-there").to_string_lossy().into_owned()];
+        gone.push(dirs["D"].clone());
+        assert_eq!(gallery_pick(entries.clone(), gone, false).dirs.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_with_stacks_picked_merges_into_the_first_stack_where_the_first_was() {
+        let (root, store, dirs) = mixed_gallery();
+        let picked = vec![dirs["Two"].clone(), dirs["D"].clone(), dirs["One"].clone(), dirs["A"].clone()];
+        let into = store.stack_picked(picked);
+        // the first stack picked takes in the rest in the order shown, keeping its name, where A
+        // (the first picked) was; the emptied stack is gone
+        assert_eq!(Path::new(&into), Path::new(&dirs["One"]));
+        assert_eq!(shown(&store, None), names(&["One[A,B,C,D,E]"]));
+        assert!(!Path::new(&dirs["Two"]).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_with_picks_around_others_keeps_the_others_in_their_places() {
+        let (root, store, dirs) = mixed_gallery();
+        // D and Two: Two takes D in, where D was
+        store.stack_picked(vec![dirs["D"].clone(), dirs["Two"].clone()]);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C]", "Two[D,E]"]));
+        // two stacks: the first takes the other's artworks after its own
+        store.stack_picked(vec![dirs["Two"].clone(), dirs["One"].clone()]);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C,D,E]"]));
+        // only artworks: a new stack, as before
+        let e = store.list(None);
+        let lone = artwork(&store, "F", None);
+        store.move_entry(lone.clone(), 2, None);
+        let made = store.stack_picked(vec![lone, e[0].dir().to_owned()]);
+        assert_ne!(Path::new(&made), Path::new(&dirs["One"]));
+        assert_eq!(shown(&store, None), names(&["Stack[A,F]", "One[B,C,D,E]"]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_never_overwrites_an_artwork_already_in_the_stack() {
+        let (root, store, dirs) = mixed_gallery();
+        // a folder in "One" of the same name as A's (no two should share one, but if they did)
+        let clash = Path::new(&dirs["One"]).join(name_of(Path::new(&dirs["A"])));
+        fs::create_dir_all(&clash).unwrap();
+        let json = serde_json::json!({ "name": "Clash", "document": { "width": 8, "height": 8 } });
+        fs::write(clash.join(ARTWORK_FILE), json.to_string()).unwrap();
+        store.stack_picked(vec![dirs["A"].clone(), dirs["One"].clone()]);
+        // A stays where it was, whole; the one in the stack is untouched
+        assert_eq!(name_in(&dirs["A"]), "A");
+        assert_eq!(name_in(&clash.to_string_lossy()), "Clash");
+        let mut all: Vec<String> = shown(&store, None);
+        all.sort();
+        assert_eq!(all, names(&["A", "D", "One[Clash,B,C]", "Two[E]"]));
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The name kept in the artwork's file in `dir`.

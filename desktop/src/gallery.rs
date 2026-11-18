@@ -1,8 +1,8 @@
 //! The gallery, as the Android app's (ui/GalleryScreen.kt): every artwork as a thumbnail with its
 //! name and size, a stack as its top artwork over two turned cards; over them the app's name (in a
 //! stack, the way back and its name), Select, Import, Photo and +, which opens the New canvas list
-//! (the window's size, then the presets). Select picks artworks to stack, preview, duplicate or
-//! delete. The artworks are the core's store (gallery.rs), kept in the app's folder; the presets
+//! (the window's size, then the presets). Select picks artworks and stacks to stack, preview,
+//! share, duplicate or delete. The artworks are the core's store (gallery.rs), kept in the app's folder; the presets
 //! are the core's too, kept as the Android app keeps them.
 
 use std::collections::HashMap;
@@ -14,7 +14,8 @@ use egui::{
     Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use procraft_core::{
-    ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, P3, preset_label, presets_from_json, profile_chip,
+    ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, GalleryPick, P3, gallery_pick, preset_label,
+    presets_from_json, profile_chip,
 };
 
 use crate::animated_export::Animated;
@@ -230,8 +231,8 @@ pub struct Gallery {
     pub kinds: Vec<procraft_core::PluginKind>,
     /// The screen's size, pixels: Screen Size's canvas.
     pub screen_px: (u32, u32),
-    /// Select: on, the artworks picked (by folder), More's list open, the picked artworks shown
-    /// one at a time (and which), and the alert asking before they are deleted.
+    /// Select: on, the artworks and stacks picked (by folder), More's list open, the picked
+    /// artworks shown one at a time (and which), and the alert asking before they are deleted.
     selecting: bool,
     picked: Vec<String>,
     more_open: bool,
@@ -610,7 +611,8 @@ impl Gallery {
                     self.store.delete(dir);
                     self.refresh();
                 } else {
-                    for dir in std::mem::take(&mut self.picked) {
+                    // those picked still shown, a stack with its artworks
+                    for dir in self.pick().dirs {
                         self.store.delete(dir);
                     }
                     self.end_selecting();
@@ -631,15 +633,19 @@ impl Gallery {
         asked
     }
 
-    /// The artworks picked, in the gallery's order.
-    fn picked_artworks(&self) -> Vec<GalleryArtwork> {
-        self.entries
-            .iter()
-            .filter_map(|e| match e {
-                GalleryEntry::Artwork { artwork } if self.picked.contains(&artwork.dir) => Some(artwork.clone()),
-                _ => None,
-            })
-            .collect()
+    /// What Select's actions act on now (the core's rules): the entries picked in the order
+    /// shown, the artworks they hold, whether they can be stacked, what Delete asks.
+    fn pick(&self) -> GalleryPick {
+        gallery_pick(self.entries.clone(), self.picked.clone(), self.stack.is_some())
+    }
+
+    /// Selecting, a tap on the artwork or stack in `dir` picks it, or lets it go.
+    fn toggle_pick(&mut self, dir: &str) {
+        if let Some(at) = self.picked.iter().position(|d| d == dir) {
+            self.picked.remove(at);
+        } else {
+            self.picked.push(dir.to_owned());
+        }
     }
 
     fn end_selecting(&mut self) {
@@ -652,9 +658,9 @@ impl Gallery {
     /// Whether `action` can act on what is picked now.
     fn can(&self, action: SelectAction) -> bool {
         match action {
-            SelectAction::Stack => self.stack.is_none() && self.picked.len() >= 2,
+            SelectAction::Stack => self.pick().can_stack,
             SelectAction::More => true,
-            _ => !self.picked.is_empty(),
+            _ => !self.pick().dirs.is_empty(),
         }
     }
 
@@ -662,37 +668,44 @@ impl Gallery {
         if !self.can(action) {
             return;
         }
+        let pick = self.pick();
         match action {
+            // the first stack picked takes in the rest; with none, a new stack
             SelectAction::Stack => {
-                let dirs = self.picked_artworks().into_iter().map(|a| a.dir).collect();
-                self.store.stack(dirs);
+                self.store.stack_picked(pick.dirs);
                 self.end_selecting();
             }
             SelectAction::Preview => {
                 self.more_open = false;
-                self.preview = Some((self.picked_artworks(), 0, false, 0.0));
+                self.preview = Some((pick.artworks, 0, false, 0.0));
             }
+            // a stack whole, beside itself
             SelectAction::Duplicate => {
-                self.duplicate(self.picked_artworks().into_iter().map(|a| a.dir).collect());
+                self.duplicate(pick.dirs);
                 self.end_selecting();
             }
             SelectAction::Delete => {
-                let n = self.picked.len();
-                let title = if n == 1 { "Delete 1 artwork?".to_owned() } else { format!("Delete {n} artworks?") };
-                self.alert.open(&title, "This can't be undone.", "Delete", Some(&icons::TRASH));
+                self.alert.open(&pick.delete_title, &pick.delete_message, "Delete", Some(&icons::TRASH));
             }
             SelectAction::More => self.more_open = !self.more_open,
-            // several go into one PDF, named after the stack they are in
+            // several go into one PDF, named after the stack they are in (or the one picked alone)
             SelectAction::Share => {
-                let group = self.stack.as_ref().map_or_else(|| GROUP.to_owned(), |(_, name)| name.clone());
-                self.sharing = Some((self.picked_artworks(), None, group));
+                let alone = match pick.dirs.as_slice() {
+                    [one] => self.entries.iter().find_map(|e| match e {
+                        GalleryEntry::Stack { dir, name, .. } if dir == one => Some(name.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                let group = alone.or_else(|| self.stack.as_ref().map(|(_, name)| name.clone()));
+                self.sharing = Some((pick.artworks, None, group.unwrap_or_else(|| GROUP.to_owned())));
             }
         }
     }
 
     /// Select's title row: the title, then (on a wide window) Stack, Preview, Share, Duplicate and
-    /// Delete, or Share, Delete and More, each dimmed until it can act; then the blue round button
-    /// that ends selecting.
+    /// Delete (in a stack no Stack), or Share, Delete and More, each dimmed until it can act; then
+    /// the blue round button that ends selecting.
     fn select_header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) {
         let painter = ui.painter();
         let top = screen.top();
@@ -707,14 +720,16 @@ impl Gallery {
             argb(TITLE),
         );
         let wide = screen.width() > screen.height();
+        let all: &[(SelectAction, &str, f32)] = &[
+            (SelectAction::Stack, "Stack", 65.0),
+            (SelectAction::Preview, "Preview", 80.0),
+            (SelectAction::Share, "Share", 65.0),
+            (SelectAction::Duplicate, "Duplicate", 91.0),
+            (SelectAction::Delete, "Delete", 70.0),
+        ];
         let actions: &[(SelectAction, &str, f32)] = if wide {
-            &[
-                (SelectAction::Stack, "Stack", 65.0),
-                (SelectAction::Preview, "Preview", 80.0),
-                (SelectAction::Share, "Share", 65.0),
-                (SelectAction::Duplicate, "Duplicate", 91.0),
-                (SelectAction::Delete, "Delete", 70.0),
-            ]
+            // a stack has no Stack of its own
+            if self.stack.is_some() { all.split_first().map_or(all, |(_, rest)| rest) } else { all }
         } else {
             &[
                 (SelectAction::Share, "Share", 65.0),
@@ -751,12 +766,23 @@ impl Gallery {
         }
     }
 
-    /// More options for the picked artworks, under More: Preview, Stack (two or more), Duplicate.
+    /// More options for the picked artworks and stacks, under More: Preview, Stack (two or more;
+    /// none in a stack), Duplicate.
     fn more(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) {
         let width = 250.0;
         let more_x = screen.right() - 20.0 - 44.0 - 13.0 - 61.0 / 2.0;
         let left = (more_x - width / 2.0).clamp(screen.left() + 4.0, screen.right() - 4.0 - width);
-        let height = panel::ARROW_HEIGHT + 14.0 + 29.0 + 12.0 + 44.0 * 3.0 + 2.0 + 12.0;
+        let rows: &[(SelectAction, &str)] = if self.stack.is_some() {
+            &[(SelectAction::Preview, "Preview"), (SelectAction::Duplicate, "Duplicate")]
+        } else {
+            &[
+                (SelectAction::Preview, "Preview"),
+                (SelectAction::Stack, "Stack"),
+                (SelectAction::Duplicate, "Duplicate"),
+            ]
+        };
+        let n = rows.len() as f32;
+        let height = panel::ARROW_HEIGHT + 14.0 + 29.0 + 12.0 + 44.0 * n + (n - 1.0) + 12.0;
         let rect = Rect::from_min_size(pos2(left, screen.top() + 57.0), vec2(width, height));
         let mut chosen = None;
         let mut close = false;
@@ -785,17 +811,10 @@ impl Gallery {
             );
             let group = Rect::from_min_size(
                 pos2(body.left() + 10.0, body.top() + 14.0 + 29.0 + 12.0),
-                vec2(width - 20.0, 44.0 * 3.0 + 2.0),
+                vec2(width - 20.0, 44.0 * n + (n - 1.0)),
             );
             ui.painter().rect_filled(group, 18.0, argb(ACTIONS_GROUP));
-            for (i, (action, label)) in [
-                (SelectAction::Preview, "Preview"),
-                (SelectAction::Stack, "Stack"),
-                (SelectAction::Duplicate, "Duplicate"),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (i, &(action, label)) in rows.iter().enumerate() {
                 let row =
                     Rect::from_min_size(pos2(group.left(), group.top() + 45.0 * i as f32), vec2(group.width(), 44.0));
                 if i > 0 {
@@ -1339,17 +1358,13 @@ impl Gallery {
                                 self.renaming = Some((artwork.clone(), artwork.name.clone(), false));
                                 self.renaming_stack = None;
                             } else if tapped && self.selecting {
-                                if let Some(at) = self.picked.iter().position(|d| *d == artwork.dir) {
-                                    self.picked.remove(at);
-                                } else {
-                                    self.picked.push(artwork.dir.clone());
-                                }
+                                self.toggle_pick(&artwork.dir);
                             } else if tapped {
                                 asked = Some(Asked::Open(artwork.dir.clone()));
                             }
                         }
                         GalleryEntry::Stack { dir, name, artworks } => {
-                            self.stack_cell(ui, cell, name, artworks);
+                            self.stack_cell(ui, cell, dir, name, artworks);
                             // on its name, a tap renames it, as an artwork's does
                             let below = cell.top() + 39.0 + Self::thumb_box(cell).height() + 8.0;
                             let on_name = response.interact_pointer_pos().is_some_and(|p| p.y > below);
@@ -1382,7 +1397,10 @@ impl Gallery {
                                 let shown = GalleryArtwork { name: name.clone(), ..top.clone() };
                                 self.renaming = Some((shown, name.clone(), false));
                                 self.renaming_stack = Some(dir.clone());
-                            } else if tapped && !self.selecting {
+                            } else if tapped && self.selecting {
+                                // selecting, a tap picks it (or lets it go), as an artwork's
+                                self.toggle_pick(dir);
+                            } else if tapped {
                                 self.stack = Some((dir.clone(), name.clone()));
                                 self.opening_stack = Some((cell, Instant::now()));
                                 into_stack = true;
@@ -1429,7 +1447,7 @@ impl Gallery {
                     }
                     match entry {
                         GalleryEntry::Artwork { artwork } => _ = self.artwork_cell(&faded, at, artwork, 1.0),
-                        GalleryEntry::Stack { name, artworks, .. } => self.stack_cell(&faded, at, name, artworks),
+                        GalleryEntry::Stack { dir, name, artworks } => self.stack_cell(&faded, at, dir, name, artworks),
                     }
                 }
             });
@@ -1859,26 +1877,7 @@ impl Gallery {
             self.thumbnail(ui, picture, a, 0.0);
         }
         let chosen = self.picked.contains(&a.dir);
-        // the marks fade in as Select starts, and out as it ends
-        let marks = ui.ctx().animate_bool_with_time_and_easing(
-            Id::unique("select marks"),
-            self.selecting,
-            SELECT_FADE_S,
-            |t| crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t),
-        );
-        if marks > 0.0 {
-            // a circle at its top right: filled blue with a tick when picked, else a thin light ring
-            let mark = pos2(picture.right() - 12.0 - 7.0, picture.top() + 12.0 + 7.0);
-            if chosen {
-                ui.painter().circle_filled(mark, 7.0, argb(PICKED).gamma_multiply(marks));
-            } else {
-                let ring = Stroke::new(1.0, argb(UNPICKED_RING).gamma_multiply(marks));
-                ui.painter().circle_stroke(mark, 6.5, ring);
-            }
-        }
-        if chosen {
-            tick(ui.painter(), pos2(picture.right() - 19.0, picture.top() + 19.0));
-        }
+        self.select_mark(ui, picture, chosen);
         let ink = if self.selecting && chosen { Color32::WHITE } else { argb(TEXT) };
         let name = one_line(ui, &a.name, 13.0, Weight::SemiBold, ink, frame.width());
         let at = pos2(cell.center().x - name.size().x / 2.0, frame.bottom() + 12.0);
@@ -1896,7 +1895,31 @@ impl Gallery {
         Rect::from_min_size(at, name.size())
     }
 
-    fn stack_cell(&mut self, ui: &Ui, cell: Rect, name: &str, artworks: &[GalleryArtwork]) {
+    /// Selecting, the mark at the top right of a `picture` (an artwork's, or a stack's top card):
+    /// filled blue with a tick when `chosen`, else a thin light ring; the marks fade in as Select
+    /// starts, and out as it ends.
+    fn select_mark(&self, ui: &Ui, picture: Rect, chosen: bool) {
+        let marks = ui.ctx().animate_bool_with_time_and_easing(
+            Id::unique("select marks"),
+            self.selecting,
+            SELECT_FADE_S,
+            |t| crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t),
+        );
+        if marks > 0.0 {
+            let mark = pos2(picture.right() - 12.0 - 7.0, picture.top() + 12.0 + 7.0);
+            if chosen {
+                ui.painter().circle_filled(mark, 7.0, argb(PICKED).gamma_multiply(marks));
+            } else {
+                let ring = Stroke::new(1.0, argb(UNPICKED_RING).gamma_multiply(marks));
+                ui.painter().circle_stroke(mark, 6.5, ring);
+            }
+        }
+        if chosen {
+            tick(ui.painter(), pos2(picture.right() - 19.0, picture.top() + 19.0));
+        }
+    }
+
+    fn stack_cell(&mut self, ui: &Ui, cell: Rect, dir: &str, name: &str, artworks: &[GalleryArtwork]) {
         let Some(top) = artworks.first() else { return };
         let frame = Self::thumb_box(cell);
         let picture = Self::fitted(frame, top);
@@ -1907,8 +1930,10 @@ impl Gallery {
             }
         }
         self.thumbnail(ui, picture, top, 0.0);
-        // selecting, a stack can't be picked: its name dims
-        let ink = if self.selecting { argb(SIZE) } else { argb(TEXT) };
+        // selecting, it is picked as an artwork is: the mark on its top card, its name white
+        let chosen = self.picked.iter().any(|d| d == dir);
+        self.select_mark(ui, picture, chosen);
+        let ink = if self.selecting && chosen { Color32::WHITE } else { argb(TEXT) };
         let label = one_line(ui, name, 13.0, Weight::SemiBold, ink, frame.width());
         let at = pos2(cell.center().x - label.size().x / 2.0, frame.bottom() + 12.0);
         ui.painter().galley(at, label.clone(), Color32::WHITE);
@@ -2404,6 +2429,48 @@ mod tests {
         assert_eq!(shown.gallery.deleting.as_deref(), Some(stack.as_str()));
         assert!(shown.gallery.alert.is_open());
         assert!(std::path::Path::new(&stack).exists(), "nothing goes before the answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn selecting_picks_a_stack_with_artworks_and_stacks_them_all_in_it() {
+        let (mut shown, stack, root) = with_a_stack("pick");
+        // a loose artwork after the stack
+        let store = Arc::clone(&shown.gallery.store);
+        let c = store.new_folder(None);
+        std::fs::write(
+            std::path::Path::new(&c).join("artwork.json"),
+            r#"{"name":"C","document":{"width":64,"height":32}}"#,
+        )
+        .unwrap();
+        store.move_entry(c.clone(), 1, None);
+        shown.gallery.refresh();
+        shown.gallery.selecting = true;
+        shown.frame(Vec::new());
+        let cell_of = |shown: &Shown, dir: &str| {
+            shown.gallery.drawn_cells.iter().find(|(e, _)| entry_dir(e) == dir).map(|(_, c)| *c).unwrap()
+        };
+        // a tap on the stack picks it, as a tap on an artwork does
+        shown.click(cell_of(&shown, &stack).center());
+        shown.click(cell_of(&shown, &c).center());
+        assert_eq!(shown.gallery.picked, [stack.clone(), c.clone()]);
+        assert!(shown.gallery.can(SelectAction::Stack));
+        assert!(shown.gallery.can(SelectAction::Delete));
+        // Preview and Share take the stack's artworks with the loose one
+        let names: Vec<String> = shown.gallery.pick().artworks.into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["A", "B", "C"]);
+        // Stack: the stack takes the artwork in, keeping its name
+        shown.gallery.act(SelectAction::Stack);
+        let shown_now: Vec<String> = store
+            .list(None)
+            .iter()
+            .map(|e| match e {
+                GalleryEntry::Artwork { artwork } => artwork.name.clone(),
+                GalleryEntry::Stack { name, artworks, .. } => format!("{name}{}", artworks.len()),
+            })
+            .collect();
+        assert_eq!(shown_now, ["Pair3"]);
+        assert!(!shown.gallery.selecting);
         let _ = std::fs::remove_dir_all(&root);
     }
 

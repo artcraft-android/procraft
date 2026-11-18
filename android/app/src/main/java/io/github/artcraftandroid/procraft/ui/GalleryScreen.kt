@@ -150,7 +150,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var dropOnto by remember { mutableStateOf<String?>(null) }
     val dropPlaces = remember { DropPlaces() }
     var backLit by remember { mutableStateOf(false) }
-    // Select: the artworks picked, by folder
+    // Select: the artworks and stacks picked, by folder
     var selecting by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
     var moreOpen by remember { mutableStateOf(false) }
@@ -160,7 +160,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var pdfFor by remember { mutableStateOf<GalleryShare?>(null) }
     // a stack swiped to, asked about deleting
     var deletingStack by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Stack?>(null) }
-    var deletingSelected by remember { mutableStateOf(false) }
+    // what Select's Delete is asking about
+    var deletingSelected by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Pick?>(null) }
     var previewing by remember { mutableStateOf<List<Artwork>?>(null) }
     // which of them Preview starts on
     var previewFrom by remember { mutableIntStateOf(0) }
@@ -168,7 +169,12 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var opening by remember { mutableStateOf<PinchOpening?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    fun picked() = vm.artworks.filter { it.dir.name in selected }
+    // what Select's actions act on now (the shared core's rules)
+    fun picked() = vm.store.pick(vm.galleryEntries, selected, vm.openStack != null)
+
+    // several shared as one PDF are named after the stack open, or the one stack picked alone
+    fun shareName(p: io.github.artcraftandroid.procraft.gallery.Pick) =
+        (p.entries.singleOrNull() as? io.github.artcraftandroid.procraft.gallery.Stack)?.name ?: galleryShareName(vm.openStack?.name)
     fun endSelecting() {
         selecting = false
         selected.clear()
@@ -214,25 +220,27 @@ fun GalleryScreen(vm: CanvasViewModel) {
         ) {
             if (selecting) {
                 val screen = androidx.compose.ui.platform.LocalConfiguration.current
+                val pick = picked()
                 SelectHeader(
                     title = vm.openStack?.name ?: "ProCraft",
-                    count = selected.size,
+                    count = pick.entries.size,
                     wide = screen.screenWidthDp > screen.screenHeightDp,
-                    canStack = vm.openStack == null,
+                    inStack = vm.openStack != null,
+                    canStack = pick.canStack,
                     onStack = {
-                        vm.stackArtworks(picked())
+                        vm.stackPicked(picked().entries)
                         endSelecting()
                     },
                     onPreview = {
                         previewFrom = 0
-                        previewing = picked()
+                        previewing = picked().artworks
                     },
-                    onShare = { sharing = GalleryShare(picked(), null, galleryShareName(vm.openStack?.name)) },
+                    onShare = { picked().let { p -> sharing = GalleryShare(p.artworks, null, shareName(p)) } },
                     onDuplicate = {
-                        picked().forEach(vm::duplicateArtwork)
+                        vm.duplicateEntries(picked().entries)
                         endSelecting()
                     },
-                    onDelete = { deletingSelected = true },
+                    onDelete = { deletingSelected = picked() },
                     onMore = { moreOpen = !moreOpen },
                     onDone = ::endSelecting,
                 )
@@ -309,9 +317,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                 val open = androidx.compose.animation.core.animateFloatAsState(
                                     if (swiped == entry.dir.name) 1f else 0f, Motion.swipeActions(), label = "swipe",
                                 ).value
+                                // selecting, a tap picks it (or lets it go), as an artwork's
+                                val stackChosen = entry.dir.name in selected
                                 Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) {
                                     StackCell(
-                                        entry, vm.galleryVersion, dim = selecting, wash = dropOnto == entry.dir.name,
+                                        entry, vm.galleryVersion, chosen = if (selecting) stackChosen else null, wash = dropOnto == entry.dir.name,
                                         modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = faint.value * (1f - SWIPED_FADE * open.coerceIn(0f, 1f)) },
                                         onPlaced = { stackCellAt[entry.dir.name] = it },
                                         onSwipe = { dx, dy -> swipeOpens(dx, dy, selecting)?.let { opens -> swiped = if (opens) entry.dir.name else null } },
@@ -336,11 +346,21 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                             }
                                         },
                                         onRename = {
-                                            // a tap puts away the actions showing
-                                            if (swiped != null) swiped = null else if (!selecting) renamingStack = entry
+                                            // a tap puts away the actions showing; selecting, it picks the stack
+                                            when {
+                                                swiped != null -> swiped = null
+                                                !selecting -> renamingStack = entry
+                                                stackChosen -> selected.remove(entry.dir.name)
+                                                else -> selected.add(entry.dir.name)
+                                            }
                                         },
                                     ) {
-                                        if (swiped != null) swiped = null else if (!selecting) vm.showStack(entry)
+                                        when {
+                                            swiped != null -> swiped = null
+                                            !selecting -> vm.showStack(entry)
+                                            stackChosen -> selected.remove(entry.dir.name)
+                                            else -> selected.add(entry.dir.name)
+                                        }
                                     }
                                     if (open > 0f) {
                                         // a stack's act on every artwork in it
@@ -562,24 +582,26 @@ fun GalleryScreen(vm: CanvasViewModel) {
         val morePlace = popoverPlace(250.dp, maxWidth - 20.dp - 44.dp - 13.dp - 61.dp / 2, maxWidth, minRight = 4.dp)
         MenuPresence(moreOpen, androidx.compose.ui.graphics.TransformOrigin(morePlace.arrowX / 250.dp, 0f)) { look ->
             val place = morePlace
+            val pick = picked()
             MoreOptions(
                 Modifier.offset(x = place.left, y = 60.dp).then(look),
                 place.arrowX,
-                count = selected.size,
-                canStack = vm.openStack == null,
+                count = pick.entries.size,
+                inStack = vm.openStack != null,
+                canStack = pick.canStack,
                 onStack = {
                     moreOpen = false
-                    vm.stackArtworks(picked())
+                    vm.stackPicked(picked().entries)
                     endSelecting()
                 },
                 onPreview = {
                     moreOpen = false
                     previewFrom = 0
-                    previewing = picked()
+                    previewing = picked().artworks
                 },
                 onDuplicate = {
                     moreOpen = false
-                    picked().forEach(vm::duplicateArtwork)
+                    vm.duplicateEntries(picked().entries)
                     endSelecting()
                 },
             )
@@ -708,17 +730,17 @@ fun GalleryScreen(vm: CanvasViewModel) {
         RecoveryProgress(recovery, recovered)
     }
 
-    // deleting the picked artworks, or one swiped to
+    // deleting what Select picked (a stack with its artworks), or one swiped to
     Alert(
-        if (deletingSelected) selected.size else null,
-        title = { n -> if (n == 1) "Delete 1 artwork?" else "Delete $n artworks?" },
-        message = { "This can't be undone." },
+        deletingSelected,
+        title = { p -> p.deleteTitle },
+        message = { p -> p.deleteMessage },
         action = "Delete",
         icon = PcIcons.Trash,
-        onCancel = { deletingSelected = false },
-        onAction = {
-            picked().forEach(vm::deleteArtwork)
-            deletingSelected = false
+        onCancel = { deletingSelected = null },
+        onAction = { p ->
+            vm.deleteEntries(p.entries)
+            deletingSelected = null
             endSelecting()
         },
     )
@@ -838,15 +860,16 @@ private class SelectAction(val label: String, val width: Dp, val enabled: Boolea
 
 /**
  * Select's title row: upright, Share, Delete and More; on a wide screen Stack, Preview, Share,
- * Duplicate and Delete side by side ([wide]). Each is dimmed until it can act on the [count]
- * picked artworks (Stack on two or more; More always opens, its rows greyed). Then the blue round
- * button that ends selecting.
+ * Duplicate and Delete side by side ([wide]; in a stack no Stack). Each is dimmed until it can act
+ * on the [count] picked artworks and stacks (Stack on two or more, [canStack]; More always opens,
+ * its rows greyed). Then the blue round button that ends selecting.
  */
 @Composable
 private fun SelectHeader(
     title: String,
     count: Int,
     wide: Boolean,
+    inStack: Boolean,
     canStack: Boolean,
     onStack: () -> Unit,
     onPreview: () -> Unit,
@@ -858,8 +881,9 @@ private fun SelectHeader(
 ) {
     val any = count > 0
     val actions = if (wide) {
-        listOf(
-            SelectAction("Stack", 65.dp, canStack && count >= 2, onStack),
+        listOfNotNull(
+            // a stack has no Stack of its own
+            SelectAction("Stack", 65.dp, canStack, onStack).takeUnless { inStack },
             SelectAction("Preview", 80.dp, any, onPreview),
             SelectAction("Share", 65.dp, any, onShare),
             SelectAction("Duplicate", 91.dp, any, onDuplicate),
@@ -1285,13 +1309,14 @@ private fun ImageFormats(modifier: Modifier, side: ArrowSide, arrowAt: Dp, onPic
     }
 }
 
-/** More options for the picked artworks: Preview, Stack (two or more), Duplicate. */
+/** More options for the picked artworks and stacks: Preview, Stack (two or more; none in a stack), Duplicate. */
 @Composable
-private fun MoreOptions(modifier: Modifier, arrowX: Dp, count: Int, canStack: Boolean, onStack: () -> Unit, onPreview: () -> Unit, onDuplicate: () -> Unit) {
+private fun MoreOptions(modifier: Modifier, arrowX: Dp, count: Int, inStack: Boolean, canStack: Boolean, onStack: () -> Unit, onPreview: () -> Unit, onDuplicate: () -> Unit) {
     Popover(250.dp, arrowX, modifier, fill = Pc.GalleryPopover) {
         Text("More Options", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 24.dp, top = 14.dp, bottom = 12.dp))
         Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 12.dp).clip(RoundedCornerShape(18.dp)).background(Pc.ActionsGroup)) {
-            for ((i, row) in listOf(Triple("Preview", true, onPreview), Triple("Stack", canStack && count >= 2, onStack), Triple("Duplicate", true, onDuplicate)).withIndex()) {
+            val rows = listOfNotNull(Triple("Preview", true, onPreview), Triple("Stack", canStack, onStack).takeUnless { inStack }, Triple("Duplicate", true, onDuplicate))
+            for ((i, row) in rows.withIndex()) {
                 val (label, ready, action) = row
                 val enabled = ready && count > 0
                 if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
@@ -1303,12 +1328,15 @@ private fun MoreOptions(modifier: Modifier, arrowX: Dp, count: Int, canStack: Bo
     }
 }
 
-/** A stack: its newest artwork on two more cards, the name, and how many it holds; a tap opens it. */
+/**
+ * A stack: its newest artwork on two more cards, the name, and how many it holds; a tap opens it.
+ * While selecting ([chosen] not null) its top card has an artwork's mark, filled when picked.
+ */
 @Composable
 private fun StackCell(
     s: io.github.artcraftandroid.procraft.gallery.Stack,
     version: Int,
-    dim: Boolean,
+    chosen: Boolean?,
     wash: Boolean,
     modifier: Modifier,
     onPlaced: (androidx.compose.ui.geometry.Rect) -> Unit,
@@ -1326,7 +1354,7 @@ private fun StackCell(
         modifier.height(cell.pitch).onGloballyPositioned {
             onPlaced(it.boundsInWindow())
             cellAt[0] = it.positionInWindow()
-        }.pointerInput(s) {
+        }.pointerInput(s, chosen) {
             // a tap opens it (on its name, renames it); moved across, it is swiped ([onSwipe], how
             // far across and down); held and moved, it is dragged ([onDrag], with the finger's
             // place in the window)
@@ -1374,9 +1402,9 @@ private fun StackCell(
                     Box(Modifier.graphicsLayer { rotationZ = turn }, contentAlignment = Alignment.BottomCenter) { Thumbnail(top, version) }
                 }
             }
-            Thumbnail(top, version, wash = wash)
+            Thumbnail(top, version, chosen, wash = wash)
         }
-        Text(s.name, color = if (dim) Pc.GallerySize else Pc.GalleryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(top = 12.dp))
+        Text(s.name, color = if (chosen == true) Color.White else Pc.GalleryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(top = 12.dp))
         Text("${s.artworks.size} artworks", color = Pc.GallerySize, fontSize = 10.sp)
     }
 }

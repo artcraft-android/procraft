@@ -1526,11 +1526,44 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshGallery()
     }
 
-    /** The artworks put together in a new stack. */
-    fun stackArtworks(list: List<Artwork>) {
-        if (list.size < 2 || openStack != null) return
+    /**
+     * Select's picked [entries] (artworks and stacks) put together in one stack where the first
+     * was: the first stack picked takes in the rest; with none picked, a new stack.
+     */
+    fun stackPicked(entries: List<io.github.artcraftandroid.procraft.gallery.GalleryEntry>) {
+        if (entries.size < 2 || openStack != null) return
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.stack(list) }
+            withContext(Dispatchers.IO) { store.stackPicked(entries) }
+            refreshGallery()
+        }
+    }
+
+    /** Each of [entries] duplicated right after itself (a stack with a copy of each of its artworks), one after another. */
+    fun duplicateEntries(entries: List<io.github.artcraftandroid.procraft.gallery.GalleryEntry>) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                for (e in entries) {
+                    when (e) {
+                        is Artwork -> store.duplicate(e)
+                        is io.github.artcraftandroid.procraft.gallery.Stack -> store.duplicateStack(e)
+                    }
+                }
+            }
+            refreshGallery()
+        }
+    }
+
+    /** [entries] deleted, a stack with every artwork in it (Delete asks first). */
+    fun deleteEntries(entries: List<io.github.artcraftandroid.procraft.gallery.GalleryEntry>) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                for (e in entries) {
+                    when (e) {
+                        is Artwork -> store.delete(e)
+                        is io.github.artcraftandroid.procraft.gallery.Stack -> store.deleteStack(e)
+                    }
+                }
+            }
             refreshGallery()
         }
     }
