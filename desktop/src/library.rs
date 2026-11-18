@@ -300,6 +300,8 @@ pub struct Library {
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
     set_rects: Vec<(usize, Rect)>,
     brush_rects: Vec<((u32, u32), Rect)>,
+    /// The brush shown highlighted last frame: the one in use, where it is listed.
+    highlighted: Option<(u32, u32)>,
     /// The library changed: the app keeps it; its sample strokes are drawn again next frame (not
     /// dropped in the middle of one that shows them).
     pub changed: bool,
@@ -553,6 +555,7 @@ impl Library {
         }
         let mut set_rects = Vec::new();
         let mut brush_rects = Vec::new();
+        let mut highlighted = None;
         let mut plus = Rect::NOTHING;
         let mut lists = Rect::NOTHING;
         let mut set_tapped = None;
@@ -737,12 +740,13 @@ impl Library {
                                 .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
                                 .unwrap_or_default()
                         };
-                        let chosen = library.get(shown).and_then(|set| set.chosen);
                         for (b, pinned) in listed {
-                            // the current brush, or the brush last chosen in this set (in the
-                            // Recent set the current brush alone)
-                            let selected = (b.set, b.index) == (current.set, current.index)
-                                || (!recent && chosen == Some(b.index));
+                            // the brush in use, alone: a set opened brings back its own last
+                            // choice as the brush, so another set's choice never shows chosen
+                            let selected = (b.set, b.index) == (current.set, current.index);
+                            if selected {
+                                highlighted = Some((b.set, b.index));
+                            }
                             let (response, cell) = self.brush_row(ui, look, session, b, selected, pinned);
                             // a brush found from the Recent set is scrolled to in its own
                             if self.found == Some((b.set, b.index)) {
@@ -808,6 +812,7 @@ impl Library {
         });
         self.set_rects = set_rects;
         self.brush_rects = brush_rects;
+        self.highlighted = highlighted;
         self.draw_previews(ctx, session);
         self.follow_press(ctx, session);
         // a set let go after it was lifted was dragged, not tapped
@@ -822,6 +827,11 @@ impl Library {
             } else {
                 self.shown_set = Some(i);
                 self.recent = false;
+                // the brush last chosen in it becomes the one in use, as it shows highlighted
+                if let Some(b) = session.brush_set_choice(i as u32) {
+                    session.select_brush(b.set, b.index);
+                    self.changed = true;
+                }
             }
         }
         if recent_tapped {
@@ -841,7 +851,7 @@ impl Library {
             } else {
                 session.select_brush(key.0, key.1);
                 self.changed = true;
-                // a highlighted brush opens in the studio
+                // the brush in use opens in the studio; another becomes the brush
                 if selected {
                     self.studio = Some(None);
                 }
@@ -2317,6 +2327,80 @@ mod tests {
         assert!(f.library.showing_libraries);
         pinch(&mut f, card, 60.0, 130.0);
         assert!(!f.library.showing_libraries);
+    }
+
+    /// In one set with its brush, another set tapped: the brush last chosen there becomes the one
+    /// in use, and it alone shows highlighted. A tap on another of its brushes makes that the
+    /// brush (no studio); a tap on the brush in use opens the studio.
+    #[test]
+    fn a_set_tapped_brings_back_its_brush_and_a_tap_on_another_there_takes_it() {
+        let mut f = Finger::new();
+        let current = |f: &Finger| (f.session.current_brush().set, f.session.current_brush().index);
+        let set_row = |f: &Finger, set: usize| {
+            f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).expect("the set's row")
+        };
+        let brush_cell = |f: &Finger, key: (u32, u32)| {
+            f.library.brush_rects.iter().find(|(k, _)| *k == key).map(|(_, r)| r.center()).expect("the brush's cell")
+        };
+        let tap = |f: &mut Finger, at: Pos2| {
+            f.down(at);
+            f.up(at);
+            f.frame(Vec::new());
+        };
+        // a brush chosen in set 1, then in set 0, which shows
+        assert!(f.session.select_brush(1, 2));
+        assert!(f.session.select_brush(0, 3));
+        f.library.tool_changed();
+        f.frame(Vec::new());
+        assert_eq!(f.library.highlighted, Some((0, 3)));
+        // set 1 tapped: its brush is the one in use, and the one highlighted
+        let row = set_row(&f, 1);
+        tap(&mut f, row);
+        assert_eq!(current(&f), (1, 2));
+        assert_eq!(f.library.highlighted, Some((1, 2)));
+        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 == 1));
+        // another brush there tapped: it is the brush, and the studio stays shut
+        let other = brush_cell(&f, (1, 0));
+        tap(&mut f, other);
+        assert_eq!(current(&f), (1, 0));
+        assert_eq!(f.library.highlighted, Some((1, 0)));
+        assert!(f.library.studio.is_none());
+        // the brush in use tapped: the studio
+        tap(&mut f, other);
+        assert!(f.library.studio.is_some());
+        f.library.studio = None;
+        // back in set 0, its own again
+        let row = set_row(&f, 0);
+        tap(&mut f, row);
+        assert_eq!(current(&f), (0, 3));
+        assert_eq!(f.library.highlighted, Some((0, 3)));
+    }
+
+    /// A set never chosen in, opened, leaves the brush as it is and shows none highlighted; a tap
+    /// on one of its brushes makes it the brush.
+    #[test]
+    fn a_set_with_no_brush_chosen_shows_none_highlighted_and_a_tap_takes_one() {
+        let mut f = Finger::new();
+        let start = f.session.current_brush();
+        let set = f
+            .library
+            .set_rects
+            .iter()
+            .map(|(s, _)| *s)
+            .find(|&s| s as u32 != start.set && f.session.brush_set_choice(s as u32).is_none())
+            .expect("a set never chosen in");
+        let row = f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).unwrap();
+        f.down(row);
+        f.up(row);
+        f.frame(Vec::new());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (start.set, start.index));
+        assert_eq!(f.library.highlighted, None);
+        let cell = f.library.brush_rects.iter().find(|(k, _)| k.1 == 1).map(|(_, r)| r.center()).unwrap();
+        f.down(cell);
+        f.up(cell);
+        f.frame(Vec::new());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (set as u32, 1));
+        assert!(f.library.studio.is_none());
     }
 
     #[test]

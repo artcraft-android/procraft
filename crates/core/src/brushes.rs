@@ -348,6 +348,16 @@ impl CanvasSession {
         true
     }
 
+    /// The brush last chosen in `set`, if one has been and it is still there. A set opened in the
+    /// library makes it the current tool's brush at once, so the brush shown highlighted is always
+    /// the one in use.
+    pub fn brush_set_choice(&self, set: u32) -> Option<BrushInfo> {
+        let st = self.shared.lock();
+        let index = st.set_choice(set as usize)?;
+        let brush = st.library.get(set as usize)?.brushes.get(index)?;
+        Some(BrushInfo { set, index: index as u32, name: brush.name.clone() })
+    }
+
     /// A sample stroke drawn with the brush, white on transparent, fitted into `width` × `height`
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {

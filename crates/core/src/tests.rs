@@ -7947,6 +7947,35 @@ fn a_size_saved_from_the_panel_is_gone_back_to_from_its_mark_and_taken_away_on_i
     assert!(!s.can_save_slider_notch(true));
 }
 
+/// A set opened in the library brings back the brush last chosen in it as the one in use, so the
+/// brush it shows highlighted is the one that paints; a set never chosen in brings back none.
+#[test]
+fn a_set_opened_takes_the_brush_last_chosen_in_it_and_follows_it_when_moved() {
+    let s = CanvasSession::new(64, 64);
+    let at = |b: Option<crate::BrushInfo>| b.map(|b| (b.set, b.index));
+    let start = s.current_brush().set;
+    assert!(s.select_brush(1, 2));
+    assert!(s.select_brush(0, 3));
+    assert_eq!(at(s.brush_set_choice(1)), Some((1, 2)));
+    assert_eq!(at(s.brush_set_choice(0)), Some((0, 3)));
+    let untouched = (2..s.brush_library().len() as u32).find(|&i| i != start).unwrap();
+    assert_eq!(s.brush_set_choice(untouched), None);
+    // opened, set 1's choice is the brush; back in set 0, set 0's
+    let b = s.brush_set_choice(1).unwrap();
+    assert!(s.select_brush(b.set, b.index));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (1, 2));
+    let b = s.brush_set_choice(0).unwrap();
+    assert!(s.select_brush(b.set, b.index));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (0, 3));
+    // the choice moved to the top of its set is still that set's choice
+    assert!(s.move_brush(1, 2, 1, 0));
+    assert_eq!(at(s.brush_set_choice(1)), Some((1, 0)));
+    // moved into another set, its old set has none and the other keeps its later choice
+    assert!(s.move_brush(1, 0, 0, 0));
+    assert_eq!(s.brush_set_choice(1), None);
+    assert_eq!(at(s.brush_set_choice(0)), Some((0, 4)));
+}
+
 #[test]
 fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
     use procraft_engine::brush::Brush;

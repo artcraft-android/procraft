@@ -659,9 +659,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                 ) {
                     items(listed, key = { (b, _) -> "${b.set}-${b.index}" }) { (b, pinned) ->
                         val key = "${b.set}-${b.index}"
-                        // the current brush, or the brush last chosen in this set (in the Recent
-                        // set the current brush alone)
-                        val selected = if (recent) vm.currentBrush?.let { it.set == b.set && it.index == b.index } == true else vm.highlighted(b)
+                        // the brush in use alone (a set opened makes its last choice the brush)
+                        val selected = vm.highlighted(b)
                         val picked = key in vm.pickedBrushes
                         // previews go by place, and are dropped when the library changes
                         val preview = vm.previews[key]
@@ -754,9 +753,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                                 vm.pickedBrushes.clear()
                                                 return@clickable
                                             }
-                                            // a highlighted brush opens in the studio
+                                            // the brush in use opens in the studio; another becomes the brush
+                                            val inUse = vm.highlighted(b)
                                             vm.chooseBrush(b)
-                                            if (selected) vm.openStudio()
+                                            if (inUse) vm.openStudio()
                                         },
                                 ) {
                                     // the sample stroke filling the cell's height (its ends past the cell's sides),

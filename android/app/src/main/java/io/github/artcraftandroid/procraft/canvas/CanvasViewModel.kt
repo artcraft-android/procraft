@@ -119,6 +119,9 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
 internal fun sliderPanelKeeps(at: androidx.compose.ui.geometry.Offset, bar: androidx.compose.ui.geometry.Rect, panel: androidx.compose.ui.geometry.Rect): Boolean =
     bar.contains(at) || panel.contains(at)
 
+/** Whether [b] is the brush in use ([current]): the one the library shows highlighted, and opens in the studio when tapped. */
+internal fun isBrushInUse(b: BrushInfo, current: BrushInfo?): Boolean = current != null && current.set == b.set && current.index == b.index
+
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
 /**
@@ -3176,7 +3179,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
         brushSets = s.brushLibrary()
         readLibraries()
-        readSetChoices()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
         // a new artwork exists in the gallery from the start (an opened one is there already)
@@ -4127,7 +4129,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             currentBrush = s.currentBrush()
             readSliders()
             brushSets = s.brushLibrary()
-            readSetChoices()
             keepChoices(s)
         }
         if (panel == Panel.BRUSHES) panel = Panel.NONE
@@ -4147,9 +4148,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             readRecentBrushes()
             return
         }
-        // the set's last chosen brush becomes the current one, as choosing it again would
-        val choice = setChoice[index] ?: return
-        brushSets.getOrNull(index)?.brushes?.getOrNull(choice)?.let { chooseBrush(it) }
+        // the set's last chosen brush becomes the current one, as choosing it again would: the
+        // brush it shows highlighted is the one that paints
+        session?.brushSetChoice(index.toUInt())?.let { chooseBrush(it) }
     }
 
     // ---- time-lapse ----
@@ -5162,7 +5163,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         brushSets = s.brushLibrary()
         readLibraries()
         currentBrush = s.currentBrush()
-        readSetChoices()
         if (shownSet != RECENT_SET) shownSet = shownSet.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0))
         recentBrushes = s.recentBrushes()
         readSliders()
@@ -5616,10 +5616,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val before = currentBrush
         if (s.selectBrush(b.set, b.index)) {
             if (before != null && (before.set != b.set || before.index != b.index)) lastBrush = before.set to before.index
-            // the set left behind keeps showing the brush it had
-            before?.let { setChoice[it.set.toInt()] = it.index.toInt() }
             currentBrush = s.currentBrush()
-            setChoice[b.set.toInt()] = b.index.toInt()
             readSliders()
             keepChoices(s)
         }
@@ -5672,19 +5669,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (s.selectBrush(set, index)) {
             lastBrush = now?.let { it.set to it.index }
             currentBrush = s.currentBrush()
-            setChoice[set.toInt()] = index.toInt()
             readSliders()
             keepChoices(s)
         }
-    }
-
-    /** Each set's last chosen brush, which it shows highlighted (by place in the set). */
-    val setChoice = mutableStateMapOf<Int, Int>()
-
-    /** Each set's last choice, as the library read last has it. */
-    private fun readSetChoices() {
-        setChoice.clear()
-        brushSets.forEachIndexed { i, set -> set.chosen?.let { setChoice[i] = it.toInt() } }
     }
 
     /** Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session. */
@@ -5711,12 +5698,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Whether [b] shows highlighted: the current brush, or its set's last choice. */
-    fun highlighted(b: BrushInfo): Boolean {
-        val c = currentBrush
-        if (c != null && c.set == b.set) return c.index == b.index
-        return setChoice[b.set.toInt()] == b.index.toInt()
-    }
+    /**
+     * Whether [b] shows highlighted: the brush in use alone. A set opened makes the brush last
+     * chosen in it the one in use (see [showSet]), so another set's choice never shows chosen.
+     */
+    fun highlighted(b: BrushInfo): Boolean = isBrushInUse(b, currentBrush)
 
     // the brush studio
 
