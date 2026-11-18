@@ -1332,34 +1332,50 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The picture of a copy made here that the system's clipboard holds, to tell it from another app's. */
     private var clipUri: android.net.Uri? = null
 
+    /** When the system's clipboard says the last copy put there from here went there (its clock), to tell it from another app's. */
+    private var clipPutAt: Long? = null
+
     /** One copy at a time goes on the system's clipboard, in the order they were made. */
     private val clipWrites = Mutex()
+
+    /** A copy the system's clipboard didn't take has been told of this run. */
+    private val clipRefusedTold = TellOnce()
 
     /**
      * Puts [copy] (premultiplied, as kept here) on the system's clipboard in place of what it held: a
      * PNG other apps paste, its transparency kept, from the app's files. Made off the main thread, as
-     * a big canvas takes a moment.
+     * a big canvas takes a moment. Whatever goes wrong on the way (a picture too big to make, a
+     * system that refuses it) costs only other apps' paste, told once: the copy stays here to paste.
      */
     private fun putOnSystemClipboard(copy: io.github.artcraftandroid.procraft.core.ThumbnailImage) {
         val turn = ++clipTurn
         val app = getApplication<Application>()
-        // the colour profile its colours are in, which the picture carries
-        val profile = session?.copyProfile() ?: ByteArray(0)
+        // the colour profile its colours are in, which the picture carries (none if it can't be read)
+        val profile = runCatching { session?.copyProfile() }.getOrNull() ?: ByteArray(0)
         viewModelScope.launch {
             clipWrites.withLock {
                 if (turn != clipTurn) return@launch
                 val dir = File(app.cacheDir, "exports/clipboard")
                 val file = File(dir, "copy-${System.currentTimeMillis()}.png")
                 val written = withContext(Dispatchers.Default) {
-                    dir.mkdirs()
-                    io.github.artcraftandroid.procraft.core.writeCopyPng(copy, profile, file.path)
+                    runCatching {
+                        dir.mkdirs()
+                        io.github.artcraftandroid.procraft.core.writeCopyPng(copy, profile, file.path)
+                    }.getOrDefault(false)
                 }
-                val uri = if (written && turn == clipTurn) runCatching { androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file) }.getOrNull() else null
+                // a newer copy is on its way: it goes there instead
+                val superseded = turn != clipTurn
+                val uri = if (written && !superseded) runCatching { androidx.core.content.FileProvider.getUriForFile(app, app.packageName + ".files", file) }.getOrNull() else null
                 val board = systemClipboard
                 val put = uri != null && board != null && runCatching { board.setPrimaryClip(android.content.ClipData.newUri(app.contentResolver, "Picture", uri)) }.isSuccess
-                if (put) clipUri = uri
+                if (put) {
+                    clipUri = uri
+                    clipPutAt = runCatching { board?.primaryClipDescription?.timestamp }.getOrNull()
+                } else if (!superseded && clipRefusedTold.first()) {
+                    showNotice("Copied to paste here: the system clipboard didn't take the picture.", warning = true)
+                }
                 // only the one on the clipboard is kept
-                withContext(Dispatchers.IO) { dir.listFiles()?.filter { if (put) it != file else it == file }?.forEach { it.delete() } }
+                withContext(Dispatchers.IO) { runCatching { dir.listFiles()?.filter { if (put) it != file else it == file }?.forEach { it.delete() } } }
             }
         }
     }
@@ -3282,7 +3298,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun paste(private: Boolean = false) {
         // a picture copied after the last copy here goes first (only then is the clip itself read)
         val kinds = runCatching { systemClipboard?.primaryClipDescription }.getOrNull()
-        if (kinds != null && isPicture(kinds) && (clipboard == null || kinds.timestamp > clipboardAt)) {
+        if (kinds != null && isPicture(kinds) && pastesSystemPicture(false, kinds.timestamp, clipboard != null, clipboardAt, clipPutAt)) {
             val uri = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
             if (uri != null && uri != clipUri) {
                 pastePicture(uri, private)
@@ -3292,11 +3308,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         paste(clipboard ?: return, private)
     }
 
-    /** Another app's picture at [uri], pasted: into the current mask if a plugin says so, else as an inserted picture. */
+    /** Whether the picture at [uri] can be read (another app's, which the system may not let this one have). */
+    private fun readable(uri: android.net.Uri): Boolean = runCatching {
+        getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.read() >= 0 } ?: false
+    }.getOrDefault(false)
+
+    /**
+     * Another app's picture at [uri], pasted: into the current mask if a plugin says so, else as an
+     * inserted picture. One that can't be read leaves the copy made here to paste, if there is one.
+     */
     private fun pastePicture(uri: android.net.Uri, private: Boolean) {
         val s = session ?: return
         closePanels()
+        val own = clipboard
         viewModelScope.launch {
+            if (own != null && !withContext(Dispatchers.IO) { readable(uri) }) {
+                paste(own, private)
+                return@launch
+            }
             // a mask that takes what is pasted has no use for a copy of the picture
             if (!private && !(modelOpen && !modelFlat) && s.pastesIntoMask()) {
                 val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
@@ -4683,13 +4712,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val sel = if (v.selection.collapsed) TextRange(0, v.text.length) else v.selection
         val part = v.text.substring(sel.min, sel.max)
         if (part.isEmpty()) return
-        systemClipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Text", part))
+        // a system clipboard that refuses it: the words stay where they are, cut or not
+        if (runCatching { systemClipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Text", part)) }.isFailure) {
+            showNotice("The system clipboard didn't take the text.", warning = true)
+            return
+        }
         if (cut) changeTextField(TextFieldValue(v.text.removeRange(sel.min, sel.max), TextRange(sel.min)))
     }
 
     /** Puts the copied text in place of the selection. */
     fun pasteText() {
-        val add = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(getApplication())?.toString() ?: return
+        val add = runCatching { systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(getApplication())?.toString() }.getOrNull() ?: return
         val v = textField
         val text = v.text.replaceRange(v.selection.min, v.selection.max, add)
         changeTextField(TextFieldValue(text, TextRange(v.selection.min + add.length)))
@@ -5801,11 +5834,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun pastedSource(): ByteArray? = sourceOrSay("pasting into a source editor") { clipboardSource() }
 
     private suspend fun clipboardSource(): ByteArray? {
-        val clip = systemClipboard?.primaryClip?.takeIf { it.itemCount > 0 }
+        val clip = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }
         val uri = clip?.getItemAt(0)?.uri
         // what was cut or copied here, unless another app's picture went on the clipboard since
         val own = clipboard
-        if (own != null && (uri == null || uri == clipUri || clipboardAt >= (clip.description?.timestamp ?: 0L))) {
+        val others = uri != null && pastesSystemPicture(uri == clipUri, clip?.description?.timestamp ?: 0L, own != null, clipboardAt, clipPutAt)
+        if (own != null && !others) {
             val source = withContext(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.sourceFromCopy(own) }
             if (source.isNotEmpty()) return source
         }
