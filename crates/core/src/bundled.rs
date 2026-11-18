@@ -23,6 +23,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("rotation-reset", include_bytes!("../bundled-plugins/rotation-reset.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
+    ("value-check", include_bytes!("../bundled-plugins/value-check.procraft-plugin")),
     ("vector-layers", include_bytes!("../bundled-plugins/vector-layers.procraft-plugin")),
 ];
 

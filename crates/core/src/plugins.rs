@@ -3539,6 +3539,47 @@ mod tests {
     }
 
     #[test]
+    fn value_check_shows_the_canvas_in_greys_from_its_switch_or_its_press() {
+        const VALUES: &str = "io.github.artcraftandroid.value-check";
+        let dir = store("bundled-values");
+        let plugins = app_at(&dir);
+        let s = viewed();
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.set_on(VALUES.to_owned(), true));
+        // on, but its switch off: the colours as they are
+        assert_eq!(plugins.hooks().view_look(), None);
+        // Alt+G flips it: each colour the grey of its luminance, on the screen alone
+        let flipped = press(&plugins, "alt+g");
+        assert!(
+            matches!(flipped, Some(PluginPressed::Switched { control: PluginControl::Switch { ref control } }) if control.on)
+        );
+        let grey = plugins.hooks().view_look().unwrap();
+        assert_eq!(grey, procraft_gpu::GREY_LOOK);
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.shared.lock().shown_look(), Some(procraft_gpu::GREY_LOOK));
+        // asked as the plugins change (twelve entries): quick
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            assert!(hooks.view_look().is_some());
+        }
+        let asked = t.elapsed() / 200;
+        println!("the view look asked in {asked:?}");
+        assert!(asked < std::time::Duration::from_millis(1), "{asked:?}");
+        // stronger contrast spreads the greys from a middle grey; the grey view goes on top
+        assert!(plugins.set_slider(format!("{VALUES}.contrast"), 2.0).is_some());
+        let strong = plugins.hooks().view_look().unwrap();
+        let mid = crate::view_look::through(&strong, [0.18; 3]);
+        assert!(mid.iter().all(|v| (v - 0.18).abs() < 1e-5), "{mid:?}");
+        // and off again: nothing shown through
+        assert!(matches!(press(&plugins, "alt+g"), Some(PluginPressed::Switched { .. })));
+        assert_eq!(plugins.hooks().view_look(), None);
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.shared.lock().shown_look(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();
         plugins.add_bundled(crate::bundled::BUNDLED);
