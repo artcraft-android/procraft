@@ -127,17 +127,12 @@ const RELAY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(6);
 const STAMP_WORK: u64 = 1 << 10;
 const IN_PLACE_PIXEL_WORK: u64 = 16;
 const IN_PLACE_STAMP_WORK: u64 = 256 << 10;
-/// How long a piece of a paced canvas's work (see [`Canvas::pace`]) is to take on the GPU, from
-/// being sent to being done: its pieces are cut to about this. A weak GPU took seconds over a wet
-/// brush's sample stroke sent as a few pieces, and the window's frames waited behind them.
-const PACED_PIECE: std::time::Duration = std::time::Duration::from_millis(10);
-/// The least work a paced piece is cut to (a stamp of wet paint's own share), and what its first
-/// piece holds before the GPU's pace is known.
-const PACED_WORK_LEAST: u64 = IN_PLACE_STAMP_WORK;
-const PACED_WORK_FIRST: u64 = 4 * PACED_WORK_LEAST;
-/// How much finer than its pieces a paced canvas cuts its stamps ahead: a piece that comes back
-/// slow makes the rest of the render's down to this share of it.
-const PACED_CUTS: u64 = 8;
+/// The most painting a paced canvas (see [`Canvas::pace`]) sends as one piece, by [`stamp_work`]:
+/// a sixteenth of [`WORK_AT_ONCE`], short on a weak GPU even where a wet brush's paint costs far
+/// more than its share. A weak GPU took seconds over a wet brush's sample stroke sent as a few
+/// pieces at once, and the window's frames waited behind them. (Cut by the work alone, not by how
+/// long pieces take, the pieces and what they lay are the same each time.)
+const PACED_WORK: u64 = WORK_AT_ONCE / 16;
 /// The longest a paced canvas waits for a piece (a device lost or stopped never finishes it).
 const PACED_WAIT_MOST: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -2781,8 +2776,8 @@ pub struct Canvas {
     stamps_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
-    /// Each piece waited for on the GPU before the next is sent, cut to take about
-    /// [`PACED_PIECE`] there (see [`Canvas::pace`]); and the longest one took since last asked.
+    /// Each piece waited for on the GPU before the next is sent, and pieces of no more than
+    /// [`PACED_WORK`] (see [`Canvas::pace`]); and the longest one took since last asked.
     paced: bool,
     paced_longest: std::time::Duration,
     /// Compute dispatches recorded for smudges, paint laid in place and stamps laid by their rule.
@@ -4206,17 +4201,14 @@ impl Canvas {
         self.pieces_sent
     }
 
-    /// Paces the canvas's work on the GPU (`on`): each piece is waited for before the next is
-    /// sent, and pieces are cut to take about [`PACED_PIECE`] there, from a small first one. For a
-    /// canvas drawn on a thread of its own beside the window's frames (a brush's sample stroke): a
-    /// frame then never queues behind more than a piece of its work, however slow the GPU, and no
-    /// piece runs long enough for a driver to stop it. What is laid is the same either way (on an
-    /// old GPU's fragment passes, but for a level here and there where pieces meet).
+    /// Paces the canvas's work on the GPU (`on`): pieces of no more than [`PACED_WORK`], each
+    /// waited for before the next is sent. For a canvas drawn on a thread of its own beside the
+    /// window's frames (a brush's sample stroke): a frame then never queues behind more than a short
+    /// piece of its work, and no piece runs long enough for a driver to stop it. What is laid is the
+    /// same but for a level here and there where pieces meet, as with any stroke sent in pieces.
     pub fn pace(&mut self, on: bool) {
-        if self.paced != on {
-            self.paced = on;
-            self.work_at_once = if on { PACED_WORK_FIRST } else { WORK_AT_ONCE };
-        }
+        self.paced = on;
+        self.work_at_once = if on { PACED_WORK } else { WORK_AT_ONCE };
     }
 
     /// The longest a paced piece of work took on the GPU, from being sent to being done, since
@@ -4226,9 +4218,8 @@ impl Canvas {
     }
 
     /// Waits for the piece of work sent as `index` at `sent`, if the canvas is paced (see
-    /// [`Canvas::pace`]), and cuts the next pieces to take about [`PACED_PIECE`] by how long its
-    /// `work` (by [`stamp_work`]) took: less for a slow one, up to twice as much for a quick one.
-    fn wait_if_paced(&mut self, gpu: &Gpu, index: wgpu::SubmissionIndex, sent: std::time::Instant, work: u64) {
+    /// [`Canvas::pace`]).
+    fn wait_if_paced(&mut self, gpu: &Gpu, index: wgpu::SubmissionIndex, sent: std::time::Instant) {
         if !self.paced {
             return;
         }
@@ -4236,21 +4227,7 @@ impl Canvas {
         if let Err(e) = gpu.device.poll(wait) {
             log::warn!("waiting for a paced piece of work: {e}");
         }
-        let took = sent.elapsed();
-        self.paced_longest = self.paced_longest.max(took);
-        // a piece of no stamps' work (a stroke's end) tells nothing of what they take
-        if work == 0 {
-            return;
-        }
-        let next = if took > PACED_PIECE {
-            (work as f64 * PACED_PIECE.as_secs_f64() / took.as_secs_f64()) as u64
-        } else if took < PACED_PIECE / 2 {
-            // no more than twice what was done: a few quick stamps don't vouch for many
-            self.work_at_once.max(work.saturating_mul(2)).min(self.work_at_once.saturating_mul(2))
-        } else {
-            self.work_at_once
-        };
-        self.work_at_once = next.clamp(PACED_WORK_LEAST, WORK_AT_ONCE);
+        self.paced_longest = self.paced_longest.max(sent.elapsed());
     }
 
     /// What the undo and redo history's pixels take on the GPU, bytes.
@@ -5675,10 +5652,8 @@ impl Canvas {
         // no more stamps than one upload takes (room left for the predicted tail): the rest wait for
         // a render after this one's
         let most_stamps = self.stamps_at_once.min(Self::stamps_in_a_buffer(device) / 2).max(1);
-        // a paced canvas's stamps cut finer than its pieces, put together into pieces as its pace
-        // allows as they are sent: a piece that comes back slow makes the next ones smaller
-        let cut = if self.paced { (self.work_at_once / PACED_CUTS).max(PACED_WORK_LEAST) } else { self.work_at_once };
-        let ops = in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), cut, most_stamps);
+        let ops =
+            in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), self.work_at_once, most_stamps);
         let (ops, held_back) = {
             let (mut taken, mut count) = (Vec::with_capacity(ops.len()), 0u64);
             let mut ops = ops.into_iter();
@@ -5819,8 +5794,7 @@ impl Canvas {
             if let Op::Stamps { instances, style, second, .. } = &op {
                 let work = stamps_work(instances, self.full(), style.in_place() && !second);
                 if recorded > 0 && recorded.saturating_add(work) > self.work_at_once {
-                    let uniforms = (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms);
-                    self.send_piece(gpu, &mut encoder, uniforms, recorded);
+                    self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms));
                     recorded = 0;
                 }
                 recorded = recorded.saturating_add(work);
@@ -5828,7 +5802,7 @@ impl Canvas {
             // a paced canvas sends a stroke's end as a piece of its own: no stamps' work, and on a
             // slow GPU among its slowest
             if self.paced && recorded > 0 && matches!(op, Op::Commit(_)) {
-                self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms), recorded);
+                self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms));
                 recorded = 0;
             }
             if let Op::Commit(stroke) = &op {
@@ -6851,7 +6825,7 @@ impl Canvas {
         for buffer in uploaded {
             self.uploads.give_back(buffer);
         }
-        self.wait_if_paced(gpu, sent, at, recorded);
+        self.wait_if_paced(gpu, sent, at);
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
         self.pack_history(gpu);
@@ -9060,7 +9034,6 @@ impl Canvas {
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         (uniforms, smudge, wet): (&mut UniformData, &mut UniformData, &mut UniformData),
-        work: u64,
     ) {
         if !smudge.data.is_empty() {
             gpu.queue.write_buffer(&self.smudge_params, 0, &smudge.data);
@@ -9073,7 +9046,7 @@ impl Canvas {
         *smudge = UniformData::default();
         *wet = UniformData::default();
         self.pieces_sent = self.pieces_sent.wrapping_add(1);
-        self.wait_if_paced(gpu, sent, at, work);
+        self.wait_if_paced(gpu, sent, at);
     }
 
     /// Goes on remaking the caches for a while (parts of whole items, each part's layers brought
