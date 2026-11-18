@@ -46,6 +46,119 @@ impl GalleryEntry {
     }
 }
 
+/// One of the buttons in the gallery's title row (in its capsule, or More's list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GalleryAction {
+    Select,
+    Import,
+    Photo,
+    Stack,
+    Preview,
+    Share,
+    Duplicate,
+    Delete,
+    /// The rest, in a list under it.
+    More,
+}
+
+/// A button in the capsule: what it does, its name, how wide it is.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryButton {
+    pub action: GalleryAction,
+    pub label: String,
+    pub width: f32,
+}
+
+/// The gallery's title row laid out for the window: the capsule's buttons (`more` holds those
+/// that don't fit, in More's list), where the capsule's left edge is and how wide it is, and the
+/// title's size as a share of its own (it shrinks to fit beside the capsule, never under 0.3) and
+/// the most it may be wide (past that, at 0.3, it is cut short).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryHeaderFit {
+    pub buttons: Vec<GalleryButton>,
+    pub more: Vec<GalleryAction>,
+    pub capsule_left: f32,
+    pub capsule_width: f32,
+    pub title_scale: f32,
+    pub title_room: f32,
+}
+
+/// Under this wide a window, More alone holds every button.
+const HEADER_NARROW: f32 = 440.0;
+/// The room right of the title, + left out, that all the buttons need; and selecting.
+const HEADER_ROOM_ALL: f32 = 300.0;
+const HEADER_ROOM_ALL_SELECTING: f32 = 560.0;
+/// The window's edge to + (or Select's round button that ends it), how wide that is, and the gap
+/// before it (13 selecting); the title's gap before the capsule; how small the title may shrink.
+const HEADER_END: f32 = 20.0;
+const HEADER_ROUND: f32 = 44.0;
+const HEADER_TITLE_GAP: f32 = 12.0;
+const HEADER_TITLE_LEAST: f32 = 0.3;
+/// More alone in the capsule (its glyph, no name).
+pub const GALLERY_MORE_ALONE: f32 = 56.0;
+
+fn button(action: GalleryAction) -> GalleryButton {
+    let (label, width) = match action {
+        GalleryAction::Select => ("Select", 69.0),
+        GalleryAction::Import => ("Import", 71.0),
+        GalleryAction::Photo => ("Photo", 66.0),
+        GalleryAction::Stack => ("Stack", 65.0),
+        GalleryAction::Preview => ("Preview", 80.0),
+        GalleryAction::Share => ("Share", 65.0),
+        GalleryAction::Duplicate => ("Duplicate", 91.0),
+        GalleryAction::Delete => ("Delete", 70.0),
+        GalleryAction::More => ("More", 61.0),
+    };
+    GalleryButton { action, label: label.to_owned(), width }
+}
+
+/// The gallery's title row in a window `width` wide (`landscape`: wider than tall): the title
+/// starts `title_x` in and is `title_width` wide at its own size (36), `selecting` or not, in a
+/// stack or not. With room, every button shows (selecting, all five only on a window on its side);
+/// with less, some and More; under 440 wide, More alone. The title then shrinks to fit.
+#[uniffi::export]
+pub fn gallery_header_fit(
+    width: f32,
+    title_x: f32,
+    title_width: f32,
+    selecting: bool,
+    landscape: bool,
+    in_stack: bool,
+) -> GalleryHeaderFit {
+    use GalleryAction::*;
+    let room = width - (title_x + title_width) - HEADER_ROUND;
+    let all: Vec<GalleryAction> = if !selecting {
+        vec![Select, Import, Photo]
+    } else if in_stack {
+        vec![Preview, Share, Duplicate, Delete]
+    } else {
+        vec![Stack, Preview, Share, Duplicate, Delete]
+    };
+    let (shown, more): (Vec<GalleryAction>, Vec<GalleryAction>) = if width < HEADER_NARROW {
+        (vec![More], all)
+    } else if (selecting && landscape && room >= HEADER_ROOM_ALL_SELECTING) || (!selecting && room >= HEADER_ROOM_ALL) {
+        (all, Vec::new())
+    } else if selecting {
+        // More's list in its own order: Preview, Stack (none in a stack), Duplicate
+        let more = if in_stack { vec![Preview, Duplicate] } else { vec![Preview, Stack, Duplicate] };
+        (vec![Share, Delete, More], more)
+    } else {
+        (vec![Select, More], vec![Import, Photo])
+    };
+    let mut buttons: Vec<GalleryButton> = shown.into_iter().map(button).collect();
+    if let [alone] = buttons.as_mut_slice()
+        && alone.action == More
+    {
+        alone.width = GALLERY_MORE_ALONE;
+    }
+    let capsule_width: f32 = buttons.iter().map(|b| b.width).sum();
+    let gap = if selecting { 13.0 } else { 12.0 };
+    let capsule_left = width - HEADER_END - HEADER_ROUND - gap - capsule_width;
+    let title_room = (capsule_left - HEADER_TITLE_GAP - title_x).max(0.0);
+    let title_scale = if title_width > 0.0 { (title_room / title_width).clamp(HEADER_TITLE_LEAST, 1.0) } else { 1.0 };
+    GalleryHeaderFit { buttons, more, capsule_left, capsule_width, title_scale, title_room }
+}
+
 /// How long a dragged artwork rests on a stack, or on the way back out of the stack open (its
 /// title), before that opens with the drag going on, milliseconds.
 pub const GALLERY_SPRING_MS: i64 = 600;
@@ -1157,6 +1270,81 @@ mod tests {
         assert_eq!(shown(&store, None), names(&["C", "A", "D", "B", "Two[E]"]));
         assert!(!Path::new(&dirs["One"]).exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn actions(fit: &GalleryHeaderFit) -> Vec<GalleryAction> {
+        fit.buttons.iter().map(|b| b.action).collect()
+    }
+
+    /// "ProCraft" at its own size, about as wide as it is drawn.
+    const TITLE: f32 = 150.0;
+
+    #[test]
+    fn a_tablet_title_row_is_laid_out_as_it_always_was() {
+        use GalleryAction::*;
+        // tablets upright and on their side: Select, Import and Photo, the title at its size; the
+        // capsule 12 left of + (44, 20 in)
+        for (width, landscape) in [(640.0, false), (744.0, false), (800.0, false), (1024.0, true), (1280.0, true)] {
+            let fit = gallery_header_fit(width, 32.0, TITLE, false, landscape, false);
+            assert_eq!(actions(&fit), [Select, Import, Photo], "{width}");
+            assert!(fit.more.is_empty());
+            assert_eq!(fit.capsule_width, 69.0 + 71.0 + 66.0);
+            assert_eq!(fit.capsule_left, width - 20.0 - 44.0 - 12.0 - fit.capsule_width);
+            assert_eq!(fit.title_scale, 1.0, "{width}");
+            // selecting: on its side Stack, Preview, Share, Duplicate and Delete; upright Share,
+            // Delete and More (Preview, Stack, Duplicate); the round button 13 right of them
+            let picking = gallery_header_fit(width, 32.0, TITLE, true, landscape, false);
+            if landscape {
+                assert_eq!(actions(&picking), [Stack, Preview, Share, Duplicate, Delete], "{width}");
+                assert!(picking.more.is_empty());
+            } else {
+                assert_eq!(actions(&picking), [Share, Delete, More], "{width}");
+                assert_eq!(picking.more, [Preview, Stack, Duplicate]);
+            }
+            assert_eq!(picking.capsule_left, width - 20.0 - 44.0 - 13.0 - picking.capsule_width);
+            assert_eq!(picking.title_scale, 1.0, "{width}");
+        }
+        // in a stack, selecting: no Stack, in the row or under More
+        let fit = gallery_header_fit(1024.0, 60.0, TITLE, true, true, true);
+        assert_eq!(actions(&fit), [Preview, Share, Duplicate, Delete]);
+        let fit = gallery_header_fit(744.0, 60.0, TITLE, true, false, true);
+        assert_eq!(fit.more, [Preview, Duplicate]);
+    }
+
+    #[test]
+    fn a_narrow_window_keeps_the_title_on_one_line_beside_fewer_buttons() {
+        use GalleryAction::*;
+        // a phone upright (411 wide): More alone holds them all; the title fits at its size
+        let fit = gallery_header_fit(411.0, 32.0, TITLE, false, false, false);
+        assert_eq!(actions(&fit), [More]);
+        assert_eq!(fit.more, [Select, Import, Photo]);
+        assert_eq!(fit.capsule_width, GALLERY_MORE_ALONE);
+        assert_eq!(fit.title_scale, 1.0);
+        assert!(32.0 + TITLE + 12.0 <= fit.capsule_left);
+        let picking = gallery_header_fit(411.0, 32.0, TITLE, true, false, false);
+        assert_eq!(actions(&picking), [More]);
+        assert_eq!(picking.more, [Stack, Preview, Share, Duplicate, Delete]);
+        // a window too narrow to give the room 300: Select and More (Import, Photo)
+        let fit = gallery_header_fit(500.0, 32.0, TITLE, false, false, false);
+        assert_eq!(actions(&fit), [Select, More]);
+        assert_eq!(fit.more, [Import, Photo]);
+        assert!(fit.title_room >= TITLE);
+        // on its side but not 560 of room: Share, Delete and More
+        let picking = gallery_header_fit(700.0, 32.0, TITLE, true, true, false);
+        assert_eq!(actions(&picking), [Share, Delete, More]);
+        // a long stack name shrinks to fit beside the buttons, no smaller than 0.3, and the room
+        // it gets never runs under the capsule
+        for width in [300.0, 360.0, 411.0, 500.0, 640.0, 900.0] {
+            for selecting in [false, true] {
+                let fit = gallery_header_fit(width, 60.0, 900.0, selecting, width > 600.0, true);
+                assert!(fit.title_scale >= 0.3 && fit.title_scale <= 1.0);
+                assert!(60.0 + fit.title_room + 12.0 <= fit.capsule_left + 0.01 || fit.title_room == 0.0);
+                if fit.title_scale > 0.3 && fit.title_scale < 1.0 {
+                    assert!((900.0 * fit.title_scale - fit.title_room).abs() < 0.01, "{width} {fit:?}");
+                }
+                assert!(fit.capsule_left + fit.capsule_width + 44.0 + 20.0 <= width + 13.01);
+            }
+        }
     }
 
     /// The name kept in the artwork's file in `dir`.

@@ -97,6 +97,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -108,6 +109,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import io.github.artcraftandroid.procraft.core.GalleryAction
 
 /**
  * A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
@@ -200,6 +202,27 @@ fun GalleryScreen(vm: CanvasViewModel) {
             label = "blur",
         )
         val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
+        // the title row laid out for the window (the shared core's rules): the buttons that fit,
+        // the rest under More, and the title on one line, shrunk to fit beside them
+        val titleText = vm.openStack?.name ?: "ProCraft"
+        val titleStyle = androidx.compose.material3.LocalTextStyle.current.merge(androidx.compose.ui.text.TextStyle(fontSize = 36.sp, fontWeight = FontWeight.Bold))
+        val titleMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
+        val titleSize = remember(titleText, titleStyle) { titleMeasurer.measure(titleText, titleStyle, softWrap = false, maxLines = 1).size }
+        val headerDensity = LocalDensity.current
+        val headerConfig = androidx.compose.ui.platform.LocalConfiguration.current
+        val fit = io.github.artcraftandroid.procraft.core.galleryHeaderFit(
+            screenWidth.value,
+            // in a stack the name follows the way back; selecting, it stands alone
+            if (vm.openStack != null && !selecting) 60f else 32f,
+            with(headerDensity) { titleSize.width.toDp().value },
+            selecting,
+            headerConfig.screenWidthDp > headerConfig.screenHeightDp,
+            vm.openStack != null,
+        )
+        val titleHeight = with(headerDensity) { titleSize.height.toDp() }
+        // the middle of More in the title row, for its list to hang from
+        val moreCentre = fit.capsuleLeft.dp + fit.buttons.takeWhile { it.action != GalleryAction.MORE }.sumOf { it.width.toDouble() }.toFloat().dp +
+            (fit.buttons.firstOrNull { it.action == GalleryAction.MORE }?.width ?: 0f).dp / 2
         Column(
             Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier).then(
                 galleryDrop(
@@ -220,13 +243,12 @@ fun GalleryScreen(vm: CanvasViewModel) {
             ),
         ) {
             if (selecting) {
-                val screen = androidx.compose.ui.platform.LocalConfiguration.current
                 val pick = picked()
                 SelectHeader(
                     title = vm.openStack?.name ?: "ProCraft",
+                    fit = fit,
+                    titleHeight = titleHeight,
                     count = pick.entries.size,
-                    wide = screen.screenWidthDp > screen.screenHeightDp,
-                    inStack = vm.openStack != null,
                     canStack = pick.canStack,
                     onStack = {
                         vm.stackPicked(picked().entries)
@@ -248,6 +270,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
             } else {
                 GalleryHeader(
                     stack = vm.openStack?.name,
+                    fit = fit,
+                    titleHeight = titleHeight,
+                    onMore = { moreOpen = !moreOpen },
                     backLit = backLit,
                     onBackPlaced = { dropPlaces.back = it },
                     onBack = { vm.showStack(null) },
@@ -579,33 +604,56 @@ fun GalleryScreen(vm: CanvasViewModel) {
             }
         }
         if (moreOpen) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { moreOpen = false } })
-        // under More, kept 4 from the screen's edge
-        val morePlace = popoverPlace(250.dp, maxWidth - 20.dp - 44.dp - 13.dp - 61.dp / 2, maxWidth, minRight = 4.dp)
-        MenuPresence(moreOpen, androidx.compose.ui.graphics.TransformOrigin(morePlace.arrowX / 250.dp, 0f)) { look ->
+        // under More, kept 4 from the screen's edge: what the title row has no room for
+        val morePlace = popoverPlace(250.dp, moreCentre, maxWidth, minRight = 4.dp)
+        // Share's formats under Select's Share, or under More when Share is in its list
+        val shareCentre = if (fit.buttons.any { it.action == GalleryAction.SHARE }) selectShareCentre(maxWidth) else moreCentre
+        MenuPresence(moreOpen && fit.more.isNotEmpty(), androidx.compose.ui.graphics.TransformOrigin(morePlace.arrowX / 250.dp, 0f)) { look ->
             val place = morePlace
             val pick = picked()
-            MoreOptions(
-                Modifier.offset(x = place.left, y = 60.dp).then(look),
-                place.arrowX,
-                count = pick.entries.size,
-                inStack = vm.openStack != null,
-                canStack = pick.canStack,
-                onStack = {
+            val any = pick.entries.isNotEmpty()
+            val rows = fit.more.map { action ->
+                val label = when (action) {
+                    GalleryAction.SELECT -> "Select"
+                    GalleryAction.IMPORT -> "Import"
+                    GalleryAction.PHOTO -> "Photo"
+                    GalleryAction.STACK -> "Stack"
+                    GalleryAction.PREVIEW -> "Preview"
+                    GalleryAction.SHARE -> "Share"
+                    GalleryAction.DUPLICATE -> "Duplicate"
+                    GalleryAction.DELETE -> "Delete"
+                    GalleryAction.MORE -> "More"
+                }
+                val enabled = when (action) {
+                    GalleryAction.SELECT, GalleryAction.IMPORT, GalleryAction.PHOTO -> true
+                    GalleryAction.STACK -> pick.canStack
+                    else -> any
+                }
+                MoreRow(label, enabled) {
                     moreOpen = false
-                    vm.stackPicked(picked().entries)
-                    endSelecting()
-                },
-                onPreview = {
-                    moreOpen = false
-                    previewFrom = 0
-                    previewing = picked().artworks
-                },
-                onDuplicate = {
-                    moreOpen = false
-                    vm.duplicateEntries(picked().entries)
-                    endSelecting()
-                },
-            )
+                    when (action) {
+                        GalleryAction.SELECT -> selecting = true
+                        GalleryAction.IMPORT -> importFile.launch(arrayOf("*/*"))
+                        GalleryAction.PHOTO -> photo.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        GalleryAction.STACK -> {
+                            vm.stackPicked(picked().entries)
+                            endSelecting()
+                        }
+                        GalleryAction.PREVIEW -> {
+                            previewFrom = 0
+                            previewing = picked().artworks
+                        }
+                        GalleryAction.SHARE -> picked().let { p -> sharing = GalleryShare(p.artworks, null, shareName(p)) }
+                        GalleryAction.DUPLICATE -> {
+                            vm.duplicateEntries(picked().entries)
+                            endSelecting()
+                        }
+                        GalleryAction.DELETE -> deletingSelected = picked()
+                        GalleryAction.MORE -> {}
+                    }
+                }
+            }
+            MoreOptions(Modifier.offset(x = place.left, y = 60.dp).then(look), place.arrowX, rows)
         }
         // Share's formats: beside a swiped artwork's Share, or under Select's
         var shown by remember { mutableStateOf<GalleryShare?>(null) }
@@ -614,7 +662,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
         shown?.let { share ->
             val density = LocalDensity.current.density
             val from = share.from?.let { r -> androidx.compose.ui.geometry.Rect(r.left / density, r.top / density, r.right / density, r.bottom / density) }
-            val place = formatsPlace(from, maxWidth, maxHeight, selectShareCentre(maxWidth))
+            val place = formatsPlace(from, maxWidth, maxHeight, shareCentre)
             MenuPresence(sharing != null, place.origin) { look ->
                 ImageFormats(Modifier.offset(x = place.left, y = place.top).then(look), place.side, place.arrowAt) { format ->
                     sharing = null
@@ -771,10 +819,18 @@ fun GalleryScreen(vm: CanvasViewModel) {
     )
 }
 
-/** The title row: the app's name, the select/import/photo capsule and the new-canvas button. */
+/**
+ * The title row: the app's name (in a stack, the way back and its name), the capsule of Select,
+ * Import and Photo and the new-canvas button, laid out by [fit]: in a narrow window some or all of
+ * the buttons go under More ([onMore]) and the title shrinks to fit ([titleHeight] its height at
+ * its own size), never wrapping.
+ */
 @Composable
 private fun GalleryHeader(
     stack: String?,
+    fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit,
+    titleHeight: Dp,
+    onMore: () -> Unit,
     backLit: Boolean,
     onBackPlaced: (androidx.compose.ui.geometry.Rect) -> Unit,
     onBack: () -> Unit,
@@ -825,17 +881,18 @@ private fun GalleryHeader(
                     Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
                         Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = ink, modifier = Modifier.size(28.dp))
                     }
-                    Text(name, color = ink, fontSize = 36.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    GalleryTitle(name, ink, fit, Modifier)
                 }
             } else {
-                Text(
-                    "ProCraft",
-                    color = Pc.GalleryTitle,
-                    fontSize = 36.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 32.dp, top = 11.dp)
-                        .clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
-                )
+                // as wide as there is room beside the capsule, the name on one line in it
+                Box(Modifier.padding(start = 32.dp, top = 11.dp).size(fit.titleRoom.dp, titleHeight), contentAlignment = Alignment.CenterStart) {
+                    GalleryTitle(
+                        "ProCraft",
+                        Pc.GalleryTitle,
+                        fit,
+                        Modifier.clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
+                    )
+                }
             }
         }
         Row(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -843,14 +900,15 @@ private fun GalleryHeader(
                 Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                for ((label, width) in listOf("Select" to 69.dp, "Import" to 71.dp, "Photo" to 66.dp)) {
-                    val action: () -> Unit = when (label) {
-                        "Import" -> onImport
-                        "Photo" -> onPhoto
+                for (b in fit.buttons) {
+                    val action: () -> Unit = when (b.action) {
+                        GalleryAction.IMPORT -> onImport
+                        GalleryAction.PHOTO -> onPhoto
+                        GalleryAction.MORE -> onMore
                         else -> onSelect
                     }
-                    Box(Modifier.width(width).height(45.dp).clickable(onClick = action), contentAlignment = Alignment.Center) {
-                        Text(label, color = Pc.GalleryText, fontSize = 16.sp)
+                    Box(Modifier.width(b.width.dp).height(45.dp).clickable(onClick = action), contentAlignment = Alignment.Center) {
+                        CapsuleLabel(b, fit, Pc.GalleryText)
                     }
                 }
             }
@@ -862,21 +920,44 @@ private fun GalleryHeader(
     }
 }
 
-/** One of Select's buttons: its label, width, whether it can act now, and what it does. */
-private class SelectAction(val label: String, val width: Dp, val enabled: Boolean, val onClick: () -> Unit)
+/** The title's name ([text]), on one line at its size shrunk as [fit] says, cut short if even then too long. */
+@Composable
+private fun GalleryTitle(text: String, ink: Color, fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit, modifier: Modifier) {
+    Text(
+        text,
+        color = ink,
+        fontSize = 36.sp * fit.titleScale,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.widthIn(max = fit.titleRoom.dp).then(modifier),
+    )
+}
+
+/** A capsule button's face: its name, or, More alone in the capsule, its glyph. */
+@Composable
+private fun CapsuleLabel(b: io.github.artcraftandroid.procraft.core.GalleryButton, fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit, ink: Color) {
+    if (b.action == GalleryAction.MORE && fit.buttons.size == 1) {
+        Icon(PcIcons.More, contentDescription = b.label, tint = ink, modifier = Modifier.size(24.dp))
+    } else {
+        Text(b.label, color = ink, fontSize = 16.sp)
+    }
+}
 
 /**
  * Select's title row: upright, Share, Delete and More; on a wide screen Stack, Preview, Share,
- * Duplicate and Delete side by side ([wide]; in a stack no Stack). Each is dimmed until it can act
- * on the [count] picked artworks and stacks (Stack on two or more, [canStack]; More always opens,
- * its rows greyed). Then the blue round button that ends selecting.
+ * Duplicate and Delete side by side (in a stack no Stack); in a narrow window More alone, as [fit]
+ * lays it out. Each is dimmed until it can act on the [count] picked artworks and stacks (Stack on
+ * two or more, [canStack]; More always opens, its rows greyed). Then the blue round button that
+ * ends selecting.
  */
 @Composable
 private fun SelectHeader(
     title: String,
+    fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit,
+    titleHeight: Dp,
     count: Int,
-    wide: Boolean,
-    inStack: Boolean,
     canStack: Boolean,
     onStack: () -> Unit,
     onPreview: () -> Unit,
@@ -887,25 +968,23 @@ private fun SelectHeader(
     onDone: () -> Unit,
 ) {
     val any = count > 0
-    val actions = if (wide) {
-        listOfNotNull(
-            // a stack has no Stack of its own
-            SelectAction("Stack", 65.dp, canStack, onStack).takeUnless { inStack },
-            SelectAction("Preview", 80.dp, any, onPreview),
-            SelectAction("Share", 65.dp, any, onShare),
-            SelectAction("Duplicate", 91.dp, any, onDuplicate),
-            SelectAction("Delete", 70.dp, any, onDelete),
-        )
-    } else {
-        listOf(SelectAction("Share", 65.dp, any, onShare), SelectAction("Delete", 70.dp, any, onDelete), SelectAction("More", 61.dp, true, onMore))
-    }
     Box(Modifier.fillMaxWidth().height(55.dp)) {
-        Text(title, color = Pc.GalleryTitle, fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 32.dp, top = 11.dp))
+        Box(Modifier.padding(start = 32.dp, top = 11.dp).size(fit.titleRoom.dp, titleHeight), contentAlignment = Alignment.CenterStart) {
+            GalleryTitle(title, Pc.GalleryTitle, fit, Modifier)
+        }
         Row(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape), verticalAlignment = Alignment.CenterVertically) {
-                for (a in actions) {
-                    Box(Modifier.width(a.width).height(45.dp).clickable(enabled = a.enabled, onClick = a.onClick), contentAlignment = Alignment.Center) {
-                        Text(a.label, color = if (a.enabled) Pc.GalleryTitle else Pc.GallerySize, fontSize = 16.sp)
+                for (b in fit.buttons) {
+                    val (enabled, action) = when (b.action) {
+                        GalleryAction.STACK -> canStack to onStack
+                        GalleryAction.PREVIEW -> any to onPreview
+                        GalleryAction.SHARE -> any to onShare
+                        GalleryAction.DUPLICATE -> any to onDuplicate
+                        GalleryAction.DELETE -> any to onDelete
+                        else -> true to onMore
+                    }
+                    Box(Modifier.width(b.width.dp).height(45.dp).clickable(enabled = enabled, onClick = action), contentAlignment = Alignment.Center) {
+                        CapsuleLabel(b, fit, if (enabled) Pc.GalleryTitle else Pc.GallerySize)
                     }
                 }
             }
@@ -1329,19 +1408,23 @@ private fun ImageFormats(modifier: Modifier, side: ArrowSide, arrowAt: Dp, onPic
     }
 }
 
-/** More options for the picked artworks and stacks: Preview, Stack (two or more; none in a stack), Duplicate. */
+/** A row of More's list: its name, whether it can act now (else greyed), and what it does. */
+private class MoreRow(val label: String, val enabled: Boolean, val onClick: () -> Unit)
+
+/**
+ * More's list, of what the title row has no room for: selecting, Preview, Stack (two or more;
+ * none in a stack) and Duplicate, and in a narrow window Share and Delete too; else Import and
+ * Photo, and in a narrow window Select too.
+ */
 @Composable
-private fun MoreOptions(modifier: Modifier, arrowX: Dp, count: Int, inStack: Boolean, canStack: Boolean, onStack: () -> Unit, onPreview: () -> Unit, onDuplicate: () -> Unit) {
+private fun MoreOptions(modifier: Modifier, arrowX: Dp, rows: List<MoreRow>) {
     Popover(250.dp, arrowX, modifier, fill = Pc.GalleryPopover) {
         Text("More Options", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 24.dp, top = 14.dp, bottom = 12.dp))
         Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 12.dp).clip(RoundedCornerShape(18.dp)).background(Pc.ActionsGroup)) {
-            val rows = listOfNotNull(Triple("Preview", true, onPreview), Triple("Stack", canStack, onStack).takeUnless { inStack }, Triple("Duplicate", true, onDuplicate))
             for ((i, row) in rows.withIndex()) {
-                val (label, ready, action) = row
-                val enabled = ready && count > 0
                 if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-                Box(Modifier.fillMaxWidth().height(44.dp).clickable(enabled = enabled, onClick = action).padding(start = 16.dp), contentAlignment = Alignment.CenterStart) {
-                    Text(label, color = if (enabled) Pc.PanelTitle else Pc.ActionsDisabled, fontSize = 17.sp)
+                Box(Modifier.fillMaxWidth().height(44.dp).clickable(enabled = row.enabled, onClick = row.onClick).padding(start = 16.dp), contentAlignment = Alignment.CenterStart) {
+                    Text(row.label, color = if (row.enabled) Pc.PanelTitle else Pc.ActionsDisabled, fontSize = 17.sp)
                 }
             }
         }

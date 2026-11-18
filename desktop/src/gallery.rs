@@ -14,8 +14,8 @@ use egui::{
     Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use procraft_core::{
-    ArtworkStore, CanvasPreset, DragRest, GalleryArtwork, GalleryEntry, GalleryPick, P3, gallery_pick, preset_label,
-    presets_from_json, profile_chip,
+    ArtworkStore, CanvasPreset, DragRest, GalleryAction, GalleryArtwork, GalleryEntry, GalleryHeaderFit, GalleryPick,
+    P3, gallery_header_fit, gallery_pick, preset_label, presets_from_json, profile_chip,
 };
 
 use crate::animated_export::Animated;
@@ -264,6 +264,9 @@ pub struct Gallery {
     /// Select's, where it last was).
     sharing: Option<(Vec<GalleryArtwork>, Option<Rect>, String)>,
     share_button: Rect,
+    /// The title row as last laid out for the window (what More's list holds), and where More is.
+    header_fit: Option<GalleryHeaderFit>,
+    more_button: Rect,
     /// What a hold lifted (by folder) and where it was taken (window points), and where the way
     /// back out of a stack is, to drop it there.
     lifted: Option<(String, Pos2)>,
@@ -406,6 +409,8 @@ impl Gallery {
             dragged: egui::Vec2::ZERO,
             sharing: None,
             share_button: Rect::NOTHING,
+            header_fit: None,
+            more_button: Rect::NOTHING,
             lifted: None,
             back: Rect::NOTHING,
             lifted_entry: None,
@@ -596,7 +601,7 @@ impl Gallery {
             }
         }
         if self.more_open {
-            self.more(ctx, look, screen);
+            asked = self.more(ctx, look, screen).or(asked);
         }
         if self.about {
             self.about(ctx, screen);
@@ -712,59 +717,75 @@ impl Gallery {
         }
     }
 
-    /// Select's title row: the title, then (on a wide window) Stack, Preview, Share, Duplicate and
-    /// Delete (in a stack no Stack), or Share, Delete and More, each dimmed until it can act; then
-    /// the blue round button that ends selecting.
-    fn select_header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) {
-        let painter = ui.painter();
-        let top = screen.top();
+    /// The title row laid out for the window (the core's rules): the buttons that fit, the rest
+    /// under More, the title on one line shrunk to fit beside them.
+    fn header_fit(&mut self, ui: &Ui, screen: Rect) -> GalleryHeaderFit {
         let title = self.stack.as_ref().map_or("ProCraft", |s| s.1.as_str()).to_owned();
-        text(
-            painter,
-            pos2(screen.left() + 32.0, top + 11.0),
-            Align2::LEFT_TOP,
-            &title,
-            36.0,
-            Weight::Bold,
-            argb(TITLE),
+        let own = ui.painter().layout_no_wrap(title, Weight::Bold.font(36.0), Color32::WHITE).size();
+        // in a stack the name follows the way back; selecting, it stands alone
+        let title_x = if self.stack.is_some() && !self.selecting { 60.0 } else { 32.0 };
+        let fit = gallery_header_fit(
+            screen.width(),
+            title_x,
+            own.x,
+            self.selecting,
+            screen.width() > screen.height(),
+            self.stack.is_some(),
         );
-        let wide = screen.width() > screen.height();
-        let all: &[(SelectAction, &str, f32)] = &[
-            (SelectAction::Stack, "Stack", 65.0),
-            (SelectAction::Preview, "Preview", 80.0),
-            (SelectAction::Share, "Share", 65.0),
-            (SelectAction::Duplicate, "Duplicate", 91.0),
-            (SelectAction::Delete, "Delete", 70.0),
-        ];
-        let actions: &[(SelectAction, &str, f32)] = if wide {
-            // a stack has no Stack of its own
-            if self.stack.is_some() { all.split_first().map_or(all, |(_, rest)| rest) } else { all }
+        self.header_fit = Some(fit.clone());
+        fit
+    }
+
+    /// A capsule button's face in `button`: its name, or (More alone in the capsule) its glyph.
+    fn capsule_label(ui: &Ui, look: &mut Look, button: Rect, label: &str, alone: bool, ink: Color32) {
+        if alone {
+            look.icon(ui, &icons::MORE, button.center(), 24.0, ink);
         } else {
-            &[
-                (SelectAction::Share, "Share", 65.0),
-                (SelectAction::Delete, "Delete", 70.0),
-                (SelectAction::More, "More", 61.0),
-            ]
-        };
+            text(ui.painter(), button.center(), Align2::CENTER_CENTER, label, 16.0, Weight::Regular, ink);
+        }
+    }
+
+    /// Select's title row: the title, then (on a wide window) Stack, Preview, Share, Duplicate and
+    /// Delete (in a stack no Stack), or Share, Delete and More, or in a narrow window More alone,
+    /// each dimmed until it can act; then the blue round button that ends selecting.
+    fn select_header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) {
+        let top = screen.top();
+        let fit = self.header_fit(ui, screen);
+        let title = self.stack.as_ref().map_or("ProCraft", |s| s.1.as_str()).to_owned();
+        title_text(ui, pos2(screen.left() + 32.0, top + 11.0), Align2::LEFT_TOP, &title, argb(TITLE), &fit);
+        let painter = ui.painter();
         let done = Rect::from_min_size(pos2(screen.right() - 20.0 - 44.0, top + 10.0), vec2(44.0, 45.0));
-        let width: f32 = actions.iter().map(|a| a.2).sum();
-        let capsule = Rect::from_min_size(pos2(done.left() - 13.0 - width, top + 10.0), vec2(width, 45.0));
+        let capsule =
+            Rect::from_min_size(pos2(screen.left() + fit.capsule_left, top + 10.0), vec2(fit.capsule_width, 45.0));
         painter.rect_filled(capsule, 22.5, argb(CAPSULE));
         painter.rect_stroke(capsule, 22.5, Stroke::new(1.0, argb(CAPSULE_EDGE)), egui::StrokeKind::Inside);
         let mut x = capsule.left();
         let mut chosen = None;
-        for &(action, label, w) in actions {
-            let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(w, 45.0));
+        let alone = fit.buttons.len() == 1;
+        let mut shared = false;
+        for b in &fit.buttons {
+            let action = select_action(b.action);
+            let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(b.width, 45.0));
             let ink = if self.can(action) { argb(TITLE) } else { argb(SIZE) };
-            text(painter, button.center(), Align2::CENTER_CENTER, label, 16.0, Weight::Regular, ink);
-            if action == SelectAction::Share {
-                self.share_button = button;
+            Self::capsule_label(ui, look, button, &b.label, alone, ink);
+            match action {
+                SelectAction::Share => {
+                    self.share_button = button;
+                    shared = true;
+                }
+                SelectAction::More => self.more_button = button,
+                _ => {}
             }
-            if ui.interact(button, ui.scope_id().with(("select", label)), Sense::click()).clicked() {
+            if ui.interact(button, ui.scope_id().with(("select", b.label.as_str())), Sense::click()).clicked() {
                 chosen = Some(action);
             }
-            x += w;
+            x += b.width;
         }
+        // Share in More's list: its formats hang from More
+        if !shared {
+            self.share_button = self.more_button;
+        }
+        let painter = ui.painter();
         painter.rect_filled(done, 22.0, argb(DONE_FILL));
         look.icon(ui, &icons::DONE_TICK, done.center(), 40.0, Color32::WHITE);
         if ui.interact(done, ui.scope_id().with("select done"), Sense::click()).clicked() {
@@ -775,21 +796,20 @@ impl Gallery {
         }
     }
 
-    /// More options for the picked artworks and stacks, under More: Preview, Stack (two or more;
-    /// none in a stack), Duplicate.
-    fn more(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) {
-        let width = 250.0;
-        let more_x = screen.right() - 20.0 - 44.0 - 13.0 - 61.0 / 2.0;
-        let left = (more_x - width / 2.0).clamp(screen.left() + 4.0, screen.right() - 4.0 - width);
-        let rows: &[(SelectAction, &str)] = if self.stack.is_some() {
-            &[(SelectAction::Preview, "Preview"), (SelectAction::Duplicate, "Duplicate")]
-        } else {
-            &[
-                (SelectAction::Preview, "Preview"),
-                (SelectAction::Stack, "Stack"),
-                (SelectAction::Duplicate, "Duplicate"),
-            ]
+    /// More's list, under More, of what the title row has no room for: selecting, Preview, Stack
+    /// (two or more; none in a stack) and Duplicate, and in a narrow window Share and Delete too;
+    /// else Import and Photo, and in a narrow window Select too. What a tap on one asked for.
+    fn more(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) -> Option<Asked> {
+        let rows: Vec<(GalleryAction, &str)> = match &self.header_fit {
+            Some(fit) if !fit.more.is_empty() => fit.more.iter().map(|&a| (a, action_label(a))).collect(),
+            _ => {
+                self.more_open = false;
+                return None;
+            }
         };
+        let width = 250.0;
+        let more_x = self.more_button.center().x;
+        let left = (more_x - width / 2.0).clamp(screen.left() + 4.0, screen.right() - 4.0 - width);
         let n = rows.len() as f32;
         let height = panel::ARROW_HEIGHT + 14.0 + 29.0 + 12.0 + 44.0 * n + (n - 1.0) + 12.0;
         let rect = Rect::from_min_size(pos2(left, screen.top() + 57.0), vec2(width, height));
@@ -824,13 +844,15 @@ impl Gallery {
             );
             ui.painter().rect_filled(group, 18.0, argb(ACTIONS_GROUP));
             for (i, &(action, label)) in rows.iter().enumerate() {
+                let select = select_action(action);
                 let row =
                     Rect::from_min_size(pos2(group.left(), group.top() + 45.0 * i as f32), vec2(group.width(), 44.0));
                 if i > 0 {
                     let line = Rect::from_min_size(pos2(row.left(), row.top() - 1.0), vec2(row.width(), 1.0));
                     ui.painter().rect_filled(line, 0, argb(ACTIONS_SEPARATOR));
                 }
-                let on = self.can(action);
+                let on = matches!(action, GalleryAction::Select | GalleryAction::Import | GalleryAction::Photo)
+                    || self.can(select);
                 let colour = if on { ink } else { argb(ACTIONS_DISABLED) };
                 text(
                     ui.painter(),
@@ -849,9 +871,20 @@ impl Gallery {
         if close {
             self.more_open = false;
         }
-        if let Some(action) = chosen {
-            self.more_open = false;
-            self.act(action);
+        let action = chosen?;
+        self.more_open = false;
+        match action {
+            GalleryAction::Select => {
+                self.selecting = true;
+                self.new_open = false;
+                None
+            }
+            GalleryAction::Import => Some(Asked::Import(self.folder())),
+            GalleryAction::Photo => Some(Asked::Photo(self.folder())),
+            other => {
+                self.act(select_action(other));
+                None
+            }
         }
     }
 
@@ -1172,12 +1205,13 @@ impl Gallery {
     }
 
     /// The app's name (in a stack, the way back and its name), then Select, Import and Photo in a
-    /// capsule, and +.
+    /// capsule, and +; in a narrow window some or all of them under More, the title shrunk to fit.
     fn header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) -> Option<Asked> {
         if self.selecting {
             self.select_header(ui, look, screen);
             return None;
         }
+        let fit = self.header_fit(ui, screen);
         let painter = ui.painter();
         let top = screen.top();
         if let Some((_, name)) = self.stack.clone() {
@@ -1190,7 +1224,7 @@ impl Gallery {
             let lit = response.is_pointer_button_down_on() || over;
             let ink = if lit { argb(crate::look::pc::ACCENT) } else { argb(TITLE) };
             look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
-            text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, &name, 36.0, Weight::Bold, ink);
+            title_text(ui, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, &name, ink, &fit);
             if response.clicked() {
                 self.leave_stack();
             }
@@ -1207,14 +1241,13 @@ impl Gallery {
                 look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
                 text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, name, 36.0, Weight::Bold, ink);
             }
-            let name = text(
-                painter,
+            let name = title_text(
+                ui,
                 pos2(screen.left() + 32.0, top + 11.0),
                 Align2::LEFT_TOP,
                 "ProCraft",
-                36.0,
-                Weight::Bold,
                 argb(TITLE).gamma_multiply(title_in),
+                &fit,
             );
             // the app's name tapped: what it is and its version
             if ui.interact(name, ui.scope_id().with("about"), Sense::click()).clicked() {
@@ -1222,20 +1255,27 @@ impl Gallery {
             }
         }
         let plus = Rect::from_min_size(pos2(screen.right() - 20.0 - 44.0, top + 10.0), vec2(44.0, 45.0));
-        let capsule_width = 69.0 + 71.0 + 66.0;
         let capsule =
-            Rect::from_min_size(pos2(plus.left() - 12.0 - capsule_width, top + 10.0), vec2(capsule_width, 45.0));
+            Rect::from_min_size(pos2(screen.left() + fit.capsule_left, top + 10.0), vec2(fit.capsule_width, 45.0));
         painter.rect_filled(capsule, 22.5, argb(CAPSULE));
         painter.rect_stroke(capsule, 22.5, Stroke::new(1.0, argb(CAPSULE_EDGE)), egui::StrokeKind::Inside);
         let mut x = capsule.left();
         let mut asked = None;
-        for (label, width) in [("Select", 69.0), ("Import", 71.0), ("Photo", 66.0)] {
-            let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(width, 45.0));
-            text(painter, button.center(), Align2::CENTER_CENTER, label, 16.0, Weight::Regular, argb(TEXT));
-            if ui.interact(button, ui.scope_id().with(label), Sense::click()).clicked() {
-                asked = match label {
-                    "Import" => Some(Asked::Import(self.folder())),
-                    "Photo" => Some(Asked::Photo(self.folder())),
+        let alone = fit.buttons.len() == 1;
+        for b in &fit.buttons {
+            let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(b.width, 45.0));
+            Self::capsule_label(ui, look, button, &b.label, alone, argb(TEXT));
+            if b.action == GalleryAction::More {
+                self.more_button = button;
+            }
+            if ui.interact(button, ui.scope_id().with(b.label.as_str()), Sense::click()).clicked() {
+                asked = match b.action {
+                    GalleryAction::Import => Some(Asked::Import(self.folder())),
+                    GalleryAction::Photo => Some(Asked::Photo(self.folder())),
+                    GalleryAction::More => {
+                        self.more_open = !self.more_open;
+                        None
+                    }
                     _ => {
                         self.selecting = true;
                         self.new_open = false;
@@ -1243,8 +1283,9 @@ impl Gallery {
                     }
                 };
             }
-            x += width;
+            x += b.width;
         }
+        let painter = ui.painter();
         let disc = Rect::from_center_size(plus.center(), vec2(42.0, 42.0));
         painter.rect_filled(disc, 21.0, argb(CAPSULE));
         painter.rect_stroke(disc, 21.0, Stroke::new(1.0, argb(CAPSULE_EDGE)), egui::StrokeKind::Inside);
@@ -2369,6 +2410,54 @@ impl ThumbnailReader {
     }
 }
 
+/// Select's action for a button of the title row.
+fn select_action(action: GalleryAction) -> SelectAction {
+    match action {
+        GalleryAction::Stack => SelectAction::Stack,
+        GalleryAction::Preview => SelectAction::Preview,
+        GalleryAction::Share => SelectAction::Share,
+        GalleryAction::Duplicate => SelectAction::Duplicate,
+        GalleryAction::Delete => SelectAction::Delete,
+        GalleryAction::Select | GalleryAction::Import | GalleryAction::Photo | GalleryAction::More => {
+            SelectAction::More
+        }
+    }
+}
+
+/// A title-row button's name, as More's list shows it.
+fn action_label(action: GalleryAction) -> &'static str {
+    match action {
+        GalleryAction::Select => "Select",
+        GalleryAction::Import => "Import",
+        GalleryAction::Photo => "Photo",
+        GalleryAction::Stack => "Stack",
+        GalleryAction::Preview => "Preview",
+        GalleryAction::Share => "Share",
+        GalleryAction::Duplicate => "Duplicate",
+        GalleryAction::Delete => "Delete",
+        GalleryAction::More => "More",
+    }
+}
+
+/// The title row's `name` placed at `at` by `align` as at its own size (36, bold): at that size
+/// as it always was where it fits; else shrunk as `fit` says, about the same middle, on one line
+/// cut short past the room it gets. Where it is.
+fn title_text(ui: &Ui, at: Pos2, align: Align2, name: &str, ink: Color32, fit: &GalleryHeaderFit) -> Rect {
+    let own = ui.painter().layout_no_wrap(name.to_owned(), Weight::Bold.font(36.0), ink).size();
+    if fit.title_scale >= 1.0 && own.x <= fit.title_room + 0.5 {
+        return text(ui.painter(), at, align, name, 36.0, Weight::Bold, ink);
+    }
+    let middle = match align.y() {
+        egui::Align::Min => at.y + own.y / 2.0,
+        egui::Align::Center => at.y,
+        egui::Align::Max => at.y - own.y / 2.0,
+    };
+    let galley = one_line(ui, name, 36.0 * fit.title_scale, Weight::Bold, ink, fit.title_room.max(1.0));
+    let rect = Align2::LEFT_CENTER.anchor_size(pos2(at.x, middle), galley.size());
+    ui.painter().galley(rect.min, galley, ink);
+    rect
+}
+
 /// An artwork's width over its height as the gallery shows it (on its side, the other way).
 fn shown_ratio(a: &GalleryArtwork) -> f32 {
     let upright = if a.width > 0 && a.height > 0 { a.width as f32 / a.height as f32 } else { 0.75 };
@@ -2387,13 +2476,15 @@ mod tests {
         look: Look,
         gallery: Gallery,
         time: f64,
+        /// The window's size.
+        size: egui::Vec2,
     }
 
     impl Shown {
         fn frame(&mut self, events: Vec<Event>) -> Option<Asked> {
             self.time += 1.0 / 60.0;
             let raw = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
                 time: Some(self.time),
                 events,
                 ..RawInput::default()
@@ -2415,7 +2506,7 @@ mod tests {
         fn page(&mut self, events: Vec<Event>) {
             self.time += 1.0 / 60.0;
             let raw = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
                 time: Some(self.time),
                 events,
                 ..RawInput::default()
@@ -2481,6 +2572,7 @@ mod tests {
             look: Look::default(),
             gallery: Gallery::with_store(store),
             time: 0.0,
+            size: vec2(1200.0, 900.0),
         };
         (shown, stack, root)
     }
@@ -2651,6 +2743,33 @@ mod tests {
         let store = Arc::clone(&shown.gallery.store);
         let first = store.list(None).into_iter().next();
         assert!(matches!(first, Some(GalleryEntry::Artwork { artwork }) if artwork.name == "B"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_narrow_window_puts_the_buttons_under_more_beside_a_whole_title() {
+        let (mut shown, _stack, root) = with_a_stack("narrow");
+        // as wide as a phone upright
+        shown.size = vec2(400.0, 800.0);
+        shown.page(Vec::new());
+        shown.page(Vec::new());
+        let fit = shown.gallery.header_fit.clone().unwrap();
+        assert_eq!(fit.buttons.iter().map(|b| b.action).collect::<Vec<_>>(), [GalleryAction::More]);
+        assert_eq!(fit.more, [GalleryAction::Select, GalleryAction::Import, GalleryAction::Photo]);
+        assert_eq!(fit.title_scale, 1.0, "the name fits whole beside More and +");
+        // More opens its list, inside the window
+        let more = shown.gallery.more_button;
+        assert!(more.left() > 0.0 && more.right() < 400.0 - 20.0 - 44.0);
+        shown.page(vec![Event::PointerMoved(more.center()), Shown::button(more.center(), true)]);
+        shown.page(vec![Shown::button(more.center(), false)]);
+        assert!(shown.gallery.more_open);
+        // as wide as a tablet: Select, Import and Photo, as always
+        shown.gallery.more_open = false;
+        shown.size = vec2(1200.0, 900.0);
+        shown.page(Vec::new());
+        let fit = shown.gallery.header_fit.clone().unwrap();
+        assert_eq!(fit.buttons.len(), 3);
+        assert!(fit.more.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
