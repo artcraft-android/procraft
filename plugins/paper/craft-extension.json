@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.paper",
+  "name": "Paper",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A paper for each artwork, chosen in Actions > Canvas: every brush takes its grain as it paints, and it shows under the art in a colour of its own.",
+  "compat": { "procraft": { "interface": 8 } },
+  "permissions": [],
+  "hooks": ["paper"],
+  "controls": [
+    {
+      "key": "paper", "type": "slider", "label": "Paper", "least": 0, "most": 5, "step": 1, "starts": 0,
+      "names": ["None", "Cold press", "Hot press", "Rough", "Canvas", "Laid"], "place": "canvas", "artwork": true
+    },
+    {
+      "key": "colour", "type": "slider", "label": "Paper colour", "least": 0, "most": 6, "step": 1, "starts": 0,
+      "names": ["Background", "White", "Cream", "Ivory", "Grey", "Kraft", "Black"], "place": "canvas", "artwork": true
+    },
+    {
+      "key": "grain", "type": "slider", "label": "Grain", "least": 0, "most": 1, "step": 0.05, "starts": 0.6,
+      "shown_times": 100, "unit": "%", "place": "canvas", "artwork": true
+    },
+    {
+      "key": "size", "type": "slider", "label": "Grain size", "least": 0.5, "most": 4, "step": 0.25, "starts": 1,
+      "shown_times": 100, "unit": "%", "artwork": true
+    },
+    {
+      "key": "shown", "type": "slider", "label": "Texture under the art", "least": 0, "most": 1, "step": 0.05,
+      "starts": 0.3, "shown_times": 100, "unit": "%", "artwork": true
+    }
+  ]
+}

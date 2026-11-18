@@ -3580,6 +3580,65 @@ mod tests {
     }
 
     #[test]
+    fn a_paper_is_kept_with_each_artwork_and_given_to_its_canvas() {
+        const PAPER: &str = "io.github.artcraftandroid.paper";
+        let dir = store("bundled-paper");
+        let plugins = app_at(&dir);
+        assert!(plugins.set_on(PAPER.to_owned(), true));
+        let paper_of = |s: &crate::CanvasSession| s.shared.lock().plugin_paper.clone();
+        // an artwork starts with none
+        let one = crate::CanvasSession::new(64, 48);
+        one.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&one), None);
+        // chosen for it: given to its canvas, and kept with it
+        let edits = one.edits();
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 3.0).is_some());
+        assert!(plugins.set_slider(format!("{PAPER}.colour"), 2.0).is_some());
+        assert_ne!(one.edits(), edits);
+        // its tile drawn once a change, and given as drawn after: what the app asks each time the
+        // plugins change costs little
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        let drawn = hooks.paper();
+        let first = t.elapsed();
+        let t = std::time::Instant::now();
+        let again = hooks.paper();
+        let kept = t.elapsed();
+        println!("the paper asked in {first:?} drawing its tile, in {kept:?} drawn");
+        assert!(drawn.is_some() && drawn == again);
+        // (drawn row by row: before, point by point, it took 200 ms here, four times as long on a tablet)
+        assert!(first < std::time::Duration::from_millis(150), "{first:?}");
+        assert!(kept < std::time::Duration::from_millis(30), "{kept:?}");
+        one.use_plugins(Arc::clone(&plugins));
+        let given = paper_of(&one).unwrap();
+        assert_eq!(given.tile.len(), procraft_engine::textures::TEXTURE_SIZE.pow(2));
+        assert!(given.tile.iter().any(|&h| h < 128) && given.tile.iter().any(|&h| h > 128));
+        assert_eq!((given.strength, given.scale, given.depth), (0.6, 1.0, 0.3));
+        let cream = [0xF4, 0xEC, 0xD8].map(|c| c as f32 / 255.0);
+        assert_eq!(given.colour, Some(cream));
+        let saved = std::env::temp_dir().join(format!("procraft-paper-artwork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&saved);
+        one.save(saved.to_string_lossy().into_owned()).unwrap();
+        // another artwork has its own: none until chosen
+        let two = crate::CanvasSession::new(64, 48);
+        two.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&two), None);
+        assert!(
+            matches!(plugins.control(&format!("{PAPER}.paper")), Some(PluginControl::Slider { control }) if control.value == 0.0)
+        );
+        // the first opened again has its paper back
+        let opened = crate::CanvasSession::open(saved.to_string_lossy().into_owned()).unwrap();
+        opened.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&opened), Some(given));
+        // None takes it away
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 0.0).is_some());
+        opened.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&opened), None);
+        let _ = std::fs::remove_dir_all(&saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();
         plugins.add_bundled(crate::bundled::BUNDLED);
