@@ -957,4 +957,73 @@ mod tests {
         assert_eq!(s.redo().as_deref(), Some("Text editing"));
         assert_eq!(s.layer_text(id).map(|t| t.each_run().len()), Some(2));
     }
+
+    /// A style change, and how it reads on a run (to see it took).
+    type Change = (TextStyleChange, fn(&TextRun) -> bool);
+
+    /// Each style change the sheet makes.
+    fn changes() -> Vec<Change> {
+        vec![
+            (TextStyleChange::Font { family: "serif".to_owned() }, |r| r.font == "serif"),
+            (TextStyleChange::Style { name: "Bold".to_owned() }, |r| r.style == "Bold"),
+            (TextStyleChange::Size { size: 40.0 }, |r| r.size == 40.0),
+            (TextStyleChange::Kerning { value: 0.5 }, |r| r.kerning == 0.5),
+            (TextStyleChange::Tracking { value: -0.25 }, |r| r.tracking == -0.25),
+            (TextStyleChange::Baseline { value: 0.3 }, |r| r.baseline == 0.3),
+            (TextStyleChange::Opacity { value: 0.4 }, |r| r.opacity == 0.4),
+            (TextStyleChange::Underline { on: true }, |r| r.underline),
+            (TextStyleChange::Outline { on: true }, |r| r.outline),
+        ]
+    }
+
+    #[test]
+    fn a_style_picked_with_a_caret_is_typed_next_with_some_letters_theirs_and_with_all_the_whole_text() {
+        for (change, took) in changes() {
+            let s = CanvasSession::new(400, 400);
+            let id = s.text_begin(None, text("ab rd")).unwrap();
+            let before = s.layer_text(id).unwrap();
+            // only the caret (after "ab"): the text as it was; what is typed there next takes it
+            s.text_select(2, 2);
+            let now = s.text_restyle(2, 2, change.clone()).unwrap();
+            assert_eq!(now, before, "{change:?}");
+            let look = s.text_look(2, 2).unwrap();
+            assert!(took(&TextRun::from(look)), "{change:?}");
+            let typed = s.set_text(TextInfo { text: "abx rd".to_owned(), ..now }).unwrap();
+            s.text_select(3, 3);
+            let runs = typed.each_run();
+            assert_eq!(runs.iter().map(|r| (r.len, took(r))).collect::<Vec<_>>(), [(2, false), (1, true), (3, false)]);
+            // some letters ("rd"): theirs alone
+            s.text_select(4, 6);
+            let some = s.text_restyle(4, 6, change.clone()).unwrap();
+            let runs = some.each_run();
+            assert_eq!(runs.last().map(|r| (r.len, took(r))), Some((2, true)), "{change:?}");
+            assert!(runs.first().is_some_and(|r| !took(r)), "{change:?}");
+            // all of them: the whole text, one look throughout
+            s.text_select(0, 6);
+            let all = s.text_restyle(0, 6, change.clone()).unwrap();
+            assert!(all.runs.is_empty() && took(&all.each_run()[0]), "{change:?} {all:?}");
+            s.text_end(true);
+        }
+    }
+
+    #[test]
+    fn a_text_opened_again_takes_a_style_picked_straight_away_whole() {
+        // as before letters could be chosen: a text opened for editing (and new text before
+        // anything is typed) has all of it chosen, so a look picked then is the whole text's
+        for (change, took) in changes() {
+            let s = CanvasSession::new(400, 400);
+            s.text_begin(None, text("Text")).unwrap();
+            let new = s.text_restyle(0, 4, change.clone()).unwrap();
+            assert!(new.runs.is_empty() && took(&new.each_run()[0]), "{change:?}");
+            s.text_end(true);
+            let id = s.text_begin(None, text("Hello there")).unwrap();
+            s.text_end(true);
+            assert!(s.text_begin(Some(id), s.layer_text(id).unwrap()).is_some());
+            let whole = s.text_restyle(0, 11, change.clone()).unwrap();
+            assert!(whole.runs.is_empty() && took(&whole.each_run()[0]), "{change:?} {whole:?}");
+            let look = TextRun::from(s.text_look(0, 11).unwrap());
+            assert!(look.len == 11 && took(&look), "{change:?}");
+            s.text_end(true);
+        }
+    }
 }
