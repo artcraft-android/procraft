@@ -246,6 +246,10 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    // the devices' own raw input, which nothing here reads: under X11 a tablet's pen sends it for
+    // each of its moves, besides the window's own events
+    #[cfg(target_os = "linux")]
+    event_loop.listen_device_events(winit::event_loop::DeviceEvents::Never);
     // a Mac hands the files opened from the Finder to the app as it runs, not in its arguments
     #[cfg(target_os = "macos")]
     finder::watch();
@@ -476,6 +480,11 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // X11 gives each axis of a pen's move (its pressure, its tilts) as an event of its own as
+        // well, which nothing here reads: several for every move a tablet's pen makes
+        if matches!(event, WindowEvent::AxisMotion { .. }) {
+            return;
+        }
         let _timed =
             Timed(if event == WindowEvent::RedrawRequested { "a frame" } else { "a window event" }, Instant::now());
         if self.projection.as_ref().is_some_and(|p| p.window.id() == id) {
