@@ -99,6 +99,11 @@ impl State {
     ) {
         self.needs_frame = false;
         self.frame_due = None;
+        // a shape moved since the last frame is drawn again where it is now, once however many
+        // moves came meanwhile
+        self.draw_moved_shape();
+        // what runs ahead of the open stroke, once however many samples came since the last frame
+        self.draw_ahead();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;

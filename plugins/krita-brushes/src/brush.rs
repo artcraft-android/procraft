@@ -204,6 +204,11 @@ pub struct Smudge {
     pub smear_alpha: bool,
     /// It picks up from every layer (Krita's overlay mode).
     pub overlay: bool,
+    /// A lightness tip's paint thickness (how far its grey keeps from a flat middle grey, 0..1) and
+    /// how that meets the thickness laid before: over it in its place (1), or over it as far as the
+    /// smudge length and the thickness take it (2).
+    pub thickness: CurveOption,
+    pub thickness_mode: u32,
 }
 
 impl Smudge {
@@ -223,7 +228,16 @@ impl Smudge {
             newer,
             smear_alpha: p.flag("SmudgeRateSmearAlpha", true),
             overlay: p.flag("MergedPaint", false),
+            thickness: CurveOption::read(p, "", "PaintThickness", true, 0.0, 1.0),
+            // (Krita reads its reserved 0 as the second)
+            thickness_mode: if p.number("PaintThicknessThicknessMode", 2.0) as u32 == 1 { 1 } else { 2 },
         }
+    }
+
+    /// Whether its dabs keep their paint with the layer, lit by the thickness their tips lay (a
+    /// lightness tip's, as Krita's colour smudge keeps it between strokes).
+    pub fn keeps_thickness(&self, tip: Kind) -> bool {
+        tip == Kind::Lightness
     }
 
     /// How far a dab lays what it moves, and what share of that is the colour, for its smudge rate,
@@ -1139,9 +1153,17 @@ impl Brush {
         if self.moves_paint() || self.grid.as_ref().is_some_and(|g| g.sample) {
             look.byte(9, 1);
         }
-        // in overlay mode (a clone from the image), from every layer
-        if self.smudge.as_ref().is_some_and(|s| s.overlay) || self.clone.as_ref().is_some_and(|c| c.from_image) {
+        // in overlay mode (a clone from the image), from every layer; a smudge keeping its paint with
+        // the layer picks up from that alone
+        let keeps = self.smudge.as_ref().is_some_and(|s| s.keeps_thickness(self.tip.kind));
+        if self.smudge.as_ref().is_some_and(|s| s.overlay && !keeps)
+            || self.clone.as_ref().is_some_and(|c| c.from_image)
+        {
             look.byte(10, 1);
+        }
+        // a lightness tip's smudge keeps its paint with the layer, lit by the thickness laid
+        if keeps {
+            look.byte(12, 1);
         }
         // a bristle brush soaking up its ink wants the colours where its strokes start
         if let Some(side) = self.hairy.as_ref().map(crate::others::Hairy::soaks).filter(|&s| s > 0) {

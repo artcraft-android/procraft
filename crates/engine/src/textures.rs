@@ -154,6 +154,11 @@ pub fn drawn_to_stock_size(index: u32) -> bool {
     drawn_to_stock_width(index).is_some()
 }
 
+/// How many shapes and grains there are: their indices run up to one under. Known without
+/// making them (a library of brushes standing in with them is made long before it draws).
+pub const SHAPE_COUNT: u32 = shape::STUBBLE + 1;
+pub const GRAIN_COUNT: u32 = grain::SCROLLS + 1;
+
 /// The Coarse grain's tooth: below this the fibres darken it, by this much a unit.
 const COARSE_LIGHT: f32 = 0.6;
 const COARSE_DEPTH: f32 = 1.25;
@@ -324,8 +329,9 @@ fn marks(half: u32) -> Vec<f32> {
     let sigma = (half as f32 / 4.0) / 1.665;
     let raw: Vec<f32> = (0..n * n).map(|k| hash((k % n) as i32, (k / n) as i32, 6101)).collect();
     let soft = if sigma < 0.35 { raw } else { gaussian_wrapped(&raw, n, sigma) };
-    let mut order: Vec<(f32, usize)> = soft.iter().copied().zip(0..).collect();
-    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // in order of value, equal ones in order of place (as a stable sort by value)
+    let mut order: Vec<(u32, usize)> = soft.iter().map(|&v| total_order(v)).zip(0..).collect();
+    order.sort_unstable();
     let mut even = vec![0.0; n * n];
     for (rank, &(_, k)) in order.iter().enumerate() {
         if let Some(v) = even.get_mut(k) {
@@ -345,19 +351,32 @@ fn gaussian_wrapped(values: &[f32], n: usize, sigma: f32) -> Vec<f32> {
     let reach = (sigma * 3.0).ceil() as i32;
     let weights: Vec<f32> = (-reach..=reach).map(|d| (-(d * d) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let total: f32 = weights.iter().sum();
+    // each pixel worked out as it was a pixel at a time, bands of rows side by side
     let pass = |src: &[f32], across: bool| -> Vec<f32> {
-        (0..n * n)
-            .map(|k| {
-                let (i, j) = ((k % n) as i32, (k / n) as i32);
-                let mut v = 0.0;
-                for (w, d) in weights.iter().zip(-reach..=reach) {
-                    let (x, y) =
-                        if across { ((i + d).rem_euclid(n as i32), j) } else { (i, (j + d).rem_euclid(n as i32)) };
-                    v += w * src.get(y as usize * n + x as usize).copied().unwrap_or(0.0);
-                }
-                v / total
-            })
-            .collect()
+        let mut out = vec![0.0; n * n];
+        let rows = n.div_ceil(crate::par::cores()).max(1);
+        std::thread::scope(|s| {
+            for (band, part) in out.chunks_mut(rows * n).enumerate() {
+                let weights = &weights;
+                crate::par::beside(s, move || {
+                    for (at, px) in part.iter_mut().enumerate() {
+                        let k = band * rows * n + at;
+                        let (i, j) = ((k % n) as i32, (k / n) as i32);
+                        let mut v = 0.0;
+                        for (w, d) in weights.iter().zip(-reach..=reach) {
+                            let (x, y) = if across {
+                                ((i + d).rem_euclid(n as i32), j)
+                            } else {
+                                (i, (j + d).rem_euclid(n as i32))
+                            };
+                            v += w * src.get(y as usize * n + x as usize).copied().unwrap_or(0.0);
+                        }
+                        *px = v / total;
+                    }
+                });
+            }
+        });
+        out
     };
     pass(&pass(values, true), false)
 }
@@ -2454,17 +2473,29 @@ fn worn() -> Vec<u8> {
 
 /// `raw` values ranked onto `spread` ((value, share at or below it), rising): the darkest share
 /// of them takes the darkest values, and so on.
+/// `v`'s bits as a number that orders as [`f32::total_cmp`] orders the values.
+fn total_order(v: f32) -> u32 {
+    let bits = v.to_bits();
+    if bits >> 31 == 1 { !bits } else { bits | 1 << 31 }
+}
+
 fn ranked(raw: &[f32], spread: &[(f32, f32)]) -> Vec<u8> {
-    let mut order: Vec<usize> = (0..raw.len()).collect();
-    order.sort_by(|&a, &b| raw.get(a).unwrap_or(&0.0).total_cmp(raw.get(b).unwrap_or(&0.0)));
+    // in order of value, equal ones in order of place (as a stable sort by value)
+    let mut order: Vec<(u32, usize)> = raw.iter().enumerate().map(|(k, &v)| (total_order(v), k)).collect();
+    order.sort_unstable();
     let mut pixels = vec![0u8; raw.len()];
     let count = order.len().max(1) as f32;
     let last = spread.last().map_or(1.0, |s| s.0);
-    for (rank, &k) in order.iter().enumerate() {
+    // the stretch of `spread` the share falls in: the first whose end it doesn't pass (the shares
+    // only grow, so it only moves on)
+    let mut at = 0;
+    for (rank, &(_, k)) in order.iter().enumerate() {
         let share = (rank as f32 + 0.5) / count;
-        let at = spread.windows(2).find(|w| matches!(w, [_, b] if share <= b.1));
-        let value = match at {
-            Some([a, b]) => a.0 + (b.0 - a.0) * (share - a.1) / (b.1 - a.1).max(1e-6),
+        while spread.get(at + 1).is_some_and(|b| share > b.1) {
+            at += 1;
+        }
+        let value = match (spread.get(at), spread.get(at + 1)) {
+            (Some(a), Some(b)) => a.0 + (b.0 - a.0) * (share - a.1) / (b.1 - a.1).max(1e-6),
             _ => last,
         };
         if let Some(p) = pixels.get_mut(k) {
@@ -2537,12 +2568,11 @@ fn recycled() -> Vec<u8> {
 fn field(f: impl Fn(f32, f32) -> f32 + Sync) -> Vec<u8> {
     let n = TEXTURE_SIZE;
     let mut out = vec![0u8; n * n];
-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
-    let rows = n.div_ceil(threads);
+    let rows = n.div_ceil(crate::par::cores());
     std::thread::scope(|s| {
         for (band, pixels) in out.chunks_mut(rows * n).enumerate() {
             let f = &f;
-            s.spawn(move || {
+            crate::par::beside(s, move || {
                 for (k, px) in pixels.iter_mut().enumerate() {
                     let (i, j) = (k % n, band * rows + k / n);
                     let v = f((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
@@ -2840,28 +2870,47 @@ fn blend_edges(img: &[f32], n: usize, repeat: Repeat) -> Vec<f32> {
     tones.iter().zip(&detail).map(|(a, b)| a + b).collect()
 }
 
-/// A box blur of radius `r` over the square image, wrapping round its edges.
+/// A box blur of radius `r` (under `TEXTURE_SIZE`) over the square image, wrapping round its
+/// edges: each pixel the sum of the `2r + 1` about it across, in order, over their count, then the
+/// same down. The rows (then the columns, turned into rows) are worked side by side.
 fn blurred(img: &[f32], r: usize) -> Vec<f32> {
     let n = TEXTURE_SIZE;
+    let across = blurred_rows(img, n, r);
+    transposed(&blurred_rows(&transposed(&across, n), n, r), n)
+}
+
+/// Each row of `img` (`n` square) box-blurred across by radius `r` (at most `n`), wrapping round:
+/// each pixel the sum of the `2r + 1` about it, left to right, over their count. Bands of rows are
+/// worked side by side.
+fn blurred_rows(img: &[f32], n: usize, r: usize) -> Vec<f32> {
     let span = (2 * r + 1) as f32;
-    let pass = |src: &[f32], across: bool| -> Vec<f32> {
-        let at = |a: usize, b: usize| {
-            let (x, y) = if across { (a % n, b) } else { (b, a % n) };
-            src.get(y * n + x).copied().unwrap_or(0.0)
-        };
-        let mut out = vec![0.0; n * n];
-        for b in 0..n {
-            for a in 0..n {
-                let sum: f32 = (0..=2 * r).map(|k| at(a + n - r + k, b)).sum();
-                let (x, y) = if across { (a, b) } else { (b, a) };
-                if let Some(px) = out.get_mut(y * n + x) {
-                    *px = sum / span;
+    let mut out = vec![0.0; n * n];
+    let rows = n.div_ceil(crate::par::cores()).max(1);
+    std::thread::scope(|s| {
+        for (band, part) in out.chunks_mut(rows * n).enumerate() {
+            crate::par::beside(s, move || {
+                // a row with `r` of it wrapped round on each side
+                let mut wrapped = vec![0.0f32; n + 2 * r];
+                for (j, line) in part.chunks_mut(n).enumerate() {
+                    let y = band * rows + j;
+                    let row = img.get(y * n..(y + 1) * n).unwrap_or_default();
+                    for (i, w) in wrapped.iter_mut().enumerate() {
+                        *w = row.get((i + n - r) % n.max(1)).copied().unwrap_or(0.0);
+                    }
+                    for (a, px) in line.iter_mut().enumerate() {
+                        let sum: f32 = wrapped.get(a..=a + 2 * r).unwrap_or_default().iter().sum();
+                        *px = sum / span;
+                    }
                 }
-            }
+            });
         }
-        out
-    };
-    pass(&pass(img, true), false)
+    });
+    out
+}
+
+/// `img` (`n` square) turned about its diagonal: its rows as columns.
+fn transposed(img: &[f32], n: usize) -> Vec<f32> {
+    (0..n * n).map(|k| img.get((k % n) * n + k / n).copied().unwrap_or(0.0)).collect()
 }
 
 /// A box blur of radius `r` (less than `n`) over the `n` square image, wrapping round its edges.
@@ -2904,6 +2953,109 @@ fn sample_wrapped(img: &[f32], n: usize, u: f32, v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The box blur as first written, a pixel at a time: what [`blurred`] must match bit for bit.
+    fn blurred_slowly(img: &[f32], r: usize) -> Vec<f32> {
+        let n = TEXTURE_SIZE;
+        let span = (2 * r + 1) as f32;
+        let pass = |src: &[f32], across: bool| -> Vec<f32> {
+            let at = |a: usize, b: usize| {
+                let (x, y) = if across { (a % n, b) } else { (b, a % n) };
+                src[y * n + x]
+            };
+            let mut out = vec![0.0; n * n];
+            for b in 0..n {
+                for a in 0..n {
+                    let sum: f32 = (0..=2 * r).map(|k| at(a + n - r + k, b)).sum();
+                    let (x, y) = if across { (a, b) } else { (b, a) };
+                    out[y * n + x] = sum / span;
+                }
+            }
+            out
+        };
+        pass(&pass(img, true), false)
+    }
+
+    /// The ranking as first written (a stable sort, each share's stretch looked for from the
+    /// start): what [`ranked`] must match.
+    fn ranked_slowly(raw: &[f32], spread: &[(f32, f32)]) -> Vec<u8> {
+        let mut order: Vec<usize> = (0..raw.len()).collect();
+        order.sort_by(|&a, &b| raw[a].total_cmp(&raw[b]));
+        let mut pixels = vec![0u8; raw.len()];
+        let count = order.len().max(1) as f32;
+        let last = spread.last().map_or(1.0, |s| s.0);
+        for (rank, &k) in order.iter().enumerate() {
+            let share = (rank as f32 + 0.5) / count;
+            let at = spread.windows(2).find(|w| matches!(w, [_, b] if share <= b.1));
+            let value = match at {
+                Some([a, b]) => a.0 + (b.0 - a.0) * (share - a.1) / (b.1 - a.1).max(1e-6),
+                _ => last,
+            };
+            pixels[k] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        pixels
+    }
+
+    /// The Gaussian softening as first written, a pixel at a time on one thread.
+    fn gaussian_slowly(values: &[f32], n: usize, sigma: f32) -> Vec<f32> {
+        let reach = (sigma * 3.0).ceil() as i32;
+        let weights: Vec<f32> = (-reach..=reach).map(|d| (-(d * d) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+        let total: f32 = weights.iter().sum();
+        let pass = |src: &[f32], across: bool| -> Vec<f32> {
+            (0..n * n)
+                .map(|k| {
+                    let (i, j) = ((k % n) as i32, (k / n) as i32);
+                    let mut v = 0.0;
+                    for (w, d) in weights.iter().zip(-reach..=reach) {
+                        let (x, y) =
+                            if across { ((i + d).rem_euclid(n as i32), j) } else { (i, (j + d).rem_euclid(n as i32)) };
+                        v += w * src[y as usize * n + x as usize];
+                    }
+                    v / total
+                })
+                .collect()
+        };
+        pass(&pass(values, true), false)
+    }
+
+    #[test]
+    fn there_are_as_many_shapes_and_grains_as_counted() {
+        assert_eq!(shapes().len(), SHAPE_COUNT as usize);
+        assert_eq!(grains().len(), GRAIN_COUNT as usize);
+    }
+
+    #[test]
+    fn the_blur_and_ranking_give_what_they_gave_a_pixel_at_a_time() {
+        let n = TEXTURE_SIZE;
+        let noise: Vec<f32> = (0..n * n).map(|k| hash((k % n) as i32, (k / n) as i32, 91)).collect();
+        for sigma in [0.5f32, 2.0, 6.0] {
+            let (fast, slow) = (gaussian_wrapped(&noise, n, sigma), gaussian_slowly(&noise, n, sigma));
+            assert!(fast.iter().zip(&slow).all(|(a, b)| a.to_bits() == b.to_bits()), "sigma {sigma}");
+        }
+        for v in [-1.5f32, -0.0, 0.0, 1e-30, 0.25, 7.0] {
+            for w in [-1.5f32, -0.0, 0.0, 1e-30, 0.25, 7.0] {
+                assert_eq!(total_order(v).cmp(&total_order(w)), v.total_cmp(&w), "{v} {w}");
+            }
+        }
+        let n = TEXTURE_SIZE;
+        // noise with runs of equal values, as shapes have
+        let img: Vec<f32> =
+            (0..n * n).map(|k| (hash((k % n) as i32 / 3, (k / n) as i32, 77) * 8.0).floor() / 8.0).collect();
+        for r in [0, 1, 6, 24, 64] {
+            let (fast, slow) = (blurred(&img, r), blurred_slowly(&img, r));
+            assert!(fast.iter().zip(&slow).all(|(a, b)| a.to_bits() == b.to_bits()), "radius {r}");
+        }
+        let spreads: [&[(f32, f32)]; 4] = [&SHEET_SPREAD, &RECYCLED_SPREAD, &[(0.2, 0.0)], &[]];
+        for spread in spreads {
+            assert_eq!(ranked(&img, spread), ranked_slowly(&img, spread));
+        }
+        let shape = shapes().into_iter().nth(shape::LEAF as usize).unwrap().pixels;
+        let tones: Vec<u8> = (0..17).map(|k| (k * 15) as u8).collect();
+        let raw: Vec<f32> = shape.iter().map(|&v| f32::from(v) + 0.5).collect();
+        let spread: Vec<(f32, f32)> =
+            tones.iter().zip(SHAPE_TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+        assert_eq!(ranked(&raw, &spread), ranked_slowly(&raw, &spread));
+    }
 
     #[test]
     fn a_retoned_grain_takes_the_tones_it_is_given_in_its_own_order() {

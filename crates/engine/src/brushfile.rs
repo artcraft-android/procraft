@@ -464,12 +464,28 @@ pub fn read(bytes: &[u8]) -> Option<BrushFile> {
     read_in(&ZipReader::new(bytes)?, "")
 }
 
+/// Reads the brush file that is the archive `zip`; none if it isn't one.
+pub fn read_zip(zip: &ZipReader<'_>) -> Option<BrushFile> {
+    read_in(zip, "")
+}
+
 /// Reads a set file: the set's name and its brushes in order; none if it isn't one.
 pub fn read_set(bytes: &[u8]) -> Option<(String, Vec<BrushFile>)> {
     let zip = ZipReader::new(bytes)?;
-    let (name, folders) = set_list(&zip.read("brushset.plist")?)?;
-    let brushes: Vec<BrushFile> = folders.iter().filter_map(|f| read_in(&zip, &format!("{f}/"))).collect();
+    let (name, folders) = set_folders(&zip)?;
+    let brushes: Vec<BrushFile> = folders.iter().filter_map(|f| read_folder(&zip, f)).collect();
     (!brushes.is_empty()).then_some((name, brushes))
+}
+
+/// A set file's name and its brushes' folders, in order, from its list; none if `zip` isn't one.
+/// Its brushes can then be read a folder at a time ([`read_folder`]), a big set never all at once.
+pub fn set_folders(zip: &ZipReader<'_>) -> Option<(String, Vec<String>)> {
+    set_list(&zip.read("brushset.plist")?)
+}
+
+/// The brush in `folder` of set file `zip`; none if it holds none.
+pub fn read_folder(zip: &ZipReader<'_>, folder: &str) -> Option<BrushFile> {
+    read_in(zip, &format!("{folder}/"))
 }
 
 /// The set's name and its brushes' folders from `brushset.plist` (XML or binary).
@@ -784,10 +800,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     let secondary =
         if prefix.ends_with(SECONDARY) { None } else { read_in(zip, &format!("{prefix}{SECONDARY}")).map(Box::new) };
     // Older combined brushes predate the Normal blend switch and use the classic rule.
-    if secondary.is_some()
-        && f.num("legacyNormalDual").is_none()
-        && f.num("dualBlendMode").unwrap_or(0.0) == 0.0
-    {
+    if secondary.is_some() && f.num("legacyNormalDual").is_none() && f.num("dualBlendMode").unwrap_or(0.0) == 0.0 {
         set("classic_combine", 1.0);
     }
     let inverted = f.flag("textureInverted") && !older_grain;

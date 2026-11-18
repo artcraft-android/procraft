@@ -26,7 +26,7 @@ class SaveToGalleryActivity : ComponentActivity() {
     private val files by lazy { intent.getStringArrayExtra(EXTRA_PATHS).orEmpty().map(::File).filter { it.isFile } }
     private val mime by lazy { intent.getStringExtra(EXTRA_MIME) ?: "image/png" }
 
-    // Android 9 lets an app into the shared folders only with leave to write there
+    // Android 8 and 9 let an app into the shared folders only with leave to write there
     private val askToWrite = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             save()
@@ -103,7 +103,7 @@ class SaveToGalleryActivity : ComponentActivity() {
     }
 
     /**
-     * Android 9: [file] copied into the shared folder under a name of its own (written beside it
+     * Android 8 and 9: [file] copied into the shared folder under a name of its own (written beside it
      * first, then put in place whole), then told to the media store so galleries list it.
      */
     @Suppress("DEPRECATION")

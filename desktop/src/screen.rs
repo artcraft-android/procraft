@@ -376,8 +376,10 @@ impl Screen {
         let (format, screen) = (config.format, screen_profile(config));
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            // made again at the window's size as it now is: the window changing is what put the
+            // surface out of date, and made at its old size it would stay so
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.resize(size.0, size.1);
+                self.resize(window.width, window.height);
                 return Some(Duration::ZERO);
             }
             wgpu::CurrentSurfaceTexture::Timeout

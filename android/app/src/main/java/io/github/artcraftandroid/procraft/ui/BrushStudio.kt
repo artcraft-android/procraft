@@ -1840,7 +1840,8 @@ private fun NodeMenu(points: List<Offset>, index: Int, box: androidx.compose.ui.
     }
 }
 
-private val NodeMenuFill = Color(0xFF101010)
-private val NodeMenuHalo = 16.dp
-private val NodeMenuWidth = 70.dp
-private val NodeMenuRow = 36.dp
+/** A node menu's look (a curve's, the guide editor's handles'): its fill, the room round it for its shadow, its width and its rows' height. */
+internal val NodeMenuFill = Color(0xFF101010)
+internal val NodeMenuHalo = 16.dp
+internal val NodeMenuWidth = 70.dp
+internal val NodeMenuRow = 36.dp

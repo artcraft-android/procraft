@@ -22,7 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,319 +53,362 @@ fun AppRoot(vm: CanvasViewModel) {
     val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList, keptClear)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize, keptClear) {
-        if (vm.screen == Screen.GALLERY) {
-            ZoomingGallery(vm, overlay = false)
-            // a share from the gallery shows its card there, and a file brought in its own
-            ExportProgress(vm.exportShown, vm::cancelExport)
-            ImportProgress(vm.importShown, vm::cancelImport)
-            PluginOfferAlert(vm)
-            WrongBuildAlert(vm)
-            return@ProCraftTheme
+        // layers lifted out of the panel stay held across the gallery and into another artwork
+        HoldingLayers(vm) { Screens(vm, keptClear) }
+    }
+}
+
+/** The gallery, or the open artwork's canvas with the bars and panels over it. */
+@Composable
+private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
+    if (vm.screen == Screen.GALLERY) {
+        ZoomingGallery(vm, overlay = false)
+        // a share from the gallery shows its card there, and a file brought in its own
+        ExportProgress(vm.exportShown, vm::cancelExport)
+        ImportProgress(vm.importShown, vm::cancelImport)
+        PluginOfferAlert(vm)
+        WrongBuildAlert(vm)
+        return
+    }
+    // back closes an open panel first, then leaves the artwork for the gallery
+    BackHandler {
+        when {
+            vm.guideEditing -> vm.closeGuideEditor(keep = false)
+            vm.cropRect != null -> vm.endCrop(false)
+            vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
+            vm.studioOpen -> vm.closeStudio(keep = false)
+            vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
+            vm.selectionPopup != SelectionPopup.NONE -> vm.selectionPopup = SelectionPopup.NONE
+            vm.selecting -> vm.closeSelecting()
+            vm.adjustment != null -> vm.endAdjustment(true)
+            vm.transforming -> vm.endTransform(true)
+            vm.panel != Panel.NONE -> vm.closePanels()
+            else -> vm.closeArtwork()
         }
-        // back closes an open panel first, then leaves the artwork for the gallery
-        BackHandler {
-            when {
-                vm.guideEditing -> vm.closeGuideEditor(keep = false)
-                vm.cropRect != null -> vm.endCrop(false)
-                vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
-                vm.studioOpen -> vm.closeStudio(keep = false)
-                vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
-                vm.selectionPopup != SelectionPopup.NONE -> vm.selectionPopup = SelectionPopup.NONE
-                vm.selecting -> vm.closeSelecting()
-                vm.adjustment != null -> vm.endAdjustment(true)
-                vm.transforming -> vm.endTransform(true)
-                vm.panel != Panel.NONE -> vm.closePanels()
-                else -> vm.closeArtwork()
-            }
+    }
+    // panels over the canvas are frosted (where it is on the screen: the corner of the window's
+    // content, this view's, and in from it by what the interface keeps clear of; see canvasCorner)
+    val content = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(content, keptClear) {
+        vm.backdrops.canvasOnScreen = {
+            val at = IntArray(2).also(content::getLocationOnScreen)
+            canvasCorner(androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat()), keptClear)
         }
-        // panels over the canvas are frosted (where it is on the screen: the window's corner, and
-        // in from it by what the interface keeps clear of)
-        val window = androidx.compose.ui.platform.LocalView.current.rootView
-        androidx.compose.runtime.DisposableEffect(window, keptClear) {
-            vm.backdrops.windowOnScreen = {
-                val at = IntArray(2).also(window::getLocationOnScreen)
-                androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat()) + keptClear.corner
-            }
-            onDispose { vm.backdrops.windowOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
-        }
-        CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
-            // files dragged in from another app: pictures as layers, brushes into the library
-            val activity = androidx.compose.ui.platform.LocalContext.current.activity()
-            val dropped = androidx.compose.runtime.remember(vm) {
-                object : androidx.compose.ui.draganddrop.DragAndDropTarget {
-                    override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
-                        val uris = event.droppedFiles(activity)
-                        vm.dropOnCanvas(uris)
-                        return uris.isNotEmpty()
-                    }
+        onDispose { vm.backdrops.canvasOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
+    }
+    CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
+        // files dragged in from another app: pictures as layers, brushes into the library
+        val activity = androidx.compose.ui.platform.LocalContext.current.activity()
+        val dropped = androidx.compose.runtime.remember(vm) {
+            object : androidx.compose.ui.draganddrop.DragAndDropTarget {
+                override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
+                    val uris = event.droppedFiles(activity)
+                    vm.dropOnCanvas(uris)
+                    return uris.isNotEmpty()
                 }
             }
-            BoxWithConstraints(
-                Modifier.fillMaxSize().background(Pc.Surround).dragAndDropTarget(
-                    shouldStartDragAndDrop = { it.fromElsewhere() },
-                    target = dropped,
-                ),
-            ) {
-                AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
-                // the drawing guide is the canvas's: under every bar and panel
-                GuideOverlay(vm)
-                if (vm.transforming) TransformOverlay(vm)
-                if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
-                vm.picking?.let { pick ->
-                    val pickingZ = if (pick.fromReference) 1f else 0f
-                    Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
-                    if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight).zIndex(pickingZ), pick.fromReference)
-                }
-                // the bars fade out as the interface hides, and back
-                val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
-                // with the interface hidden, a button in the top left brings it back
-                if (barsShown < 1f) {
-                    Box(
-                        Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
-                            .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        // its glyph is drawn wider than it is tall: 50 units shown 36.7 by 32
-                        androidx.compose.foundation.Image(
-                            androidx.compose.ui.graphics.vector.rememberVectorPainter(PcIcons.FullScreen),
-                            contentDescription = "Show the interface",
-                            contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
-                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pc.SideGlyph),
-                            modifier = Modifier.offset(y = 0.3.dp).requiredSize(36.7.dp, 32.dp),
-                        )
-                    }
-                }
-                // a slider's panel kept up goes with the next touch anywhere else
-                if (vm.sliderPanelKept && vm.sliderPanel != null) {
-                    Box(
-                        Modifier.fillMaxSize().pointerInput(Unit) {
-                            awaitEachGesture {
-                                awaitFirstDown().consume()
-                                vm.sliderPanel = null
-                                vm.sliderPanelKept = false
-                            }
-                        },
+        }
+        BoxWithConstraints(
+            Modifier.fillMaxSize().background(Pc.Surround).dragAndDropTarget(
+                shouldStartDragAndDrop = { it.fromElsewhere() },
+                target = dropped,
+            ),
+        ) {
+            AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
+            // the drawing guide is the canvas's: under every bar and panel
+            GuideOverlay(vm)
+            if (vm.transforming) TransformOverlay(vm)
+            if (vm.selecting) SelectionOverlay(vm, Pc.barShown)
+            vm.picking?.let { pick ->
+                val pickingZ = if (pick.fromReference) 1f else 0f
+                Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
+                if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.barShown).zIndex(pickingZ), pick.fromReference)
+            }
+            // the bars fade out as the interface hides, and back
+            val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
+            // with the interface hidden, a button in the top left brings it back
+            if (barsShown < 1f) {
+                Box(
+                    Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
+                        .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    // its glyph is drawn wider than it is tall: 50 units shown 36.7 by 32
+                    androidx.compose.foundation.Image(
+                        androidx.compose.ui.graphics.vector.rememberVectorPainter(PcIcons.FullScreen),
+                        contentDescription = "Show the interface",
+                        contentScale = androidx.compose.ui.layout.ContentScale.FillBounds,
+                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pc.SideGlyph),
+                        modifier = Modifier.offset(y = 0.3.dp).requiredSize(36.7.dp, 32.dp),
                     )
                 }
-                if (barsShown > 0f) {
-                    // the top bar slides up off the screen and the side bar out to its side as they fade
-                    val fade = Modifier.graphicsLayer { alpha = barsShown }
-                    val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
-                    val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
+            }
+            // a slider's panel kept up goes with the next touch anywhere else
+            if (vm.sliderPanelKept && vm.sliderPanel != null) {
+                Box(
+                    Modifier.fillMaxSize().pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown().consume()
+                            vm.sliderPanel = null
+                            vm.sliderPanelKept = false
+                        }
+                    },
+                )
+            }
+            if (barsShown > 0f) {
+                // the top bar slides up off the screen and the side bar out to its side as they fade
+                val fade = Modifier.graphicsLayer { alpha = barsShown }
+                val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
+                val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
+                // the top bar and the side bar each at the size a plugin may give them
+                PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR) {
                     val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
                     val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
-                    val sideBar = Pc.sideBarFit(maxHeight)
-                    // a mode taking the screen slides it off its edge, and back when it ends
-                    androidx.compose.animation.AnimatedVisibility(
-                        vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
-                            vm.opacityLayer == null &&
-                            (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
-                        enter = Motion.sideBarIn(vm.rightHanded),
-                        exit = Motion.sideBarOut(vm.rightHanded),
-                    ) {
-                        // where it is, for a dragged colour over it
-                        DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
+                }
+                val side = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR)
+                val sideBar = Pc.sideBarFit(maxHeight / side, Pc.barShown / side)
+                // a mode taking the screen slides it off its edge, and back when it ends
+                androidx.compose.animation.AnimatedVisibility(
+                    vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                        vm.opacityLayer == null &&
+                        (vm.adjustment == null || vm.adjustPencil),
+                    Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top * side),
+                    enter = Motion.sideBarIn(vm.rightHanded),
+                    exit = Motion.sideBarOut(vm.rightHanded),
+                ) {
+                    // where it is, for a dragged colour over it
+                    DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
+                    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR) {
                         SideBar(
                             vm,
-                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow().translate(-keptClear.corner) },
+                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInRoot().translate(-keptClear.corner) },
                             right = vm.rightHanded,
                             trackHeight = sideBar.track,
                             shown = barsShown,
                         )
                     }
                 }
-                NoticeBand(vm)
-                DropBandUi(vm)
-                // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
-                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
-                    vm.animatedExport != null || vm.modelAnimatedExport != null
-                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
-                // the bottom toolbars rise from below the screen, and drop away
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.transforming && !vm.barsHidden,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) { TransformToolbar(vm, maxWidth) }
-                BrushCursor(vm)
-                // the Reference window floats over the bars and the canvas's own marks; the panels,
-                // menus and pages opened later come over it
-                ReferenceWindow(vm)
-                // the colour panel dragged out by its grabber: a window over the canvas until closed,
-                // under the panels, which open over it
-                FloatingColors(vm, maxWidth, maxHeight)
-                // each panel hangs from its button: colour, layers, then the tool that opened the library;
-                // it grows out of its arrow as it opens and fades as it closes
-                PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
-                    val (width, button) = when (shown) {
-                        Panel.LAYERS -> (if (vm.backgroundPicking) 376.dp else 384.dp) to 1
-                        Panel.COLOR -> 376.dp to 0
-                        Panel.BRUSHES -> 440.dp to when (vm.tool) {
-                            ToolKind.ERASE -> 2
-                            ToolKind.SMUDGE -> 3
-                            else -> 4
-                        }
-                        Panel.ACTIONS -> 390.dp to 0
-                        Panel.ADJUSTMENTS -> 330.dp to 1
-                        Panel.NONE -> 0.dp to 0
-                    }
-                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
-                    val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
-                    // panels keep clear of the side bar, on whichever side it is
-                    val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap
-                    val place = if (vm.rightHanded) popoverPlace(width, buttonX, maxWidth, minRight = clear) else popoverPlace(width, buttonX, maxWidth, clear)
-                    val pivot = with(androidx.compose.ui.platform.LocalDensity.current) {
-                        origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.BarHeight.toPx())
-                    }
-                    val at = Modifier.offset(x = place.left, y = Pc.BarHeight).graphicsLayer {
-                        this.alpha = alpha
-                        scaleX = scale
-                        scaleY = scale
-                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
-                    }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
-                    ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
-                        when (shown) {
-                            Panel.LAYERS -> if (vm.backgroundPicking) {
-                                ColorPanel(vm, place.arrowX, maxHeight, at, background = true)
-                                // closed any way at all, the colour is kept
-                                androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
-                            } else {
-                                LayersPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
-                            }
-                            Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
-                            Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
-                            // ending 25 above the screen's edge, their rows scrolling (as measured)
-                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.NONE -> Unit
-                        }
-                    }
-                }
-                if (vm.transforming && !vm.barsHidden) {
-                    TransformPopover(vm, maxWidth, maxHeight)
-                    TransformNumeric(vm)
-                }
-                TouchCompanion(vm)
-                CropOverlay(vm)
-                if (vm.textInfo != null) TextEditor(vm)
-                RasterizePrompt(vm)
-                vm.animatedExport?.let { AnimatedExport(vm, it) }
-                vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
-                // full-screen pages slide up over everything, and back down
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.canvasInfoOpen,
-                    enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
-                    exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
-                ) { Box(Modifier.fillMaxSize()) { CanvasInfo(vm) } }
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.gestureControlsOpen,
-                    enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
-                    exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
-                ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
-                // a plugin's own panel, while its action keeps it open
-                if (vm.pluginPanel != null) {
-                    Box(Modifier.fillMaxSize()) {
-                        // what its rows don't take stays on the panel, never reaching the canvas under it
-                        val swallows = Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
-                        PluginPanelView(vm, Modifier.align(Alignment.TopEnd).padding(top = Pc.BarHeight + 12.dp, end = 12.dp).then(swallows))
-                    }
-                }
-                ModelPicture(vm)
-                BlockedDialog(vm)
-                ModelWarningsAlert(vm)
-                SharedLayerAlert(vm)
-                PluginOfferAlert(vm)
-                // a fill a plugin is finishing: nothing is touched until it is done
-                if (vm.fillFinishing) {
-                    Box(
-                        Modifier.fillMaxSize().pointerInput(Unit) {
-                            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
-                        },
-                    )
-                }
-                ExportProgress(vm.exportShown, vm::cancelExport)
-                ImportProgress(vm.importShown, vm::cancelImport)
-                // a passing message goes in the band under the top bar, as what undo and redo did
-                vm.message?.let { text ->
-                    androidx.compose.runtime.LaunchedEffect(text) {
-                        vm.showNotice(text)
-                        vm.message = null
-                    }
-                }
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.timeLapseReplaying,
-                    Modifier.matchParentSize(),
-                    enter = androidx.compose.animation.fadeIn(Motion.replayFade()),
-                    exit = androidx.compose.animation.fadeOut(Motion.replayFade()),
-                ) { TimeLapseReplay(vm) }
-                // the gallery zooming into the artwork as it opens, over everything
-                ZoomingGallery(vm, overlay = true)
-                if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
-                if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
-                if (vm.recoloring) RecolorReticle(vm)
-                QuickShapeHandles(vm)
-                CopyPastePanel(vm)
-                QuickMenu(vm)
-                LayerChoice(vm)
-                if (!vm.barsHidden) QuickShapeBar(vm, Modifier.offset(y = Pc.BarHeight))
-                if (vm.opacityLayer != null && !vm.barsHidden) LayerOpacityBar(vm, Modifier.offset(y = Pc.BarHeight))
-                if (vm.adjustment != null && !vm.barsHidden) {
-                    AdjustmentBar(vm, Modifier.offset(y = Pc.BarHeight))
-                    AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.BarHeight + 52.dp))
-                    AdjustmentMenu(vm, maxWidth, maxHeight)
-                }
-                // the adjustment's own panel rises from below the screen, and drops away
-                val bottomPanel = vm.adjustment?.takeIf { !vm.barsHidden && it in BottomPanels }
-                val shownPanel = androidx.compose.runtime.remember { arrayOfNulls<Adjustment>(1) }
-                if (bottomPanel != null) shownPanel[0] = bottomPanel
-                androidx.compose.animation.AnimatedVisibility(
-                    bottomPanel != null,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) {
-                    shownPanel[0]?.let {
-                        when (it) {
-                            Adjustment.HSB -> HsbPanel(vm, Modifier)
-                            Adjustment.COLOR_BALANCE -> ColorBalancePanel(vm, Modifier)
-                            Adjustment.CURVES -> CurvesPanel(vm, Modifier)
-                            Adjustment.GRADIENT_MAP -> GradientMapPanel(vm, Modifier)
-                            Adjustment.GLITCH -> GlitchPanel(vm, Modifier)
-                            Adjustment.NOISE -> NoisePanel(vm, Modifier)
-                            Adjustment.BLOOM -> BloomPanel(vm, Modifier)
-                            Adjustment.HALFTONE -> HalftonePanel(vm, Modifier)
-                            Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
-                            Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
-                            Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
-                            Adjustment.PLUGIN -> PluginFilterPanel(vm, Modifier)
-                            else -> Unit
-                        }
-                    }
-                }
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.recoloring && !vm.barsHidden,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) { RecolorPanel(vm, Modifier) }
-                androidx.compose.animation.AnimatedVisibility(
-                    vm.selecting && !vm.barsHidden,
-                    Modifier.align(Alignment.BottomCenter),
-                    enter = Motion.toolbarIn(),
-                    exit = Motion.toolbarOut(),
-                ) { SelectionToolbar(vm, maxWidth) }
-                if (vm.selecting && !vm.barsHidden) {
-                    SelectionPopover(vm, maxWidth, maxHeight)
-                }
-                GuideEditor(vm)
-                LightingStudio(vm)
-                BrushStudio(vm)
-                PadMenu(vm, maxWidth)
-                // a colour dragged out goes over everything
-                DropDot(vm)
             }
+            NoticeBand(vm)
+            DropBandUi(vm)
+            // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
+            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
+                vm.animatedExport != null || vm.modelAnimatedExport != null
+            if (!vm.barsHidden && !pageOver) AnimationBar(vm)
+            // the bottom toolbars rise from below the screen, and drop away
+            androidx.compose.animation.AnimatedVisibility(
+                vm.transforming && !vm.barsHidden,
+                Modifier.align(Alignment.BottomCenter),
+                enter = Motion.toolbarIn(),
+                exit = Motion.toolbarOut(),
+            ) { TransformToolbar(vm, maxWidth) }
+            BrushCursor(vm)
+            // the Reference window floats over the bars and the canvas's own marks; the panels,
+            // menus and pages opened later come over it
+            ReferenceWindow(vm)
+            // the colour panel dragged out by its grabber: a window over the canvas until closed,
+            // under the panels, which open over it
+            FloatingColors(vm, maxWidth, maxHeight)
+            // the Layers panel and the brush library torn off into windows of their own, likewise
+            FloatingPanels(vm, maxWidth, maxHeight)
+            // each panel hangs from its button: colour, layers, then the tool that opened the library;
+            // it grows out of its arrow as it opens and fades as it closes
+            PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
+                val (width, button) = when (shown) {
+                    Panel.LAYERS -> (if (vm.backgroundPicking) 376.dp else 384.dp) to 1
+                    Panel.COLOR -> 376.dp to 0
+                    Panel.BRUSHES -> 440.dp to when (vm.tool) {
+                        ToolKind.ERASE -> 2
+                        ToolKind.SMUDGE -> 3
+                        else -> 4
+                    }
+                    Panel.ACTIONS -> 390.dp to 0
+                    Panel.ADJUSTMENTS -> 330.dp to 1
+                    Panel.NONE -> 0.dp to 0
+                }
+                val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
+                // its button where the top bar shows it, at the bar's size
+                val bar = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR)
+                val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth / bar) * bar else maxWidth - Pc.toolCentreFromRight(button, maxWidth / bar) * bar
+                // panels keep clear of the side bar, on whichever side it is
+                val clear = if (vm.showSideBar) Pc.sideBarShown + Pc.PopoverGap else Pc.PopoverGap
+                // placed at the size it shows (the panels' size), and laid out at its own
+                val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS)
+                val place = if (vm.rightHanded) popoverPlace(width * k, buttonX, maxWidth, minRight = clear) else popoverPlace(width * k, buttonX, maxWidth, clear)
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val pivot = with(density) {
+                    origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.barShown.toPx())
+                }
+                val left = with(density) { place.left.roundToPx() }
+                val top = with(density) { Pc.barShown.roundToPx() }
+                // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
+                val undocking = when (shown) {
+                    Panel.LAYERS -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS
+                    Panel.BRUSHES -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES
+                    else -> false
+                }
+                val seen = if (undocking) 0f else alpha
+                val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.graphicsLayer {
+                    this.alpha = seen
+                    scaleX = scale
+                    scaleY = scale
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / (width * k), 0f)
+                }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
+                // the screen as a panel at its size measures it: the room under the top bar
+                // as it shows, in the panel's own dp (the panels take the bar's height off it)
+                val room = (maxHeight - Pc.barShown) / k + Pc.BarHeight
+                val arrowX = place.arrowX / k
+                PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS) {
+                ProvidePanelLook(PanelLook(seen, scale, pivot)) {
+                    when (shown) {
+                        Panel.LAYERS -> if (vm.backgroundPicking) {
+                            ColorPanel(vm, arrowX, room, at, background = true)
+                            // closed any way at all, the colour is kept
+                            androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
+                        } else {
+                            LayersPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - Pc.PopoverGap))
+                        }
+                        Panel.COLOR -> ColorPanel(vm, arrowX, room, at)
+                        Panel.BRUSHES -> BrushLibrary(vm, arrowX, at.height(room - Pc.BarHeight - 25.dp))
+                        // ending 25 above the screen's edge, their rows scrolling (as measured)
+                        Panel.ACTIONS -> ActionsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
+                        Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
+                        Panel.NONE -> Unit
+                    }
+                }
+                }
+            }
+            if (vm.transforming && !vm.barsHidden) {
+                TransformPopover(vm, maxWidth, maxHeight)
+                TransformNumeric(vm)
+            }
+            TouchCompanion(vm)
+            CropOverlay(vm)
+            if (vm.textInfo != null) TextEditor(vm)
+            RasterizePrompt(vm)
+            vm.animatedExport?.let { AnimatedExport(vm, it) }
+            vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
+            // full-screen pages slide up over everything, and back down
+            androidx.compose.animation.AnimatedVisibility(
+                vm.canvasInfoOpen,
+                enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
+                exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
+            ) { Box(Modifier.fillMaxSize()) { CanvasInfo(vm) } }
+            androidx.compose.animation.AnimatedVisibility(
+                vm.gestureControlsOpen,
+                enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
+                exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
+            ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
+            // a plugin's own panel, while its action keeps it open
+            if (vm.pluginPanel != null) {
+                Box(Modifier.fillMaxSize()) {
+                    // what its rows don't take stays on the panel, never reaching the canvas under it
+                    // (being touched is enough for that). Only a press is taken, as the brush
+                    // studio's: taking every move too undid the rows' taps and drags whenever a
+                    // move came between press and lift, as it always does from a pen
+                    val swallows = Modifier.pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }
+                    // floating, at the floating windows' size
+                    val box = this
+                    val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+                    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING) {
+                        with(box) { PluginPanelView(vm, Modifier.align(Alignment.TopEnd).padding(top = (Pc.barShown + 12.dp) / k, end = 12.dp / k).then(swallows)) }
+                    }
+                }
+            }
+            ModelPicture(vm)
+            BlockedDialog(vm)
+            ModelWarningsAlert(vm)
+            SharedLayerAlert(vm)
+            PluginOfferAlert(vm)
+            // a fill a plugin is finishing: nothing is touched until it is done
+            if (vm.fillFinishing) {
+                Box(
+                    Modifier.fillMaxSize().pointerInput(Unit) {
+                        awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                    },
+                )
+            }
+            ExportProgress(vm.exportShown, vm::cancelExport)
+            ImportProgress(vm.importShown, vm::cancelImport)
+            // a passing message goes in the band under the top bar, as what undo and redo did
+            vm.message?.let { text ->
+                androidx.compose.runtime.LaunchedEffect(text) {
+                    vm.showNotice(text)
+                    vm.message = null
+                }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                vm.timeLapseReplaying,
+                Modifier.matchParentSize(),
+                enter = androidx.compose.animation.fadeIn(Motion.replayFade()),
+                exit = androidx.compose.animation.fadeOut(Motion.replayFade()),
+            ) { TimeLapseReplay(vm) }
+            // the gallery zooming into the artwork as it opens, over everything
+            ZoomingGallery(vm, overlay = true)
+            if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
+            if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
+            if (vm.recoloring) RecolorReticle(vm)
+            QuickShapeHandles(vm)
+            CopyPastePanel(vm)
+            QuickMenu(vm)
+            LayerChoice(vm)
+            if (!vm.barsHidden) QuickShapeBar(vm, Modifier.offset(y = Pc.barShown))
+            if (vm.opacityLayer != null && !vm.barsHidden) LayerOpacityBar(vm, Modifier.offset(y = Pc.barShown))
+            if (vm.adjustment != null && !vm.barsHidden) {
+                AdjustmentBar(vm, Modifier.offset(y = Pc.barShown))
+                AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.barShown + 52.dp))
+                AdjustmentMenu(vm, maxWidth, maxHeight)
+            }
+            // the adjustment's own panel rises from below the screen, and drops away
+            val bottomPanel = vm.adjustment?.takeIf { !vm.barsHidden && it in BottomPanels }
+            val shownPanel = androidx.compose.runtime.remember { arrayOfNulls<Adjustment>(1) }
+            if (bottomPanel != null) shownPanel[0] = bottomPanel
+            androidx.compose.animation.AnimatedVisibility(
+                bottomPanel != null,
+                Modifier.align(Alignment.BottomCenter),
+                enter = Motion.toolbarIn(),
+                exit = Motion.toolbarOut(),
+            ) {
+                shownPanel[0]?.let {
+                    when (it) {
+                        Adjustment.HSB -> HsbPanel(vm, Modifier)
+                        Adjustment.COLOR_BALANCE -> ColorBalancePanel(vm, Modifier)
+                        Adjustment.CURVES -> CurvesPanel(vm, Modifier)
+                        Adjustment.GRADIENT_MAP -> GradientMapPanel(vm, Modifier)
+                        Adjustment.GLITCH -> GlitchPanel(vm, Modifier)
+                        Adjustment.NOISE -> NoisePanel(vm, Modifier)
+                        Adjustment.BLOOM -> BloomPanel(vm, Modifier)
+                        Adjustment.HALFTONE -> HalftonePanel(vm, Modifier)
+                        Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
+                        Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
+                        Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
+                        Adjustment.PLUGIN -> PluginFilterPanel(vm, Modifier)
+                        else -> Unit
+                    }
+                }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                vm.recoloring && !vm.barsHidden,
+                Modifier.align(Alignment.BottomCenter),
+                enter = Motion.toolbarIn(),
+                exit = Motion.toolbarOut(),
+            ) { RecolorPanel(vm, Modifier) }
+            androidx.compose.animation.AnimatedVisibility(
+                vm.selecting && !vm.barsHidden,
+                Modifier.align(Alignment.BottomCenter),
+                enter = Motion.toolbarIn(),
+                exit = Motion.toolbarOut(),
+            ) { SelectionToolbar(vm, maxWidth) }
+            if (vm.selecting && !vm.barsHidden) {
+                SelectionPopover(vm, maxWidth, maxHeight)
+            }
+            GuideEditor(vm)
+            LightingStudio(vm)
+            BrushStudio(vm)
+            PadMenu(vm, maxWidth)
+            // a colour dragged out goes over everything
+            DropDot(vm)
         }
     }
 }
@@ -495,7 +538,7 @@ private fun NoticeBand(vm: CanvasViewModel) {
         vm.noticeGone(n)
     }
     if (shown.value <= 0f && n == null) return
-    Box(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().height(24.dp).clipToBounds()) {
+    Box(Modifier.offset(y = Pc.barShown).fillMaxWidth().height(24.dp).clipToBounds()) {
         // frosted over the canvas, as measured (a thin line under it doesn't show through); moved
         // as it is placed, so the frost follows it
         Box(

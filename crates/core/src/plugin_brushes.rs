@@ -90,6 +90,9 @@ mod field {
     /// Its strokes want the colours of their layer under where they start, a square this many
     /// pixels a side (u32).
     pub const UNDER_START: u16 = 11;
+    /// What its strokes keep with their layer between strokes (u8, a layer store's kind: 1 the paint
+    /// they lay and a height lighting it), with field 9.
+    pub const STORE: u16 = 12;
     /// A load: the brush's id and data, and whether the app holds its look already.
     pub const LOAD_ID: u16 = 1;
     pub const LOAD_DATA: u16 = 2;
@@ -145,6 +148,8 @@ const SEE_THROUGH: u32 = 32768;
 /// The most dabs a stroke may ask about at once, and the most pixels read for them at once.
 const MOST_ASKED: usize = 4096;
 const MOST_READ: i64 = 1 << 20;
+/// Into its layer's store: its tip's grey goes over the height there, as opaque as word 20 says.
+const LAYS_HEIGHT: u32 = 65536;
 
 /// The most tips, and the largest side of one, and of a texture.
 const MOST_TIP_SIDE: u32 = 4096;
@@ -197,6 +202,8 @@ pub(crate) struct BrushLook {
     pub from_image: bool,
     /// How big a square of the layer's colours under where a stroke starts it wants (0 none).
     pub under_start: u32,
+    /// What its strokes keep with their layer between strokes (a layer store's kind, 0 none).
+    pub store: u32,
     pub tips: TipSet,
     pub build: Build,
     pub blend: Option<u32>,
@@ -233,9 +240,10 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
     });
     let mut tips = Vec::new();
     let (mut build, mut blend, mut erases, mut texture, mut second) = (Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges, mut from_image, mut under_start) = (None, false, false, 0);
+    let (mut airbrush, mut smudges, mut from_image, mut under_start, mut store) = (None, false, false, 0, 0);
     for (f, value) in fields(bytes) {
         match f {
+            field::STORE => store = store_kind(value),
             field::SMUDGES => smudges = value.first() == Some(&1),
             field::FROM_IMAGE => from_image = value.first() == Some(&1),
             field::UNDER_START => under_start = u32_of(value).unwrap_or(0).min(MOST_UNDER_START),
@@ -254,6 +262,8 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
         smudges,
         from_image,
         under_start,
+        // (only for a brush whose dabs move paint)
+        store: if smudges { store } else { 0 },
         tips: tip_set(&tips, id, kind)?,
         build,
         blend,
@@ -261,6 +271,11 @@ pub(crate) fn read_look(bytes: &[u8], id: u64) -> Option<BrushLook> {
         texture,
         second,
     })
+}
+
+/// A look's store's kind, as its field says: 0 for none, or for one there isn't.
+fn store_kind(value: &[u8]) -> u32 {
+    value.first().map(|&k| u32::from(k)).filter(|&k| procraft_gpu::LayerStore::planes_of(k) > 0).unwrap_or(0)
 }
 
 /// The most samples a brush engine is handed at once.
@@ -426,8 +441,9 @@ fn stretched(w: u32, h: u32, pixels: &[u8], side: u32) -> Vec<u8> {
 /// A look as it is kept on the disk: as the GPU takes it (its tips fitted, its texture a square),
 /// so that a start only reads it. Fields: 1 its version, 2 its tips (a side, then each layer), 3
 /// how they build up, 4 its blend, 5 whether it erases, 6 its texture (a side, its pixels, its
-/// tile, its mode) and 7 its second (its tips, how they build up, how it combines).
-const KEPT_LOOK_VERSION: u32 = 6;
+/// tile, its mode) and 7 its second (its tips, how they build up, how it combines); 8 to 12 as a
+/// look's own.
+const KEPT_LOOK_VERSION: u32 = 7;
 
 /// The largest square of colours under a stroke's start an engine may ask for.
 const MOST_UNDER_START: u32 = 512;
@@ -459,6 +475,7 @@ pub(crate) fn kept_look(look: &BrushLook) -> Vec<u8> {
     r.field(9, &[u8::from(look.smudges)]);
     r.field(10, &[u8::from(look.from_image)]);
     r.field(11, &look.under_start.to_le_bytes());
+    r.field(12, &[u8::try_from(look.store).unwrap_or(0)]);
     if let Some(t) = &look.texture {
         let mut tex = Record::default();
         tex.field(1, &t.side.to_le_bytes())
@@ -506,10 +523,11 @@ fn tips_kept(bytes: &[u8], id: u64) -> Option<TipSet> {
 pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
     let (mut version, mut tips, mut build, mut blend, mut erases, mut texture, mut second) =
         (None, None, Build::Over, None, false, None, None);
-    let (mut airbrush, mut smudges, mut from_image, mut under_start) = (None, false, false, 0);
+    let (mut airbrush, mut smudges, mut from_image, mut under_start, mut store) = (None, false, false, 0, 0);
     for (f, value) in fields(bytes) {
         match f {
             1 => version = u32_of(value),
+            12 => store = store_kind(value),
             9 => smudges = value.first() == Some(&1),
             10 => from_image = value.first() == Some(&1),
             11 => under_start = u32_of(value).unwrap_or(0).min(MOST_UNDER_START),
@@ -553,7 +571,20 @@ pub(crate) fn look_kept_as(bytes: &[u8], id: u64) -> Option<BrushLook> {
         }
     }
     (version == Some(KEPT_LOOK_VERSION)).then_some(())?;
-    Some(BrushLook { airbrush, smudges, from_image, under_start, tips: tips?, build, blend, erases, texture, second })
+    let store = if smudges { store } else { 0 };
+    Some(BrushLook {
+        airbrush,
+        smudges,
+        from_image,
+        under_start,
+        store,
+        tips: tips?,
+        build,
+        blend,
+        erases,
+        texture,
+        second,
+    })
 }
 
 /// What a brush's load hands its engine: the brush's id and its data, and, if the app holds its
@@ -1045,6 +1076,7 @@ fn stamp_of(dab: &[u8; DAB_BYTES], colour: [f32; 3], tips: usize, build: Build, 
             } else {
                 0.0
             },
+            height: (flags & LAYS_HEIGHT != 0).then(|| unit(w20, 0.0)),
             over: flags & LAID_OVER != 0,
             here: flags & PICKS_HERE != 0,
             from: (flags & PICKS_FROM != 0 && w20.is_finite() && w21.is_finite()).then_some([w20, w21]),
@@ -1155,6 +1187,9 @@ impl OutsideEngine for EngineHalf {
 pub(crate) struct OutsideStroke {
     /// Every how many milliseconds its engine wants the pen again while it holds still.
     pub airbrush: Option<f32>,
+    /// What its look keeps with the layer between strokes (a layer store's kind, 0 none): its style
+    /// paints into that only where the caller says (a plain layer's stroke of the user's own).
+    pub store: u32,
     pub style: StrokeStyle,
     pub second: Option<SecondStroke>,
     pub first: EngineHalf,
@@ -1244,6 +1279,7 @@ pub(crate) fn engine_stroke(
     let (brush_look, id) = look_of(hooks, brush)?;
     let (style, second) = look_styles(&brush_look, tool, &starting, look, canvas, gpu)?;
     let airbrush = brush_look.airbrush;
+    let store = if style.tool == StrokeTool::Smudge { brush_look.store } else { 0 };
     // the colours under where it starts, if the engine wants them
     let under = starting.under_at.filter(|_| brush_look.under_start > 0).and_then(|(layer, x, y)| {
         let side = brush_look.under_start as i32;
@@ -1269,7 +1305,7 @@ pub(crate) fn engine_stroke(
     });
     let (width, height) = canvas.size();
     let (first, second_half) = begin_stroke(hooks, brush, brush_look, id, starting, under, (width, height))?;
-    Some(OutsideStroke { airbrush, style, second, first, second_half })
+    Some(OutsideStroke { airbrush, store, style, second, first, second_half })
 }
 
 impl crate::State {
@@ -1335,10 +1371,18 @@ impl crate::State {
         if first.is_some() && look_of(&hooks, brush).is_some_and(|(l, _)| l.under_start > 0) {
             canvas.render(gpu, &mut self.doc, None);
         }
-        let stroke = engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu);
+        let mut stroke = engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu);
         // a stroke of the pen's on the canvas is told the colours under the dabs it asks about
         if first.is_some() {
             self.engine_asking = stroke.as_ref().map(|o| o.first.asking()).unwrap_or_default();
+        }
+        // what its look keeps with the layer, on a layer of plain pixels
+        let plain = self
+            .doc
+            .layer(layer)
+            .is_some_and(|l| l.kind == procraft_engine::document::LayerKind::Paint && !l.drawn_from_data());
+        if let Some(o) = stroke.as_mut().filter(|_| plain) {
+            o.style.store = o.store;
         }
         stroke
     }
@@ -1623,7 +1667,7 @@ mod tests {
     }
 
     /// A Krita colour smudge brush moves the paint it goes over: dragged from red into the clear, it
-    /// lays the red where there was nothing, whatever the colour.
+    /// lays the red where there was nothing, whatever the colour; within a selection, only inside it.
     #[test]
     fn a_krita_colour_smudge_moves_the_paint_it_goes_over() {
         let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
@@ -1682,6 +1726,18 @@ mod tests {
         let at_x = |x: usize| &px[(60 * 200 + x) * 4..(60 * 200 + x) * 4 + 4];
         assert!(at_x(130)[0] > 128 && at_x(130)[3] > 128 && at_x(130)[2] < 64, "red dragged out: {:?}", at_x(130));
         assert_eq!(at_x(190)[3], 0, "past the stroke, still clear");
+        // with the left 120 pixels selected, a stroke across its edge moves nothing outside it
+        s.select_shape(false, 0.0, 0.0, 120.0, 120.0, crate::SelectionJoin::Add);
+        let coverage = s.shared.lock().selection.as_ref().unwrap().data.clone();
+        let at = |x: f32| crate::PenSample { y: 25.0, ..at(x) };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(60.0)]);
+        s.stroke_add((61..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let moved = |i: usize| px[i * 4..i * 4 + 4] != after[i * 4..i * 4 + 4];
+        assert!(moved(25 * 200 + 110), "dragged inside");
+        let outside = (0..200 * 120).filter(|&i| coverage[i] == 0 && moved(i)).count();
+        assert_eq!(outside, 0, "pixels outside the selection changed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1790,31 +1846,156 @@ mod tests {
     }
 
     /// On an old GPU (no compute passes: see `Gpu::headless_old`) an engine whose dabs ask what lies
-    /// under them and move paint goes on without trouble: its smudge lays nothing and says so once,
-    /// as the smudge tool does there, the engine still on; one that only paints paints.
+    /// under them and move paint smudges as on any other (within a step of 8 bits a channel here and
+    /// there), nothing said and the engine still on; one that only paints paints the same.
     #[test]
-    fn an_engine_asking_on_an_old_gpu_smudges_nothing_and_says_so() {
-        let gpu = match procraft_gpu::Gpu::headless_old() {
-            Ok(g) => g,
-            Err(e) => return eprintln!("skipped: {e}"),
+    fn an_engine_asking_on_an_old_gpu_smudges_as_on_others() {
+        let (Ok(full), Ok(old)) = (procraft_gpu::Gpu::headless(), procraft_gpu::Gpu::headless_old()) else {
+            return eprintln!("skipped: no GPU");
         };
-        let (s, plugins, id, set, dir) = mypaint_session(gpu, "told-under-old");
-        let layer = s.add_layer();
-        s.set_color(0.0, 0.0, 1.0);
-        choose(&s, set, "Plain Ink");
-        drag_across(&s);
-        let painted = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
-        let blue = |px: &[u8], x: usize| px[(60 * 200 + x) * 4 + 2];
-        assert!(blue(&painted, 100) > 200, "it paints");
-        choose(&s, set, "Wet Drag");
-        for told in [true, false] {
-            let before = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+        let laid = [(full, "told-under-full"), (old, "told-under-old")].map(|(gpu, tag)| {
+            let (s, plugins, id, set, dir) = mypaint_session(gpu, tag);
+            let layer = procraft_engine::document::LayerId(s.add_layer());
+            s.set_color(0.0, 0.0, 1.0);
+            choose(&s, set, "Plain Ink");
             drag_across(&s);
-            let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
-            assert_eq!(before, after, "its smudge lays nothing");
-            assert_eq!(s.take_failure().as_deref(), told.then_some("This device's graphics can't smudge."));
+            let painted = s.shared.lock().layer_pixels(layer).unwrap();
+            choose(&s, set, "Wet Drag");
+            s.set_color(1.0, 0.0, 0.0);
+            drag_across(&s);
+            let smudged = s.shared.lock().layer_pixels(layer).unwrap();
+            assert_eq!(s.take_failure(), None);
+            assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
+            let _ = std::fs::remove_dir_all(&dir);
+            (painted, smudged)
+        });
+        let [(painted, smudged), (old_painted, old_smudged)] = laid;
+        let blue = |px: &[u8], x: usize| px[(60 * 200 + x) * 4 + 2];
+        assert!(blue(&old_painted, 100) > 200, "it paints");
+        assert_ne!(old_smudged, old_painted, "it smudges");
+        let most = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+        let (p, m) = (most(&painted, &old_painted), most(&smudged, &old_smudged));
+        eprintln!("old GPU against a full one: painted {p} at most, smudged {m}");
+        assert!(p <= 1 && m <= 2, "{p} {m}");
+    }
+
+    /// A look's store is kept with it (only for dabs that move paint), and a dab with flag 65536 lays
+    /// its grey over the height as opaque as word 20 says.
+    #[test]
+    fn a_look_keeps_paint_with_the_layer_and_a_dab_lays_its_height() {
+        let mut r = Record::default();
+        r.field(field::TIP, &tip(2, 2)).field(field::SMUDGES, &[1]).field(field::STORE, &[1]);
+        let look = read_look(&r.bytes(), 9).unwrap();
+        assert_eq!(look.store, procraft_gpu::STORE_LIT);
+        assert_eq!(look_kept_as(&kept_look(&look), 9).map(|l| l.store), Some(procraft_gpu::STORE_LIT));
+        // not for dabs that don't move paint, nor a kind there isn't
+        let mut still = Record::default();
+        still.field(field::TIP, &tip(2, 2)).field(field::STORE, &[1]);
+        assert_eq!(read_look(&still.bytes(), 9).unwrap().store, 0);
+        let mut other = Record::default();
+        other.field(field::TIP, &tip(2, 2)).field(field::SMUDGES, &[1]).field(field::STORE, &[7]);
+        assert_eq!(read_look(&other.bytes(), 9).unwrap().store, 0);
+        let dab = |flags: u32| {
+            let mut dab = [0_u8; DAB_BYTES];
+            let words = [
+                (2, 10.0_f32.to_bits()),
+                (5, 1.0_f32.to_bits()),
+                (8, flags),
+                (15, 0.4_f32.to_bits()),
+                (20, 0.75_f32.to_bits()),
+            ];
+            for (i, v) in words {
+                dab[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            dab
+        };
+        let stamp = stamp_of(&dab(MOVES_PAINT | LAYS_HEIGHT), [0.0; 3], 1, Build::Over, 0.0).unwrap();
+        assert_eq!(stamp.pick_up.and_then(|p| p.height), Some(0.75));
+        assert!((stamp.lightness - 0.4).abs() < 1e-6);
+        let without = stamp_of(&dab(MOVES_PAINT), [0.0; 3], 1, Build::Over, 0.0).unwrap();
+        assert_eq!(without.pick_up.and_then(|p| p.height), None);
+    }
+
+    /// A Krita colour smudge brush with a lightness tip keeps its paint with a plain layer between
+    /// strokes, the layer showing it lit by the tip's grey; undone, the layer keeps nothing.
+    #[test]
+    fn a_krita_lightness_smudge_keeps_its_paint_with_the_layer_lit_by_its_thickness() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
         }
-        assert!(plugins.plugins().iter().any(|p| p.id == id && p.on && p.problem.is_none()), "the engine still on");
+        let dir = std::env::temp_dir().join(format!("procraft-thickness-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        s.use_plugins(Arc::clone(&plugins));
+        // a tip 32 pixels a side, a disc (a picture, as it is see-through), its grey in bands 8 rows
+        // each, light and dark
+        let side = 32_usize;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = ((i % side) as f32 - 15.5, (i / side) as f32 - 15.5);
+                let a = if x * x + y * y < 15.5 * 15.5 { 255 } else { 0 };
+                if (i / side / 8).is_multiple_of(2) { [220, 220, 220, a] } else { [40, 40, 40, a] }
+            })
+            .collect();
+        let png = crate::project::png_of(side as u32, side as u32, &pixels).unwrap();
+        let tip = procraft_engine::base64::encode(&png);
+        let xml = format!(
+            r#"<Preset name="Thick" paintopid="colorsmudge"><resources><resource name="bands" filename="bands.png" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="png_brush" filename="bands.png" spacing="0.1" BrushVersion="2" brushApplication="2" scale="1" angle="0" useAutoSpacing="0"/>]]></param><param name="PressureSize"><![CDATA[false]]></param><param name="PressureSmudgeRate"><![CDATA[false]]></param><param name="SmudgeRateValue"><![CDATA[1]]></param><param name="SmudgeRateMode"><![CDATA[0]]></param><param name="SmudgeRateUseNewEngine"><![CDATA[true]]></param><param name="PressureColorRate"><![CDATA[true]]></param><param name="ColorRateValue"><![CDATA[1]]></param></Preset>"#
+        );
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+        kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+        kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+        kpp.extend(chunk(b"IEND", &[]));
+        let read = crate::read_brushes(kpp, Some("Thick.kpp".to_owned())).unwrap();
+        let set = s.add_brushes_read(read, 0).unwrap();
+        assert!(s.select_brush(set, 0));
+        let layer = procraft_engine::document::LayerId(s.add_layer());
+        // a mid grey all over: its lightness 0.5 goes lighter and darker as the tip's grey says
+        s.set_color(0.5, 0.5, 0.5);
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        s.stroke_begin(crate::PointerKind::Stylus, vec![at(40.0)]);
+        s.stroke_add((41..=160).map(|x| at(x as f32)).collect());
+        s.stroke_end(vec![]);
+        let store = |s: &crate::CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.store(layer).map(|s| s.kind)
+        };
+        assert_eq!(store(&s), Some(procraft_gpu::STORE_LIT));
+        let px = s.shared.lock().layer_pixels(layer).unwrap();
+        // down the middle of the stroke, the bands of the tip lit light and dark
+        let column: Vec<u8> = (48..72).map(|y| px[(y * 200 + 100) * 4]).collect();
+        let (lo, hi) = (column.iter().min().copied().unwrap(), column.iter().max().copied().unwrap());
+        assert!(lo < 90 && hi > 170, "{column:?}");
+        s.undo();
+        assert_eq!(store(&s), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2123,5 +2304,114 @@ mod tests {
         assert_eq!(brushes[0].engine.as_ref().map(|e| e.engine.as_str()), Some("a.b.c"));
         assert_eq!(brushes[1].name, "Ink");
         assert!(brushes[1].engine.is_some());
+    }
+
+    /// A Krita tip turned by its angle points where Krita draws it, by the plugin's engine and by the
+    /// app's own reading of the preset alike: Krita turns a tip counter-clockwise on the canvas
+    /// (whose rows run down) by its angle, so a bar from the tip's middle to its right edge points up
+    /// and to the right at 30°, straight up at 90° and straight down at 270°, the notch at its end on
+    /// its left as it goes (never mirrored to its right).
+    #[test]
+    fn a_krita_tip_turned_by_its_angle_points_where_krita_draws_it() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 200);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(procraft_engine::view::View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-krita-angle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let packed = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1;
+        assert_eq!(plugins.install(packed.to_vec()), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        s.use_plugins(Arc::clone(&plugins));
+        // a tip 40 pixels a side, a picture (see-through): a bar 8 rows thick from its middle to its
+        // right edge, nothing on its left, with a notch up from the bar's end
+        let side = 40_usize;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = ((i % side) as f32 - 19.5, (i / side) as f32 - 19.5);
+                let bar = x > 2.0 && y.abs() < 4.0;
+                let notch = (11.0..19.0).contains(&x) && (-15.0..-3.0).contains(&y);
+                let a = if bar || notch { 255 } else { 0 };
+                [0, 0, 0, a]
+            })
+            .collect();
+        let png = crate::project::png_of(side as u32, side as u32, &pixels).unwrap();
+        let tip = procraft_engine::base64::encode(&png);
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        // a dab of the tip at `degrees` in the middle of a layer of its own
+        let dab_at = |degrees: f32, engine: bool| {
+            let angle = degrees.to_radians();
+            let xml = format!(
+                r#"<Preset name="Bar" paintopid="paintbrush"><resources><resource name="bar" filename="bar.png" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="png_brush" filename="bar.png" spacing="5" BrushVersion="2" brushApplication="0" scale="1" angle="{angle}" useAutoSpacing="0"/>]]></param><param name="PressureSize"><![CDATA[false]]></param><param name="PressureOpacity"><![CDATA[false]]></param></Preset>"#
+            );
+            let mut kpp = b"\x89PNG\r\n\x1a\n".to_vec();
+            kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+            kpp.extend(chunk(b"tEXt", &[b"preset\0".as_slice(), xml.as_bytes()].concat()));
+            kpp.extend(chunk(b"IEND", &[]));
+            let read = crate::read_brushes(kpp, Some("Bar.kpp".to_owned())).unwrap();
+            if engine {
+                s.make_engine_brushes(Arc::clone(&read));
+            }
+            let set = s.add_brushes_read(read, 0).unwrap();
+            assert_eq!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), engine);
+            assert!(s.select_brush(set, 0));
+            if !engine {
+                // the app's own brush at its biggest, to be measured as finely
+                s.set_brush_size(1.0);
+            }
+            s.set_color(0.0, 0.0, 0.0);
+            let layer = s.add_layer();
+            let at = crate::PenSample {
+                x: 100.0,
+                y: 100.0,
+                pressure: 1.0,
+                tilt: 0.0,
+                orientation: 0.0,
+                time_ms: 0.0,
+                roll: 0.0,
+            };
+            s.stroke_begin(crate::PointerKind::Stylus, vec![at]);
+            s.stroke_end(vec![]);
+            s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap()
+        };
+        let alpha = |rgba: &[u8], x: f32, y: f32| rgba[(y.round() as usize * 200 + x.round() as usize) * 4 + 3];
+        for engine in [true, false] {
+            assert!(plugins.set_on(id.clone(), engine));
+            for degrees in [0.0_f32, 30.0, 90.0, 270.0] {
+                let rgba = dab_at(degrees, engine);
+                // the dab's size against the tip's: its farthest corner (19, -15) from its middle
+                let far = (0..200 * 200)
+                    .filter(|i| rgba[i * 4 + 3] > 128)
+                    .map(|i| ((i % 200) as f32 - 100.0).hypot((i / 200) as f32 - 100.0))
+                    .fold(0.0_f32, f32::max);
+                let k = far / 24.2;
+                let (c, sn) = (degrees.to_radians().cos(), degrees.to_radians().sin());
+                // a point of the tip (right, down) where it lands, turned counter-clockwise on the
+                // canvas
+                let lands = |(x, y): (f32, f32)| (100.0 + k * (x * c + y * sn), 100.0 + k * (y * c - x * sn));
+                let way = if engine { "the engine" } else { "the app" };
+                // 8 pixels out along the bar, and as far the other way
+                let (toward, away) = (lands((8.0, 0.0)), lands((-8.0, 0.0)));
+                let (on, off) = (alpha(&rgba, toward.0, toward.1), alpha(&rgba, away.0, away.1));
+                assert!(on > 200 && off < 20, "{way}, {degrees}°: {on} toward {toward:?}, {off} away (k {k})");
+                // the notch, on the bar's left (up, at 0°), not mirrored across it
+                let (notch, mirrored) = (lands((15.0, -10.0)), lands((15.0, 10.0)));
+                let (on, off) = (alpha(&rgba, notch.0, notch.1), alpha(&rgba, mirrored.0, mirrored.1));
+                assert!(on > 200 && off < 20, "{way}, {degrees}°: the notch {on} at {notch:?}, {off} mirrored");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

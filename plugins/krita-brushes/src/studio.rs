@@ -908,6 +908,16 @@ fn smudge_page(p: &Preset, page: &mut Page) {
     page.flag(p, "SmudgeRateSmearAlpha", "Smear alpha", true);
     page.flag(p, "SmudgeRateUseNewEngine", "Use new smudge algorithm", false);
     page.flag(p, "MergedPaint", "Overlay mode", false);
+    // (a lightness tip's: its paint kept with the layer, lit by how thick it is)
+    option_rows(p, page, "PaintThickness", "Paint thickness", true);
+    page.chosen(
+        p,
+        "PaintThicknessThicknessMode",
+        "Paint thickness mode",
+        &["Overwrite existing thickness", "Paint over existing thickness"],
+        &["1", "2"],
+        1,
+    );
 }
 
 /// A tangent normal brush's tilt: which way each channel goes, what turns it, how much it leans.

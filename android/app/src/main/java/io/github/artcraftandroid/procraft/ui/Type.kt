@@ -230,11 +230,37 @@ private fun sizedScreen(interfaceSize: Float, clear: Clearance, density: Float):
  */
 const val MATCHED_POPUP_TEXT = 0.85f
 
+/** How big the part of the interface being composed shows next to the rest, as [PartScaled] sized it. */
+val LocalPartScale = androidx.compose.runtime.staticCompositionLocalOf { 1f }
+
+/**
+ * [content] as [part] of the interface, at the size a plugin gives it next to the rest
+ * ([Pc.partScale]): its dp and sp are that much bigger or smaller, whatever part it is in.
+ */
+@Composable
+fun PartScaled(part: io.github.artcraftandroid.procraft.core.InterfacePart, content: @Composable () -> Unit) {
+    val scale = Pc.partScale(part)
+    val was = LocalPartScale.current
+    val density = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(density.density / was * scale, density.fontScale),
+        LocalPartScale provides scale,
+        content = content,
+    )
+}
+
+/** The density of a popup, its text scaled by [textScale]: the interface's, at the menus' size. */
+@Composable
+private fun popupDensity(textScale: Float): Density {
+    val menus = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.MENUS)
+    return Density(LocalDensity.current.density / LocalPartScale.current * menus, textScale)
+}
+
 /**
  * A popup whose text keeps one size whatever the system font scale. A popup is a window of its
  * own, composed with the system's font scale, so its text followed it where the rest of the
  * interface doesn't; this hands it the theme's density, its text scaled by [textScale], and the
- * theme's screen.
+ * theme's screen. It shows at the size a plugin gives popovers and menus.
  */
 @Composable
 fun PcPopup(
@@ -245,10 +271,11 @@ fun PcPopup(
     textScale: Float = 1f,
     content: @Composable () -> Unit,
 ) {
-    val density = Density(LocalDensity.current.density, textScale)
+    val density = popupDensity(textScale)
+    val menus = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.MENUS)
     val screen = LocalConfiguration.current
     androidx.compose.ui.window.Popup(alignment, offset, onDismissRequest, properties) {
-        CompositionLocalProvider(LocalDensity provides density, LocalConfiguration provides screen, content = content)
+        CompositionLocalProvider(LocalDensity provides density, LocalPartScale provides menus, LocalConfiguration provides screen, content = content)
     }
 }
 
@@ -261,9 +288,10 @@ fun PcPopup(
     textScale: Float = 1f,
     content: @Composable () -> Unit,
 ) {
-    val density = Density(LocalDensity.current.density, textScale)
+    val density = popupDensity(textScale)
+    val menus = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.MENUS)
     val screen = LocalConfiguration.current
     androidx.compose.ui.window.Popup(popupPositionProvider, onDismissRequest, properties) {
-        CompositionLocalProvider(LocalDensity provides density, LocalConfiguration provides screen, content = content)
+        CompositionLocalProvider(LocalDensity provides density, LocalPartScale provides menus, LocalConfiguration provides screen, content = content)
     }
 }

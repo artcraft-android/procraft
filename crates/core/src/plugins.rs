@@ -57,6 +57,8 @@ fn moved_and_changed(key: &str, value: &str) -> bool {
 pub(crate) const STOPPED_DRIVER: &str = "Switched off: it stopped the graphics driver.";
 /// Why a filter whose files no longer hold up can't open.
 const FILTER_DAMAGED: &str = "This filter's files don't hold up.";
+/// What is told when the plugins' order couldn't be kept.
+const ORDER_UNKEPT: &str = "The plugins' order couldn't be saved.";
 
 /// Where one came from. The route decides this, never the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -435,10 +437,67 @@ fn from_file(manifest: Manifest) -> (PluginInfo, Shape) {
     (info, manifest.shape)
 }
 
+/// The parts of the interface a plugin may show bigger or smaller than the rest
+/// ([`Plugins::interface_part_scale`]), each by its number on the `interface_part_scale` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum InterfacePart {
+    /// Windows that float over the canvas: the colour panel dragged out, and any other.
+    Floating = 0,
+    /// Popovers and menus: what drops down from a button or a row.
+    Menus = 1,
+    /// The side bar.
+    SideBar = 2,
+    /// The bar across the top.
+    TopBar = 3,
+    /// The panels that hang from the top bar's buttons.
+    Panels = 4,
+}
+
+/// The notices the interface shows, by what they say ([`Plugins::shows_notice`]); the first two by
+/// their number on the `hide_notices` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum NoticeKind {
+    /// What undo or redo took back or brought back.
+    Step = 0,
+    /// Anything else done: copied, pasted, cleared, merged, applied, switched on or off.
+    Done = 1,
+    /// Something that went wrong, or couldn't be kept: it always shows.
+    Problem = 2,
+}
+
+/// Where in the interface a plugin's menu is, from a button of the app's
+/// ([`Plugins::menu_choices`]), by its name in a manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum PluginMenuPlace {
+    /// The colour panel's Classic picker, from a button in its lower left corner.
+    Classic,
+}
+
+impl PluginMenuPlace {
+    /// The place a manifest calls `name`, if this app has it.
+    pub(crate) fn named(name: &str) -> Option<PluginMenuPlace> {
+        match name {
+            "classic" => Some(PluginMenuPlace::Classic),
+            _ => None,
+        }
+    }
+}
+
+/// One of the choices a plugin's menu offers: what picks it ([`Plugins::choose`]), its words, its
+/// icon (SVG path data on a 24-unit grid, filled even-odd in the interface's ink), and whether it
+/// stands now (every control it sets is as it sets it).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginChoice {
+    pub key: String,
+    pub label: String,
+    pub icon: String,
+    pub chosen: bool,
+}
+
 /// `plugin` as its card shows it: what comes under a switch that is off left out.
 fn shown(plugin: &PluginInfo, shape: Option<&Shape>) -> PluginInfo {
     let Some(shape) = shape else { return plugin.clone() };
-    let shows = |under: &[Option<usize>], at: usize| Shape::shows(under.get(at).copied().flatten(), &plugin.controls);
+    let shows = |under: &[Option<usize>], at: usize| shape.shows(under.get(at).copied().flatten(), &plugin.controls);
     let controls = plugin.controls.iter().enumerate().filter(|(at, _)| shows(&shape.under, *at));
     let actions = plugin.actions.iter().enumerate().filter(|(at, _)| shows(&shape.action_under, *at));
     PluginInfo {
@@ -535,9 +594,25 @@ struct Listed {
     read: HashSet<String>,
     /// The switches set as the on or off of a plugin they stand for was read back.
     flag_switched: HashSet<String>,
+    /// The order someone put the plugins in on the Plugins page, by id, as written down in the
+    /// store; those not in it come after, as they are listed.
+    order: Vec<String>,
+    /// That the order couldn't be kept has been said, since it last could be.
+    order_unkept_said: bool,
 }
 
 impl Listed {
+    /// The plugins in the order the Plugins page shows them: those put in an order first, in it,
+    /// then the rest as they are listed. Only the page goes by it: the hooks go through what is on
+    /// in id order, whatever it is.
+    fn in_order(&self) -> Vec<&PluginInfo> {
+        let place = |p: &PluginInfo| self.order.iter().position(|id| *id == p.id).unwrap_or(usize::MAX);
+        let mut shown: Vec<&PluginInfo> = self.files.iter().collect();
+        // (stable: those in no order keep theirs)
+        shown.sort_by_key(|p| place(p));
+        shown
+    }
+
     /// Whether plugin `id` is one the app added that starts off until someone turns it on.
     fn added_off(&self, id: &str) -> bool {
         self.added.iter().any(|added| added.off && added.id == id)
@@ -642,6 +717,7 @@ impl Plugins {
             files.push(plugin);
         }
         let added = store.as_deref().map(plugin_file::read_added).unwrap_or_default();
+        let order = store.as_deref().map(plugin_file::read_order).unwrap_or_default();
         if let Some(store) = &store {
             plugin_file::settle_trying(store, STOPPED_DRIVER);
             for plugin in &mut files {
@@ -664,6 +740,8 @@ impl Plugins {
             carried: HashSet::new(),
             read: HashSet::new(),
             flag_switched: HashSet::new(),
+            order,
+            order_unkept_said: false,
         };
         // what one here takes the place of goes, once, if it is still here
         if let Some(store) = &store {
@@ -777,10 +855,10 @@ impl Plugins {
                 }
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)
-                    && let Some(text) =
+                    && let Some((text, keys)) =
                         store.and_then(|store| plugin_file::read_picture_code(store, &plugin.id, &plugin.version))
                 {
-                    self.hooks.give_picture(&plugin.id, text);
+                    self.hooks.give_picture(&plugin.id, text, keys, values.clone());
                 }
                 // the files picked for it, handed over
                 for (at, control) in plugin.controls.iter().enumerate() {
@@ -1061,7 +1139,30 @@ impl Plugins {
     /// under a switch that is off left out).
     pub fn plugins(&self) -> Vec<PluginInfo> {
         let list = self.listed();
-        list.files.iter().map(|p| list.shown(p)).collect()
+        list.in_order().into_iter().map(|p| list.shown(p)).collect()
+    }
+
+    /// Moves plugin `id` to place `to` on the Plugins page (past the end: the last), the order
+    /// written down whole in the store for the next start. Only the page goes by it. What to tell
+    /// if it couldn't be kept, said once until it can be (the page shows the order meanwhile);
+    /// nothing for an id that isn't here.
+    pub fn move_plugin(&self, id: String, to: u32) -> Option<String> {
+        let mut list = self.listed();
+        let shown: Vec<String> = list.in_order().into_iter().map(|p| p.id.clone()).collect();
+        let mut order = shown.clone();
+        let from = order.iter().position(|o| *o == id)?;
+        let moved = order.remove(from);
+        order.insert((to as usize).min(order.len()), moved);
+        if order == shown {
+            return None;
+        }
+        let kept = self.store.as_deref().is_none_or(|store| plugin_file::note_order(store, &order));
+        list.order = order;
+        if kept {
+            list.order_unkept_said = false;
+            return None;
+        }
+        (!std::mem::replace(&mut list.order_unkept_said, true)).then(|| ORDER_UNKEPT.to_owned())
     }
 
     /// The actions listed in `place` now, of the plugins that are on.
@@ -1084,7 +1185,8 @@ impl Plugins {
             if listed.is_empty() {
                 filters.push(plugin.clone());
             }
-            for filter in listed.iter().filter(|f| Shape::shows(f.under, &plugin.controls)) {
+            let shape = list.shapes.get(&plugin.id);
+            for filter in listed.iter().filter(|f| shape.is_none_or(|shape| shape.shows(f.under, &plugin.controls))) {
                 filters.push(PluginInfo {
                     id: filter.id.clone(),
                     name: filter.label.clone(),
@@ -1162,13 +1264,19 @@ impl Plugins {
             let by_flags = flagged.contains(&plugin.id) || carried.contains(&plugin.id);
             if added_off && moved_and_changed(&key, &value) && !by_flags {
                 plugin.on = plugin.problem.is_none();
-                // with the switch it comes under
-                let under = shapes.get(&plugin.id).and_then(|shape| shape.under.get(at).copied().flatten());
-                if let Some(PluginControl::Switch { control }) = under.and_then(|at| plugin.controls.get_mut(at))
-                    && !read.contains(&control.key)
-                    && !flag_switched.contains(&control.key)
-                {
-                    control.on = true;
+                // with the switch it comes under, and the one that comes under
+                let shape = shapes.get(&plugin.id);
+                let mut under = shape.and_then(|shape| shape.under.get(at).copied().flatten());
+                while let Some(above) = under {
+                    if let Some(PluginControl::Switch { control }) = plugin.controls.get_mut(above)
+                        && !read.contains(&control.key)
+                        && !flag_switched.contains(&control.key)
+                    {
+                        control.on = true;
+                    }
+                    // (two deep at most, as read)
+                    under =
+                        shape.and_then(|shape| shape.under.get(above).copied().flatten()).filter(|&next| next != above);
                 }
             }
         } else if moved(&key) {
@@ -1286,8 +1394,9 @@ impl Plugins {
             list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
                 let index = p.actions.iter().position(|a| a.key == key)?;
                 // (one under a switch that is off isn't there)
-                let under = list.shapes.get(&p.id).and_then(|shape| shape.action_under.get(index).copied().flatten());
-                if !Shape::shows(under, &p.controls) {
+                let shape = list.shapes.get(&p.id);
+                let under = shape.and_then(|shape| shape.action_under.get(index).copied().flatten());
+                if !shape.is_none_or(|shape| shape.shows(under, &p.controls)) {
                     return None;
                 }
                 let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
@@ -1583,6 +1692,108 @@ impl Plugins {
     /// (0..1, y down): `[x, y]`, or none with no picker plugin on.
     pub fn picker_point(&self, s: f32, v: f32) -> Option<Vec<f32>> {
         self.hooks().picker_point(s, v).map(|(x, y)| vec![x, y])
+    }
+
+    /// The hue (0..1) the picker plugin says a touch starting at point (`x`, `y`) of the Classic
+    /// square picks (0..1, y down); none where it picks saturation and brightness, or with no picker
+    /// plugin on that picks hues itself.
+    pub fn picker_hue(&self, x: f32, y: f32) -> Option<f32> {
+        self.hooks().picker_hue(x, y)
+    }
+
+    /// Where the picker plugin says hue `h`'s knob sits on the Classic square (0..1, y down): `[x,
+    /// y]`, or none while the app's hue slider has the hue (it shows only then).
+    pub fn picker_hue_point(&self, h: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_hue_point(h).map(|(x, y)| vec![x, y])
+    }
+
+    /// A number that changes whenever a plugin comes on or off or its controls change: what a plugin
+    /// answered, or a picture drawn by one, before it changed may not be what it answers now.
+    pub fn generation(&self) -> u64 {
+        self.hooks().generation()
+    }
+
+    /// How big `part` of the interface shows next to the rest of it, on top of
+    /// [`Self::interface_scale`], as plugins say (1: as the rest).
+    pub fn interface_part_scale(&self, part: InterfacePart) -> f32 {
+        self.hooks().interface_part_scale(part as i32)
+    }
+
+    /// Whether a plugin has the floating colour window show Classic's picker alone: no title, mode
+    /// icons or the other pickers.
+    pub fn floating_picker_only(&self) -> bool {
+        self.hooks().floating_picker_only()
+    }
+
+    /// Whether the notice of `kind` shows: one of something gone wrong always does; one of
+    /// something done unless a plugin hides it (what undo and redo did, by the undo notice's hook
+    /// too).
+    pub fn shows_notice(&self, kind: NoticeKind) -> bool {
+        let hooks = self.hooks();
+        match kind {
+            NoticeKind::Problem => true,
+            NoticeKind::Step => !hooks.hide_undo_notice() && !hooks.hide_notice(kind as i32),
+            NoticeKind::Done => !hooks.hide_notice(kind as i32),
+        }
+    }
+
+    /// Whether a plugin lets `panel` be torn off into a window of its own.
+    pub fn floats(&self, panel: crate::floating::FloatingPanel) -> bool {
+        self.hooks().floating_panel(panel as i32)
+    }
+
+    /// The choices the menus at `place` offer, of each plugin on that has one there (in order of
+    /// id), as their manifests list them. None: the app shows no button for them.
+    pub fn menu_choices(&self, place: PluginMenuPlace) -> Vec<PluginChoice> {
+        let list = self.listed();
+        let mut on: Vec<&PluginInfo> = list.files.iter().filter(|p| p.on && p.problem.is_none()).collect();
+        on.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut choices = Vec::new();
+        for plugin in on {
+            let Some(menu) = list.shapes.get(&plugin.id).and_then(|shape| shape.menu.as_ref()) else { continue };
+            if menu.place != place {
+                continue;
+            }
+            for choice in &menu.choices {
+                let chosen =
+                    choice.sets.iter().all(|&(at, value)| plugin.controls.get(at).is_some_and(|c| c.number() == value));
+                choices.push(PluginChoice {
+                    key: choice.key.clone(),
+                    label: choice.label.clone(),
+                    icon: choice.icon.clone(),
+                    chosen,
+                });
+            }
+        }
+        choices
+    }
+
+    /// The menu choice `key` ([`PluginChoice::key`]) picked: each control it sets set so, as if on
+    /// its card, its plugin told. The controls it changed, as they are now, for the app to keep
+    /// (as it keeps a switch or a slider set on the card); none for a choice no plugin on offers.
+    pub fn choose(&self, key: String) -> Vec<PluginControl> {
+        let mut list = self.listed();
+        let Listed { files, shapes, .. } = &mut *list;
+        let found = files.iter_mut().filter(|p| p.on && p.problem.is_none()).find_map(|plugin| {
+            let choice = shapes.get(&plugin.id)?.menu.as_ref()?.choices.iter().find(|c| c.key == key)?;
+            Some((plugin, choice.sets.clone()))
+        });
+        let Some((plugin, sets)) = found else { return Vec::new() };
+        let mut changed = Vec::new();
+        for (at, value) in sets {
+            let Some(control) = plugin.controls.get_mut(at) else { continue };
+            if control.number() == value {
+                continue;
+            }
+            match control {
+                PluginControl::Switch { control } => control.on = value != 0.0,
+                PluginControl::Slider { control } => control.value = control.stepped(value),
+                PluginControl::File { .. } => continue,
+            }
+            self.hooks.control(&plugin.id, at, control.number());
+            changed.push(control.clone());
+        }
+        changed
     }
 
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
@@ -2348,6 +2559,7 @@ mod tests {
     const INTERFACE: &str = "io.github.artcraftandroid.interface";
     const LAYER_TOOLS: &str = "io.github.artcraftandroid.layer-tools";
     const LAYER_FILLS: &str = "io.github.artcraftandroid.layer-fills";
+    const TRIANGLE: &str = "io.github.artcraftandroid.colour-triangle";
     const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
 
     /// The app's plugins kept in `dir`, what it comes with added.
@@ -2565,6 +2777,33 @@ mod tests {
         assert!(plugins.picker_on());
         let corner = plugins.picker_pick(0.933, 0.5).unwrap();
         assert!(corner.iter().all(|share| (share - 1.0).abs() < 1e-3), "{corner:?}");
+        // the hue slider has the hue until the ring does, then a touch on the ring picks it
+        assert_eq!(plugins.picker_hue_point(0.0), None);
+        assert_eq!(plugins.picker_hue(0.97, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.ring"), true));
+        let knob = plugins.picker_hue_point(0.25).unwrap();
+        assert!((knob[0] - 0.5).abs() < 1e-3 && (knob[1] - 0.05).abs() < 1e-3, "{knob:?}");
+        assert!(plugins.picker_hue(0.97, 0.5).is_some_and(|h| !(1e-3..=0.999).contains(&h)));
+        assert_eq!(plugins.picker_hue(0.5, 0.5), None, "the triangle's middle");
+        // the floating window: smaller with Interface size's slider, and the picker alone with its switch
+        assert!(!plugins.floating_picker_only());
+        assert!(plugins.set_switch(format!("{TRIANGLE}.picker_only"), true));
+        assert!(plugins.floating_picker_only());
+        // the parts of the interface each on top of the whole, while they're sized separately
+        assert!(plugins.set_slider(format!("{INTERFACE}.floating"), 0.5).is_some());
+        assert!(plugins.set_slider(format!("{INTERFACE}.top_bar"), 1.5).is_some());
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 1.0);
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 0.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::TopBar), 1.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Panels), 1.0);
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6, "the whole as it was");
+        // the triangle's own switch off: Classic is the app's square again, and the window as it was
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), false));
+        assert!(!plugins.picker_on() && !plugins.floating_picker_only());
+        assert_eq!(plugins.picker_pick(0.933, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), true));
+        assert!(plugins.picker_on());
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
@@ -2603,21 +2842,31 @@ mod tests {
         assert_eq!(labels(&plugins, COLORDROP), switches);
         assert!(plugins.set_switch(format!("{COLORDROP}.gap_closing"), true));
         assert_eq!(labels(&plugins, COLORDROP), ["ColorDrop fills by all layers", "ColorDrop gap closing", "Gap"]);
-        let interface = ["Interface size", "Interface colour", "Hide undo notices", "Panels stay open"];
+        let interface =
+            ["Interface size", "Interface colour", "Hide undo notices", "Hide all action notices", "Panels stay open"];
         assert_eq!(labels(&plugins, INTERFACE), interface);
         assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
         assert!(plugins.set_switch(format!("{INTERFACE}.colour"), true));
         let all = [
             "Interface size",
             "Size",
+            "Size parts separately",
             "Clear of status bar and camera",
             "Interface colour",
             "Hue",
             "Saturation",
             "Hide undo notices",
+            "Hide all action notices",
             "Panels stay open",
         ];
         assert_eq!(labels(&plugins, INTERFACE), all);
+        // a switch under a switch, and what comes under it while both are on
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        let parts = ["Floating panels", "Popovers and menus", "Side bar", "Top bar", "Panels"];
+        let with_parts: Vec<&str> = all[..3].iter().chain(&parts).chain(&all[3..]).copied().collect();
+        assert_eq!(labels(&plugins, INTERFACE), with_parts);
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), false));
+        assert_eq!(labels(&plugins, INTERFACE)[..2], ["Interface size", "Interface colour"]);
         let tools = ["Opacity of picked layers", "Paste into masks", "Eyedropper picks from layer"];
         assert_eq!(labels(&plugins, LAYER_TOOLS), tools);
         assert_eq!(labels(&plugins, EFFECTS), ["Extract lines", "Outline", "Posterise"]);
@@ -2924,6 +3173,99 @@ mod tests {
     }
 
     #[test]
+    fn the_triangle_s_menu_switches_its_shape_and_what_it_sets_is_kept() {
+        let dir = store("bundled-menu");
+        let plugins = app_at(&dir);
+        // nothing at Classic while it's off
+        assert!(plugins.menu_choices(PluginMenuPlace::Classic).is_empty());
+        assert!(plugins.choose(format!("{TRIANGLE}.ring")).is_empty(), "none offers it");
+        assert!(plugins.set_on(TRIANGLE.to_owned(), true));
+        let chosen = |plugins: &Plugins| {
+            let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+            choices.iter().filter(|c| c.chosen).map(|c| c.label.clone()).collect::<Vec<_>>()
+        };
+        let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+        let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Square", "Triangle", "Hue ring"]);
+        assert!(choices.iter().all(|c| c.icon.starts_with('M') && c.icon.ends_with('Z')), "each its icon");
+        // the triangle starts on, its ring off
+        assert_eq!(chosen(&plugins), ["Triangle"]);
+        assert_eq!(plugins.picker_hue_point(0.25), None);
+        // the ring: its switch set, and told back to be kept
+        let changed = plugins.choose(format!("{TRIANGLE}.ring"));
+        let keys: Vec<&str> = changed.iter().map(PluginControl::key).collect();
+        assert_eq!(keys, [format!("{TRIANGLE}.ring")]);
+        assert_eq!(chosen(&plugins), ["Hue ring"]);
+        assert!(plugins.picker_hue_point(0.25).is_some(), "the ring has the hue");
+        // the square: Classic is the app's own again
+        let changed = plugins.choose(format!("{TRIANGLE}.square"));
+        assert!(matches!(changed.as_slice(), [PluginControl::Switch { control }] if !control.on));
+        assert_eq!(chosen(&plugins), ["Square"]);
+        assert!(!plugins.picker_on());
+        // picked again, nothing changes
+        assert!(plugins.choose(format!("{TRIANGLE}.square")).is_empty());
+        // kept, so through a restart, as if set on its card
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(chosen(&next), ["Square"]);
+        assert!(!next.picker_on());
+        assert!(!next.choose(format!("{TRIANGLE}.ring")).is_empty());
+        assert_eq!(chosen(&next), ["Hue ring"]);
+        // off, it offers nothing
+        assert!(next.set_on(TRIANGLE.to_owned(), false));
+        assert!(next.menu_choices(PluginMenuPlace::Classic).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_interface_hides_every_notice_of_something_done_but_what_went_wrong() {
+        let dir = store("bundled-notices");
+        let plugins = app_at(&dir);
+        let shown = |plugins: &Plugins| {
+            [NoticeKind::Step, NoticeKind::Done, NoticeKind::Problem].map(|k| plugins.shows_notice(k))
+        };
+        // with it off, every notice shows
+        assert_eq!(shown(&plugins), [true; 3]);
+        assert!(plugins.set_on(INTERFACE.to_owned(), true));
+        assert_eq!(shown(&plugins), [true; 3], "each waits for its switch");
+        // undo's alone, then every action's; what went wrong always shows
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), true));
+        assert_eq!(shown(&plugins), [false, true, true]);
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), false));
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_notices"), true));
+        assert_eq!(shown(&plugins), [false, false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(shown(&next), [false, false, true]);
+        assert!(next.set_on(INTERFACE.to_owned(), false));
+        assert_eq!(shown(&next), [true; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panels_float_while_the_floating_panels_switches_say() {
+        use crate::floating::FloatingPanel;
+        const FLOATING: &str = "io.github.artcraftandroid.floating-panels";
+        let dir = store("bundled-floating");
+        let plugins = app_at(&dir);
+        let floats = |plugins: &Plugins| [FloatingPanel::Layers, FloatingPanel::Brushes].map(|p| plugins.floats(p));
+        // with it off nothing floats; on, both do at once, each while its switch is
+        assert_eq!(floats(&plugins), [false; 2]);
+        assert!(plugins.set_on(FLOATING.to_owned(), true));
+        assert_eq!(floats(&plugins), [true, true]);
+        assert!(plugins.set_switch(format!("{FLOATING}.layers"), false));
+        assert_eq!(floats(&plugins), [false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(floats(&next), [false, true]);
+        assert!(next.set_on(FLOATING.to_owned(), false));
+        assert_eq!(floats(&next), [false; 2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();
         plugins.add_bundled(crate::bundled::BUNDLED);
@@ -2942,6 +3284,102 @@ mod tests {
         // a value kept for it finds nothing to go to
         next.read_kept("org.example.filter.cut".to_owned(), "0.1".to_owned());
         assert!(filters(&next).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const A: &str = "org.example.a";
+    const B: &str = "org.example.b";
+    const C: &str = "org.example.c";
+
+    /// The ids on the Plugins page, the top first.
+    fn page(plugins: &Plugins) -> Vec<String> {
+        plugins.plugins().into_iter().map(|p| p.id).collect()
+    }
+
+    /// A store holding filters `ids`, imported in that order.
+    fn store_of(name: &str, ids: &[&str]) -> String {
+        let dir = store(name);
+        let plugins = at(&dir);
+        for id in ids {
+            assert_eq!(plugins.install(filter_file(&filter(id))), None);
+        }
+        dir
+    }
+
+    /// What is left half written in `dir`.
+    fn left_beside(dir: &str) -> Vec<String> {
+        let names = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        names.filter(|n| n.starts_with('.')).collect()
+    }
+
+    #[test]
+    fn plugins_moved_on_the_page_stay_in_that_order_through_a_restart() {
+        let dir = store_of("order", &[A, B, C]);
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        // the last to the top, then the first of the others past the end: the last
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None);
+        assert_eq!(page(&plugins), [C, A, B]);
+        assert_eq!(plugins.move_plugin(A.to_owned(), 99), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // nothing for one that isn't here, nor for one put where it is
+        assert_eq!(plugins.move_plugin("org.example.gone".to_owned(), 0), None);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 1), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // kept whole, nothing left beside it
+        let next = at(&dir);
+        assert_eq!(page(&next), [C, B, A]);
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // only the page goes by it: the Adjustments menu lists them as ever
+        let menu: Vec<String> = next.filters().into_iter().map(|p| p.id).collect();
+        assert_eq!(menu, [A, B, C]);
+        // one imported since comes after them; one removed leaves the rest as they were
+        assert_eq!(next.install(filter_file(&filter("org.example.d"))), None);
+        assert!(next.remove(B.to_owned()).is_some());
+        assert_eq!(page(&next), [C, A, "org.example.d"]);
+        assert_eq!(page(&at(&dir)), [C, A, "org.example.d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_kept_before_the_order_was_reads_as_it_did() {
+        // imported in no order: listed by id, as before
+        let dir = store_of("no-order", &[C, A, B]);
+        assert!(!dir_holds(&dir, "order"));
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_order_damaged_anyhow_keeps_what_it_can_and_the_rest_come_after() {
+        let dir = store_of("order-damaged", &[A, B, C]);
+        let note = std::path::Path::new(&dir).join("order");
+        // junk, an id twice, one gone, blank lines and spaces: C, then the rest as listed
+        std::fs::write(
+            &note,
+            "not an id\n\n  org.example.c  \nORG.EXAMPLE.A\norg.example.gone\norg.example.c\n\u{fffd}",
+        )
+        .unwrap();
+        assert_eq!(page(&at(&dir)), [C, A, B]);
+        // too big to be one: none
+        std::fs::write(&note, format!("{B}\n").repeat(10_000)).unwrap();
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        // not a file: none, and moving one says once that it isn't kept
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None, "said once");
+        assert_eq!(page(&plugins), [C, B, A], "shown meanwhile");
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // kept again once it can be, and said again if it can't afterwards
+        std::fs::remove_dir_all(&note).unwrap();
+        assert_eq!(plugins.move_plugin(A.to_owned(), 0), None);
+        assert_eq!(page(&at(&dir)), [A, C, B]);
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

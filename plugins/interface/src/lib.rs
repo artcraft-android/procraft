@@ -1,11 +1,13 @@
 //! Interface: the interface as one likes it, each part on while its switch is. Its size, a little
-//! bigger or smaller for a screen it doesn't suit, and on a phone kept clear of the status bar and
-//! the camera; its accent, the blue of what is chosen and switched on, in a hue and saturation of
-//! one's own; undo and redo without the notice naming what they took back; and panels left open
-//! while one paints. It's a plugin, not part of the app: `tools/pack_plugin.py` makes a
+//! bigger or smaller for a screen it doesn't suit (and its parts each bigger or smaller again, if
+//! one likes), and on a phone kept clear of the status bar and the camera; its accent, the blue of what is chosen and switched on, in a hue and saturation of
+//! one's own; undo and redo without the notice naming what they took back, or every action without
+//! the notice saying it was done (what went wrong still says so); and panels left open while one
+//! paints. It's a plugin, not part of the app: `tools/pack_plugin.py` makes a
 //! `.procraft-plugin` file of it.
 //!
-//! The app asks how big to show and draws at that number, whether to keep clear (and lays the
+//! The app asks how big to show, and each part on top of that, and draws at those numbers, whether
+//! to keep clear (and lays the
 //! interface out inside the system's bars and the screen's cutouts if so), which colour, and
 //! whether to show the notice or close a panel. The drawing, undo and the panels stay the app's.
 //! The interface is written down at the top of `crates/core/src/plugin_run.rs`.
@@ -13,16 +15,25 @@
 #![cfg_attr(not(test), no_std)]
 
 /// The controls by their place, as the manifest starts them.
-static CONTROLS: kit::Controls<8> = kit::Controls::new([0.0, 1.0, 0.0, 0.0, 212.0, 1.0, 0.0, 0.0]);
+static CONTROLS: kit::Controls<15> =
+    kit::Controls::new([0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 212.0, 1.0, 0.0, 0.0, 0.0]);
 kit::controls!(CONTROLS);
 const SIZE_ON: usize = 0;
 const SIZE: usize = 1;
-const CLEAR: usize = 2;
-const COLOUR: usize = 3;
-const HUE: usize = 4;
-const SATURATION: usize = 5;
-const HIDE_UNDO: usize = 6;
-const PIN_PANELS: usize = 7;
+const PARTS: usize = 2;
+/// The parts' sliders, in the order the app numbers the parts: floating panels, popovers and
+/// menus, the side bar, the top bar, the panels.
+const FIRST_PART: usize = 3;
+const PART_COUNT: i32 = 5;
+const CLEAR: usize = 8;
+const COLOUR: usize = 9;
+const HUE: usize = 10;
+const SATURATION: usize = 11;
+const HIDE_UNDO: usize = 12;
+const HIDE_NOTICES: usize = 13;
+const PIN_PANELS: usize = 14;
+/// The notices the app asks about by number: what undo and redo did, and anything else done.
+const NOTICE_KINDS: core::ops::RangeInclusive<i32> = 0..=1;
 
 /// The steps it moves in as a window gets smaller, percent, so a window dragged smaller doesn't lay
 /// everything out again at each pixel.
@@ -50,6 +61,16 @@ pub extern "C" fn procraft_interface_scale(width: f32, height: f32) -> f32 {
     if CONTROLS.on(SIZE_ON) { fitted(CONTROLS.get(SIZE), width, height) } else { 1.0 }
 }
 
+/// How big part `part` of the interface shows next to the rest of it: as its slider says while
+/// Interface size sizes the parts separately; as the rest otherwise, and for a part it doesn't know.
+#[unsafe(no_mangle)]
+pub extern "C" fn procraft_interface_part_scale(part: i32) -> f32 {
+    if !(0..PART_COUNT).contains(&part) || !CONTROLS.on(SIZE_ON) || !CONTROLS.on(PARTS) {
+        return 1.0;
+    }
+    CONTROLS.get(FIRST_PART + part as usize).clamp(0.5, 1.5)
+}
+
 // whether the interface keeps clear of the status bar and the screen's cutouts: Interface size's
 // switch for it
 kit::yes!(procraft_keep_clear, || CONTROLS.on(SIZE_ON) && CONTROLS.on(CLEAR));
@@ -68,6 +89,13 @@ pub extern "C" fn procraft_interface_colour(role: i32) -> i32 {
 }
 
 kit::yes!(procraft_hide_undo_notice, || CONTROLS.on(HIDE_UNDO));
+
+/// Whether the notice of something done, of kind `kind`, goes by unseen: every kind the app has
+/// while Hide all action notices is on (a kind it doesn't know shows).
+#[unsafe(no_mangle)]
+pub extern "C" fn procraft_hide_notice(kind: i32) -> i32 {
+    i32::from(CONTROLS.on(HIDE_NOTICES) && NOTICE_KINDS.contains(&kind))
+}
 kit::yes!(procraft_pin_panels, || CONTROLS.on(PIN_PANELS));
 
 /// A colour by its hue (degrees), saturation and brightness (0 to 1), as red, green and blue.
@@ -124,16 +152,30 @@ mod tests {
                 procraft_interface_colour(0),
                 procraft_hide_undo_notice(),
                 procraft_pin_panels(),
+                procraft_hide_notice(0) + procraft_hide_notice(1),
             )
         };
+        let parts = || (0..PART_COUNT).map(|part| procraft_interface_part_scale(part)).collect::<Vec<_>>();
         // all off: as measured, the app's own colour
-        assert_eq!(said(), (1.0, 0, -1, 0, 0));
+        assert_eq!(said(), (1.0, 0, -1, 0, 0, 0));
+        assert_eq!(parts(), [1.0; 5]);
         // its sliders do nothing with their switch off
         procraft_control(SIZE as i32, 0.8);
         procraft_control(CLEAR as i32, 1.0);
-        assert_eq!(said(), (1.0, 0, -1, 0, 0));
+        for (i, part) in [0.5, 0.75, 1.25, 1.5, 0.9].into_iter().enumerate() {
+            procraft_control((FIRST_PART + i) as i32, part);
+        }
+        assert_eq!(said(), (1.0, 0, -1, 0, 0, 0));
+        assert_eq!(parts(), [1.0; 5]);
         procraft_control(SIZE_ON as i32, 1.0);
-        assert_eq!(said(), (0.8, 1, -1, 0, 0));
+        assert_eq!(said(), (0.8, 1, -1, 0, 0, 0));
+        // each part as its slider says only while they're sized separately; a part it doesn't know as
+        // the rest
+        assert_eq!(parts(), [1.0; 5]);
+        procraft_control(PARTS as i32, 1.0);
+        assert_eq!(parts(), [0.5, 0.75, 1.25, 1.5, 0.9]);
+        assert_eq!((procraft_interface_part_scale(-1), procraft_interface_part_scale(PART_COUNT)), (1.0, 1.0));
+        assert_eq!(said().0, 0.8, "the whole as it was");
         procraft_control(CLEAR as i32, 0.0);
         assert_eq!(said().1, 0);
         // the accent starts as the usual blue, and goes by its sliders
@@ -146,14 +188,19 @@ mod tests {
         assert_eq!(procraft_interface_colour(0), 0xFDFDFD);
         procraft_control(HIDE_UNDO as i32, 1.0);
         procraft_control(PIN_PANELS as i32, 1.0);
-        assert_eq!(said(), (0.8, 0, 0xFDFDFD, 1, 1));
-        for switch in [SIZE_ON, COLOUR, HIDE_UNDO, PIN_PANELS] {
+        assert_eq!(said(), (0.8, 0, 0xFDFDFD, 1, 1, 0));
+        // every action's notice, and only the kinds the app has
+        procraft_control(HIDE_NOTICES as i32, 1.0);
+        assert_eq!(said(), (0.8, 0, 0xFDFDFD, 1, 1, 2));
+        assert_eq!((procraft_hide_notice(-1), procraft_hide_notice(2)), (0, 0));
+        for switch in [SIZE_ON, COLOUR, HIDE_UNDO, HIDE_NOTICES, PIN_PANELS] {
             procraft_control(switch as i32, 0.0);
         }
-        assert_eq!(said(), (1.0, 0, -1, 0, 0));
+        assert_eq!(said(), (1.0, 0, -1, 0, 0, 0));
+        assert_eq!(parts(), [1.0; 5]);
         // a control it doesn't have changes nothing
-        procraft_control(8, 1.0);
-        assert_eq!(said(), (1.0, 0, -1, 0, 0));
+        procraft_control(15, 1.0);
+        assert_eq!(said(), (1.0, 0, -1, 0, 0, 0));
     }
 
     #[test]

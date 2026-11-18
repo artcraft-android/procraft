@@ -1810,6 +1810,84 @@ fn liquify_kept_at_part_of_itself_looks_as_it_did_shown_at_that_part() {
 }
 
 #[test]
+fn liquify_steps_undo_and_redo_one_at_a_time_and_survive_the_edit_ending() {
+    use procraft_gpu::{Filter, LiquifyMode};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(30.0, 40.0), 6.0), dot(Vec2::new(30.0, 90.0), 6.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let untouched = canvas.read_layer(&gpu, layer).unwrap();
+    canvas.begin_transform(layer);
+    canvas.begin_liquify();
+    let push = |canvas: &mut Canvas, y: f32| {
+        for k in 0..30 {
+            canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Push, [30.0 + k as f32, y], 30.0, 1.0)]);
+        }
+    };
+    let shown = |canvas: &mut Canvas, doc: &mut Document| {
+        canvas.set_filter(Filter::Liquify { amount: 1.0 });
+        canvas.render(&gpu, doc, None);
+        canvas.read_layer(&gpu, layer).unwrap()
+    };
+    // two strokes, each its own step; a step that changed nothing is one too
+    push(&mut canvas, 40.0);
+    canvas.liquify_mark();
+    let first = shown(&mut canvas, &mut doc);
+    push(&mut canvas, 90.0);
+    canvas.liquify_mark();
+    let both = shown(&mut canvas, &mut doc);
+    canvas.liquify_mark();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.liquify_steps(), (3, 0));
+    assert!(first != untouched && both != first);
+    // back a step at a time, and forward again
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == both, "the empty step undone changed the field");
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == first, "the second stroke not undone alone");
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == untouched, "the first stroke not undone");
+    assert_eq!(canvas.liquify_steps(), (0, 3));
+    canvas.liquify_redo();
+    assert!(shown(&mut canvas, &mut doc) == first);
+    canvas.liquify_redo();
+    assert!(shown(&mut canvas, &mut doc) == both);
+    // a new stroke after an undo leaves nothing to redo
+    canvas.liquify_undo();
+    push(&mut canvas, 40.0);
+    canvas.liquify_mark();
+    let again = shown(&mut canvas, &mut doc);
+    assert_eq!(canvas.liquify_steps(), (2, 0));
+    // set aside as the edit ends (kept), and taken up by the next: as it was, its steps with it
+    canvas.keep_liquify();
+    canvas.end_transform(true);
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.keeps_liquify());
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == again);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == untouched);
+    canvas.begin_transform(layer);
+    canvas.resume_liquify();
+    assert!(shown(&mut canvas, &mut doc) == again, "the field set aside didn't come back");
+    assert!(!canvas.keeps_liquify());
+    assert_eq!(canvas.liquify_steps(), (2, 0));
+    canvas.liquify_undo();
+    assert!(shown(&mut canvas, &mut doc) == first);
+    canvas.keep_liquify();
+    canvas.end_transform(false);
+    canvas.forget_liquify();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(!canvas.keeps_liquify());
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == untouched);
+}
+
+#[test]
 fn an_adjustment_painted_on_shows_only_where_painted_and_clone_copies() {
     use procraft_gpu::Filter;
     let Some(gpu) = gpu() else { return };
@@ -2391,11 +2469,9 @@ fn half_grain(canvas: &mut Canvas, gpu: &Gpu, style: &mut StrokeStyle, tile: f32
 fn a_stamp_flip_reflects_its_moving_grain_around_the_stamp_center() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
-    for (wet_pull, rendering) in [
-        (None, Rendering::BuildUp),
-        (None, Rendering::Capped),
-        (Some(0.5), Rendering::Gradual),
-    ] {
+    for (wet_pull, rendering) in
+        [(None, Rendering::BuildUp), (None, Rendering::Capped), (Some(0.5), Rendering::Gradual)]
+    {
         for fixed_grain_per_stamp in [false, true] {
             let mut doc = Document::new(64, 64);
             let mut canvas = Canvas::new(&gpu, &doc).unwrap();
@@ -2419,15 +2495,8 @@ fn a_stamp_flip_reflects_its_moving_grain_around_the_stamp_center() {
             canvas.render(&gpu, &mut doc, None);
             let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
             let [left, right] = [24, 40].map(|x| pixel(&layer, 64, x, 32)[3]);
-            let (ink, clear) = if fixed_grain_per_stamp {
-                (left, right)
-            } else {
-                (right, left)
-            };
-            assert!(
-                ink > 200 && clear == 0,
-                "{wet_pull:?} {rendering:?} {fixed_grain_per_stamp}: {left} {right}"
-            );
+            let (ink, clear) = if fixed_grain_per_stamp { (left, right) } else { (right, left) };
+            assert!(ink > 200 && clear == 0, "{wet_pull:?} {rendering:?} {fixed_grain_per_stamp}: {left} {right}");
         }
     }
 }
@@ -3609,6 +3678,51 @@ fn a_wet_stroke_redrawn_whole_is_laid_once() {
     // about 40 stamps over the middle at 1% each
     let expected = 255.0 * (1.0 - 0.99f32.powf(12.0 * 1.0 / 0.3));
     assert!((f32::from(once) - expected).abs() < 8.0, "{once} {expected}");
+}
+
+/// A stroke redrawn from scratch more than once before a render (a shape dragged about faster
+/// than frames come) is laid as its last drawing alone: the pixels that drawn once makes, and
+/// none of the work of those before it.
+#[test]
+fn a_stroke_redrawn_twice_before_a_render_lays_only_the_last() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let line = |y: f32| -> Vec<Stamp> {
+        (0..40)
+            .map(|i| Stamp {
+                time_ms: f64::from(i) * 4.0,
+                distance: i as f32,
+                ..Stamp::round(Vec2::new(12.0 + i as f32, y), 5.0, 0.5)
+            })
+            .collect()
+    };
+    let (first, last) = (line(20.0), line(44.0));
+    let blue = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    // built up in the stroke texture, and wet paint laid in place
+    for style in [blue, StrokeStyle { wet_pull: Some(0.85), dilution: 0.5, load: 0.1, ..blue }] {
+        let laid = |drawings: &[&[Stamp]]| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            canvas.render(&gpu, &mut doc, None);
+            // a piece sent for each stamp: the pieces count the stamps laid
+            canvas.set_work_at_once(1);
+            canvas.begin_stroke(doc.current(), style);
+            for stamps in drawings {
+                canvas.replace_stamps(stamps);
+            }
+            let sent = canvas.pieces_sent();
+            canvas.render(&gpu, &mut doc, None);
+            let pieces = canvas.pieces_sent() - sent;
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            (canvas.read_layer(&gpu, doc.current()).unwrap(), pieces)
+        };
+        let (once, once_pieces) = laid(&[&last]);
+        let (twice, twice_pieces) = laid(&[&first, &last]);
+        let wet = style.in_place();
+        assert!(once == twice, "wet {wet}: laid twice, it came out differently");
+        assert_eq!(twice_pieces, once_pieces, "wet {wet}: the first drawing was laid too");
+    }
 }
 
 /// A stroke redrawn whole as it ends, its stamps laid so far still at its start, lays only those

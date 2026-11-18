@@ -53,6 +53,16 @@ This product bundles third-party material under its own licenses, listed below.
   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+- Microsoft's DirectX Shader Compiler (https://github.com/microsoft/DirectXShaderCompiler, release
+  v1.9.2609, dxc_2026_09_29.zip): dxcompiler.dll and dxil.dll, beside ProCraft.exe in the Windows
+  installer and portable zip (downloaded from the release, checksum checked, as they are packaged;
+  not kept in the repository), by Microsoft Corporation. dxcompiler.dll is under the University
+  of Illinois/NCSA Open Source License (the LLVM Release License), Copyright (c) 2003-2015
+  University of Illinois at Urbana-Champaign; the release also gives the MIT License, Copyright
+  (c) Microsoft Corporation. dxil.dll is distributed under the Microsoft Software License Terms
+  for the DirectX Shader Compiler (its distributable code). The three texts, as the release gives
+  them, are beside the DLLs as DXC-LICENSE-LLVM.txt, DXC-LICENCE-MIT.txt and DXC-LICENSE-MS.txt;
+  the first two are also in packaging/windows/dxc.
 
 Libraries
 

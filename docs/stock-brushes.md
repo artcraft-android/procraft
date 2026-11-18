@@ -38,3 +38,5 @@ Brushes are known by where they came from, so the update changes nothing about t
   renamed or added brushes to stay where they are. Your tools, Recent brushes and QuickMenu
   buttons follow the brushes they were on.
 - Restore default brushes puts deleted stock and Legacy brushes back where they ship.
+- The Legacy set's brushes are also in [`legacy-brushes/`](../legacy-brushes), a brush set file
+  for each set they first came in, to import on their own.

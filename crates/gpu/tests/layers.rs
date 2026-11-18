@@ -1356,6 +1356,10 @@ fn allocated(gpu: &Gpu) -> Option<u64> {
 #[test]
 fn a_canvas_makes_its_scratch_and_second_composite_only_once_wanted() {
     let Some(gpu) = Gpu::headless().ok() else { return eprintln!("skipped: no GPU") };
+    // (counted for strokes in half floats: on a GPU that can't draw into them a stroke keeps more)
+    if !gpu.draws_half_floats() {
+        return eprintln!("skipped: strokes aren't in half floats here");
+    }
     let side = 1024u32;
     let mut doc = Document::new(side, side);
     // the first canvas makes the device's pipelines; the second is measured

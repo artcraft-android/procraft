@@ -24,10 +24,12 @@ mod export_card;
 mod files;
 #[cfg(target_os = "macos")]
 mod finder;
+mod floating_panels;
 mod gallery;
 mod gesture_controls;
 mod gradient_map;
 mod guide_editor;
+mod held_layers;
 mod icons;
 mod input;
 mod layer_choice;
@@ -278,6 +280,8 @@ fn main() {
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
         interface_touches: input::InterfaceTouches::default(),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        maximised_before_full_screen: false,
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -346,6 +350,10 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
     /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
     interface_touches: input::InterfaceTouches,
+    /// The keyboard's modifiers held now, for Alt+Enter.
+    modifiers: winit::keyboard::ModifiersState,
+    /// The window was maximised as it went full screen, and is maximised again as it comes back.
+    maximised_before_full_screen: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -356,6 +364,39 @@ fn window_icon() -> Option<winit::window::Icon> {
     let rgba = picture.into_rgba8();
     let (width, height) = rgba.dimensions();
     winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// Whether `key` pressed with `modifiers` held is the window's full screen key: F11, or off a Mac
+/// Alt+Enter as well (Ctrl with Alt is AltGr, typing).
+fn full_screen_key(key: &winit::keyboard::Key, modifiers: winit::keyboard::ModifiersState) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::F11) => true,
+        Key::Named(NamedKey::Enter) => {
+            !cfg!(target_os = "macos") && modifiers.alt_key() && !modifiers.control_key() && !modifiers.super_key()
+        }
+        _ => false,
+    }
+}
+
+/// The window fills its screen without its frame, or goes back to a window. On Windows a maximised
+/// window is put back to its own size first and maximised again as it comes back: left maximised,
+/// Windows keeps it to the screen less the task bar, and the task bar's strip shows black.
+fn toggle_full_screen(window: &Window, maximised_before: &mut bool) {
+    if window.fullscreen().is_some() {
+        pen::set_full_screen(false);
+        window.set_fullscreen(None);
+        if std::mem::take(maximised_before) {
+            window.set_maximized(true);
+        }
+        return;
+    }
+    *maximised_before = cfg!(windows) && window.is_maximized();
+    if *maximised_before {
+        window.set_maximized(false);
+    }
+    pen::set_full_screen(true);
+    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 }
 
 /// Tap Assistance holds a finger's touch where it landed this long.
@@ -474,15 +515,17 @@ impl ApplicationHandler for App {
         if response.repaint && event != WindowEvent::RedrawRequested {
             redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
         }
-        // F11: the window fills its screen without its frame (a pen display's whole screen for
-        // the canvas, as the tablet's), or goes back to a window
+        // F11, or Alt+Enter off a Mac: the window fills its screen without its frame (a pen
+        // display's whole screen for the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = m.state();
+        }
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.state.is_pressed()
             && !key.repeat
-            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+            && full_screen_key(&key.logical_key, self.modifiers)
         {
-            let full = screen.window.fullscreen().is_none();
-            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+            toggle_full_screen(&screen.window, &mut self.maximised_before_full_screen);
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -846,6 +889,19 @@ impl App {
             // the New canvas list offers the kinds of artwork the plugins on make
             gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // layers held out of an artwork: held a moment over another, it opens; let go here,
+            // they go nowhere
+            if let Some(held) = interface.held.as_mut() {
+                let at = ui.ctx().input(|i| i.pointer.latest_pos());
+                let under = at.and_then(|at| gallery.artwork_at(at)).map(held_layers::Spring::Artwork);
+                match held.frame(ui.ctx(), under, false) {
+                    held_layers::Outcome::Open(held_layers::Spring::Artwork(dir)) => {
+                        asked = Some(gallery::Asked::Open(dir));
+                    }
+                    held_layers::Outcome::Holding | held_layers::Outcome::Open(_) => {}
+                    held_layers::Outcome::Dropped(_) | held_layers::Outcome::Gone => interface.held = None,
+                }
+            }
             // a pen's buttons do nothing here, and nothing in the artwork opened next either
             crate::pen::take_button_presses();
             // a share from the gallery shows its card there
@@ -928,8 +984,9 @@ impl App {
             Some(gallery::Asked::Share(list, format)) => {
                 files::share_artworks(&list, format, 100, &mut self.ui.export_card);
             }
-            Some(gallery::Asked::SharePdf(list, quality)) => {
-                files::share_artworks(&list, files::Format::Pdf, quality, &mut self.ui.export_card);
+            // several as one PDF, a page each
+            Some(gallery::Asked::SharePdf(list, quality, group)) => {
+                files::share_pdf(&list, quality, &group, &mut self.ui.export_card);
             }
             Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
             // opened (read as Open reads it), then shared

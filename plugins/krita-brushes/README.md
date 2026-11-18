@@ -56,7 +56,11 @@ It comes with the app, off.
   it towards the secondary colour; an eraser's is clear, taking the paint away), laid as far as its
   smudge rate says (in place of what is there, or over it without smearing alpha), picked up from
   every layer in overlay mode, by the older engine's sums or the newer's; the first dab only marks where the
-  next picks up from.
+  next picks up from. With a lightness tip its paint is kept with the layer between strokes (the
+  app's layer store), lit by a thickness each dab's tip lays: in its place, flattened as far as the
+  paint thickness option is low, or over what is there as far as the smudge length and the thickness
+  take it; the layer shows the paint at the lightness the thickness says, and any other change to
+  the layer dries it.
 - Other engines: the quick brush (hard round dabs of its diameter and spacing), the tangent normal
   brush (a pixel brush painting the pen's lean, or the stroke's way, or the pen's turn, as a normal
   map's colour, its channels swizzled as it says), the sketch brush (at each move a line from where
@@ -108,9 +112,10 @@ the plugin's data.
 The Krita brush studio (the plugin's action, opened by the app's brush studio for its brushes) shows
 a brush's Krita settings a page at a time, the pages its engine has: a pixel brush's tip, spacing,
 size, opacity and flow, turn and squash, scatter and mirror, colour and texture; a colour smudge
-brush's smudge length and mode, smudge radius, colour rate and gradient; a tangent normal brush's
-tilt; a sketch brush's lines; a spray brush's area, particles, their dynamics and colours; a quick
-brush's diameter and spacing; a bristle, hatching, curve, particle, grid, chalk or dyna brush's own.
+brush's smudge length and mode, smudge radius, colour rate, gradient and paint thickness; a tangent
+normal brush's tilt; a sketch brush's lines; a spray brush's area, particles, their dynamics and
+colours; a quick brush's diameter and spacing; a bristle, hatching, curve, particle, grid, chalk or
+dyna brush's own.
 Each setting is named and ranged as Krita's own option widgets name and range it, and each option
 comes with the sensor it follows and its curve.
 
@@ -151,9 +156,9 @@ readers (which its tests use) run in it.
   background fill aren't drawn.
 - The lightness and gradient texturing modes take the texture's grey alone (a pattern's
   see-through parts are taken as opaque).
-- Colour smudge's paint thickness (lightness tips' height). Its overlay mode picks up from the
-  image as last shown, so within one batch of the pen's moves it doesn't see what it has just laid
-  (Krita keeps its own copy of the image up to date dab by dab).
+- Colour smudge's kept paint is 8 bits a channel (Krita keeps its own at 16). Its overlay mode picks
+  up from the image as last shown, so within one batch of the pen's moves it doesn't see what it
+  has just laid (Krita keeps its own copy of the image up to date dab by dab).
 - Pictures a preset takes from Krita's own resources without carrying them (nor its bundle): a
   tip of one is Krita's default tip, as Krita stands it in (round, 40 px across, the studio saying
   so); a masking brush or texture of one is left out.
@@ -208,7 +213,9 @@ sources for facts only (formulas, defaults and file layouts), none of it copied 
 - GIMP brush, pipe and pattern files and how pipes pick cells;
 - the texture's mask and its texturing modes; the masking brush and its composite ops;
 - the colour smudge brush: its smudge rate, colour rate, smudge radius and gradient options, its
-  dulling and smearing modes and how its older and newer engines combine them;
+  dulling and smearing modes and how its older and newer engines combine them; with a lightness tip,
+  the paint and the thickness it keeps with the layer, how each dab lays its thickness, and how the
+  layer shows the paint lit by it;
 - the quick, tangent normal, sketch, spray, bristle, hatching, curve, particle and grid brushes:
   their settings, and how they lay their dabs, lines, particles and cells.
 

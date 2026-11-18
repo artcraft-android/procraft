@@ -652,6 +652,18 @@ const MOST_PIECES: usize = 64;
 /// points, a pixel or so apart, even out; a quick stroke's, far apart, keep its curve.
 const BLEND_NEAR: f32 = 2.0;
 const BLEND_FAR: f32 = 4.0;
+/// Input read in whole screen pixels is evened out over this far (screen pixels) of its path
+/// either way of each point (see [`StrokeBuilder::destepped`]): far enough for a slow line's steps
+/// to even out into its slope, not so far that a slow small curve is flattened.
+const STEPPED_REACH: f32 = 12.0;
+/// The most a point read in whole pixels is moved (screen pixels) across the way the path goes,
+/// and along it: half a pixel, as far as the pen can have been from where it was read either way
+/// of a pixel's side, and half a pixel's diagonal. Across is what a line's steps show; at a slow
+/// corner it is what rounds it.
+const STEPPED_ACROSS: f32 = 0.5;
+const STEPPED_ALONG: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// The most points read in whole pixels wait to be evened out, however close together they come.
+const STEPPED_WAITING: usize = 64;
 
 /// The shares four points in a row give a place `t` of the way from the second to the third:
 /// a quarter, a half and a quarter of the first three at the second (`t` 0), of the last three at
@@ -865,7 +877,8 @@ impl Random {
 /// pixels) instead, as a clone does; `before`: from the layer as it was before the stroke. What it
 /// picks up may come through a `warp` (each pixel from elsewhere under it), and be blurred (`blur`,
 /// 0..1 as a smudge's blur) and then sharpened (`sharpen`, how much of the difference from the blur
-/// is added) before it is laid.
+/// is added) before it is laid. On a stroke that keeps paint with its layer (see the canvas's layer
+/// stores), `height` lays the stamp's tip's grey over the height kept there, that opaque (0..1).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PickUp {
     pub paint_share: f32,
@@ -873,6 +886,7 @@ pub struct PickUp {
     pub dull: Option<(f32, bool)>,
     pub clear: bool,
     pub thin: f32,
+    pub height: Option<f32>,
     pub over: bool,
     pub here: bool,
     pub from: Option<[f32; 2]>,
@@ -965,6 +979,18 @@ pub struct StrokeBuilder {
     ahead: Option<PathPoint>,
     /// Where the point before the newest was, as it came (see [`StrokeBuilder::blended`]).
     before_ahead: Option<Vec2>,
+    /// The canvas shown at this many screen pixels a canvas pixel, if the input comes in whole
+    /// screen pixels (see [`StrokeBuilder::read_in_whole_pixels`]).
+    whole_pixels: Option<f32>,
+    /// The input turned out to come finer than whole pixels: read so from the next samples on (see
+    /// [`StrokeBuilder::read_finer`]).
+    finer_next: bool,
+    /// The path's points as they came in whole pixels, before they are evened out: the first
+    /// `steps_settled` gone on to the curve (kept while those still waiting reach them), the rest
+    /// waiting for the path to go far enough on past them; and where the last gone on went.
+    steps: VecDeque<PathPoint>,
+    steps_settled: usize,
+    steps_at: Option<Vec2>,
     direction: f32,
     /// The direction a dab has, the path not having gone anywhere (see
     /// [`StrokeBuilder::dab_way`]).
@@ -1002,6 +1028,8 @@ pub struct StrokeBuilder {
     exact: bool,
     /// Drawn on the studio's pad, and whether the brush previews tilt there.
     pad: Option<bool>,
+    /// The samples say nothing of how the pen is turned (the library's sample stroke).
+    no_azimuth: bool,
     /// The whole stroke's colour shift, drawn once.
     stroke_shift: Tint,
     /// The stroke's share of the secondary colour, picked as it starts.
@@ -1149,6 +1177,42 @@ impl StrokeBuilder {
         self
     }
 
+    /// The input comes in whole screen pixels (a mouse, or a tablet's pen read no finer than the
+    /// pointer it moves), the canvas shown at `zoom` screen pixels a canvas pixel: a slow line
+    /// read so goes in steps of a pixel, which its points are evened out over (see
+    /// [`StrokeBuilder::destepped`]) before the path curves through them.
+    pub fn read_in_whole_pixels(mut self, zoom: f32) -> StrokeBuilder {
+        if zoom.is_finite() && zoom > 0.0 {
+            self.whole_pixels = Some(zoom);
+        }
+        self
+    }
+
+    /// Whether the input is taken as read in whole screen pixels (see
+    /// [`StrokeBuilder::read_in_whole_pixels`]).
+    pub fn reads_whole_pixels(&self) -> bool {
+        self.whole_pixels.is_some() && !self.finer_next
+    }
+
+    /// The input taken as read in whole pixels turned out to come finer (a position between them;
+    /// one read finer lands on whole pixels now and then): as the next samples are added, the
+    /// points still waiting to be evened out go on as they are, and the path is read finer from
+    /// there.
+    pub fn read_finer(&mut self) {
+        self.finer_next = self.whole_pixels.is_some();
+    }
+
+    /// Reads the input finer from here, if it was found to be (see [`StrokeBuilder::read_finer`]).
+    fn take_finer(&mut self, out: &mut Vec<Stamp>) {
+        if std::mem::take(&mut self.finer_next) {
+            self.settle_steps(true, out);
+            self.whole_pixels = None;
+            self.steps.clear();
+            self.steps_settled = 0;
+            self.steps_at = None;
+        }
+    }
+
     /// The stroke drawn for show (the library's sample): it never counts as fast, each use of the
     /// pressure takes it as it comes, and no streamline, stabilisation or motion filtering holds
     /// its path back (it still curves through its points).
@@ -1205,6 +1269,13 @@ impl StrokeBuilder {
     /// toward the cap there, and the tilt switches act only when the brush previews tilt.
     pub fn on_pad(mut self, preview_tilt: bool) -> StrokeBuilder {
         self.pad = Some(preview_tilt);
+        self
+    }
+
+    /// The samples say nothing of how the pen is turned (the library's sample stroke): a brush
+    /// whose stamps turn as the pen is held turns them with the stroke instead, as under a finger.
+    pub fn without_azimuth(mut self) -> StrokeBuilder {
+        self.no_azimuth = true;
         self
     }
 
@@ -1301,6 +1372,11 @@ impl StrokeBuilder {
             behind: None,
             ahead: None,
             before_ahead: None,
+            whole_pixels: None,
+            finer_next: false,
+            steps: VecDeque::new(),
+            steps_settled: 0,
+            steps_at: None,
             scale: 1.0,
             spacing: StampSpacing::default(),
             length: 0.0,
@@ -1318,6 +1394,7 @@ impl StrokeBuilder {
             library_thumbnail: false,
             exact: false,
             pad: None,
+            no_azimuth: false,
             stroke_shift: Tint::NONE,
             stroke_secondary: 0.0,
             stroke_turn: 0.0,
@@ -1414,6 +1491,7 @@ impl StrokeBuilder {
             return stamps;
         }
         let mut out = Vec::new();
+        self.take_finer(&mut out);
         for s in samples.iter().filter(|s| s.is_finite()) {
             self.push(*s, &mut out);
         }
@@ -1449,6 +1527,7 @@ impl StrokeBuilder {
 
     /// Walks the stretch to the newest path point, as if nothing came after it.
     fn flush(&mut self, out: &mut Vec<Stamp>) {
+        self.settle_steps(true, out);
         if let (Some(c), Some(b)) = (self.ahead.take(), self.head) {
             self.walk_curve(self.behind, b, c, None, out);
             self.behind = Some(b);
@@ -1470,7 +1549,8 @@ impl StrokeBuilder {
     /// The newest input as a point of the path, smoothed by nothing.
     fn input_point(&self) -> Option<PathPoint> {
         let (last, head) = (self.last_sample?, self.head?);
-        let newest = self.ahead.unwrap_or(head);
+        let waiting = self.steps.back().filter(|_| self.steps_settled < self.steps.len());
+        let newest = waiting.copied().or(self.ahead).unwrap_or(head);
         Some(PathPoint {
             pos: last.pos,
             pressure: self.pressure.unwrap_or(1.0),
@@ -1494,6 +1574,13 @@ impl StrokeBuilder {
     /// longer reaches, and the tip, the stamps after them as they would be drawn were the stroke
     /// to end here.
     pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
+        let kept = self.add_kept(samples);
+        (kept, self.tip_now())
+    }
+
+    /// The first half of [`StrokeBuilder::add_tipped`]: the stamps to draw for good now, the tip
+    /// left to [`StrokeBuilder::tip_now`] (or [`StrokeBuilder::preview_tip`]) when it is wanted.
+    pub fn add_kept(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         self.add(samples);
         let start = self.start_span();
         let reach = match self.start_settled {
@@ -1510,11 +1597,16 @@ impl StrokeBuilder {
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
-        // the tip as if the stroke ended here: walked on to the input
-        let mut ended = self.open_copy(to);
+        kept
+    }
+
+    /// The tip of a stroke shown with its tip, as if it ended here: the stamps after those drawn
+    /// for good, walked on to the input.
+    pub fn tip_now(&mut self) -> Vec<Stamp> {
+        let mut ended = self.open_copy(self.kept);
         ended.reach_input(&mut Vec::new());
         ended.respace_tip();
-        (kept, ended.tip_from(0))
+        ended.tip_from(0)
     }
 
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
@@ -2003,9 +2095,165 @@ impl StrokeBuilder {
         (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
     }
 
+    /// Takes the path on to `to`: input read in whole pixels evened out first (see
+    /// [`StrokeBuilder::destepped`]), as soon as the path has gone far enough on past each point.
+    fn path_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
+        if self.whole_pixels.is_none() || self.exact {
+            self.path_on(to, out);
+            return;
+        }
+        // a point where the newest one is only brings that one up to date: still waiting, as it
+        // waits; gone on, where it went
+        if self.steps.back().is_some_and(|n| n.pos.distance(to.pos) <= 1e-4) {
+            if self.steps_settled < self.steps.len() {
+                if let Some(newest) = self.steps.back_mut() {
+                    *newest = PathPoint { pos: newest.pos, ..to };
+                }
+            } else if let Some(at) = self.steps_at {
+                self.path_on(PathPoint { pos: at, ..to }, out);
+            }
+            return;
+        }
+        self.steps.push_back(to);
+        self.settle_steps(false, out);
+    }
+
+    /// Takes the points read in whole pixels that are waiting on to the curve, evened out, as far
+    /// as the path has gone on past them (`all`: every one, as if no more were to come); and lets
+    /// go of those further behind than the next can reach.
+    fn settle_steps(&mut self, all: bool, out: &mut Vec<Stamp>) {
+        let Some(zoom) = self.whole_pixels else { return };
+        let gap = |steps: &VecDeque<PathPoint>, j: usize| match (steps.get(j), steps.get(j + 1)) {
+            (Some(a), Some(b)) => a.pos.distance(b.pos) * zoom,
+            _ => 0.0,
+        };
+        while let Some(&p) = self.steps.get(self.steps_settled) {
+            let i = self.steps_settled;
+            if !all && self.steps.len() - i < STEPPED_WAITING {
+                // it waits until the path goes on past it as far as it reaches back (and the reach
+                // allows), or the next point came too far off to be evened out with
+                let behind: f32 = (0..i).map(|j| gap(&self.steps, j)).sum();
+                let ahead: f32 = (i..self.steps.len()).map(|j| gap(&self.steps, j)).sum();
+                if ahead < behind.min(STEPPED_REACH) && gap(&self.steps, i) < BLEND_FAR {
+                    break;
+                }
+            }
+            let at = self.destepped(i, zoom);
+            self.steps_settled += 1;
+            self.steps_at = Some(at);
+            self.path_on(PathPoint { pos: at, ..p }, out);
+        }
+        // those out of reach of the first still to come (or of the last, all having gone on)
+        loop {
+            let to = self.steps_settled.min(self.steps.len().saturating_sub(1));
+            let reach: f32 = (1..to).map(|j| gap(&self.steps, j)).sum();
+            if to < 2 || reach <= STEPPED_REACH {
+                break;
+            }
+            self.steps.pop_front();
+            self.steps_settled -= 1;
+        }
+    }
+
+    /// Where the path goes through the `i`th of the points read in whole pixels: on the curve
+    /// that best fits those as far either way of it along the path as it reaches both ways (up to
+    /// [`STEPPED_REACH`]), a parabola by how far along they are, nearer ones counting more. A slow
+    /// line then goes on at its slope, not in the steps of a pixel it was read in; a small curve
+    /// keeps its bend. It moves the point no further than the pen can have been from it
+    /// ([`STEPPED_ACROSS`], [`STEPPED_ALONG`]), and only as far as its neighbours are close (as
+    /// [`StrokeBuilder::blended`] does): a quick stroke's corners stay.
+    fn destepped(&self, i: usize, zoom: f32) -> Vec2 {
+        let Some(at) = self.steps.get(i).map(|p| p.pos) else { return Vec2::ZERO };
+        // the points either way, each with how far along the path it is from this one (screen
+        // pixels), as far as the reach and as the path goes
+        let side = |ahead: bool| {
+            let mut found = Vec::new();
+            let (mut along, mut last, mut j) = (0.0f32, at, i);
+            loop {
+                let next = if ahead { j.checked_add(1) } else { j.checked_sub(1) };
+                let Some((n, p)) = next.and_then(|n| self.steps.get(n).map(|p| (n, p.pos))) else {
+                    return (found, along);
+                };
+                along += last.distance(p) * zoom;
+                if along > STEPPED_REACH {
+                    return (found, STEPPED_REACH);
+                }
+                found.push((if ahead { along } else { -along }, p));
+                (last, j) = (p, n);
+            }
+        };
+        let (before, back) = side(false);
+        let (after, on) = side(true);
+        let reach = back.min(on);
+        // A corner joins two straight stretches. Reduce smoothing there, but keep the fitted
+        // parabola on rounded turns and on stair steps along a single straight line.
+        let straight_side = |side: &[(f32, Vec2)]| {
+            let mut points = side.iter().take_while(|(s, _)| s.abs() <= reach);
+            let (_, end) = points.clone().last()?;
+            let dir = (*end - at).normalized_or(Vec2::ZERO);
+            points.all(|(_, p)| (*p - at).cross(dir).abs() * zoom <= STEPPED_ACROSS).then_some(dir)
+        };
+        let turn = straight_side(&before).zip(straight_side(&after)).map_or(1.0, |(a, b)| (-a.dot(b)).clamp(0.0, 1.0));
+        let near: Vec<(f32, Vec2)> = before
+            .into_iter()
+            .chain(std::iter::once((0.0, at)))
+            .chain(after)
+            .filter(|(along, _)| along.abs() <= reach)
+            .collect();
+        if near.len() < 4 {
+            return at;
+        }
+        // x and y each fitted by least squares as a + b s + c s^2, s how far along, nearer
+        // points weighing more: a is where the curve goes through here, b the way it goes
+        let mut sums = [0.0f64; 5];
+        let (mut xs, mut ys) = ([0.0f64; 3], [0.0f64; 3]);
+        for &(along, p) in &near {
+            let w = f64::from(1.0 - along.abs() / (reach + 1.0));
+            let s = f64::from(along);
+            let d = p - at;
+            let powers = [w, w * s, w * s * s, w * s * s * s, w * s * s * s * s];
+            for (sum, power) in sums.iter_mut().zip(powers) {
+                *sum += power;
+            }
+            for ((x, y), power) in xs.iter_mut().zip(ys.iter_mut()).zip(powers) {
+                *x += power * f64::from(d.x);
+                *y += power * f64::from(d.y);
+            }
+        }
+        let [s0, s1, s2, s3, s4] = sums;
+        let det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
+        if det.abs() < 1e-9 {
+            return at;
+        }
+        // (by Cramer's rule)
+        let through = |[v0, v1, v2]: [f64; 3]| {
+            ((v0 * (s2 * s4 - s3 * s3) - s1 * (v1 * s4 - s3 * v2) + s2 * (v1 * s3 - s2 * v2)) / det) as f32
+        };
+        let way = |[v0, v1, v2]: [f64; 3]| {
+            ((s0 * (v1 * s4 - s3 * v2) - v0 * (s1 * s4 - s3 * s2) + s2 * (s1 * v2 - v1 * s2)) / det) as f32
+        };
+        let moved = Vec2::new(through(xs), through(ys)) * zoom;
+        let way = Vec2::new(way(xs), way(ys));
+        if !moved.is_finite() || !way.is_finite() || way.length() <= 1e-6 {
+            return at;
+        }
+        let way = way * (1.0 / way.length());
+        let across = Vec2::new(-way.y, way.x);
+        let moved = way * moved.dot(way).clamp(-STEPPED_ALONG, STEPPED_ALONG)
+            + across * moved.dot(across).clamp(-STEPPED_ACROSS, STEPPED_ACROSS);
+        // as far as its neighbours are close
+        let apart = [i.checked_sub(1), i.checked_add(1)]
+            .into_iter()
+            .filter_map(|j| self.steps.get(j?))
+            .map(|p| p.pos.distance(at) * zoom)
+            .fold(0.0, f32::max);
+        let share = ((BLEND_FAR - apart) / (BLEND_FAR - BLEND_NEAR)).clamp(0.0, 1.0);
+        at + moved * (share * turn / zoom)
+    }
+
     /// Takes the path on to `to`: the stretch before it walked along the curve through the points
     /// around it (an exact path goes straight, keeping its corners).
-    fn path_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
+    fn path_on(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
         let Some(head) = self.head.filter(|_| !self.exact) else {
             self.walk_to(to, out);
             return;
@@ -2026,7 +2274,8 @@ impl StrokeBuilder {
             self.before_ahead = Some(head.pos);
             return;
         };
-        let at = self.blended(self.before_ahead, next.pos, to.pos);
+        // (input read in whole pixels was evened out over more already)
+        let at = if self.whole_pixels.is_some() { next.pos } else { self.blended(self.before_ahead, next.pos, to.pos) };
         self.before_ahead = Some(next.pos);
         self.walk_curve(self.behind, head, PathPoint { pos: at, ..next }, Some(to), out);
         self.behind = Some(head);
@@ -2096,8 +2345,13 @@ impl StrokeBuilder {
     /// How far stamps turn with the stroke: a pen turns them as it is held (its azimuth) in place
     /// of following the stroke, which is for touch.
     fn follow(&self) -> f32 {
-        let held = self.brush.shape.follow_azimuth && self.pointer.has_pressure();
-        if held { 0.0 } else { self.brush.shape.follow }
+        if self.turned_by_pen() { 0.0 } else { self.brush.shape.follow }
+    }
+
+    /// The stamps turn as the pen is held, not with the stroke: a brush that says so, under a pen
+    /// that tells how it is turned.
+    fn turned_by_pen(&self) -> bool {
+        self.brush.shape.follow_azimuth && self.pointer.has_pressure() && !self.no_azimuth
     }
 
     fn classic(&self) -> bool {
@@ -2814,7 +3068,7 @@ impl StrokeBuilder {
             }
             let turned = self.stroke_turn - self.screen_turn + follow * self.direction;
             let mut own = shape.rotation;
-            if shape.follow_azimuth {
+            if shape.follow_azimuth && !self.no_azimuth {
                 own += p.azimuth;
             }
             if let Some(from) = self.roll_from {
@@ -2889,7 +3143,7 @@ impl StrokeBuilder {
             // the patch read takes the rotation control's share of the stamp's whole turn, which
             // counts from an eighth of a turn, from a pen's lean the other way (kept to the
             // screen, the grain is too)
-            let held = if shape.follow_azimuth && self.pointer.has_pressure() { std::f32::consts::PI } else { 0.0 };
+            let held = if self.turned_by_pen() { std::f32::consts::PI } else { 0.0 };
             let from_eighth = wrapped(std::f32::consts::FRAC_PI_4 + turned) + own - held;
             let grain_turn = x.grain_rotation * from_eighth + self.screen_turn;
             let placed = Placed {
@@ -3146,10 +3400,8 @@ mod tests {
         }
         stroke.add(&samples);
         let stamps = stroke.finish();
-        let middle = stamps
-            .iter()
-            .min_by(|a, b| (a.center.x - 200.0).abs().total_cmp(&(b.center.x - 200.0).abs()))
-            .unwrap();
+        let middle =
+            stamps.iter().min_by(|a, b| (a.center.x - 200.0).abs().total_cmp(&(b.center.x - 200.0).abs())).unwrap();
         let expected = (1.0 + 0.5_f32.powf(FLOW_POWER)) * 0.5;
         assert!((middle.center.x - 200.0).abs() < 2.0);
         assert!((middle.alpha - expected).abs() < 0.005, "{}", middle.alpha);
@@ -4049,6 +4301,207 @@ mod tests {
             let off = stamps.iter().map(|s| (s.center.distance(centre) - radius).abs()).fold(0.0, f32::max);
             assert!(off < 0.75, "{radius}: {off} px off round");
         }
+    }
+
+    /// How a pen's position is read: finer than a pixel, in whole screen pixels as the stroke
+    /// takes any input, or in whole pixels the stroke is told of.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Read {
+        Finer,
+        Whole,
+        WholeTold,
+    }
+
+    /// A pen drawn along `path` (screen pixels, from 0 to 1 along it) in `ms`, read `n` times at
+    /// 240 Hz as `read` says and handed over four a frame (each frame's with one time), with the
+    /// canvas shown at `zoom` screen pixels a canvas pixel: the samples, in canvas pixels.
+    fn read_at(zoom: f32, read: Read, n: usize, ms: f64, path: impl Fn(f32) -> Vec2) -> Vec<Sample> {
+        (0..=n)
+            .map(|i| {
+                let p = path(i as f32 / n as f32);
+                let p = if read == Read::Finer { p } else { Vec2::new(p.x.round(), p.y.round()) };
+                let frame = (i / 4) as f64 * 4.0 * ms / n as f64;
+                Sample::at(p * (1.0 / zoom), 0.6, frame + 0.01 * (i % 4) as f64)
+            })
+            .collect()
+    }
+
+    /// A stroke 6 screen pixels wide as the canvas begins one shown at `zoom`, told of input read
+    /// in whole pixels if `read` says.
+    fn stroke_at(zoom: f32, read: Read) -> StrokeBuilder {
+        let b = StrokeBuilder::new(plain(), 6.0 / zoom, Pointer::Stylus).seen_at(zoom);
+        if read == Read::WholeTold { b.read_in_whole_pixels(zoom) } else { b }
+    }
+
+    /// The stamps of `samples` drawn four at a time (see [`stroke_at`]).
+    fn drawn_at(zoom: f32, read: Read, samples: &[Sample]) -> Vec<Stamp> {
+        let mut b = stroke_at(zoom, read);
+        for some in samples.chunks(4) {
+            b.add(some);
+        }
+        b.finish()
+    }
+
+    /// How far the middle eight tenths of a stroke's stamps stray (screen pixels) across the line
+    /// from `start` going `way`: at most, and the root mean square.
+    fn strays_across(stamps: &[Stamp], zoom: f32, start: Vec2, way: Vec2) -> [f32; 2] {
+        let across: Vec<f32> = stamps.iter().map(|s| (s.center * zoom - start).dot(Vec2::new(-way.y, way.x))).collect();
+        let middle = &across[across.len() / 10..across.len() * 9 / 10];
+        let mean = middle.iter().sum::<f32>() / middle.len() as f32;
+        let most = middle.iter().map(|a| (a - mean).abs()).fold(0.0, f32::max);
+        let squares = middle.iter().map(|a| (a - mean) * (a - mean)).sum::<f32>();
+        [most, (squares / middle.len() as f32).sqrt()]
+    }
+
+    /// How much nearer to `centre` the nearest of the middle eight tenths of a stroke's stamps
+    /// comes than the furthest (screen pixels): 0 for a round one.
+    fn strays_round(stamps: &[Stamp], zoom: f32, centre: Vec2) -> f32 {
+        let out: Vec<f32> = stamps.iter().map(|s| (s.center * zoom).distance(centre)).collect();
+        let middle = &out[out.len() / 10..out.len() * 9 / 10];
+        let (lo, hi) = middle.iter().fold((f32::MAX, f32::MIN), |(lo, hi), r| (lo.min(*r), hi.max(*r)));
+        hi - lo
+    }
+
+    /// The point `angle` radians round from the right, a unit from the middle.
+    fn towards(angle: f32) -> Vec2 {
+        Vec2::new(angle.cos(), angle.sin())
+    }
+
+    #[test]
+    fn slow_lines_and_small_circles_read_in_whole_pixels_stray_alike_on_screen_at_any_zoom() {
+        // the canvas zoomed out (a big canvas fitted to the screen), at 100% and zoomed in
+        let zooms = [0.5f32, 1.0, 3.0];
+        let mut strays = Vec::new();
+        for read in [Read::Finer, Read::Whole, Read::WholeTold] {
+            for zoom in zooms {
+                // slow lines, 100 px a second and 150 long, from a shallow slope to near diagonal
+                let line = [8.0f32, 20.0, 30.0, 40.0]
+                    .map(|degrees| {
+                        let (start, way) = (Vec2::new(100.3, 100.6), towards(degrees.to_radians()));
+                        let samples = read_at(zoom, read, 360, 1500.0, |t| start + way * (150.0 * t));
+                        strays_across(&drawn_at(zoom, read, &samples), zoom, start, way)
+                    })
+                    .into_iter()
+                    .fold([0.0f32; 2], |[m, r], [most, rms]| [m.max(most), r.max(rms)]);
+                // small circles drawn slowly, 60 px a second
+                let round = [6.0f32, 12.0, 24.0]
+                    .map(|radius| {
+                        let centre = Vec2::new(200.3, 200.6);
+                        let ms = f64::from(TAU as f32 * radius / 60.0) * 1000.0;
+                        let samples = read_at(zoom, read, (ms * 0.24) as usize, ms, |t| {
+                            centre + towards(TAU as f32 * t) * radius
+                        });
+                        strays_round(&drawn_at(zoom, read, &samples), zoom, centre)
+                    })
+                    .into_iter()
+                    .fold(0.0, f32::max);
+                strays.push((read, zoom, line, round));
+            }
+        }
+        let seen = |read| strays.iter().filter(move |s| s.0 == read).map(|s| (s.1, s.2, s.3));
+        // read finer than a pixel: straight and round at every zoom
+        for (zoom, [most, _], round) in seen(Read::Finer) {
+            assert!(most < 0.01 && round < 0.01, "zoom {zoom}: {most} {round}");
+        }
+        // read in whole pixels, evened out with the neighbours alone, at each zoom the same on
+        // screen (a step of a pixel is two canvas pixels zoomed out, a third of one zoomed in: what
+        // changes is how wide the brush is on screen): up to 0.35 to 0.37 px off straight (0.20
+        // root mean square), 0.80 to 0.82 off round; evened out over the steps, up to 0.10 to 0.17
+        // (0.046 at each zoom) and under 0.49
+        for (zoom, [most, rms], round) in seen(Read::Whole) {
+            assert!(most > 0.3 && most < 0.4 && rms > 0.1 && round > 0.75, "zoom {zoom}: {most} {rms} {round}");
+        }
+        for (zoom, [most, rms], round) in seen(Read::WholeTold) {
+            assert!(most < 0.2 && rms < 0.06 && round < 0.5, "zoom {zoom}: {most} {rms} {round}");
+        }
+        for read in [Read::Whole, Read::WholeTold] {
+            let rms: Vec<f32> = seen(read).map(|s| s.1[1]).collect();
+            let spread = rms.iter().fold(0.0f32, |m, l| m.max(*l)) - rms.iter().fold(1.0f32, |m, l| m.min(*l));
+            assert!(spread < 0.01, "{read:?}: {rms:?}");
+        }
+    }
+
+    #[test]
+    fn with_no_smoothing_what_is_laid_keeps_a_sample_behind_the_pen_unless_it_evens_out_whole_pixels() {
+        // a pen drawn across at 200 px a second, read at 240 Hz finer than a pixel (its first
+        // position on whole pixels, by chance) and handed over four a frame: how far behind the
+        // pen what is laid for good is, once it is under way (screen pixels, the canvas at 100%)
+        let samples: Vec<Sample> = (0..=240)
+            .map(|i| {
+                let p = Vec2::new(100.0 + 200.0 * i as f32 / 240.0, 100.0 + 0.3 * (i as f32 * 0.2).sin());
+                Sample::at(p, 0.6, (i / 4) as f64 * 1000.0 / 60.0 + 0.01 * (i % 4) as f64)
+            })
+            .collect();
+        let behind = |mut b: StrokeBuilder, finer_after_first: bool| {
+            let mut laid = f32::MIN;
+            let mut most = 0.0f32;
+            for (k, some) in samples.chunks(4).enumerate() {
+                if finer_after_first && k == 1 {
+                    b.read_finer();
+                }
+                laid = b.add(some).iter().map(|s| s.center.x).fold(laid, f32::max);
+                if k >= 10 {
+                    most = most.max(some.last().map_or(0.0, |s| s.pos.x) - laid);
+                }
+            }
+            most
+        };
+        let stroke = || StrokeBuilder::new(plain(), 6.0, Pointer::Stylus);
+        // read finer: a sample and a little more (the curve through the points waits for the next)
+        let finer = behind(stroke(), false);
+        assert!(finer < 2.0, "{finer}");
+        // taken for whole pixels, each point waits for the path to go on up to 12 px past it
+        let whole = behind(stroke().read_in_whole_pixels(1.0), false);
+        assert!(whole > 10.0, "{whole}");
+        // found to be read finer at its next samples: as read finer from there
+        let found = behind(stroke().read_in_whole_pixels(1.0), true);
+        assert!((found - finer).abs() < 0.01, "{found} {finer}");
+    }
+
+    #[test]
+    fn whole_pixels_evened_out_keep_a_quick_strokes_corners_and_a_slow_ones_nearly() {
+        let corner = Vec2::new(140.3, 100.6);
+        // a square's corner: along and then down, 40 px each way, in whole pixels
+        let path = |t: f32| {
+            let along = 80.0 * t;
+            if along < 40.0 { corner - Vec2::new(40.0 - along, 0.0) } else { corner + Vec2::new(0.0, along - 40.0) }
+        };
+        for zoom in [0.5f32, 1.0, 3.0] {
+            // drawn quickly (1.2 px a millisecond, 5 px between samples): the same as not told
+            let quick = read_at(zoom, Read::Whole, 16, 66.0, path);
+            let centres = |read| drawn_at(zoom, read, &quick).iter().map(|s| s.center).collect::<Vec<_>>();
+            assert_eq!(centres(Read::WholeTold), centres(Read::Whole), "zoom {zoom}");
+            // drawn slowly (100 px a second): rounded off little more than the neighbours alone
+            // round it (0.87 to 1.14 px from the corner, 1.02 to 1.31 evened out over the steps)
+            let slow = read_at(zoom, Read::Whole, 192, 800.0, path);
+            let nearest = |read| {
+                drawn_at(zoom, read, &slow).iter().map(|s| (s.center * zoom).distance(corner)).fold(f32::MAX, f32::min)
+            };
+            let (before, after) = (nearest(Read::Whole), nearest(Read::WholeTold));
+            assert!(after < before + 0.25 && after < 1.4, "zoom {zoom}: {before} {after}");
+        }
+    }
+
+    #[test]
+    fn whole_pixels_evened_out_show_up_to_the_input_and_end_where_it_lifts() {
+        // a slow line in whole pixels, handed over a sample at a time: what shows reaches the
+        // newest sample however many points wait to be evened out, and the stroke ends at the last
+        let start = Vec2::new(100.3, 100.6);
+        let samples = read_at(1.0, Read::Whole, 120, 500.0, |t| start + towards(0.3) * (50.0 * t));
+        let mut b = stroke_at(1.0, Read::WholeTold);
+        for s in &samples {
+            b.add(std::slice::from_ref(s));
+            let shown = b.preview_to_input(&[]);
+            let end = shown.last().map_or_else(|| b.stamps().last().unwrap().center, |t| t.center);
+            assert!(end.distance(s.pos) < 2.0, "shown up to {end:?}, the input at {:?}", s.pos);
+        }
+        let end = b.finish().last().unwrap().center;
+        assert!(end.distance(samples.last().unwrap().pos) < 2.0, "{end:?}");
+        // and a tap in whole pixels leaves its dot where it was read
+        let mut tap = stroke_at(0.5, Read::WholeTold);
+        tap.add(&[Sample::at(Vec2::new(60.0, 80.0), 0.5, 0.0)]);
+        let dots = tap.finish();
+        assert_eq!(dots.iter().map(|s| s.center).collect::<Vec<_>>(), [Vec2::new(60.0, 80.0)]);
     }
 
     #[test]
@@ -5052,6 +5505,38 @@ mod tests {
         assert!((angle(Pointer::Stylus, 0.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 0.0));
         assert!((angle(Pointer::Finger, 0.0) - quarter).abs() < 1e-4, "{}", angle(Pointer::Finger, 0.0));
         assert!((angle(Pointer::Stylus, 1.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 1.0));
+    }
+
+    /// The library's sample stroke tells no pen's turn: a brush turned as the pen is held turns its
+    /// stamps along the stroke there, as a finger does, each stamp with the stroke's way where it is.
+    #[test]
+    fn a_sample_stroke_without_the_pen_s_turn_turns_stamps_along_its_way() {
+        let angles = |azimuth: bool, follow: f32| {
+            let mut b = plain();
+            b.set_setting("shape_rotation", follow);
+            b.set_setting("input_style", if azimuth { 1.0 } else { 0.0 });
+            // a quarter circle from heading right to heading down, the pen held turned 0.3 radians
+            let at = |i: u32| {
+                let a = i as f32 / 20.0 * std::f32::consts::FRAC_PI_2;
+                let p = Vec2::new(200.0 * a.sin(), 200.0 * (1.0 - a.cos()));
+                Sample { azimuth: 0.3, ..Sample::at(p, 1.0, f64::from(i) * 4.0) }
+            };
+            let samples: Vec<Sample> = (0..=20).map(at).collect();
+            // the stroke as it ends, its first stamps turned to the way it went
+            let mut stroke = StrokeBuilder::new(b, 10.0, Pointer::Stylus).steady().on_pad(false).without_azimuth();
+            stroke.add(&samples);
+            let stamps = stroke.finish();
+            (stamps.first().map_or(f32::NAN, |s| s.angle), stamps.last().map_or(f32::NAN, |s| s.angle))
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        for azimuth in [true, false] {
+            let (first, last) = angles(azimuth, 1.0);
+            assert!(first.abs() < 0.2, "azimuth {azimuth}: the first stamp heads right, {first}");
+            assert!((last - quarter).abs() < 0.2, "azimuth {azimuth}: the last heads down, {last}");
+        }
+        // a fixed one stays as it is set, the pen's turn not added
+        let (first, last) = angles(true, 0.0);
+        assert!(first.abs() < 1e-4 && last.abs() < 1e-4, "{first} {last}");
     }
 
     #[test]

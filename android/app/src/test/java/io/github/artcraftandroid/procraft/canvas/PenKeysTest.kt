@@ -127,4 +127,51 @@ class PenKeysTest {
         assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true, touching = true))
         assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
     }
+
+    @Test
+    fun a_button_held_through_a_stroke_whose_events_leave_it_out_is_one_press() {
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val buttons = PenButtons()
+        // pressed hovering: once
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true))
+        // the stroke, its lift too, without it: still held, not let go and pressed again as the pen
+        // hovers on with it (which switched to the eraser and straight back)
+        assertEquals(0 to 0, buttons.next(0, penIn = true, touching = true))
+        assertEquals(0 to 0, buttons.next(0, penIn = true, lifting = true))
+        assertEquals(0 to 0, buttons.next(first, penIn = true))
+        // let go hovering
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
+        // the same, let go during the stroke: the next hover says so
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true))
+        assertEquals(0 to 0, buttons.next(0, penIn = true, touching = true))
+        assertEquals(0 to 0, buttons.next(0, penIn = true, lifting = true))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
+    }
+
+    @Test
+    fun a_pen_whose_touches_show_its_buttons_lets_go_as_it_lifts_without_one() {
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val buttons = PenButtons()
+        // pressed and let go during strokes, a pen with no hover at all: each lift says
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true, touching = true))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true, lifting = true))
+        // held into the next stroke, let go before it lifts
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true, touching = true))
+        assertEquals(0 to 0, buttons.next(0, penIn = true, touching = true))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true, lifting = true))
+    }
+
+    @Test
+    fun which_events_are_the_pen_on_the_glass_and_lifting() {
+        for (a in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_POINTER_UP)) {
+            assertEquals(true, penTouching(a))
+            assertEquals(false, penLifting(a))
+        }
+        assertEquals(true, penLifting(MotionEvent.ACTION_UP))
+        assertEquals(false, penTouching(MotionEvent.ACTION_UP))
+        for (a in listOf(MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_EXIT, MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE, MotionEvent.ACTION_CANCEL)) {
+            assertEquals(false, penTouching(a))
+            assertEquals(false, penLifting(a))
+        }
+    }
 }

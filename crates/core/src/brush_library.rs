@@ -485,12 +485,12 @@ struct LastLibrary {
 pub fn prepare_brushes(dir: String) {
     // the brushes the app comes with first, kept or not
     crate::stock_library::prepare();
-    let (library, first) = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
+    let library = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
     if holds(&LAST_LIBRARY, &library) || !library.is_file() {
         return;
     }
     let started = std::time::Instant::now();
-    if CanvasSession::new(1, 1).load_library_file(&library, !first) {
+    if CanvasSession::new(1, 1).load_library_file(&library, true) {
         log::info!("the brushes read ahead in {} ms", started.elapsed().as_millis());
     }
 }
@@ -748,10 +748,11 @@ impl State {
                     .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
                     .collect()
             }),
-            // a stock shape's is made again from its name when the brush comes back
-            shape_source: own(&brush.shape.source, &base.shape.source).filter(|_| brush.stock.shape.is_none()),
+            // a stock shape's is made again from its name when the brush comes back (so it isn't
+            // drawn, nor written out, to be kept)
+            shape_source: brush.stock.shape.is_none().then(|| own(&brush.shape.source, &base.shape.source)).flatten(),
             // a stock grain's is made again from its name when the brush comes back
-            grain_source: own(&brush.grain.source, &base.grain.source).filter(|_| brush.stock.grain.is_none()),
+            grain_source: brush.stock.grain.is_none().then(|| own(&brush.grain.source, &base.grain.source)).flatten(),
             grain_file: brush
                 .grain_file_now()
                 .map(|f| SavedGrainFile { width: f.width, full: f.full.as_ref().map(SavedImage::of) }),
@@ -1268,6 +1269,67 @@ impl CanvasSession {
         true
     }
 
+    /// Moves brushes `indices` of `set` together, in their order, to place `to_index` of set
+    /// `to_set` (counted without them there): several brushes dragged at once onto a set, or along
+    /// their own. A tool that used one keeps it, wherever it goes. False, moving none, if any isn't
+    /// a brush there or there is no such set.
+    pub fn move_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> bool {
+        let mut st = self.shared.lock();
+        let (s, ts) = (set as usize, to_set as usize);
+        let mut moving: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+        moving.sort_unstable();
+        moving.dedup();
+        let held = st.library.get(s).map_or(0, |e| e.brushes.len());
+        if moving.is_empty() || ts >= st.library.len() || moving.iter().any(|&i| i >= held) {
+            return false;
+        }
+        let Some(entry) = st.library.get_mut(s) else { return false };
+        // out of their set from the last up, so the places of the rest hold
+        let mut taken = Vec::with_capacity(moving.len());
+        for &i in moving.iter().rev() {
+            let brush = entry.brushes.remove(i);
+            let origin = if i < entry.origins.len() { entry.origins.remove(i) } else { None };
+            taken.push((brush, origin));
+        }
+        taken.reverse();
+        let Some(target) = st.library.get_mut(ts) else { return false };
+        let ti = (to_index as usize).min(target.brushes.len());
+        for (k, (brush, origin)) in taken.into_iter().enumerate() {
+            target.brushes.insert(ti + k, brush);
+            if ti + k <= target.origins.len() {
+                target.origins.insert(ti + k, origin);
+            } else {
+                target.origins.push(origin);
+            }
+        }
+        let count = moving.len();
+        st.move_brush_refs(|(rs, ri)| {
+            if rs == s
+                && let Ok(k) = moving.binary_search(&ri)
+            {
+                return Some((ts, ti + k));
+            }
+            // out of their old places, then into the new ones
+            let ri = if rs == s { ri - moving.partition_point(|&m| m < ri) } else { ri };
+            Some((rs, if rs == ts && ri >= ti { ri + count } else { ri }))
+        });
+        true
+    }
+
+    /// Names brush `index` of `set` (from its menu in the library), as a set is named: trimmed, at
+    /// most 256 characters; a name of nothing but spaces leaves it as it was. Whether it changed.
+    pub fn rename_brush(&self, set: u32, index: u32, name: String) -> bool {
+        let name: String = name.trim().chars().take(256).collect();
+        let mut st = self.shared.lock();
+        match st.library.get_mut(set as usize).and_then(|s| s.brushes.get_mut(index as usize)) {
+            Some(brush) if !name.is_empty() && brush.name != name => {
+                brush.name = name;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Removes a brush; a tool that used it takes the one now in its place.
     pub fn delete_brush(&self, set: u32, index: u32) -> bool {
         let mut st = self.shared.lock();
@@ -1403,11 +1465,12 @@ impl CanvasSession {
         }
     }
 
-    /// Removes a set and its brushes (not the last set).
+    /// Removes a set and its brushes; the last one too, leaving the library with none (it shows
+    /// as a library with no brushes yet, a set made with its "+").
     pub fn delete_brush_set(&self, set: u32) -> bool {
         let mut st = self.shared.lock();
         let s = set as usize;
-        if s >= st.library.len() || st.library.len() <= 1 {
+        if s >= st.library.len() {
             return false;
         }
         st.library.remove(s);
@@ -1520,6 +1583,8 @@ impl CanvasSession {
             drop(st);
             crate::brush_pictures::forget_unnamed(&dir.join(crate::brush_pictures::FOLDER), &libraries);
         }
+        // the tools' brushes ready by the first stroke
+        self.shared.lock().warm_tools_brushes();
         loaded
     }
 }
@@ -1933,6 +1998,33 @@ impl CanvasSession {
 #[cfg(test)]
 mod keeping {
     use crate::CanvasSession;
+
+    #[test]
+    fn a_brush_renamed_from_its_menu_keeps_the_name_and_its_settings() {
+        let s = CanvasSession::new(32, 32);
+        let library = s.brush_library();
+        let stock = library.first().and_then(|set| set.brushes.get(1)).cloned().expect("a stock brush");
+        assert!(s.select_brush(0, 1));
+        let size = s.info().size;
+        // trimmed; the current brush's name follows; nothing but spaces, or the same name, changes nothing
+        assert!(s.rename_brush(0, 1, "  My pencil ".into()));
+        assert_eq!(s.current_brush().name, "My pencil");
+        assert!(!s.rename_brush(0, 1, "   ".into()));
+        assert!(!s.rename_brush(0, 1, "My pencil".into()));
+        assert!(!s.rename_brush(0, 9999, "Nowhere".into()) && !s.rename_brush(9999, 0, "Nowhere".into()));
+        assert!(s.rename_brush(0, 1, "x".repeat(300)));
+        assert_eq!(s.current_brush().name.chars().count(), 256);
+        assert!(s.rename_brush(0, 1, "My pencil".into()));
+        // the others keep theirs, and the brush draws as before
+        assert_eq!(s.brush_library()[0].brushes[0].name, library[0].brushes[0].name);
+        assert_eq!(s.info().size, size);
+        assert_ne!(stock.name, "My pencil");
+        // kept with the library, and read back
+        let kept = s.saved_brush_library();
+        let other = CanvasSession::new(32, 32);
+        assert!(other.load_brush_library(kept));
+        assert_eq!(other.brush_library()[0].brushes[1].name, "My pencil");
+    }
 
     #[test]
     fn brushes_moved_deleted_and_combined_at_random_leave_every_place_sound() {

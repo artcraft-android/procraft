@@ -11,6 +11,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("colordrop-tools", include_bytes!("../bundled-plugins/colordrop-tools.procraft-plugin")),
     ("colour-triangle", include_bytes!("../bundled-plugins/colour-triangle.procraft-plugin")),
     ("effects", include_bytes!("../bundled-plugins/effects.procraft-plugin")),
+    ("floating-panels", include_bytes!("../bundled-plugins/floating-panels.procraft-plugin")),
     ("interface", include_bytes!("../bundled-plugins/interface.procraft-plugin")),
     ("keyboard-shortcuts", include_bytes!("../bundled-plugins/keyboard-shortcuts.procraft-plugin")),
     ("krita-brushes", include_bytes!("../bundled-plugins/krita-brushes.procraft-plugin")),

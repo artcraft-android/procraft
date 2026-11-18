@@ -29,9 +29,6 @@ use procraft_gpu::{
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
 use crate::{CanvasSession, MobileError, PenSample, PointerKind, State, ToolKind};
 
-/// Why a model can't be painted on an old GPU (see `Gpu::paints_3d`), as the apps tell it.
-const NO_3D_SAID: &str = "this device's graphics can't paint in 3D";
-
 /// How far a one-finger drag turns the model: this many radians across the window's shorter
 /// side, wherever the finger is and however fast it goes (measured: 0.0122 rad a point on a 744
 /// point side).
@@ -1001,10 +998,6 @@ impl CanvasSession {
         name: String,
         texture_size: u32,
     ) -> Result<Arc<CanvasSession>, MobileError> {
-        // an old GPU can't paint in 3D (where the app's device is made already)
-        if crate::device::kept().as_ref().is_some_and(|gpu| !gpu.paints_3d()) {
-            return Err(file_error("opening the model", NO_3D_SAID));
-        }
         let (file, file_name, files) = if extension_of(&file_name) == "zip" {
             let zipped = unzip_model(&file).ok_or_else(|| file_error("opening the model", "no model in the zip"))?;
             let mut all = zipped.files;
@@ -2345,7 +2338,8 @@ fn to_waiting(gpu: &Gpu, set: &mut TextureSet) {
 /// A texture set's canvas becoming the session's: paged as the session's canvases are, its brush
 /// images made now so the first stroke doesn't wait for them.
 fn to_session(gpu: &Gpu, canvas: &mut Canvas) {
-    canvas.set_resident_budget(crate::layers::resident_budget());
+    let (w, h) = canvas.size();
+    canvas.set_resident_budget(crate::layers::canvas_budget(w, h));
     canvas.prepare_brush_images(gpu);
 }
 
@@ -3555,14 +3549,6 @@ impl State {
     ) {
         {
             let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
-            // an old GPU can't draw the model: the canvas says it can't, rather than staying blank
-            if scene.view.is_none() && !gpu.paints_3d() {
-                if self.error.is_none() {
-                    log::error!("{NO_3D_SAID}");
-                    self.error = Some(NO_3D_SAID.to_owned());
-                }
-                return;
-            }
             if scene.view.is_none() {
                 let mut view = MeshView::new(gpu, &scene.mesh, scene.texture_size, format);
                 if let Some(orbit) = scene.orbit.take() {
@@ -5445,7 +5431,10 @@ f 1/1 2/2",
         let small = 1024 + 1 + 2 * layers;
         let (bytes, _, made) = channel_bytes(&s);
         assert_eq!(made, [true, true]);
-        assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);
+        // (on a GPU that can't draw into half floats a stroke keeps more: counted for half floats)
+        if s.shared.lock().gpu.as_ref().is_some_and(procraft_gpu::Gpu::draws_half_floats) {
+            assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);
+        }
         s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
         frame(&s, 200);
         assert_eq!(channel_bytes(&s).0, bytes);
@@ -5870,8 +5859,8 @@ f 1/1 2/2",
             let _ = std::fs::remove_dir_all(&dir);
             s.save(dir.to_string_lossy().into_owned()).unwrap();
             let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-            let _ = std::fs::remove_dir_all(&dir);
             assert!(shown(&opened));
+            let _ = std::fs::remove_dir_all(&dir);
             assert!(all(&opened) == end, "seed {seed}: reopened, after {done:?}");
         }
     }

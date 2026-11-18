@@ -3,7 +3,9 @@
 //! copied in before them and back after, so that what is bound never grows with the canvas and a
 //! stroke begins without copying its layer. What the stroke keeps of the layer (the layer as it
 //! was, and wet paint's stroke as laid and how much each pixel has taken) is kept in tiles, each
-//! made as the stroke first writes to it.
+//! made as the stroke first writes to it. A stroke laying paint into its layer's store (see
+//! `store.rs`) works in the store's paint, and its tiles keep the layer and the height as they were
+//! too.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -17,7 +19,16 @@ use super::{
 use crate::Gpu;
 
 /// The side of the tiles a smudge stroke keeps (pixels).
-const TILE: u32 = 256;
+pub(super) const TILE: u32 = 256;
+
+/// Where a copy from a texture may put its rows in a window's buffer: at a multiple of this many
+/// bytes. Direct3D 12 without unrestricted copy pitches (on Windows 10, and with older drivers, as
+/// many integrated GPUs have) places them only so: wgpu copies to any other offset through a
+/// buffer of its own and copies that back whole, the rest of each row with it, so a tile copied
+/// into a window wider than it wrote over its neighbours in the window with whatever that buffer
+/// held (blocks of the layer gone, stale or doubled as the stroke went on).
+const PLACEMENT: u32 = 512;
+const _: () = assert!(TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a column copies can start at");
 
 /// The most bytes a window takes for work laid together in it: past it, the work goes in windows of
 /// its own (only a piece that reaches further than this by itself takes one bigger).
@@ -50,12 +61,14 @@ impl Keeps {
 
 /// What a smudge stroke keeps of a tile of its layer once it has written there: the layer as it
 /// was, and (as it keeps them) the stroke as laid, how much each pixel has taken and how much of
-/// the paint shows (these two f32s a pixel, as their bytes).
+/// the paint shows (these two f32s a pixel, as their bytes); and the textures it changes besides
+/// the one it works in as they were (see [`Canvas::smudge_also`]).
 pub(super) struct Tile {
-    before: wgpu::Texture,
-    grained: Option<wgpu::Texture>,
-    amount: Option<wgpu::Texture>,
-    shown: Option<wgpu::Texture>,
+    pub(super) before: wgpu::Texture,
+    pub(super) grained: Option<wgpu::Texture>,
+    pub(super) amount: Option<wgpu::Texture>,
+    pub(super) shown: Option<wgpu::Texture>,
+    pub(super) more: Vec<wgpu::Texture>,
 }
 
 /// The buffers a smudge stroke's passes work in (see the module): the layer as the stroke has left
@@ -78,6 +91,8 @@ pub(super) enum Pipe {
     BlurDown,
     BlurAcross,
     Deposit,
+    /// A run of a pass's stamps laid at once (see `cs_deposit_run`).
+    DepositRun,
     Synthesize,
     WetPlots,
 }
@@ -96,13 +111,35 @@ pub(super) struct Piece {
     pub kept: bool,
 }
 
-/// Bytes a row of a window `width` pixels wide takes (rows are 256-byte aligned for copies).
-fn row_bytes(width: u32) -> u32 {
-    (width.max(1) * 4).div_ceil(256) * 256
+/// Bytes a row of a window `width` pixels wide takes (rows start at multiples of [`PLACEMENT`]).
+pub(super) fn row_bytes(width: u32) -> u32 {
+    (width.max(1) * 4).div_ceil(PLACEMENT) * PLACEMENT
 }
 
+/// The window laid over `reach`: from a column a copy can start at (see [`PLACEMENT`]), so that each
+/// tile's part of it (tiles start on such columns) starts at a multiple of it, as its rows do.
+pub(super) fn window_reach(reach: IRect) -> IRect {
+    if reach.is_empty() {
+        return reach;
+    }
+    let step = (PLACEMENT / 4) as i32;
+    IRect { x0: reach.x0 - reach.x0.rem_euclid(step), ..reach }
+}
+
+/// Bytes a window over `reach` takes as the stroke's work is cut into windows: its pixels, rows
+/// 256 bytes apart (one laid in buffers takes a little more, see [`window_reach`]).
 fn window_bytes(reach: IRect) -> u64 {
+    u64::from((reach.width().max(1) * 4).div_ceil(256) * 256) * u64::from(reach.height().max(1))
+}
+
+/// Bytes a window laid in buffers over `reach` takes, rows [`row_bytes`] apart.
+fn laid_bytes(reach: IRect) -> u64 {
     u64::from(row_bytes(reach.width())) * u64::from(reach.height().max(1))
+}
+
+/// Where `r` (within the window over `reach`) starts in the window's buffers, bytes.
+fn in_window(reach: IRect, r: IRect) -> u64 {
+    u64::from(row_bytes(reach.width())) * u64::from(r.y0.abs_diff(reach.y0)) + 4 * u64::from(r.x0.abs_diff(reach.x0))
 }
 
 /// The pixels the shader's `layer_at` reads for canvas points from `lo` to `hi` (bilinear, with a
@@ -191,16 +228,42 @@ fn runs(lo: u32, hi: u32, fits: impl Fn(u32, u32) -> bool) -> Vec<(u32, u32)> {
 }
 
 /// The tiles `rect` (canvas pixels, none negative) touches.
-fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
+pub(super) fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
     let (x0, y0) = (rect.x0.max(0).unsigned_abs() / TILE, rect.y0.max(0).unsigned_abs() / TILE);
     let (x1, y1) = (rect.x1.max(1).unsigned_abs().div_ceil(TILE), rect.y1.max(1).unsigned_abs().div_ceil(TILE));
     let rows = if rect.is_empty() { 0..0 } else { y0..y1 };
     rows.flat_map(move |y| (x0..x1).map(move |x| (x, y)))
 }
 
-fn tile_rect((x, y): (u32, u32)) -> IRect {
+pub(super) fn tile_rect((x, y): (u32, u32)) -> IRect {
     let at = |n: u32| i32::try_from(n * TILE).unwrap_or(i32::MAX);
     IRect::new(at(x), at(y), at(x + 1), at(y + 1))
+}
+
+/// Copies `size` of a texture from `from` into a window's buffer at `into`; where `placed` says to
+/// (for tests), as Direct3D 12 without unrestricted copy pitches does (see [`PLACEMENT`]): a copy
+/// to an offset it can't place goes through a buffer of its own, holding anything (here every byte
+/// 255), and all of that is copied back.
+fn copy_to_window(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    from: wgpu::TexelCopyTextureInfo<'_>,
+    into: wgpu::TexelCopyBufferInfo<'_>,
+    size: wgpu::Extent3d,
+    placed: bool,
+) {
+    let layout = into.layout;
+    if !placed || layout.offset.is_multiple_of(u64::from(PLACEMENT)) {
+        encoder.copy_texture_to_buffer(from, into, size);
+        return;
+    }
+    let row = layout.bytes_per_row.unwrap_or(0);
+    let bytes = u64::from(row) * u64::from(size.height.saturating_sub(1)) + 4 * u64::from(size.width);
+    let filler = vec![255; usize::try_from(bytes).unwrap_or(0)];
+    let usage = wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let staged = super::buffer_init(device, "placed copy", &filler, usage);
+    encoder.copy_texture_to_buffer(from, in_buffer(&staged, 0, row, size.height), size);
+    encoder.copy_buffer_to_buffer(&staged, 0, into.buffer, layout.offset, bytes);
 }
 
 /// A buffer for a window.
@@ -403,9 +466,19 @@ impl Canvas {
         reach: IRect,
         (brush, second): (&wgpu::BindGroup, Option<&wgpu::TextureView>),
     ) -> bool {
+        // without compute passes, in fragment passes (see `fragments`)
+        if self.pipelines.compute.is_none() {
+            return self.lay_window_in_fragments(gpu, encoder, params, pieces, reach, (brush, second));
+        }
         let reach = if reach.is_empty() { IRect::new(0, 0, 1, 1) } else { reach }.intersect(self.full());
+        // laid out so that copies into it start where any API places them, where a binding holds
+        // that (else as it is: only a window close to the most a binding holds is that big)
+        let room = Self::smudge_room_for(&gpu.device);
+        let halves = self.smudge.as_ref().map_or(1, |s| s.keeps.halves());
+        let fits = |r: IRect| laid_bytes(r).saturating_mul(halves) <= room;
+        let reach = Some(window_reach(reach)).filter(|r| fits(*r)).unwrap_or(reach);
         // past what a binding holds (a piece the stroke couldn't cut smaller): not laid
-        if reach.is_empty() || !self.window_fits(reach, Self::smudge_room_for(&gpu.device)) {
+        if reach.is_empty() || !fits(reach) {
             log::error!("smudging: {} by {} pixels is past what a binding holds", reach.width(), reach.height());
             return true;
         }
@@ -427,6 +500,7 @@ impl Canvas {
         let Some(window) = smudge.window.as_ref() else { return false };
         // (never begun without them: see `Canvas::smudges`)
         let Some(compute) = self.pipelines.compute.as_ref() else { return false };
+        let Some(carry) = smudge.carry.as_ref() else { return false };
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -442,7 +516,7 @@ impl Canvas {
             entries: &[
                 uniform(0, &self.smudge_params, SMUDGE_UNIFORM_SIZE),
                 wgpu::BindGroupEntry { binding: 1, resource: window.work.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: smudge.carry.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: carry.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: window.grained.as_ref().unwrap_or(&spare[0]).as_entire_binding(),
@@ -498,10 +572,12 @@ impl Canvas {
                     Pipe::BlurDown => &compute.smudge_blur_down,
                     Pipe::BlurAcross => &compute.smudge_blur_across,
                     Pipe::Deposit => &compute.smudge_deposit,
+                    Pipe::DepositRun => &compute.smudge_deposit_run,
                     Pipe::Synthesize => &compute.smudge_synthesize,
                     Pipe::WetPlots => &compute.smudge_wet_plots,
                 });
                 pass.dispatch_workgroups(x, y, 1);
+                self.dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         drop(pass);
@@ -511,7 +587,7 @@ impl Canvas {
 
     /// Room for `count` more smudge uniforms: when the buffer they go in is full, what it holds is
     /// written to it now (the passes laid with it read that) and the rest start a bigger one.
-    fn smudge_uniform_room(&mut self, gpu: &Gpu, params: &mut UniformData, count: usize) {
+    pub(super) fn smudge_uniform_room(&mut self, gpu: &Gpu, params: &mut UniformData, count: usize) {
         let slots = SMUDGE_UNIFORM_SIZE.div_ceil(SLOT) * count as u64;
         if params.data.len() as u64 / SLOT + slots <= self.smudge_capacity {
             return;
@@ -538,8 +614,11 @@ impl Canvas {
     ) -> bool {
         let device = &gpu.device;
         let full = self.full();
+        let also = self.smudge_also();
+        let placed = self.placed_copies;
         let Some(smudge) = self.smudge.as_mut() else { return false };
-        let Some(layer) = self.layers.get(&smudge.layer) else { return false };
+        let Some(layer) = self.layers.get(&smudge.into) else { return false };
+        let also: Vec<&wgpu::Texture> = also.iter().filter_map(|id| self.layers.get(id)).map(|l| &l.texture).collect();
         if smudge.stalled {
             return false;
         }
@@ -584,6 +663,7 @@ impl Canvas {
                         grained: keeps.grained.then(|| tile("smudge grained")),
                         amount: keeps.amount.then(|| tile("smudge amount")),
                         shown: keeps.shown.then(|| tile("smudge shown")),
+                        more: also.iter().map(|_| tile("smudge kept")).collect(),
                     };
                     (at, tile)
                 })
@@ -609,6 +689,13 @@ impl Canvas {
                 for into in std::iter::once(&tile.before).chain(&tile.grained) {
                     encoder.copy_texture_to_texture(
                         copy_at(&layer.texture, r.x0, r.y0),
+                        copy_at(into, 0, 0),
+                        extent(r.width(), r.height()),
+                    );
+                }
+                for (from, into) in also.iter().zip(&tile.more) {
+                    encoder.copy_texture_to_texture(
+                        copy_at(from, r.x0, r.y0),
                         copy_at(into, 0, 0),
                         extent(r.width(), r.height()),
                     );
@@ -640,7 +727,7 @@ impl Canvas {
             }
             let t = tile_rect(at);
             let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
-            let offset = u64::from(row) * u64::from(r.y0.abs_diff(reach.y0)) + 4 * u64::from(r.x0.abs_diff(reach.x0));
+            let offset = in_window(reach, r);
             if before {
                 encoder.copy_texture_to_texture(
                     copy_at(&tile.before, x, y),
@@ -655,11 +742,8 @@ impl Canvas {
             ];
             for (kept, buffer, start) in halves {
                 if let (Some(kept), Some(buffer)) = (kept, buffer) {
-                    encoder.copy_texture_to_buffer(
-                        copy_at(kept, x, y),
-                        in_buffer(buffer, start + offset, row, r.height()),
-                        size,
-                    );
+                    let into = in_buffer(buffer, start + offset, row, r.height());
+                    copy_to_window(device, encoder, copy_at(kept, x, y), into, size, placed);
                 }
             }
         }
@@ -680,11 +764,10 @@ impl Canvas {
             return;
         }
         let Some(smudge) = self.smudge.as_ref() else { return };
-        let (Some(window), Some(layer)) = (smudge.window.as_ref(), self.layers.get(&smudge.layer)) else { return };
+        let (Some(window), Some(layer)) = (smudge.window.as_ref(), self.layers.get(&smudge.into)) else { return };
         let row = row_bytes(reach.width());
         let bytes = u64::from(row) * u64::from(reach.height());
-        let offset =
-            |r: IRect| u64::from(row) * u64::from(r.y0.abs_diff(reach.y0)) + 4 * u64::from(r.x0.abs_diff(reach.x0));
+        let offset = |r: IRect| in_window(reach, r);
         if work {
             encoder.copy_buffer_to_texture(
                 in_buffer(&window.work, offset(changed), row, changed.height()),
@@ -721,25 +804,49 @@ impl Canvas {
         }
     }
 
-    /// Puts the open smudge stroke's layer back as it was wherever the stroke has written.
+    /// Puts the open smudge stroke's layer back as it was wherever the stroke has written (and what
+    /// it changes besides, as they were).
     pub(super) fn smudge_put_back(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let full = self.full();
+        let also = self.smudge_also();
         let Some(smudge) = self.smudge.as_ref() else { return };
-        let Some(layer) = self.layers.get(&smudge.layer) else { return };
+        let Some(layer) = self.layers.get(&smudge.into) else { return };
+        let also: Vec<Option<&wgpu::Texture>> = also.iter().map(|id| self.layers.get(id).map(|l| &l.texture)).collect();
         for (&at, tile) in &smudge.tiles {
             let r = tile_rect(at).intersect(full);
-            encoder.copy_texture_to_texture(
-                copy_at(&tile.before, 0, 0),
-                copy_at(&layer.texture, r.x0, r.y0),
-                extent(r.width(), r.height()),
-            );
+            let back =
+                std::iter::once((&tile.before, Some(&layer.texture))).chain(tile.more.iter().zip(also.iter().copied()));
+            for (kept, to) in back {
+                let Some(to) = to else { continue };
+                encoder.copy_texture_to_texture(
+                    copy_at(kept, 0, 0),
+                    copy_at(to, r.x0, r.y0),
+                    extent(r.width(), r.height()),
+                );
+            }
         }
     }
 
     /// The open smudge stroke's layer as it was over `rect` (within the canvas), into `into`.
     pub(super) fn smudge_before(&self, encoder: &mut wgpu::CommandEncoder, rect: IRect, into: &wgpu::Texture) {
+        self.smudge_before_of(encoder, rect, into, None);
+    }
+
+    /// What the open smudge stroke works in as it was over `rect` (within the canvas), into `into`;
+    /// or (`also`) the one of the textures it changes besides (see [`Canvas::smudge_also`]).
+    pub(super) fn smudge_before_of(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        rect: IRect,
+        into: &wgpu::Texture,
+        also: Option<usize>,
+    ) {
         let Some(smudge) = self.smudge.as_ref() else { return };
-        let Some(layer) = self.layers.get(&smudge.layer) else { return };
+        let id = match also {
+            Some(k) => self.smudge_also().get(k).copied(),
+            None => Some(smudge.into),
+        };
+        let Some(layer) = id.and_then(|id| self.layers.get(&id)) else { return };
         // as it is where the stroke hasn't written, then its tiles
         encoder.copy_texture_to_texture(
             copy_at(&layer.texture, rect.x0, rect.y0),
@@ -748,17 +855,98 @@ impl Canvas {
         );
         for at in tiles_of(rect) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
+            let kept = match also {
+                Some(k) => tile.more.get(k),
+                None => Some(&tile.before),
+            };
+            let Some(kept) = kept else { continue };
             let t = tile_rect(at);
             let r = t.intersect(rect);
             if r.is_empty() {
                 continue;
             }
             encoder.copy_texture_to_texture(
-                copy_at(&tile.before, r.x0 - t.x0, r.y0 - t.y0),
+                copy_at(kept, r.x0 - t.x0, r.y0 - t.y0),
                 copy_at(into, r.x0 - rect.x0, r.y0 - rect.y0),
                 extent(r.width(), r.height()),
             );
         }
+    }
+
+    /// The textures the open smudge stroke changes besides the one it works in: laying paint into
+    /// its layer's store, the layer itself and the store's height.
+    pub(super) fn smudge_also(&self) -> Vec<procraft_engine::document::LayerId> {
+        let Some(smudge) = self.smudge.as_ref() else { return Vec::new() };
+        smudge.store.as_ref().map_or_else(Vec::new, |s| vec![smudge.layer, s.planes[1]])
+    }
+
+    /// Makes the open smudge stroke's tiles under `rects` that it hasn't made yet (keeping what is
+    /// under them as it was), before it writes there other than through a window; false if they
+    /// couldn't be made (the stroke then lays nothing more).
+    pub(super) fn smudge_keep(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        rects: &[IRect],
+    ) -> bool {
+        let full = self.full();
+        let also = self.smudge_also();
+        let in_fragments = self.pipelines.compute.is_none();
+        let Some(smudge) = self.smudge.as_mut() else { return false };
+        if smudge.stalled {
+            return false;
+        }
+        let Some(layer) = self.layers.get(&smudge.into) else { return false };
+        let also: Vec<&wgpu::Texture> = also.iter().filter_map(|id| self.layers.get(id)).map(|l| &l.texture).collect();
+        let keeps = smudge.keeps;
+        let mut missing: Vec<(u32, u32)> =
+            rects.iter().flat_map(|w| tiles_of(w.intersect(full))).filter(|t| !smudge.tiles.contains_key(t)).collect();
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
+            return true;
+        }
+        let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let tile = |label| texture(device, label, TILE, TILE, LAYER_FORMAT);
+        // (the amounts' bits as words in fragment passes, as their bytes elsewhere)
+        let amounts = if in_fragments { super::fragments::AMOUNT_FORMAT } else { LAYER_FORMAT };
+        let amount_tile = |label| texture(device, label, TILE, TILE, amounts);
+        let made: Vec<((u32, u32), Tile)> = missing
+            .iter()
+            .map(|&at| {
+                let tile = Tile {
+                    before: tile("smudge before"),
+                    grained: keeps.grained.then(|| tile("smudge grained")),
+                    amount: keeps.amount.then(|| amount_tile("smudge amount")),
+                    shown: keeps.shown.then(|| amount_tile("smudge shown")),
+                    more: also.iter().map(|_| tile("smudge kept")).collect(),
+                };
+                (at, tile)
+            })
+            .collect();
+        if let Some(e) = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop())) {
+            log::error!("smudging: {e}");
+            self.smudge_untold = true;
+            smudge.stalled = true;
+            return false;
+        }
+        smudge.laid = true;
+        for (at, tile) in made {
+            let r = tile_rect(at).intersect(full);
+            let from = std::iter::once((&layer.texture, &tile.before))
+                .chain(tile.grained.iter().map(|g| (&layer.texture, g)))
+                .chain(also.iter().copied().zip(&tile.more));
+            for (from, into) in from {
+                encoder.copy_texture_to_texture(
+                    copy_at(from, r.x0, r.y0),
+                    copy_at(into, 0, 0),
+                    extent(r.width(), r.height()),
+                );
+            }
+            smudge.tiles.insert(at, tile);
+        }
+        true
     }
 }
 
@@ -766,12 +954,23 @@ impl Canvas {
 pub(super) type Tiles = BTreeMap<(u32, u32), Tile>;
 
 impl super::Smudge {
-    /// The textures the stroke holds: its tiles' and its window's.
+    /// The textures the stroke holds: its tiles' and its window's (and in fragment passes, what
+    /// the brush carries).
     pub(super) fn textures(&self) -> Vec<&wgpu::Texture> {
         let tiles = self.tiles.values().flat_map(|t| {
-            std::iter::once(&t.before).chain(t.grained.iter()).chain(t.amount.iter()).chain(t.shown.iter())
+            std::iter::once(&t.before)
+                .chain(t.grained.iter())
+                .chain(t.amount.iter())
+                .chain(t.shown.iter())
+                .chain(t.more.iter())
         });
-        tiles.chain(self.window.as_ref().map(|w| &w.before)).chain(self.passed.as_ref().map(|p| &p.0)).collect()
+        let fragments =
+            self.held.iter().flat_map(|h| h.textures()).chain(self.frag_window.iter().flat_map(|w| w.textures()));
+        tiles
+            .chain(self.window.as_ref().map(|w| &w.before))
+            .chain(self.passed.as_ref().map(|p| &p.0))
+            .chain(fragments)
+            .collect()
     }
 }
 
@@ -800,5 +999,25 @@ mod tests {
         assert_eq!(tiles, [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]);
         assert_eq!(tiles_of(IRect::EMPTY).count(), 0);
         assert_eq!(part(0, 0, 255, 255), WHOLE);
+    }
+
+    #[test]
+    fn each_tile_s_part_of_a_window_starts_where_a_copy_can_place_it() {
+        // windows from any column, wide and narrow, over tiles they cross part of
+        let windows = [(0, 0, 1, 1), (3, 7, 900, 300), (250, 250, 20, 700), (257, 1, 1500, 2), (1023, 511, 513, 257)];
+        for (x0, y0, w, h) in windows.into_iter().chain([(130, 129, 4000, 9), (5000, 3, 77, 600)]) {
+            let reach = window_reach(IRect::new(x0, y0, x0 + w, y0 + h));
+            assert!(reach.x0 <= x0 && x0 - reach.x0 < 128, "{reach:?}");
+            assert_eq!((reach.x1, reach.y0, reach.y1), (x0 + w, y0, y0 + h));
+            let bytes = u64::from(row_bytes(reach.width())) * u64::from(reach.height());
+            for at in tiles_of(reach) {
+                let r = tile_rect(at).intersect(reach);
+                // the amount's second half too
+                for start in [0, bytes] {
+                    assert_eq!((start + in_window(reach, r)) % u64::from(PLACEMENT), 0, "{reach:?} {at:?}");
+                }
+            }
+        }
+        assert_eq!(window_reach(IRect::EMPTY), IRect::EMPTY);
     }
 }

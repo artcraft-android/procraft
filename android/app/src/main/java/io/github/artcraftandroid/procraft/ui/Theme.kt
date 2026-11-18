@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.artcraftandroid.procraft.core.InterfacePart
 
 /** Interface colours and sizes. Sizes in dp equal the measured points. */
 object Pc {
@@ -23,6 +24,30 @@ object Pc {
 
     /** A picker plugin's Classic square, while one is on: its picture, and where touches land and the knob sits. */
     var picker by mutableStateOf<ClassicPicker?>(null)
+
+    /** How big each part of the interface shows next to the rest of it, as a plugin says (1: as the rest), in [InterfacePart]'s order. */
+    var partScales by mutableStateOf(List(InterfacePart.entries.size) { 1f })
+
+    /** How big [part] shows next to the rest of the interface. */
+    fun partScale(part: InterfacePart): Float = partScales.getOrElse(part.ordinal) { 1f }
+
+    /** How far down the top bar reaches, as it shows: what hangs from it hangs from there. */
+    val barShown: Dp get() = BarHeight * partScale(InterfacePart.TOP_BAR)
+
+    /** How wide the side bar is, as it shows: what keeps clear of it keeps clear of that. */
+    val sideBarShown: Dp get() = SideBarWidth * partScale(InterfacePart.SIDE_BAR)
+
+    /** A plugin has the floating colour window show Classic's picker alone: no title or mode icons. */
+    var floatingPickerOnly by mutableStateOf(false)
+
+    /** Plugins' menus with choices for Classic's corner, while any has: a button there opens them. */
+    var classicMenu by mutableStateOf<ClassicMenu?>(null)
+
+    /** The panels a plugin lets be torn off into windows of their own. */
+    var floatingPanels by mutableStateOf(emptySet<io.github.artcraftandroid.procraft.core.FloatingPanel>())
+
+    /** The notices that show, as the plugins say: one of something done may not; one of something gone wrong always does. */
+    var noticesShown by mutableStateOf(io.github.artcraftandroid.procraft.core.NoticeKind.entries.toSet())
 
     /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
     var accentGiven by mutableStateOf<Color?>(null)
@@ -162,16 +187,29 @@ object Pc {
 
     // the side bar
     // the bar and the tracks translucent, each straight over what is behind (#2d2d2d and #676767
-    // over white); the thumbs opaque (#a6a6a6 over white and over the dark surround alike)
+    // over white; light 235 and 244); the thumbs opaque (#a6a6a6 over white and over the dark
+    // surround alike; white on the light look), each with a soft shadow a point below it
     val SideBar: Color get() = pick(0xE7171717, 0xCFE5E5E5)
     val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0)
     // a lighter rim round each track, more of what is behind showing through it (#5a5a5a over the
-    // dark surround, #969696 over white)
-    val SliderRim: Color get() = pick(0xB96E6E6E, 0xFFE9E9E9)
+    // dark surround, #969696 over white; light 249 over white)
+    val SliderRim: Color get() = pick(0xB96E6E6E, 0xB9F7F7F7)
     val SliderRimWidth = 0.8.dp
-    val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFF8F8F8)
-    val SideGlyph: Color get() = pick(0xFF969696, 0xFF646464)
-    val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x33000000)
+    // a hairline round each track's window in the bar, a little darker than the bar (38 against
+    // the dark bar's 45 over white, about 220 against the light bar's 235)
+    val SliderEdge: Color get() = pick(0x28000000, 0x10000000)
+    val SliderEdgeWidth = 0.5.dp
+    val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFFFFFFF)
+    /**
+     * A value saved on a slider (a notch): a short bar across the track, mid grey and see-through
+     * on either look, so that it shows on the dark track and the light one (119 over the dark
+     * track's 103 and 162 over the light one's 244, over white).
+     */
+    val NotchMark = Color(0xB3808080)
+    // the modify outline and undo and redo: light, the dark look's grey turned over (105 and
+    // about 204 over the light bar)
+    val SideGlyph: Color get() = pick(0xFF969696, 0xFF696969)
+    val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x22000000)
     val SideBarWidth = 51.dp
     val SideBarHeight = 519.dp
     val SideBarCorner = 20.dp
@@ -240,11 +278,11 @@ object Pc {
      * that clears the top bar; in a shorter window (split screen) just under the top bar, its tracks
      * giving up what it is short of, so that all of it can be reached.
      */
-    fun sideBarFit(height: Dp): SideBarFit {
+    fun sideBarFit(height: Dp, barBottom: Dp = BarHeight): SideBarFit {
         val top = height * SIDE_BAR_CENTRE - SideBarHeight / 2
-        if (top >= BarHeight) return SideBarFit(top, SliderHeight)
+        if (top >= barBottom) return SideBarFit(top, SliderHeight)
         val rest = SideBarHeight - SliderHeight * 2
-        return SideBarFit(BarHeight, ((height - BarHeight - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
+        return SideBarFit(barBottom, ((height - barBottom - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
     }
 }
 
@@ -282,7 +320,7 @@ object CanvasSpace {
         }
     }
 
-    /** [bitmap], of the canvas's colours, marked with the canvas's space (on Android 9, a copy so marked). */
+    /** [bitmap], of the canvas's colours, marked with the canvas's space (before Android 10, a copy so marked). */
     fun tag(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
         if (!p3) return bitmap
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
@@ -303,10 +341,20 @@ object CanvasSpace {
 /**
  * A picker plugin's Classic square: [pick] gives the saturation and brightness at a point and [point] where they sit
  * (points 0..1 across and down); [picture] draws it for a hue, a side in pixels, premultiplied RGBA (none if it
- * couldn't be drawn: its plugin goes off).
+ * couldn't be drawn: its plugin goes off). If it picks the hue too, on a ring of its own: [hue] gives the hue a touch
+ * starting at a point picks (none where it picks saturation and brightness), and [huePoint] where a hue's knob sits
+ * (none while the hue slider has the hue).
  */
 class ClassicPicker(
     val pick: (Float, Float) -> List<Float>?,
     val point: (Float, Float) -> List<Float>?,
     val picture: (Float, Int) -> ByteArray?,
+    val hue: (Float, Float) -> Float? = { _, _ -> null },
+    val huePoint: (Float) -> List<Float>? = { null },
+)
+
+/** Plugins' menus at Classic's corner: their [choices] (each its icon, words and whether it stands now), and [choose], which picks one by its key. */
+class ClassicMenu(
+    val choices: List<io.github.artcraftandroid.procraft.core.PluginChoice>,
+    val choose: (String) -> Unit,
 )

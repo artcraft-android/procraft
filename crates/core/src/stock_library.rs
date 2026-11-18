@@ -121,6 +121,8 @@ pub(crate) fn prepare() {
 
 #[cfg(test)]
 mod tests {
+    use procraft_engine::variant::{fnv, moved, range, shifted};
+
     use super::*;
 
     #[test]
@@ -242,48 +244,8 @@ mod tests {
         "grain_filtering",
     ];
 
-    fn fnv(text: &str) -> u64 {
-        text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
-    }
-
-    /// How much brush `name` moves its control `key`: a share of its value, 1% to 3% either way
-    /// (2.95%, so that kept to four figures it stays within 3%), the same every time.
-    fn moved(name: &str, key: &str) -> f32 {
-        // splitmix64 of the two names' hashes
-        let mut z = (fnv(name) ^ fnv(key).rotate_left(17)).wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        let share = 0.01 + 0.0195 * ((z >> 40) as f32 / (1u64 << 24) as f32);
-        if z & 1 == 0 { share } else { -share }
-    }
-
-    /// `value` moved by `by` (a share of it) to four figures, kept inside `low..high` (moved the
-    /// other way where it would leave them); none moves at none or at either end, where moving would
-    /// change what it does.
-    fn shifted(value: f32, by: f32, (low, high): (f32, f32)) -> f32 {
-        let inside = |v: f32| v > low + 1e-6 && v < high - 1e-6;
-        if value.abs() < 1e-6 || !inside(value) {
-            return value;
-        }
-        let figures = |v: f32| {
-            let scale = 10f32.powi(3 - v.abs().log10().floor() as i32);
-            (v * scale).round() / scale
-        };
-        [value * (1.0 + by), value * (1.0 - by)].into_iter().map(figures).find(|&v| inside(v)).unwrap_or(value)
-    }
-
     /// The top of a brush file's most size (its units, see `brushfile::set_sizes`).
     const FILE_MOST_SIZE: f32 = 4.0;
-
-    /// The range of control `key`, as a brush keeps it.
-    fn range(key: &str) -> (f32, f32) {
-        let mut b = procraft_engine::brush::Brush::round_pen();
-        b.set_setting(key, -1000.0);
-        let low = b.setting(key);
-        b.set_setting(key, 1000.0);
-        (low, b.setting(key))
-    }
 
     /// `file` as brush `name` of ours: each value moved (see [`moved`], as `seed` says), its
     /// switches, choices and curves as they are, and none of the file's own pictures, preview or
@@ -633,5 +595,111 @@ mod tests {
         // past the end it moves the other way
         assert!((shifted(0.99, 0.02, (0.0, 1.0)) - 0.9702).abs() < 1e-6);
         assert!(CHOICES.iter().all(|k| !k.is_empty()));
+    }
+
+    /// Where the Legacy set's brushes are kept as files to import: `legacy-brushes/` at the
+    /// repository's root, a set file for each set they came in.
+    fn legacy_folder() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../legacy-brushes")
+    }
+
+    /// What to do when the folder isn't as the Legacy set is.
+    const REWRITE: &str = "write them again: cargo test -p procraft-core --lib write_legacy_brushes -- --ignored";
+
+    /// Each set the Legacy set's brushes came in, in the order it holds them: its name, the place
+    /// of its first brush in the Legacy set, and how many it has.
+    fn legacy_sets() -> Vec<(&'static str, usize, usize)> {
+        let ours = library();
+        let mut first = 0;
+        SHELF
+            .iter()
+            .filter_map(|&s| ours.get(s))
+            .map(|set| {
+                let at = first;
+                first += set.brushes.len();
+                (set.name, at, set.brushes.len())
+            })
+            .collect()
+    }
+
+    /// `name`'s set file, written by `session` (its library as it ships): the brushes of the Legacy
+    /// set from `first`, `count` of them, their folders named from the set's name.
+    fn legacy_set_file(session: &crate::CanvasSession, name: &str, first: usize, count: usize) -> Vec<u8> {
+        let legacy = session.shared.lock().library.iter().position(|s| s.name == LEGACY_SET).unwrap();
+        session.brushes_as_set_file(legacy as u32, first..first + count, name, fnv(name)).unwrap()
+    }
+
+    /// Writes the Legacy set's brushes into `legacy-brushes/` as set files, one for each set they
+    /// came in, as the app shares a set (their previews drawn on the GPU), each named after its set
+    /// (`Spray Paint.brushset`). Written again, a file comes out the same but for the previews
+    /// another GPU draws. `cargo test -p procraft-core --lib write_legacy_brushes -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_legacy_brushes() {
+        let gpu = procraft_gpu::Gpu::headless().expect("the previews are drawn on a GPU");
+        let session = crate::CanvasSession::new(200, 200);
+        {
+            let mut st = session.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(procraft_engine::view::View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let folder = legacy_folder();
+        std::fs::create_dir_all(&folder).unwrap();
+        // what isn't a set's now goes
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "brushset") {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        for (name, first, count) in legacy_sets() {
+            let file = legacy_set_file(&session, name, first, count);
+            std::fs::write(folder.join(format!("{name}.brushset")), file).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_legacy_brushes_folder_holds_each_set_as_the_legacy_set_has_it() {
+        // a set file for each set and nothing else, each holding its brushes as the app writes them
+        // now (their previews aside, which only a GPU draws)
+        let sets = legacy_sets();
+        let mut wanted: Vec<String> = sets.iter().map(|(name, _, _)| format!("{name}.brushset")).collect();
+        let mut found: Vec<String> = std::fs::read_dir(legacy_folder())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".brushset"))
+            .collect();
+        wanted.sort();
+        found.sort();
+        assert_eq!(found, wanted, "{REWRITE}");
+        let session = crate::CanvasSession::new(32, 32);
+        let without_preview = |mut f: BrushFile| {
+            f.thumbnail = None;
+            f
+        };
+        let mut brushes = 0;
+        for (name, first, count) in sets {
+            let kept = std::fs::read(legacy_folder().join(format!("{name}.brushset"))).unwrap();
+            let (kept_name, kept) = procraft_engine::brushfile::read_set(&kept).unwrap();
+            let (_, now) =
+                procraft_engine::brushfile::read_set(&legacy_set_file(&session, name, first, count)).unwrap();
+            assert_eq!(kept_name, name, "{REWRITE}");
+            assert_eq!(kept.len(), count, "{name}: {REWRITE}");
+            assert!(kept.iter().all(|f| f.thumbnail.is_some()), "{name}: each with its preview");
+            let kept: Vec<BrushFile> = kept.into_iter().map(without_preview).collect();
+            let now: Vec<BrushFile> = now.into_iter().map(without_preview).collect();
+            assert!(kept == now, "{name}'s brushes have changed: {REWRITE}");
+            // ours alone: no maker, and no image another app's file would name
+            for f in kept.iter().flat_map(|f| std::iter::once(f).chain(f.secondary.as_deref())) {
+                assert!(f.author.is_empty() && f.author_picture.is_none() && f.signature.is_none(), "{}", f.name);
+                for t in [&f.shape, &f.grain, &f.metallic, &f.roughness] {
+                    assert!(!matches!(t, procraft_engine::brushfile::Texture::Stock { .. }), "{}", f.name);
+                }
+            }
+            brushes += count;
+        }
+        assert_eq!(brushes, library().iter().map(|s| s.brushes.len()).sum::<usize>());
     }
 }

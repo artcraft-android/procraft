@@ -1,7 +1,7 @@
 //! Layers: the list the layers panel shows and every change to it, each one undoable. A slider
 //! drag (opacity, background colour) is one undo step from where it began to `done`.
 
-use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
+use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Place, Unseen};
 
 use crate::CanvasSession;
 
@@ -123,6 +123,107 @@ pub struct LayerOptionRow {
     pub label: String,
     pub enabled: bool,
     pub switch_on: Option<bool>,
+}
+
+/// A row of the layers panel where it is laid out (its top and bottom, any unit, down the
+/// screen), to place a drop by.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct ShownRow {
+    pub id: u64,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// Where rows dragged in the layers panel land if let go now ([`CanvasSession::row_drop`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RowDrop {
+    /// Where they are: let go over their own rows.
+    Stays,
+    /// Just above row `target` (over its mask), in the group that row is in.
+    Above { target: u64 },
+    /// Just below row `target`, in the group it is in: the last row of a group keeps what is let
+    /// go on its lower half in that group.
+    Below { target: u64 },
+    /// At the bottom of the stack, in no group.
+    Bottom,
+    /// Onto row `target`, held over it a moment: into a group at its top; with a layer, both in a
+    /// new group.
+    Onto { target: u64 },
+}
+
+/// A row held over this long while a row is dragged takes what is let go onto it.
+pub const ROW_HOLD_SECONDS: f32 = 0.5;
+
+/// How long a dragged row must be held over another to let go onto it, seconds
+/// ([`ROW_HOLD_SECONDS`]).
+#[uniffi::export]
+pub fn row_hold_seconds() -> f32 {
+    ROW_HOLD_SECONDS
+}
+
+impl RowDrop {
+    /// The engine's place for it; none for [`RowDrop::Stays`].
+    pub(crate) fn engine(self) -> Option<Place> {
+        Some(match self {
+            RowDrop::Stays => return None,
+            RowDrop::Above { target } => Place::Above(LayerId(target)),
+            RowDrop::Below { target } => Place::Below(LayerId(target)),
+            RowDrop::Bottom => Place::Bottom,
+            RowDrop::Onto { target } => Place::Onto(LayerId(target)),
+        })
+    }
+}
+
+/// The shown row as [`place_drop`] weighs it: where it is laid out (if it is), whether it is the
+/// last shown of the group it is in, and whether a drag held over it lets go onto it.
+#[derive(Clone, Copy, Debug)]
+struct DropRow {
+    id: u64,
+    span: Option<(f32, f32)>,
+    last_in_group: bool,
+    holdable: bool,
+}
+
+/// Where a drag lets go at `y`, by `rows` (the panel's rows shown, top down, without the ones
+/// dragged; those laid out with their spans), `over_own` (`y` is over a row dragged) and `held`
+/// (the row the drag has been held over): on a row held over, onto it; on the lower
+/// half of the last row of a group, under it in that group; otherwise just above the first row
+/// whose middle is at or under `y` (out of a group by its row's upper half, into an open one by
+/// its row's lower half), or at the bottom.
+fn place_drop(rows: &[DropRow], y: f32, over_own: bool, held: Option<u64>) -> RowDrop {
+    let within = |r: &DropRow| r.span.is_some_and(|(top, bottom)| y >= top && y < bottom);
+    if let Some(r) = held.and_then(|h| rows.iter().find(|r| r.id == h)).filter(|r| r.holdable && within(r)) {
+        return RowDrop::Onto { target: r.id };
+    }
+    let over = rows.iter().position(within);
+    if over.is_none() && over_own {
+        return RowDrop::Stays;
+    }
+    if let Some(k) = over
+        && let Some(r) = rows.get(k)
+        && let Some((top, bottom)) = r.span
+        && bottom > top
+        && (y - top) / (bottom - top) > 0.5
+    {
+        if r.last_in_group {
+            return RowDrop::Below { target: r.id };
+        }
+        // under its middle: above the next row, laid out or not
+        return rows.get(k + 1).map_or(RowDrop::Bottom, |n| RowDrop::Above { target: n.id });
+    }
+    if let Some(r) = over.and_then(|k| rows.get(k)) {
+        return RowDrop::Above { target: r.id };
+    }
+    // between rows or past them: above the first laid out under `y`, or the one after the last
+    // laid out (scrolled away)
+    if let Some(r) = rows.iter().find(|r| r.span.is_some_and(|(top, _)| top >= y)) {
+        return RowDrop::Above { target: r.id };
+    }
+    let last = rows.iter().rposition(|r| r.span.is_some());
+    match last.and_then(|k| rows.get(k + 1)) {
+        Some(n) => RowDrop::Above { target: n.id },
+        None => RowDrop::Bottom,
+    }
 }
 
 /// What locking (`on`) or unlocking layer `id` is called (see [`CanvasSession::lock_said`]).
@@ -252,6 +353,19 @@ pub fn set_resident_budget(bytes: u64) {
 
 pub(crate) fn resident_budget() -> u64 {
     RESIDENT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
+/// caches (four).
+pub(crate) const CANVAS_LAYERS: u64 = 7;
+
+/// What the layers' textures of a canvas `width` × `height` may take, bytes: the device's budget
+/// less what the canvas holds besides them, so that the canvas as a whole keeps to the budget (a
+/// layer's worth at least; 0, no budget, keeps every layer on the GPU).
+pub(crate) fn canvas_budget(width: u32, height: u32) -> u64 {
+    let budget = resident_budget();
+    let per = u64::from(width) * u64::from(height) * 4;
+    if budget == 0 { 0 } else { budget.saturating_sub(CANVAS_LAYERS * per).max(per.max(1)) }
 }
 
 /// How many layers a canvas holds, has, and of which kinds.
@@ -638,21 +752,67 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// Moves layer `id` just above or below `target`'s row, as a row dragged in the panel drops:
-    /// with what goes with it (its mask, or a group with what is in it); the current layer with
-    /// others picked (or a picked one) takes them all along, in their order. False if nothing moved.
-    pub fn move_next_to(&self, id: u64, target: u64, above: bool) -> bool {
+    /// Where layer `id`, dragged in the panel with what goes with it (see
+    /// [`CanvasSession::moving_with`]), lands if let go with its middle at `y`: `rows` are the
+    /// panel's rows where they are laid out (any unit, down the screen; those scrolled away may be
+    /// left out), `held` the row the drag has been held over for [`ROW_HOLD_SECONDS`], if any.
+    /// With no `id`, for layers brought in from elsewhere.
+    pub fn row_drop(&self, id: Option<u64>, rows: Vec<ShownRow>, y: f32, held: Option<u64>) -> RowDrop {
         let layers = self.layers();
-        let Some((unit, together)) = moving(&layers, id) else { return false };
-        if unit.contains(&target) {
-            return false;
-        }
-        // the others, bottom first: it goes in among them
-        let Some(at) = layers.iter().filter(|o| !unit.contains(&o.id)).rev().position(|o| o.id == target) else {
-            return false;
+        let unit = id.and_then(|id| moving(&layers, id)).map(|(unit, _)| unit).unwrap_or_default();
+        let by_id: std::collections::HashMap<u64, &LayerInfo> = layers.iter().map(|l| (l.id, l)).collect();
+        let by_id = &by_id;
+        // the groups a row is in, innermost first (a mask's, its layer's)
+        let groups = |l: &LayerInfo| {
+            let mut at =
+                if l.kind == LayerType::Mask { l.parent.and_then(|p| by_id.get(&p)?.parent) } else { l.parent };
+            std::iter::from_fn(move || {
+                let g = at?;
+                at = by_id.get(&g).and_then(|o| o.parent);
+                Some(g)
+            })
+            .take(layers.len())
         };
-        let to = u32::try_from(if above { at + 1 } else { at }).unwrap_or(u32::MAX);
-        if together { self.move_chosen(to) } else { self.move_layer(id, to) }
+        let closed = |g: u64| by_id.get(&g).is_some_and(|o| o.collapsed);
+        let shown: Vec<&LayerInfo> =
+            layers.iter().filter(|l| !unit.contains(&l.id) && !groups(l).any(closed)).collect();
+        let span = |id: u64| rows.iter().find(|r| r.id == id).map(|r| (r.top, r.bottom));
+        let drop_rows: Vec<DropRow> = shown
+            .iter()
+            .enumerate()
+            .map(|(k, l)| {
+                let next = shown.get(k + 1);
+                DropRow {
+                    id: l.id,
+                    span: span(l.id),
+                    last_in_group: groups(l).next().is_some_and(|g| next.is_none_or(|n| !groups(n).any(|o| o == g))),
+                    holdable: l.kind != LayerType::Mask,
+                }
+            })
+            .collect();
+        let over_own = rows.iter().any(|r| unit.contains(&r.id) && y >= r.top && y < r.bottom);
+        place_drop(&drop_rows, y, over_own, held)
+    }
+
+    /// Moves layer `id` to `place` (as [`CanvasSession::row_drop`] gives it) with what goes with
+    /// it: its mask, or a group with what is in it; the current layer with others picked (or a
+    /// picked one) takes them all along, in their order. One undo step; false if nothing moved.
+    pub fn drop_row(&self, id: u64, place: RowDrop) -> bool {
+        let layers = self.layers();
+        let Some((_, together)) = moving(&layers, id) else { return false };
+        let Some(place) = place.engine() else { return false };
+        let combined =
+            matches!(place, Place::Onto(t) if layers.iter().any(|l| l.id == t.0 && l.kind == LayerType::Paint));
+        let name = match (combined, together) {
+            (true, _) => "combine down",
+            (false, true) => "move layers",
+            (false, false) => "move layer",
+        };
+        self.change(name, |d| {
+            let moved = if together { d.move_chosen_to(place) } else { d.move_to(LayerId(id), place) };
+            moved.then_some(())
+        })
+        .is_some()
     }
 
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
@@ -754,7 +914,7 @@ impl CanvasSession {
     }
 
     /// The rows a drag of layer `id` in the panel takes along (see
-    /// [`CanvasSession::move_next_to`]), it among them.
+    /// [`CanvasSession::drop_row`]), it among them.
     pub fn moving_with(&self, id: u64) -> Vec<u64> {
         let layers = self.layers();
         let Some((unit, _)) = moving(&layers, id) else { return Vec::new() };
@@ -1322,6 +1482,8 @@ impl CanvasSession {
 
 #[cfg(test)]
 mod tests {
+    use super::RowDrop::{Above, Below, Bottom, Onto, Stays};
+    use super::{DropRow, LayerType, ShownRow, place_drop};
     use crate::CanvasSession;
 
     #[test]
@@ -1334,11 +1496,11 @@ mod tests {
             s.layers().iter().filter(|l| l.kind != super::LayerType::Mask).map(|l| l.id).collect::<Vec<_>>()
         };
         assert_eq!(order(&s), vec![top, middle, bottom]);
-        assert!(s.move_next_to(bottom, top, true));
+        assert!(s.drop_row(bottom, Above { target: top }));
         assert_eq!(order(&s), vec![bottom, top, middle]);
-        assert!(s.move_next_to(bottom, middle, false));
+        assert!(s.drop_row(bottom, Below { target: middle }));
         assert_eq!(order(&s), vec![top, middle, bottom]);
-        assert!(!s.move_next_to(top, top, true), "onto itself it stays");
+        assert!(!s.drop_row(top, Above { target: top }), "onto itself it stays");
         assert_eq!(s.why_blocked(), None);
         s.set_layer_locked(top, true);
         assert_eq!(s.why_blocked(), Some(super::Blocked::Locked));
@@ -1348,15 +1510,186 @@ mod tests {
         s.set_layer_visible(top, true);
         // a layer's mask goes with it
         let mask = s.add_mask(middle).unwrap_or_default();
-        assert!(s.move_next_to(middle, top, true));
+        assert!(s.drop_row(middle, Above { target: top }));
         let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
         let at = |id| ids.iter().position(|&i| i == id).unwrap_or(usize::MAX);
         assert!(at(mask) < at(middle) && at(middle) < at(top), "{ids:?}");
-        assert!(!s.move_next_to(middle, mask, true), "onto its own mask it stays");
+        assert!(!s.drop_row(middle, Above { target: mask }), "onto its own mask it stays");
         let mut with = s.moving_with(middle);
         with.sort_unstable();
         let mut expected = vec![middle, mask];
         expected.sort_unstable();
         assert_eq!(with, expected);
+    }
+
+    /// Top down: x, a, the group (c1, c2), b; x current. Returns the session and the ids.
+    fn grouped() -> (std::sync::Arc<CanvasSession>, [u64; 6]) {
+        let s = CanvasSession::new(64, 64);
+        let b = s.layers().first().map(|l| l.id).unwrap_or_default();
+        let c2 = s.add_layer();
+        let c1 = s.add_layer();
+        s.pick_layer(c2);
+        let g = s.group_picked();
+        s.select_layer(g);
+        let a = s.add_layer();
+        let x = s.add_layer();
+        let ids = [x, a, g, c1, c2, b];
+        let order: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+        assert_eq!(order, ids);
+        (s, ids)
+    }
+
+    /// The rows shown, laid out down from 0 as the panel does: a group 44 high, a layer 69, 1
+    /// apart; `skip`: rows scrolled away.
+    fn laid_out(s: &CanvasSession, skip: &[u64]) -> Vec<ShownRow> {
+        let layers = s.layers();
+        let closed: Vec<u64> = layers.iter().filter(|l| l.collapsed).map(|l| l.id).collect();
+        let mut y = 0.0;
+        let mut rows = Vec::new();
+        for l in &layers {
+            if closed.iter().any(|g| super::is_inside(&layers, l, *g)) {
+                continue;
+            }
+            let h = if l.kind == LayerType::Group { 44.0 } else { 69.0 };
+            if !skip.contains(&l.id) {
+                rows.push(ShownRow { id: l.id, top: y, bottom: y + h });
+            }
+            y += h + 1.0;
+        }
+        rows
+    }
+
+    fn parent(s: &CanvasSession, id: u64) -> Option<u64> {
+        s.layers().into_iter().find(|l| l.id == id).and_then(|l| l.parent)
+    }
+
+    fn order(s: &CanvasSession) -> Vec<u64> {
+        s.layers().iter().map(|l| l.id).collect()
+    }
+
+    #[test]
+    fn a_row_let_go_by_an_open_group_goes_in_only_among_its_layers() {
+        let (s, [x, a, g, c1, c2, b]) = grouped();
+        let rows = laid_out(&s, &[]);
+        // x 0..69, a 70..139, the group 140..184, c1 185..254, c2 255..324, b 325..394
+        let at = |y: f32| s.row_drop(Some(x), rows.clone(), y, None);
+        assert_eq!(at(30.0), Stays, "over its own row");
+        assert_eq!(at(80.0), Above { target: a });
+        assert_eq!(at(130.0), Above { target: g }, "the lower half of the row over the group: above it, out of it");
+        assert_eq!(at(150.0), Above { target: g }, "the group's upper half: above it");
+        assert_eq!(at(175.0), Above { target: c1 }, "the open group's lower half: in it at its top");
+        assert_eq!(at(240.0), Above { target: c2 });
+        assert_eq!(at(310.0), Below { target: c2 }, "its last layer's lower half: in it at its bottom");
+        assert_eq!(at(324.5), Above { target: b }, "between the group and the row under it: out of it");
+        assert_eq!(at(330.0), Above { target: b });
+        assert_eq!(at(390.0), Bottom);
+        assert_eq!(at(500.0), Bottom);
+        // let go there: in or out of the group as placed
+        assert!(s.drop_row(x, at(330.0)));
+        assert_eq!(parent(&s, x), None);
+        assert_eq!(order(&s), [a, g, c1, c2, x, b]);
+        let rows = laid_out(&s, &[]);
+        // a 0..69, the group 70..114, c1 115..184, c2 185..254, x 255..324: c2's lower half
+        assert!(s.drop_row(x, s.row_drop(Some(x), rows, 240.0, None)));
+        assert_eq!(parent(&s, x), Some(g), "on its last layer's lower half");
+        assert_eq!(order(&s), [a, g, c1, c2, x, b]);
+    }
+
+    #[test]
+    fn a_row_let_go_by_a_closed_group_goes_by_it_and_into_it_only_held_onto_its_row() {
+        let (s, [x, a, g, _, _, b]) = grouped();
+        s.set_group_collapsed(g, true);
+        let rows = laid_out(&s, &[]);
+        // x 0..69, a 70..139, the group 140..184, b 185..254
+        let at = |y: f32, held| s.row_drop(Some(x), rows.clone(), y, held);
+        assert_eq!(at(80.0, None), Above { target: a });
+        assert_eq!(at(150.0, None), Above { target: g });
+        assert_eq!(at(175.0, None), Above { target: b }, "the closed group's lower half: under it, out of it");
+        assert_eq!(at(190.0, None), Above { target: b });
+        // held over its row, anywhere on it: onto it
+        assert_eq!(at(150.0, Some(g)), Onto { target: g });
+        assert_eq!(at(175.0, Some(g)), Onto { target: g });
+        assert_eq!(at(190.0, Some(g)), Above { target: b }, "moved off the row held over");
+        assert!(s.drop_row(x, at(175.0, None)));
+        assert_eq!(parent(&s, x), None);
+        let rows = laid_out(&s, &[]);
+        // a 0..69, the group 70..114, x 115..184
+        let onto = s.row_drop(Some(x), rows, 100.0, Some(g));
+        assert_eq!(onto, Onto { target: g });
+        assert!(s.drop_row(x, onto));
+        assert_eq!(parent(&s, x), Some(g));
+        let ids = order(&s);
+        assert_eq!(ids.iter().position(|i| *i == x), Some(2), "at the group's top: {ids:?}");
+    }
+
+    #[test]
+    fn a_row_held_onto_a_layer_makes_a_group_with_it_but_never_onto_a_mask() {
+        let (s, [x, a, ..]) = grouped();
+        let mask = s.add_mask(a).unwrap_or_default();
+        s.select_layer(x);
+        let rows = laid_out(&s, &[]);
+        let row = |id| rows.iter().find(|r| r.id == id).copied().unwrap();
+        let on_mask = row(mask).top + 10.0;
+        assert_eq!(s.row_drop(Some(x), rows.clone(), on_mask, Some(mask)), Above { target: mask });
+        let on_a = row(a).top + 10.0;
+        let onto = s.row_drop(Some(x), rows, on_a, Some(a));
+        assert_eq!(onto, Onto { target: a });
+        assert!(s.drop_row(x, onto));
+        let group = parent(&s, a).unwrap();
+        assert_eq!(parent(&s, x), Some(group));
+        let layers = s.layers();
+        let new = layers.iter().find(|l| l.id == group).unwrap();
+        assert_eq!((new.kind, new.parent), (LayerType::Group, None));
+    }
+
+    #[test]
+    fn a_group_s_last_layer_dragged_keeps_the_one_over_it_last_and_its_own_place_stays() {
+        let (s, [_, _, g, c1, c2, b]) = grouped();
+        let rows = laid_out(&s, &[]);
+        let row = |id| rows.iter().find(|r| r.id == id).copied().unwrap();
+        let at = |y: f32| s.row_drop(Some(c2), rows.clone(), y, None);
+        assert_eq!(at(row(c2).top + 30.0), Stays);
+        assert_eq!(at(row(c1).bottom - 5.0), Below { target: c1 }, "c1 is the group's last without it");
+        assert_eq!(at(row(b).top + 5.0), Above { target: b });
+        assert!(!s.drop_row(c2, at(row(c1).bottom - 5.0)), "where it was: nothing moves");
+        // the group dragged: never into itself
+        let at = |y: f32| s.row_drop(Some(g), rows.clone(), y, None);
+        assert_eq!(at(row(c1).top + 5.0), Stays);
+        assert_eq!(at(row(b).top + 5.0), Above { target: b });
+    }
+
+    #[test]
+    fn rows_scrolled_away_still_place_a_drop_by_their_order() {
+        let (s, [x, _, _, c1, c2, b]) = grouped();
+        // only x, a, the group and c1 laid out
+        let rows = laid_out(&s, &[c2, b]);
+        let y = rows.iter().find(|r| r.id == c1).map_or(0.0, |r| r.bottom - 5.0);
+        assert_eq!(s.row_drop(Some(x), rows.clone(), y, None), Above { target: c2 });
+        assert_eq!(s.row_drop(Some(x), rows, 1000.0, None), Above { target: c2 });
+        // layers brought in from elsewhere: nothing of theirs to stay by
+        let rows = laid_out(&s, &[]);
+        assert_eq!(s.row_drop(None, rows, 30.0, None), Above { target: x });
+    }
+
+    #[test]
+    fn a_drop_is_placed_by_halves_of_rows_and_the_last_rows_of_groups() {
+        let row = |id, top: f32, bottom: f32, last_in_group| DropRow {
+            id,
+            span: Some((top, bottom)),
+            last_in_group,
+            holdable: true,
+        };
+        // 1 at the top level; 2 the last in a group; 3 under it
+        let rows = [row(1, 0.0, 10.0, false), row(2, 10.0, 20.0, true), row(3, 20.0, 30.0, false)];
+        let place = |y, held| place_drop(&rows, y, false, held);
+        assert_eq!(place(5.0, None), Above { target: 1 }, "a row's middle counts as its upper half");
+        assert_eq!(place(5.1, None), Above { target: 2 });
+        assert_eq!(place(15.1, None), Below { target: 2 });
+        assert_eq!(place(25.1, None), Bottom);
+        assert_eq!(place(-5.0, None), Above { target: 1 });
+        assert_eq!(place(25.1, Some(3)), Onto { target: 3 });
+        assert_eq!(place(25.1, Some(1)), Bottom, "held over a row it has left");
+        assert_eq!(place_drop(&rows, 40.0, true, None), Stays, "over its own rows, past the others");
+        assert_eq!(place_drop(&[], 40.0, false, None), Bottom);
     }
 }

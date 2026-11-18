@@ -104,6 +104,9 @@ pub(crate) struct ShapeEdit {
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
     stroke: Option<DrawnStroke>,
+    /// Moved since its stroke was last drawn: drawn again as the next frame is, or as it is kept.
+    /// A drag's moves come faster than frames, and each would lay the whole stroke again.
+    stale: bool,
 }
 
 impl ShapeEdit {
@@ -116,18 +119,9 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
-        ShapeEdit {
-            shape,
-            first,
-            earlier: Vec::new(),
-            later: Vec::new(),
-            choices,
-            drawn,
-            along,
-            modes: Vec::new(),
-            held,
-            stroke,
-        }
+        let modes = initial_curve_modes(&shape);
+        let (earlier, later) = (Vec::new(), Vec::new());
+        ShapeEdit { shape, first, earlier, later, choices, drawn, along, modes, held, stroke, stale: false }
     }
 
     /// A drag undone can be done again.
@@ -300,7 +294,7 @@ impl State {
         let mut builder = self.engine_again(kept.stroke.builder.clone(), kept.stroke.layer, kept.stroke.seed);
         let guide = self.doc.stroke_guide();
         let Some(canvas) = self.canvas.as_mut() else { return false };
-        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide);
+        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide, false);
         crate::close_stroke(canvas, builder, None, &guide);
         self.flush();
         kept.steps = self.canvas.as_ref().map_or(0, Canvas::steps_made);
@@ -328,6 +322,9 @@ impl State {
 
     /// Redraws the open stroke along the shape's outline.
     fn draw_shape(&mut self) {
+        if let Some(edit) = self.shape.as_mut() {
+            edit.stale = false;
+        }
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
         let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
@@ -352,6 +349,14 @@ impl State {
         self.second = None;
     }
 
+    /// Redraws the open stroke along the shape if it moved since it was last drawn: as a frame is
+    /// drawn, and before it is kept (see [`ShapeEdit::stale`]).
+    pub(crate) fn draw_moved_shape(&mut self) {
+        if self.shape.as_ref().is_some_and(|edit| edit.stale) {
+            self.draw_shape();
+        }
+    }
+
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
     /// with it, about its start (open shapes) or centre (closed ones). Whether it changed.
     pub(crate) fn follow_shape(&mut self, to: Vec2) -> bool {
@@ -373,7 +378,7 @@ impl State {
             return false;
         }
         edit.shape = shape;
-        self.draw_shape();
+        edit.stale = true;
         true
     }
 
@@ -462,6 +467,32 @@ fn shape_number(kind: ShapeKind) -> i32 {
 /// The place in a curve's anchors' modes of its `k`th anchor: a closed curve's last is its first.
 fn mode_of(shape: &Shape, k: usize) -> usize {
     if shape.closed_curve() && k == shape.nodes.len().saturating_sub(1) / 3 { 0 } else { k }
+}
+
+/// How a curve's anchors start, as it is fitted: broken where the controls either side turn (by
+/// some 16 degrees or more), so a drag of one leaves the other and the turn stays; smooth elsewhere.
+/// The ends and a closed curve's join start smooth.
+fn initial_curve_modes(shape: &Shape) -> Vec<Anchor> {
+    if shape.kind != ShapeKind::Curve {
+        return Vec::new();
+    }
+    let n = shape.nodes.len().saturating_sub(1) / 3 + 1;
+    (0..n)
+        .map(|k| {
+            let i = k * 3;
+            if i == 0 || i + 1 >= shape.nodes.len() {
+                return Anchor::Smooth;
+            }
+            let (Some(&point), Some(&prior), Some(&next)) =
+                (shape.nodes.get(i), shape.nodes.get(i - 1), shape.nodes.get(i + 1))
+            else {
+                return Anchor::Smooth;
+            };
+            let (incoming, outgoing) = (point - prior, next - point);
+            let lengths = incoming.length() * outgoing.length();
+            if lengths > 1e-5 && incoming.dot(outgoing) < 0.96 * lengths { Anchor::Broken } else { Anchor::Smooth }
+        })
+        .collect()
 }
 
 /// How each of a curve's anchors sits, for its handles to be drawn as.
@@ -747,7 +778,7 @@ impl CanvasSession {
         edit.earlier.push(before);
         edit.later.clear();
         // fitted afresh: the anchors it had are no guide
-        edit.modes.clear();
+        edit.modes = initial_curve_modes(&edit.shape);
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -832,7 +863,7 @@ impl CanvasSession {
             edit.shape.move_handle(index, to);
         }
         refresh_corners(&mut edit.shape, &edit.modes);
-        st.draw_shape();
+        edit.stale = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -931,7 +962,7 @@ impl CanvasSession {
         let edit = st.shape.as_mut()?;
         edit.held = None;
         edit.shape = edit.shape.translated(by);
-        st.draw_shape();
+        edit.stale = true;
         self.shared.frame(st);
         st.shape_info()
     }

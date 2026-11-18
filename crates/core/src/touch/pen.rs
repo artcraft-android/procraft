@@ -304,6 +304,7 @@ impl CanvasSession {
                         match near {
                             // the colour under the pen is taken
                             Some(h) if !cancelled => {
+                                t.pick_pen = true;
                                 out.push(TouchCommand::Pick { x: h.x, y: h.y });
                                 out.push(TouchCommand::PickDone);
                             }
@@ -399,6 +400,7 @@ impl CanvasSession {
         match (s.action, near) {
             (Some(GestureAction::Eyedropper), Some(h)) => {
                 s.picking = true;
+                t.pick_pen = true;
                 out.push(TouchCommand::Pick { x: h.x, y: h.y });
             }
             (Some(GestureAction::Eyedropper), None) if s.picking => {
@@ -656,6 +658,8 @@ mod tests {
             squeeze(SqueezePhase::Began, over(10.0, 10.0, 0.4, 0.0), 0.0),
             vec![TouchCommand::Pick { x: 10.0, y: 10.0 }]
         );
+        // its loupe on the pen's tip
+        assert_eq!(s.pick_loupe_lift(), 0.0);
         // the loupe stands in for the brush's outline
         s.touch_pen_hover(over(10.0, 10.0, 0.4, 5.0));
         assert_eq!(s.pen_hover_cursor(), None);

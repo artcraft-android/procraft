@@ -83,9 +83,10 @@ private const val GlassSide = 24
 @Composable
 fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
     // it fades in where it is, and out when closed; over the whole screen, since the fade draws
-    // into a buffer its own size and the window sits away from the corner
+    // into a buffer its own size and the window sits away from the corner. Crop and Resize puts it
+    // away while it is open, and it comes back after
     androidx.compose.animation.AnimatedVisibility(
-        vm.referenceOn,
+        vm.referenceOn && vm.cropRect == null,
         Modifier.matchParentSize(),
         enter = androidx.compose.animation.fadeIn(Motion.referenceFade()),
         exit = androidx.compose.animation.fadeOut(Motion.referenceFade()),
@@ -287,7 +288,7 @@ private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, pictu
             fun pickAt(p: Offset) {
                 val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
                 val at = io.github.artcraftandroid.procraft.core.referencePicturePoint(view, sizes, p.x, p.y) ?: return
-                vm.pickReference(picture, at[0], at[1], at[2], toScreen(p))
+                vm.pickReference(picture, at[0], at[1], at[2], toScreen(p), pen = first.type == androidx.compose.ui.input.pointer.PointerType.Stylus)
             }
             pickAt(first.position)
             while (true) {

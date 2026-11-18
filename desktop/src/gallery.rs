@@ -82,6 +82,28 @@ const RENAME_FIELD_FILL: u32 = 0x14FFFFFF;
 /// Renaming's picture rising from its cell, and its fading away when done (seconds).
 const RENAME_RISE_S: f32 = 0.3;
 const RENAME_FADE_S: f32 = 0.15;
+/// Several artworks shared as one PDF from the gallery itself (not a stack) are first named so.
+const GROUP: &str = "Artworks";
+
+/// What a swipe opened the actions of: an artwork, or a stack (its folder and name) and what is
+/// in it.
+struct Swiped {
+    dir: String,
+    name: String,
+    artworks: Vec<GalleryArtwork>,
+    stack: bool,
+}
+
+impl Swiped {
+    fn artwork(a: &GalleryArtwork) -> Swiped {
+        Swiped { dir: a.dir.clone(), name: a.name.clone(), artworks: vec![a.clone()], stack: false }
+    }
+
+    fn stack(dir: &str, name: &str, artworks: &[GalleryArtwork]) -> Swiped {
+        Swiped { dir: dir.to_owned(), name: name.to_owned(), artworks: artworks.to_vec(), stack: true }
+    }
+}
+
 /// A swiped artwork's actions: three pills over its thumbnail, which fades back.
 const SWIPE_PILL: (f32, f32) = (94.0, 56.0);
 const SWIPE_PILL_FILL: Themed = Themed(0xDB1C1C1C, 0xFFF5F5F5);
@@ -126,8 +148,9 @@ pub enum Asked {
     Photo(Option<String>),
     /// These artworks written as this format, where the user picks.
     Share(Vec<GalleryArtwork>, crate::files::Format),
-    /// These artworks written as PDFs keeping their pictures at this JPEG quality.
-    SharePdf(Vec<GalleryArtwork>, u8),
+    /// These artworks written as a PDF keeping their pictures at this JPEG quality: one alone as
+    /// its own, several as one with a page each, first named as given.
+    SharePdf(Vec<GalleryArtwork>, u8, String),
     /// The artwork opened to be shared as this animation, the gallery back after.
     ShareAnimated(GalleryArtwork, Animated),
     /// The artwork lifted and dragged out of the window: handed to the system as a file.
@@ -220,7 +243,7 @@ pub struct Gallery {
     alert: crate::alert::Alert,
     /// Share's PDF asks how well it keeps its pictures first (for these artworks).
     pdf_alert: crate::alert::Alert,
-    pdf_for: Option<Vec<GalleryArtwork>>,
+    pdf_for: Option<(Vec<GalleryArtwork>, String)>,
     /// An artwork lifted and dragged out past the window's edge.
     dragged_out: Option<GalleryArtwork>,
     /// The artwork being renamed, its name as typed, and whether its field has had the focus.
@@ -238,7 +261,7 @@ pub struct Gallery {
     dragged: egui::Vec2,
     /// Share's formats, open for these artworks, beside a swiped artwork's Share (or under
     /// Select's, where it last was).
-    sharing: Option<(Vec<GalleryArtwork>, Option<Rect>)>,
+    sharing: Option<(Vec<GalleryArtwork>, Option<Rect>, String)>,
     share_button: Rect,
     /// What a hold lifted (by folder) and where it was taken (window points), and where the way
     /// back out of a stack is, to drop it there.
@@ -339,7 +362,11 @@ const DROPPED: (f32, f32) = (1.0, 0.25);
 
 impl Gallery {
     pub fn new() -> Gallery {
-        let store = ArtworkStore::open(crate::files::app_dir().join("artworks").to_string_lossy().into_owned());
+        Gallery::with_store(ArtworkStore::open(crate::files::app_dir().join("artworks").to_string_lossy().into_owned()))
+    }
+
+    /// The gallery of the artworks kept in `store`.
+    fn with_store(store: Arc<ArtworkStore>) -> Gallery {
         let presets = presets_from_json(std::fs::read_to_string(presets_path()).ok());
         let mut gallery = Gallery {
             store,
@@ -434,6 +461,15 @@ impl Gallery {
     /// Where the artwork in folder `dir` was last drawn, if it was.
     pub fn picture_of(&self, dir: &str) -> Option<Rect> {
         self.pictures.get(dir).copied()
+    }
+
+    /// The artwork whose cell is under window point `at`, as last drawn (a stack's: none): where
+    /// layers held over the gallery open.
+    pub fn artwork_at(&self, at: egui::Pos2) -> Option<String> {
+        self.drawn_cells.iter().find(|(_, r)| r.contains(at)).and_then(|(e, _)| match e {
+            GalleryEntry::Artwork { artwork } => Some(artwork.dir.clone()),
+            GalleryEntry::Stack { .. } => None,
+        })
     }
 
     /// Where the artwork in folder `dir` (its canvas `size` pixels) will be drawn once it shows
@@ -584,10 +620,10 @@ impl Gallery {
             None => {}
         }
         if let Some(answer) = self.pdf_alert.show(ctx, look)
-            && let Some(list) = self.pdf_for.take()
+            && let Some((list, group)) = self.pdf_for.take()
             && let Some(quality) = crate::alert::pdf_jpeg(answer)
         {
-            asked = Some(Asked::SharePdf(list, quality));
+            asked = Some(Asked::SharePdf(list, quality, group));
         }
         if let Some(artwork) = self.dragged_out.take() {
             asked = Some(Asked::DragOut(artwork));
@@ -646,7 +682,11 @@ impl Gallery {
                 self.alert.open(&title, "This can't be undone.", "Delete", Some(&icons::TRASH));
             }
             SelectAction::More => self.more_open = !self.more_open,
-            SelectAction::Share => self.sharing = Some((self.picked_artworks(), None)),
+            // several go into one PDF, named after the stack they are in
+            SelectAction::Share => {
+                let group = self.stack.as_ref().map_or_else(|| GROUP.to_owned(), |(_, name)| name.clone());
+                self.sharing = Some((self.picked_artworks(), None, group));
+            }
         }
     }
 
@@ -1289,7 +1329,7 @@ impl Gallery {
                             let id = ui.scope_id().with(("swipe open", &artwork.dir));
                             let open = ui.ctx().animate_bool_with_time_and_easing(id, swiped, SWIPE_S, swipe_ease);
                             if open > 0.0 {
-                                self.swipe_actions(ui, cell, artwork, open, swiped);
+                                self.swipe_actions(ui, cell, &Swiped::artwork(artwork), open, swiped);
                             }
                             // selecting, a tap picks it (or lets it go); a tap puts away actions
                             // showing
@@ -1313,7 +1353,28 @@ impl Gallery {
                             // on its name, a tap renames it, as an artwork's does
                             let below = cell.top() + 39.0 + Self::thumb_box(cell).height() + 8.0;
                             let on_name = response.interact_pointer_pos().is_some_and(|p| p.y > below);
-                            if tapped
+                            // dragged across, its actions show (left) or go (right), as an artwork's
+                            if response.drag_started() {
+                                self.dragged = egui::Vec2::ZERO;
+                            }
+                            self.dragged += response.drag_delta();
+                            if response.drag_stopped()
+                                && !self.selecting
+                                && self.lifted.is_none()
+                                && self.dragged.x.abs() > self.dragged.y.abs()
+                            {
+                                self.swiped = (self.dragged.x < 0.0).then(|| dir.clone());
+                            }
+                            let swiped = self.swiped.as_ref() == Some(dir);
+                            let id = ui.scope_id().with(("swipe open", dir));
+                            let open = ui.ctx().animate_bool_with_time_and_easing(id, swiped, SWIPE_S, swipe_ease);
+                            if open > 0.0 {
+                                let on = Swiped::stack(dir, name, artworks);
+                                self.swipe_actions(ui, cell, &on, open, swiped);
+                            }
+                            if tapped && self.swiped.is_some() {
+                                self.swiped = None;
+                            } else if tapped
                                 && on_name
                                 && !self.selecting
                                 && let Some(top) = artworks.first()
@@ -1490,11 +1551,11 @@ impl Gallery {
         self.refresh();
     }
 
-    /// A swiped artwork's actions: Share, Duplicate and Delete as pills across the middle of its
-    /// thumbnail's box, the cell faded back under them.
-    /// A swiped artwork's actions, `open` of the way in (they grow from a fifth of their size
-    /// about their right end, fading in, as the artwork fades back); tappable once `shown`.
-    fn swipe_actions(&mut self, ui: &Ui, cell: Rect, a: &GalleryArtwork, open: f32, shown: bool) {
+    /// A swiped artwork's (or stack's) actions: Share, Duplicate and Delete as pills across the
+    /// middle of its thumbnail's box, the cell faded back under them, `open` of the way in (they
+    /// grow from a fifth of their size about their right end, fading in, as the cell fades back);
+    /// tappable once `shown`. A stack's act on all its artworks.
+    fn swipe_actions(&mut self, ui: &Ui, cell: Rect, on: &Swiped, open: f32, shown: bool) {
         let alpha = open.clamp(0.0, 1.0);
         ui.painter().rect_filled(cell, 0, argb(BACKGROUND).gamma_multiply(SWIPED_FADE * alpha));
         let frame = Self::thumb_box(cell);
@@ -1527,17 +1588,22 @@ impl Gallery {
                 match label {
                     "Duplicate" => {
                         self.swiped = None;
-                        self.duplicate(vec![a.dir.clone()]);
+                        self.duplicate(vec![on.dir.clone()]);
                     }
                     "Delete" => {
                         self.swiped = None;
-                        self.deleting = Some(a.dir.clone());
-                        let title = format!("Delete \u{201c}{}\u{201d}?", a.name);
-                        self.alert.open(&title, "This can't be undone.", "Delete", Some(&icons::TRASH));
+                        self.deleting = Some(on.dir.clone());
+                        let title = format!("Delete \u{201c}{}\u{201d}?", on.name);
+                        let message = if on.stack {
+                            format!("Its {} artworks go with it. This can't be undone.", on.artworks.len())
+                        } else {
+                            "This can't be undone.".to_owned()
+                        };
+                        self.alert.open(&title, &message, "Delete", Some(&icons::TRASH));
                     }
                     _ => {
                         self.swiped = None;
-                        self.sharing = Some((vec![a.clone()], Some(pill)));
+                        self.sharing = Some((on.artworks.clone(), Some(pill), on.name.clone()));
                     }
                 }
             }
@@ -1548,7 +1614,7 @@ impl Gallery {
     /// room (the other if that one is too narrow), kept 2 inside the window; or under Select's
     /// Share, centred on it, kept 4 inside. A tap on one shares in it, a tap off closes.
     fn formats(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) -> Option<Asked> {
-        let (list, from) = self.sharing.clone()?;
+        let (list, from, group) = self.sharing.clone()?;
         let (width, n) = (FORMATS_WIDTH, SHARE_ROWS.len() as f32);
         let height = 55.0 + 40.0 * n + (n - 1.0) + 10.0;
         let (rect, arrow) = match from {
@@ -1632,7 +1698,7 @@ impl Gallery {
         match chosen? {
             // how well a PDF keeps its pictures, asked first
             ShareRow::Still(crate::files::Format::Pdf) => {
-                self.pdf_for = Some(list);
+                self.pdf_for = Some((list, group));
                 self.pdf_alert.ask(crate::alert::pdf_quality());
                 None
             }
@@ -2171,7 +2237,12 @@ fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
     let count = session.animation_frame_count();
     let fit = (PLAYED_MOST / 4.0 / f64::from(count.max(1))).sqrt() as u32;
     let pictures: Vec<_> = (0..count).filter_map(|i| session.animation_frame(i, false, side.min(fit))).collect();
-    Some(PlayedFrames { pictures, order: session.animation_sequence(), fps: settings.fps, playback: settings.playback })
+    Some(PlayedFrames {
+        pictures,
+        order: session.animation_play_order(),
+        fps: settings.fps,
+        playback: settings.playback,
+    })
 }
 
 /// A thread reading the gallery's thumbnails one after another: an artwork's folder, when it was
@@ -2213,9 +2284,128 @@ fn shown_ratio(a: &GalleryArtwork) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Rect, pos2, vec2};
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
 
-    use super::formats_beside;
+    use super::*;
+
+    /// The gallery's grid (and Share's formats once open) shown a frame at a time.
+    struct Shown {
+        ctx: egui::Context,
+        look: Look,
+        gallery: Gallery,
+        time: f64,
+    }
+
+    impl Shown {
+        fn frame(&mut self, events: Vec<Event>) -> Option<Asked> {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Shown { ctx, look, gallery, .. } = self;
+            let mut asked = None;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let screen = ui.ctx().content_rect();
+                asked = gallery.grid(ui, Rect::from_min_max(pos2(0.0, HEADER), screen.max));
+                if gallery.sharing.is_some() {
+                    asked = gallery.formats(ui.ctx(), look, screen).or(asked.take());
+                }
+            });
+            output.textures_delta.clear();
+            asked
+        }
+
+        fn button(at: Pos2, pressed: bool) -> Event {
+            Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+        }
+
+        fn click(&mut self, at: Pos2) {
+            self.frame(vec![Event::PointerMoved(at), Shown::button(at, true)]);
+            self.frame(vec![Shown::button(at, false)]);
+        }
+
+        /// A quick drag `by` from `from`.
+        fn drag(&mut self, from: Pos2, by: egui::Vec2) {
+            self.frame(vec![Event::PointerMoved(from), Shown::button(from, true)]);
+            for k in 1..=6 {
+                self.frame(vec![Event::PointerMoved(from + by * (k as f32 / 6.0))]);
+            }
+            self.frame(vec![Shown::button(from + by, false)]);
+        }
+
+        fn settle(&mut self) {
+            for _ in 0..40 {
+                self.frame(Vec::new());
+            }
+        }
+    }
+
+    /// A gallery of its own holding a stack, "Pair", of two artworks; the stack's folder.
+    fn with_a_stack(name: &str) -> (Shown, String, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("procraft-desk-gallery-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = ArtworkStore::open(root.to_string_lossy().into_owned());
+        let artwork = |name: &str| {
+            let dir = store.new_folder(None);
+            let json = format!(r#"{{"name":"{name}","document":{{"width":64,"height":32}}}}"#);
+            std::fs::write(std::path::Path::new(&dir).join("artwork.json"), json).unwrap();
+            dir
+        };
+        let (a, b) = (artwork("A"), artwork("B"));
+        // in a known order (made in the same moment, they may share a time)
+        store.move_entry(a.clone(), 0, None);
+        store.move_entry(b.clone(), 1, None);
+        let stack = store.stack(vec![a, b]);
+        store.rename_stack(stack.clone(), "Pair".into());
+        let shown = Shown {
+            ctx: egui::Context::default(),
+            look: Look::default(),
+            gallery: Gallery::with_store(store),
+            time: 0.0,
+        };
+        (shown, stack, root)
+    }
+
+    #[test]
+    fn a_stack_swiped_left_shares_all_its_artworks_named_after_it() {
+        let (mut shown, stack, root) = with_a_stack("share");
+        shown.frame(Vec::new());
+        let cell = shown.gallery.drawn_cells.iter().find(|(e, _)| entry_dir(e) == stack).map(|(_, c)| *c).unwrap();
+        // dragged left: its actions open
+        shown.drag(cell.center(), vec2(-120.0, 0.0));
+        assert_eq!(shown.gallery.swiped.as_deref(), Some(stack.as_str()));
+        shown.settle();
+        // Share, the first pill across the thumbnail's middle
+        let frame = Gallery::thumb_box(cell);
+        let left = cell.center().x - (SWIPE_PILL.0 * 3.0 + 6.0) / 2.0;
+        shown.click(pos2(left + SWIPE_PILL.0 / 2.0, frame.center().y));
+        let (list, from, group) = shown.gallery.sharing.clone().expect("Share's formats open");
+        let names: Vec<&str> = list.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+        assert!(from.is_some());
+        assert_eq!(group, "Pair");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stack_swiped_left_is_deleted_whole_after_asking() {
+        let (mut shown, stack, root) = with_a_stack("delete");
+        shown.frame(Vec::new());
+        let cell = shown.gallery.drawn_cells.iter().find(|(e, _)| entry_dir(e) == stack).map(|(_, c)| *c).unwrap();
+        shown.drag(cell.center(), vec2(-120.0, 0.0));
+        shown.settle();
+        let frame = Gallery::thumb_box(cell);
+        let left = cell.center().x - (SWIPE_PILL.0 * 3.0 + 6.0) / 2.0;
+        // Delete, the third
+        shown.click(pos2(left + (SWIPE_PILL.0 + 3.0) * 2.0 + SWIPE_PILL.0 / 2.0, frame.center().y));
+        assert_eq!(shown.gallery.deleting.as_deref(), Some(stack.as_str()));
+        assert!(shown.gallery.alert.is_open());
+        assert!(std::path::Path::new(&stack).exists(), "nothing goes before the answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn share_formats_go_where_there_is_room_and_point_at_the_pill() {

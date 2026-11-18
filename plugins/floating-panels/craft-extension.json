@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.floating-panels",
+  "name": "Floating panels",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "The Layers panel and the brush library dragged out by their grabbers into windows of their own, which stay open while you draw and stay where you left them.",
+  "compat": { "procraft": { "interface": 7 } },
+  "permissions": [],
+  "hooks": ["floating_panels"],
+  "controls": [
+    { "key": "layers", "type": "switch", "label": "Layers panel can float", "starts": true },
+    { "key": "brushes", "type": "switch", "label": "Brush library can float", "starts": true }
+  ]
+}

@@ -25,8 +25,8 @@ struct OnHook {
     hooks: u32,
     /// The keys of its rows in the brush studio, in their order.
     brush_keys: Vec<String>,
-    /// On the picker hook: its picture's code.
-    picture: Option<Arc<str>>,
+    /// On the picker hook: its picture.
+    picture: Option<Picture>,
     /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
     /// the app never waits on this one (its other hooks' copy).
     events: Option<Shared>,
@@ -36,6 +36,15 @@ struct OnHook {
     /// by engine and data (the latest last).
     brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
     looks: Vec<(String, u64, Arc<crate::plugin_brushes::BrushLook>)>,
+}
+
+/// A picker plugin's picture: its code, the keys it reads its plugin's controls by (written to
+/// interface 6 or later; none before), and their values now.
+#[derive(Clone)]
+pub(crate) struct Picture {
+    pub(crate) text: Arc<str>,
+    pub(crate) keys: Option<Arc<[String]>>,
+    pub(crate) values: Vec<f32>,
 }
 
 #[derive(Default)]
@@ -506,41 +515,91 @@ impl Hooks {
         }
     }
 
-    /// `id`'s picture's code, for the picker hook.
-    pub(crate) fn give_picture(&self, id: &str, text: String) {
+    /// `id`'s picture's code, for the picker hook, read by `keys` (if it reads its controls) at
+    /// its controls' `values`.
+    pub(crate) fn give_picture(&self, id: &str, text: String, keys: Option<Vec<String>>, values: Vec<f32>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
-            plugin.picture = Some(text.into());
+            plugin.picture = Some(Picture { text: text.into(), keys: keys.map(Into::into), values });
         }
     }
 
-    /// The picker hook's plugin (the first on it): its id and its picture's code.
-    pub(crate) fn picker(&self) -> Option<(String, Arc<str>)> {
+    /// The picker hook's plugin (the first on it that draws Classic now): its id and its picture.
+    pub(crate) fn picker(&self) -> Option<(String, Picture)> {
         if !self.has(Hook::Picker) {
             return None;
         }
         let working = self.working();
-        let on = working.on.iter().find(|p| p.hooks & Hook::Picker.bit() != 0)?;
-        Some((on.id.clone(), Arc::clone(on.picture.as_ref()?)))
+        let mut on = working.on.iter().filter(|p| p.hooks & Hook::Picker.bit() != 0);
+        // (one that stops saying is taken off the next time the hook goes through it)
+        let on = on.find(|p| at_work(&p.running).picker_on().unwrap_or(false))?;
+        Some((on.id.clone(), on.picture.clone()?))
+    }
+
+    /// What the picker hook's plugin (the first on it that draws Classic now) answers to `ask`.
+    fn picker_asks<T: Copy>(&self, mut ask: impl FnMut(&mut Running) -> Result<Option<T>, Stop>) -> Option<T> {
+        if !self.has(Hook::Picker) {
+            return None;
+        }
+        let said = self.through(Hook::Picker, None, |running, said: Option<Option<T>>| {
+            if said.is_some() || !running.picker_on()? {
+                return Ok(said);
+            }
+            ask(running).map(Some)
+        });
+        said.flatten()
     }
 
     /// The picker hook: the saturation and brightness a point of the picker picks (0..1, y down).
     pub(crate) fn picker_pick(&self, x: f32, y: f32) -> Option<(f32, f32)> {
-        if !self.has(Hook::Picker) {
-            return None;
-        }
-        self.through(Hook::Picker, None, |running, got| if got.is_some() { Ok(got) } else { running.picker_pick(x, y) })
+        self.picker_asks(|running| running.picker_pick(x, y))
     }
 
     /// The picker hook: where saturation `s` and brightness `v` sit on the picker (0..1, y down).
     pub(crate) fn picker_point(&self, s: f32, v: f32) -> Option<(f32, f32)> {
-        if !self.has(Hook::Picker) {
-            return None;
+        self.picker_asks(|running| running.picker_point(s, v))
+    }
+
+    /// The picker hook: the hue (0..1) a touch starting at a point of the picker picks; none where
+    /// it picks saturation and brightness, or if the picker leaves the hue to the app's slider.
+    pub(crate) fn picker_hue(&self, x: f32, y: f32) -> Option<f32> {
+        self.picker_asks(|running| running.picker_hue(x, y))
+    }
+
+    /// The picker hook: where hue `h`'s knob sits on the picker (0..1, y down); none while it leaves
+    /// the hue to the app's slider.
+    pub(crate) fn picker_hue_point(&self, h: f32) -> Option<(f32, f32)> {
+        self.picker_asks(|running| running.picker_hue_point(h))
+    }
+
+    /// The part scale hook: how big part `part` of the interface shows next to the rest of it,
+    /// each plugin on it scaling it in turn, .5 to 2 in all.
+    pub(crate) fn interface_part_scale(&self, part: i32) -> f32 {
+        if !self.has(Hook::InterfacePartScale) {
+            return 1.0;
         }
-        self.through(
-            Hook::Picker,
-            None,
-            |running, got| if got.is_some() { Ok(got) } else { running.picker_point(s, v) },
-        )
+        let said =
+            self.through(Hook::InterfacePartScale, 1.0, |running, at| Ok(at * running.interface_part_scale(part)?));
+        said.clamp(0.5, 2.0)
+    }
+
+    /// The floating picker hook: whether the floating colour window shows Classic's picker alone.
+    pub(crate) fn floating_picker_only(&self) -> bool {
+        self.has(Hook::FloatingPickerOnly)
+            && self.through(Hook::FloatingPickerOnly, false, |running, said| Ok(said | running.floating_picker_only()?))
+    }
+
+    /// The notices hook: whether the notice of something done, of kind `kind` (by
+    /// [`crate::plugins::NoticeKind`]), goes by unseen, as any plugin on it says.
+    pub(crate) fn hide_notice(&self, kind: i32) -> bool {
+        self.has(Hook::HideNotices)
+            && self.through(Hook::HideNotices, false, |running, said| Ok(said || running.hide_notice(kind)?))
+    }
+
+    /// The floating panels hook: whether panel `panel` (by [`crate::floating::FloatingPanel`]) can be
+    /// torn off into a window of its own, as any plugin on it says.
+    pub(crate) fn floating_panel(&self, panel: i32) -> bool {
+        self.has(Hook::FloatingPanels)
+            && self.through(Hook::FloatingPanels, false, |running, said| Ok(said || running.floating_panel(panel)?))
     }
 
     /// The kinds of layer `id` adds, in its manifest's order.
@@ -719,6 +778,10 @@ impl Hooks {
         {
             let mut working = self.working();
             if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                // what its picture is drawn with
+                if let Some(kept) = working.on.get_mut(at).and_then(|p| p.picture.as_mut()?.values.get_mut(index)) {
+                    *kept = value;
+                }
                 // its events' copy too
                 if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
                     let _ = at_work(events).control(index, value);
@@ -776,21 +839,26 @@ impl CanvasSession {
             let st = self.shared.lock();
             (st.hooks.clone()?, st.gpu.clone()?, st.picker_program.clone())
         };
-        let (id, text) = hooks.picker()?;
-        let program = match cached.filter(|(was, code, _)| *was == id && *code == text) {
-            Some((_, _, program)) => program,
+        let (id, picture) = hooks.picker()?;
+        let crate::hooks::Picture { text, keys, values } = picture;
+        let program = match cached.filter(|(was, code, read_by, _)| *was == id && *code == text && *read_by == keys) {
+            Some((_, _, _, program)) => program,
             None => {
-                let code = procraft_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
+                let code = match &keys {
+                    Some(keys) => procraft_gpu::read_picture_given(&text, keys),
+                    None => procraft_gpu::read_picture(&text),
+                };
+                let code = code.map_err(|why| log::warn!("a picture was refused: {why}"));
                 let made = code.ok().and_then(|code| gpu.make_picture(code).ok());
                 let Some(program) = made else {
                     hooks.stopped(&id, Stop::Damaged);
                     return None;
                 };
-                self.shared.lock().picker_program = Some((id.clone(), Arc::clone(&text), Arc::clone(&program)));
+                self.shared.lock().picker_program = Some((id.clone(), Arc::clone(&text), keys, Arc::clone(&program)));
                 program
             }
         };
-        match gpu.draw_picture(&program, hue, side) {
+        match gpu.draw_picture(&program, hue, side, &values) {
             Ok(rgba) => Some(rgba),
             // asked bigger than it can be drawn, or the device gone: not the plugin's doing
             Err(procraft_gpu::PictureStop::TooBig | procraft_gpu::PictureStop::Lost) => None,
@@ -802,10 +870,12 @@ impl CanvasSession {
     }
 
     /// The notice an undo (`undo`) or a redo of the step `name` shows: "Undo Brush stroke", or
-    /// "Redo" for a step with no name; none while a plugin hides it.
+    /// "Redo" for a step with no name; none while a plugin hides it (the undo notice's hook, or the
+    /// notices' for what undo and redo did).
     pub fn step_notice(&self, undo: bool, name: Option<String>) -> Option<String> {
         let hooks = self.shared.lock().hooks.clone();
-        if hooks.is_some_and(|hooks| hooks.hide_undo_notice()) {
+        let step = crate::plugins::NoticeKind::Step as i32;
+        if hooks.is_some_and(|hooks| hooks.hide_undo_notice() || hooks.hide_notice(step)) {
             return None;
         }
         let word = if undo { "Undo" } else { "Redo" };
@@ -1413,6 +1483,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_picture_written_to_interface_6_is_drawn_again_as_its_controls_say() {
+        let Some(s) = session() else { return };
+        let dir = store("picker-given");
+        let plugins = Plugins::with_store(dir.clone());
+        // a picker with a switch, its picture red while the switch is on
+        let picks = crate::plugin_run::tests::PICKS;
+        let text = format!(
+            r#"(module (func (export "procraft_control") (param i32 f32)) {})"#,
+            &picks["(module".len()..picks.len() - 1]
+        );
+        let module = wat::parse_str(text).unwrap();
+        let picture = "fn picture(at: vec2<f32>) -> vec4<f32> { return vec4<f32>(v.red, 0.0, 0.0, 1.0); }";
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["picker"]);
+        manifest["compat"]["procraft"]["interface"] = json!(6);
+        manifest["controls"] = json!([{ "key": "red", "type": "switch", "label": "Red" }]);
+        let listed = json!({ "path": "picture.wgsl", "sha256": crate::plugin_file::sha256(picture.as_bytes()), "size": picture.len() });
+        manifest["files"].as_array_mut().unwrap().push(listed);
+        let file = pack(&manifest, &[(MODULE, &module), ("picture.wgsl", picture.as_bytes())]);
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let red = |s: &CanvasSession| s.picker_picture(0.0, 4).expect("drawn")[0];
+        assert_eq!(red(&s), 0);
+        let before = plugins.generation();
+        assert!(plugins.set_switch(format!("{ID}.red"), true));
+        assert_ne!(plugins.generation(), before, "what drew it changed");
+        assert_eq!(red(&s), 255);
+        // the same text written to interface 2 reads no controls: it can't be imported
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        let older = pack(&manifest, &[(MODULE, &module), ("picture.wgsl", picture.as_bytes())]);
+        let older_dir = store("picker-given-2");
+        assert!(Plugins::with_store(older_dir.clone()).install(older).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&older_dir);
+    }
+
+    #[test]
     fn a_picker_picture_that_never_ends_switches_its_plugin_off() {
         let Some(s) = session() else { return };
         let dir = store("picker-loops");
@@ -1873,6 +1981,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quickshape_curves_stay_on_for_dense_and_wavy_strokes() {
+        let dir = store("curves-dense-samples");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bundled) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bundled.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.quickshape-curves";
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let hooks = plugins.hooks();
+        // a curve that ran out of its budget would switch the plugin off, and every held stroke
+        // after it would be a polyline: thousands of pen samples, and many bends over a few hundred
+        // (the fit's most work), stay within it
+        let dense = |count: usize| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let x = i as f32 * 600.0 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (x, 120.0 + 55.0 * (x * tau / 300.0).sin() + 3.0 * (x * tau / 23.0).sin())
+                })
+                .collect()
+        };
+        let wavy = |count: usize, waves: f32| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let t = i as f32 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (t * 1600.0, 400.0 + 300.0 * (t * waves * tau).sin() + 6.0 * (i as f32 * 1.7).sin())
+                })
+                .collect()
+        };
+        let strokes =
+            [dense(4_001), dense(12_001), wavy(400, 4.0), wavy(257, 12.0), wavy(1000, 12.0), wavy(5000, 25.0)];
+        for points in &strokes {
+            let nodes = hooks.quickshape_curve(points, 1).expect("a curve");
+            assert!(nodes.len() >= 10 && nodes.len() % 3 == 1, "{} samples: {} nodes", points.len(), nodes.len());
+            assert!(hooks.is_on(ID), "off after {} samples", points.len());
+        }
+        assert!(plugins.plugins().iter().find(|p| p.id == ID).is_some_and(|p| p.on && p.problem.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_stroke_bending_twice_snaps_to_a_curve_while_a_plugin_says_so() {
         use crate::{QuickShapeAnchor, QuickShapeKind};
         let Some(s) = session() else { return };
@@ -1908,12 +2057,13 @@ pub(crate) mod tests {
         let shape = zigzag(&s, 1000.0).expect("it snaps");
         assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
         assert!(shape.choices.contains(&QuickShapeKind::Polyline));
-        assert!(shape.anchors.len() >= 3 && shape.anchors.iter().all(|a| *a == QuickShapeAnchor::Smooth));
-        // a tap on an anchor in the middle steps it on: broken, then a corner
-        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
-        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken);
+        assert!(shape.anchors.len() >= 3);
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken, "a deliberate sharp turn needs independent handles");
+        // a tap cycles a detected broken anchor through corner and smooth
         let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
         assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Smooth);
         // a control is no anchor
         assert!(s.quickshape_cycle_anchor(1).is_none());
         // shown as the polyline, then as a curve again: the plugin fits it afresh

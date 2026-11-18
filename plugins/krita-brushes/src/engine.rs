@@ -370,6 +370,8 @@ const PICKS_FROM: u32 = 1024;
 const WARPS: u32 = 2048;
 const FILTERS: u32 = 4096;
 const PICKS_BEFORE: u32 = 8192;
+/// Into the layer's kept paint: its tip's grey over the thickness kept there, as opaque as word 20.
+const LAYS_HEIGHT: u32 = 65536;
 
 /// Where a clone brush picks up from: the point a tap set, and how far its first stroke after that
 /// started from it (kept while the source moves with the brush).
@@ -1946,9 +1948,26 @@ impl Stroke {
                 let one = |o: &CurveOption, otherwise: f32, fuzz: &mut Fuzz<'_>| {
                     if o.checked { o.size_like(&info, fuzz, true) } else { otherwise }
                 };
+                // a lightness tip's thickness, as Krita takes it first (all of it when off)
+                let keeps = smudge.keeps_thickness(brush.tip.kind);
+                let thickness = if keeps { one(&smudge.thickness, 1.0, &mut fuzz).clamp(0.0, 1.0) } else { 1.0 };
                 let rate = one(&smudge.rate, 1.0, &mut fuzz);
                 let colour_rate = one(&smudge.colour_rate, 0.0, &mut fuzz);
                 let (laid, share) = smudge.laid(rate, colour_rate, dab.opacity);
+                if keeps {
+                    // its grey flattened as far as it is thin, laid over the thickness there at its
+                    // opacity: in its place (Krita's overwrite, and with the option off), or as far
+                    // as the smudge length goes, the rest of the way as far as it is thick
+                    let over = if smudge.thickness.checked && smudge.thickness_mode == 2 {
+                        let from = rate - 0.01;
+                        from + (1.0 - from) * thickness
+                    } else {
+                        1.0
+                    };
+                    dab.lightness = thickness;
+                    dab.extra[0] = if self.dabs == 0 { 0.0 } else { (dab.opacity * over).clamp(0.0, 1.0) };
+                    dab.flags |= LAYS_HEIGHT;
+                }
                 // the first dab only marks where the next picks up from
                 dab.opacity = if self.dabs == 0 { 0.0 } else { laid };
                 dab.flow = 1.0;

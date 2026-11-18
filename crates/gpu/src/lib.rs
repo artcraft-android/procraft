@@ -5,6 +5,8 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+#[cfg(windows)]
+mod compiler;
 mod kept;
 mod lighting;
 mod scene;
@@ -14,12 +16,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
-pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture};
+pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerThumbnailStep, LiquifyMode, LiquifyStamp, MOST_TIPS,
-    PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke, SelectionLook,
-    SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, TipKind,
-    most_resident, read_texture, start_reading, textures_bytes,
+    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode, LiquifyStamp,
+    MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke,
+    SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
+    TipKind, most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
@@ -29,6 +31,9 @@ pub use scene::{
 };
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
+
+#[cfg(windows)]
+use compiler::with_compiler;
 
 /// The canvas's textures are made so the GPU keeps them uncompressed: on Mali GPUs (Vulkan), whose
 /// block compression (AFBC) can lose blocks of a picture redrawn a part at a time (a stroke's
@@ -179,26 +184,10 @@ pub struct Gpu {
     old: bool,
 }
 
-/// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
-/// `dxcompiler.dll` (beside it), else the one Windows has. Never one found elsewhere on the PATH, as
-/// wgpu would take: an older one there (an SDK's) can't make our shaders, and nothing draws.
-fn with_compiler(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
-    desc.backend_options.dx12.shader_compiler = dx12_compiler();
-    desc
-}
-
-#[cfg(windows)]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dxcompiler.dll")));
-    match beside.filter(|path| path.is_file()) {
-        Some(path) => wgpu::Dx12Compiler::DynamicDxc { dxc_path: path.to_string_lossy().into_owned() },
-        None => wgpu::Dx12Compiler::Fxc,
-    }
-}
-
+/// Elsewhere there's no Direct3D 12 to choose a shader compiler for.
 #[cfg(not(windows))]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    wgpu::Dx12Compiler::Fxc
+fn with_compiler(desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc
 }
 
 impl Gpu {
@@ -285,8 +274,12 @@ impl Gpu {
         }
     }
 
-    /// A device for offscreen work (tests, exports), from the first instance that makes one.
+    /// A device for offscreen work (tests, exports), from the first instance that makes one. With
+    /// `PROCRAFT_HEADLESS_OLD` set, an old GPU's (see [`Gpu::headless_old`]): to run every test there.
     pub fn headless() -> Result<Gpu, GpuError> {
+        if std::env::var_os("PROCRAFT_HEADLESS_OLD").is_some() {
+            return Gpu::headless_old();
+        }
         Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
     }
 
@@ -610,14 +603,8 @@ impl Gpu {
             && limits.max_compute_workgroup_size_y >= 16
     }
 
-    /// Whether 3D painting can run here: it draws distances and strokes in floats and marks a
-    /// stroke's footprint in a compute pass.
-    pub fn paints_3d(&self) -> bool {
-        self.computes() && self.draws_half_floats() && self.draws(wgpu::TextureFormat::R32Float)
-    }
-
     /// Whether the GPU draws into `format` (without blending).
-    fn draws(&self, format: wgpu::TextureFormat) -> bool {
+    pub(crate) fn draws(&self, format: wgpu::TextureFormat) -> bool {
         let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
         !self.old && self.adapter.get_texture_format_features(format).allowed_usages.contains(usages)
     }
@@ -627,16 +614,16 @@ impl Gpu {
     pub fn lacks(&self) -> Vec<&'static str> {
         let mut lacks = Vec::new();
         if !self.draws_half_floats() {
-            lacks.push("can't draw into half floats: strokes build up in 8 bits a channel, and Liquify is off");
+            lacks.push(
+                "can't draw into half floats: strokes build up in half floats kept as integers beside them, and \
+                 Liquify's field is kept in integers, 3D painting's distances and light in 8 bits a channel",
+            );
         }
         if !self.computes() {
             lacks.push(
-                "has no compute passes with storage buffers: Smudge is off, wet paint and paint laid in place are \
-                 laid dry, and strokes that build up gradually or to their transfer are drawn over",
+                "has no compute passes with storage buffers: strokes, smudges and wet paint are laid in fragment \
+                 passes instead",
             );
-        }
-        if !self.paints_3d() {
-            lacks.push("can't paint in 3D");
         }
         lacks
     }
@@ -757,8 +744,8 @@ mod tests {
         };
         assert_eq!(gpu.max_texture_size(), 4096);
         assert_eq!(gpu.device.limits().max_storage_buffers_per_shader_stage, 0);
-        assert!(!gpu.draws_half_floats() && !gpu.computes() && !gpu.paints_3d());
-        assert_eq!(gpu.lacks().len(), 3);
+        assert!(!gpu.draws_half_floats() && !gpu.computes());
+        assert_eq!(gpu.lacks().len(), 2);
         gpu.prepare_canvases();
         assert_eq!(gpu.errors(), 0);
     }

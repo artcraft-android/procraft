@@ -369,7 +369,7 @@ impl CanvasSession {
     /// Perspective: a tap at window point (`x`, `y`) adds a vanishing point (up to three); returns
     /// the index of the point there, to drag.
     pub fn touch_vanishing_point(&self, x: f32, y: f32) -> Option<u32> {
-        self.vanishing_point_at(x, y, VANISHING_REACH)
+        self.vanishing_point_at(x, y, VANISHING_REACH, true)
     }
     pub fn move_vanishing_point(&self, index: u32, x: f32, y: f32) -> GuideInfo {
         let to = self.shared.lock().to_canvas_point(x, y);
@@ -385,6 +385,19 @@ impl CanvasSession {
             if (index as usize) < g.vanishing.len() {
                 g.vanishing.remove(index as usize);
             }
+        })
+    }
+
+    /// The guide's centre back in the middle of the canvas and upright: what a tap on the centre
+    /// of a grid, isometric or symmetry guide offers.
+    pub fn reset_guide_place(&self) -> GuideInfo {
+        let middle = {
+            let st = self.shared.lock();
+            [st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0]
+        };
+        self.change_guide(|g| {
+            g.centre = middle;
+            g.angle = 0.0;
         })
     }
 
@@ -444,8 +457,8 @@ impl State {
 
 impl CanvasSession {
     /// Perspective: a touch at window point (`x`, `y`) takes the vanishing point within `reach`
-    /// window pixels, else adds one there (up to three); its index, to drag.
-    fn vanishing_point_at(&self, x: f32, y: f32, reach: f32) -> Option<u32> {
+    /// window pixels, else (with `add`) adds one there (up to three); its index, to drag.
+    fn vanishing_point_at(&self, x: f32, y: f32, reach: f32, add: bool) -> Option<u32> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let p = st.to_canvas_point(x, y)?;
@@ -459,7 +472,7 @@ impl CanvasSession {
         if let Some(i) = near {
             return Some(i as u32);
         }
-        if st.doc.guide.vanishing.len() >= 3 {
+        if !add || st.doc.guide.vanishing.len() >= 3 {
             return None;
         }
         st.doc.guide.vanishing.push([p.x, p.y]);
@@ -468,14 +481,38 @@ impl CanvasSession {
         Some(st.doc.guide.vanishing.len() as u32 - 1)
     }
 
+    /// A tap on the guide editor's canvas at window point (`x`, `y`) away from its handles: a
+    /// perspective guide with fewer than three points gets one there. Whether it did.
+    pub(crate) fn guide_tap(&self, x: f32, y: f32) -> bool {
+        if self.guide().kind != GuideType::Perspective {
+            return false;
+        }
+        let before = self.shared.lock().doc.guide.vanishing.len();
+        self.vanishing_point_at(x, y, 0.0, true).is_some() && self.shared.lock().doc.guide.vanishing.len() > before
+    }
+
+    /// Where handle `grab` is, window pixels: a tapped one's menu shows there.
+    pub(crate) fn guide_handle_at(&self, grab: GuideGrab) -> Option<(f32, f32)> {
+        let g = self.guide();
+        let point = match grab {
+            GuideGrab::Point(i) => g.vanishing.get(i as usize * 2..i as usize * 2 + 2),
+            GuideGrab::Centre => g.centre.get(..2),
+            GuideGrab::Turn => g.handle.get(..2),
+        };
+        match point {
+            Some([x, y]) => Some((*x, *y)),
+            _ => None,
+        }
+    }
+
     /// A touch on the guide editor's canvas at window point (`x`, `y`), `scale` window pixels a
-    /// point: what it takes. A perspective guide's point there (one added, if there is room), else
-    /// the turn handle or the centre it lands near.
+    /// point: what it takes. A perspective guide's point there, else the turn handle or the centre
+    /// it lands near (a point is added by a tap, [`CanvasSession::guide_tap`], not by a touch).
     pub(crate) fn guide_grab(&self, x: f32, y: f32, scale: f32) -> Option<GuideGrab> {
         let reach = HANDLE_REACH * scale;
         let g = self.guide();
         if g.kind == GuideType::Perspective {
-            return self.vanishing_point_at(x, y, reach).map(GuideGrab::Point);
+            return self.vanishing_point_at(x, y, reach, false).map(GuideGrab::Point);
         }
         let near = |p: &[f32]| matches!(p, [px, py, ..] if (px - x).hypot(py - y) <= reach);
         if near(&g.handle) {
