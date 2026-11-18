@@ -15595,6 +15595,243 @@ fn brush_previews_come_out_the_same_on_a_device_starved_of_memory_and_threads() 
     assert_eq!(gpu.errors(), 0);
 }
 
+/// A brush's sample stroke comes out the same drawn paced (its work sent a short piece at a time,
+/// each waited for) as unpaced: wet paint alone and with a second, dual brushes, glazes and strokes
+/// built up gradually. On an old GPU's fragment passes a pixel may round a level apart where the
+/// pieces meet, as with any stroke sent in pieces. A wet brush's stroke goes as several pieces.
+#[test]
+fn brush_previews_come_out_the_same_paced_or_not() {
+    use procraft_engine::brush::Rendering;
+    let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return eprintln!("skipped: no GPU") };
+    for (gpu, rounds) in [(full, false), (old, true)] {
+        let previews = |pace: bool| -> Vec<(String, Vec<u8>, u64)> {
+            let s = session_on(gpu.clone(), 64, 64);
+            // the preview's canvas made, then paced or not
+            let _ = s.brush_preview(0, 0, 106, 32);
+            if let Some((canvas, _)) = s.shared.lock().preview.as_mut() {
+                canvas.pace(pace);
+            }
+            let picks: Vec<(String, u32, u32)> = {
+                let st = s.shared.lock();
+                let kinds: [fn(&procraft_engine::brush::Brush) -> bool; 4] = [
+                    |b| b.mixes_wet() && b.secondary.is_none(),
+                    |b| b.mixes_wet() && b.secondary.is_some(),
+                    |b| !b.mixes_wet() && b.secondary.is_some(),
+                    |b| matches!(b.rendering, Rendering::Gradual | Rendering::Capped),
+                ];
+                kinds
+                    .iter()
+                    .flat_map(|want| {
+                        let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                            let of = set.brushes.iter().enumerate().filter(|(_, b)| b.thumbnail.is_none() && want(b));
+                            of.map(move |(j, b)| (b.name.clone(), i as u32, j as u32))
+                        });
+                        all.take(4).collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            assert_eq!(picks.len(), 16);
+            let sent = |s: &CanvasSession| s.shared.lock().preview.as_ref().map_or(0, |(c, _)| c.pieces_sent());
+            picks
+                .into_iter()
+                .map(|(name, set, index)| {
+                    let before = sent(&s);
+                    let drawn = s.brush_preview(set, index, 212, 65).map(|t| t.rgba);
+                    assert!(drawn.is_some(), "{name}: drawn");
+                    (name, drawn.unwrap_or_default(), sent(&s) - before)
+                })
+                .collect()
+        };
+        let (paced, unpaced) = (previews(true), previews(false));
+        for ((name, a, pieces), (_, b, _)) in paced.iter().zip(&unpaced) {
+            let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+            let most = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+            let (most_differ, most_by) = if rounds { (a.len() / 1000, 1) } else { (0, 0) };
+            assert!(
+                a.len() == b.len() && differ <= most_differ && most <= most_by,
+                "{name}: drawn paced in {pieces} pieces, {differ} bytes differ from unpaced, by up to {most}"
+            );
+        }
+        let most = paced.iter().take(4).map(|(_, _, pieces)| *pieces).max().unwrap_or(0);
+        assert!(most > 1, "a wet brush's stroke went as {most} pieces");
+        assert_eq!(gpu.errors(), 0);
+    }
+}
+
+/// The brush library's sample strokes drawn while the window's frames go on, on an old GPU's
+/// device: no frame holds the canvas longer than [`LIBRARY_HOLD_MOST`], nor does the app's own
+/// thread (asking for the Recent set meanwhile) wait longer for it. Each frame waits under its
+/// hold for what the GPU has queued before it, as frames did on a weak phone: they waited behind a
+/// wet brush's sample stroke for seconds, the app's thread behind them, until the system closed
+/// the app. The holds and waits are printed for the strokes drawn paced, as the library draws
+/// them, and unpaced, as it did. Run alone with `--ignored --nocapture`: other tests on the same
+/// GPU make its frames slow.
+#[test]
+#[ignore]
+fn brush_library_previews_never_hold_the_canvas_long_on_an_old_gpu() {
+    let Ok(gpu) = Gpu::headless_old() else { return eprintln!("skipped: no GPU") };
+    let Some(run) = previews_beside_frames(gpu.clone(), (1080, 2340), 2.625) else { return };
+    assert!(run.paced.hold <= LIBRARY_HOLD_MOST, "a frame held the canvas {:?}", run.paced.hold);
+    assert!(run.paced.wait <= LIBRARY_HOLD_MOST, "the app waited {:?}", run.paced.wait);
+    for (name, drawn) in run.paced.drawn.iter().chain(&run.unpaced.drawn) {
+        assert!(drawn.is_some(), "{name}: drawn");
+    }
+    assert_eq!(gpu.errors(), 0);
+}
+
+/// The same on a GPU as slow as an old phone's (the system's software GPU, held to an old GPU's
+/// limits), where a frame waited behind a wet brush's stroke for many seconds: drawn paced, the
+/// longest hold is a fraction of that. The holds and waits are printed. Run with `--ignored
+/// --nocapture` (several minutes).
+#[test]
+#[ignore]
+fn brush_library_previews_on_a_slow_gpu() {
+    let Ok(gpu) = Gpu::headless_software_old() else { return eprintln!("skipped: no software GPU") };
+    let Some(run) = previews_beside_frames(gpu.clone(), (540, 1170), 1.3125) else { return };
+    assert!(run.paced.hold * 4 < run.unpaced.hold, "paced {:?}, unpaced {:?}", run.paced.hold, run.unpaced.hold);
+    assert_eq!(gpu.errors(), 0);
+}
+
+/// The longest a frame may hold the canvas, and the app's own thread wait for it, while the
+/// library's sample strokes are drawn (see `brush_library_previews_never_hold_the_canvas_long_on_an_old_gpu`).
+const LIBRARY_HOLD_MOST: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What frames went through while sample strokes were drawn beside them (see
+/// [`previews_beside_frames`]): the longest a frame held the canvas, the longest the app's own
+/// thread waited for it, and each stroke drawn.
+struct BesideFrames {
+    hold: std::time::Duration,
+    wait: std::time::Duration,
+    drawn: Vec<(&'static str, Option<Vec<u8>>)>,
+}
+
+/// Frames drawn into a `window` (at `scale` pixels a point, the library's panel frosted over most
+/// of it) as the render thread draws them, each waiting under its hold for what the GPU has queued
+/// before it, while the library draws heavy sample strokes, unpaced and then paced; the app's
+/// thread asks for the Recent set meanwhile. Printed, and returned paced and unpaced.
+fn previews_beside_frames(gpu: Gpu, window: (u32, u32), scale: f32) -> Option<PacedAndNot> {
+    use procraft_gpu::wgpu;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let ((width, height), pt) = (window, scale);
+    let s = session_on(gpu.clone(), 1024, height);
+    s.resize_window(width, height);
+    s.set_display_scale(pt);
+    s.set_glass(vec![0.0, 60.0 * pt, width as f32, 820.0 * pt, 24.0 * pt, 1.0], Vec::new());
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    // the pencil and pen of wet paint whose sample strokes never came on that phone, a dry one of
+    // each set, and the stroke that held a frame longest on a desktop GPU
+    let names = ["Pangolin", "Lundy", "Beluga", "Copperwing", "Bridgeport"];
+    let picks: Vec<(u32, u32, &'static str)> =
+        names.iter().filter_map(|&n| library_brush(&s, |b| b.name == n).map(|(set, i)| (set, i, n))).collect();
+    if picks.len() != names.len() {
+        eprintln!("skipped: the stock brushes changed");
+        return None;
+    }
+    // each drawn once first (their pictures, the preview's canvas), and frames (their pipelines)
+    for &(set, index, _) in &picks {
+        s.brush_preview(set, index, 530, 162);
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    // frames every 8 ms while `work` runs, the app's thread asking for the Recent set every 16 ms:
+    // the longest hold, and the app's longest wait with what held the canvas through it
+    let beside = |work: &dyn Fn()| -> (Duration, Duration, String, usize) {
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let frames = std::thread::Builder::new().name("procraft-render".to_owned());
+            let render = frames
+                .spawn_scoped(scope, || {
+                    let started = Instant::now();
+                    let (mut longest, mut count) = (Duration::ZERO, 0);
+                    while !stop.load(Ordering::Acquire) {
+                        let mut st = s.shared.lock();
+                        let t = Instant::now();
+                        st.needs_frame = true;
+                        st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, started);
+                        // what the GPU has queued before the frame, waited for under the hold
+                        gpu.flush();
+                        longest = longest.max(t.elapsed());
+                        count += 1;
+                        parking_lot::MutexGuard::unlock_fair(st);
+                        std::thread::sleep(Duration::from_millis(8));
+                    }
+                    (longest, count)
+                })
+                .unwrap();
+            let app = scope.spawn(|| {
+                let (mut longest, mut said) = (Duration::ZERO, String::new());
+                while !stop.load(Ordering::Acquire) {
+                    // who has the canvas as the wait begins (the log's account of a long wait)
+                    let holder = s.shared.holder.said();
+                    let t = Instant::now();
+                    let _ = s.recent_brushes();
+                    if t.elapsed() > longest {
+                        (longest, said) = (t.elapsed(), holder);
+                    }
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                (longest, said)
+            });
+            work();
+            stop.store(true, Ordering::Release);
+            let (wait, said) = app.join().unwrap();
+            let (hold, frames) = render.join().unwrap();
+            (hold, wait, said, frames)
+        })
+    };
+    let (alone, ..) = beside(&|| std::thread::sleep(Duration::from_millis(500)));
+    let info = gpu.adapter.get_info();
+    println!("{} ({:?}): a frame alone held the canvas up to {:.1} ms", info.name, info.backend, ms(alone));
+    let mut runs = Vec::new();
+    for pace in [false, true] {
+        if let Some((canvas, _)) = s.shared.lock().preview.as_mut() {
+            canvas.pace(pace);
+        }
+        let drawn = std::sync::Mutex::new(Vec::new());
+        let took = std::sync::Mutex::new(Vec::new());
+        let longest_piece = || s.shared.lock().preview.as_mut().map_or(Duration::ZERO, |(c, _)| c.take_paced_longest());
+        longest_piece();
+        let (hold, wait, said, frames) = beside(&|| {
+            for &(set, index, name) in &picks {
+                let t = Instant::now();
+                let preview = s.brush_preview(set, index, 530, 162).map(|p| p.rgba);
+                took.lock().unwrap().push(format!("{name} {:.0}", ms(t.elapsed())));
+                drawn.lock().unwrap().push((name, preview));
+            }
+        });
+        let piece = if pace { format!("; its longest piece {:.1} ms", ms(longest_piece())) } else { String::new() };
+        println!(
+            "{}: strokes {:?} ms; {frames} frames, the longest hold {:.1} ms; the app's longest wait {:.1} ms, the \
+             canvas {said}{piece}",
+            if pace { "paced" } else { "unpaced" },
+            took.into_inner().unwrap(),
+            ms(hold),
+            ms(wait),
+        );
+        runs.push(BesideFrames { hold, wait, drawn: drawn.into_inner().unwrap() });
+    }
+    let paced = runs.pop()?;
+    let unpaced = runs.pop()?;
+    Some(PacedAndNot { paced, unpaced })
+}
+
+/// [`previews_beside_frames`]'s two runs.
+struct PacedAndNot {
+    paced: BesideFrames,
+    unpaced: BesideFrames,
+}
+
 /// A dual brush whose second reaches past its first (a Normal second shows on its own, in the
 /// stroke's colour) keeps all of its second's paint as the stroke ends: dry, blending with burnt
 /// edges (an outline pen's way), laid in place, light and dark. The stroke laid again from scratch

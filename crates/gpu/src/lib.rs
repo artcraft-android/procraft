@@ -289,7 +289,20 @@ impl Gpu {
     #[doc(hidden)]
     pub fn headless_old() -> Result<Gpu, GpuError> {
         let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
-        Gpu::create(instance, None, true)
+        Gpu::create(instance, None, true, false)
+    }
+
+    /// [`Gpu::headless_old`] on the system's software GPU (Direct3D 12's WARP, Vulkan's lavapipe),
+    /// where it has one: a GPU as slow as an old phone's, for testing what waits on the GPU.
+    #[doc(hidden)]
+    pub fn headless_software_old() -> Result<Gpu, GpuError> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::PRIMARY;
+        let gpu = Gpu::create(wgpu::Instance::new(with_compiler(desc)), None, true, true)?;
+        if gpu.adapter.get_info().device_type != wgpu::DeviceType::Cpu {
+            return Err(GpuError::NoAdapter("no software GPU".to_owned()));
+        }
+        Ok(gpu)
     }
 
     /// The app's device, the canvases' pipelines made: from the first instance that makes one
@@ -331,7 +344,7 @@ impl Gpu {
             let last = tries + 1 >= count;
             trying(backend);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Gpu::create(instance, None, false).map(|gpu| {
+                Gpu::create(instance, None, false, false).map(|gpu| {
                     let taken = last || fine(&gpu);
                     (gpu, taken)
                 })
@@ -349,10 +362,17 @@ impl Gpu {
 
     /// A device that can present to `surface` (made from `instance`).
     pub fn for_surface(instance: wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Gpu, GpuError> {
-        Gpu::create(instance, Some(surface), false)
+        Gpu::create(instance, Some(surface), false, false)
     }
 
-    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, old: bool) -> Result<Gpu, GpuError> {
+    /// A device from `instance` (for `surface`), held to an old GPU's limits if `old`, on the
+    /// software GPU if `software`.
+    fn create(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        old: bool,
+        software: bool,
+    ) -> Result<Gpu, GpuError> {
         // a driver's own description can run over several lines: one line in the log
         fn one_line(text: &str) -> String {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -377,7 +397,7 @@ impl Gpu {
             // the faster GPU of a laptop's two, unless `WGPU_POWER_PREF` says (`low`: to try the
             // other when one fails or lags)
             power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance),
-            force_fallback_adapter: false,
+            force_fallback_adapter: software,
             compatible_surface: surface,
             apply_limit_buckets: false,
         }))
