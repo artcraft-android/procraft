@@ -545,17 +545,33 @@ fun BrushCursor(vm: CanvasViewModel) {
             if (paths.isEmpty()) drawCircle(color, r, at, style = Stroke(width))
             for (p in paths) drawPath(p, color, style = Stroke(width))
         }
-        val contrast = { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
-        val colour = { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
-        when (style) {
-            CanvasViewModel.CursorStyle.CONTRAST -> contrast()
-            CanvasViewModel.CursorStyle.COLOR -> colour()
-            // as the brush says: none, contrasting lines, or the colour
-            CanvasViewModel.CursorStyle.BRUSH -> when (vm.cursorOutline) {
-                0 -> Unit
-                2 -> colour()
-                else -> contrast()
-            }
+        // (a fill at the faintest opacities is as good as none: the lines show with it)
+        when (cursorLines(style, vm.cursorOutline, filled = fill != null && strength >= CURSOR_FILL_SEEN)) {
+            CursorLines.NONE -> Unit
+            CursorLines.CONTRAST -> { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
+            CursorLines.COLOUR -> { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
         }
+    }
+}
+
+/** A hover fill drawn at least this strong (the brush's opacity) shows by itself. */
+private const val CURSOR_FILL_SEEN = 0.1f
+
+/** How the brush cursor's outline is drawn: not at all, a thin dark line with a light edge, or in the colour. */
+internal enum class CursorLines { NONE, CONTRAST, COLOUR }
+
+/**
+ * The brush cursor's outline in [style], for a brush whose own outline is [brushOutline] (0 none,
+ * 1 contrasting lines, 2 the colour), its hover fill shown under it if [filled]. Per brush, one
+ * whose own is none shows its fill alone where it has one (hovering); painting, or with no fill,
+ * it still shows contrasting lines, so a brush cursor turned on never goes missing.
+ */
+internal fun cursorLines(style: CanvasViewModel.CursorStyle, brushOutline: Int, filled: Boolean): CursorLines = when (style) {
+    CanvasViewModel.CursorStyle.CONTRAST -> CursorLines.CONTRAST
+    CanvasViewModel.CursorStyle.COLOR -> CursorLines.COLOUR
+    CanvasViewModel.CursorStyle.BRUSH -> when (brushOutline) {
+        0 -> if (filled) CursorLines.NONE else CursorLines.CONTRAST
+        2 -> CursorLines.COLOUR
+        else -> CursorLines.CONTRAST
     }
 }

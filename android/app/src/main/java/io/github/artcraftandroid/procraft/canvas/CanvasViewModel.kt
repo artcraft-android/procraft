@@ -483,21 +483,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (cursorAt == null || (hovering && now - cursorReadAt >= CURSOR_REREAD_MS)) session?.let { s ->
             cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
             cursorOutline = s.currentBrushSetting("cursor_outline").roundToInt()
-            cursorShape = s.brushOutline()
+            // a shape or a fill that can't be read leaves the round tip's circle, in lines: the
+            // cursor still shows
+            cursorShape = runCatching { s.brushOutline() }.getOrDefault(emptyList())
             // turned with the canvas, as its stamps are (unless the brush keeps to the screen)
             cursorTurn = if (s.currentBrushSetting("orient_to_screen") < 0.5f) s.viewMatrix().let { m -> kotlin.math.atan2(m[1], m[0]) } else 0f
-            cursorFill = if (hovering && s.currentBrushSetting("hover_fill").roundToInt() > 0) fillStamp(s) else null
+            cursorFill = if (hovering && s.currentBrushSetting("hover_fill").roundToInt() > 0) runCatching { fillStamp(s) }.getOrNull() else null
             cursorReadAt = now
         }
         cursorHovering = hovering
         cursorAt = p
     }
 
-    /** The brush's stamp at the cursor's size on the screen, white with its coverage as alpha; made again only when it changes. */
+    /**
+     * The brush's stamp at the cursor's size on the screen, white with its coverage as alpha; made
+     * again only when it changes. None for a stamp too faint to see there: the outline shows instead.
+     */
     private fun fillStamp(s: CanvasSession): androidx.compose.ui.graphics.ImageBitmap? {
         val n = (cursorRadius * 2f).roundToInt().coerceIn(2, CURSOR_FILL_MOST)
         val alpha = s.brushStamp(n.toUInt())
-        if (alpha.size < n * n) return null
+        if (alpha.size < n * n || alpha.none { (it.toInt() and 0xFF) >= CURSOR_FILL_FAINTEST }) return null
         cursorFillMade?.let { (side, made) -> if (side == n && made.contentEquals(alpha)) return cursorFill }
         cursorFillMade = n to alpha
         val colors = IntArray(n * n) { i -> (alpha[i].toInt() and 0xFF shl 24) or 0xFFFFFF }
@@ -8746,6 +8751,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** The hover fill's stamp is made at most this many pixels across (larger, it is drawn bigger). */
         const val CURSOR_FILL_MOST = 256
+
+        /** A hover fill whose stamp is nowhere stronger than this (of 255) is too faint to see. */
+        const val CURSOR_FILL_FAINTEST = 8
         const val ACTIONS_TAB = "actions_tab"
         const val STUDIO_TAB = "studio_tab"
         const val PAD_3D = "pad_3d_preview"
