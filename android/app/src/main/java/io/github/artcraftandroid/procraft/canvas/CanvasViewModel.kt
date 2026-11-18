@@ -2851,6 +2851,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = s.guide()
     }
 
+    /** The tablet's own three-finger gesture has been told of this run. */
+    private val fingersTakenTold = TellOnce()
+
+    /**
+     * The tablet took three fingers on the canvas for a gesture of its own (see [systemTookFingers]):
+     * said once, with the way to have three-finger taps, scrubs and swipes back.
+     */
+    fun systemTookFingers() {
+        if (!fingersTakenTold.first()) return
+        showNotice("The tablet took that three-finger touch: turn off its three-finger screenshot to use three fingers here.", warning = true)
+    }
+
     /** The canvas view's ear for a pen's side button that comes as a key (true: the second), and what it did. */
     var penKeyHeard: ((second: Boolean, action: PenKeyAction) -> Unit)? = null
 

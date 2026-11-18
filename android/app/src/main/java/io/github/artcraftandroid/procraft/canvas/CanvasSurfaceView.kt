@@ -168,6 +168,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** Contacts too big for a fingertip (a palm, on a screen that says how big a touch is): the shared touches never see them, and one that grows that big is taken back. */
     private val palms = mutableSetOf<Int>()
 
+    /** When the last pointer landed on the canvas (event time, ms). */
+    private var landedAt = 0L
+
     /** Whether pointer [i] of [e] is a finger's contact [PALM_MM] or more across. */
     private fun palmSized(e: MotionEvent, i: Int): Boolean {
         if (e.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) return false
@@ -184,6 +187,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     strokePointer = e.getPointerId(i)
                     palms.clear()
                 }
+                landedAt = e.eventTime
                 if (palmSized(e, i)) {
                     palms += e.getPointerId(i)
                     emptyList()
@@ -209,6 +213,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
+                // the tablet taking three fingers for its own gesture: said once, with what to do
+                val fingers = (0 until e.pointerCount).count { e.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
+                if (systemTookFingers(fingers, e.eventTime - landedAt, hasWindowFocus())) vm.systemTookFingers()
                 palms.clear()
                 s.touchCancel()
             }
