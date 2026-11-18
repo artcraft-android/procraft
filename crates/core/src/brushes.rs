@@ -67,16 +67,24 @@ fn undrawn<'a>(
         .collect()
 }
 
-/// Draws `pictures`, each on a thread of its own (one on this one).
+/// Draws `pictures` side by side, as many at once as there are cores and memory for (see
+/// `procraft_engine::par`), one at a time where the system is short of memory (an old phone's, or
+/// a 32-bit build's): each holds a few pictures' worth while it is drawn.
 fn draw_side_by_side(pictures: &[procraft_engine::brush::Pixels]) {
-    let Some((first, rest)) = pictures.split_first() else { return };
-    std::thread::scope(|s| {
-        for p in rest {
-            s.spawn(move || drop(p.shared()));
+    if pictures.len() <= 1 || crate::device::short_of_memory(PICTURES_AT_ONCE) {
+        for p in pictures {
+            drop(p.shared());
         }
-        drop(first.shared());
-    });
+        return;
+    }
+    procraft_engine::par::side_by_side_within(pictures, PICTURE_WORK, |p| drop(p.shared()));
 }
+
+/// About what a brush's picture holds while it is drawn (its pictures in floats, and the image it
+/// is made from), bytes; and what drawing a few at once takes, which a system short of it draws
+/// one at a time.
+const PICTURE_WORK: usize = 16 << 20;
+const PICTURES_AT_ONCE: u64 = 64 << 20;
 
 impl crate::State {
     /// The tools' brushes' pictures drawn ahead (see [`warm_pictures`]).

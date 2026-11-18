@@ -358,7 +358,7 @@ fn gaussian_wrapped(values: &[f32], n: usize, sigma: f32) -> Vec<f32> {
         std::thread::scope(|s| {
             for (band, part) in out.chunks_mut(rows * n).enumerate() {
                 let weights = &weights;
-                s.spawn(move || {
+                crate::par::beside(s, move || {
                     for (at, px) in part.iter_mut().enumerate() {
                         let k = band * rows * n + at;
                         let (i, j) = ((k % n) as i32, (k / n) as i32);
@@ -2568,12 +2568,11 @@ fn recycled() -> Vec<u8> {
 fn field(f: impl Fn(f32, f32) -> f32 + Sync) -> Vec<u8> {
     let n = TEXTURE_SIZE;
     let mut out = vec![0u8; n * n];
-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
-    let rows = n.div_ceil(threads);
+    let rows = n.div_ceil(crate::par::cores());
     std::thread::scope(|s| {
         for (band, pixels) in out.chunks_mut(rows * n).enumerate() {
             let f = &f;
-            s.spawn(move || {
+            crate::par::beside(s, move || {
                 for (k, px) in pixels.iter_mut().enumerate() {
                     let (i, j) = (k % n, band * rows + k / n);
                     let v = f((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
@@ -2889,7 +2888,7 @@ fn blurred_rows(img: &[f32], n: usize, r: usize) -> Vec<f32> {
     let rows = n.div_ceil(crate::par::cores()).max(1);
     std::thread::scope(|s| {
         for (band, part) in out.chunks_mut(rows * n).enumerate() {
-            s.spawn(move || {
+            crate::par::beside(s, move || {
                 // a row with `r` of it wrapped round on each side
                 let mut wrapped = vec![0.0f32; n + 2 * r];
                 for (j, line) in part.chunks_mut(n).enumerate() {

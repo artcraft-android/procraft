@@ -423,7 +423,7 @@ pub(crate) fn joined<T: Copy + PartialOrd + Sync>(
     std::thread::scope(|scope| {
         for ((y0, y1), part) in bands.iter().copied().zip(out.chunks_mut(band * w)) {
             let (runs, inside, value, row) = (&runs, &inside, &value, &row);
-            scope.spawn(move || {
+            crate::par::beside(scope, move || {
                 for y in y0..y1 {
                     for i in row(y) {
                         let (Some(&[x0, x1]), Some(true)) = (runs.get(i), inside.get(i).copied()) else { continue };

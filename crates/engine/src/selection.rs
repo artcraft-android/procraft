@@ -545,7 +545,7 @@ fn blur_columns_into(values: &[f32], out: &mut [u8], w: usize, h: usize, r: usiz
     }
     std::thread::scope(|scope| {
         for (k, mut pieces) in bands.into_iter().enumerate() {
-            scope.spawn(move || {
+            crate::par::beside(scope, move || {
                 let (from, to) = (k * part, (k * part + part).min(w));
                 let (mut strip, mut blurred, mut sums) = (Vec::new(), Vec::new(), Vec::new());
                 for x0 in (from..to).step_by(STRIP) {
@@ -602,7 +602,7 @@ fn by_bands<T: Send>(data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) +
     std::thread::scope(|scope| {
         for (k, rows) in data.chunks_mut(band * width).enumerate() {
             let f = &f;
-            scope.spawn(move || f(k * band, rows));
+            crate::par::beside(scope, move || f(k * band, rows));
         }
     });
 }

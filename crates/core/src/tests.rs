@@ -14901,6 +14901,53 @@ fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
     assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_none());
 }
 
+/// Brush previews on a device like an old 32-bit phone's: an old GPU's fragment passes, the system
+/// short of memory, and no thread to be had for drawing the brushes' pictures. Each of a set's
+/// sample strokes still comes out, the same as with room to spare, one picture at a time, and
+/// nothing panics (a thread that couldn't be made used to).
+#[test]
+fn brush_previews_come_out_the_same_on_a_device_starved_of_memory_and_threads() {
+    use procraft_engine::brush::Rendering;
+    let Ok(gpu) = Gpu::headless_old() else { return eprintln!("skipped: no GPU") };
+    let previews = |s: &CanvasSession| -> Vec<(String, Option<Vec<u8>>)> {
+        let picks: Vec<(String, u32, u32)> = {
+            let st = s.shared.lock();
+            let kinds: [fn(&procraft_engine::brush::Brush) -> bool; 3] = [
+                |b| b.mixes_wet(),
+                |b| matches!(b.rendering, Rendering::Gradual | Rendering::Capped),
+                |b| b.grain.image.is_some() && b.secondary.is_some(),
+            ];
+            kinds
+                .iter()
+                .flat_map(|want| {
+                    let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                        let of = set.brushes.iter().enumerate().filter(|(_, b)| b.thumbnail.is_none() && want(b));
+                        of.map(move |(j, b)| (b.name.clone(), i as u32, j as u32))
+                    });
+                    all.take(3).collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert_eq!(picks.len(), 9);
+        picks
+            .into_iter()
+            .map(|(name, set, index)| (name, s.brush_preview(set, index, 212, 65).map(|t| t.rgba)))
+            .collect()
+    };
+    // starved first (the pictures drawn then, for both)
+    crate::device::MEMORY_FREE.with(|m| m.set(Some(200 << 20)));
+    procraft_engine::par::threads_fail(true);
+    let starved = previews(&session_on(gpu.clone(), 64, 64));
+    procraft_engine::par::threads_fail(false);
+    crate::device::MEMORY_FREE.with(|m| m.set(None));
+    let roomy = previews(&session_on(gpu.clone(), 64, 64));
+    for ((name, a), (_, b)) in starved.iter().zip(&roomy) {
+        assert!(a.is_some(), "{name}: drawn");
+        assert_eq!(a, b, "{name}: the same as with room");
+    }
+    assert_eq!(gpu.errors(), 0);
+}
+
 /// Wet paint that keeps what it has laid tile by tile (building up gradually, it keeps how much
 /// each pixel has taken; with a second brush, its paint laid apart) comes out pixel for pixel the
 /// same where a copy from a texture can put its rows in a buffer only at multiples of 512 bytes,
