@@ -14874,6 +14874,97 @@ fn nothing_a_selection_leaves_out_changes_under_a_brush_that_moves_paint() {
     }
 }
 
+/// Stock brushes of wet paint (alone, with a second, building up gradually) and those laid by their
+/// rule (glazes), stroked frame by frame over a picture, come out pixel for pixel as they did when
+/// wet paint went down a stamp a dispatch, on a full GPU and an old one's fragment passes alike.
+#[test]
+fn stock_wet_brushes_laid_in_runs_come_out_as_laid_stamp_by_stamp() {
+    use procraft_engine::brush::{Brush, Rendering};
+    let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return eprintln!("skipped: no GPU") };
+    let side = 320u32;
+    let n = side as usize;
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        *px = [
+            (x * 3 % 256) as u8,
+            (y * 2 % 256) as u8,
+            ((x + y) % 256) as u8,
+            if (x / 40 + y / 40) % 3 == 0 { 0 } else { 255 },
+        ];
+    }
+    // wet paint alone, with a second, building up gradually; and a glaze
+    let kinds: [fn(&Brush) -> bool; 4] = [
+        |b| b.mixes_wet() && b.secondary.is_none() && b.rendering != Rendering::Gradual,
+        |b| b.mixes_wet() && b.secondary.is_some(),
+        |b| b.mixes_wet() && b.rendering == Rendering::Gradual,
+        |b| !b.mixes_wet() && matches!(b.rendering, Rendering::Gradual | Rendering::Capped),
+    ];
+    let at = |e: usize| PenSample {
+        pressure: 0.4 + 0.5 * (e as f32 * 0.21).sin().abs(),
+        ..sample(30.0 + e as f32 * 2.2, 160.0 + (e as f32 * 0.05).sin() * 110.0, e as f64 * 4.0)
+    };
+    for gpu in [full, old] {
+        // each way in a session of its own, the same strokes in the same order (a stroke's jitter
+        // goes on from the last's)
+        let laid = |one_by_one: bool| {
+            let s = session_on(gpu.clone(), side, side);
+            let image = crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() };
+            let layer = s.insert_image(image, false).unwrap();
+            s.shared.lock().canvas.as_mut().unwrap().lay_stamp_by_stamp(one_by_one);
+            // the first few of each kind
+            let picks: Vec<(String, usize, usize)> = {
+                let st = s.shared.lock();
+                kinds
+                    .iter()
+                    .flat_map(|want| {
+                        let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                            let of = set.brushes.iter().enumerate().filter(|(_, b)| want(b));
+                            of.map(move |(j, b)| (b.name.clone(), i, j))
+                        });
+                        all.take(3).collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            assert_eq!(picks.len(), 12, "three stock brushes of each kind");
+            let strokes: Vec<(String, Vec<u8>)> = picks
+                .into_iter()
+                .map(|(name, set, index)| {
+                    assert!(s.select_brush(set as u32, index as u32));
+                    s.set_brush_size(0.5);
+                    s.set_color(0.8, 0.3, 0.1);
+                    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+                    for e in 1..=60 {
+                        s.stroke_add(vec![at(2 * e - 1), at(2 * e)]);
+                        if e % 2 == 0 {
+                            let _ = picture(&s);
+                        }
+                    }
+                    s.stroke_end(vec![]);
+                    let _ = picture(&s);
+                    let pixels = s.copy_layer_contents(layer).unwrap().rgba;
+                    s.undo();
+                    (name, pixels)
+                })
+                .collect();
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            let dispatches = s.shared.lock().canvas.as_ref().unwrap().compute_dispatches();
+            (strokes, dispatches)
+        };
+        let ((runs, fewer), (one_by_one, more)) = (laid(false), laid(true));
+        assert!(!gpu.computes() || fewer < more, "{fewer} dispatches against {more}");
+        for ((name, runs), (_, one_by_one)) in runs.into_iter().zip(one_by_one) {
+            assert_ne!(runs, rgba, "{name}: painted");
+            let (worst, channels) = differ(&runs, &one_by_one);
+            assert!(
+                channels == 0,
+                "{name} (computes {}): {channels} channels differ, by {worst} at most",
+                gpu.computes()
+            );
+        }
+    }
+}
+
 /// A brush's sample stroke drawn with its graphics device lost under it (as a phone's can be, short
 /// of memory or its driver reset) comes back as none and never panics, for a glaze (laid by its
 /// rule, whose tile lists wgpu's way of making panicked on there and closed the app from the

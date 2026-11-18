@@ -91,6 +91,8 @@ pub(super) enum Pipe {
     BlurDown,
     BlurAcross,
     Deposit,
+    /// A run of a pass's stamps laid at once (see `cs_deposit_run`).
+    DepositRun,
     Synthesize,
     WetPlots,
 }
@@ -570,6 +572,7 @@ impl Canvas {
                     Pipe::BlurDown => &compute.smudge_blur_down,
                     Pipe::BlurAcross => &compute.smudge_blur_across,
                     Pipe::Deposit => &compute.smudge_deposit,
+                    Pipe::DepositRun => &compute.smudge_deposit_run,
                     Pipe::Synthesize => &compute.smudge_synthesize,
                     Pipe::WetPlots => &compute.smudge_wet_plots,
                 });

@@ -95,7 +95,11 @@ fn cs_blur_across(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = st.bbox.xy + vec2<i32>(id.xy);
-    let d = deposit(p);
+    let dab = own_dab();
+    if (!in_bbox(dab, p)) {
+        return;
+    }
+    let d = deposit(dab, p, found_at(p));
     if (!d.laid) {
         return;
     }
@@ -113,10 +117,68 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     work[k] = pack4x8unorm(d.out);
 }
 
+// A run of a pass's stamps (`st.run`, as `wet_pass` lists them) laid at once over all their bounds
+// (`st.bbox`): each pixel goes through those over it in order, as its paint stands after each (in 8
+// bits a channel, as the window keeps it), and is written once. It comes out as the stamps laid
+// one by one do, each a dispatch of its own.
+@compute @workgroup_size(8, 8)
+fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p = st.bbox.xy + vec2<i32>(id.xy);
+    if (any(p >= st.bbox.zw)) {
+        return;
+    }
+    var found = found_at(p);
+    var laid = false;
+    var amount_set = false;
+    var shown_set = false;
+    var word = 0u;
+    for (var k = st.run.x; k < st.run.y; k++) {
+        let bbox = wet_pass.stamps[k].bbox;
+        if (any(p < bbox.xy) || any(p >= bbox.zw)) {
+            continue;
+        }
+        let d = deposit(pass_dab(k), p, found);
+        if (!d.laid) {
+            continue;
+        }
+        laid = true;
+        if (d.amount_set) {
+            found.amount = d.amount;
+            amount_set = true;
+        }
+        if (d.shown_set) {
+            found.shown = d.shown;
+            shown_set = true;
+        }
+        // as the window keeps it, and the next stamp finds it
+        word = pack4x8unorm(d.out);
+        if (d.into_grained) {
+            found.grained = unpack4x8unorm(word);
+        } else {
+            found.work = unpack4x8unorm(word);
+        }
+    }
+    if (!laid) {
+        return;
+    }
+    let i = window_index(p);
+    if (amount_set) {
+        amount[i] = found.amount;
+    }
+    if (shown_set) {
+        amount[st.stride * st.rows + i] = found.shown;
+    }
+    if (st.laid_apart == 2u) {
+        grained[i] = word;
+    } else {
+        work[i] = word;
+    }
+}
+
 @compute @workgroup_size(8, 8)
 fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = st.bbox.xy + vec2<i32>(id.xy);
-    if (!in_bbox(p) || left_out(p)) {
+    if (!in_bbox(own_dab(), p) || left_out(p)) {
         return;
     }
     work[window_index(p)] = pack4x8unorm(synthesized(p));

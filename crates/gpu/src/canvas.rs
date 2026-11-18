@@ -1475,6 +1475,7 @@ fn smudge_uniform(s: &StampInstance, style: &StrokeStyle, bbox: IRect, (width, h
         rows: 0,
         origin: [0, 0],
         part: smudge::WHOLE,
+        run: [0; 4],
     }
 }
 
@@ -1600,6 +1601,9 @@ struct SmudgeUniform {
     warp_shift: [f32; 2],
     warp_amount: f32,
     sharpen: f32,
+    /// A run of a pass's stamps laid at once (see `cs_deposit_run`): its first and its end among
+    /// them, as [`WetPass`] lists them (`bbox` then all of theirs).
+    run: [u32; 4],
 }
 
 const _: () = assert!(size_of::<SmudgeUniform>().is_multiple_of(16));
@@ -1623,13 +1627,88 @@ const WET_PASS_MOST: usize = 64;
 const WET_PLOT_MOST: u32 = 128;
 const WET_PLOTS_TEXELS: u64 = 1024 * 1024;
 
-/// The stamps of one pass of wet paint (see `cs_wet_plots`), each as its middle, radius and turn,
-/// then its roundness, pull, mixture and final mixture, then what it paints with.
+/// The stamps of one pass of wet paint (see `cs_wet_plots`), each as [`wet_stamp`] lists it.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct WetPass {
-    stamps: [[f32; 12]; WET_PASS_MOST],
+    stamps: [[f32; WET_STAMP_FLOATS]; WET_PASS_MOST],
 }
+
+/// The floats a stamp of a pass takes (as the shader's `WetStamp`).
+const WET_STAMP_FLOATS: usize = 28;
+
+/// How a pass of wet paint lists its stamp `u` (laid with `pull`, `mixture` and `final_mixture`,
+/// painting with `paint`): its middle, radius and turn; roundness and those three; what it paints
+/// with (each as the plots read them); and what it lays by itself, as its own uniform has it (see
+/// the shader's `Dab`): its alpha, transfer, grain turn and shape; its grain's tile size and depth,
+/// press and bleed; where its moving grain is read from and its mirroring; its bounds (as integers).
+fn wet_stamp(
+    u: &SmudgeUniform,
+    [pull, mixture, final_mixture]: [f32; 3],
+    [r, g, b]: [f32; 3],
+) -> [f32; WET_STAMP_FLOATS] {
+    let int = |v: i32| f32::from_bits(v.cast_unsigned());
+    let [x0, y0, x1, y1] = u.bbox;
+    [
+        u.center[0],
+        u.center[1],
+        u.radius,
+        u.angle,
+        u.roundness,
+        pull,
+        mixture,
+        final_mixture,
+        r,
+        g,
+        b,
+        1.0,
+        u.alpha,
+        u.transfer,
+        u.grain_rotation,
+        u.shape as f32,
+        u.grain_scale,
+        u.grain_depth,
+        u.grain_press,
+        u.grain_bleed,
+        u.grain_offset[0],
+        u.grain_offset[1],
+        u.flip[0],
+        u.flip[1],
+        int(x0),
+        int(y0),
+        int(x1),
+        int(y1),
+    ]
+}
+
+/// `boxes` (stamps' places in their pass and bounds, in order) cut into runs laid at once (see
+/// `cs_deposit_run`): each the longest whose bounds together come to little more than theirs one
+/// by one (each pixel of a run goes through all its stamps). Each run's first and end, and bounds.
+fn deposit_runs(boxes: &[(usize, IRect)]) -> Vec<(usize, usize, IRect)> {
+    let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
+    let mut runs: Vec<(usize, usize, IRect)> = Vec::new();
+    let mut summed = 0u64;
+    for &(k, b) in boxes {
+        if b.is_empty() {
+            continue;
+        }
+        if let Some((_, end, union)) = runs.last_mut() {
+            let joined = union.union(b);
+            if area(joined) <= 2 * (summed + area(b)) + RUN_SPARE {
+                *end = k + 1;
+                *union = joined;
+                summed += area(b);
+                continue;
+            }
+        }
+        runs.push((k, k + 1, b));
+        summed = area(b);
+    }
+    runs
+}
+
+/// The pixels a run of stamps' bounds may cover together past twice theirs (see [`deposit_runs`]).
+const RUN_SPARE: u64 = 64 * 64;
 const WET_PASS_SIZE: u64 = std::mem::size_of::<WetPass>() as u64;
 
 /// A smudge stroke in progress: what the brush carries, and what the stroke keeps of its layer and
@@ -2372,6 +2451,7 @@ pub(crate) struct ComputePipelines {
     smudge_blur_down: wgpu::ComputePipeline,
     smudge_blur_across: wgpu::ComputePipeline,
     smudge_deposit: wgpu::ComputePipeline,
+    smudge_deposit_run: wgpu::ComputePipeline,
     smudge_synthesize: wgpu::ComputePipeline,
     smudge_wet_plots: wgpu::ComputePipeline,
 }
@@ -2592,6 +2672,9 @@ pub struct Canvas {
     pieces_sent: u64,
     /// Compute dispatches recorded for smudges, paint laid in place and stamps laid by their rule.
     dispatched: AtomicU64,
+    /// Wet paint and paint laid in place go down a stamp a dispatch, as they did before runs of
+    /// stamps were laid at once (see [`Canvas::lay_stamp_by_stamp`]).
+    stamp_by_stamp: bool,
     /// How the last plugin filter's draw went, not yet asked for.
     filter_run: Option<plugin_filter::FilterRun>,
     /// How many times the composite has been redrawn.
@@ -2970,6 +3053,7 @@ impl Canvas {
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
             dispatched: AtomicU64::new(0),
+            stamp_by_stamp: false,
             filter_run: None,
             composites: 0,
             active: None,
@@ -3867,6 +3951,13 @@ impl Canvas {
     #[doc(hidden)]
     pub fn compute_dispatches(&self) -> u64 {
         self.dispatched.load(Ordering::Relaxed)
+    }
+
+    /// Lays wet paint and paint laid in place a stamp a dispatch (or fragment pass), as before a
+    /// pass's stamps went down in runs at once: for tests, which compare the two.
+    #[doc(hidden)]
+    pub fn lay_stamp_by_stamp(&mut self, on: bool) {
+        self.stamp_by_stamp = on;
     }
 
     /// How many pieces of work were sent early, there being too much for one: for tests.
@@ -6827,25 +6918,62 @@ impl Canvas {
         };
         let mut changed = IRect::EMPTY;
         let mut pieces = Vec::new();
+        let groups = |r: IRect| [r.width().div_ceil(8), r.height().div_ceil(8)];
         if style.wet_pull.is_none() {
-            // dry paint laid in place: each stamp lays the paint itself, no pass of plots
-            for (s, _, _) in stamps {
-                let bbox = bbox_of(s);
-                if bbox.is_empty() {
+            // dry paint laid in place: each stamp lays the paint itself, no pass of plots; listed a
+            // lot at a time as a pass's stamps are, and laid in runs at once
+            for lot in stamps.chunks(WET_PASS_MOST) {
+                let mut list: WetPass = bytemuck::Zeroable::zeroed();
+                let mut own = Vec::with_capacity(lot.len());
+                for (k, (s, _, _)) in lot.iter().enumerate() {
+                    let bbox = bbox_of(s);
+                    changed = changed.union(bbox);
+                    let [r, g, b] = stamp_paint(s, style);
+                    let uniform = SmudgeUniform {
+                        mode: 1,
+                        modulated,
+                        grain_once,
+                        count: 0,
+                        laid_apart: laid_apart * 2,
+                        paint: [r, g, b, 1.0],
+                        ..smudge_uniform(s, style, bbox, size)
+                    };
+                    if let Some(slot) = list.stamps.get_mut(k) {
+                        *slot = wet_stamp(&uniform, [0.0; 3], [r, g, b]);
+                    }
+                    own.push((uniform, bbox));
+                }
+                // stamps laid one by one (each a dispatch of its own), a band of rows at a time
+                let one_by_one = |canvas: &Self, laid: &[(SmudgeUniform, IRect)], listed: u32| -> Vec<smudge::Piece> {
+                    laid.iter()
+                        .filter(|(_, bbox)| !bbox.is_empty())
+                        .flat_map(|&(u, bbox)| canvas.bands(smudge::Pipe::Deposit, u, bbox, changes, listed))
+                        .collect()
+                };
+                if self.stamp_by_stamp {
+                    pieces.extend(one_by_one(self, &own, 0));
                     continue;
                 }
-                changed = changed.union(bbox);
-                let [r, g, b] = stamp_paint(s, style);
-                let uniform = SmudgeUniform {
-                    mode: 1,
-                    modulated,
-                    grain_once,
-                    count: 0,
-                    laid_apart: laid_apart * 2,
-                    paint: [r, g, b, 1.0],
-                    ..smudge_uniform(s, style, bbox, size)
-                };
-                pieces.extend(self.bands(smudge::Pipe::Deposit, uniform, bbox, changes, 0));
+                let listed = passes.push(&list);
+                let boxes: Vec<(usize, IRect)> = own.iter().map(|(_, b)| *b).enumerate().collect();
+                for (start, end, union) in deposit_runs(&boxes) {
+                    let Some(&(head, _)) = own.get(start) else { continue };
+                    if !self.fits_window(union) {
+                        // a run reaching further than a window holds
+                        pieces.extend(one_by_one(self, own.get(start..end).unwrap_or_default(), listed));
+                        continue;
+                    }
+                    let run = [u32::try_from(start).unwrap_or(0), u32::try_from(end).unwrap_or(0), 0, 0];
+                    pieces.push(smudge::Piece {
+                        uniforms: vec![SmudgeUniform { run, bbox: [union.x0, union.y0, union.x1, union.y1], ..head }],
+                        dispatches: vec![(smudge::Pipe::DepositRun, 0, groups(union))],
+                        listed,
+                        reach: union,
+                        writes: union,
+                        work: changes.0,
+                        kept: changes.1,
+                    });
+                }
             }
             // paint laid apart put together right after, in the same window where it fits (the
             // layer, the paint as laid and the layer as it was are then copied in once a frame)
@@ -6887,36 +7015,6 @@ impl Canvas {
             while plot > 4 && u64::from(plot * plot) * n as u64 > WET_PLOTS_TEXELS {
                 plot /= 2;
             }
-            let mut list = WetPass { stamps: [[0.0; 12]; WET_PASS_MOST] };
-            for (k, (s, w, paced)) in group.iter().enumerate() {
-                let [grade_by, _, _, wet_jitter_by, charge_by, dilution_by, wet_pull_by, _] = *w;
-                // the mixture varies from stamp to stamp by the wetness jitter
-                let jitter = 1.0 - style.wet_jitter * wet_jitter_by * unit_hash(smudge.stamps);
-                smudge.stamps = smudge.stamps.saturating_add(1);
-                // the paint runs out with the length the stroke has gone
-                let (mixture, pull) = wet_mixture(style, paced.distance, jitter, s.more[3], dilution_by, charge_by);
-                let pull = pull * wet_pull_by;
-                let grade = (style.grade * grade_by).clamp(-1.0, 1.0);
-                let final_mixture = final_mixture(mixture, pull, grade, (k, n), first);
-                let [r, g, b] = stamp_paint(s, style);
-                if let Some(slot) = list.stamps.get_mut(k) {
-                    *slot = [
-                        s.center[0],
-                        s.center[1],
-                        s.radius.max(0.5),
-                        s.angle,
-                        s.roundness,
-                        pull,
-                        mixture,
-                        final_mixture,
-                        r,
-                        g,
-                        b,
-                        1.0,
-                    ];
-                }
-            }
-            let listed = passes.push(&list);
             let carried = smudge.plot.max(1);
             let turn = smudge.passes % 2;
             let wet = |s: &StampInstance, bbox: IRect, index: u32| SmudgeUniform {
@@ -6932,6 +7030,28 @@ impl Canvas {
                 carried,
                 ..smudge_uniform(s, style, bbox, size)
             };
+            // each stamp as the plots read it and as it lays itself, and its own uniform
+            let mut list: WetPass = bytemuck::Zeroable::zeroed();
+            let mut own = Vec::with_capacity(n);
+            for (k, (s, w, paced)) in group.iter().enumerate() {
+                let [grade_by, _, _, wet_jitter_by, charge_by, dilution_by, wet_pull_by, _] = *w;
+                // the mixture varies from stamp to stamp by the wetness jitter
+                let jitter = 1.0 - style.wet_jitter * wet_jitter_by * unit_hash(smudge.stamps);
+                smudge.stamps = smudge.stamps.saturating_add(1);
+                // the paint runs out with the length the stroke has gone
+                let (mixture, pull) = wet_mixture(style, paced.distance, jitter, s.more[3], dilution_by, charge_by);
+                let pull = pull * wet_pull_by;
+                let grade = (style.grade * grade_by).clamp(-1.0, 1.0);
+                let final_mixture = final_mixture(mixture, pull, grade, (k, n), first);
+                let [r, g, b] = stamp_paint(s, style);
+                let bbox = bbox_of(s);
+                let uniform = wet(s, bbox, u32::try_from(k).unwrap_or(0));
+                if let Some(slot) = list.stamps.get_mut(k) {
+                    *slot = wet_stamp(&uniform, [pull, mixture, final_mixture], [r, g, b]);
+                }
+                own.push((uniform, bbox));
+            }
+            let listed = passes.push(&list);
             smudge.passes = smudge.passes.saturating_add(1);
             smudge.plot = plot;
             let Some(head) = group.first() else { continue };
@@ -6947,16 +7067,25 @@ impl Canvas {
                 work: changes.0,
                 kept: changes.1,
             };
-            for (k, (s, _, _)) in group.iter().enumerate() {
-                let bbox = bbox_of(s);
-                if bbox.is_empty() {
-                    continue;
-                }
+            for &(_, bbox) in &own {
                 changed = changed.union(bbox);
                 piece.writes = piece.writes.union(bbox);
-                let groups = [bbox.width().div_ceil(8), bbox.height().div_ceil(8)];
-                piece.dispatches.push((smudge::Pipe::Deposit, piece.uniforms.len(), groups));
-                piece.uniforms.push(wet(s, bbox, u32::try_from(k).unwrap_or(0)));
+            }
+            if self.stamp_by_stamp {
+                for &(u, bbox) in own.iter().filter(|(_, bbox)| !bbox.is_empty()) {
+                    piece.dispatches.push((smudge::Pipe::Deposit, piece.uniforms.len(), groups(bbox)));
+                    piece.uniforms.push(u);
+                }
+            } else {
+                // the stamps laid from their plots in runs, each run at once
+                let boxes: Vec<(usize, IRect)> = own.iter().map(|(_, b)| *b).enumerate().collect();
+                for (start, end, union) in deposit_runs(&boxes) {
+                    let Some(&(head, _)) = own.get(start) else { continue };
+                    let run = [u32::try_from(start).unwrap_or(0), u32::try_from(end).unwrap_or(0), 0, 0];
+                    let bbox = [union.x0, union.y0, union.x1, union.y1];
+                    piece.dispatches.push((smudge::Pipe::DepositRun, piece.uniforms.len(), groups(union)));
+                    piece.uniforms.push(SmudgeUniform { run, bbox, ..head });
+                }
             }
             if self.fits_window(piece.reach) {
                 pieces.push(piece);
@@ -10748,6 +10877,7 @@ impl Pipelines {
             let smudge_blur_down = smudge_pass("smudge blur down", "cs_blur_down");
             let smudge_blur_across = smudge_pass("smudge blur across", "cs_blur_across");
             let smudge_deposit = smudge_pass("smudge deposit", "cs_deposit");
+            let smudge_deposit_run = smudge_pass("smudge deposit run", "cs_deposit_run");
             let smudge_synthesize = smudge_pass("smudge synthesize", "cs_synthesize");
             let smudge_wet_plots = smudge_pass("smudge wet plots", "cs_wet_plots");
             // stamps laid by their stroke's rule: the stamp's uniform, the frame's stamps, the part's
@@ -10807,6 +10937,7 @@ impl Pipelines {
                 smudge_blur_down,
                 smudge_blur_across,
                 smudge_deposit,
+                smudge_deposit_run,
                 smudge_synthesize,
                 smudge_wet_plots,
             }
@@ -12809,6 +12940,104 @@ mod tests {
         }
         assert_eq!(full.errors(), 0);
         assert_eq!(old.errors(), 0);
+    }
+
+    /// Wet paint and paint laid in place, a pass's stamps laid in runs at once (each pixel going
+    /// through those over it in order), come out pixel for pixel as laid a stamp a dispatch, on a
+    /// full GPU and in an old one's fragment passes alike, in roomy windows and small ones; in far
+    /// fewer dispatches.
+    #[test]
+    fn wet_paint_laid_in_runs_comes_out_as_laid_stamp_by_stamp() {
+        use procraft_engine::geom::Vec2;
+        let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return };
+        // overlapping stamps a few milliseconds apart (many to a pass), turning, of two sizes, a
+        // few off the canvas's edge
+        let stamps: Vec<Stamp> = (0..48)
+            .map(|i| Stamp {
+                time_ms: 2.5 * f64::from(i),
+                distance: 3.0 * i as f32,
+                angle: 0.2 * i as f32,
+                roundness: if i % 3 == 0 { 0.6 } else { 1.0 },
+                transfer: 0.4 + 0.01 * i as f32,
+                ..Stamp::round(
+                    Vec2::new(-6.0 + 3.4 * i as f32, 20.0 + 1.7 * i as f32 + 9.0 * (i as f32 * 0.4).sin()),
+                    if i % 7 == 3 { 22.0 } else { 11.0 },
+                    0.3 + 0.012 * i as f32,
+                )
+            })
+            .collect();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.6),
+            load: 0.4,
+            dilution: 0.3,
+            hardness: 0.4,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.2, 0.3, 0.8], 1.0)
+        };
+        let grained = StrokeStyle { grain: Some(0), grain_depth: 0.8, grain_scale: 32.0, ..wet };
+        let styles = [
+            ("wet", wet),
+            ("wet, modulated", StrokeStyle { rendering: Rendering::Gradual, ..wet }),
+            ("wet, grained, pooling", StrokeStyle { wet_edges: 0.5, ..grained }),
+            ("wet, moving grain", StrokeStyle { grain_mode: GrainMode::Moving, ..grained }),
+            ("light glaze", StrokeStyle { rendering: Rendering::Strongest, wet_edges: 0.3, ..wet }),
+            ("uniform glaze", StrokeStyle { rendering: Rendering::Capped, ..wet }),
+            ("wet, luminance", StrokeStyle { luminance: true, ..wet }),
+            ("laid in place", StrokeStyle { wet_pull: None, laid_in_place: true, ..wet }),
+            ("laid in place, burnt", StrokeStyle { wet_pull: None, laid_in_place: true, burnt_edges: 0.5, ..wet }),
+        ];
+        let laid = |gpu: &Gpu, style: StrokeStyle, one_by_one: bool, most: Option<u64>| {
+            let mut doc = procraft_engine::document::Document::new(150, 110);
+            let mut canvas = Canvas::new(gpu, &doc).unwrap();
+            let id = doc.current();
+            canvas.upload_layer(gpu, id, &patches(150, 110)).unwrap();
+            canvas.lay_stamp_by_stamp(one_by_one);
+            if let Some(most) = most {
+                canvas.smudge_most = most;
+            }
+            canvas.begin_stroke(id, style);
+            for lot in stamps.chunks(12) {
+                canvas.add_stamps(lot);
+                canvas.render(gpu, &mut doc, None);
+            }
+            canvas.end_stroke();
+            canvas.render(gpu, &mut doc, None);
+            assert!(!canvas.take_smudge_refused());
+            (canvas.read_layer(gpu, id).unwrap(), canvas.compute_dispatches())
+        };
+        for (name, style) in styles {
+            for gpu in [&full, &old] {
+                for most in [None, Some(8 << 10)] {
+                    let (runs, fewer) = laid(gpu, style, false, most);
+                    let (one_by_one, more) = laid(gpu, style, true, most);
+                    let (worst, n) = differ(&runs, &one_by_one);
+                    assert!(
+                        n == 0,
+                        "{name} (old GPU {}, windows {most:?}): {n} channels differ, by {worst} at most",
+                        gpu.old
+                    );
+                    assert_ne!(runs, patches(150, 110), "{name}: painted");
+                    if gpu.computes() && most.is_none() {
+                        assert!(fewer < more, "{name}: {fewer} dispatches against {more}");
+                    }
+                }
+            }
+        }
+        assert_eq!(full.errors(), 0);
+        assert_eq!(old.errors(), 0);
+    }
+
+    /// A pass's stamps are cut into runs that each reach little further together than one by one:
+    /// a pass's stamps close together are one run, a pass jumping across the canvas several, each
+    /// in order and none left out.
+    #[test]
+    fn a_pass_is_laid_in_runs_of_stamps_close_together() {
+        let at = |x: i32, y: i32| IRect::new(x, y, x + 20, y + 20);
+        let close: Vec<(usize, IRect)> = (0..10).map(|k| (k, at(3 * k as i32, 2 * k as i32))).collect();
+        assert_eq!(deposit_runs(&close), [(0, 10, IRect::new(0, 0, 47, 38))]);
+        // far apart, then back together; an empty one (a stamp of no size) passed over
+        let jumping = [(0, at(0, 0)), (1, at(2, 1)), (2, IRect::EMPTY), (3, at(900, 700)), (4, at(903, 701))];
+        assert_eq!(deposit_runs(&jumping), [(0, 2, IRect::new(0, 0, 22, 21)), (3, 5, IRect::new(900, 700, 923, 721))]);
+        assert!(deposit_runs(&[(0, IRect::EMPTY)]).is_empty());
     }
 
     /// Stamps laid by their rule come out pixel for pixel the same however the parts of the canvas

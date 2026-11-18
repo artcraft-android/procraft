@@ -143,7 +143,7 @@ struct Deposited {
 @fragment
 fn fs_deposit(@builtin(position) pos: vec4<f32>) -> Deposited {
     let p = fragment_pixel(pos);
-    let d = deposit(p);
+    let d = deposit(own_dab(), p, found_at(p));
     var o: Deposited;
     o.pixel = select(work_at(p), grained_at(p), d.into_grained);
     o.amount = textureLoad(amount_tex, window_texel(p), 0).r;
@@ -161,10 +161,72 @@ fn fs_deposit(@builtin(position) pos: vec4<f32>) -> Deposited {
     return o;
 }
 
+// k/255 for a byte k, the nearest float to it, as a texture of 8 bits a channel reads byte k:
+// worked out on its bits, so that no compiler's division rounds it otherwise. k/255 is k's 8 bits
+// repeated past the point: its first 24 bits from the leading one, rounded by the next (never a
+// tie, as k's bits go on).
+fn byte_value(k: u32) -> f32 {
+    if (k == 0u) {
+        return 0.0;
+    }
+    if (k >= 255u) {
+        return 1.0;
+    }
+    let bits = k * 0x01010101u;
+    let lead = countLeadingZeros(bits);
+    let s = bits << lead;
+    let m = (s >> 8u) + ((s >> 7u) & 1u);
+    return ldexp(f32(m), -24 - i32(lead));
+}
+
+// `c` as a texture of 8 bits a channel holds it once drawn with to_eight(c), read back
+fn kept_eight(c: vec4<f32>) -> vec4<f32> {
+    let k = vec4<u32>(floor(0.5 + 255.0 * clamp(c, vec4<f32>(0.0), vec4<f32>(1.0))));
+    return vec4<f32>(byte_value(k.x), byte_value(k.y), byte_value(k.z), byte_value(k.w));
+}
+
+// A run of a pass's stamps (`st.run`, as `wet_pass` lists them) laid at once within all their
+// bounds (as cs_deposit_run lays them): each fragment goes through those over it in order, as its
+// paint stands after each (in 8 bits a channel, as the window's texture keeps it), drawn once.
+@fragment
+fn fs_deposit_run(@builtin(position) pos: vec4<f32>) -> Deposited {
+    let p = fragment_pixel(pos);
+    var found = found_at(p);
+    var o: Deposited;
+    o.pixel = select(found.work, found.grained, st.laid_apart == 2u);
+    o.amount = textureLoad(amount_tex, window_texel(p), 0).r;
+    o.shown = textureLoad(shown_tex, window_texel(p), 0).r;
+    for (var k = st.run.x; k < st.run.y; k++) {
+        let bbox = wet_pass.stamps[k].bbox;
+        if (any(p < bbox.xy) || any(p >= bbox.zw)) {
+            continue;
+        }
+        let d = deposit(pass_dab(k), p, found);
+        if (!d.laid) {
+            continue;
+        }
+        if (d.amount_set) {
+            found.amount = d.amount;
+            o.amount = bitcast<u32>(d.amount);
+        }
+        if (d.shown_set) {
+            found.shown = d.shown;
+            o.shown = bitcast<u32>(d.shown);
+        }
+        o.pixel = to_eight(d.out);
+        if (d.into_grained) {
+            found.grained = kept_eight(d.out);
+        } else {
+            found.work = kept_eight(d.out);
+        }
+    }
+    return o;
+}
+
 @fragment
 fn fs_synthesize(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = fragment_pixel(pos);
-    if (!in_bbox(p) || left_out(p)) {
+    if (!in_bbox(own_dab(), p) || left_out(p)) {
         return work_at(p);
     }
     return to_eight(synthesized(p));

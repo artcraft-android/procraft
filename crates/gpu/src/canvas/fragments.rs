@@ -77,8 +77,9 @@ pub(crate) struct FragmentPipelines {
     pub(super) blur_down: wgpu::RenderPipeline,
     pub(super) blur_across: wgpu::RenderPipeline,
     /// A stamp laid, by whether the window keeps how much of the paint each pixel has taken, and
-    /// how much shows (each its own target).
+    /// how much shows (each its own target); and a run of a pass's stamps laid at once, likewise.
     pub(super) deposit: [[wgpu::RenderPipeline; 2]; 2],
+    pub(super) deposit_run: [[wgpu::RenderPipeline; 2]; 2],
     pub(super) synthesize: wgpu::RenderPipeline,
     pub(super) wet_plots: wgpu::RenderPipeline,
     pub(super) wet_carried: wgpu::RenderPipeline,
@@ -258,10 +259,12 @@ impl FragmentPipelines {
             pipeline(label, &smudge_pipeline_layout, &smudge_module, ("vs_full", fs), targets)
         };
         let carried = [target(CARRY_FORMAT)];
-        let deposit = |amount: bool, shown: bool| {
+        let deposit_by = |fs: &'static str, amount: bool, shown: bool| {
             let kept = |on: bool| if on { target(AMOUNT_FORMAT) } else { None };
-            pass("smudge deposit", "fs_deposit", &[target(LAYER_FORMAT), kept(amount), kept(shown)])
+            pass("smudge deposit", fs, &[target(LAYER_FORMAT), kept(amount), kept(shown)])
         };
+        let deposit = |amount, shown| deposit_by("fs_deposit", amount, shown);
+        let deposit_run = |amount, shown| deposit_by("fs_deposit_run", amount, shown);
         let liquify = liquify.map(|(uniform_layout, transform_layout, filter_module)| {
             let liquify_module = module("liquify in integers", include_str!("../shaders/liquify.wgsl"));
             let sums_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -324,6 +327,10 @@ impl FragmentPipelines {
             blur_down: pass("smudge blur down", "fs_blur_down", &carried),
             blur_across: pass("smudge blur across", "fs_blur_across", &carried),
             deposit: [[deposit(false, false), deposit(false, true)], [deposit(true, false), deposit(true, true)]],
+            deposit_run: [
+                [deposit_run(false, false), deposit_run(false, true)],
+                [deposit_run(true, false), deposit_run(true, true)],
+            ],
             synthesize: pass("smudge synthesize", "fs_synthesize", &[target(LAYER_FORMAT)]),
             wet_plots: pass("smudge wet plots", "fs_wet_plots", &carried),
             wet_carried: pass("smudge wet carried", "fs_wet_carried", &carried),
@@ -959,13 +966,15 @@ impl Canvas {
                         draw_in(encoder, "smudge blur", pipeline, &[Some(&scratch.view)], rect, binds(&main));
                         copy_rect(encoder, scratch, carry, rect, down);
                     }
-                    (smudge::Pipe::Deposit, _) => {
+                    (smudge::Pipe::Deposit | smudge::Pipe::DepositRun, _) => {
                         let rect = in_window(bbox);
                         let into = if u.laid_apart == 2 { window.grained.as_ref() } else { Some(&window.work) };
                         let Some([was, next]) = into else { continue };
                         let amount = window.amount.as_ref();
                         let shown = window.shown.as_ref();
-                        let [[alone, with_shown], [with_amount, with_both]] = &f.deposit;
+                        let variants =
+                            if matches!(pipe, smudge::Pipe::DepositRun) { &f.deposit_run } else { &f.deposit };
+                        let [[alone, with_shown], [with_amount, with_both]] = variants;
                         let pipeline = match (amount.is_some(), shown.is_some()) {
                             (false, false) => alone,
                             (false, true) => with_shown,
