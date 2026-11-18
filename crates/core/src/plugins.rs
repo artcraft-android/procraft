@@ -3639,6 +3639,29 @@ mod tests {
     }
 
     #[test]
+    fn reference_windows_lets_as_many_be_open_as_it_says() {
+        const WINDOWS: &str = "io.github.artcraftandroid.reference-windows";
+        let dir = store("bundled-references");
+        let plugins = app_at(&dir);
+        assert_eq!(plugins.reference_windows(), 1);
+        assert!(plugins.set_on(WINDOWS.to_owned(), true));
+        assert_eq!(plugins.reference_windows(), 3);
+        assert!(plugins.set_slider(format!("{WINDOWS}.most"), 6.0).is_some());
+        assert_eq!(plugins.reference_windows(), 6);
+        // asked each frame on a desktop: quick
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(plugins.reference_windows(), 6);
+        }
+        let asked = t.elapsed() / 1000;
+        println!("how many reference windows asked in {asked:?}");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
+        assert!(plugins.set_on(WINDOWS.to_owned(), false));
+        assert_eq!(plugins.reference_windows(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();
         plugins.add_bundled(crate::bundled::BUNDLED);

@@ -21,6 +21,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("quickshape-curves", include_bytes!("../bundled-plugins/quickshape-curves.procraft-plugin")),
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
     ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
+    ("reference-windows", include_bytes!("../bundled-plugins/reference-windows.procraft-plugin")),
     ("rotation-reset", include_bytes!("../bundled-plugins/rotation-reset.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),

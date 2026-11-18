@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.reference-windows",
+  "name": "Reference windows",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "More than one Reference window open at once: + on a window opens another, each showing the canvas or a picture of its own, kept with the artwork.",
+  "compat": { "procraft": { "interface": 8 } },
+  "permissions": [],
+  "hooks": ["reference_windows"],
+  "controls": [
+    { "key": "most", "type": "slider", "label": "Windows at once", "least": 2, "most": 8, "step": 1, "starts": 3 }
+  ]
+}
