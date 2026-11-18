@@ -66,6 +66,7 @@ mod transform;
 mod transform_numeric;
 mod ui;
 mod video;
+mod window_controls;
 mod zoom;
 
 use std::sync::Arc;
@@ -280,6 +281,7 @@ fn main() {
         interface_touches: input::InterfaceTouches::default(),
         modifiers: winit::keyboard::ModifiersState::empty(),
         maximised_before_full_screen: false,
+        macos_top_bar: false,
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -352,6 +354,8 @@ struct App {
     modifiers: winit::keyboard::ModifiersState,
     /// The window was maximised as it went full screen, and is maximised again as it comes back.
     maximised_before_full_screen: bool,
+    /// Whether the custom macOS top bar is active and window decorations are hidden.
+    macos_top_bar: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -407,11 +411,15 @@ impl ApplicationHandler for App {
         if self.screen.is_some() {
             return;
         }
+        let macos = self.ui.plugins().macos_top_bar();
+        self.macos_top_bar = macos;
+        crate::window_controls::set_macos_topbar(macos);
         let attributes = Window::default_attributes()
             .with_title("ProCraft")
             .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(640.0, 480.0))
+            .with_decorations(!macos)
             // opened for a test (PROCRAFT_BACKGROUND set), it leaves the keyboard where it was
             .with_active(std::env::var_os("PROCRAFT_BACKGROUND").is_none());
         // on Linux the desktop's menus match the window to the app's entry (procraft.desktop)
@@ -474,6 +482,7 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.handle_window_actions(event_loop);
         let _timed =
             Timed(if event == WindowEvent::RedrawRequested { "a frame" } else { "a window event" }, Instant::now());
         if self.projection.as_ref().is_some_and(|p| p.window.id() == id) {
@@ -609,6 +618,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.handle_window_actions(event_loop);
         // files opened from the Finder meanwhile come in as files dropped on the window do
         #[cfg(target_os = "macos")]
         {
@@ -678,6 +688,52 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn handle_window_actions(&mut self, event_loop: &ActiveEventLoop) {
+        let macos = self.ui.plugins().macos_top_bar();
+        crate::window_controls::set_macos_topbar(macos);
+        if self.macos_top_bar != macos {
+            self.macos_top_bar = macos;
+            if let Some(screen) = &self.screen {
+                screen.window.set_decorations(!macos);
+                screen.window.request_redraw();
+            }
+        }
+        if let Some(action) = window_controls::take_pending_action() {
+            match action {
+                window_controls::WindowControlAction::Close => {
+                    let waits = self.hide_while_opening();
+                    if self.leave_artwork() {
+                        files::finish_writing();
+                        files::tell_what_was_told();
+                        self.closed = true;
+                        event_loop.exit();
+                    } else if waits && let Some(screen) = &self.screen {
+                        screen.window.set_visible(true);
+                    }
+                }
+                window_controls::WindowControlAction::Minimize => {
+                    if let Some(screen) = &self.screen {
+                        screen.window.set_minimized(true);
+                    }
+                }
+                window_controls::WindowControlAction::Maximize => {
+                    if let Some(screen) = &self.screen {
+                        screen.window.set_maximized(!screen.window.is_maximized());
+                    }
+                }
+                window_controls::WindowControlAction::Drag => {
+                    if let Some(screen) = &self.screen {
+                        let _ = screen.window.drag_window();
+                    }
+                }
+                window_controls::WindowControlAction::ToggleFullscreen => {
+                    if let Some(screen) = &self.screen {
+                        toggle_full_screen(&screen.window, &mut self.maximised_before_full_screen);
+                    }
+                }
+            }
+        }
+    }
     /// Shows `session` in the window, in place of the artwork open.
     fn show(&mut self, session: Arc<CanvasSession>) {
         let Some(screen) = self.screen.as_mut() else { return };
