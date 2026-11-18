@@ -5091,11 +5091,12 @@ fn middle_ms(mut each: Vec<f64>) -> f64 {
     each.get(each.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// What a paper costs a frame against none, on a canvas of the tablet's size shown in its window,
+/// What a paper costs a frame against none, on a canvas of a tablet's size shown in its window,
 /// waiting for the GPU each time: a stroke drawn across it (its live part composited each frame),
-/// and the whole canvas composited again (as after a change to every layer). A paper that takes
-/// nothing is, pixel for pixel, none. The times are printed; a frame with a paper may take at most
-/// half again as long (and a little, for a busy machine).
+/// and the whole canvas composited again (as after a change to every layer). The three canvases (no
+/// paper, one that takes nothing, a paper) take turns frame by frame, so a busy machine slows each
+/// alike. A paper that takes nothing is, pixel for pixel, none. The times are printed; a frame with
+/// a paper may take at most half again as long, and a little.
 #[test]
 fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
     let Some(gpu) = gpu() else { return };
@@ -5111,45 +5112,53 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
         depth,
         colour,
     };
-    let to_screen = View::fit((2732, 2048), size).to_screen();
-    let run = |paper: Option<&procraft_gpu::CanvasPaper>| {
-        let mut doc = Document::new(2732, 2048);
-        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-        canvas.set_paper(&gpu, paper);
-        canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
-        gpu.flush();
-        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
-        let drawing: Vec<f64> = (0..45)
-            .map(|k| {
-                let stamps: Vec<Stamp> =
-                    (0..4).map(|j| dot(Vec2::new(200.0 + (k * 4 + j) as f32 * 12.0, 1000.0), 40.0)).collect();
-                canvas.add_stamps(&stamps);
-                let t = std::time::Instant::now();
-                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
-                gpu.flush();
-                t.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect();
+    let (w, h) = (2048, 1536);
+    let to_screen = View::fit((w, h), size).to_screen();
+    let papers = [None, Some(paper(0.0, 0.0, None)), Some(paper(0.6, 0.3, Some([0.96, 0.93, 0.85])))];
+    let mut canvases: Vec<(Document, Canvas)> = papers
+        .iter()
+        .map(|p| {
+            let mut doc = Document::new(w, h);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            canvas.set_paper(&gpu, p.as_ref());
+            canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
+            gpu.flush();
+            canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+            (doc, canvas)
+        })
+        .collect();
+    let mut drawing = [Vec::new(), Vec::new(), Vec::new()];
+    let mut whole = [Vec::new(), Vec::new(), Vec::new()];
+    let mut shown = Vec::new();
+    for k in 0..45 {
+        let stamps: Vec<Stamp> =
+            (0..4).map(|j| dot(Vec2::new(150.0 + (k * 4 + j) as f32 * 9.0, 760.0), 40.0)).collect();
+        for ((doc, canvas), times) in canvases.iter_mut().zip(drawing.iter_mut()) {
+            canvas.add_stamps(&stamps);
+            let t = std::time::Instant::now();
+            canvas.render(&gpu, doc, Some(shown_on(&view, format, size, to_screen, None)));
+            gpu.flush();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    for (doc, canvas) in &mut canvases {
         canvas.end_stroke();
-        let whole: Vec<f64> = (0..25)
-            .map(|_| {
-                canvas.invalidate();
-                let t = std::time::Instant::now();
-                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
-                gpu.flush();
-                t.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect();
-        let shown = read(&gpu, &texture, size.0, size.1);
-        (middle_ms(drawing), middle_ms(whole), shown, canvas.read_layer(&gpu, doc.current()).unwrap())
-    };
-    // once first, so what is made once (pipelines, textures) is made before any is timed
-    let _ = run(None);
-    let (none_drawing, none_whole, none_shown, none_layer) = run(None);
-    let (off_drawing, off_whole, off_shown, off_layer) = run(Some(&paper(0.0, 0.0, None)));
-    assert!(off_shown == none_shown && off_layer == none_layer, "a paper that takes nothing changes no pixel");
-    let (on_drawing, on_whole, on_shown, on_layer) = run(Some(&paper(0.6, 0.3, Some([0.96, 0.93, 0.85]))));
-    assert!(on_shown != none_shown && on_layer != none_layer, "a paper shows");
+        canvas.render(&gpu, doc, Some(shown_on(&view, format, size, to_screen, None)));
+        shown.push((read(&gpu, &texture, size.0, size.1), canvas.read_layer(&gpu, doc.current()).unwrap()));
+    }
+    for _ in 0..25 {
+        for ((doc, canvas), times) in canvases.iter_mut().zip(whole.iter_mut()) {
+            canvas.invalidate();
+            let t = std::time::Instant::now();
+            canvas.render(&gpu, doc, Some(shown_on(&view, format, size, to_screen, None)));
+            gpu.flush();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    assert!(shown[0] == shown[1], "a paper that takes nothing changes no pixel");
+    assert!(shown[2].0 != shown[0].0 && shown[2].1 != shown[0].1, "a paper shows");
+    let [none_drawing, off_drawing, on_drawing] = drawing.map(middle_ms);
+    let [none_whole, off_whole, on_whole] = whole.map(middle_ms);
     println!(
         "a frame drawing: no paper {none_drawing:.3} ms, off {off_drawing:.3} ms, paper {on_drawing:.3} ms; \
          the whole canvas again: no paper {none_whole:.3} ms, off {off_whole:.3} ms, paper {on_whole:.3} ms"
@@ -5161,32 +5170,30 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
     assert!(on_whole <= none_whole * 1.5 + 2.0, "whole: {on_whole:.3} ms with a paper, {none_whole:.3} without");
 }
 
-/// What a look on the screen costs a frame against none, on a canvas of the tablet's size in its
-/// window, waiting for the GPU each time; printed, and at most half again as long (and a little).
+/// What a look on the screen costs a frame against none, on a canvas of a tablet's size in its
+/// window, waiting for the GPU each time, the two taking turns frame by frame; printed, and at most
+/// half again as long (and a little).
 #[test]
 fn a_view_look_costs_a_frame_little_more_than_none() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     let (size, format) = ((1280u32, 800u32), wgpu::TextureFormat::Rgba8Unorm);
     let (_texture, view) = window_target(&gpu, size, format);
-    let mut doc = Document::new(2732, 2048);
+    let mut doc = Document::new(2048, 1536);
     doc.background = [0.8, 0.5, 0.2];
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-    let to_screen = View::fit((2732, 2048), size).to_screen();
-    let mut frames = |look: Option<procraft_gpu::ViewLook>| {
-        let each: Vec<f64> = (0..60)
-            .map(|_| {
-                let t = std::time::Instant::now();
-                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, look)));
-                gpu.flush();
-                t.elapsed().as_secs_f64() * 1000.0
-            })
-            .collect();
-        middle_ms(each)
-    };
-    let _ = frames(Some(procraft_gpu::GREY_LOOK));
-    let none = frames(None);
-    let grey = frames(Some(procraft_gpu::GREY_LOOK));
+    let to_screen = View::fit((2048, 1536), size).to_screen();
+    let looks = [None, Some(procraft_gpu::GREY_LOOK)];
+    let mut times = [Vec::new(), Vec::new()];
+    for _ in 0..60 {
+        for (look, each) in looks.iter().zip(times.iter_mut()) {
+            let t = std::time::Instant::now();
+            canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, *look)));
+            gpu.flush();
+            each.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    let [none, grey] = times.map(middle_ms);
     println!("a frame: no look {none:.3} ms, values {grey:.3} ms");
     assert!(grey <= none * 1.5 + 1.0, "{grey:.3} ms with a look, {none:.3} without");
 }
