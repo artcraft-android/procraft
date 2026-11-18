@@ -29,18 +29,19 @@ fn meta_prefix() -> String {
 }
 
 /// A brush library as its file holds it: its sets in order, and each tool's brush (set, brush).
+/// Its brushes as they are read ([`read_with`] can make them something else as it goes).
 #[derive(Clone, Debug, PartialEq)]
-pub struct LibraryFile {
-    pub sets: Vec<LibrarySetFile>,
+pub struct LibraryFile<B = BrushFile> {
+    pub sets: Vec<LibrarySetFile<B>>,
     pub tools: [Option<(usize, usize)>; TOOLS],
 }
 
 /// A set in a library file: its name, the stock set whose icon it shows, and its brushes.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LibrarySetFile {
+pub struct LibrarySetFile<B = BrushFile> {
     pub name: String,
     pub icon: Option<String>,
-    pub brushes: Vec<BrushFile>,
+    pub brushes: Vec<B>,
 }
 
 /// A list: its lines (name, order) in their order, and its properties (key, value).
@@ -130,7 +131,14 @@ pub fn is_library<'n>(names: impl Iterator<Item = &'n str>) -> bool {
 
 /// Reads a brush library file (its empty sets too); none if it isn't one or holds no brushes.
 pub fn read(bytes: &[u8]) -> Option<LibraryFile> {
-    let zip = ZipReader::new(bytes)?;
+    read_with(&ZipReader::new(bytes)?, Some)
+}
+
+/// Reads the brush library file that is the archive `zip` as [`read`] does, each brush made
+/// `make` of it as soon as it is read (a few side by side, a set's brush files read one at a time
+/// from the archive), so a big library is never held whole; a brush `make` makes nothing of is
+/// left out.
+pub fn read_with<B: Send>(zip: &ZipReader<'_>, make: impl Fn(BrushFile) -> Option<B> + Sync) -> Option<LibraryFile<B>> {
     let prefix = meta_prefix();
     let names: Vec<String> = zip.names().map(str::to_owned).collect();
     let meta_in = |folder: Option<&str>| {
@@ -141,6 +149,8 @@ pub fn read(bytes: &[u8]) -> Option<LibraryFile> {
         })?;
         Meta::read(&zip.read(name)?)
     };
+    // (a brush file read and made at once: no more of them held at a time than there are threads)
+    let made = |path: &String| zip.read(path).and_then(|b| brushfile::read(&b)).and_then(&make);
     // the sets' folders (an empty one kept by its empty file) and their brush files, as the zip
     // has them
     let mut folders: Vec<(String, Vec<String>)> = Vec::new();
@@ -165,12 +175,12 @@ pub fn read(bytes: &[u8]) -> Option<LibraryFile> {
     for s in top.order(&set_names) {
         let Some((folder, files)) = folders.get(s) else { continue };
         let meta = meta_in(Some(folder)).unwrap_or_default();
+        let ordered: Vec<&String> = meta.order(files).into_iter().filter_map(|f| files.get(f)).collect();
+        let paths: Vec<String> = ordered.iter().map(|file| format!("{folder}/{file}")).collect();
         let mut brushes = Vec::new();
         let mut kept = Vec::new();
-        for file in meta.order(files).into_iter().filter_map(|f| files.get(f)) {
-            let Some(brush) = zip.read(&format!("{folder}/{file}")).and_then(|b| brushfile::read(&b)) else {
-                continue;
-            };
+        for (file, brush) in ordered.iter().zip(crate::par::side_by_side(&paths, made)) {
+            let Some(brush) = brush.flatten() else { continue };
             brushes.push(brush);
             kept.push(file.trim_end_matches(".brush").to_owned());
         }

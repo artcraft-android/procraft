@@ -2303,13 +2303,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** [importOne] past the file's first bytes: [zipFile], a copy of a zip, read as what it holds. */
     private suspend fun importOne(uri: android.net.Uri, head: ByteArray?, name: String?, foreign: Boolean, zipFile: File?) {
-        val resolver = getApplication<Application>().contentResolver
         val kind = zipFile?.let { f -> withContext(Dispatchers.IO) { io.github.artcraftandroid.procraft.core.zipFileKind(f.path) } }
-        // the zip whole, read only for what needs all of it (brushes and a model's files)
+        // the zip whole, read only for what needs all of it (a model's files)
         suspend fun zipBytes() = zipFile?.let { f -> withContext(Dispatchers.IO) { runCatching { f.readBytes() }.getOrNull() } }
-        if (kind == io.github.artcraftandroid.procraft.core.ZipKind.Brushes) {
-            val bytes = zipBytes()
-            if (bytes == null || !addBrushes(bytes)) message = "This file has no brushes in it."
+        if (kind == io.github.artcraftandroid.procraft.core.ZipKind.Brushes && zipFile != null) {
+            addBrushesFile(zipFile, name)
         } else if ((foreign || kind == io.github.artcraftandroid.procraft.core.ZipKind.Swatches) && importSwatches(uri)) {
             message = "Palette added."
         } else if (foreign) {
@@ -2328,8 +2326,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val title = kind.name.substringAfterLast('/').substringBeforeLast('.')
             newFromModel(uri, if (name?.endsWith(".zip", ignoreCase = true) == true) name else "${name ?: "model"}.zip", bytes = zipBytes(), title = title)
         } else if (name != null && isOtherBrushFile(name)) {
-            val bytes = zipBytes() ?: withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
-            if (bytes == null || !addOtherBrushes(bytes, name)) message = "This file has no brushes in it."
+            // another app's brushes, read from a copy (a zip's is made already)
+            val copy = zipFile ?: withContext(Dispatchers.IO) { cacheCopy(uri) }
+            if (copy == null) {
+                if (!importCancelled) message = if (copyNoRoom) NO_ROOM_TO_IMPORT else "This file has no brushes in it."
+            } else {
+                try {
+                    addBrushesFile(copy, name)
+                } finally {
+                    if (copy !== zipFile) withContext(Dispatchers.IO) { copy.delete() }
+                }
+            }
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
             importPsd(uri, name)
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "%PDF") {
@@ -2431,14 +2438,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The last [cacheCopy] failed for want of room on the device. */
+    @Volatile
+    private var copyNoRoom = false
+
     /**
      * The file at [uri] copied whole into the cache (streamed through, never held in memory), or
-     * none; the import card's pie follows it, and its Cancel stops it.
+     * none (with [copyNoRoom] set when there wasn't room for it); the import card's pie follows it,
+     * and its Cancel stops it.
      */
     private fun cacheCopy(uri: android.net.Uri): File? {
         val temp = File(getApplication<Application>().cacheDir, "import-${System.nanoTime()}.zip")
         val resolver = getApplication<Application>().contentResolver
         val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: -1L
+        copyNoRoom = false
+        // a file the device has no room for isn't begun
+        if (size > 0 && temp.parentFile?.usableSpace?.let { it < size + COPY_ROOM_SPARE } == true) {
+            copyNoRoom = true
+            return null
+        }
         return runCatching {
             resolver.openInputStream(uri)?.use { input ->
                 temp.outputStream().use { out ->
@@ -2456,6 +2474,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             } ?: error("nothing to read")
             temp
         }.getOrElse {
+            // (the device filling up meanwhile, whatever else wrote to it)
+            copyNoRoom = it is java.io.IOException && it.message.orEmpty().contains("ENOSPC")
             if (!importCancelled) AppLog.e("ProCraft", "copying a file in", it)
             temp.delete()
             null
@@ -5298,35 +5318,91 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * The brushes in the file at [uri], called [name]: copied into the cache first (streamed
+     * through, so a set of a gigabyte and more is never held in memory), then read from there a
+     * brush at a time (see [addBrushesFile]).
+     */
     private suspend fun importBrushesFrom(uri: android.net.Uri, name: String?) {
-        val read = withContext(Dispatchers.IO) { runCatching { readAll(uri) } }
-        val bytes = read.getOrNull()
-        if (bytes == null) {
-            message = if (read.exceptionOrNull() is OutOfMemoryError) "This file is too large to import." else "This file could not be read."
+        val copy = withContext(Dispatchers.IO) { cacheCopy(uri) }
+        if (copy == null) {
+            if (!importCancelled) message = if (copyNoRoom) NO_ROOM_TO_IMPORT else "This file could not be read."
             return
         }
-        // the name says which kind, when it has one we know; else our own kinds first, then
-        // the other apps' (each told apart by its contents)
-        val added = session?.let {
-            // the shared core tells the kinds apart and makes them brushes off the main
-            // thread; they join the library here, once nothing holds a place in it
-            val read = withContext(Dispatchers.Default) {
-                // plugins' brush engines make theirs of the file here too, off the main thread
-                io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)?.also { r -> it.makeEngineBrushes(r) }
-            }
+        try {
+            addBrushesFile(copy, name)
+        } finally {
+            withContext(Dispatchers.IO) { copy.delete() }
+        }
+    }
+
+    /**
+     * The brushes in [file] (a copy in the cache), called [name], into the library (a set of their
+     * own, or a brush at the top of a set, shown), or with no canvas open the file kept (moved out
+     * of the cache) until one opens; told when it has none. The shared core tells the kinds apart
+     * and reads a brush, set or library file a brush at a time off the main thread, the import
+     * card's pie following it; they join the library here, once nothing holds a place in it.
+     */
+    private suspend fun addBrushesFile(file: File, name: String?) {
+        val s = session
+        if (s == null) {
+            // ours are told by the names in the zip; another app's file is read to see that it holds any
+            val ours = withContext(Dispatchers.IO) { io.github.artcraftandroid.procraft.core.zipFileKind(file.path) } ==
+                io.github.artcraftandroid.procraft.core.ZipKind.Brushes
+            val any = ours || readBrushesFile(file, name)?.also { it.destroy() } != null
             if (importCancelled) return
-            read?.let {
-                brushesRead += it
-                addBrushesRead()
-            } != null
-        } ?: if (importCancelled) {
+            if (!any) {
+                message = "This file has no brushes in it."
+                return
+            }
+            val kept = withContext(Dispatchers.IO) {
+                pendingBrushDir.mkdirs()
+                val to = File(pendingBrushDir, pendingBrushFileName(System.nanoTime(), name ?: "Imported.$BRUSH_EXTENSION"))
+                file.renameTo(to) || runCatching { file.copyTo(to) }.isSuccess
+            }
+            message = if (kept) "Brushes will be added to the library when a canvas opens." else NO_ROOM_TO_IMPORT
             return
-        } else if (name != null && isOtherBrushFile(name)) {
-            addOtherBrushes(bytes, name)
-        } else {
-            addBrushes(bytes) || addOtherBrushes(bytes, name ?: "Imported")
         }
-        if (!added) message = "This file has no brushes in it."
+        val read = readBrushesFile(file, name)
+        if (importCancelled) {
+            read?.destroy()
+            return
+        }
+        if (read == null) {
+            message = "This file has no brushes in it."
+            return
+        }
+        // plugins' brush engines make theirs of the file here too, off the main thread
+        withContext(Dispatchers.Default) { runCatching { s.makeEngineBrushes(read) } }
+        brushesRead += read
+        addBrushesRead()
+    }
+
+    /**
+     * The brushes in [file], called [name], read off the main thread a brush at a time, the import
+     * card's pie following from where the copy left it; its Cancel stops the reading. None if it
+     * holds none (or it was stopped).
+     */
+    private suspend fun readBrushesFile(file: File, name: String?): io.github.artcraftandroid.procraft.core.BrushesRead? {
+        val reading = io.github.artcraftandroid.procraft.core.BrushFileReading()
+        val from = importStep
+        val following = viewModelScope.launch {
+            while (true) {
+                if (importCancelled) reading.cancel()
+                importStep = from + (1f - from) * reading.progress()
+                kotlinx.coroutines.delay(EXPORT_POLL_MS)
+            }
+        }
+        return try {
+            withContext(Dispatchers.Default) {
+                runCatching { io.github.artcraftandroid.procraft.core.readBrushesFile(file.path, name, reading) }
+                    .onFailure { AppLog.e("ProCraft", "reading a brush file", it) }
+                    .getOrNull()
+            }
+        } finally {
+            following.cancel()
+            reading.destroy()
+        }
     }
 
     /** Brushes read from files, waiting to join the library. */
@@ -5360,84 +5436,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         libraryChanged()
     }
 
-    /** All of [uri]'s bytes, read into one array of the file's own size when it is known. */
-    private fun readAll(uri: android.net.Uri): ByteArray {
-        val resolver = getApplication<Application>().contentResolver
-        val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: -1L
-        val stream = resolver.openInputStream(uri) ?: throw java.io.IOException("no stream")
-        return stream.use { input ->
-            if (size in 0..Int.MAX_VALUE.toLong()) {
-                val out = ByteArray(size.toInt())
-                var at = 0
-                while (at < out.size) {
-                    val n = input.read(out, at, out.size - at)
-                    if (n < 0) break
-                    at += n
-                }
-                if (at < out.size) {
-                    out.copyOf(at)
-                } else {
-                    // a file that grew since its size was read
-                    val more = input.readBytes()
-                    if (more.isEmpty()) out else out + more
-                }
-            } else {
-                input.readBytes()
-            }
-        }
-    }
-
-    /**
-     * Another app's brushes [bytes] as a set of brushes named after the file [name] (shown),
-     * or, with no canvas open, kept until one opens; false if the file has none.
-     */
-    private suspend fun addOtherBrushes(bytes: ByteArray, name: String): Boolean {
-        val setName = name.substringBeforeLast('.').trim()
-        val s = session
-        if (s == null) {
-            // read once now (and let go: it is read again when a canvas opens), so a file with
-            // none in it is told so here rather than promised and then dropped without a word
-            val any = withContext(Dispatchers.Default) {
-                runCatching { io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)?.also { it.destroy() } != null }.getOrDefault(false)
-            }
-            if (!any) return false
-            withContext(Dispatchers.IO) {
-                pendingBrushDir.mkdirs()
-                File(pendingBrushDir, pendingBrushFileName(System.nanoTime(), name)).writeBytes(bytes)
-            }
-            message = "Brushes will be added to the library when a canvas opens."
-            return true
-        }
-        val set = withContext(Dispatchers.Default) { s.importOtherBrushes(bytes, setName) } ?: return false
-        shownSet = set.toInt()
-        libraryChanged()
-        return true
-    }
-
-    /**
-     * Brushes from a brush or set file [bytes] into the library (shown), or, with no canvas open,
-     * kept until one opens; false if the file has none.
-     */
-    private suspend fun addBrushes(bytes: ByteArray): Boolean {
-        val s = session
-        if (s == null) {
-            if (!isBrushFile(bytes)) return false
-            withContext(Dispatchers.IO) {
-                pendingBrushDir.mkdirs()
-                File(pendingBrushDir, "${System.nanoTime()}.$BRUSH_EXTENSION").writeBytes(bytes)
-            }
-            message = "Brushes will be added to the library when a canvas opens."
-            return true
-        }
-        val set = s.importBrushes(bytes)
-            // files of ours, from before
-            ?: runCatching { s.importBrushFile(shownSet.coerceAtLeast(0).toUInt(), bytes.decodeToString()) }.getOrNull()
-            ?: return false
-        shownSet = set.toInt()
-        libraryChanged()
-        return true
-    }
-
     /** Whether a file named [name] holds another app's brushes (see [OTHER_BRUSH_EXTENSIONS]). */
     private fun isOtherBrushFile(name: String) = OTHER_BRUSH_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
 
@@ -5456,9 +5454,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (session != null) {
                 val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
                 val read = withContext(Dispatchers.Default) {
-                    // named after the set, for another app's (kept as .abr by earlier versions)
+                    // named after the set, for another app's (kept as .abr by earlier versions); a
+                    // big set read a brush at a time, never whole
                     runCatching {
-                        io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-'))
+                        io.github.artcraftandroid.procraft.core.readBrushesFile(f.path, f.name.substringAfter('-'), null)
                             ?.also { r -> session?.makeEngineBrushes(r) }
                     }.getOrNull()
                 }
@@ -5481,9 +5480,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private val pendingBrushDir get() = File(getApplication<Application>().filesDir, "pending-brushes")
-
-    /** Whether [bytes] is a zip holding a brush or a set of them. */
-    private fun isBrushFile(bytes: ByteArray): Boolean = io.github.artcraftandroid.procraft.core.isBrushZip(bytes)
 
     fun chooseBrush(b: BrushInfo) {
         val s = session ?: return
@@ -8700,6 +8696,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
          * creeps on towards [IMPORT_CREEP_TO], this share of the way left each poll.
          */
         private const val IMPORT_COPY_SHARE = 0.6f
+
+        /** Room left on the device past a file's size before it is copied in (bytes). */
+        private const val COPY_ROOM_SPARE = 64L shl 20
+
+        /** Told once when the device has no room for a file brought in. */
+        private const val NO_ROOM_TO_IMPORT = "There isn't enough room on this device to import this file."
         private const val IMPORT_CREEP_TO = 0.95f
         private const val IMPORT_CREEP = 0.03f
 

@@ -139,21 +139,19 @@ pub fn keep_pending_brushes(paths: &[PathBuf]) -> bool {
     kept
 }
 
-/// The brush files kept while no canvas was open, oldest first, each with its own name; taken
-/// out of the folder.
-pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
+/// The brush files kept while no canvas was open, oldest first, each with its own name, to be
+/// read where they are and then taken out of the folder.
+pub fn take_pending_brushes() -> Vec<crate::library::BrushFileIn> {
     let Ok(read) = std::fs::read_dir(pending_brushes_dir()) else { return Vec::new() };
     let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
     paths
         .into_iter()
         .filter_map(|path| {
-            let bytes = std::fs::read(&path).ok();
-            let _ = std::fs::remove_file(&path);
             let kept = path.file_name()?.to_string_lossy().into_owned();
             // the name it came with, after the stamp and the number
             let name = kept.splitn(3, '-').nth(2).unwrap_or(&kept).to_owned();
-            Some((bytes?, name))
+            Some(crate::library::BrushFileIn { path, name, taken: true })
         })
         .collect()
 }
@@ -313,6 +311,13 @@ pub fn pick_sound(title: &str) -> Option<(Vec<u8>, String)> {
 }
 
 /// A file the user picks (titled `title`), read whole, with its name.
+/// A file the user picks, and its name; none if they pick none.
+pub fn pick_path(title: &str) -> Option<(PathBuf, String)> {
+    let path = dialog().set_title(title).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Some((path, name))
+}
+
 pub fn pick_file(title: &str) -> Option<(Vec<u8>, String)> {
     let path = dialog().set_title(title).pick_file()?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

@@ -374,7 +374,7 @@ impl Interface {
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
-        self.library.add_brushes(session, crate::files::take_pending_brushes(), true);
+        self.library.add_brushes(session, crate::files::take_pending_brushes(), true, &mut self.export_card);
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
@@ -1682,14 +1682,13 @@ impl Interface {
             let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
             if PICTURES.contains(&extension.as_str()) || VIDEOS.contains(&extension.as_str()) {
                 pictures.push(path.clone());
-            } else if crate::files::is_brush_file(path)
-                && let Ok(bytes) = std::fs::read(path)
-            {
+            } else if crate::files::is_brush_file(path) {
+                // read where it is, a brush at a time: a big set is never held whole
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                brushes.push((bytes, name));
+                brushes.push(crate::library::BrushFileIn { path: path.clone(), name, taken: false });
             }
         }
-        self.library.add_brushes(session, brushes, true);
+        self.library.add_brushes(session, brushes, true, &mut self.export_card);
         if !pictures.is_empty() {
             self.open = None;
             self.insert_files(session, pictures, false);
@@ -1699,6 +1698,11 @@ impl Interface {
     /// Brushes read from files meanwhile added to the library and told of (when asked to), the
     /// library kept. True while more are being read or wait to be added.
     fn brushes_added(&mut self, session: &CanvasSession) -> bool {
+        // a file picked from the library's "+"
+        if let Some((path, name, tell)) = self.library.take_picked_file() {
+            let file = crate::library::BrushFileIn { path, name, taken: false };
+            self.library.add_brushes(session, vec![file], tell, &mut self.export_card);
+        }
         let added = self.library.added(session, self.studio.open);
         // brushes from a file are on disk once they show in the library, not later on a thread
         // of its own: the app stopping right after (closed, or crashing) still has them

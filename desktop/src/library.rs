@@ -14,7 +14,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_any_brushes};
+use procraft_core::{BrushFileReading, BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_brushes_from};
 
 use crate::alert::{Alert, Answer};
 use crate::icons;
@@ -110,6 +110,14 @@ struct Preview {
 /// A sample stroke drawn on its thread: the brush's, its picture (none if it draws nothing), and
 /// whether it runs under the name.
 type DrawnPreview = ((u32, u32), Option<(egui::ColorImage, bool)>);
+
+/// A brush file to read: where it is, its name, and whether it is taken out once read (one kept
+/// while no canvas was open).
+pub struct BrushFileIn {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub taken: bool,
+}
 
 /// What a press on a brush turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,9 +307,12 @@ pub struct Library {
     /// The studio asked for: on the brush now chosen, or on one just made (Cancel throws it away).
     pub studio: Option<Option<(u32, u32)>>,
     /// Brush files read on threads of their own (another app's big ones take a while): each
-    /// batch's brushes come back (a file that held none left out), and whether to say that they
-    /// came in.
-    importing: Vec<(std::sync::mpsc::Receiver<Vec<ReadBrushes>>, bool)>,
+    /// batch's brushes come back (a file that held none left out; none at all if Cancel stopped
+    /// it), and whether to say that they came in.
+    importing: Vec<(std::sync::mpsc::Receiver<Option<Vec<ReadBrushes>>>, bool)>,
+    /// A brush file picked from a "+" menu, to be read (with the import card, which the app
+    /// shows), and whether to say that its brushes came in.
+    picked_file: Option<(std::path::PathBuf, String, bool)>,
     /// The search: what is typed, whether its field has the keys, whether it has come down into
     /// sight, and whether the sets and the brushes were at their tops last frame.
     query: String,
@@ -329,24 +340,63 @@ impl Library {
             || self.card_menu.is_open()
     }
 
-    /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
-    /// library once read (`added`). `tell`: say that they came in (else only that they held none).
-    pub fn add_brushes(&mut self, session: &CanvasSession, files: Vec<(Vec<u8>, String)>, tell: bool) {
+    /// Brush files read where they are on a thread of their own (a brush, set or library file a
+    /// brush at a time, never held whole), `card` showing how far it has come (its Cancel stops
+    /// it) unless an export has it; their brushes added to the library once read (`added`).
+    /// `tell`: say that they came in (else only that they held none).
+    pub fn add_brushes(
+        &mut self,
+        session: &CanvasSession,
+        files: Vec<BrushFileIn>,
+        tell: bool,
+        card: &mut crate::export_card::ExportCard,
+    ) {
         if files.is_empty() {
             return;
         }
         let (done, importing) = std::sync::mpsc::channel();
         // plugins' brush engines make theirs of the files there too
         let engines = session.brush_engines();
+        let reading = BrushFileReading::new();
+        let shown = Arc::clone(&reading);
+        let exporting = (!card.busy()).then(|| card.start_importing(move || shown.progress()));
         std::thread::spawn(move || {
-            let read = files
-                .into_iter()
-                .filter_map(|(bytes, name)| read_any_brushes(&bytes, Some(name)))
-                .map(|read| engines.make(read))
-                .collect();
-            let _ = done.send(read);
+            let read: Vec<ReadBrushes> = std::thread::scope(|scope| {
+                let (files, reading) = (&files, &reading);
+                let worker = scope.spawn(move || {
+                    let mut read = Vec::new();
+                    for file in files {
+                        if let Some(brushes) = read_brushes_from(&file.path, Some(file.name.clone()), reading) {
+                            read.push(engines.make(brushes));
+                        }
+                        if file.taken && !reading.cancelled() {
+                            let _ = std::fs::remove_file(&file.path);
+                        }
+                    }
+                    read
+                });
+                // Cancel on the card stops the reading at its next brush
+                while !worker.is_finished() {
+                    if exporting.as_ref().is_some_and(crate::export_card::Exporting::cancelled) {
+                        reading.cancel();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                worker.join().unwrap_or_default()
+            });
+            let cancelled = reading.cancelled();
+            if let Some(exporting) = &exporting {
+                exporting.ended(!cancelled && !read.is_empty());
+            }
+            let _ = done.send((!cancelled).then_some(read));
         });
         self.importing.push((importing, tell));
+    }
+
+    /// A brush file picked from a "+" menu, waiting to be read, and whether to say that its
+    /// brushes came in.
+    pub fn take_picked_file(&mut self) -> Option<(std::path::PathBuf, String, bool)> {
+        self.picked_file.take()
     }
 
     /// Brushes read meanwhile added to the library, each batch's set shown: whether any came in,
@@ -364,10 +414,12 @@ impl Library {
         }
         let mut came = Vec::new();
         self.importing.retain(|(r, tell)| match r.try_recv() {
-            Ok(read) => {
+            Ok(Some(read)) => {
                 came.push((read, *tell));
                 false
             }
+            // stopped with Cancel: nothing to add or say
+            Ok(None) => false,
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
@@ -402,7 +454,7 @@ impl Library {
     /// they are kept with the rest).
     pub fn finish_importing(&mut self, session: &CanvasSession) {
         for (importing, _) in std::mem::take(&mut self.importing) {
-            if let Ok(read) = importing.recv() {
+            if let Ok(Some(read)) = importing.recv() {
                 self.add_read(session, read);
             }
         }
@@ -956,9 +1008,9 @@ impl Library {
                 self.library_changed();
             }
             _ => {
-                let Some(file) = crate::files::pick_file("Import brushes") else { return };
+                let Some((path, name)) = crate::files::pick_path("Import brushes") else { return };
                 self.shown_set = Some(shown);
-                self.add_brushes(session, vec![file], false);
+                self.picked_file = Some((path, name, false));
             }
         }
     }

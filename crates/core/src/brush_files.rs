@@ -160,20 +160,24 @@ pub enum ReadBrushes {
 
 /// A library file's sets in `bytes`, as a library called `name`; none if it isn't one.
 fn read_library(bytes: &[u8], name: String) -> Option<ReadBrushes> {
-    let file = brushlibrary::read(bytes)?;
+    let zip = procraft_engine::zip::ZipReader::new(bytes)?;
+    Some(library_brushes(brushlibrary::read_with(&zip, |f| Some(brush_from(&f)))?, name))
+}
+
+/// A library file's sets (their brushes made already) as a library called `name`.
+fn library_brushes(file: brushlibrary::LibraryFile<Brush>, name: String) -> ReadBrushes {
     let sets = file
         .sets
-        .iter()
+        .into_iter()
         .map(|set| {
             // its icon as the stock set it names has it
             let icon = crate::brush_library::shipped_icon(set.icon.as_deref().unwrap_or(&set.name));
-            let brushes = procraft_engine::par::side_by_side(&set.brushes, brush_from).into_iter().flatten().collect();
-            (set.name.clone(), icon, brushes)
+            (set.name, icon, set.brushes)
         })
         .collect();
     // the file's tools are paint, smudge and erase
     let [paint, smudge, erase] = file.tools;
-    Some(ReadBrushes::Library { name, sets, tools: [paint, erase, smudge].map(|t| t.unwrap_or((0, 0))) })
+    ReadBrushes::Library { name, sets, tools: [paint, erase, smudge].map(|t| t.unwrap_or((0, 0))) }
 }
 
 /// Our brush file's or set file's brushes in `bytes`.
@@ -321,6 +325,136 @@ pub struct BrushesRead(std::sync::Mutex<Option<ReadBrushes>>);
 #[uniffi::export]
 pub fn read_brushes(bytes: Vec<u8>, file_name: Option<String>) -> Option<std::sync::Arc<BrushesRead>> {
     read_any_brushes(&bytes, file_name).map(|read| std::sync::Arc::new(BrushesRead(std::sync::Mutex::new(Some(read)))))
+}
+
+/// How far reading a brush file ([`read_brushes_file`]) has come, and whether it is to stop: the
+/// interface shows the one and may ask for the other, from another thread.
+#[derive(uniffi::Object, Default)]
+pub struct BrushFileReading {
+    /// Brushes read so far, of how many there are (none known yet: 0).
+    done: std::sync::atomic::AtomicUsize,
+    of: std::sync::atomic::AtomicUsize,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+#[uniffi::export]
+impl BrushFileReading {
+    #[uniffi::constructor]
+    pub fn new() -> std::sync::Arc<BrushFileReading> {
+        std::sync::Arc::new(BrushFileReading::default())
+    }
+
+    /// How far the reading has come, 0..1 (0 while it doesn't know how many brushes there are).
+    pub fn progress(&self) -> f32 {
+        let of = self.of.load(std::sync::atomic::Ordering::Relaxed);
+        let done = self.done.load(std::sync::atomic::Ordering::Relaxed);
+        if of == 0 { 0.0 } else { (done as f32 / of as f32).min(1.0) }
+    }
+
+    /// Stops the reading: it reads no more brushes, and what it read is let go.
+    pub fn cancel(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl BrushFileReading {
+    pub fn cancelled(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// There are `of` brushes to read.
+    fn begin(&self, of: usize) {
+        self.done.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.of.store(of, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `file` made a brush, unless the reading was stopped; counted.
+    fn made(&self, file: Option<BrushFile>) -> Option<Brush> {
+        if self.cancelled() {
+            return None;
+        }
+        let brush = file.map(|f| brush_from(&f));
+        self.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        brush
+    }
+}
+
+/// How much memory reading one brush of an archive may take while its pictures are decoded, at
+/// the least (a few are read side by side, as many as fit in the budget for such work).
+const BRUSH_READ_BYTES: usize = 64 << 20;
+
+/// The brushes in the file at `path` the user chose, called `file_name` (if known), as
+/// [`read_any_brushes`] reads them, not yet added. A brush, set or library file (an archive) is
+/// read a brush at a time, each made a brush as it is read and its file's bytes let go, so however
+/// big the archive only a few brushes' files are held at once; `reading` follows it and can stop
+/// it (it then reads as none). Another kind of file is read whole. None if it holds no brushes.
+pub fn read_brushes_from(
+    path: &std::path::Path,
+    file_name: Option<String>,
+    reading: &BrushFileReading,
+) -> Option<ReadBrushes> {
+    let name = file_name.clone().unwrap_or_default();
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
+    let stem = stem.trim().to_owned();
+    let other = OTHER_BRUSH_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(ext));
+    if !other && let Some(zip) = procraft_engine::zip::ZipReader::open(path) {
+        if ext.eq_ignore_ascii_case(brushlibrary::EXTENSION) || brushlibrary::is_library(zip.names()) {
+            reading.begin(zip.names().filter(|n| n.ends_with(".brush")).count());
+            let file = brushlibrary::read_with(&zip, |f| reading.made(Some(f)));
+            if reading.cancelled() {
+                return None;
+            }
+            if let Some(file) = file {
+                return Some(library_brushes(file, stem));
+            }
+        }
+        if let Some((set_name, folders)) = brushfile::set_folders(&zip) {
+            reading.begin(folders.len());
+            // as many side by side as their pictures fit, by the biggest brush's files
+            let mut sizes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for f in zip.facts() {
+                if let Some((folder, _)) = f.name.split_once('/') {
+                    let size = sizes.entry(folder).or_default();
+                    *size = size.saturating_add(f.size);
+                }
+            }
+            let each = sizes.values().max().map_or(0, |&s| s.saturating_mul(4)).max(BRUSH_READ_BYTES);
+            let made = procraft_engine::par::side_by_side_within(&folders, each, |folder| {
+                reading.made(brushfile::read_folder(&zip, folder))
+            });
+            if reading.cancelled() {
+                return None;
+            }
+            let brushes: Vec<Brush> = made.into_iter().flatten().flatten().collect();
+            if !brushes.is_empty() {
+                return Some(ReadBrushes::Set { name: set_name, brushes, file: None });
+            }
+        }
+        if let Some(file) = brushfile::read_zip(&zip) {
+            return Some(ReadBrushes::One(Box::new(brush_from(&file))));
+        }
+    }
+    if reading.cancelled() {
+        return None;
+    }
+    // another app's, or one of ours from before (its text): read whole
+    let bytes = std::fs::read(path).ok()?;
+    read_any_brushes(&bytes, file_name)
+}
+
+/// The brushes in the file at `path` the user chose, called `file_name` (if known), as
+/// [`read_brushes_from`] reads them (a brush, set or library file a brush at a time, never held
+/// whole), not yet added; `reading`, if given, follows it and can stop it. None if it holds none
+/// (or it was stopped).
+#[uniffi::export]
+pub fn read_brushes_file(
+    path: String,
+    file_name: Option<String>,
+    reading: Option<std::sync::Arc<BrushFileReading>>,
+) -> Option<std::sync::Arc<BrushesRead>> {
+    let reading = reading.unwrap_or_default();
+    read_brushes_from(std::path::Path::new(&path), file_name, &reading)
+        .map(|read| std::sync::Arc::new(BrushesRead(std::sync::Mutex::new(Some(read)))))
 }
 
 #[uniffi::export]
