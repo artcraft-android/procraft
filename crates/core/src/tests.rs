@@ -14800,6 +14800,94 @@ fn nothing_a_selection_leaves_out_changes_under_a_brush_that_moves_paint() {
     }
 }
 
+/// Wet paint that keeps what it has laid tile by tile (building up gradually, it keeps how much
+/// each pixel has taken; with a second brush, its paint laid apart) comes out pixel for pixel the
+/// same where a copy from a texture can put its rows in a buffer only at multiples of 512 bytes,
+/// as Direct3D 12 without unrestricted copy pitches does (on Windows 10, and with older drivers):
+/// big strokes to and fro across the tiles of a canvas over a picture, a frame every few samples.
+/// A tile's paint copied into a window wider than it had written over the rest of its rows there,
+/// and blocks of the layer went blank, stale or doubled.
+#[test]
+fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_of_512_bytes() {
+    use procraft_engine::brush::{Brush, Rendering};
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let side = 1100u32;
+    let n = side as usize;
+    // every tile of the picture its own
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        let tile = (x / 256 * 50 + y / 256 * 90) % 256;
+        *px = [(x / 5 % 256) as u8, (y / 5 % 256) as u8, tile as u8, 255];
+    }
+    let gradual = |b: &Brush| b.mixes_wet() && b.rendering == Rendering::Gradual;
+    let with_second = |b: &Brush| b.mixes_wet() && b.secondary.is_some();
+    let kinds = [("gradual", gradual as fn(&Brush) -> bool), ("with a second", with_second)];
+    let layers = [false, true].map(|placed| {
+        let s = session_on(gpu.clone(), side, 800);
+        s.shared.lock().canvas.as_mut().unwrap().emulate_placed_copies(placed);
+        let layer =
+            s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
+        let layer = layer.unwrap();
+        let picks: Vec<(usize, usize)> = {
+            let st = s.shared.lock();
+            kinds
+                .iter()
+                .map(|(kind, want)| {
+                    let found = st
+                        .library
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+                    found.unwrap_or_else(|| panic!("a stock brush of wet paint {kind}"))
+                })
+                .collect()
+        };
+        let frame = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            st.canvas.as_mut().unwrap().render(st.gpu.as_ref().unwrap(), &mut st.doc, None);
+        };
+        for (k, (set, index)) in picks.into_iter().enumerate() {
+            assert!(s.select_brush(set as u32, index as u32));
+            s.set_brush_size(1.0);
+            s.set_color(0.1 + 0.6 * k as f32, 0.2, 0.7 - 0.5 * k as f32);
+            // across, then down, swinging over most of the tiles
+            let ways: [&dyn Fn(f32) -> (f32, f32); 2] =
+                [&|t| (40.0 + t * 1020.0, 550.0 + (t * 19.0).sin() * 470.0), &|t| {
+                    (550.0 + (t * 17.0).cos() * 470.0, 40.0 + t * 1020.0)
+                }];
+            for way in ways {
+                let at = |e: usize| {
+                    let (x, y) = way(e as f32 / 120.0);
+                    PenSample { pressure: 0.5 + 0.5 * (e as f32 * 0.3).sin().abs(), ..sample(x, y, e as f64 * 6.0) }
+                };
+                s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+                for e in 1..=120 {
+                    s.stroke_add(vec![at(e)]);
+                    if e % 3 == 0 {
+                        frame(&s);
+                    }
+                }
+                s.stroke_end(vec![]);
+                frame(&s);
+            }
+        }
+        assert_eq!(s.shared.lock().gpu.as_ref().unwrap().errors(), 0, "GPU validation errors");
+        s.copy_layer_contents(layer).unwrap().rgba
+    });
+    let [direct, placed] = &layers;
+    assert_ne!(direct, &rgba, "the strokes painted");
+    // the 256-pixel tiles that differ
+    let mut tiles = std::collections::BTreeSet::new();
+    for (i, (a, b)) in direct.as_chunks::<4>().0.iter().zip(placed.as_chunks::<4>().0).enumerate() {
+        if a != b {
+            tiles.insert((i % n / 256, i / n / 256));
+        }
+    }
+    assert!(tiles.is_empty(), "tiles that came out otherwise: {tiles:?}");
+}
+
 /// How long a large library takes to keep and to open again: `LIBRARY_CORPUS` a folder of brush
 /// files (searched through), all brought in first.
 #[test]

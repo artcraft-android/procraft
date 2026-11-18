@@ -2487,6 +2487,9 @@ pub struct Canvas {
     stamp_capacity: u64,
     /// The most stamps' work sent to the GPU as one piece (see [`WORK_AT_ONCE`]).
     work_at_once: u64,
+    /// Copies into a smudge window's buffers go as Direct3D 12 without unrestricted copy pitches
+    /// makes them (see [`Canvas::emulate_placed_copies`]).
+    placed_copies: bool,
     /// The most stamps one render uploads (see [`STAMPS_AT_ONCE`]).
     stamps_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
@@ -2862,6 +2865,7 @@ impl Canvas {
             stamp_buffer,
             stamp_capacity,
             work_at_once: WORK_AT_ONCE,
+            placed_copies: false,
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
             filter_run: None,
@@ -3735,6 +3739,14 @@ impl Canvas {
     #[doc(hidden)]
     pub fn set_work_at_once(&mut self, work: u64) {
         self.work_at_once = work;
+    }
+
+    /// Copies from textures into a smudge window's buffers made as Direct3D 12 without unrestricted
+    /// copy pitches makes them, where an offset isn't one it places (see `smudge::PLACEMENT`): for
+    /// tests on other GPUs.
+    #[doc(hidden)]
+    pub fn emulate_placed_copies(&mut self, on: bool) {
+        self.placed_copies = on;
     }
 
     /// Uploads at most this many stamps in a render, in place of [`STAMPS_AT_ONCE`]: for tests.
