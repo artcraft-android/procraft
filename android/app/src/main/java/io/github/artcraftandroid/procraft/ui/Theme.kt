@@ -42,6 +42,10 @@ object Pc {
 
     /** Plugins' menus with choices for Classic's corner, while any has: a button there opens them. */
     var classicMenu by mutableStateOf<ClassicMenu?>(null)
+
+    /** The notices that show, as the plugins say: one of something done may not; one of something gone wrong always does. */
+    var noticesShown by mutableStateOf(io.github.artcraftandroid.procraft.core.NoticeKind.entries.toSet())
+
     /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
     var accentGiven by mutableStateOf<Color?>(null)
 

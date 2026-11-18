@@ -46,6 +46,10 @@ pub struct Picking {
 
 pub struct Overlays {
     notice: Option<Notice>,
+    /// Whether the notices of something done go by unseen, as the plugins said at their generation
+    /// (asked again when it changes).
+    hide_done: bool,
+    notices_for: Option<u64>,
     /// Where the notice band shows this frame, to frost the canvas under it (as measured).
     pub frost: Option<Rect>,
     pub picking: Option<Picking>,
@@ -77,6 +81,8 @@ impl Default for Overlays {
     fn default() -> Overlays {
         Overlays {
             notice: None,
+            hide_done: false,
+            notices_for: None,
             frost: None,
             picking: None,
             spent: None,
@@ -93,9 +99,35 @@ impl Default for Overlays {
 }
 
 impl Overlays {
-    /// Shows `text` in the band under the top bar, in place of any message there.
+    /// Shows `text` in the band under the top bar, in place of any message there: a notice of
+    /// something gone wrong, which always shows.
     pub fn notice(&mut self, text: impl Into<String>, warning: bool) {
         self.notice = Some(Notice { text: text.into(), since: Instant::now(), warning });
+    }
+
+    /// Shows `text`, the notice of something done (copied, cleared, applied, switched on), unless
+    /// a plugin hides those.
+    pub fn done(&mut self, text: impl Into<String>, warning: bool) {
+        if !self.hide_done {
+            self.notice(text, warning);
+        }
+    }
+
+    /// Shows `text`, a notice of `kind`: [`Overlays::notice`] or [`Overlays::done`].
+    pub fn notice_of(&mut self, text: impl Into<String>, warning: bool, kind: procraft_core::NoticeKind) {
+        match kind {
+            procraft_core::NoticeKind::Problem => self.notice(text, warning),
+            procraft_core::NoticeKind::Step | procraft_core::NoticeKind::Done => self.done(text, warning),
+        }
+    }
+
+    /// Which notices show, as `plugins` say now (asked again only when they change).
+    pub fn follow_plugins(&mut self, plugins: &procraft_core::Plugins) {
+        let now = plugins.generation();
+        if self.notices_for != Some(now) {
+            self.notices_for = Some(now);
+            self.hide_done = !plugins.shows_notice(procraft_core::NoticeKind::Done);
+        }
     }
 
     /// The brush's outline goes to (x, y), window pixels (sized and styled as the stroke begins),

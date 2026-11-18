@@ -588,6 +588,13 @@ impl Hooks {
             && self.through(Hook::FloatingPickerOnly, false, |running, said| Ok(said | running.floating_picker_only()?))
     }
 
+    /// The notices hook: whether the notice of something done, of kind `kind` (by
+    /// [`crate::plugins::NoticeKind`]), goes by unseen, as any plugin on it says.
+    pub(crate) fn hide_notice(&self, kind: i32) -> bool {
+        self.has(Hook::HideNotices)
+            && self.through(Hook::HideNotices, false, |running, said| Ok(said || running.hide_notice(kind)?))
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -856,10 +863,12 @@ impl CanvasSession {
     }
 
     /// The notice an undo (`undo`) or a redo of the step `name` shows: "Undo Brush stroke", or
-    /// "Redo" for a step with no name; none while a plugin hides it.
+    /// "Redo" for a step with no name; none while a plugin hides it (the undo notice's hook, or the
+    /// notices' for what undo and redo did).
     pub fn step_notice(&self, undo: bool, name: Option<String>) -> Option<String> {
         let hooks = self.shared.lock().hooks.clone();
-        if hooks.is_some_and(|hooks| hooks.hide_undo_notice()) {
+        let step = crate::plugins::NoticeKind::Step as i32;
+        if hooks.is_some_and(|hooks| hooks.hide_undo_notice() || hooks.hide_notice(step)) {
             return None;
         }
         let word = if undo { "Undo" } else { "Redo" };

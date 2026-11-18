@@ -68,7 +68,8 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Layers of its own](#layers-of-its-own)) or one brush engine (see
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
 the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
-5, and more than eight controls, or a picker's picture that reads its controls, 6.
+5, more than eight controls, or a picker's picture that reads its controls, 6, and the `hide_notices`
+hook 7.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -406,6 +407,23 @@ procraft_hide_undo_notice() -> i32
 ```
 
 It only hides the notice: undo and redo work as before.
+
+### `hide_notices`
+
+Whether the notice of something done, in the band at the top, goes by unseen (not 0) (interface 7):
+
+```
+procraft_hide_notice(kind: i32) -> i32
+```
+
+| `kind` | The notices |
+|---|---|
+| 0 | What undo and redo took back or brought back, as [`hide_undo_notice`](#hide_undo_notice) |
+| 1 | Anything else done: copied, cut, cleared, merged, applied, a layer shown, hidden or locked, a shape snapped, snapping switched on or off |
+
+Answer 0 for a kind you don't know: more may come. A notice that something went wrong, or that
+something couldn't be saved, is never asked about: it always shows. With several plugins on this
+hook, one that hides a kind hides it.
 
 ### `interface_colour`
 
@@ -1479,9 +1497,10 @@ a filter's function, what a filter is given, the kinds of control, and the app's
 2 added actions, permissions, panels, the picture of the `picker` hook and kinds of artwork; later,
 within it, the `key_shortcut` hook, panels that show keys or ask for a key press, and what a plugin
 keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.data` permission and
-the utilities, interface 5 several filters in one plugin, and interface 6 up to sixteen controls,
-a picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its
-own, a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks.
+the utilities, interface 5 several filters in one plugin, interface 6 up to sixteen controls, a
+picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its own,
+a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks, and
+interface 7 the `hide_notices` hook.
 What comes under a switch at the top of the list, taking the place of other plugins, and a menu of
 its own need no newer interface: an older app shows every control, leaves the others where they are,
 and shows no menu. What a

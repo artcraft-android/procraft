@@ -453,6 +453,18 @@ pub enum InterfacePart {
     Panels = 4,
 }
 
+/// The notices the interface shows, by what they say ([`Plugins::shows_notice`]); the first two by
+/// their number on the `hide_notices` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum NoticeKind {
+    /// What undo or redo took back or brought back.
+    Step = 0,
+    /// Anything else done: copied, pasted, cleared, merged, applied, switched on or off.
+    Done = 1,
+    /// Something that went wrong, or couldn't be kept: it always shows.
+    Problem = 2,
+}
+
 /// Where in the interface a plugin's menu is, from a button of the app's
 /// ([`Plugins::menu_choices`]), by its name in a manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
@@ -1713,6 +1725,18 @@ impl Plugins {
         self.hooks().floating_picker_only()
     }
 
+    /// Whether the notice of `kind` shows: one of something gone wrong always does; one of
+    /// something done unless a plugin hides it (what undo and redo did, by the undo notice's hook
+    /// too).
+    pub fn shows_notice(&self, kind: NoticeKind) -> bool {
+        let hooks = self.hooks();
+        match kind {
+            NoticeKind::Problem => true,
+            NoticeKind::Step => !hooks.hide_undo_notice() && !hooks.hide_notice(kind as i32),
+            NoticeKind::Done => !hooks.hide_notice(kind as i32),
+        }
+    }
+
     /// The choices the menus at `place` offer, of each plugin on that has one there (in order of
     /// id), as their manifests list them. None: the app shows no button for them.
     pub fn menu_choices(&self, place: PluginMenuPlace) -> Vec<PluginChoice> {
@@ -2813,7 +2837,8 @@ mod tests {
         assert_eq!(labels(&plugins, COLORDROP), switches);
         assert!(plugins.set_switch(format!("{COLORDROP}.gap_closing"), true));
         assert_eq!(labels(&plugins, COLORDROP), ["ColorDrop fills by all layers", "ColorDrop gap closing", "Gap"]);
-        let interface = ["Interface size", "Interface colour", "Hide undo notices", "Panels stay open"];
+        let interface =
+            ["Interface size", "Interface colour", "Hide undo notices", "Hide all action notices", "Panels stay open"];
         assert_eq!(labels(&plugins, INTERFACE), interface);
         assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
         assert!(plugins.set_switch(format!("{INTERFACE}.colour"), true));
@@ -2826,6 +2851,7 @@ mod tests {
             "Hue",
             "Saturation",
             "Hide undo notices",
+            "Hide all action notices",
             "Panels stay open",
         ];
         assert_eq!(labels(&plugins, INTERFACE), all);
@@ -3183,6 +3209,32 @@ mod tests {
         // off, it offers nothing
         assert!(next.set_on(TRIANGLE.to_owned(), false));
         assert!(next.menu_choices(PluginMenuPlace::Classic).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_interface_hides_every_notice_of_something_done_but_what_went_wrong() {
+        let dir = store("bundled-notices");
+        let plugins = app_at(&dir);
+        let shown = |plugins: &Plugins| {
+            [NoticeKind::Step, NoticeKind::Done, NoticeKind::Problem].map(|k| plugins.shows_notice(k))
+        };
+        // with it off, every notice shows
+        assert_eq!(shown(&plugins), [true; 3]);
+        assert!(plugins.set_on(INTERFACE.to_owned(), true));
+        assert_eq!(shown(&plugins), [true; 3], "each waits for its switch");
+        // undo's alone, then every action's; what went wrong always shows
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), true));
+        assert_eq!(shown(&plugins), [false, true, true]);
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), false));
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_notices"), true));
+        assert_eq!(shown(&plugins), [false, false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(shown(&next), [false, false, true]);
+        assert!(next.set_on(INTERFACE.to_owned(), false));
+        assert_eq!(shown(&next), [true; 3]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

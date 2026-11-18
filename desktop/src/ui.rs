@@ -500,6 +500,8 @@ impl Interface {
         self.style_once(&ctx);
         // how big each part of the interface shows, as the plugins on say, before any of it draws
         crate::panel::set_part_scales(&ctx, &self.prefs.plugins);
+        // and which notices show
+        self.overlays.follow_plugins(&self.prefs.plugins);
         self.ended_export = None;
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
@@ -750,7 +752,7 @@ impl Interface {
                 Some(Touch::Tap) => self.toggle(session, Popover::Colour),
                 Some(Touch::Hold) => {
                     if self.colours.previous(session) {
-                        self.overlays.notice("Previous colour", false);
+                        self.overlays.done("Previous colour", false);
                     }
                 }
                 Some(Touch::Dragged) => self.open = None,
@@ -1115,7 +1117,7 @@ impl Interface {
     fn text_editor(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         use crate::text::Said;
         match self.text.show(ctx, &mut self.look, session) {
-            Some(Said::Notice(text, warning)) => self.overlays.notice(text, warning),
+            Some(Said::Notice(text, warning)) => self.overlays.done(text, warning),
             Some(Said::Undo) => self.undo(session),
             Some(Said::Redo) => self.redo(session),
             None => {}
@@ -1355,7 +1357,7 @@ impl Interface {
 
     /// A stroke snapped to a shape: its bar shows, and the notice says what it is.
     fn snapped(&mut self, info: procraft_core::QuickShapeInfo) {
-        self.overlays.notice(snapped_to(info.kind), false);
+        self.overlays.done(snapped_to(info.kind), false);
         self.overlays.shape = Some(info);
         self.overlays.shape_editing = false;
     }
@@ -1442,7 +1444,7 @@ impl Interface {
     fn clear_layer(&mut self, session: &CanvasSession) {
         if self.takes_changes(session) {
             session.clear_layer();
-            self.overlays.notice("Layer cleared", false);
+            self.overlays.done("Layer cleared", false);
         }
     }
 
@@ -1453,7 +1455,7 @@ impl Interface {
         if self.model && !session.model_flat() {
             if let Some(said) = session.pick_submesh_at(x, y) {
                 self.layers.follow_picked_mesh(session);
-                self.overlays.notice(said, false);
+                self.overlays.done(said, false);
             }
             return;
         }
@@ -1582,7 +1584,7 @@ impl Interface {
             QuickAction::LayerVisibility => _ = current.map(|l| session.tap_visibility(l.id)),
             QuickAction::Solo => {
                 if let Some(said) = id.and_then(|id| session.hold_visibility(id)) {
-                    self.overlays.notice(said, false);
+                    self.overlays.done(said, false);
                 }
             }
             QuickAction::Copy => self.copy_layer(session),
@@ -1607,7 +1609,7 @@ impl Interface {
             QuickAction::Eyedropper => session.set_pick_next(true),
             QuickAction::SwapColors => {
                 if self.colours.previous(session) {
-                    self.overlays.notice("Previous colour", false);
+                    self.overlays.done("Previous colour", false);
                 }
             }
             QuickAction::Selection => self.toggle_selection(session),
@@ -1753,7 +1755,7 @@ impl Interface {
                         session.set_animation_assist(true);
                     }
                     if added > 0 {
-                        self.overlays.notice("Frames saved to timeline", false);
+                        self.overlays.done("Frames saved to timeline", false);
                     }
                     if full {
                         crate::files::no_room(session);
@@ -1909,7 +1911,7 @@ impl Interface {
     fn end_adjustment(&mut self, session: &CanvasSession, commit: bool) {
         self.adjustments.menu_at = None;
         if session.adjustment_end(commit) && commit {
-            self.overlays.notice("Adjustment applied", false);
+            self.overlays.done("Adjustment applied", false);
         }
     }
 
@@ -1926,7 +1928,7 @@ impl Interface {
         match asked {
             Asked::Apply => {
                 session.adjustment_apply();
-                self.overlays.notice("Adjustment applied", false);
+                self.overlays.done("Adjustment applied", false);
             }
             Asked::Undo => session.adjustment_undo(),
             Asked::Preview => session.adjustment_preview(!session.adjustment_shown().preview),
@@ -1986,7 +1988,7 @@ impl Interface {
             return None;
         }
         let cut = session.cut_layer()?;
-        self.overlays.notice("Layer cut", false);
+        self.overlays.done("Layer cut", false);
         Some(cut)
     }
 
@@ -2006,7 +2008,7 @@ impl Interface {
             return None;
         }
         let copied = session.copy_layer()?;
-        self.overlays.notice("Layer copied", false);
+        self.overlays.done("Layer copied", false);
         Some(copied)
     }
 
@@ -2015,7 +2017,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
             self.keep_copy(session, copied);
-            self.overlays.notice("Canvas copied", false);
+            self.overlays.done("Canvas copied", false);
         }
     }
 
@@ -2264,7 +2266,7 @@ impl Interface {
             // its own box ticked (what else hides it stays)
             Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
                 if let Some(said) = session.show_layer(id) {
-                    self.overlays.notice(said, false);
+                    self.overlays.done(said, false);
                 }
             }
             Answer::Extra if matches!(why, Blocked::MeshHidden | Blocked::MeshLocked) => session.free_meant_meshes(),
@@ -2320,7 +2322,7 @@ impl Interface {
             ToolKind::Smudge => "Smudging",
             ToolKind::Erase => "Erasing",
         };
-        self.overlays.notice(format!("{doing} with the current brush"), false);
+        self.overlays.done(format!("{doing} with the current brush"), false);
     }
 
     /// With the interface hidden, a button in the top left (44 square, 20 in) that brings it
@@ -2498,8 +2500,8 @@ impl Interface {
                 if let Some(key) = self.layers.run_action.take() {
                     self.run_plugin_action(ctx, session, key);
                 }
-                if let Some((text, warning)) = self.layers.notice.take() {
-                    self.overlays.notice(text, warning);
+                if let Some((text, warning, kind)) = self.layers.notice.take() {
+                    self.overlays.notice_of(text, warning, kind);
                 }
                 if let Some(id) = self.layers.lifted.take() {
                     self.lift_layers(ctx, session, id);

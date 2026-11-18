@@ -15,7 +15,8 @@ use std::time::Instant;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, RowDrop, ShownRow,
+    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind, RowDrop,
+    ShownRow,
     ThumbnailImage,
 };
 use resvg::tiny_skia;
@@ -195,7 +196,7 @@ pub struct Layers {
     twin: Option<Twin>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
     /// layers shared, a text layer's text edited.
-    pub notice: Option<(String, bool)>,
+    pub notice: Option<(String, bool, procraft_core::NoticeKind)>,
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
     pub edit_text: Option<u64>,
@@ -803,7 +804,8 @@ impl Layers {
             self.mesh_press = None;
             if slide > PICK_REACH / 2.0 {
                 if !session.pick_more_submeshes(index as u32) {
-                    self.notice = Some(("Those meshes aren't in the same texture set".to_owned(), true));
+                    self.notice =
+                        Some(("Those meshes aren't in the same texture set".to_owned(), true, NoticeKind::Problem));
                 }
                 self.mesh_swiped = None;
             } else {
@@ -819,7 +821,8 @@ impl Layers {
             text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Medium, argb(SWIPE_INK));
             if ui.interact(rect, ui.scope_id().with(("mesh lock", index)), Sense::click()).clicked() {
                 session.set_submesh_locked(index as u32, !locked);
-                self.notice = Some((if locked { "Unlock mesh" } else { "Lock mesh" }.to_owned(), false));
+                self.notice =
+                    Some((if locked { "Unlock mesh" } else { "Lock mesh" }.to_owned(), false, NoticeKind::Done));
                 self.mesh_swiped = None;
                 self.mesh_slid.remove(&index);
             }
@@ -859,7 +862,8 @@ impl Layers {
         check_box(ui, look, visibility.center(), !hidden, argb(CHECK_FILL));
         if ui.interact(visibility, ui.scope_id().with(("mesh box", index)), Sense::click()).clicked() {
             session.set_submesh_hidden(index as u32, !hidden);
-            self.notice = Some((if hidden { "Show Submesh" } else { "Hide Submesh" }.to_owned(), false));
+            self.notice =
+                Some((if hidden { "Show Submesh" } else { "Hide Submesh" }.to_owned(), false, NoticeKind::Done));
         } else if response.clicked() {
             self.open_mesh(session, colours, index);
         }
@@ -870,13 +874,13 @@ impl Layers {
     fn replace_map(&mut self, session: &CanvasSession, colours: &mut Colours, id: u64, channel: u32) {
         let Some(path) = crate::files::dialog().set_title("Replace Material Map Content").pick_file() else { return };
         let Ok(picture) = image::open(&path) else {
-            self.notice = Some(("This picture can't be opened.".to_owned(), true));
+            self.notice = Some(("This picture can't be opened.".to_owned(), true, NoticeKind::Problem));
             return;
         };
         let rgba = picture.to_rgba8();
         let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
         if session.replace_material_map(id, channel, image) {
-            self.notice = Some(("Replace Material Map Content".to_owned(), false));
+            self.notice = Some(("Replace Material Map Content".to_owned(), false, NoticeKind::Done));
             self.channel_pictures.retain(|(_, l), _| *l != id);
             self.follow_channel(session, colours);
         }
@@ -1014,7 +1018,7 @@ impl Layers {
                     "Lock" | "Unlock" => {
                         let said = session.lock_said(l.id, !l.locked);
                         if session.set_layer_locked(l.id, !l.locked) {
-                            self.notice = Some((said, false));
+                            self.notice = Some((said, false, NoticeKind::Done));
                         }
                     }
                     "Duplicate" => _ = session.duplicate_layer(l.id),
@@ -1379,7 +1383,7 @@ impl Layers {
                 if held >= HOLD {
                     *done = true;
                     if let Some(said) = session.hold_visibility(l.id) {
-                        self.notice = Some((said, false));
+                        self.notice = Some((said, false, NoticeKind::Done));
                     }
                 } else {
                     ui.ctx().request_repaint_after(HOLD - held);
@@ -1392,7 +1396,7 @@ impl Layers {
             && !held
             && let Some(said) = session.tap_visibility(l.id)
         {
-            self.notice = Some((said, false));
+            self.notice = Some((said, false, NoticeKind::Done));
         }
         if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
             self.box_press = None;
@@ -1479,7 +1483,8 @@ impl Layers {
             LayerOption::EditText => self.edit_text = Some(l.id),
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
-                self.notice = Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true));
+                self.notice =
+                    Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true, NoticeKind::Done));
             }
             // a plugin's layer: its strokes recoloured, or given the paint brush, as strokes
             LayerOption::Recolour | LayerOption::ApplyBrush => {

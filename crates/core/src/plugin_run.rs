@@ -59,6 +59,9 @@
 //!   [`crate::plugins::InterfacePart`]).
 //! - `procraft_floating_picker_only() -> i32`: for the hook `floating_picker_only`, whether the
 //!   floating colour window shows Classic's picker alone (not 0).
+//! - `procraft_hide_notice(kind: i32) -> i32`: for the hook `hide_notices` (interface 7), whether
+//!   the notice of something done goes by unseen (not 0), `kind` by [`crate::plugins::NoticeKind`]:
+//!   0 what undo and redo did, 1 anything else done. A notice of something gone wrong is never asked.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -215,6 +218,7 @@ const PICKER_HUE: &str = "procraft_picker_hue";
 const PICKER_HUE_POINT: &str = "procraft_picker_hue_point";
 const INTERFACE_PART_SCALE: &str = "procraft_interface_part_scale";
 const FLOATING_PICKER_ONLY: &str = "procraft_floating_picker_only";
+const HIDE_NOTICE: &str = "procraft_hide_notice";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -353,6 +357,8 @@ pub(crate) enum Hook {
     InterfacePartScale,
     /// The floating colour window with Classic's picker alone.
     FloatingPickerOnly,
+    /// The notices of things done (interface 7).
+    HideNotices,
 }
 
 impl Hook {
@@ -381,6 +387,7 @@ impl Hook {
             "keep_clear" => Some(Hook::KeepClear),
             "interface_part_scale" => Some(Hook::InterfacePartScale),
             "floating_picker_only" => Some(Hook::FloatingPickerOnly),
+            "hide_notices" => Some(Hook::HideNotices),
             _ => None,
         }
     }
@@ -413,6 +420,7 @@ impl Hook {
             Hook::Brushes => "This plugin can read brush files and draw their brushes its own way.",
             Hook::InterfacePartScale => "This plugin can make parts of the interface bigger or smaller.",
             Hook::FloatingPickerOnly => "This plugin can show the floating colour window with its picker alone.",
+            Hook::HideNotices => "This plugin can hide the notices shown when something is done.",
         }
     }
 
@@ -434,6 +442,7 @@ impl Hook {
             Hook::KeepClear => exports(module, KEEP_CLEAR, &[], &[ValType::I32]),
             Hook::InterfacePartScale => exports(module, INTERFACE_PART_SCALE, &[ValType::I32], &[ValType::F32]),
             Hook::FloatingPickerOnly => exports(module, FLOATING_PICKER_ONLY, &[], &[ValType::I32]),
+            Hook::HideNotices => exports(module, HIDE_NOTICE, &[ValType::I32], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -794,6 +803,7 @@ pub(crate) struct Running {
     picker_hue_point: Option<TypedFunc<f32, i64>>,
     interface_part_scale: Option<TypedFunc<i32, f32>>,
     floating_picker_only: Option<TypedFunc<(), i32>>,
+    hide_notice: Option<TypedFunc<i32, i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -940,6 +950,7 @@ impl Running {
             let picker_hue_point = instance.get_typed_func(&store, PICKER_HUE_POINT).ok();
             let interface_part_scale = instance.get_typed_func(&store, INTERFACE_PART_SCALE).ok();
             let floating_picker_only = instance.get_typed_func(&store, FLOATING_PICKER_ONLY).ok();
+            let hide_notice = instance.get_typed_func(&store, HIDE_NOTICE).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1039,6 +1050,7 @@ impl Running {
                 picker_hue_point,
                 interface_part_scale,
                 floating_picker_only,
+                hide_notice,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -1942,6 +1954,17 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             floating_picker_only.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says the notice of something done, of kind `kind`, goes by unseen.
+    pub(crate) fn hide_notice(&mut self, kind: i32) -> Result<bool, Stop> {
+        let Running { store, hide_notice, .. } = self;
+        let Some(hide_notice) = hide_notice else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            hide_notice.call(&mut *store, kind).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
     }

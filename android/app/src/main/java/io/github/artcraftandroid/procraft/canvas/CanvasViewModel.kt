@@ -573,6 +573,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.floatingPickerOnly = plugins.floatingPickerOnly()
         val choices = plugins.menuChoices(io.github.artcraftandroid.procraft.core.PluginMenuPlace.CLASSIC)
         io.github.artcraftandroid.procraft.ui.Pc.classicMenu = choices.takeIf { it.isNotEmpty() }?.let { io.github.artcraftandroid.procraft.ui.ClassicMenu(it, ::choosePluginChoice) }
+        io.github.artcraftandroid.procraft.ui.Pc.noticesShown = io.github.artcraftandroid.procraft.core.NoticeKind.entries.filter { plugins.showsNotice(it) }.toSet()
         tweensOn = plugins.tweens()
         followStrokeSound()
     }
@@ -1816,7 +1817,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val hide = submeshesHidden.getOrNull(index) != true
         s.setSubmeshHidden(index.toUInt(), hide)
         readMeshes()
-        showNotice(if (hide) "Hide Submesh" else "Show Submesh")
+        showDone(if (hide) "Hide Submesh" else "Show Submesh")
     }
 
     /** Locks submesh [index] (or unlocks it), saying which. */
@@ -1825,7 +1826,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val lock = submeshesLocked.getOrNull(index) != true
         s.setSubmeshLocked(index.toUInt(), lock)
         readMeshes()
-        showNotice(if (lock) "Lock mesh" else "Unlock mesh")
+        showDone(if (lock) "Lock mesh" else "Unlock mesh")
     }
 
     /** Adds submesh [index] to those picked, or takes it away; meshes picked share a texture set. */
@@ -1912,7 +1913,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "This picture can't be opened."
                 return@launch
             }
-            if (s.replaceMaterialMap(l.id, channel.toUInt(), image)) showNotice("Replace Material Map Content")
+            if (s.replaceMaterialMap(l.id, channel.toUInt(), image)) showDone("Replace Material Map Content")
             followModelChannel()
             loadThumbnail(l.id)
             refreshChannelThumbnails(l.id)
@@ -3147,7 +3148,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val copied = session?.copyLayer()
         closePanels()
-        if (copied != null) showNotice("Layer copied")
+        if (copied != null) showDone("Layer copied")
         return copied
     }
 
@@ -3159,7 +3160,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
             clipboard = copied ?: clipboard
             offerPaste()
-            if (copied != null) showNotice("Canvas copied")
+            if (copied != null) showDone("Canvas copied")
         }
     }
 
@@ -3178,7 +3179,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val cut = session?.cutLayer()
         closePanels()
         refresh()
-        if (cut != null) showNotice("Layer cut")
+        if (cut != null) showDone("Layer cut")
         return cut
     }
 
@@ -3254,7 +3255,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             openSubmesh = activeSubmeshes.firstOrNull()
             textureSet = session?.textureSet()?.toInt() ?: textureSet
             refresh()
-            showNotice(said)
+            showDone(said)
             return
         }
         val s = session ?: return
@@ -3562,7 +3563,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         var said: String? = null
         // the other rows' boxes show them hidden while it is alone
         layerChange(thumbs = false) { said = it.holdVisibility(l.id) }
-        said?.let { showNotice(it) }
+        said?.let { showDone(it) }
     }
 
     // Layer opacity: a drag across the canvas changes the current layer's opacity, read in the band
@@ -3686,7 +3687,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     return false
                 }
                 refresh()
-                showNotice("Frames saved to timeline")
+                showDone("Frames saved to timeline")
                 if (done.full) message = noRoom()
                 return !done.full
             }
@@ -3786,7 +3787,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return false
         }
         if (animation == null || animation?.pages == true) changeAnimationAssist(true) else refresh()
-        showNotice("Frames saved to timeline")
+        showDone("Frames saved to timeline")
         if (full) message = noRoom()
         return true
     }
@@ -3856,7 +3857,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val info = session?.quickshapeInfo() ?: return
         quickShape = info
         quickShapeEditing = false
-        showNotice(snappedTo(info.kind))
+        showDone(snappedTo(info.kind))
     }
 
     /** The snapped shape changed (dragged, or a finger down while it is held). */
@@ -3882,7 +3883,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val info = session?.quickshapeLast() ?: return
         quickShape = info
         quickShapeEditing = false
-        showNotice(snappedTo(info.kind))
+        showDone(snappedTo(info.kind))
         refreshFlags()
     }
 
@@ -3939,7 +3940,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             keepChoices(s)
         }
         if (panel == Panel.BRUSHES) panel = Panel.NONE
-        showNotice(
+        showDone(
             when (target) {
                 ToolKind.PAINT -> "Painting"
                 ToolKind.SMUDGE -> "Smudging"
@@ -4609,7 +4610,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val families = withContext(Dispatchers.IO) { uris.mapNotNull { importFont(it) } }
             val family = families.firstOrNull() ?: return@launch
             restyleText(TextStyleChange.Font(family))
-            showNotice(if (families.size > 1) "Fonts imported" else "Font imported")
+            showDone(if (families.size > 1) "Fonts imported" else "Font imported")
         }
     }
 
@@ -4839,7 +4840,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> {
                     var said: String? = null
                     layerChange { said = it.showLayer(l.id) }
-                    said?.let { showNotice(it) }
+                    said?.let { showDone(it) }
                 }
                 Blocked.EMPTY_GROUP, Blocked.GROUP, Blocked.SEVERAL -> Unit
                 Blocked.MESH_HIDDEN, Blocked.MESH_LOCKED -> {
@@ -4853,7 +4854,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun rasterize(l: LayerInfo) {
         layerChange { it.rasterizeLayer(l.id) }
-        showNotice(if (l.text) "Text rasterized" else "Layer rasterized", warning = true)
+        showDone(if (l.text) "Text rasterized" else "Layer rasterized", warning = true)
     }
 
     /**
@@ -6082,7 +6083,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun previousColor() {
         val before = colourHistory.previous(colorRgb().toUInt())?.toInt() ?: return
         setRgb(before)
-        showNotice("Previous colour")
+        showDone("Previous colour")
     }
 
     /** The current and second colours trade places. */
@@ -6700,10 +6701,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private var notices = 0L
 
-    /** Shows [text] in the band under the top bar, in place of any message there; a [warning] stays longer. */
-    fun showNotice(text: String, warning: Boolean = false) {
+    /**
+     * Shows [text] in the band under the top bar, in place of any message there; a [warning] stays longer. Of [kind]: one
+     * of something gone wrong always shows, one of something done unless a plugin hides it.
+     */
+    fun showNotice(text: String, warning: Boolean = false, kind: io.github.artcraftandroid.procraft.core.NoticeKind = io.github.artcraftandroid.procraft.core.NoticeKind.PROBLEM) {
+        if (kind != io.github.artcraftandroid.procraft.core.NoticeKind.PROBLEM && kind !in io.github.artcraftandroid.procraft.ui.Pc.noticesShown) return
         notice = Notice(text, ++notices, warning)
     }
+
+    /** Shows [text], the notice of something done (copied, cleared, applied, switched on), unless a plugin hides those. */
+    fun showDone(text: String, warning: Boolean = false) = showNotice(text, warning, io.github.artcraftandroid.procraft.core.NoticeKind.DONE)
 
     /** The message under the top bar has gone. */
     fun noticeGone(n: Notice) {
@@ -6855,7 +6863,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         adjustMenuAt = null
         val painted = adjustPencil
         session?.adjustmentEnd(commit)
-        if (commit) showNotice("Adjustment applied")
+        if (commit) showDone("Adjustment applied")
         adjustModesOpen = false
         readAdjust()
         adjustment = null
@@ -7078,7 +7086,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (adjustment == null) return
         adjustMenuAt = null
         session?.adjustmentApply()
-        showNotice("Adjustment applied")
+        showDone("Adjustment applied")
         readAdjust()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
@@ -7778,12 +7786,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleAdvancedMesh() {
         advancedMesh = !advancedMesh
         transformPrefs.edit().putBoolean(ADVANCED_MESH, advancedMesh).apply()
-        showNotice("Advanced mesh " + if (advancedMesh) "on" else "off")
+        showDone("Advanced mesh " + if (advancedMesh) "on" else "off")
     }
 
     fun changeGuides(g: GuideSettings) {
-        if (g.snapping != guides.snapping) showNotice("Snapping " + if (g.snapping) "on" else "off")
-        else if (g.magnetics != guides.magnetics) showNotice("Magnetics " + if (g.magnetics) "on" else "off")
+        if (g.snapping != guides.snapping) showDone("Snapping " + if (g.snapping) "on" else "off")
+        else if (g.magnetics != guides.magnetics) showDone("Magnetics " + if (g.magnetics) "on" else "off")
         guides = g
         session?.transformSetGuides(g)
         transformPrefs.edit()
@@ -8143,7 +8151,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleVisible(l: LayerInfo) {
         var said: String? = null
         layerChange { said = it.tapVisibility(l.id) }
-        said?.let { showNotice(it) }
+        said?.let { showDone(it) }
     }
 
     fun setLayerOpacity(l: LayerInfo, value: Float, done: Boolean) = layerChange(thumbs = false) { it.setLayerOpacity(l.id, value, done) }
@@ -8325,7 +8333,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val said = session?.lockSaid(l.id, on) ?: return
         var done = false
         layerChange(thumbs = false) { done = it.setLayerLocked(l.id, on) }
-        if (done) showNotice(said)
+        if (done) showDone(said)
     }
 
     fun duplicate(l: LayerInfo) = layerChange { if (it.duplicateLayer(l.id) == null) message = noRoom() }
@@ -8386,7 +8394,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         layers.firstOrNull { it.current }?.let {
             if (currentTakesChanges()) {
                 clear(it)
-                showNotice("Layer cleared")
+                showDone("Layer cleared")
             }
         }
     }
