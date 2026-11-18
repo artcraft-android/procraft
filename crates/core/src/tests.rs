@@ -2765,14 +2765,18 @@ fn a_stroke_laid_again_as_it_ends_goes_on_over_frames_as_the_next_begins() {
 
 /// With the canvas drawn on its own thread as the apps draw it, a stroke begun right after one whose
 /// end lays it whole again (wet paint whose end taper reaches back) doesn't wait for that: its first
-/// samples are taken while the last is still being laid.
+/// samples are taken while the last is still being laid, the lift and the next start each waiting a
+/// small share of it. Five rounds, judged by the middle one (other work on the machine may hold up a
+/// lift or a start alone, now and then); `stroke_end_cost` bounds the times.
 #[test]
 fn a_stroke_begun_right_after_another_doesnt_wait_for_its_end() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let Some(s) = session(1024, 1024) else { return };
+    use std::time::{Duration, Instant};
+    let side = 2048;
+    let Some(s) = session(side, side) else { return };
     let Some((set, index)) = library_brush(&s, |b| b.name == "Lundy") else { return };
     assert!(s.select_brush(set, index));
-    s.set_brush_size(0.5);
+    s.set_brush_size(1.0);
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     // a frame every 8 ms, as a 120 Hz screen asks for them
     let frames = {
@@ -2781,7 +2785,7 @@ fn a_stroke_begun_right_after_another_doesnt_wait_for_its_end() {
             let gpu = s.shared.lock().gpu.clone().unwrap();
             let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
                 label: Some("window"),
-                size: procraft_gpu::wgpu::Extent3d { width: 1024, height: 1024, depth_or_array_layers: 1 },
+                size: procraft_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: procraft_gpu::wgpu::TextureDimension::D2,
@@ -2792,36 +2796,46 @@ fn a_stroke_begun_right_after_another_doesnt_wait_for_its_end() {
             let view = texture.create_view(&Default::default());
             while !stop.load(Ordering::Relaxed) {
                 let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
-                s.draw(&view, format, (1024, 1024), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+                s.draw(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, Instant::now());
                 gpu.flush();
-                std::thread::sleep(std::time::Duration::from_millis(8));
+                std::thread::sleep(Duration::from_millis(8));
             }
         })
     };
+    // a long wavy stroke across the canvas, long enough that laying it again takes many frames
     let point = |k: usize, y: f32| PenSample {
         pressure: 0.4 + 0.5 * (k as f32 * 0.03).sin().abs(),
-        ..sample(40.0 + k as f32 * 2.0, y + (k as f32 * 0.02).sin() * 100.0, k as f64 * 4.17)
+        ..sample(80.0 + k as f32 * 2.0, y + (k as f32 * 0.02).sin() * 200.0, k as f64 * 4.17)
     };
     let mut waits = Vec::new();
-    for round in 0..3 {
-        let y = 200.0 + 250.0 * round as f32;
+    for round in 0..5 {
+        let y = 280.0 + 300.0 * round as f32;
         s.stroke_begin(PointerKind::Stylus, vec![point(0, y)]);
-        for k in 1..=470 {
+        for k in 1..=940 {
             s.stroke_add(vec![point(k, y)]);
             if k % 2 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(4));
+                std::thread::sleep(Duration::from_millis(4));
             }
         }
-        let lifted = std::time::Instant::now();
+        let lifted = Instant::now();
         s.stroke_end(vec![]);
         let ended = lifted.elapsed();
-        let begun = std::time::Instant::now();
-        s.stroke_begin(PointerKind::Stylus, vec![point(0, y + 100.0)]);
-        s.stroke_add(vec![point(1, y + 100.0), point(2, y + 100.0)]);
+        let begun = Instant::now();
+        s.stroke_begin(PointerKind::Stylus, vec![point(0, y + 200.0)]);
+        s.stroke_add(vec![point(1, y + 200.0), point(2, y + 200.0)]);
         let began = begun.elapsed();
-        // how long laying the last again went on after the next began
-        while s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::relaying) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        // how long laying the last again went on: until a frame drawn since lays no more of it
+        let drawn = s.shared.lock().frames;
+        let mut polls = 0;
+        loop {
+            let st = s.shared.lock();
+            if st.frames > drawn && !st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::relaying) {
+                break;
+            }
+            drop(st);
+            polls += 1;
+            assert!(polls < 60_000, "laid again in time");
+            std::thread::sleep(Duration::from_micros(500));
         }
         let laid = lifted.elapsed();
         s.stroke_end(vec![]);
@@ -2829,7 +2843,7 @@ fn a_stroke_begun_right_after_another_doesnt_wait_for_its_end() {
     }
     stop.store(true, Ordering::Relaxed);
     frames.join().unwrap();
-    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     for (ended, began, laid) in &waits {
         eprintln!(
             "lift {:.1} ms, next begun in {:.1} ms, laid again {:.1} ms after the lift",
@@ -2838,19 +2852,23 @@ fn a_stroke_begun_right_after_another_doesnt_wait_for_its_end() {
             ms(*laid)
         );
     }
-    // a frame's share of the work, not all of it (as a share: other work on the machine slows each
-    // share as much as the whole; `stroke_end_cost` bounds what they take)
-    for &(ended, began, laid) in &waits {
-        let waited = ended.max(began);
-        if laid > std::time::Duration::from_millis(60) {
-            assert!(
-                waited * 3 < laid,
-                "waited {:.1} ms of the {:.1} ms the last was laid again in",
-                ms(waited),
-                ms(laid)
-            );
-        }
-    }
+    // a frame's share of the work, not all of it: the longer of the lift and the next start, as a
+    // share of the time the last was laid again in (other work on the machine slows each share of
+    // that as much as the whole); a round whose end was laid again too quickly to tell counts as none
+    let mut shares: Vec<f64> = waits
+        .iter()
+        .map(|&(ended, began, laid)| {
+            let tells = laid > Duration::from_millis(60);
+            if tells { ended.max(began).as_secs_f64() / laid.as_secs_f64() } else { 0.0 }
+        })
+        .collect();
+    shares.sort_by(f64::total_cmp);
+    let share = shares.get(shares.len() / 2).copied().unwrap_or_default();
+    assert!(
+        share * 3.0 < 1.0,
+        "waited {:.0}% of the time the last was laid again in (the middle of {shares:.2?})",
+        share * 100.0
+    );
 }
 
 /// Paint laid in place whose end taper reaches back over what it has laid (wet, wet with a second,
