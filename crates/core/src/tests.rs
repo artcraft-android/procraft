@@ -2682,10 +2682,9 @@ fn a_dual_brushs_stroke_ends_laying_only_the_rest_as_laid_whole() {
         };
         assert!(dual || name == "Merlin", "{name} is a dual brush");
         assert_eq!(differ(&whole, &rest), (0, 0), "{name}: ended unlike laid whole");
-        // wet paint laid in place with its second inside it: what it laid isn't laid again at the
-        // end (a second laid by a rule is, which costs little; one reaching past the paint has it
-        // all laid again, a share a frame)
-        if name == "Lestrade" {
+        // wet and dry paint laid in place: what it laid isn't laid again at the end, wherever its
+        // second reaches (a second laid by a rule is, which costs little)
+        if ["Lestrade", "Aberdeen", "Whitsand Bay"].contains(&name) {
             let saved = sent_whole.saturating_sub(sent_rest);
             assert!(saved * 2 > laid as u64, "{name}: {sent_rest} pieces at the end against {sent_whole}, {laid} laid");
         }

@@ -3118,6 +3118,56 @@ fn a_wet_dual_brush_s_first_fades_into_its_second_s_colour() {
     assert!(a > 250 && r > 60 && b > 60, "red {r} blue {b} alpha {a}");
 }
 
+/// A dual brush's second shows past its first's stamps as the stroke is drawn, and stays there as
+/// it is kept: ended with only the rest, or laid whole again (its first changed at the end), paint
+/// built up in the stroke or laid in place wet. Where only the second reaches, what is kept is what
+/// showed.
+#[test]
+fn a_dual_brush_s_second_past_its_first_is_kept_as_it_showed() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let built = StrokeStyle { hardness: 0.1, ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0) };
+    let wet = StrokeStyle { wet_pull: Some(0.5), dilution: 0.3, ..built };
+    let firsts: Vec<Stamp> = (0..6).map(|i| Stamp::round(Vec2::new(20.0 + i as f32 * 4.0, 16.0), 8.0, 0.8)).collect();
+    let seconds: Vec<Stamp> = (0..6).map(|i| Stamp::round(Vec2::new(20.0 + i as f32 * 4.0, 16.0), 26.0, 1.0)).collect();
+    for (name, first) in [("built up", built), ("wet", wet)] {
+        for laid_again in [false, true] {
+            let mut doc = Document::new(96, 32);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let second = procraft_gpu::SecondStroke {
+                style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0),
+                mode: 0,
+                threshold: -1.0,
+                classic: false,
+            };
+            canvas.begin_dual_stroke(doc.current(), first, second);
+            for k in 0..firsts.len() {
+                canvas.add_second_stamps(&seconds[k..=k]);
+                canvas.add_stamps(&firsts[k..=k]);
+            }
+            canvas.render(&gpu, &mut doc, None);
+            let shown = canvas.read_composite(&gpu).unwrap();
+            // ended as a stroke ends: its final form given whole (the first's last stamp fainter,
+            // when laid again)
+            let mut last = firsts.clone();
+            if laid_again && let Some(s) = last.first_mut() {
+                s.alpha = 0.5;
+            }
+            canvas.replace_second_stamps(&seconds);
+            canvas.replace_stamps(&last);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            let kept = canvas.read_composite(&gpu).unwrap();
+            // past the first's stamps (they reach x 48), within the second's (to x 66)
+            for x in [54, 58, 62] {
+                let (a, b) = (pixel(&shown, 96, x, 16), pixel(&kept, 96, x, 16));
+                assert!(a != [255, 255, 255, 255], "{name}: the second shows at x {x} as drawn: {a:?}");
+                assert_eq!(a, b, "{name} (laid again {laid_again}): kept at x {x} as it showed");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_classic_normal_combine_keeps_the_first_s_colour_whole_beside_the_second_s_share() {
     let Some(gpu) = gpu() else { return };

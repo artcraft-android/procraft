@@ -1399,14 +1399,16 @@ fn lay_stroke(
         // (a stroke shown with its tip keeps what it drew for good, as it stood before it ended,
         // for when that can't be told without it; a brush engine's stamps stay as they came)
         let before = (canvas.shows_tip() && !builder.is_outside()).then(|| builder.clone());
-        let rest = canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n));
-        if !rest.is_some_and(|rest| canvas.end_with(&rest)) {
-            let for_good = before.and_then(|b| b.drawn_for_good());
-            let all = builder.finish();
-            match for_good.as_deref().and_then(|stamps| all.strip_prefix(stamps)) {
-                // nothing drawn for good changes: only the rest is laid
-                Some(rest) => canvas.add_stamps(&guide::mirrored(guide, rest)),
-                None => canvas.replace_stamps(&guide::mirrored(guide, &all)),
+        match canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n)) {
+            Some(rest) => canvas.end_with(&rest),
+            None => {
+                let for_good = before.and_then(|b| b.drawn_for_good());
+                let all = builder.finish();
+                match for_good.as_deref().and_then(|stamps| all.strip_prefix(stamps)) {
+                    // nothing drawn for good changes: only the rest is laid
+                    Some(rest) => canvas.add_stamps(&guide::mirrored(guide, rest)),
+                    None => canvas.replace_stamps(&guide::mirrored(guide, &all)),
+                }
             }
         }
     }

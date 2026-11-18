@@ -1823,6 +1823,9 @@ struct Smudge {
     /// nothing more).
     laid: bool,
     stalled: bool,
+    /// Where paint laid apart has been put together so far: all of it is put together once more
+    /// as the stroke ends, from what the stroke and its second laid in the end.
+    synthesized: IRect,
 }
 
 /// How much of a wet stroke's paint shows at a pixel, by its glaze: as far as its stamps took it
@@ -3720,27 +3723,9 @@ impl Canvas {
     }
 
     /// Ends the open stroke with `rest`, the stamps of its final form after the
-    /// [`Canvas::laid_count`] it has laid (as they still are): only those are laid, if that leaves
-    /// what laying it whole would. False if it doesn't (laid with nothing): the caller lays it whole
-    /// with [`Canvas::replace_stamps`].
-    pub fn end_with(&mut self, rest: &[Stamp]) -> bool {
-        if !self.second_stays_within(rest) {
-            return false;
-        }
+    /// [`Canvas::laid_count`] it has laid (as they still are): only those are laid.
+    pub fn end_with(&mut self, rest: &[Stamp]) {
         self.add_stamps(rest);
-        self.own_reach();
-        true
-    }
-
-    /// A dual brush's stroke redrawn in its final form keeps only where its own stamps reach, as
-    /// one laid whole again from scratch does (its second redrawn before it): what showed of the
-    /// second past them goes as it is put into its layer.
-    fn own_reach(&mut self) {
-        let Some(active) = self.active.as_mut().filter(|a| a.second.is_some() && a.bounds != a.first) else { return };
-        if !self.measuring {
-            self.dirty = self.dirty.union(active.bounds);
-        }
-        active.bounds = active.first;
     }
 
     /// Redraws the open stroke from scratch with `stamps` (its final form, e.g. with the end taper).
@@ -3748,9 +3733,8 @@ impl Canvas {
     /// stroke of wet paint, laid whole again as the pen lifted, took a tenth of a second or more.
     pub fn replace_stamps(&mut self, stamps: &[Stamp]) {
         let laid = laid_before(self.laid.as_deref(), stamps, !self.ends_with_rest(false));
-        if let Some(from) = laid.filter(|&from| self.second_stays_within(stamps.get(from..).unwrap_or_default())) {
+        if let Some(from) = laid {
             self.add_stamps(stamps.get(from..).unwrap_or_default());
-            self.own_reach();
             return;
         }
         self.tip = None;
@@ -3759,36 +3743,6 @@ impl Canvas {
             self.laid = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
         }
         self.laid_count = stamps.len();
-    }
-
-    /// Whether a dual brush's paint laid in place, ending with `rest` laid after what it has laid,
-    /// reaches wherever its second does: laid whole again, it is put together only where its own
-    /// stamps reach (the second showing nowhere else), so laying only the rest leaves the same
-    /// only then. Any other stroke does.
-    fn second_stays_within(&self, rest: &[Stamp]) -> bool {
-        let Some(active) = self.active.filter(|a| a.second.is_some() && a.style.in_place()) else { return true };
-        let first = active.first.union(self.reach_of(rest, active.style));
-        // (a stamp's quad reaches a little past where it is counted to; nothing is past the canvas)
-        let m = 3;
-        let s = active.second_reach;
-        let second = IRect { x0: s.x0 - m, y0: s.y0 - m, x1: s.x1 + m, y1: s.y1 + m }.intersect(self.full());
-        s.is_empty()
-            || (second.x0 >= first.x0 && second.y0 >= first.y0 && second.x1 <= first.x1 && second.y1 <= first.y1)
-    }
-
-    /// Where `stamps`, drawn in `style`, reach on this canvas (as [`Canvas::push_stamps_to`]
-    /// counts it).
-    fn reach_of(&self, stamps: &[Stamp], style: StrokeStyle) -> IRect {
-        let scale = self.scaled.map(|(_, k)| k);
-        let reach = |s: &Stamp| {
-            let s = self.scaled.map_or(*s, |(origin, k)| scaled_stamp(s, origin, k));
-            let radius = drawn_radius(&style, s.radius, s.taper);
-            let radius = scale.map_or(radius, |k| scaled_radius(&style, radius, k));
-            let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
-            IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2)
-        };
-        let drawn = stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite());
-        drawn.fold(IRect::EMPTY, |b, s| b.union(reach(s))).intersect(self.full())
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
@@ -3871,7 +3825,9 @@ impl Canvas {
             if !self.measuring {
                 self.dirty = self.dirty.union(active.bounds);
             }
-            active.bounds = bounds;
+            // (a dual brush's second shows wherever it reaches, past the first's stamps too)
+            let past = if active.second.is_some() { active.second_reach } else { IRect::EMPTY };
+            active.bounds = bounds.union(past);
         } else {
             active.bounds = active.bounds.union(bounds);
         }
@@ -5948,8 +5904,11 @@ impl Canvas {
                     self.lay_wet(gpu, &mut encoder, uniforms, &held, &stroke.style);
                     // a dual brush's paint laid apart, put together over the whole stroke once more
                     // (its second's first stamps may have come before the paint laid apart began)
-                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, stroke.bounds);
-                    self.finish_smudge(device, &mut encoder, stroke.bounds, false);
+                    // (and wherever it was put together before: past the stroke's stamps where its
+                    // second's reached)
+                    let rect = stroke.bounds.union(self.smudge.as_ref().map_or(IRect::EMPTY, |s| s.synthesized));
+                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect);
+                    self.finish_smudge(device, &mut encoder, rect, false);
                     history_changed = true;
                 }
                 // painting an adjustment on leaves the layer to the adjustment
@@ -6924,6 +6883,7 @@ impl Canvas {
                 frag_window: None,
                 laid: false,
                 stalled: false,
+                synthesized: IRect::EMPTY,
             });
         }
         if style.paints_in_place() {
@@ -7176,6 +7136,13 @@ impl Canvas {
         Some([rect.x0, rect.y0])
     }
 
+    /// Paint laid apart has been put together over `rect` (see [`Smudge::synthesized`]).
+    fn note_synthesized(&mut self, rect: IRect) {
+        if let Some(smudge) = self.smudge.as_mut() {
+            smudge.synthesized = smudge.synthesized.union(rect.intersect(IRect::from_size(self.width, self.height)));
+        }
+    }
+
     /// A dual brush's paint laid in place put together with its second over `rect` (see
     /// `cs_synthesize`), and shown.
     fn synthesize(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, params: &mut UniformData, rect: IRect) {
@@ -7186,6 +7153,7 @@ impl Canvas {
         if pieces.is_empty() {
             return;
         }
+        self.note_synthesized(rect);
         let second = (dual != 0).then(|| self.second_stroke.get(device).1.clone());
         self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
     }
@@ -7307,6 +7275,7 @@ impl Canvas {
             // layer, the paint as laid and the layer as it was are then copied in once a frame)
             if laid_apart == 1 {
                 pieces.extend(self.synthesis(changed));
+                self.note_synthesized(changed);
             }
             self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
             return;
@@ -7425,6 +7394,7 @@ impl Canvas {
         }
         if laid_apart == 1 {
             pieces.extend(self.synthesis(changed));
+            self.note_synthesized(changed);
         }
         self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
     }
