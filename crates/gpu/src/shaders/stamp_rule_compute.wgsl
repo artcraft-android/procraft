@@ -27,7 +27,10 @@ fn cs_stamp_rule(@builtin(workgroup_id) tile: vec3<u32>, @builtin(local_invocati
     if (px.x >= size.x || px.y >= size.y) {
         return;
     }
-    let paint = rule_laid(textureLoad(rule_before, px, 0), px, at);
+    // rounded to half floats here, as they are kept: packing leaves the rounding to the GPU's API,
+    // and Direct3D rounds otherwise than Vulkan, which a stroke built up frame by frame carried on
+    // until a sharp edge or a grain cut it into specks
+    let paint = halves(rule_laid(textureLoad(rule_before, px, 0), px, at));
     let o = at.y * RULE_ROW + at.x;
     rule_out[o] = vec2<u32>(pack2x16float(paint.rg), pack2x16float(paint.ba));
 }

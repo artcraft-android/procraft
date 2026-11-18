@@ -14888,6 +14888,95 @@ fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_o
     assert!(tiles.is_empty(), "tiles that came out otherwise: {tiles:?}");
 }
 
+/// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to
+/// the canvas draws alike through Vulkan and Direct3D 12 on the same GPU, square by square: its
+/// paint was packed into half floats as each API rounds, and Direct3D's rounding, carried on frame
+/// by frame, came out as specks under the grain and a sharp edge. Nothing is compared where the
+/// two aren't both there (`WGPU_POWER_PREF=low` compares a laptop's integrated GPU).
+#[test]
+fn strokes_laid_by_their_rule_draw_alike_through_vulkan_and_direct3d() {
+    use procraft_engine::brush::{Brush, GrainMode, Rendering};
+    use procraft_gpu::wgpu::Backends;
+    let backends = Gpu::backends();
+    let index = |b: Backends| backends.iter().position(|x| *x == b);
+    let (Some(vulkan), Some(direct3d)) = (index(Backends::VULKAN), index(Backends::DX12)) else {
+        return eprintln!("skipped: not both Vulkan and Direct3D 12");
+    };
+    let gpus = [vulkan, direct3d].map(|from| Gpu::for_canvases_from(from, |_| {}));
+    let [Ok((a, ia)), Ok((b, ib))] = gpus else { return eprintln!("skipped: no device on one of them") };
+    if (ia, ib) != (vulkan, direct3d) {
+        return eprintln!("skipped: a backend gave way to another");
+    }
+    let by_rule = |b: &Brush| {
+        matches!(b.rendering, Rendering::Gradual | Rendering::Capped)
+            && b.grain.image.is_some()
+            && b.grain.mode == GrainMode::Texturized
+            && !b.mixes_wet()
+    };
+    let side = 384;
+    // each brush's stroke on its own, as each shows it once lifted
+    let strokes = [a, b].map(|gpu| {
+        let s = session_on(gpu, side, side);
+        let picks: Vec<(String, usize, usize)> = {
+            let st = s.shared.lock();
+            let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                set.brushes.iter().enumerate().filter(|(_, b)| by_rule(b)).map(move |(j, b)| (b.name.clone(), i, j))
+            });
+            all.collect()
+        };
+        assert!(!picks.is_empty(), "stock brushes laid by their rule under a grain fixed to the canvas");
+        let blank = picture(&s);
+        let at = |e: usize| sample(30.0 + e as f32 * 1.1, 190.0 + (e as f32 * 0.05).sin() * 100.0, e as f64 * 4.0);
+        picks
+            .into_iter()
+            .map(|(name, set, index)| {
+                assert!(s.select_brush(set as u32, index as u32));
+                s.set_brush_size(0.5);
+                s.set_color(0.2, 0.3, 0.8);
+                s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+                for e in 1..=150 {
+                    s.stroke_add(vec![at(2 * e - 1), at(2 * e)]);
+                    if e % 2 == 0 {
+                        let _ = picture(&s);
+                    }
+                }
+                s.stroke_end(vec![]);
+                let shown = picture(&s);
+                s.undo();
+                assert_eq!(picture(&s), blank);
+                (name, shown)
+            })
+            .collect::<Vec<_>>()
+    });
+    // each 16-pixel square's mean as alike as the two APIs' arithmetic leaves it (a jittered stamp
+    // turned a hair otherwise moves a grain's specks about); the specks took a square's from paint
+    // to paper
+    let block = 16;
+    let means = |px: &[u8]| -> Vec<f32> {
+        let across = side / block;
+        let mut sums = vec![0.0f32; (across * across * 4) as usize];
+        for (i, v) in px.iter().enumerate() {
+            let (pixel, channel) = (i as u32 / 4, i as u32 % 4);
+            let (x, y) = (pixel % side / block, pixel / side / block);
+            sums[((y * across + x) * 4 + channel) as usize] += f32::from(*v) / (block * block) as f32;
+        }
+        sums
+    };
+    let unlike: Vec<(String, f32)> = strokes[0]
+        .iter()
+        .zip(&strokes[1])
+        .map(|((name, p), (_, q))| {
+            let worst = means(p).iter().zip(means(q)).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            (name.clone(), worst)
+        })
+        .filter(|(_, worst)| *worst > 16.0)
+        .collect();
+    assert!(
+        unlike.is_empty(),
+        "strokes unlike through Vulkan and Direct3D 12 (the most a square's mean differs): {unlike:?}"
+    );
+}
+
 /// How long a large library takes to keep and to open again: `LIBRARY_CORPUS` a folder of brush
 /// files (searched through), all brought in first.
 #[test]
