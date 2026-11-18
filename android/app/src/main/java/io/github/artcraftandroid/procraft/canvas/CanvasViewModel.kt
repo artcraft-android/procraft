@@ -2827,6 +2827,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** [e] taken out of the stack open to the gallery's front (let go on the way back). */
+    fun takeOutOfStack(e: io.github.artcraftandroid.procraft.gallery.GalleryEntry) {
+        if (openStack == null) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.move(e, 0, store.root) }
+            refreshGallery()
+        }
+    }
+
     /** Artwork [a] dropped onto [onto] in the gallery: with an artwork it makes a stack, [a] first; a stack takes it in first. */
     fun dropOnto(a: Artwork, onto: io.github.artcraftandroid.procraft.gallery.GalleryEntry) {
         if (openStack != null || a.dir == onto.dir) return

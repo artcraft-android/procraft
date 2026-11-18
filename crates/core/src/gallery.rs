@@ -46,6 +46,60 @@ impl GalleryEntry {
     }
 }
 
+/// How long a dragged artwork rests on a stack, or on the way back out of the stack open (its
+/// title), before that opens with the drag going on, milliseconds.
+pub const GALLERY_SPRING_MS: i64 = 600;
+
+#[uniffi::export]
+pub fn gallery_spring_ms() -> i64 {
+    GALLERY_SPRING_MS
+}
+
+/// What a drag in the gallery rests on, for what opens when rested on long enough: a stack (by
+/// folder), or "" the way back out of the stack open.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DragRest {
+    /// What it rests on, since when (milliseconds), and whether that has opened already.
+    on: Option<(String, i64, bool)>,
+}
+
+impl DragRest {
+    /// The drag is over `on` (none: over nothing that opens) at `now_ms`: true the moment it has
+    /// rested there `GALLERY_SPRING_MS`, once; moved off and back, it waits again.
+    pub fn over(&mut self, on: Option<&str>, now_ms: i64) -> bool {
+        let Some(on) = on else {
+            self.on = None;
+            return false;
+        };
+        match &mut self.on {
+            Some((was, since, opened)) if was == on => {
+                if !*opened && now_ms - *since >= GALLERY_SPRING_MS {
+                    *opened = true;
+                    return true;
+                }
+                false
+            }
+            _ => {
+                self.on = Some((on.to_owned(), now_ms, false));
+                false
+            }
+        }
+    }
+
+    /// What it rests on and has not opened yet.
+    pub fn resting_on(&self) -> Option<&str> {
+        self.on.as_ref().filter(|(_, _, opened)| !opened).map(|(on, _, _)| on.as_str())
+    }
+
+    /// How long until what it rests on opens (none: nothing to wait for).
+    pub fn waiting(&self, now_ms: i64) -> Option<i64> {
+        self.on
+            .as_ref()
+            .filter(|(_, _, opened)| !opened)
+            .map(|(_, since, _)| (since + GALLERY_SPRING_MS - now_ms).max(0))
+    }
+}
+
 /// What Select's actions act on, the same in every app.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GalleryPick {
@@ -1054,6 +1108,54 @@ mod tests {
         let mut all: Vec<String> = shown(&store, None);
         all.sort();
         assert_eq!(all, names(&["A", "D", "One[Clash,B,C]", "Two[E]"]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_drag_resting_on_the_way_back_or_a_stack_opens_it_once() {
+        let mut rest = DragRest::default();
+        // on the way back: nothing until it has rested there long enough, then once
+        assert!(!rest.over(Some(""), 1000));
+        assert_eq!(rest.resting_on(), Some(""));
+        assert_eq!(rest.waiting(1100), Some(GALLERY_SPRING_MS - 100));
+        assert!(!rest.over(Some(""), 1000 + GALLERY_SPRING_MS - 1));
+        assert!(rest.over(Some(""), 1000 + GALLERY_SPRING_MS));
+        assert!(!rest.over(Some(""), 1000 + GALLERY_SPRING_MS * 3));
+        assert_eq!(rest.resting_on(), None);
+        // moved onto a stack it waits again; off everything, it forgets
+        assert!(!rest.over(Some("stack"), 5000));
+        assert!(!rest.over(None, 5300));
+        assert!(!rest.over(Some("stack"), 5400));
+        assert!(!rest.over(Some("stack"), 5400 + GALLERY_SPRING_MS - 1));
+        assert!(rest.over(Some("stack"), 5400 + GALLERY_SPRING_MS));
+        // from one to another, the time starts again
+        assert!(!rest.over(Some("a"), 0));
+        assert!(!rest.over(Some("b"), GALLERY_SPRING_MS));
+        assert!(rest.over(Some("b"), GALLERY_SPRING_MS * 2));
+    }
+
+    #[test]
+    fn an_artwork_taken_out_of_its_stack_goes_where_it_is_let_go() {
+        let (root, store, dirs) = mixed_gallery();
+        let in_stack = |name: &str| -> String {
+            store
+                .list(Some(dirs["One"].clone()))
+                .iter()
+                .map(|e| e.dir().to_owned())
+                .find(|d| name_in(d) == name)
+                .unwrap()
+        };
+        // let go between D and Two in the gallery: out of its stack, there, whole
+        let b = in_stack("B");
+        store.move_entry(b.clone(), 3, Some(store.root()));
+        assert_eq!(shown(&store, None), names(&["A", "One[C]", "D", "B", "Two[E]"]));
+        let now = root.join(name_of(Path::new(&b)));
+        assert_eq!(name_in(&now.to_string_lossy()), "B");
+        assert!(!Path::new(&b).exists());
+        // let go on the way back: to the gallery's front; the emptied stack goes
+        store.move_entry(in_stack("C"), 0, Some(store.root()));
+        assert_eq!(shown(&store, None), names(&["C", "A", "D", "B", "Two[E]"]));
+        assert!(!Path::new(&dirs["One"]).exists());
         let _ = fs::remove_dir_all(&root);
     }
 

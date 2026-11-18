@@ -213,6 +213,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         dropOnto = null
                     },
                     onMove = vm::moveInGallery,
+                    onTakeOut = vm::takeOutOfStack,
                     onStack = vm::dropOnto,
                     onFiles = vm::importFiles,
                 ),
@@ -809,9 +810,15 @@ private fun GalleryHeader(
                 // in a stack: back to the gallery (blue while touched, or while an artwork dragged
                 // rests on it to go back), and the stack's name
                 val touch = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                val density = LocalDensity.current
                 val ink = if (heldOf(touch) || backLit) Pc.Accent else Pc.GalleryTitle
                 Row(
-                    Modifier.padding(start = 20.dp, top = 12.dp).height(41.dp).onGloballyPositioned { onBackPlaced(it.boundsInRoot()) }
+                    Modifier.padding(start = 20.dp, top = 12.dp).height(41.dp).onGloballyPositioned {
+                        // a drag takes the way back as the title row's whole height there, from the edge
+                        val b = it.boundsInRoot()
+                        val pad = with(density) { 12.dp.toPx() to 20.dp.toPx() }
+                        onBackPlaced(androidx.compose.ui.geometry.Rect(b.left - pad.second, b.top - pad.first, b.right, b.top - pad.first + with(density) { 55.dp.toPx() }))
+                    }
                         .clickable(touch, indication = null, onClick = onBack),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1011,8 +1018,8 @@ private const val DRAGGED_ALPHA = 0.3f
 /** The blue over an artwork (or stack) a dragged artwork would be stacked with. */
 private val DropWash = Color(0x800064DC)
 
-/** How long a dragged artwork rests on a stack (or a stack's way back) before it opens (the gallery). */
-private const val SPRING_MS = 600L
+/** How long a dragged artwork rests on a stack (or a stack's way back) before it opens (the gallery): the shared core's. */
+private val SPRING_MS = io.github.artcraftandroid.procraft.core.gallerySpringMs()
 
 /** Where the gallery's own drags land: the grid showing (its state, and its place and height in the root), and a stack's way back. */
 private class DropPlaces {
@@ -1068,7 +1075,7 @@ private fun dropAt(grid: androidx.compose.foundation.lazy.grid.LazyGridState, en
  * goes where it is let go. Near the grid's top or bottom the grid scrolls. An artwork resting on a
  * stack opens it ([onOpen]) and, in a stack, on the way back ([onBackLit] meanwhile) opens the
  * gallery ([onBack]), the drag going on, so it can be put in a stack where it is let go, or taken
- * out of one.
+ * out of one; let go on the way back at once, it is taken out to the gallery's front ([onTakeOut]).
  */
 @Composable
 private fun galleryDrop(
@@ -1082,6 +1089,7 @@ private fun galleryDrop(
     onOver: (String?) -> Unit,
     onEnded: () -> Unit,
     onMove: (GalleryEntry, Int) -> Unit,
+    onTakeOut: (GalleryEntry) -> Unit,
     onStack: (Artwork, GalleryEntry) -> Unit,
     onFiles: (List<android.net.Uri>) -> Unit,
 ): Modifier {
@@ -1093,6 +1101,7 @@ private fun galleryDrop(
     val over = androidx.compose.runtime.rememberUpdatedState(onOver)
     val ended = androidx.compose.runtime.rememberUpdatedState(onEnded)
     val move = androidx.compose.runtime.rememberUpdatedState(onMove)
+    val takeOut = androidx.compose.runtime.rememberUpdatedState(onTakeOut)
     val stack = androidx.compose.runtime.rememberUpdatedState(onStack)
     // files dragged in from another app are imported, as Import's
     val files = androidx.compose.runtime.rememberUpdatedState(onFiles)
@@ -1118,6 +1127,9 @@ private fun galleryDrop(
 
             // what it rests on: "" the way back, else a stack (by folder)
             var springOn: String? = null
+
+            // over the way back out of the stack open
+            var onBackNow = false
 
             fun stopSpring() {
                 spring?.cancel()
@@ -1145,7 +1157,8 @@ private fun galleryDrop(
                 val d = e.toAndroidDragEvent()
                 val entry = dragged(e) ?: return
                 val r = Offset(d.x, d.y)
-                if (!inGallery.value && places.back?.contains(r) == true) {
+                onBackNow = !inGallery.value && places.back?.contains(r) == true
+                if (onBackNow) {
                     at = null
                     edge = 0
                     over.value(null)
@@ -1171,6 +1184,7 @@ private fun galleryDrop(
 
             override fun onExited(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
                 at = null
+                onBackNow = false
                 edge = 0
                 stopSpring()
                 over.value(null)
@@ -1181,6 +1195,11 @@ private fun galleryDrop(
                     val uris = event.droppedFiles(activity)
                     if (uris.isNotEmpty()) files.value(uris)
                     return uris.isNotEmpty()
+                }
+                // let go on the way back before it opened the gallery: out to the gallery's front
+                if (onBackNow && !inGallery.value) {
+                    takeOut.value(e)
+                    return true
                 }
                 val drop = at ?: return true
                 val list = now.value
@@ -1198,6 +1217,7 @@ private fun galleryDrop(
 
             override fun onEnded(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
                 at = null
+                onBackNow = false
                 edge = 0
                 stopSpring()
                 ended.value()

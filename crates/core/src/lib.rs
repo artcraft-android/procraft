@@ -161,7 +161,10 @@ pub use floating::{
     floating_key, floating_moved, floating_read, floating_resized, floating_sizes,
 };
 pub use frame::{configure, screen_profile};
-pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry, GalleryPick, ZipKind, gallery_pick, zip_file_kind};
+pub use gallery::{
+    ArtworkStore, DragRest, GALLERY_SPRING_MS, GalleryArtwork, GalleryEntry, GalleryPick, ZipKind, gallery_pick,
+    gallery_spring_ms, zip_file_kind,
+};
 pub use gestures::{
     GestureOption, GesturePurpose, GestureSettings, KeptGestures, MAX_DELAY_S, MIN_DELAY_S, Trigger, gesture_options,
     gesture_purpose_heading, gesture_purpose_title, gesture_purposes, gesture_trigger_label,

@@ -14,7 +14,7 @@ use egui::{
     Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use procraft_core::{
-    ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, GalleryPick, P3, gallery_pick, preset_label,
+    ArtworkStore, CanvasPreset, DragRest, GalleryArtwork, GalleryEntry, GalleryPick, P3, gallery_pick, preset_label,
     presets_from_json, profile_chip,
 };
 
@@ -268,6 +268,12 @@ pub struct Gallery {
     /// back out of a stack is, to drop it there.
     lifted: Option<(String, Pos2)>,
     back: Rect,
+    /// What was lifted and where its picture last sat, for when the gallery changes under the
+    /// drag (a stack opened by resting on it, or left by resting on the way back); and what the
+    /// drag rests on.
+    lifted_entry: Option<GalleryEntry>,
+    lifted_picture: Rect,
+    rest: DragRest,
     /// Custom Canvas, open on a new canvas or a preset.
     custom: Option<crate::custom_canvas::CustomCanvas>,
     /// The preset row swiped open, and the one being dragged (and how far it is).
@@ -402,6 +408,9 @@ impl Gallery {
             share_button: Rect::NOTHING,
             lifted: None,
             back: Rect::NOTHING,
+            lifted_entry: None,
+            lifted_picture: Rect::NOTHING,
+            rest: DragRest::default(),
             custom: None,
             preset_open: None,
             preset_drag: None,
@@ -1183,11 +1192,7 @@ impl Gallery {
             look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
             text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, &name, 36.0, Weight::Bold, ink);
             if response.clicked() {
-                if let Some((dir, name)) = self.stack.take() {
-                    let cells = std::mem::take(&mut self.drawn_cells);
-                    self.leaving_stack = Some(LeavingStack { dir, name, cells, since: Instant::now() });
-                }
-                self.refresh();
+                self.leave_stack();
             }
         } else {
             // a stack just left: its name fades out as the gallery's fades in
@@ -1304,6 +1309,8 @@ impl Gallery {
                         if held >= HOLD_S {
                             let at = response.interact_pointer_pos().unwrap_or_else(|| cell.center());
                             self.lifted = Some((entry_dir(entry).to_owned(), at));
+                            self.lifted_entry = Some(entry.clone());
+                            self.rest = DragRest::default();
                             self.swiped = None;
                         } else {
                             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(HOLD_S - held));
@@ -1485,12 +1492,25 @@ impl Gallery {
         (last + 1 == entries.len() && past).then_some((None, entries.len()))
     }
 
+    /// Back from the stack open to the gallery, its artworks flying back into its cell.
+    fn leave_stack(&mut self) {
+        if let Some((dir, name)) = self.stack.take() {
+            let cells = std::mem::take(&mut self.drawn_cells);
+            self.leaving_stack = Some(LeavingStack { dir, name, cells, since: Instant::now() });
+        }
+        self.refresh();
+    }
+
     /// A lifted artwork (or stack) follows the pointer, its cell faint behind; let go, it goes where
     /// it was let go: onto another to stack with it, between cells to move there, or (in a stack)
-    /// on the way back, out to the gallery's front.
+    /// on the way back, out to the gallery's front. Resting a moment on a stack opens it, and on
+    /// the way back opens the gallery, the drag going on: so an artwork is put in a stack, or
+    /// taken out of one to wherever in the gallery it is let go.
     fn drag(&mut self, ui: &Ui, entries: &[GalleryEntry], cells: &[(usize, Rect)]) {
         let Some((dir, from)) = self.lifted.clone() else { return };
-        let Some(entry) = entries.iter().find(|e| entry_dir(e) == dir).cloned() else {
+        // shown here, or carried in from where it was lifted (into a stack, or out of one)
+        let here = entries.iter().position(|e| entry_dir(e) == dir);
+        let Some(entry) = here.and_then(|i| entries.get(i).cloned()).or_else(|| self.lifted_entry.clone()) else {
             self.lifted = None;
             return;
         };
@@ -1508,6 +1528,42 @@ impl Gallery {
         }
         let stacking = self.stack.is_none() && matches!(entry, GalleryEntry::Artwork { .. });
         let target = pointer.and_then(|p| Self::drop_at(entries, cells, &dir, p, stacking));
+        let back = self.stack.is_some() && pointer.is_some_and(|p| self.back.contains(p));
+        // what it rests on that opens: the way back, or a stack it would be put in
+        let rests_on = if back {
+            Some(String::new())
+        } else {
+            match &target {
+                Some((Some(onto), _))
+                    if entries.iter().any(|e| matches!(e, GalleryEntry::Stack { dir, .. } if dir == onto)) =>
+                {
+                    Some(onto.clone())
+                }
+                _ => None,
+            }
+        };
+        let now_ms = (ui.input(|i| i.time) * 1000.0) as i64;
+        if down && self.rest.over(rests_on.as_deref(), now_ms) {
+            match rests_on.as_deref() {
+                Some("") => self.leave_stack(),
+                Some(stack) => {
+                    let opened = cells.iter().find_map(|&(i, cell)| match entries.get(i) {
+                        Some(GalleryEntry::Stack { dir, name, .. }) if dir == stack => {
+                            Some((dir.clone(), name.clone(), cell))
+                        }
+                        _ => None,
+                    });
+                    if let Some((dir, name, cell)) = opened {
+                        self.stack = Some((dir, name));
+                        self.opening_stack = Some((cell, Instant::now()));
+                        self.refresh();
+                    }
+                }
+                None => {}
+            }
+        } else if down && let Some(wait) = self.rest.waiting(now_ms) {
+            ui.ctx().request_repaint_after(Duration::from_millis(wait as u64));
+        }
         for &(i, cell) in cells {
             if entries.get(i).is_some_and(|e| entry_dir(e) == dir) {
                 ui.painter().rect_filled(cell, 0, argb(BACKGROUND).gamma_multiply(DRAGGED_FADE));
@@ -1528,12 +1584,18 @@ impl Gallery {
             GalleryEntry::Artwork { artwork } => Some(artwork.clone()),
             GalleryEntry::Stack { artworks, .. } => artworks.first().cloned(),
         };
-        if let (Some(a), Some(p), Some(&(_, cell))) =
-            (shown, pointer, cells.iter().find(|(i, _)| entries.get(*i).is_some_and(|e| entry_dir(e) == dir)))
+        // where its picture sits in its cell (as it last did, the cell gone with the gallery changing)
+        if let (Some(a), Some(&(_, cell))) =
+            (&shown, cells.iter().find(|(i, _)| entries.get(*i).is_some_and(|e| entry_dir(e) == dir)))
+        {
+            self.lifted_picture = Self::fitted(Self::thumb_box(cell), a);
+        }
+        if let (Some(a), Some(p)) = (shown, pointer)
+            && self.lifted_picture.is_positive()
         {
             // grown as it lifts, about where it is held
             let k = self.lifts.get(&dir).map_or(LIFTED.0, Lift::now);
-            let picture = Self::fitted(Self::thumb_box(cell), &a).translate(p - from);
+            let picture = self.lifted_picture.translate(p - from);
             let picture = Rect::from_min_max(p + (picture.min - p) * k, p + (picture.max - p) * k);
             let texture = self.texture(&a);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("lifted artwork")));
@@ -1551,19 +1613,25 @@ impl Gallery {
             return;
         }
         self.lifted = None;
-        if self.stack.is_some() && pointer.is_some_and(|p| self.back.contains(p)) {
+        self.lifted_entry = None;
+        self.rest = DragRest::default();
+        if back {
             self.store.move_entry(dir, 0, Some(self.store.root()));
         } else {
-            match target {
-                Some((Some(onto), _)) => self.store.put_onto(dir, onto),
-                Some((None, slot)) => {
-                    let at = entries.iter().position(|e| entry_dir(e) == dir).unwrap_or(slot);
+            match (target, here) {
+                (Some((Some(onto), _)), _) => self.store.put_onto(dir, onto),
+                (Some((None, slot)), Some(at)) => {
                     let to = if slot > at { slot - 1 } else { slot };
                     if to != at {
                         self.store.move_entry(dir, to as i64, None);
                     }
                 }
-                None => {}
+                // carried into a stack, or out of one into the gallery: there, at that place
+                (Some((None, slot)), None) => {
+                    let into = self.folder().unwrap_or_else(|| self.store.root());
+                    self.store.move_entry(dir, slot as i64, Some(into));
+                }
+                (None, _) => {}
             }
         }
         self.refresh();
@@ -2343,6 +2411,29 @@ mod tests {
             asked
         }
 
+        /// A frame of the whole page, its header too.
+        fn page(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Shown { ctx, look, gallery, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                gallery.page(ui.ctx(), look, Order::Background, 1.0, false);
+            });
+            output.textures_delta.clear();
+        }
+
+        /// Pages shown for `secs` with the pointer at `at` (held down or not).
+        fn wait_at(&mut self, at: Pos2, secs: f64) {
+            for _ in 0..(secs * 60.0).ceil() as usize {
+                self.page(vec![Event::PointerMoved(at)]);
+            }
+        }
+
         fn button(at: Pos2, pressed: bool) -> Event {
             Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
         }
@@ -2471,6 +2562,95 @@ mod tests {
             .collect();
         assert_eq!(shown_now, ["Pair3"]);
         assert!(!shown.gallery.selecting);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_artwork_rested_on_the_way_back_is_carried_out_of_its_stack_into_the_gallery() {
+        let (mut shown, stack, root) = with_a_stack("out");
+        // a third artwork, loose in the gallery after the stack
+        let store = Arc::clone(&shown.gallery.store);
+        let c = store.new_folder(None);
+        std::fs::write(
+            std::path::Path::new(&c).join("artwork.json"),
+            r#"{"name":"C","document":{"width":64,"height":32}}"#,
+        )
+        .unwrap();
+        store.move_entry(c.clone(), 1, None);
+        shown.gallery.refresh();
+        // into the stack
+        shown.gallery.stack = Some((stack.clone(), "Pair".into()));
+        shown.gallery.refresh();
+        // a new area shows from its second frame
+        shown.page(Vec::new());
+        shown.page(Vec::new());
+        let (b, cell) = shown
+            .gallery
+            .drawn_cells
+            .iter()
+            .find_map(|(e, c)| match e {
+                GalleryEntry::Artwork { artwork } if artwork.name == "B" => Some((artwork.dir.clone(), *c)),
+                _ => None,
+            })
+            .unwrap();
+        // held still, it lifts
+        let at = cell.center();
+        shown.page(vec![Event::PointerMoved(at), Shown::button(at, true)]);
+        shown.wait_at(at, HOLD_S + 0.1);
+        assert_eq!(shown.gallery.lifted.as_ref().map(|l| l.0.as_str()), Some(b.as_str()));
+        // onto the way back (the stack's title): lit, and still in the stack until it has rested
+        let way_back = pos2(120.0, 32.0);
+        shown.wait_at(way_back, 0.3);
+        assert!(shown.gallery.stack.is_some());
+        assert_eq!(shown.gallery.rest.resting_on(), Some(""));
+        // rested long enough: the gallery, the artwork still held
+        shown.wait_at(way_back, 0.4);
+        assert!(shown.gallery.stack.is_none(), "the gallery opens");
+        assert!(shown.gallery.lifted.is_some(), "the drag goes on");
+        // let go after C (the gallery's last cell, on its right half): out of the stack, there
+        shown.wait_at(way_back, 0.5);
+        let last = shown
+            .gallery
+            .drawn_cells
+            .iter()
+            .find_map(|(e, c)| matches!(e, GalleryEntry::Artwork { artwork } if artwork.name == "C").then_some(*c))
+            .unwrap();
+        let drop = pos2(last.right() - 10.0, last.bottom() - 10.0);
+        shown.wait_at(drop, 0.2);
+        shown.page(vec![Shown::button(drop, false)]);
+        let names: Vec<String> = store
+            .list(None)
+            .iter()
+            .map(|e| match e {
+                GalleryEntry::Artwork { artwork } => artwork.name.clone(),
+                GalleryEntry::Stack { name, artworks, .. } => format!("{name}{}", artworks.len()),
+            })
+            .collect();
+        assert_eq!(names, ["Pair1", "C", "B"]);
+        assert!(!std::path::Path::new(&b).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_artwork_let_go_on_the_way_back_goes_to_the_front_of_the_gallery() {
+        let (mut shown, stack, root) = with_a_stack("back");
+        shown.gallery.stack = Some((stack.clone(), "Pair".into()));
+        shown.gallery.refresh();
+        // a new area shows from its second frame
+        shown.page(Vec::new());
+        shown.page(Vec::new());
+        let cell = shown.gallery.drawn_cells.last().map(|(_, c)| *c).unwrap();
+        let at = cell.center();
+        shown.page(vec![Event::PointerMoved(at), Shown::button(at, true)]);
+        shown.wait_at(at, HOLD_S + 0.1);
+        assert!(shown.gallery.lifted.is_some());
+        // let go at once on the way back
+        let way_back = pos2(120.0, 32.0);
+        shown.wait_at(way_back, 0.1);
+        shown.page(vec![Shown::button(way_back, false)]);
+        let store = Arc::clone(&shown.gallery.store);
+        let first = store.list(None).into_iter().next();
+        assert!(matches!(first, Some(GalleryEntry::Artwork { artwork }) if artwork.name == "B"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
