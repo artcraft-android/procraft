@@ -406,6 +406,71 @@ mod tests {
         )
     }
 
+    /// Bake the hand-tuned stock presets into the catalog when regenerating it.
+    fn tune_stock_preset(set: &str, file: &mut BrushFile, looks: &mut [Option<StandIn>; 4], keys: &[String]) {
+        let edits: &[(&str, f32)] = match (set, file.name.as_str()) {
+            ("Drawing", "Kitehill") => {
+                // The original key omits the extension of the bundled dry acrylic grain.
+                looks[1].as_mut().unwrap().key = procraft_engine::textures::stock_key("Dry-Acrylic-Wash.png");
+                &[("preview_size", 0.459), ("grain_scale", 0.315)]
+            }
+            ("Painting", "Rasmus Roll") => {
+                &[("grain_brightness", -0.28), ("grain_scale", 0.96), ("grain_contrast", 0.185)]
+            }
+            ("Textures", "Mosaic") => &[("grain_scale", 0.171)],
+            ("Textures", "Cubes") => &[("grain_turn", 1.0), ("grain_scale", 0.278)],
+            ("Charcoals", "6B Compressed") => &[("grain_brightness", 0.064), ("grain_scale", 0.57)],
+            ("Elements", "Smoke") => {
+                &[("speed_size", 0.35), ("preview_size", 0.025), ("pressure_size", 0.71), ("roundness", 0.86)]
+            }
+            ("Elements", "Flames") => {
+                file.max_size = 1.08;
+                &[("pressure_opacity", 0.955)]
+            }
+            ("Materials", "Kerguelen") => &[("grain_scale", 0.2705), ("grain_brightness", 0.056)],
+            ("Vintage", "Toscana") => &[("grain_scale", 0.1605), ("grain_brightness", 0.23), ("preview_size", 0.288)],
+            ("Vintage", "Flower Power") => {
+                &[("spacing", 0.175), ("jitter_size", 0.4137), ("jitter_opacity", 0.79), ("jitter_lateral", 0.88)]
+            }
+            ("Organic", "Strawflower") => &[
+                ("jitter_lateral", 0.23),
+                ("jitter_linear", 0.33),
+                ("spacing", 0.158),
+                ("preview_size", 0.12),
+                ("jitter_size", 0.92),
+            ],
+            ("Organic", "Clay") => &[("grain_brightness", 0.078), ("spacing", 0.195)],
+            ("Water", "Blotch") => {
+                // Keep the scatter of a light stroke. A full-pressure splash lands under the pen.
+                for (kind, full) in [(PressureCurve::LateralJitter, 0.002), (PressureCurve::LinearJitter, 0.018)] {
+                    file.pressure_curves.retain(|(key, _)| *key != kind);
+                    file.pressure_curves
+                        .push((kind, vec![Vec2::new(0.0, 1.0), Vec2::new(0.68, 0.96), Vec2::new(1.0, full)]));
+                }
+                &[("preview_size", 0.942)]
+            }
+            _ => return,
+        };
+        file.settings.retain(|(k, _)| !edits.iter().any(|&(key, _)| key == k));
+        file.settings.extend(edits.iter().map(|&(key, value)| (key.to_owned(), value)));
+        file.settings.sort_by_cached_key(|(name, _)| keys.iter().position(|key| key == name).unwrap());
+    }
+
+    #[test]
+    fn baked_presets_agree_with_the_stock_writers_tuning() {
+        let keys = crate::stock_brushes::KEYS.map(str::to_owned);
+        for set in crate::stock_brushes::SETS {
+            for brush in set.brushes {
+                let file = brush.file();
+                let looks = [brush.shape, brush.grain, brush.metallic, brush.roughness];
+                let (mut rebuilt, mut rebuilt_looks) = (file.clone(), looks);
+                tune_stock_preset(set.name, &mut rebuilt, &mut rebuilt_looks, &keys);
+                assert_eq!(rebuilt, file, "{}/{}", set.name, brush.name);
+                assert_eq!(rebuilt_looks, looks, "{}/{}", set.name, brush.name);
+            }
+        }
+    }
+
     /// Writes `stock_brushes.rs` from a folder of brush sets (`STOCK_SETS`: a folder for each
     /// library, one in it for each set, holding its brush files) and a table of what to call them
     /// (`STOCK_NAMES`, tab-separated: kind, library, set, the brush's name in its file and ours, a
@@ -528,9 +593,10 @@ mod tests {
             base.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join(", ")
         );
         out += "/// The stock sets, in the order a new library shows them.\npub(crate) const SETS: &[StockSet] = &[\n";
-        for (name, brushes) in &sets {
+        for (name, brushes) in &mut sets {
             out += &format!("StockSet {{ name: {name:?}, brushes: &[\n");
             for (file, looks, second_looks) in brushes {
+                tune_stock_preset(name, file, looks, &keys);
                 let second = file
                     .secondary
                     .as_deref()

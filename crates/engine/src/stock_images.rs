@@ -1,7 +1,7 @@
-//! The reference stock library's own shape and grain images, bundled: what a brush file names
-//! instead of carrying. Grey, downscaled (grains to 1024 a side, shapes to 512); a .png name may
-//! hold JPEG bytes where that kept the tooth at a fraction of the size - the decoder sniffs the
-//! format, as it does for a brush file's own pictures.
+//! ProCraft's remade stock shapes and grains, looked up by the names stored in brush files.
+//! The full-resolution artwork lives in `assets/stock-sources`. The app embeds the grayscale
+//! copies in `assets/stock`. Some .png names hold JPEG data. The decoder reads the format
+//! from the bytes, as it does for pictures embedded in a brush file.
 
 /// Every image the library holds, by its file's name in lower case, sorted.
 const IMAGES: &[(&str, &[u8])] = &[
