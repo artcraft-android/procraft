@@ -1834,6 +1834,63 @@ mod tests {
     }
 
     #[test]
+    fn a_pen_s_tap_on_a_plugin_panel_row_reaches_it_as_a_touch_with_its_wobble() {
+        // the system's pen: its touches, which egui-winit also makes its pointer's, and the moves
+        // a pen makes between press and lift without going anywhere
+        let row = |r: Rect| pos2(r.left() + 60.0, r.top() + 60.0 + 22.0 + 45.0);
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let panel = PluginPanel {
+            title: "Squares".to_owned(),
+            rows: vec![
+                PanelRow::Button { label: "Add a layer".to_owned() },
+                PanelRow::Switch { label: "Round".to_owned(), on: true },
+            ],
+            key_press: false,
+        };
+        let top = pc::BAR_HEIGHT + PANEL_MARGIN;
+        let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
+        let at = row(rect);
+        let touch = |phase, pos| Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos,
+            force: Some(0.4),
+        };
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut frames = vec![Vec::new(), Vec::new()];
+        frames.push(vec![touch(egui::TouchPhase::Start, at), Event::PointerMoved(at), button(at, true)]);
+        for k in 1..=4 {
+            let wobble = at + vec2(0.4 * k as f32, -0.3 * k as f32);
+            frames.push(vec![touch(egui::TouchPhase::Move, wobble), Event::PointerMoved(wobble)]);
+        }
+        let end = at + vec2(1.6, -1.2);
+        frames.push(vec![touch(egui::TouchPhase::End, end), button(end, false), Event::PointerGone]);
+        frames.push(Vec::new());
+        let (mut time, mut asked, mut held) = (0.0, None, None);
+        for events in frames {
+            time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(asked, Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
+    }
+
+    #[test]
     fn a_plugin_panel_bigger_or_smaller_takes_its_touches_where_they_show() {
         let row = |i: f32| move |r: Rect| pos2(r.left() + 60.0, r.top() + 60.0 + 22.0 + i * 45.0);
         for scale in [0.5, 1.5] {

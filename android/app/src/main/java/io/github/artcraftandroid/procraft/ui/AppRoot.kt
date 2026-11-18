@@ -295,7 +295,10 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             if (vm.pluginPanel != null) {
                 Box(Modifier.fillMaxSize()) {
                     // what its rows don't take stays on the panel, never reaching the canvas under it
-                    val swallows = Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
+                    // (being touched is enough for that). Only a press is taken, as the brush
+                    // studio's: taking every move too undid the rows' taps and drags whenever a
+                    // move came between press and lift, as it always does from a pen
+                    val swallows = Modifier.pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }
                     // floating, at the floating windows' size
                     val box = this
                     val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
