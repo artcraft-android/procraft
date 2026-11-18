@@ -912,6 +912,11 @@ mod system {
             super::wintab::activated(hwnd, wparam.0 & 0xFFFF != 0);
             return result;
         }
+        // the mouse's own moving the pointer, or pressing, with no packet from the pen: not the pen
+        // (the pointer in the window's pixels, a signed word each in `lparam`)
+        if msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN {
+            super::wintab::mouse_at((i32::from(lparam.0 as u16 as i16), i32::from((lparam.0 >> 16) as u16 as i16)));
+        }
         // a tablet's pen moving the mouse (Windows Ink off) pressing, and up again: the mouse with
         // no button held (its keys and buttons in `wparam`)
         match msg {

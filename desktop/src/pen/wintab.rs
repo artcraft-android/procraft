@@ -45,6 +45,15 @@ static BASE: AtomicU32 = AtomicU32::new(0);
 /// The open context's handle (0: none), for the messages about a context that name it.
 static CONTEXT: AtomicUsize = AtomicUsize::new(0);
 
+/// When the last packet handed the pen on as the mouse's was read (ms since [`started`]; 0, never)
+/// and where it found the mouse pointer then (window pixels), if it could say.
+static PACKET_AT: AtomicU64 = AtomicU64::new(0);
+static PACKET_POINTER: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// How long the mouse pointer may move with no packet before what moves it is taken for the mouse:
+/// a pen moving it is read a hundred times a second or more, its packets ahead of the moves they
+/// make (a window's posted messages come before its mouse's).
+const PEN_QUIET: Duration = Duration::from_millis(100);
+
 /// What [`WTInfoW`] is asked: the default digitizing and system contexts, a device's name,
 /// pressure and orientation axes, and a cursor's name.
 const WTI_DEFCONTEXT: u32 = 3;
@@ -738,6 +747,30 @@ pub fn pressed() {
     front(Front::pressed);
 }
 
+/// The mouse pointer moved to `at` (window pixels), or pressed there. With no packet read for
+/// [`PEN_QUIET`] and the pointer elsewhere than the last one left it, the pen isn't what moves it
+/// (a mouse picked up beside the tablet, the pen left lying in its reach, whose driver says
+/// nothing of it going): what WinTab said of the pen is let go, so the mouse paints as the mouse,
+/// at full pressure, not as a pen held over the tablet, at none. A pen's packets that come after
+/// all are the pen's again (and a stroke the mouse began then becomes the pen's: see `input.rs`).
+pub fn mouse_at(at: (i32, i32)) {
+    mouse_at_after(at, started().elapsed());
+}
+
+fn mouse_at_after(at: (i32, i32), since_start: Duration) {
+    if super::mouse_pen().is_none() || ink_lately() {
+        return;
+    }
+    let read = PACKET_AT.load(Ordering::Relaxed);
+    let now = since_start.as_millis() as u64;
+    let quiet = read == 0 || now > read + PEN_QUIET.as_millis() as u64;
+    let left_there = PACKET_POINTER.lock().ok().and_then(|p| *p) == Some(at);
+    if quiet && !left_there {
+        super::set_mouse_pen(None);
+        super::pen_flags(super::MOUSE, 0);
+    }
+}
+
 /// The mouse moved, or a button came up, with none held: the pen, if it moves the mouse, is up.
 pub fn pen_up(hwnd: HWND) {
     // SAFETY: no arguments; the window the user works in
@@ -861,6 +894,10 @@ pub fn message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
             // SAFETY: a point to fill, then made the window's own
             let placed = unsafe { GetCursorPos(&mut at).is_ok() && ScreenToClient(hwnd, &mut at).as_bool() };
             super::set_mouse_pen(Some(pen));
+            PACKET_AT.store((started().elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
+            if let Ok(mut p) = PACKET_POINTER.lock() {
+                *p = placed.then_some((at.x, at.y));
+            }
             if placed {
                 let pointer = (at.x as f32, at.y as f32);
                 // the window's top left on the screen, for where in it the packet puts the pen
@@ -1395,6 +1432,51 @@ mod tests {
         assert_eq!(standing(CXS_ONTOP), "on top");
         assert_eq!(standing(CXS_ONTOP | CXS_DISABLED), "disabled");
         assert_eq!(standing(0x0002), "under another");
+    }
+
+    #[test]
+    fn the_mouse_moving_the_pointer_with_no_packets_coming_is_the_mouse_not_a_pen_left_in_reach() {
+        let _one = super::super::tests::mouse_pointer_tests();
+        INK_AT.store(0, Ordering::Relaxed);
+        stand_in(Layout { data: PK_BUTTONS | PK_NORMAL_PRESSURE, relative: 0 });
+        let send = |numbers: &[i32]| {
+            *STAND_IN.lock().unwrap() = numbers.to_vec();
+            message(HWND::default(), 0x6000, WPARAM(1), LPARAM(0))
+        };
+        let read = || Duration::from_millis(PACKET_AT.load(Ordering::Relaxed));
+        // the pen lifted from the tablet, hovering, its last packet at no pressure: its moves of
+        // the pointer, the packets coming, stay the pen's
+        assert!(send(&[0, 0]));
+        *PACKET_POINTER.lock().unwrap() = Some((40, 50));
+        mouse_at_after((41, 50), read() + Duration::from_millis(8));
+        assert_eq!(super::super::mouse_pen().map(|p| p.pressure), Some(0.0));
+        // a pause where the last packet left the pointer (a move the system makes up, the pen
+        // pressing just where it stopped) is still the pen's
+        mouse_at_after((40, 50), read() + Duration::from_secs(5));
+        assert!(super::super::mouse_pen().is_some());
+        // the pen laid down within the tablet's reach, its driver saying nothing of it going: the
+        // mouse moving the pointer is the mouse, painting at full pressure, its side switches none
+        super::super::pen_flags(super::super::MOUSE, super::super::FLAG_BARREL);
+        mouse_at_after((300, 200), read() + Duration::from_millis(250));
+        assert_eq!(super::super::mouse_pen(), None);
+        let flags = super::super::FLAGS.lock().unwrap().as_ref().and_then(|f| f.get(&super::super::MOUSE).copied());
+        assert_eq!(flags.unwrap_or(0), 0);
+        // (what the mouse's press there reads: no pen, so the mouse at its full pressure)
+        assert_eq!(super::super::mouse_pen_at((300.0, 200.0)), None);
+        // the pen taken up again: its packets make it the pen's
+        assert!(send(&[1, 600]));
+        assert!(super::super::mouse_pen().is_some_and(|p| p.pressure > 0.5));
+        // while Windows Ink has the pen, WinTab's word on it is left to the system's
+        INK_AT.store((started().elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
+        mouse_at_after((10, 10), read() + Duration::from_millis(250));
+        assert!(super::super::mouse_pen().is_some());
+        INK_AT.store(0, Ordering::Relaxed);
+        BASE.store(0, Ordering::Relaxed);
+        CONTEXT.store(0, Ordering::Relaxed);
+        *TABLET.lock().unwrap() = None;
+        *PACKET_POINTER.lock().unwrap() = None;
+        super::super::set_mouse_pen(None);
+        super::super::pen_flags(super::super::MOUSE, 0);
     }
 
     #[test]
