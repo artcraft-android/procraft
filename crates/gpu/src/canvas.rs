@@ -116,6 +116,11 @@ const LAID_KEPT_MOST: usize = 1 << 17;
 /// redraws all of it, and its millions of stamps in one buffer could pass the most the GPU makes,
 /// leaving no buffer to draw this or any later stroke with. 1M stamps take about 100 MB.
 const STAMPS_AT_ONCE: u64 = 1 << 20;
+/// How long a render that shows the canvas spends laying a stroke laid again whole as it ends
+/// (its end taper reaching back over paint laid in place) before leaving the rest to the next, the
+/// picture shown as it was until it is all laid: laid in one render, a long stroke of wet paint
+/// held the canvas, and every touch waiting on it, for a tenth of a second or more.
+const RELAY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(6);
 /// What a stamp counts for besides the pixels it covers; and a stamp painted in place, a compute
 /// pass for each, for each pixel and for itself.
 const STAMP_WORK: u64 = 1 << 10;
@@ -1787,12 +1792,23 @@ struct ActiveStroke {
     bounds: IRect,
     /// Which stroke ended here it is, counted as [`Canvas::strokes_ended`] (0 while it is open).
     number: u64,
+    /// Where its own stamps reach, and a dual brush's second's (`bounds` is where either does).
+    first: IRect,
+    second_reach: IRect,
     /// Painting an adjustment on: the stamps go into the adjustment's mask, not a layer.
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
     second: Option<SecondStroke>,
     /// Lays its pixels only within this (see [`Canvas::lay_within`]).
     within: Option<IRect>,
+}
+
+impl ActiveStroke {
+    /// A stroke on `layer` in `style` with nothing drawn yet.
+    fn new(layer: LayerId, style: StrokeStyle, pencil: bool, within: Option<IRect>) -> ActiveStroke {
+        let (bounds, first, second_reach) = (IRect::EMPTY, IRect::EMPTY, IRect::EMPTY);
+        ActiveStroke { layer, style, bounds, number: 0, first, second_reach, pencil, second: None, within }
+    }
 }
 
 /// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
@@ -2677,6 +2693,10 @@ pub struct Canvas {
     /// Wet paint and paint laid in place go down a stamp a dispatch, as they did before runs of
     /// stamps were laid at once (see [`Canvas::lay_stamp_by_stamp`]).
     stamp_by_stamp: bool,
+    /// How long a render that shows the canvas lays a stroke laid again as it ends (see
+    /// [`RELAY_AT_ONCE`]), and whether one is being laid over several (the picture held meanwhile).
+    relay_at_once: std::time::Duration,
+    relaying: bool,
     /// How the last plugin filter's draw went, not yet asked for.
     filter_run: Option<plugin_filter::FilterRun>,
     /// How many times the composite has been redrawn.
@@ -2727,10 +2747,17 @@ pub struct Canvas {
     smudge_spare: [wgpu::Buffer; 2],
     /// Stamps of input that hasn't happened yet (predicted), drawn over the canvas for one frame.
     prediction: Vec<StampInstance>,
-    /// The open stroke's stamps as laid so far, so that one redrawn whole with them still at its
-    /// start lays only what comes after (see [`Canvas::replace_stamps`]); none past
-    /// [`LAID_KEPT_MOST`], or for a dual brush's.
+    /// The open stroke's stamps as laid so far, and a dual brush's second's, so that one redrawn
+    /// whole with them still at its start lays only what comes after (see
+    /// [`Canvas::replace_stamps`]); none past [`LAID_KEPT_MOST`].
     laid: Option<Vec<Stamp>>,
+    laid_second: Option<Vec<Stamp>>,
+    /// How many of them there are, however many (see [`Canvas::laid_count`]).
+    laid_count: usize,
+    laid_second_count: usize,
+    /// A stroke redrawn whole is laid whole again, whatever it has laid (see
+    /// [`Canvas::lay_ends_whole`]).
+    ends_whole: bool,
     /// How many strokes have ended here, and the last put into its layer: its number and the
     /// undo step it made (see [`Canvas::step_of_stroke`]).
     strokes_ended: u64,
@@ -3060,6 +3087,8 @@ impl Canvas {
             pieces_sent: 0,
             dispatched: AtomicU64::new(0),
             stamp_by_stamp: false,
+            relay_at_once: RELAY_AT_ONCE,
+            relaying: false,
             filter_run: None,
             composites: 0,
             active: None,
@@ -3086,6 +3115,10 @@ impl Canvas {
             wet_capacity: 4,
             prediction: Vec::new(),
             laid: None,
+            laid_second: None,
+            laid_count: 0,
+            laid_second_count: 0,
+            ends_whole: false,
             strokes_ended: 0,
             stroke_step: None,
             ops: Vec::new(),
@@ -3473,9 +3506,10 @@ impl Canvas {
         self.end_stroke();
         self.prediction.clear();
         self.laid = Some(Vec::new());
+        (self.laid_count, self.laid_second_count) = (0, 0);
         let within = self.lay_within;
-        self.active =
-            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, number: 0, pencil: false, second: None, within });
+        self.laid_second = None;
+        self.active = Some(ActiveStroke::new(layer, style, false, within));
     }
 
     /// How a laid stroke is marked in this canvas's stroke (see `STROKE_LAID`).
@@ -3496,9 +3530,10 @@ impl Canvas {
         if let Some(active) = self.active.as_mut() {
             active.second = Some(second);
         }
-        // its paint laid apart is put together with its second as each comes: redrawn, it is laid
-        // whole again
-        self.laid = None;
+        // (paint laid in place apart only adds to what the stroke keeps, never reading its second,
+        // which only putting it together takes: that is done over the whole stroke as it ends, so
+        // laying only the rest of either at the end leaves what laying both whole would)
+        self.laid_second = Some(Vec::new());
         if !self.measuring {
             self.ops.push(Op::ClearSecond(second));
         }
@@ -3507,15 +3542,53 @@ impl Canvas {
     /// Draws more of the open stroke's second.
     pub fn add_second_stamps(&mut self, stamps: &[Stamp]) {
         self.push_stamps_to(stamps, false, true);
+        keep_laid(&mut self.laid_second, stamps);
+        self.laid_second_count += stamps.len();
     }
 
-    /// Redraws the open stroke's second from scratch with `stamps` (its final form).
+    /// Redraws the open stroke's second from scratch with `stamps` (its final form): only those
+    /// after the stamps it has laid, if they are still at its start (as [`Canvas::replace_stamps`]).
     pub fn replace_second_stamps(&mut self, stamps: &[Stamp]) {
+        if let Some(from) = laid_before(self.laid_second.as_deref(), stamps, !self.ends_with_rest(true)) {
+            self.add_second_stamps(stamps.get(from..).unwrap_or_default());
+            return;
+        }
         self.push_stamps_to(stamps, true, true);
+        if self.laid_second.is_some() {
+            self.laid_second = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
+        }
+        self.laid_second_count = stamps.len();
+    }
+
+    /// Ends the open stroke's second with `rest`, the stamps of its final form after the
+    /// [`Canvas::laid_second_count`] it has laid (as they still are): only those are laid.
+    pub fn end_second_with(&mut self, rest: &[Stamp]) {
+        self.add_second_stamps(rest);
+    }
+
+    /// How many stamps the open stroke's second has laid (none without one, or when a stroke is
+    /// laid whole as it ends, see [`Canvas::lay_ends_whole`]).
+    pub fn laid_second_count(&self) -> Option<usize> {
+        self.ends_with_rest(true).then_some(self.laid_second_count)
+    }
+
+    /// Whether the open stroke (`second`: its second) can end laying only what follows the stamps
+    /// it has laid and come out as laid whole. Not a dual brush's part laid in the stroke's
+    /// textures by a rule that builds up gradually or towards its transfer: that rounds its sums
+    /// to half floats once a lot (see `stamp_rule.wgsl`), so lots cut otherwise come out a little
+    /// otherwise, and a dual brush's stroke has always been laid whole again at its end. Nor when
+    /// that is asked for (see [`Canvas::lay_ends_whole`]).
+    fn ends_with_rest(&self, second: bool) -> bool {
+        let Some(active) = self.active.filter(|_| !self.ends_whole) else { return false };
+        let Some(dual) = active.second else { return !second };
+        let style = if second { dual.style } else { active.style };
+        let by_rule_here = self.pipelines.compute.is_some() || self.pipelines.fragments.is_some();
+        style.in_place() || by_rule(style.rendering).is_none() || !by_rule_here
     }
 
     /// The open stroke goes on without its second (it was made into a shape).
     pub fn drop_second(&mut self) {
+        self.laid_second = None;
         if let Some(active) = self.active.as_mut()
             && active.second.take().is_some()
         {
@@ -3562,22 +3635,48 @@ impl Canvas {
     pub fn add_stamps(&mut self, stamps: &[Stamp]) {
         self.untip();
         self.push_stamps(stamps, false);
-        if let Some(laid) = self.laid.as_mut() {
-            if laid.len() + stamps.len() <= LAID_KEPT_MOST {
-                laid.extend_from_slice(stamps);
-            } else {
-                self.laid = None;
-            }
+        keep_laid(&mut self.laid, stamps);
+        self.laid_count += stamps.len();
+    }
+
+    /// How many stamps the open stroke has laid for good (added since it began or was last redrawn
+    /// from scratch; none when a stroke is laid whole as it ends, see [`Canvas::lay_ends_whole`]).
+    pub fn laid_count(&self) -> Option<usize> {
+        self.ends_with_rest(false).then_some(self.laid_count)
+    }
+
+    /// Ends the open stroke with `rest`, the stamps of its final form after the
+    /// [`Canvas::laid_count`] it has laid (as they still are): only those are laid, if that leaves
+    /// what laying it whole would. False if it doesn't (laid with nothing): the caller lays it whole
+    /// with [`Canvas::replace_stamps`].
+    pub fn end_with(&mut self, rest: &[Stamp]) -> bool {
+        if !self.second_stays_within(rest) {
+            return false;
         }
+        self.add_stamps(rest);
+        self.own_reach();
+        true
+    }
+
+    /// A dual brush's stroke redrawn in its final form keeps only where its own stamps reach, as
+    /// one laid whole again from scratch does (its second redrawn before it): what showed of the
+    /// second past them goes as it is put into its layer.
+    fn own_reach(&mut self) {
+        let Some(active) = self.active.as_mut().filter(|a| a.second.is_some() && a.bounds != a.first) else { return };
+        if !self.measuring {
+            self.dirty = self.dirty.union(active.bounds);
+        }
+        active.bounds = active.first;
     }
 
     /// Redraws the open stroke from scratch with `stamps` (its final form, e.g. with the end taper).
     /// Those laid so far still at its start stay as they are, and only the rest is laid: a long
     /// stroke of wet paint, laid whole again as the pen lifted, took a tenth of a second or more.
     pub fn replace_stamps(&mut self, stamps: &[Stamp]) {
-        let unchanged = self.laid.as_ref().filter(|laid| !laid.is_empty() && stamps.starts_with(laid)).map(Vec::len);
-        if let Some(from) = unchanged {
+        let laid = laid_before(self.laid.as_deref(), stamps, !self.ends_with_rest(false));
+        if let Some(from) = laid.filter(|&from| self.second_stays_within(stamps.get(from..).unwrap_or_default())) {
             self.add_stamps(stamps.get(from..).unwrap_or_default());
+            self.own_reach();
             return;
         }
         self.tip = None;
@@ -3585,6 +3684,37 @@ impl Canvas {
         if self.laid.is_some() {
             self.laid = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
         }
+        self.laid_count = stamps.len();
+    }
+
+    /// Whether a dual brush's paint laid in place, ending with `rest` laid after what it has laid,
+    /// reaches wherever its second does: laid whole again, it is put together only where its own
+    /// stamps reach (the second showing nowhere else), so laying only the rest leaves the same
+    /// only then. Any other stroke does.
+    fn second_stays_within(&self, rest: &[Stamp]) -> bool {
+        let Some(active) = self.active.filter(|a| a.second.is_some() && a.style.in_place()) else { return true };
+        let first = active.first.union(self.reach_of(rest, active.style));
+        // (a stamp's quad reaches a little past where it is counted to; nothing is past the canvas)
+        let m = 3;
+        let s = active.second_reach;
+        let second = IRect { x0: s.x0 - m, y0: s.y0 - m, x1: s.x1 + m, y1: s.y1 + m }.intersect(self.full());
+        s.is_empty()
+            || (second.x0 >= first.x0 && second.y0 >= first.y0 && second.x1 <= first.x1 && second.y1 <= first.y1)
+    }
+
+    /// Where `stamps`, drawn in `style`, reach on this canvas (as [`Canvas::push_stamps_to`]
+    /// counts it).
+    fn reach_of(&self, stamps: &[Stamp], style: StrokeStyle) -> IRect {
+        let scale = self.scaled.map(|(_, k)| k);
+        let reach = |s: &Stamp| {
+            let s = self.scaled.map_or(*s, |(origin, k)| scaled_stamp(s, origin, k));
+            let radius = drawn_radius(&style, s.radius, s.taper);
+            let radius = scale.map_or(radius, |k| scaled_radius(&style, radius, k));
+            let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
+            IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2)
+        };
+        let drawn = stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite());
+        drawn.fold(IRect::EMPTY, |b, s| b.union(reach(s))).intersect(self.full())
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
@@ -3670,6 +3800,12 @@ impl Canvas {
             active.bounds = bounds;
         } else {
             active.bounds = active.bounds.union(bounds);
+        }
+        match (second, clear) {
+            (false, true) => active.first = bounds,
+            (false, false) => active.first = active.first.union(bounds),
+            (true, true) => active.second_reach = bounds,
+            (true, false) => active.second_reach = active.second_reach.union(bounds),
         }
         if self.measuring {
             return bounds;
@@ -3788,6 +3924,7 @@ impl Canvas {
     pub fn end_stroke(&mut self) {
         self.prediction.clear();
         self.laid = None;
+        self.laid_second = None;
         self.untip();
         if let Some(mut active) = self.active.take() {
             self.last_ended = Some((active.bounds, active.style.in_place()));
@@ -3809,6 +3946,13 @@ impl Canvas {
     /// adjustment, or that laid nothing, makes none).
     pub fn step_of_stroke(&self, number: u64) -> Option<u64> {
         self.stroke_step.filter(|&(n, _)| n == number).map(|(_, step)| step)
+    }
+
+    /// Strokes redrawn whole as they end are laid whole again, as if none of their stamps had been
+    /// laid: for tests comparing the two.
+    #[doc(hidden)]
+    pub fn lay_ends_whole(&mut self, on: bool) {
+        self.ends_whole = on;
     }
 
     /// Strokes begun from now on lay their pixels only within `rect` (none: wherever they reach),
@@ -3936,6 +4080,7 @@ impl Canvas {
     pub fn end_stroke_within(&mut self, rects: Vec<IRect>) {
         self.prediction.clear();
         self.laid = None;
+        self.laid_second = None;
         self.untip();
         if let Some(mut active) = self.active.take() {
             self.strokes_ended += 1;
@@ -3964,6 +4109,19 @@ impl Canvas {
     #[doc(hidden)]
     pub fn set_stamps_at_once(&mut self, stamps: u64) {
         self.stamps_at_once = stamps.max(1);
+    }
+
+    /// Lays a stroke laid again as it ends for at most this long in a render that shows the canvas,
+    /// in place of [`RELAY_AT_ONCE`]: for tests (none, a piece of its work a render).
+    #[doc(hidden)]
+    pub fn set_relay_at_once(&mut self, most: std::time::Duration) {
+        self.relay_at_once = most;
+    }
+
+    /// Whether a stroke laid again as it ends is still being laid, a share at each render that shows
+    /// the canvas (the picture held as it was until it is all laid).
+    pub fn relaying(&self) -> bool {
+        self.relaying
     }
 
     /// The most stamps one buffer of this device holds.
@@ -4167,6 +4325,7 @@ impl Canvas {
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
         self.laid = None;
+        self.laid_second = None;
         self.tip = None;
         if let Some(active) = self.active.take()
             && !self.measuring
@@ -4571,7 +4730,7 @@ impl Canvas {
     /// Whether the canvas has work that more renders do (caches being remade, layers being
     /// parked, the history's pixels being packed): it wants another render soon.
     pub fn wants_render(&self) -> bool {
-        self.busy() || self.parking_left || self.packing.is_some()
+        self.busy() || self.parking_left || self.packing.is_some() || self.relaying
     }
 
     /// How the last remake of the caches went (none made yet).
@@ -5033,15 +5192,8 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke {
-            layer,
-            style,
-            bounds: IRect::EMPTY,
-            number: 0,
-            pencil: true,
-            second: None,
-            within: None,
-        });
+        (self.laid_count, self.laid_second_count) = (0, 0);
+        self.active = Some(ActiveStroke::new(layer, style, true, None));
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -5359,6 +5511,7 @@ impl Canvas {
     /// Records and submits everything queued, recomposites what changed and draws to `target`.
     /// Undoing a structural step puts the earlier document into `doc`.
     pub fn render(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) {
+        let started = std::time::Instant::now();
         self.sync_layers(gpu, doc);
         // the stroke's bind goes with the open stroke's grain
         let full_grain = self.active.as_ref().and_then(|a| a.style.full_grain);
@@ -5480,8 +5633,30 @@ impl Canvas {
         let mut deferred = held_back;
         // stamps' work recorded and not sent yet
         let mut recorded = 0u64;
+        // a stroke laid again whole as it ends, in a render that shows the canvas: laid for so long
+        // (see `RELAY_AT_ONCE`), the rest left to the renders after, until its end is reached
+        let mut relay_until = target
+            .as_ref()
+            .filter(|_| self.relaying || lays_ended_stroke_again(&ops))
+            .map(|_| started + self.relay_at_once);
+        let mut relaid = false;
+        self.relaying = false;
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
+            if let (Some(until), Op::Stamps { .. }) = (relay_until, &op)
+                && relaid
+                && std::time::Instant::now() >= until
+            {
+                let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
+                self.ops.splice(0..0, rest);
+                self.relaying = true;
+                break;
+            }
+            match &op {
+                Op::Stamps { .. } => relaid = true,
+                Op::Commit(_) | Op::Cancel => relay_until = None,
+                _ => {}
+            }
             if live.as_ref().is_some_and(|live| !self.keeps_caches(&op, live)) {
                 self.let_go_caches(true);
             }
@@ -6480,8 +6655,9 @@ impl Canvas {
         // after the caches: caches just made want the whole picture composited again
         let dirty = self.dirty.intersect(self.full());
         let device = &gpu.device;
-        // while caches are remade the composite stays as it was, what changed kept for after
-        if self.remake.is_none() {
+        // while caches are remade, or a stroke laid again over several renders, the composite stays
+        // as it was, what changed kept for after
+        if self.remake.is_none() && !self.relaying {
             if !dirty.is_empty() {
                 self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
                 self.composites = self.composites.wrapping_add(1);
@@ -6526,8 +6702,9 @@ impl Canvas {
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
         self.pack_history(gpu);
-        // the work held back, in a submission after this one's
-        if deferred {
+        // the work held back, in a submission after this one's (a stroke being laid again goes on in
+        // the next render that shows the canvas)
+        if deferred && !self.relaying {
             self.render(gpu, doc, None);
         }
     }
@@ -11339,6 +11516,30 @@ fn without_passing_tips(ops: Vec<Op>) -> Vec<Op> {
         kept.push(op);
     }
     kept
+}
+
+/// Whether `ops` lay a stroke again from scratch (a layer's, not an adjustment's mask) and then end
+/// it: its end redrawn whole.
+fn lays_ended_stroke_again(ops: &[Op]) -> bool {
+    let from = ops.iter().position(|op| matches!(op, Op::Stamps { clear: true, pencil: false, .. }));
+    from.is_some_and(|from| ops.iter().skip(from).any(|op| matches!(op, Op::Commit(_))))
+}
+
+/// `stamps` laid after those `laid` holds, as far as it keeps them (see [`LAID_KEPT_MOST`]).
+fn keep_laid(laid: &mut Option<Vec<Stamp>>, stamps: &[Stamp]) {
+    if let Some(kept) = laid.as_mut() {
+        if kept.len() + stamps.len() <= LAID_KEPT_MOST {
+            kept.extend_from_slice(stamps);
+        } else {
+            *laid = None;
+        }
+    }
+}
+
+/// How many of `stamps` (a stroke's final form) were laid already: those `laid` holds, if they are
+/// all still at its start (and laying it whole isn't asked for, `whole`).
+fn laid_before(laid: Option<&[Stamp]>, stamps: &[Stamp], whole: bool) -> Option<usize> {
+    laid.filter(|laid| !whole && !laid.is_empty() && stamps.starts_with(laid)).map(<[Stamp]>::len)
 }
 
 /// `ops` without the open stroke's stamps into `layer` at their end (not its second's, nor an
