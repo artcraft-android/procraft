@@ -68,7 +68,6 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.graphicsLayer
@@ -241,8 +240,9 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 /**
  * The brush library: sets on the left, the set's brushes with a sample stroke on the right. Tap
  * the chosen set for its menu, swipe a brush left to share, duplicate or delete it, hold it for
- * its menu (and drag it on from there onto a set or to another place in its own), pinch the lists
- * in for every library's card, and add brushes and sets with the plus.
+ * its menu (and drag it on from there onto a set, which opens after a moment over it, or to
+ * another place in its own; brushes picked go with it), pinch the lists in for every library's
+ * card, and add brushes and sets with the plus.
  */
 @Composable
 fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, floating: FloatingFrame? = null) {
@@ -299,6 +299,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
     // a brush held and dragged: which, where the finger is and where on the brush it took hold
     // (window pixels); and where the sets, the brushes and the lists are on the screen
     var dragged by remember { mutableStateOf<BrushInfo?>(null) }
+    // the brushes going with it (it among them, those picked in its set), in their order; the
+    // finger dragging them, and the dragged cell's size (its row may go as another set opens)
+    var draggedWith by remember { mutableStateOf<List<BrushInfo>>(emptyList()) }
+    var dragPointer by remember { mutableStateOf<androidx.compose.ui.input.pointer.PointerId?>(null) }
+    var dragSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
     // or a set held and dragged (its place)
     var draggedSet by remember { mutableStateOf<Int?>(null) }
     var dragAt by remember { mutableStateOf(Offset.Zero) }
@@ -310,11 +315,21 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
     val overSet = if (dragged == null && draggedSet == null) null else setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key?.takeIf { it != draggedSet }
     fun drop() {
         val b = dragged ?: return
+        val moving = draggedWith.ifEmpty { listOf(b) }
         dragged = null
-        // onto a set: to its top; onto a brush of this set: to its place
+        draggedWith = emptyList()
+        dragPointer = null
+        // onto a set: to its top; onto a brush of the set shown: to its place
         val brushes = shown?.brushes.orEmpty().mapNotNull { t -> brushBounds["${t.set}-${t.index}"]?.let { (t.set.toInt() to t.index.toInt()) to it } }
-        val (set, index) = brushDropPlace(b.set.toInt() to b.index.toInt(), dragAt, setBounds, brushes) ?: return
-        vm.moveBrush(b, set, index)
+        val (set, index) = brushesDropPlace(moving.map { it.set.toInt() to it.index.toInt() }, dragAt, setBounds, brushes) ?: return
+        vm.moveBrushes(moving, set, index)
+    }
+    // held over another set a moment, the dragged brush opens it, to be let go among its brushes
+    LaunchedEffect(overSet, dragged != null) {
+        val over = overSet ?: return@LaunchedEffect
+        if (dragged == null || over == vm.shownSet) return@LaunchedEffect
+        kotlinx.coroutines.delay(SPRING_LOAD_MS)
+        if (dragged != null) vm.showSet(over)
     }
     // (for a hold that began before the library last changed)
     val dropNow by androidx.compose.runtime.rememberUpdatedState(::drop)
@@ -437,7 +452,34 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
             },
         ) {
         LibrarySearch(query, onQuery = { query = it }, onFocus = { searching = it })
-        Box(Modifier.weight(1f).onGloballyPositioned { listBounds = it.boundsInWindow() }) {
+        Box(
+            Modifier.weight(1f).onGloballyPositioned { listBounds = it.boundsInWindow() }
+                // a dragged brush is followed here, over both lists, once its row has begun the drag:
+                // on as its set's list gives way to another's
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val held = dragPointer
+                            if (dragged != null && held != null) {
+                                val change = event.changes.firstOrNull { it.id == held }
+                                if (change == null) {
+                                    // the finger gone without lifting (the gesture taken away)
+                                    dragged = null
+                                    draggedWith = emptyList()
+                                    dragPointer = null
+                                } else {
+                                    change.consume()
+                                    dragAt = listBounds.topLeft + change.position
+                                    if (!change.pressed) dropNow()
+                                }
+                            }
+                            if (event.changes.none { it.pressed }) break
+                        }
+                    }
+                },
+        ) {
         if (searching || query.isNotEmpty()) {
             SearchResults(vm, query)
         } else {
@@ -654,7 +696,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                             ) {
                                 Box(
                                     Modifier.fillMaxWidth().height(BrushHeight).onGloballyPositioned { brushBounds[key] = it.boundsInWindow() }
-                                        .alpha(if (dragged?.let { d -> d.set == b.set && d.index == b.index } == true) 0.3f else 1f)
+                                        .alpha(if (draggedWith.any { d -> d.set == b.set && d.index == b.index }) 0.3f else 1f)
                                         .pointerInput(key, recent) {
                                             // held still, its menu shows (and stays when the finger lifts); moved on
                                             // from there, the menu goes and the brush follows the finger (the Recent
@@ -668,32 +710,28 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                                 brushMenu = key
                                                 val hold = BrushHold(viewConfiguration.touchSlop, movable = !recent)
                                                 // the rest of the press is the hold's, taken before the tap under it sees
-                                                // it (letting go is no tap); taken by something else first, it ends
-                                                try {
-                                                    while (true) {
-                                                        val change = awaitPointerEvent(PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
-                                                        if (change == null || change.isConsumed) {
-                                                            dragged = null
-                                                            break
-                                                        }
-                                                        val by = change.positionChangeIgnoreConsumed()
-                                                        change.consume()
-                                                        if (!change.pressed) {
-                                                            dropNow()
-                                                            break
-                                                        }
-                                                        if (hold.move(change.position - long.position)) {
-                                                            brushMenu = null
-                                                            grab = long.position
-                                                            dragAt = (brushBounds[key]?.topLeft ?: Offset.Zero) + change.position
-                                                            dragged = brushNow
-                                                        } else if (hold.dragging) {
-                                                            dragAt += by
-                                                        }
+                                                // it (letting go is no tap), until it drags the brush: the lists' box
+                                                // follows it from there (this row may go, as another set opens)
+                                                while (true) {
+                                                    val change = awaitPointerEvent(PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
+                                                    if (change == null || change.isConsumed || !change.pressed) {
+                                                        change?.consume()
+                                                        break
                                                     }
-                                                } catch (gone: kotlinx.coroutines.CancellationException) {
-                                                    dragged = null
-                                                    throw gone
+                                                    change.consume()
+                                                    if (hold.move(change.position - long.position)) {
+                                                        brushMenu = null
+                                                        vm.swipedBrush = null
+                                                        val now = brushNow
+                                                        val bounds = brushBounds[key]
+                                                        grab = long.position
+                                                        dragAt = (bounds?.topLeft ?: Offset.Zero) + change.position
+                                                        dragSize = bounds?.size ?: androidx.compose.ui.geometry.Size.Zero
+                                                        draggedWith = draggedTogether(now, vm.pickedBrushes, vm.highlighted(now), vm.brushSets.getOrNull(now.set.toInt())?.brushes.orEmpty())
+                                                        dragPointer = long.id
+                                                        dragged = now
+                                                        break
+                                                    }
                                                 }
                                             }
                                         }
@@ -786,17 +824,25 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
         }
             // the dragged brush follows the finger
             dragged?.let { d ->
-                val size = brushBounds["${d.set}-${d.index}"]?.size
                 val at = dragAt - grab - listBounds.topLeft
                 Box(
                     Modifier.offset { IntOffset(at.x.roundToInt(), at.y.roundToInt()) }
-                        .size(with(density) { (size?.width ?: 0f).toDp() }, BrushHeight)
+                        .size(with(density) { dragSize.width.toDp() }, BrushHeight)
                         .clip(RoundedCornerShape(12.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
                 ) {
                     vm.previews["${d.set}-${d.index}"]?.let {
                         Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
                     Text(d.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 18.dp, top = 11.dp))
+                    // several going together: how many
+                    if (draggedWith.size > 1) {
+                        Box(
+                            Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp).size(24.dp).clip(CircleShape).background(Color.White),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("${draggedWith.size}", color = Pc.RowSelected, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
                 }
             }
             // and the dragged set
@@ -1274,10 +1320,35 @@ internal class BrushHold(private val slop: Float, private val movable: Boolean) 
  * [sets] (by place), to its top; onto one of the shown set's [brushes] (by place), to its place;
  * nowhere when that is where it is already, or when it is over neither.
  */
-internal fun brushDropPlace(from: Pair<Int, Int>, at: Offset, sets: Map<Int, Rect>, brushes: List<Pair<Pair<Int, Int>, Rect>>): Pair<Int, Int>? {
-    sets.entries.firstOrNull { it.value.contains(at) }?.let { return if (it.key == from.first) null else it.key to 0 }
-    return brushes.firstOrNull { it.second.contains(at) }?.first?.takeIf { it != from }
+internal fun brushDropPlace(from: Pair<Int, Int>, at: Offset, sets: Map<Int, Rect>, brushes: List<Pair<Pair<Int, Int>, Rect>>): Pair<Int, Int>? =
+    brushesDropPlace(listOf(from), at, sets, brushes)
+
+/**
+ * Where brushes from places [from] (set, index; all of one set) dragged together go, let go at
+ * [at] (window pixels): onto another set of [sets] (by place), to its top; onto one of the shown
+ * set's [brushes] (by place) not among them, to its place (the first of them taking it, the rest
+ * after it); nowhere over their own set, over one of them, or over neither.
+ */
+internal fun brushesDropPlace(from: List<Pair<Int, Int>>, at: Offset, sets: Map<Int, Rect>, brushes: List<Pair<Pair<Int, Int>, Rect>>): Pair<Int, Int>? {
+    val own = from.firstOrNull()?.first ?: return null
+    sets.entries.firstOrNull { it.value.contains(at) }?.let { return if (it.key == own) null else it.key to 0 }
+    return brushes.firstOrNull { it.second.contains(at) }?.first?.takeIf { it !in from }
 }
+
+/**
+ * The brushes dragged with [held]: those picked ([picked], by place "set-index") in its set and it,
+ * in their order in its set ([brushes]), when it is one of them (the current brush, [selected],
+ * counts as picked); else it alone.
+ */
+internal fun draggedTogether(held: BrushInfo, picked: List<String>, selected: Boolean, brushes: List<BrushInfo>): List<BrushInfo> {
+    val key = "${held.set}-${held.index}"
+    if (picked.isEmpty() || (key !in picked && !selected)) return listOf(held)
+    val going = brushes.filter { b -> b.set == held.set && ("${b.set}-${b.index}" in picked || b.index == held.index) }
+    return going.ifEmpty { listOf(held) }
+}
+
+/** How long a dragged brush is held over a set before it opens (as the system's own drags do). */
+private const val SPRING_LOAD_MS = 500L
 
 /** Hanging from its button, the library's grabber tears it off into a window of its own, while a plugin lets it ([floating]: it floats). */
 @Composable

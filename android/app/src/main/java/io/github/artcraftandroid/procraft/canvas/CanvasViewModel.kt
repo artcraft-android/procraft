@@ -5086,6 +5086,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (session?.moveBrush(b.set, b.index, set.toUInt(), index.toUInt()) == true) libraryChanged()
     }
 
+    /**
+     * Moves [brushes] (of one set) together, in their order, to place [index] of set [set]
+     * (counted without them there): brushes picked and dragged onto a set, or along their own.
+     */
+    fun moveBrushes(brushes: List<BrushInfo>, set: Int, index: Int) {
+        val first = brushes.firstOrNull() ?: return
+        if (brushes.size == 1) return moveBrush(first, set, index)
+        val indices = brushes.filter { it.set == first.set }.map { it.index }
+        if (session?.moveBrushes(first.set, indices, set.toUInt(), index.toUInt()) == true) libraryChanged()
+    }
+
     /** A new brush at the top of the shown set, opened in the studio. */
     fun newBrush() {
         val s = session ?: return

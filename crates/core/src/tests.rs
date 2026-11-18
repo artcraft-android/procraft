@@ -6530,6 +6530,53 @@ fn a_brush_moves_to_another_set_and_the_tool_keeps_it() {
     assert!(!s.move_brush(0, 0, 99, 0));
 }
 
+/// Brushes picked and dragged together onto another set go to its top in their order (brought in
+/// ones among them, into a set of the user's own), and along their own set take the place they
+/// are let go at; the tools, the Recent set and each set's choice follow them.
+#[test]
+fn brushes_dragged_together_move_into_a_set_in_their_order() {
+    let s = CanvasSession::new(64, 64);
+    let names = |set: usize| s.brush_library()[set].brushes.iter().map(|b| b.name.clone()).collect::<Vec<_>>();
+    // a set of the user's own, and a brush brought in from a file (its own "Imported" set)
+    assert_eq!(s.new_brush_set(), 0);
+    let file = brushfile_of(&s, 1, 0);
+    let imported = s.import_any_brushes(file, Some("Mine.brush".into()), 0).unwrap();
+    let library = s.brush_library();
+    let own = library.iter().position(|set| set.name == "Untitled Set").unwrap() as u32;
+    let stock = library.iter().position(|set| set.name != "Untitled Set" && set.name != "Imported").unwrap() as u32;
+    let from = names(stock as usize);
+    // the current brush among them, and one pinned in the Recent set
+    assert!(s.select_brush(stock, 3));
+    assert!(s.pin_recent_brush(stock, 3, true));
+    assert!(s.move_brushes(stock, vec![3, 1, 4], own, 0));
+    assert_eq!(names(own as usize), [from[1].clone(), from[3].clone(), from[4].clone()]);
+    let left: Vec<String> =
+        from.iter().enumerate().filter(|(i, _)| ![1, 3, 4].contains(i)).map(|(_, n)| n.clone()).collect();
+    assert_eq!(names(stock as usize), left);
+    let c = s.current_brush();
+    assert_eq!((c.set, c.index), (own, 1));
+    assert!(s.recent_brushes().iter().any(|r| (r.set, r.index) == (own, 1)));
+    // the brought in brush joins them, at the top
+    assert!(s.move_brushes(imported, vec![0], own, 0));
+    assert_eq!(names(own as usize).len(), 4);
+    assert_eq!((s.current_brush().set, s.current_brush().index), (own, 2));
+    // along their own set: the first two let go at the last brush's place
+    let before = names(own as usize);
+    assert!(s.move_brushes(own, vec![0, 1], own, 3));
+    assert_eq!(names(own as usize), [before[2].clone(), before[3].clone(), before[0].clone(), before[1].clone()]);
+    // nothing there, or nowhere to go: refused, nothing moved
+    let kept = s.brush_library();
+    assert!(!s.move_brushes(own, vec![0, 99], stock, 0));
+    assert!(!s.move_brushes(own, vec![0], 99, 0));
+    assert!(!s.move_brushes(own, vec![], stock, 0));
+    assert_eq!(s.brush_library(), kept);
+}
+
+/// Brush `index` of `set` as a brush file, as Share makes it.
+fn brushfile_of(s: &CanvasSession, set: u32, index: u32) -> Vec<u8> {
+    s.brush_as_file(set, index).expect("a brush file")
+}
+
 #[test]
 fn a_shaped_brush_outlines_its_shape_and_the_round_tip_none() {
     let s = CanvasSession::new(64, 64);

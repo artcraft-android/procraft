@@ -1193,6 +1193,53 @@ impl CanvasSession {
         true
     }
 
+    /// Moves brushes `indices` of `set` together, in their order, to place `to_index` of set
+    /// `to_set` (counted without them there): several brushes dragged at once onto a set, or along
+    /// their own. A tool that used one keeps it, wherever it goes. False, moving none, if any isn't
+    /// a brush there or there is no such set.
+    pub fn move_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> bool {
+        let mut st = self.shared.lock();
+        let (s, ts) = (set as usize, to_set as usize);
+        let mut moving: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+        moving.sort_unstable();
+        moving.dedup();
+        let held = st.library.get(s).map_or(0, |e| e.brushes.len());
+        if moving.is_empty() || ts >= st.library.len() || moving.iter().any(|&i| i >= held) {
+            return false;
+        }
+        let Some(entry) = st.library.get_mut(s) else { return false };
+        // out of their set from the last up, so the places of the rest hold
+        let mut taken = Vec::with_capacity(moving.len());
+        for &i in moving.iter().rev() {
+            let brush = entry.brushes.remove(i);
+            let origin = if i < entry.origins.len() { entry.origins.remove(i) } else { None };
+            taken.push((brush, origin));
+        }
+        taken.reverse();
+        let Some(target) = st.library.get_mut(ts) else { return false };
+        let ti = (to_index as usize).min(target.brushes.len());
+        for (k, (brush, origin)) in taken.into_iter().enumerate() {
+            target.brushes.insert(ti + k, brush);
+            if ti + k <= target.origins.len() {
+                target.origins.insert(ti + k, origin);
+            } else {
+                target.origins.push(origin);
+            }
+        }
+        let count = moving.len();
+        st.move_brush_refs(|(rs, ri)| {
+            if rs == s
+                && let Ok(k) = moving.binary_search(&ri)
+            {
+                return Some((ts, ti + k));
+            }
+            // out of their old places, then into the new ones
+            let ri = if rs == s { ri - moving.partition_point(|&m| m < ri) } else { ri };
+            Some((rs, if rs == ts && ri >= ti { ri + count } else { ri }))
+        });
+        true
+    }
+
     /// Names brush `index` of `set` (from its menu in the library), as a set is named: trimmed, at
     /// most 256 characters; a name of nothing but spaces leaves it as it was. Whether it changed.
     pub fn rename_brush(&self, set: u32, index: u32, name: String) -> bool {

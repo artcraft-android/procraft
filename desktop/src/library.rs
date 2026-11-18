@@ -86,6 +86,9 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
 /// menu (and moved on from there, drags the brush).
 pub(crate) const SLOP: f32 = 8.0;
 pub(crate) const HOLD: Duration = Duration::from_millis(400);
+/// A dragged brush held this long over a set opens it, to be let go among its brushes (as the
+/// system's own drags do).
+const SPRING_LOAD: Duration = Duration::from_millis(500);
 /// A press slides its brush once this far sideways (points), going this many times further
 /// sideways than up or down: a hand scrolling swings in an arc, and a slide opens onto Delete, so
 /// anything less plainly sideways is left to the list.
@@ -120,6 +123,37 @@ enum Way {
     Drag,
     /// Up or down first: the list has it, and scrolls.
     Scroll,
+}
+
+/// The brushes dragged with brush `held`: those `picked` (all of its set) and it, in their order,
+/// when it is one of them (the current brush, `selected`, counts as picked); else it alone.
+fn dragged_together(held: (u32, u32), picked: &[(u32, u32)], selected: bool) -> Vec<(u32, u32)> {
+    if picked.is_empty() || !(selected || picked.contains(&held)) {
+        return vec![held];
+    }
+    let mut going: Vec<(u32, u32)> = picked.iter().copied().filter(|p| p.0 == held.0).collect();
+    if !going.contains(&held) {
+        going.push(held);
+    }
+    going.sort_unstable();
+    going
+}
+
+/// Where brushes `moving` (all of one set) dragged together go, let go at `at`: onto another set
+/// of `sets` (by place), to its top; onto one of `brushes` (by place) not among them, to its place;
+/// nowhere over their own set, over one of them, or over neither.
+fn drop_place(
+    moving: &[(u32, u32)],
+    at: Pos2,
+    sets: &[(usize, Rect)],
+    brushes: &[((u32, u32), Rect)],
+) -> Option<(u32, u32)> {
+    let own = moving.first()?.0;
+    if let Some(&(to, _)) = sets.iter().find(|(_, r)| r.contains(at)) {
+        let to = u32::try_from(to).ok()?;
+        return (to != own).then_some((to, 0));
+    }
+    brushes.iter().find(|(_, r)| r.contains(at)).map(|(k, _)| *k).filter(|k| !moving.contains(k))
 }
 
 /// What a press on a brush that has moved `d` (points) from where it went down is, once it can be
@@ -247,6 +281,12 @@ pub struct Library {
     swiped: Option<(u32, u32)>,
     /// The brushes of the shown set picked by sliding them right.
     picked: Vec<(u32, u32)>,
+    /// The brushes a dragged one takes with it (it among them, those picked in its set), in their
+    /// order, and the dragged cell's size (its row may go as another set opens); the set it is
+    /// over, and since when (held there a moment, it opens).
+    dragged_with: Vec<(u32, u32)>,
+    dragged_size: Vec2,
+    spring: Option<(usize, Instant)>,
     /// How far the brushes list is scrolled.
     list_at: f32,
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
@@ -440,6 +480,25 @@ impl Library {
             .or(lifted.map(|p| p.last))
             .and_then(|at| self.set_rects.iter().find(|(_, r)| r.contains(at)).map(|(i, _)| *i))
             .filter(|i| lifted.is_none_or(|p| p.set != *i));
+        // a dragged brush held over another set a moment opens it
+        match (dragging, over_set) {
+            (Some(_), Some(i)) if i != shown || recent => match self.spring {
+                Some((j, since)) if j == i => {
+                    if since.elapsed() >= SPRING_LOAD {
+                        self.spring = None;
+                        self.shown_set = Some(i);
+                        self.recent = false;
+                    } else {
+                        ctx.request_repaint_after(SPRING_LOAD.saturating_sub(since.elapsed()));
+                    }
+                }
+                _ => {
+                    self.spring = Some((i, Instant::now()));
+                    ctx.request_repaint_after(SPRING_LOAD);
+                }
+            },
+            _ => self.spring = None,
+        }
         let mut set_rects = Vec::new();
         let mut brush_rects = Vec::new();
         let mut plus = Rect::NOTHING;
@@ -660,17 +719,19 @@ impl Library {
             if let Some(p) = dragging
                 && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
             {
-                let size = self
-                    .brush_rects
-                    .iter()
-                    .find(|(k, _)| *k == p.key)
-                    .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
-                let at = Rect::from_min_size(p.last - p.grab, size);
+                let at = Rect::from_min_size(p.last - p.grab, self.dragged_size);
                 let painter = ui.painter_at(lists);
                 painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
                 self.preview_in(&painter, (b.set, b.index), at, true);
                 let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
                 painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
+                // several going together: how many
+                if self.dragged_with.len() > 1 {
+                    let badge = pos2(at.right() - 20.0, at.top() + 20.0);
+                    painter.circle_filled(badge, 12.0, Color32::WHITE);
+                    let count = self.dragged_with.len().to_string();
+                    text(&painter, badge, Align2::CENTER_CENTER, &count, 13.0, Weight::SemiBold, argb(pc::ACCENT));
+                }
                 ctx.request_repaint();
             }
             // and the lifted set
@@ -1152,6 +1213,14 @@ impl Library {
                     if d.length() > SLOP && !self.recent {
                         p.way = Way::Drag;
                         self.brush_menu.close();
+                        let current = session.current_brush();
+                        let selected = (current.set, current.index) == p.key;
+                        self.dragged_with = dragged_together(p.key, &self.picked, selected);
+                        self.dragged_size = self
+                            .brush_rects
+                            .iter()
+                            .find(|(k, _)| *k == p.key)
+                            .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
                         ctx.request_repaint();
                     }
                 }
@@ -1188,15 +1257,18 @@ impl Library {
                 }
             }
             Way::Drag => {
-                // onto a set: to its top; onto a brush of this set: to its place
-                let (set, index) = p.key;
-                let moved = if let Some(&(to, _)) = self.set_rects.iter().find(|(_, r)| r.contains(at)) {
-                    to as u32 != set && session.move_brush(set, index, to as u32, 0)
-                } else if let Some(&(target, _)) = self.brush_rects.iter().find(|(_, r)| r.contains(at)) {
-                    target != p.key && session.move_brush(set, index, target.0, target.1)
-                } else {
-                    false
-                };
+                // onto another set: to its top; onto a brush of the set shown not among them: to
+                // its place (the first of them taking it, the rest after it)
+                let moving = std::mem::take(&mut self.dragged_with);
+                let moving = if moving.is_empty() { vec![p.key] } else { moving };
+                let place = drop_place(&moving, at, &self.set_rects, &self.brush_rects);
+                let moved = place.is_some_and(|(to, index)| match moving.as_slice() {
+                    [(set, from)] => session.move_brush(*set, *from, to, index),
+                    _ => {
+                        let indices = moving.iter().map(|&(_, i)| i).collect();
+                        session.move_brushes(p.key.0, indices, to, index)
+                    }
+                });
                 if moved {
                     self.library_changed();
                 }
@@ -1455,8 +1527,8 @@ impl Library {
         }
         self.want_preview(ui, b, cell);
         let painter = ui.painter_at(cell);
-        // the dragged brush is faint where it was
-        let faint = self.press.is_some_and(|p| p.key == key && p.way == Way::Drag);
+        // the dragged brushes are faint where they were
+        let faint = self.press.is_some_and(|p| p.way == Way::Drag) && self.dragged_with.contains(&key);
         let alpha = if faint { 0.3 } else { 1.0 };
         let picked = self.picked.contains(&key);
         if selected {
@@ -2046,6 +2118,55 @@ mod tests {
         assert_eq!(name(&f, target), held);
         assert_ne!(name(&f, key), held);
         assert!(!f.library.brush_menu.is_open());
+    }
+
+    /// Brushes picked go with the one held and dragged; held over a set that isn't shown, the set
+    /// opens, and let go on one of its brushes they take its place there, in their order.
+    #[test]
+    fn picked_brushes_dragged_over_a_set_open_it_and_land_among_its_brushes() {
+        let mut f = Finger::new();
+        let names = |f: &Finger, set: usize| -> Vec<String> {
+            f.session.brush_library()[set].brushes.iter().map(|b| b.name.clone()).collect()
+        };
+        let from = f.on_a_brush();
+        let key = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).map(|(k, _)| *k).unwrap();
+        let other =
+            f.library.brush_rects.iter().find(|(k, _)| k.0 == key.0 && k.1 == key.1 + 1).map(|(k, _)| *k).unwrap();
+        let before = names(&f, key.0 as usize);
+        f.library.picked = vec![other, key];
+        // a set other than this one, closed
+        let (to, over) = f
+            .library
+            .set_rects
+            .iter()
+            .find(|(s, r)| *s != key.0 as usize && (0.0..700.0).contains(&r.center().y))
+            .map(|(s, r)| (*s, r.center()))
+            .unwrap();
+        let theirs = names(&f, to);
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        for i in 1..=6 {
+            f.to(from + (over - from) * (i as f32 / 6.0));
+        }
+        assert_eq!(f.library.dragged_with, vec![key, other]);
+        // held there a moment: it opens, its brushes shown
+        std::thread::sleep(SPRING_LOAD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        f.frame(Vec::new());
+        assert_eq!(f.library.shown_set, Some(to));
+        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 as usize == to));
+        // let go on its second brush: both take its place
+        let onto = f.library.brush_rects.iter().find(|(k, _)| k.1 == 1).map(|(_, r)| r.center()).unwrap();
+        for i in 1..=4 {
+            f.to(over + (onto - over) * (i as f32 / 4.0));
+        }
+        f.up(onto);
+        f.frame(Vec::new());
+        let now = names(&f, to);
+        assert_eq!(now.len(), theirs.len() + 2);
+        assert_eq!(now[1..3], [before[key.1 as usize].clone(), before[other.1 as usize].clone()]);
+        assert_eq!(names(&f, key.0 as usize).len(), before.len() - 2);
     }
 
     #[test]
