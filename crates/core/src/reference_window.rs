@@ -12,6 +12,24 @@ use crate::{CanvasSession, ReferenceView};
 /// The window's imported picture, beside the artwork's layers.
 pub(crate) const REFERENCE_PICTURE: &str = "reference.png";
 
+/// The most Reference windows an artwork has open at once: its own and those a plugin lets be opened
+/// besides (the reference windows' hook).
+pub(crate) const MOST_REFERENCE_WINDOWS: usize = 8;
+
+/// The picture of window `index` besides the artwork's own (0 the first of them), beside its layers:
+/// `reference-2.png` for the second window, and so on.
+pub(crate) fn more_picture(index: usize) -> String {
+    format!("reference-{}.png", index + 2)
+}
+
+/// A window opened besides the artwork's own, kept with it as its own is: where it is and what it
+/// shows, and its imported picture, if it has one.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MoreReference {
+    pub(crate) window: ReferenceWindow,
+    pub(crate) picture: Option<Arc<Vec<u8>>>,
+}
+
 /// What the window shows. `Model`, the model itself, only on a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ReferenceShows {
@@ -193,6 +211,108 @@ impl CanvasSession {
             st.revision += 1;
         }
     }
+
+    /// The whole picture for the Reference windows that show the canvas, as
+    /// [`CanvasSession::canvas_thumbnail`] makes it, but read back from the GPU once while the
+    /// artwork stays as it is: every window showing the canvas takes the same, so more windows
+    /// cost no more reads. None before the canvas exists.
+    pub fn reference_canvas(&self, max_side: u32) -> Option<crate::ThumbnailImage> {
+        let edits = self.edits();
+        {
+            let st = self.shared.lock();
+            if let Some((at, side, picture)) = &st.reference_canvas
+                && (*at, *side) == (edits, max_side)
+            {
+                return Some(picture.as_ref().clone());
+            }
+        }
+        let picture = self.canvas_thumbnail(max_side)?;
+        self.shared.lock().reference_canvas = Some((edits, max_side, Arc::new(picture.clone())));
+        Some(picture)
+    }
+
+    /// How many Reference windows the artwork has: its own (shown or not), then those opened
+    /// besides it, while a plugin lets more than one be open (the reference windows' hook).
+    pub fn reference_window_count(&self) -> u32 {
+        1 + self.shared.lock().more_references.len() as u32
+    }
+
+    /// Window `index` as the artwork left it: 0 its own ([`CanvasSession::reference_window`]),
+    /// then those opened besides; none past them.
+    pub fn reference_window_at(&self, index: u32) -> Option<ReferenceWindowState> {
+        let st = self.shared.lock();
+        let model = st.scene.is_some();
+        match index.checked_sub(1) {
+            None => Some(state_of(&st.reference_window, model)),
+            Some(more) => st.more_references.get(more as usize).map(|m| state_of(&m.window, model)),
+        }
+    }
+
+    /// Window `index` has changed (see [`CanvasSession::set_reference_window`]).
+    pub fn set_reference_window_at(&self, index: u32, state: ReferenceWindowState) {
+        let Some(more) = index.checked_sub(1) else { return self.set_reference_window(state) };
+        let mut st = self.shared.lock();
+        let model = st.scene.is_some();
+        let Some(m) = st.more_references.get_mut(more as usize) else { return };
+        let mut next = m.window.clone();
+        take_state(&mut next, state, model);
+        if next != m.window {
+            m.window = next;
+            st.revision += 1;
+        }
+    }
+
+    /// Window `index`'s imported picture, a PNG; none if it has none (or there is no such window).
+    pub fn reference_picture_at(&self, index: u32) -> Option<Vec<u8>> {
+        let Some(more) = index.checked_sub(1) else { return self.reference_picture() };
+        self.shared.lock().more_references.get(more as usize).and_then(|m| m.picture.as_deref().cloned())
+    }
+
+    /// `png` is now window `index`'s imported picture.
+    pub fn set_reference_picture_at(&self, index: u32, png: Vec<u8>) {
+        let Some(more) = index.checked_sub(1) else { return self.set_reference_picture(png) };
+        let mut st = self.shared.lock();
+        if let Some(m) = st.more_references.get_mut(more as usize) {
+            m.picture = Some(Arc::new(png));
+            st.revision += 1;
+        }
+    }
+
+    /// Window `index`'s imported picture goes.
+    pub fn clear_reference_picture_at(&self, index: u32) {
+        let Some(more) = index.checked_sub(1) else { return self.clear_reference_picture() };
+        let mut st = self.shared.lock();
+        if st.more_references.get_mut(more as usize).is_some_and(|m| m.picture.take().is_some()) {
+            st.revision += 1;
+        }
+    }
+
+    /// Another Reference window opened besides those the artwork has, as `state` says (shown): its
+    /// index. None once the artwork has as many as it may ([`MOST_REFERENCE_WINDOWS`]); how many a
+    /// plugin lets be open is the app's to keep to.
+    pub fn add_reference_window(&self, state: ReferenceWindowState) -> Option<u32> {
+        let mut st = self.shared.lock();
+        if 1 + st.more_references.len() >= MOST_REFERENCE_WINDOWS {
+            return None;
+        }
+        let model = st.scene.is_some();
+        let mut window = ReferenceWindow::default();
+        take_state(&mut window, ReferenceWindowState { shown: true, ..state }, model);
+        st.more_references.push(MoreReference { window, picture: None });
+        st.revision += 1;
+        Some(st.more_references.len() as u32)
+    }
+
+    /// Window `index` besides the artwork's own closed, its picture with it: those after it each
+    /// take the index before theirs. The artwork's own stays (hide it with its state's `shown`).
+    pub fn remove_reference_window(&self, index: u32) {
+        let Some(more) = index.checked_sub(1) else { return };
+        let mut st = self.shared.lock();
+        if (more as usize) < st.more_references.len() {
+            st.more_references.remove(more as usize);
+            st.revision += 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +382,39 @@ mod tests {
         std::fs::write(dir.join("artwork.json"), broken).unwrap();
         let opened = CanvasSession::open(path(&dir)).unwrap();
         assert!(!opened.reference_window().shown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_opened_besides_come_back_with_the_artwork_each_with_its_picture() {
+        let dir = folder("more");
+        let s = CanvasSession::new(64, 48);
+        assert_eq!((s.reference_window_count(), s.reference_window_at(1)), (1, None));
+        assert_eq!(s.add_reference_window(ReferenceWindowState { shown: false, ..state() }), Some(1));
+        assert_eq!(s.add_reference_window(ReferenceWindowState { x: 90.0, ..state() }), Some(2));
+        // shown however asked for
+        assert!(s.reference_window_at(1).is_some_and(|w| w.shown));
+        s.set_reference_picture_at(2, b"second".to_vec());
+        s.save(path(&dir)).unwrap();
+        assert!(dir.join(more_picture(1)).exists() && !dir.join(more_picture(0)).exists());
+        let opened = CanvasSession::open(path(&dir)).unwrap();
+        assert_eq!(opened.reference_window_count(), 3);
+        assert_eq!(opened.reference_window_at(2).map(|w| w.x), Some(90.0));
+        assert_eq!(opened.reference_picture_at(2).as_deref(), Some(&b"second"[..]));
+        assert_eq!((opened.reference_picture_at(1), opened.reference_window_at(3)), (None, None));
+        // the artwork's own is as it was
+        assert!(!opened.reference_window().shown);
+        // the first of them closed: the next takes its index, its picture with it
+        opened.remove_reference_window(1);
+        assert_eq!(opened.reference_window_count(), 2);
+        assert_eq!(opened.reference_picture_at(1).as_deref(), Some(&b"second"[..]));
+        opened.save(path(&dir)).unwrap();
+        assert!(dir.join(more_picture(0)).exists() && !dir.join(more_picture(1)).exists());
+        // eight at once at most
+        for _ in 0..10 {
+            opened.add_reference_window(state());
+        }
+        assert_eq!(opened.reference_window_count() as usize, MOST_REFERENCE_WINDOWS);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

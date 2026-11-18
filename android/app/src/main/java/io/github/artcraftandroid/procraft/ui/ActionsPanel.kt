@@ -437,6 +437,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             }
                         }
                     }
+                    // what plugins put in the Canvas tab
+                    if (shownTab == 1 && !model) PluginCanvasRows(vm)
                 }
             }
         }
@@ -740,15 +742,7 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifi
         if (plugin.on && plugin.problem == null) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-                when (control) {
-                    is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
-                    is PluginControl.Slider -> {
-                        val choices = pluginSliderChoices(control.control)
-                        if (choices.isEmpty()) PluginSliderRow(control.control, vm::setPluginSlider)
-                        else PluginChoiceRow(control.control, choices, vm::setPluginSlider)
-                    }
-                    is PluginControl.File -> PluginFileRow(control.control, vm)
-                }
+                PluginControlRow(control, vm)
             }
             for (action in plugin.actions) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
@@ -760,6 +754,43 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifi
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act("Remove", onClick = onRemove))
+        }
+    }
+}
+
+/** A plugin's control as its card shows it, whatever it is: a switch, a slider, a setting named at every step, a file. */
+@Composable
+private fun PluginControlRow(control: PluginControl, vm: CanvasViewModel) {
+    when (control) {
+        is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
+        is PluginControl.Slider -> {
+            val choices = pluginSliderChoices(control.control)
+            if (choices.isEmpty()) PluginSliderRow(control.control, vm::setPluginSlider)
+            else PluginChoiceRow(control.control, choices, vm::setPluginSlider)
+        }
+        is PluginControl.File -> PluginFileRow(control.control, vm)
+    }
+}
+
+/**
+ * The controls and actions the plugins that are on put in the Canvas tab, after its own rows: a
+ * group of their own, each row as on its plugin's card.
+ */
+@Composable
+private fun PluginCanvasRows(vm: CanvasViewModel) {
+    val list = vm.pluginList
+    val controls = remember(list) { vm.plugins.controlsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
+    val actions = remember(list) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
+    if (controls.isEmpty() && actions.isEmpty()) return
+    Spacer(Modifier.height(20.dp))
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
+        controls.forEachIndexed { i, control ->
+            if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            PluginControlRow(control, vm)
+        }
+        actions.forEachIndexed { i, action ->
+            if (i > 0 || controls.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            PluginActionRow(action.label) { vm.runPluginAction(action.key) }
         }
     }
 }

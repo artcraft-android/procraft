@@ -559,6 +559,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var tweensOn by mutableStateOf(false)
         private set
 
+    /** How many Reference windows may be open at once: as many as a plugin lets be, 1 with none. */
+    var referenceWindowsAllowed by mutableStateOf(1)
+        private set
+
     /**
      * Whether a plugin makes the strokes' sound, as last asked: only then does a hovering pen tell
      * the canvas where it is (each hover event would otherwise wait on the canvas for nothing).
@@ -591,6 +595,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.floatingPanels = io.github.artcraftandroid.procraft.core.FloatingPanel.entries.filter { plugins.floats(it) }.toSet()
         io.github.artcraftandroid.procraft.ui.Pc.noticesShown = io.github.artcraftandroid.procraft.core.NoticeKind.entries.filter { plugins.showsNotice(it) }.toSet()
         tweensOn = plugins.tweens()
+        referenceWindowsAllowed = plugins.referenceWindows().toInt().coerceAtLeast(1)
         followStrokeSound()
     }
 
@@ -736,6 +741,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             readPlugins()
             if (s.takeBrushesChanged()) libraryChanged()
             refresh()
+            // an action may turn the view, settling into place
+            followView()
         }
     }
 
@@ -3099,6 +3106,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the system's animations off: a dropped colour's fill shows at once
         s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         applyPlugins(s)
+        // the controls kept with this artwork, as it keeps them
+        readPlugins()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputTipAttached, inputCurve.flatMap { listOf(it.x, it.y) })
         applyAppSettings(s)
         timeLapse = TimeLapse(dir).also {
@@ -3537,7 +3546,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         // the arrows move what is transformed, or the strokes the selection takes
         val nudges = transforming || takenBox.isNotEmpty()
-        val shortcut = plugins.keyShortcut(name, command, shift, alt, nudges) ?: return false
+        val shortcut = plugins.keyShortcut(name, command, shift, alt, nudges) ?: return pluginPress(press, repeat)
         if (repeat && !movesView(shortcut)) return false
         when (shortcut) {
             KeyShortcut.Undo -> undo()
@@ -3579,6 +3588,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 session?.keyView(shortcut)
                 followView()
             }
+        }
+        return true
+    }
+
+    /** A press none of the app's shortcuts take, as a plugin gives it one of its switches (flipped, kept as the card keeps it) or actions (run as its row runs it); false if no plugin's. */
+    private fun pluginPress(press: KeyPress, repeat: Boolean): Boolean {
+        if (repeat) return false
+        val (name, command, shift, alt) = press
+        // as a plugin rebinding keys takes it (it may make it no press at all)
+        val taken = plugins.keyPress(io.github.artcraftandroid.procraft.core.KeyCombo(name, command, shift, alt)) ?: return false
+        when (val pressed = plugins.pluginPress(taken) ?: return false) {
+            is io.github.artcraftandroid.procraft.core.PluginPressed.Switched -> {
+                val control = pressed.control
+                if (control is io.github.artcraftandroid.procraft.core.PluginControl.Switch) {
+                    interfacePrefs.edit().putBoolean(control.control.key, control.control.on).apply()
+                }
+                pluginsChanged()
+            }
+            is io.github.artcraftandroid.procraft.core.PluginPressed.Action -> runPluginAction(pressed.key)
         }
         return true
     }
@@ -4382,264 +4410,358 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (changed && layersShown) refreshThumbnails()
     }
 
-    // ---- the reference window ----
+    // ---- the reference windows ----
 
-    /** What the window shows. A face needs face tracking, which this app doesn't have yet, so an
+    /** What a window shows. A face needs face tracking, which this app doesn't have yet, so an
      *  artwork saved showing one opens on the canvas, and Face isn't offered. */
     enum class ReferenceMode { CANVAS, IMAGE, MODEL }
 
-    var referenceOn by mutableStateOf(false)
-        private set
-    var referenceMode by mutableStateOf(ReferenceMode.CANVAS)
-        private set
-
-    /** The whole canvas as it is, kept up to date while the window shows it. */
-    var referenceCanvas by mutableStateOf<ImageBitmap?>(null)
-
-    /** [referenceCanvas] is the canvas at its own size (not made smaller): its pixels are the canvas's. */
-    var referenceCanvasWhole by mutableStateOf(false)
-        private set
-    var referenceImage by mutableStateOf<ImageBitmap?>(null)
-        private set
-
-    /** How the window shows the canvas and a picture imported, each zoomed and moved by two fingers on its own. */
-    var referenceCanvasView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
-        private set
-    var referenceImageView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
-        private set
-
-    /** Where the window is (window pixels), and the size of its picture. */
-    var referenceOffset by mutableStateOf(Offset.Unspecified)
-        private set
-
-    /** The window's bars are slid out of the way. */
-    var referenceBarsHidden by mutableStateOf(false)
-        private set
-    var referenceSize by mutableStateOf(DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp))
-        private set
-
-    /** The screen the window was last laid out on (pixels), and its bars' height together (pixels). */
-    private var referenceRoom by mutableStateOf(androidx.compose.ui.geometry.Size.Unspecified)
-    private var referenceBars = 0f
-
     /**
-     * The window's picture as it shows: as big as it was sized, within the window's least and most
-     * (the core's), and no bigger than the screen.
+     * A Reference window: the artwork's own ([index] 0, which Reference in the Canvas tab shows and
+     * hides), or one opened besides it while a plugin lets more than one be open. Each is kept by
+     * the core with the artwork: where it is, its size, what it shows and its imported picture.
      */
-    val referenceShown: DpSize get() = fittedReference(referenceSize)
+    inner class ReferenceWindow(val index: Int) {
+        var on by mutableStateOf(false)
+            private set
+        var mode by mutableStateOf(ReferenceMode.CANVAS)
+            private set
 
-    private fun fittedReference(size: DpSize): DpSize {
-        val room = referenceRoom
-        val (w, h) = if (room.isSpecified) room.width / density to room.height / density else Float.NaN to Float.NaN
-        val s = io.github.artcraftandroid.procraft.core.referenceWindowSize(size.width.value, size.height.value, w, h)
-        return DpSize(s.width.dp, s.height.dp)
-    }
+        /** The whole canvas as it is, kept up to date while the window shows it. */
+        var canvas by mutableStateOf<ImageBitmap?>(null)
+            private set
 
-    /** Where the window at [at] (pixels) goes to be all on the screen it was last laid out on (its top left, if it is bigger). */
-    private fun onScreen(at: Offset): Offset {
-        val room = referenceRoom
-        if (!room.isSpecified) return at
-        val shown = referenceShown
-        val p = io.github.artcraftandroid.procraft.core.referenceWindowFitted(
-            at.x, at.y, shown.width.value * density, shown.height.value * density + referenceBars, room.width, room.height,
-        )
-        return Offset(p.x, p.y)
-    }
+        /** [canvas] is the canvas at its own size (not made smaller): its pixels are the canvas's. */
+        var canvasWhole by mutableStateOf(false)
+            private set
+        var image by mutableStateOf<ImageBitmap?>(null)
+            private set
 
-    private var referenceJob: Job? = null
-    private var referenceStale = false
+        /** How the window shows the canvas and a picture imported, each zoomed and moved by two fingers on its own. */
+        var canvasView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
+            private set
+        var imageView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
+            private set
 
-    /**
-     * The window as the artwork [s] left it, or none if it never had one. Each artwork has its own,
-     * kept by the core with the artwork: it stays with it through a close or the process ending.
-     */
-    private fun restoreReference(s: CanvasSession) {
-        forgetReference()
-        val w = s.referenceWindow()
-        referenceMode = when (w.shows) {
-            io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE -> ReferenceMode.IMAGE
-            io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS,
-            io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.CANVAS
-            io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL -> ReferenceMode.MODEL
+        /** Where the window is (window pixels), and the size of its picture. */
+        var offset by mutableStateOf(Offset.Unspecified)
+            private set
+
+        /** The window's bars are slid out of the way. */
+        var barsHidden by mutableStateOf(false)
+            private set
+        var size by mutableStateOf(DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp))
+            private set
+
+        /** The screen the window was last laid out on (pixels), and its bars' height together (pixels). */
+        private var room by mutableStateOf(androidx.compose.ui.geometry.Size.Unspecified)
+        private var bars = 0f
+
+        /**
+         * The window's picture as it shows: as big as it was sized, within the window's least and most
+         * (the core's), and no bigger than the screen.
+         */
+        val shown: DpSize get() = fitted(size)
+
+        private fun fitted(size: DpSize): DpSize {
+            val room = room
+            val (w, h) = if (room.isSpecified) room.width / density to room.height / density else Float.NaN to Float.NaN
+            val s = io.github.artcraftandroid.procraft.core.referenceWindowSize(size.width.value, size.height.value, w, h)
+            return DpSize(s.width.dp, s.height.dp)
         }
-        if (w.sized) referenceSize = DpSize(w.width.dp, w.height.dp)
-        if (w.placed) referenceOffset = Offset(w.x * density, w.y * density)
-        referenceCanvasView = w.canvasView
-        referenceImageView = w.imageView
-        referenceOn = w.shown
-        viewModelScope.launch {
-            val picture = withContext(Dispatchers.IO) {
-                s.referencePicture()?.let { png ->
-                    runCatching {
-                        // no larger than a picture imported now would be
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeByteArray(png, 0, png.size, bounds)
-                        var sample = 1
-                        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
-                        BitmapFactory.decodeByteArray(png, 0, png.size, BitmapFactory.Options().apply { inSampleSize = sample })
-                    }.getOrNull()
-                }
+
+        /** Where the window at [at] (pixels) goes to be all on the screen it was last laid out on (its top left, if it is bigger). */
+        private fun onScreen(at: Offset): Offset {
+            val room = room
+            if (!room.isSpecified) return at
+            val shown = shown
+            val p = io.github.artcraftandroid.procraft.core.referenceWindowFitted(
+                at.x, at.y, shown.width.value * density, shown.height.value * density + bars, room.width, room.height,
+            )
+            return Offset(p.x, p.y)
+        }
+
+        private var job: Job? = null
+        private var stale = false
+
+        /** The window as the artwork [s] left it, or none if it never had one. */
+        fun restore(s: CanvasSession) {
+            forget()
+            val w = s.referenceWindowAt(index.toUInt()) ?: return
+            mode = when (w.shows) {
+                io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE -> ReferenceMode.IMAGE
+                io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS,
+                io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.CANVAS
+                io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL -> ReferenceMode.MODEL
             }
-            if (picture != null && session === s) referenceImage = picture.asImageBitmap()
+            if (w.sized) size = DpSize(w.width.dp, w.height.dp)
+            if (w.placed) offset = Offset(w.x * density, w.y * density)
+            canvasView = w.canvasView
+            imageView = w.imageView
+            on = w.shown
+            viewModelScope.launch {
+                val picture = withContext(Dispatchers.IO) {
+                    s.referencePictureAt(index.toUInt())?.let { png ->
+                        runCatching {
+                            // no larger than a picture imported now would be
+                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            BitmapFactory.decodeByteArray(png, 0, png.size, bounds)
+                            var sample = 1
+                            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
+                            BitmapFactory.decodeByteArray(png, 0, png.size, BitmapFactory.Options().apply { inSampleSize = sample })
+                        }.getOrNull()
+                    }
+                }
+                if (picture != null && session === s) image = picture.asImageBitmap()
+            }
+            refresh()
         }
-        refreshReference()
-    }
 
-    /** No artwork is open: the window belongs to the canvas, so nothing of it stays for the gallery or the next artwork. */
-    private fun forgetReference() {
-        referenceJob?.cancel()
-        referenceStale = false
-        referenceOn = false
-        referenceMode = ReferenceMode.CANVAS
-        referenceCanvas = null
-        referenceCanvasWhole = false
-        referenceImage = null
-        referenceCanvasView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
-        referenceImageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
-        referenceOffset = Offset.Unspecified
-        referenceBarsHidden = false
-        referenceSize = DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp)
-    }
+        /** No artwork is open: the window belongs to the canvas, so nothing of it stays for the gallery or the next artwork. */
+        fun forget() {
+            job?.cancel()
+            stale = false
+            on = false
+            mode = ReferenceMode.CANVAS
+            canvas = null
+            canvasWhole = false
+            image = null
+            canvasView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+            imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+            offset = Offset.Unspecified
+            barsHidden = false
+            size = DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp)
+        }
 
-    /** The window as it now is, kept with the artwork. */
-    private fun keepReference() {
-        val s = session ?: return
-        val placed = referenceOffset != Offset.Unspecified
-        s.setReferenceWindow(
-            io.github.artcraftandroid.procraft.core.ReferenceWindowState(
-                shown = referenceOn,
-                shows = when (referenceMode) {
+        /** The window as it now is, for the core. */
+        fun state(): io.github.artcraftandroid.procraft.core.ReferenceWindowState {
+            val placed = offset != Offset.Unspecified
+            return io.github.artcraftandroid.procraft.core.ReferenceWindowState(
+                shown = on,
+                shows = when (mode) {
                     ReferenceMode.CANVAS -> io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS
                     ReferenceMode.IMAGE -> io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE
                     ReferenceMode.MODEL -> io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL
                 },
-                sized = referenceSize != DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp),
-                width = referenceSize.width.value,
-                height = referenceSize.height.value,
+                sized = size != DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp),
+                width = size.width.value,
+                height = size.height.value,
                 placed = placed,
-                x = if (placed) referenceOffset.x / density else 0f,
-                y = if (placed) referenceOffset.y / density else 0f,
-                canvasView = referenceCanvasView,
-                imageView = referenceImageView,
-            ),
-        )
-    }
-
-    fun changeReferenceOn(on: Boolean) {
-        referenceOn = on
-        keepReference()
-        if (on) refreshReference()
-    }
-
-    fun changeReferenceMode(mode: ReferenceMode) {
-        referenceMode = mode
-        keepReference()
-        refreshReference()
-    }
-
-    /**
-     * The window laid out on a screen [width] × [height] (pixels), its bars [bars] (pixels) tall
-     * together: the first time in the middle, near the bottom; then where it was put, all of it on
-     * the screen (an artwork may have left it on a screen of another shape, or the screen changed:
-     * turned, or split). What the artwork keeps changes only as the window is moved or sized.
-     */
-    fun placeReference(width: Float, height: Float, bars: Float) {
-        val room = androidx.compose.ui.geometry.Size(width, height)
-        if (referenceRoom != room) referenceRoom = room
-        referenceBars = bars
-        if (referenceOffset == Offset.Unspecified) {
-            val shown = referenceShown
-            val tall = shown.height.value * density + bars
-            referenceOffset = Offset((width - shown.width.value * density) / 2f, (height - REFERENCE_BOTTOM_DP * density - tall).coerceAtLeast(0f))
-            return
+                x = if (placed) offset.x / density else 0f,
+                y = if (placed) offset.y / density else 0f,
+                canvasView = canvasView,
+                imageView = imageView,
+            )
         }
-        val at = onScreen(referenceOffset)
-        if (at != referenceOffset) referenceOffset = at
-    }
 
-    fun moveReference(by: Offset) {
-        referenceOffset = onScreen(referenceOffset + by)
-        keepReference()
-    }
+        /** The window as it now is, kept with the artwork. */
+        private fun keep() {
+            session?.setReferenceWindowAt(index.toUInt(), state())
+        }
 
-    /** A drag on a size handle, from the size the window shows at; from the left one the window's left edge moves. */
-    fun resizeReference(dx: Dp, dy: Dp, fromLeft: Boolean) {
-        val old = referenceShown
-        val new = fittedReference(DpSize(old.width + if (fromLeft) -dx else dx, old.height + dy))
-        if (fromLeft) referenceOffset = referenceOffset.copy(x = referenceOffset.x + (old.width - new.width).value * density)
-        referenceSize = new
-        referenceOffset = onScreen(referenceOffset)
-        keepReference()
-    }
+        fun changeOn(on: Boolean) {
+            this.on = on
+            keep()
+            if (on) refresh()
+        }
 
-    fun importReference(uri: android.net.Uri) {
-        val s = session
-        viewModelScope.launch {
-            val image = withContext(Dispatchers.IO) {
-                runCatching {
-                    val resolver = getApplication<Application>().contentResolver
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-                    var sample = 1
-                    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
-                    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
-                }.getOrNull()
+        fun changeMode(mode: ReferenceMode) {
+            this.mode = mode
+            keep()
+            refresh()
+        }
+
+        /**
+         * The window laid out on a screen [width] × [height] (pixels), its bars [bars] (pixels) tall
+         * together: the first time in the middle, near the bottom; then where it was put, all of it on
+         * the screen (an artwork may have left it on a screen of another shape, or the screen changed:
+         * turned, or split). What the artwork keeps changes only as the window is moved or sized.
+         */
+        fun place(width: Float, height: Float, bars: Float) {
+            val room = androidx.compose.ui.geometry.Size(width, height)
+            if (this.room != room) this.room = room
+            this.bars = bars
+            if (offset == Offset.Unspecified) {
+                val shown = shown
+                val tall = shown.height.value * density + bars
+                offset = Offset((width - shown.width.value * density) / 2f, (height - REFERENCE_BOTTOM_DP * density - tall).coerceAtLeast(0f))
+                return
             }
-            if (image == null) {
-                message = "This picture can't be opened."
-            } else if (s != null && session === s) {
-                referenceImage = image.asImageBitmap()
-                referenceImageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
-                keepReference()
-                // kept with the artwork as a PNG, whatever kind of file it came from
-                withContext(Dispatchers.IO) {
-                    val png = java.io.ByteArrayOutputStream()
-                    if (image.compress(Bitmap.CompressFormat.PNG, 100, png)) s.setReferencePicture(png.toByteArray())
+            val at = onScreen(offset)
+            if (at != offset) offset = at
+        }
+
+        fun move(by: Offset) {
+            offset = onScreen(offset + by)
+            keep()
+        }
+
+        /** A drag on a size handle, from the size the window shows at; from the left one the window's left edge moves. */
+        fun resize(dx: Dp, dy: Dp, fromLeft: Boolean) {
+            val old = shown
+            val new = fitted(DpSize(old.width + if (fromLeft) -dx else dx, old.height + dy))
+            if (fromLeft) offset = offset.copy(x = offset.x + (old.width - new.width).value * density)
+            size = new
+            offset = onScreen(offset)
+            keep()
+        }
+
+        fun importPicture(uri: android.net.Uri) {
+            val s = session
+            viewModelScope.launch {
+                val image = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val resolver = getApplication<Application>().contentResolver
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                        var sample = 1
+                        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
+                        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
+                    }.getOrNull()
+                }
+                if (image == null) {
+                    message = "This picture can't be opened."
+                } else if (s != null && session === s) {
+                    this@ReferenceWindow.image = image.asImageBitmap()
+                    imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+                    keep()
+                    // kept with the artwork as a PNG, whatever kind of file it came from
+                    withContext(Dispatchers.IO) {
+                        val png = java.io.ByteArrayOutputStream()
+                        if (image.compress(Bitmap.CompressFormat.PNG, 100, png)) s.setReferencePictureAt(index.toUInt(), png.toByteArray())
+                    }
                 }
             }
         }
+
+        /** A tap on the window's picture: its bars slide away, or back. */
+        fun toggleBars() {
+            barsHidden = !barsHidden
+        }
+
+        /** Two taps on the window's picture: it fits the window again, the bars out of the way. */
+        fun fit() {
+            val fitted = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+            if (mode == ReferenceMode.IMAGE) imageView = fitted else canvasView = fitted
+            barsHidden = true
+            keep()
+        }
+
+        fun clear() {
+            image = null
+            imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+            session?.clearReferencePictureAt(index.toUInt())
+            keep()
+        }
+
+        /**
+         * Two fingers on the window's picture ([sizes]) moved from [from] to [to] (their middle, pixels
+         * in the picture's area), [spread] times as far apart: the picture zooms and moves with them.
+         */
+        fun pinch(sizes: io.github.artcraftandroid.procraft.core.ReferenceSizes, from: Offset, to: Offset, spread: Float) {
+            val image = mode == ReferenceMode.IMAGE
+            val view = if (image) imageView else canvasView
+            // the model turns under the finger, and doesn't move in the window
+            if (mode == ReferenceMode.MODEL) {
+                session?.referenceModelTurn(to.x - from.x, to.y - from.y, sizes.windowWidth)
+                refresh()
+                return
+            }
+            val next = io.github.artcraftandroid.procraft.core.referenceViewPinched(view, sizes, from.x, from.y, to.x, to.y, spread)
+            if (image) imageView = next else canvasView = next
+            keep()
+        }
+
+        /** Reads the canvas again for the window, at most every so often while changes come. */
+        fun refresh() {
+            if (!on || (mode != ReferenceMode.CANVAS && mode != ReferenceMode.MODEL)) return
+            if (job?.isActive == true) {
+                stale = true
+                return
+            }
+            val s = session ?: return
+            job = viewModelScope.launch {
+                do {
+                    stale = false
+                    val made = withContext(Dispatchers.Default) {
+                        val model = mode == ReferenceMode.MODEL
+                        val t = (if (model) s.referenceModelPicture(MODEL_REFERENCE_PIXELS.toUInt()) else s.referenceCanvas(REFERENCE_PIXELS.toUInt()))
+                            ?: return@withContext null
+                        val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                        bitmap.asImageBitmap() to (t.width == s.info().width)
+                    }
+                    if (made != null && session === s) {
+                        canvas = made.first
+                        canvasWhole = made.second
+                    }
+                    kotlinx.coroutines.delay(REFERENCE_INTERVAL_MS)
+                } while (stale)
+            }
+        }
     }
 
-    /** A tap on the window's picture: its bars slide away, or back. */
-    fun toggleReferenceBars() {
-        referenceBarsHidden = !referenceBarsHidden
-    }
+    /** The artwork's Reference windows: its own first, then those opened besides it. */
+    val referenceWindows = androidx.compose.runtime.mutableStateListOf(ReferenceWindow(0))
 
-    /** Two taps on the window's picture: it fits the window again, the bars out of the way. */
-    fun fitReference() {
-        val fitted = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
-        if (referenceMode == ReferenceMode.IMAGE) referenceImageView = fitted else referenceCanvasView = fitted
-        referenceBarsHidden = true
-        keepReference()
-    }
+    /** Whether the artwork's own window shows (Reference in the Canvas tab). */
+    val referenceOn: Boolean get() = referenceWindows.firstOrNull()?.on == true
 
-    fun clearReference() {
-        referenceImage = null
-        referenceImageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
-        session?.clearReferencePicture()
-        keepReference()
+    fun changeReferenceOn(on: Boolean) {
+        referenceWindows.firstOrNull()?.changeOn(on)
     }
 
     /**
-     * Two fingers on the window's picture ([sizes]) moved from [from] to [to] (their middle, pixels
-     * in the picture's area), [spread] times as far apart: the picture zooms and moves with them.
+     * The windows as the artwork [s] left them. Each artwork has its own, kept by the core with the
+     * artwork: they stay with it through a close or the process ending.
      */
-    fun pinchReference(sizes: io.github.artcraftandroid.procraft.core.ReferenceSizes, from: Offset, to: Offset, spread: Float) {
-        val image = referenceMode == ReferenceMode.IMAGE
-        val view = if (image) referenceImageView else referenceCanvasView
-        // the model turns under the finger, and doesn't move in the window
-        if (referenceMode == ReferenceMode.MODEL) {
-            session?.referenceModelTurn(to.x - from.x, to.y - from.y, sizes.windowWidth)
-            refreshReference()
+    private fun restoreReference(s: CanvasSession) {
+        forgetReference()
+        referenceWindows.firstOrNull()?.restore(s)
+        for (i in 1 until s.referenceWindowCount().toInt()) referenceWindows.add(ReferenceWindow(i).also { it.restore(s) })
+    }
+
+    /** No artwork is open: the windows belong to the canvas, so nothing of them stays for the gallery or the next artwork. */
+    private fun forgetReference() {
+        referenceWindows.forEach { it.forget() }
+        referenceWindows.removeAll { it.index > 0 }
+    }
+
+    /** Another window opened besides those open, a little down and right of [from], showing the canvas. */
+    fun addReferenceWindow(from: ReferenceWindow) {
+        val s = session ?: return
+        if (referenceWindows.size >= referenceWindowsAllowed) return
+        val step = REFERENCE_STEP_DP
+        val placed = from.offset != Offset.Unspecified
+        val state = from.state().copy(
+            shown = true,
+            shows = io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS,
+            placed = placed,
+            x = if (placed) from.offset.x / density + step else 0f,
+            y = if (placed) from.offset.y / density + step else 0f,
+            canvasView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f),
+            imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f),
+        )
+        val index = s.addReferenceWindow(state)?.toInt() ?: return
+        referenceWindows.add(ReferenceWindow(index).also { it.restore(s) })
+    }
+
+    /** [w] closed: the artwork's own hides; one opened besides it goes, with its picture. */
+    fun closeReferenceWindow(w: ReferenceWindow) {
+        if (w.index == 0) {
+            w.changeOn(false)
             return
         }
-        val next = io.github.artcraftandroid.procraft.core.referenceViewPinched(view, sizes, from.x, from.y, to.x, to.y, spread)
-        if (image) referenceImageView = next else referenceCanvasView = next
-        keepReference()
+        val s = session ?: return
+        s.removeReferenceWindow(w.index.toUInt())
+        // those after it each take the index before theirs: read again as the artwork has them
+        referenceWindows.filter { it.index > 0 }.forEach { it.forget() }
+        referenceWindows.removeAll { it.index > 0 }
+        for (i in 1 until s.referenceWindowCount().toInt()) referenceWindows.add(ReferenceWindow(i).also { it.restore(s) })
     }
 
     /**
-     * The eyedropper over the window's [picture] at its point ([px], [py]) (a window pixel spanning
+     * The eyedropper over a window's [picture] at its point ([px], [py]) (a window pixel spanning
      * [per] of its pixels), the finger (or the [pen]) at window point [at]: the colour there and what is around it.
      */
     fun pickReference(picture: ImageBitmap, px: Float, py: Float, per: Float, at: Offset, pen: Boolean = false) {
@@ -4653,32 +4775,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         picking = PickState(at.x, at.y, around.asImageBitmap(), rgb, fromReference = true, lift = loupeLift(pen))
     }
 
-    /** Reads the canvas again for the window, at most every so often while changes come. */
+    /** Reads the canvas again for the windows that show it. */
     fun refreshReference() {
-        if (!referenceOn || (referenceMode != ReferenceMode.CANVAS && referenceMode != ReferenceMode.MODEL)) return
-        if (referenceJob?.isActive == true) {
-            referenceStale = true
-            return
-        }
-        val s = session ?: return
-        referenceJob = viewModelScope.launch {
-            do {
-                referenceStale = false
-                val made = withContext(Dispatchers.Default) {
-                    val model = referenceMode == ReferenceMode.MODEL
-                    val t = (if (model) s.referenceModelPicture(MODEL_REFERENCE_PIXELS.toUInt()) else s.canvasThumbnail(REFERENCE_PIXELS.toUInt()))
-                        ?: return@withContext null
-                    val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
-                    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
-                    bitmap.asImageBitmap() to (t.width == s.info().width)
-                }
-                if (made != null && session === s) {
-                    referenceCanvas = made.first
-                    referenceCanvasWhole = made.second
-                }
-                kotlinx.coroutines.delay(REFERENCE_INTERVAL_MS)
-            } while (referenceStale)
-        }
+        referenceWindows.forEach { it.refresh() }
     }
 
     // ---- text ----
@@ -8788,6 +8887,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val REFERENCE_BOTTOM_DP = 50f
         const val REFERENCE_PIXELS = 700
         const val REFERENCE_INTERVAL_MS = 300L
+        /** How far down and right of the window it is opened from another Reference window opens (dp). */
+        const val REFERENCE_STEP_DP = 24f
 
         /** The window the eyedropper shows (magnified twice), dp across. */
         const val PICK_WINDOW_DP = 54f

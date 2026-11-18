@@ -474,6 +474,9 @@ pub(crate) struct Touches {
     /// Others of the fingers moving in this event are still to be told of.
     more_to_come: bool,
     pinch: Vec<(f64, f32)>,
+    /// A plugin keeps two-finger gestures from turning the canvas, as it said when the last finger
+    /// landed (the gesture lock's hook).
+    turn_locked: bool,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
     scrub_x: f32,
@@ -610,6 +613,7 @@ impl Default for Touches {
             view_moving: false,
             more_to_come: false,
             pinch: Vec::new(),
+            turn_locked: false,
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
             scrub_x: 0.0,
@@ -1136,6 +1140,8 @@ impl CanvasSession {
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
+        // a plugin locking the turn: the fingers landing now don't turn the canvas
+        t.turn_locked = hooks.as_ref().is_some_and(|hooks| hooks.gesture_lock(crate::hooks::GESTURE_TURN));
         // the guide editor: a touch takes a handle, more fingers move the view
         if t.guide_editing {
             if t.down.len() == 1 {
@@ -2196,6 +2202,7 @@ impl CanvasSession {
                     && !cancelled
                     && !tap
                     && t.view_moving
+                    && !t.turn_locked
                     && t.gesture_pair.is_none()
                     && !out.contains(&TouchCommand::Fit)
                     && self.settle_turn()
@@ -2723,7 +2730,7 @@ impl CanvasSession {
         if turn < -std::f32::consts::PI {
             turn += std::f32::consts::TAU;
         }
-        if !t.settings.rotate {
+        if !t.settings.rotate || t.turn_locked {
             turn = 0.0;
         }
         t.gesture_scale *= scale;

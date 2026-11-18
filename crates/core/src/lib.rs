@@ -100,6 +100,7 @@ mod timelapse;
 mod touch;
 mod transform;
 mod tween;
+mod view_look;
 #[cfg(target_os = "android")]
 mod window;
 // the iPad app's window is its layer: taken and drawn into as Android's is
@@ -190,7 +191,7 @@ pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelRow, PluginPanel};
 pub use plugins::{
     InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginInfo, PluginMenuPlace, PluginOffer,
-    PluginPart, PluginPlace, PluginSlider, PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes,
+    PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes,
     plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen,
     plugin_slider_shown, plugin_slider_whole,
 };
@@ -244,6 +245,7 @@ pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
     mesh_handle_at, screen_box, shown_mesh_points,
 };
+pub use view_look::ViewLook;
 
 /// Colour around the canvas, sRGB; and with the light interface.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -461,6 +463,22 @@ impl ViewCurve {
 }
 
 impl State {
+    /// The canvas takes the paper the plugins give now, if it is made yet.
+    pub(crate) fn apply_paper(&mut self) {
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.set_paper(gpu, self.plugin_paper.as_ref());
+        }
+    }
+
+    /// What the window shows the canvas through: the plugins' look, then the grey view's.
+    pub(crate) fn shown_look(&self) -> Option<ViewLook> {
+        let grey = self.grey_view.then_some(procraft_gpu::GREY_LOOK);
+        match (self.plugin_look, grey) {
+            (Some(look), Some(grey)) => Some(crate::view_look::then(&look, &grey)),
+            (look, grey) => look.or(grey),
+        }
+    }
+
     /// Moves the view on to where its settling has got by now; true while it is still moving.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn step_view_motion(&mut self) -> bool {
@@ -654,6 +672,18 @@ pub(crate) struct State {
     pub(crate) interface_size: f32,
     /// The canvas shown in perceptual greys (the window's view only).
     pub(crate) grey_view: bool,
+    /// The look the plugins on the view look's hook show the canvas through (the window's view
+    /// only), as they said when the session last took them up.
+    pub(crate) plugin_look: Option<ViewLook>,
+    /// The paper a plugin on the paper's hook gives, as it said then.
+    pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
+    /// The values of plugins' controls kept with the artwork, by their keys, saved with it.
+    pub(crate) plugin_values: std::collections::BTreeMap<String, f32>,
+    /// The Reference windows opened besides the artwork's own, kept with it as its own is.
+    pub(crate) more_references: Vec<crate::reference_window::MoreReference>,
+    /// The picture the Reference windows showed of the canvas last: the edits and the size it was
+    /// read at, and it ([`CanvasSession::reference_canvas`]).
+    pub(crate) reference_canvas: Option<(u64, u32, Arc<crate::ThumbnailImage>)>,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
@@ -1836,6 +1866,11 @@ impl CanvasSession {
             display_scale: 2.0,
             interface_size: 1.0,
             grey_view: false,
+            plugin_look: None,
+            plugin_paper: None,
+            plugin_values: std::collections::BTreeMap::new(),
+            more_references: Vec::new(),
+            reference_canvas: None,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -2484,6 +2519,45 @@ impl CanvasSession {
         st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
         self.shared.frame(&mut st);
         true
+    }
+
+    /// How far the canvas is turned on the screen, clockwise, in radians (-π to π): where a turn
+    /// under way is going.
+    pub fn view_turn(&self) -> f32 {
+        let st = self.shared.lock();
+        let view = st.view_motion.as_ref().map(|m| m.to).or(st.view);
+        view.map_or(0.0, |v| v.rotation())
+    }
+
+    /// Turns the canvas to `radians` (clockwise) about the middle of the window, keeping its zoom
+    /// and what is in the middle, settling into place as [`CanvasSession::settle_to_fit`] does.
+    /// False if it already was turned so, or there's no canvas to turn (a model shown).
+    pub fn turn_view_to(&self, radians: f32) -> bool {
+        let mut st = self.shared.lock();
+        if !radians.is_finite() || st.scene_shown() {
+            return false;
+        }
+        // turned about where a settling under way goes, from where it has got to
+        let Some(going) = st.view_motion.take().map(|m| m.to).or(st.view) else { return false };
+        let middle = Vec2::new(st.window_size.0 as f32 / 2.0, st.window_size.1 as f32 / 2.0);
+        let centred =
+            going.screen_to_canvas(middle).and_then(|c| View::centred(c, going.zoom(), radians, st.window_size));
+        let Some(to) = centred else { return false };
+        let from = st.view.unwrap_or(going);
+        if from == to {
+            return false;
+        }
+        st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
+        self.shared.frame(&mut st);
+        true
+    }
+
+    /// Whether a plugin on the gesture lock's hook keeps two-finger gestures, and a trackpad's
+    /// turning, from turning the canvas now (the canvas then doesn't snap onto a right angle as
+    /// they let go either).
+    pub fn gesture_turn_locked(&self) -> bool {
+        let hooks = self.shared.lock().hooks.clone();
+        hooks.is_some_and(|hooks| hooks.gesture_lock(crate::hooks::GESTURE_TURN))
     }
 
     /// The canvas let go turned within 5° of a right angle turns the rest of the way onto it about

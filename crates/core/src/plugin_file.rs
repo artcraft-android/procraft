@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 7;
+const INTERFACE: u32 = 8;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -163,6 +163,14 @@ pub(crate) struct Manifest {
 pub(crate) struct Shape {
     pub under: Vec<Option<usize>>,
     pub action_under: Vec<Option<usize>>,
+    /// Where else each control shows, beside the card (interface 8).
+    pub places: Vec<plugins::PluginPlace>,
+    /// The press that flips each switch, and runs each action, while the app's shortcuts leave it
+    /// free (interface 8).
+    pub presses: Vec<Option<crate::KeyCombo>>,
+    pub action_presses: Vec<Option<crate::KeyCombo>>,
+    /// Which controls are kept with each artwork rather than with the plugin (interface 8).
+    pub artwork: Vec<bool>,
     /// None for a plugin with one filter, in `filter.wgsl`.
     pub filters: Vec<ListedFilter>,
     pub replaces: Vec<Replaced>,
@@ -503,6 +511,9 @@ struct RawAction {
     /// The key of the switch it comes under.
     #[serde(default)]
     under: Option<String>,
+    /// The press that runs it.
+    #[serde(default)]
+    press: Option<String>,
 }
 
 /// The most actions a plugin may list.
@@ -590,6 +601,15 @@ struct RawControl {
     /// The key of the switch it comes under.
     #[serde(default)]
     under: Option<String>,
+    /// Where else it shows, beside the card: `canvas`.
+    #[serde(default)]
+    place: Option<String>,
+    /// The press that flips it (a switch).
+    #[serde(default)]
+    press: Option<String>,
+    /// Kept with each artwork rather than with the plugin.
+    #[serde(default)]
+    artwork: Option<bool>,
 }
 
 /// Whether `text`, at most `most` characters, is fit to show: nothing that hides, reorders or
@@ -1045,6 +1065,40 @@ fn shape_of(
     let under = under.collect::<Result<Vec<_>, _>>()?;
     let action_under = actions.iter().map(|a| a.under.as_deref().map(switch_at).transpose());
     let action_under = action_under.collect::<Result<Vec<_>, _>>()?;
+    // where else a control shows: a switch or a slider, on the card or in a place this app has
+    let mut places = Vec::new();
+    for c in controls {
+        let place = match c.place.as_deref() {
+            None => plugins::PluginPlace::Card,
+            Some(name) => plugins::PluginPlace::named(name).ok_or(Refusal::Newer)?,
+        };
+        let fits = matches!(place, plugins::PluginPlace::Card | plugins::PluginPlace::Canvas);
+        if !fits || (place != plugins::PluginPlace::Card && c.kind == "file") {
+            return Err(Refusal::Described);
+        }
+        places.push(place);
+    }
+    // a press for a switch or an action, each press once
+    let mut pressed = HashSet::new();
+    let mut press_of = |text: Option<&str>, fits: bool| match text {
+        None => Ok(None),
+        Some(text) => {
+            let press = plugin_press(text).filter(|_| fits).ok_or(Refusal::Described)?;
+            if !pressed.insert(press.text()) {
+                return Err(Refusal::Described);
+            }
+            Ok(Some(press))
+        }
+    };
+    let presses = controls.iter().map(|c| press_of(c.press.as_deref(), c.kind == "switch"));
+    let presses = presses.collect::<Result<Vec<_>, _>>()?;
+    let action_presses = actions.iter().map(|a| press_of(a.press.as_deref(), true));
+    let action_presses = action_presses.collect::<Result<Vec<_>, _>>()?;
+    // kept with each artwork: a switch or a slider that keeps no setting the app used to have
+    let artwork: Vec<bool> = controls.iter().map(|c| c.artwork == Some(true)).collect();
+    if controls.iter().zip(&artwork).any(|(c, &kept)| kept && (c.kind == "file" || c.keeps.is_some())) {
+        return Err(Refusal::Described);
+    }
     if listed.len() > MOST_FILTERS || replacing.len() > MOST_REPLACES {
         return Err(Refusal::Described);
     }
@@ -1084,7 +1138,13 @@ fn shape_of(
         }
         replaces.push(Replaced { id: r.id.clone(), switch: r.switch.as_deref().map(switch_at).transpose()?, controls });
     }
-    Ok(Shape { under, action_under, filters, replaces, menu: None })
+    Ok(Shape { under, action_under, places, presses, action_presses, artwork, filters, replaces, menu: None })
+}
+
+/// The press a manifest writes for a switch or an action, if it is one a keyboard sends (not one
+/// of the view's own moves).
+fn plugin_press(text: &str) -> Option<crate::KeyCombo> {
+    crate::KeyCombo::read(text).filter(|press| !press.key.starts_with(crate::keys::VIEW_KEY))
 }
 
 /// What a filter's code calls `controls`, in their order: their keys, without the plugin's id.
@@ -2304,9 +2364,11 @@ pub(crate) mod tests {
         };
         let package = placed("adjustments").unwrap();
         assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
-        for (name, place) in
-            [("layer", crate::plugins::PluginPlace::Layer), ("frame", crate::plugins::PluginPlace::Frame)]
-        {
+        for (name, place) in [
+            ("layer", crate::plugins::PluginPlace::Layer),
+            ("frame", crate::plugins::PluginPlace::Frame),
+            ("canvas", crate::plugins::PluginPlace::Canvas),
+        ] {
             assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
         }
         assert_eq!(placed("toolbar").err(), Some(Refusal::Newer));
@@ -2314,6 +2376,51 @@ pub(crate) mod tests {
         let filter = with(a_filter(), "/permissions", json!(["brush"]));
         assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
         assert_eq!(of("/compat/procraft/interface", json!(1)), Refusal::Described);
+    }
+
+    #[test]
+    fn controls_and_actions_may_show_in_the_canvas_tab_take_presses_and_be_kept_with_artworks() {
+        // told its controls, and an action
+        let told = r#"(func (export "procraft_control") (param i32 f32))
+            (func (export "procraft_action") (param i32) (result i32) (i32.const 0))"#;
+        let module = crate::plugin_run::tests::position_module(told, "(i64.const 0)");
+        let base = || {
+            let mut manifest = coded("org.example.placed", &module);
+            manifest["compat"]["procraft"]["interface"] = json!(8);
+            manifest["controls"] = json!([
+                { "key": "shown", "type": "switch", "label": "Shown", "place": "canvas", "press": "alt+g", "artwork": true },
+                { "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 1, "step": 0.5, "place": "card" },
+            ]);
+            manifest["actions"] =
+                json!([{ "key": "go", "label": "Go", "place": "canvas", "press": "shift+command+r" }]);
+            manifest
+        };
+        let package = read_package(&a_coded_file(&base(), &module)).unwrap();
+        let shape = &package.manifest.shape;
+        use crate::plugins::PluginPlace::{Canvas, Card};
+        assert_eq!(shape.places, [Canvas, Card]);
+        let press = |text: &str| crate::KeyCombo::read(text);
+        assert_eq!(shape.presses, [press("alt+g"), None]);
+        assert_eq!(shape.action_presses, [press("command+shift+r")]);
+        assert_eq!(shape.artwork, [true, false]);
+        assert_eq!(package.manifest.actions[0].place, Canvas);
+        let of = |at: [&str; 3], value: Value| {
+            let mut manifest = base();
+            let [list, index, field] = at;
+            manifest[list][index.parse::<usize>().unwrap()][field] = value;
+            refusal(&a_coded_file(&manifest, &module))
+        };
+        // a control shows on its card or in the Canvas tab; a place this app doesn't have is for a
+        // newer one
+        assert_eq!(of(["controls", "1", "place"], json!("layer")), Refusal::Described);
+        assert_eq!(of(["controls", "1", "place"], json!("toolbar")), Refusal::Newer);
+        // a press is a switch's or an action's, one a keyboard sends, each once
+        assert_eq!(of(["controls", "1", "press"], json!("alt+h")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("alt+g")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("view:fit")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("hyper+x")), Refusal::Described);
+        // kept with an artwork: not a setting the app used to have
+        assert_eq!(of(["controls", "0", "keeps"], json!("interface_size")), Refusal::Described);
     }
 
     /// A picker plugin's file: its module and its picture's code (`picture`, if any).

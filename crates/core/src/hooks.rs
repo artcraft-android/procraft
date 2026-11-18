@@ -11,6 +11,9 @@ use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
+/// The part of the view the gesture lock's hook is asked about: its turn.
+pub(crate) const GESTURE_TURN: i32 = 0;
+
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 pub(crate) type Shared = Arc<Mutex<Running>>;
 
@@ -602,6 +605,49 @@ impl Hooks {
             && self.through(Hook::FloatingPanels, false, |running, said| Ok(said || running.floating_panel(panel)?))
     }
 
+    /// The gesture lock's hook: whether a two-finger gesture leaves part `part` of the view (by
+    /// [`GESTURE_TURN`]) as it is, as any plugin on it says.
+    pub(crate) fn gesture_lock(&self, part: i32) -> bool {
+        self.has(Hook::GestureLock)
+            && self.through(Hook::GestureLock, false, |running, said| Ok(said || running.gesture_lock(part)?))
+    }
+
+    /// The view look's hook: the matrix the canvas's colours go through on the screen, each
+    /// plugin's in turn (in order of id); none while together they change nothing.
+    pub(crate) fn view_look(&self) -> Option<crate::ViewLook> {
+        if !self.has(Hook::ViewLook) {
+            return None;
+        }
+        let look = self.through(Hook::ViewLook, crate::view_look::IDENTITY, |running, look| {
+            Ok(running.view_look()?.map_or(look, |next| crate::view_look::then(&look, &next)))
+        });
+        (look != crate::view_look::IDENTITY).then_some(look)
+    }
+
+    /// The paper's hook: the paper the first plugin on it (by id) that gives one now gives.
+    pub(crate) fn paper(&self) -> Option<crate::plugin_run::Paper> {
+        if !self.has(Hook::Paper) {
+            return None;
+        }
+        let mut given = None;
+        self.through(Hook::Paper, (), |running, ()| {
+            if given.is_none() {
+                given = running.paper()?;
+            }
+            Ok(())
+        });
+        given
+    }
+
+    /// The reference windows' hook: how many Reference windows may be open at once, the most any
+    /// plugin on it says (1 with none).
+    pub(crate) fn reference_windows(&self) -> u32 {
+        if !self.has(Hook::ReferenceWindows) {
+            return 1;
+        }
+        self.through(Hook::ReferenceWindows, 1, |running, most| Ok(most.max(running.reference_windows()?)))
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -823,12 +869,59 @@ impl Hooks {
     }
 }
 
+impl CanvasSession {
+    /// The values of plugins' controls this artwork keeps, by their keys.
+    pub(crate) fn plugin_values(&self) -> std::collections::BTreeMap<String, f32> {
+        self.shared.lock().plugin_values.clone()
+    }
+
+    /// `value` is what the artwork keeps for the control kept under `key` from now on, saved with
+    /// it (a change being an edit, the autosave has it).
+    pub(crate) fn keep_plugin_value(&self, key: String, value: f32) {
+        let mut st = self.shared.lock();
+        if value.is_finite() && st.plugin_values.get(&key) != Some(&value) {
+            st.plugin_values.insert(key, value);
+            st.revision += 1;
+        }
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Strokes go through the plugins on in `plugins`, as they come and go, from here on.
     pub fn use_plugins(&self, plugins: Arc<Plugins>) {
+        // the controls kept with this artwork, as it keeps them, the first time it comes
+        if let Some(me) = self.me.upgrade() {
+            plugins.take_up_artwork(&me);
+        }
         let hooks = plugins.hooks();
-        self.shared.lock().hooks = Some(hooks);
+        // how the plugins have the window show the canvas, and the paper they give, asked now
+        // rather than as it is drawn
+        let look = hooks.view_look();
+        let paper = hooks.paper().map(|p| procraft_gpu::CanvasPaper {
+            tile: p.tile,
+            strength: p.strength,
+            scale: p.scale,
+            depth: p.depth,
+            colour: p.colour.map(|rgb| [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0)),
+        });
+        let mut st = self.shared.lock();
+        st.hooks = Some(hooks);
+        let mut changed = false;
+        if st.plugin_look != look {
+            st.plugin_look = look;
+            changed = true;
+        }
+        if st.plugin_paper != paper {
+            st.plugin_paper = paper;
+            st.apply_paper();
+            // the background changes with it: the Reference windows read it again
+            st.reference_canvas = None;
+            changed = true;
+        }
+        if changed {
+            self.shared.frame(&mut st);
+        }
     }
 
     /// The picker plugin's picture for `hue` (0..1), `side` pixels square: premultiplied RGBA rows,

@@ -52,6 +52,10 @@ struct LayerUniform {
     // where this one's top left is in those (x: the scale, yz: the point): grain fixed to the
     // canvas is read where it is on that canvas
     scaled: vec4<f32>,
+    // the paper: how strongly its hollows take the stroke's paint away (0: the stroke takes no
+    // paper), how many canvas pixels a pixel of its tile covers, and how deep it shows in the
+    // background (0: a flat colour)
+    paper: vec4<f32>,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -74,6 +78,7 @@ const CLIP_BASE: u32 = 3u;
 @group(0) @binding(6) var mask_tex: texture_2d<f32>;
 @group(0) @binding(7) var second_tex: texture_2d<f32>;
 @group(0) @binding(8) var clip_mask_tex: texture_2d<f32>;
+@group(0) @binding(9) var paper_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -144,6 +149,11 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         // only where the stroke is
         let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
         s = s * (a / max(s.a, 1e-6));
+    }
+    // the paper, fixed to the canvas, whatever the brush: its hollows take a share of the paint
+    if (lu.paper.x > 0.0) {
+        let at = (vec2<f32>(p) + 0.5) / lu.scaled.x + lu.scaled.yz;
+        s = s * (1.0 - lu.paper.x * (1.0 - paper_height(at)));
     }
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
@@ -284,9 +294,23 @@ fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return select(r, c, lu.clipped == CLIP_BASE);
 }
 
-// the background colour (written, not blended)
+// how high the paper stands at canvas point `at` (0 a hollow, 1 a peak): its tile repeated, each
+// of its pixels lu.paper.y canvas pixels across
+fn paper_height(at: vec2<f32>) -> f32 {
+    let side = f32(textureDimensions(paper_tex).x);
+    let level = max(log2(1.0 / lu.paper.y), 0.0);
+    return textureSampleLevel(paper_tex, grain_smp, at / (lu.paper.y * side), level).r;
+}
+
+// the background colour (written, not blended); with a paper that shows in it, its hollows
+// darker as deep as it says
 @fragment
-fn fs_solid() -> @location(0) vec4<f32> {
+fn fs_solid(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    if (lu.paper.z > 0.0 && lu.solid.a > 0.0) {
+        let at = pos.xy / lu.scaled.x + lu.scaled.yz;
+        let shade = 1.0 - lu.paper.z * (1.0 - paper_height(at));
+        return vec4<f32>(lu.solid.rgb * shade, lu.solid.a);
+    }
     return lu.solid;
 }
 

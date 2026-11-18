@@ -673,14 +673,19 @@ impl Input {
             WindowEvent::PinchGesture { delta, phase, .. } => {
                 let Some(p) = self.cursor.filter(|p| !over(*p)) else { return false };
                 session.view_gesture(p.0, p.1, 0.0, 0.0, (1.0 + *delta as f32).max(0.01), 0.0);
-                // let go near a right angle, the canvas turns onto it, as after fingers
-                if *phase == TouchPhase::Ended {
+                // let go near a right angle, the canvas turns onto it, as after fingers (unless a
+                // plugin keeps gestures from turning it)
+                if *phase == TouchPhase::Ended && !session.gesture_turn_locked() {
                     session.settle_turn();
                 }
                 true
             }
             WindowEvent::RotationGesture { delta, phase, .. } => {
                 let Some(p) = self.cursor.filter(|p| !over(*p)) else { return false };
+                // a plugin may keep gestures from turning the canvas
+                if session.gesture_turn_locked() {
+                    return true;
+                }
                 // turned anticlockwise is positive; the view turns clockwise on the screen
                 session.view_gesture(p.0, p.1, 0.0, 0.0, 1.0, -delta.to_radians());
                 if *phase == TouchPhase::Ended {

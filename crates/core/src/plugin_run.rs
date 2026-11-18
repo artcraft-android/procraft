@@ -65,6 +65,18 @@
 //! - `procraft_floating_panel(panel: i32) -> i32`: for the hook `floating_panels` (interface 7),
 //!   whether a panel can be torn off into a window of its own (not 0), `panel` by
 //!   [`crate::floating::FloatingPanel`].
+//! - `procraft_gesture_lock(part: i32) -> i32`: for the hook `gesture_lock` (interface 8), whether
+//!   a two-finger gesture leaves part of the view as it is (not 0), `part` 0 its turn.
+//! - `procraft_view_look(entry: i32) -> f32`: for the hook `view_look` (interface 8), entry 0 to 11
+//!   of a matrix the canvas's colours go through on the screen alone, in linear light: rows red,
+//!   green and blue, each three weights and what is added.
+//! - For the hook `paper` (interface 8): `procraft_paper(side: i32) -> i32` answers where the
+//!   paper's tile is in its memory, `side` x `side` bytes, each how high the paper stands (0 for
+//!   none now); `procraft_paper_look(what: i32) -> f32` how strongly its hollows take paint away
+//!   (0), how many canvas pixels a tile's pixel covers (1) and how deep it shows under the art (2);
+//!   `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the artwork's.
+//! - `procraft_reference_windows() -> i32`: for the hook `reference_windows` (interface 8), how
+//!   many Reference windows may be open at once, 1 to 8.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -223,6 +235,22 @@ const INTERFACE_PART_SCALE: &str = "procraft_interface_part_scale";
 const FLOATING_PICKER_ONLY: &str = "procraft_floating_picker_only";
 const HIDE_NOTICE: &str = "procraft_hide_notice";
 const FLOATING_PANEL: &str = "procraft_floating_panel";
+const GESTURE_LOCK: &str = "procraft_gesture_lock";
+const VIEW_LOOK: &str = "procraft_view_look";
+const PAPER: &str = "procraft_paper";
+const PAPER_LOOK: &str = "procraft_paper_look";
+const PAPER_COLOUR: &str = "procraft_paper_colour";
+const REFERENCE_WINDOWS: &str = "procraft_reference_windows";
+/// The most a view look's entry may be, either way.
+const MOST_VIEW_LOOK: f32 = 16.0;
+/// What drawing the paper's tile may spend, and how long it may take: a long call, made only as
+/// the plugins change.
+const PAPER_FUEL: u64 = 400_000_000;
+const MOST_PAPER_TIME: Duration = Duration::from_secs(3);
+/// The tile's side the app asks a paper for.
+pub(crate) const PAPER_SIDE: usize = procraft_engine::textures::TEXTURE_SIZE;
+/// How many Reference windows a plugin may let be open at once.
+pub(crate) const MOST_REFERENCE_WINDOWS: i32 = 8;
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -365,6 +393,14 @@ pub(crate) enum Hook {
     HideNotices,
     /// Panels torn off into windows of their own (interface 7).
     FloatingPanels,
+    /// A part of the view a two-finger gesture leaves as it is (interface 8).
+    GestureLock,
+    /// How the canvas's colours look on the screen alone (interface 8).
+    ViewLook,
+    /// A paper every stroke takes, shown under the art (interface 8).
+    Paper,
+    /// How many Reference windows may be open at once (interface 8).
+    ReferenceWindows,
 }
 
 impl Hook {
@@ -395,6 +431,10 @@ impl Hook {
             "floating_picker_only" => Some(Hook::FloatingPickerOnly),
             "hide_notices" => Some(Hook::HideNotices),
             "floating_panels" => Some(Hook::FloatingPanels),
+            "gesture_lock" => Some(Hook::GestureLock),
+            "view_look" => Some(Hook::ViewLook),
+            "paper" => Some(Hook::Paper),
+            "reference_windows" => Some(Hook::ReferenceWindows),
             _ => None,
         }
     }
@@ -429,6 +469,10 @@ impl Hook {
             Hook::FloatingPickerOnly => "This plugin can show the floating colour window with its picker alone.",
             Hook::HideNotices => "This plugin can hide the notices shown when something is done.",
             Hook::FloatingPanels => "This plugin can let panels float in windows of their own.",
+            Hook::GestureLock => "This plugin can keep two-finger gestures from turning the canvas.",
+            Hook::ViewLook => "This plugin can change how the canvas looks on the screen, never the artwork.",
+            Hook::Paper => "This plugin can give the canvas a paper that your strokes and its background show.",
+            Hook::ReferenceWindows => "This plugin can let more than one Reference window be open.",
         }
     }
 
@@ -452,6 +496,15 @@ impl Hook {
             Hook::FloatingPickerOnly => exports(module, FLOATING_PICKER_ONLY, &[], &[ValType::I32]),
             Hook::HideNotices => exports(module, HIDE_NOTICE, &[ValType::I32], &[ValType::I32]),
             Hook::FloatingPanels => exports(module, FLOATING_PANEL, &[ValType::I32], &[ValType::I32]),
+            Hook::GestureLock => exports(module, GESTURE_LOCK, &[ValType::I32], &[ValType::I32]),
+            Hook::ViewLook => exports(module, VIEW_LOOK, &[ValType::I32], &[ValType::F32]),
+            Hook::Paper => {
+                exports(module, PAPER, &[ValType::I32], &[ValType::I32])
+                    && exports(module, PAPER_LOOK, &[ValType::I32], &[ValType::F32])
+                    && exports(module, PAPER_COLOUR, &[], &[ValType::I32])
+                    && has_memory(module)
+            }
+            Hook::ReferenceWindows => exports(module, REFERENCE_WINDOWS, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -787,6 +840,26 @@ fn long_call<P: WasmParams, R: WasmResults>(
 }
 
 /// A plugin's module, instantiated, with what it has of ours to call.
+/// What a paper plugin exports (the `paper` hook).
+struct PaperCalls {
+    tile: TypedFunc<i32, i32>,
+    look: TypedFunc<i32, f32>,
+    colour: TypedFunc<(), i32>,
+}
+
+/// A paper a plugin gives: its tile, [`PAPER_SIDE`] square, each byte how high the paper stands
+/// there (rows from the top); how strongly its hollows take a stroke's paint away (0..1); how many
+/// canvas pixels a tile's pixel covers; how deep it shows under the art (0..1); and the colour
+/// under the art (0xRRGGBB; none: the artwork's own).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Paper {
+    pub(crate) tile: Vec<u8>,
+    pub(crate) strength: f32,
+    pub(crate) scale: f32,
+    pub(crate) depth: f32,
+    pub(crate) colour: Option<u32>,
+}
+
 pub(crate) struct Running {
     store: Store<Host>,
     position: Option<TypedFunc<(f32, f32), i64>>,
@@ -814,6 +887,10 @@ pub(crate) struct Running {
     floating_picker_only: Option<TypedFunc<(), i32>>,
     hide_notice: Option<TypedFunc<i32, i32>>,
     floating_panel: Option<TypedFunc<i32, i32>>,
+    gesture_lock: Option<TypedFunc<i32, i32>>,
+    view_look: Option<TypedFunc<i32, f32>>,
+    paper: Option<PaperCalls>,
+    reference_windows: Option<TypedFunc<(), i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -962,6 +1039,16 @@ impl Running {
             let floating_picker_only = instance.get_typed_func(&store, FLOATING_PICKER_ONLY).ok();
             let hide_notice = instance.get_typed_func(&store, HIDE_NOTICE).ok();
             let floating_panel = instance.get_typed_func(&store, FLOATING_PANEL).ok();
+            let gesture_lock = instance.get_typed_func(&store, GESTURE_LOCK).ok();
+            let view_look = instance.get_typed_func(&store, VIEW_LOOK).ok();
+            let paper = (|| {
+                Some(PaperCalls {
+                    tile: instance.get_typed_func(&store, PAPER).ok()?,
+                    look: instance.get_typed_func(&store, PAPER_LOOK).ok()?,
+                    colour: instance.get_typed_func(&store, PAPER_COLOUR).ok()?,
+                })
+            })();
+            let reference_windows = instance.get_typed_func(&store, REFERENCE_WINDOWS).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1063,6 +1150,10 @@ impl Running {
                 floating_picker_only,
                 hide_notice,
                 floating_panel,
+                gesture_lock,
+                view_look,
+                paper,
+                reference_windows,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -1992,6 +2083,84 @@ impl Running {
         Ok(said != 0)
     }
 
+    /// Whether it says a two-finger gesture leaves part `part` of the view as it is.
+    pub(crate) fn gesture_lock(&mut self, part: i32) -> Result<bool, Stop> {
+        let Running { store, gesture_lock, .. } = self;
+        let Some(gesture_lock) = gesture_lock else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            gesture_lock.call(&mut *store, part).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// The matrix it says the canvas's colours go through on the screen (rows red, green and blue:
+    /// three weights and what is added, in linear light); none while it is the identity, changing
+    /// nothing. An entry that isn't a number, or is past [`MOST_VIEW_LOOK`] either way, stops it.
+    pub(crate) fn view_look(&mut self) -> Result<Option<crate::ViewLook>, Stop> {
+        let Running { store, view_look, .. } = self;
+        let Some(view_look) = view_look else { return Ok(None) };
+        let mut rows = [[0.0_f32; 4]; 3];
+        for (entry, at) in rows.iter_mut().flatten().zip(0..) {
+            let said = guarded(|| {
+                store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+                view_look.call(&mut *store, at).map_err(|e| stop_of(&e))
+            })?;
+            if !said.is_finite() || said.abs() > MOST_VIEW_LOOK {
+                return Err(Stop::Nonsense);
+            }
+            *entry = said;
+        }
+        Ok((rows != crate::view_look::IDENTITY).then_some(rows))
+    }
+
+    /// The paper it says strokes take and the art shows on (see [`Paper`]); none for none now. A
+    /// tile out of its memory, or a look out of its range, stops it.
+    pub(crate) fn paper(&mut self) -> Result<Option<Paper>, Stop> {
+        let Running { store, paper, memory, .. } = self;
+        let (Some(paper), Some(memory)) = (paper.as_ref(), memory.as_ref()) else { return Ok(None) };
+        let until = Instant::now() + MOST_PAPER_TIME;
+        let mut left = PAPER_FUEL;
+        guarded(|| {
+            let side = PAPER_SIDE as i32;
+            let at = long_call(store, &paper.tile, side, &mut left, until)?;
+            if at == 0 {
+                return Ok(None);
+            }
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            let mut tile = vec![0_u8; PAPER_SIDE * PAPER_SIDE];
+            memory.read(&*store, place, &mut tile).map_err(|_| Stop::Nonsense)?;
+            let mut look = [0.0_f32; 3];
+            for (value, what) in look.iter_mut().zip(0..) {
+                *value = long_call(store, &paper.look, what, &mut left, until)?;
+            }
+            let [strength, scale, depth] = look;
+            let fits =
+                (0.0..=1.0).contains(&strength) && (0.25..=16.0).contains(&scale) && (0.0..=1.0).contains(&depth);
+            if !fits {
+                return Err(Stop::Nonsense);
+            }
+            let colour = match long_call(store, &paper.colour, (), &mut left, until)? {
+                -1 => None,
+                colour @ 0..=0xFF_FFFF => Some(colour as u32),
+                _ => return Err(Stop::Nonsense),
+            };
+            Ok(Some(Paper { tile, strength, scale, depth, colour }))
+        })
+    }
+
+    /// How many Reference windows it says may be open at once; one past 1 to
+    /// [`MOST_REFERENCE_WINDOWS`] stops it.
+    pub(crate) fn reference_windows(&mut self) -> Result<u32, Stop> {
+        let Running { store, reference_windows, .. } = self;
+        let Some(reference_windows) = reference_windows else { return Ok(1) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            reference_windows.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        if (1..=MOST_REFERENCE_WINDOWS).contains(&said) { Ok(said as u32) } else { Err(Stop::Nonsense) }
+    }
+
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
     pub(crate) fn randomise(&mut self, setting: i32, seed: i32) -> Result<Option<f32>, Stop> {
         let Running { store, randomise, .. } = self;
@@ -2626,6 +2795,73 @@ pub(crate) mod tests {
         let mut running = started(&none);
         assert_eq!((running.hide_notice(0), running.floating_panel(0)), (Ok(false), Ok(false)));
         assert!(!can_run(&none, &[Hook::HideNotices], false) && !can_run(&none, &[Hook::FloatingPanels], false));
+    }
+
+    #[test]
+    fn the_view_hooks_are_asked_and_an_answer_out_of_range_stops_the_plugin() {
+        // the turn locked, a look that swaps red and green, five windows
+        let text = r#"(module
+            (func (export "procraft_gesture_lock") (param i32) (result i32) (i32.eqz (local.get 0)))
+            (func (export "procraft_view_look") (param i32) (result f32)
+                (select (f32.const 1) (f32.const 0)
+                    (i32.or (i32.or (i32.eq (local.get 0) (i32.const 1)) (i32.eq (local.get 0) (i32.const 4)))
+                        (i32.eq (local.get 0) (i32.const 10)))))
+            (func (export "procraft_reference_windows") (result i32) (i32.const 5)))"#;
+        let bytes = wat::parse_str(text).unwrap();
+        assert!(can_run(&bytes, &[Hook::GestureLock, Hook::ViewLook, Hook::ReferenceWindows], false));
+        assert!(!can_run(&bytes, &[Hook::Paper], false), "not what that hook calls");
+        let mut running = started(&bytes);
+        assert_eq!((running.gesture_lock(0), running.gesture_lock(1)), (Ok(true), Ok(false)));
+        let swap = [[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        assert_eq!(running.view_look(), Ok(Some(swap)));
+        assert_eq!(running.reference_windows(), Ok(5));
+        // a look that changes nothing is none; past its range, or one window too many, stops it
+        let same = r#"(module (func (export "procraft_view_look") (param i32) (result f32)
+            (select (f32.const 1) (f32.const 0) (i32.eqz (i32.rem_u (local.get 0) (i32.const 5))))))"#;
+        assert_eq!(started(&wat::parse_str(same).unwrap()).view_look(), Ok(None));
+        let wrong = r#"(module
+            (func (export "procraft_view_look") (param i32) (result f32) (f32.const 99))
+            (func (export "procraft_reference_windows") (result i32) (i32.const 9)))"#;
+        let mut running = started(&wat::parse_str(wrong).unwrap());
+        assert_eq!((running.view_look(), running.reference_windows()), (Err(Stop::Nonsense), Err(Stop::Nonsense)));
+        // a module without them: no lock, no look, one window
+        let none =
+            wat::parse_str(r#"(module (func (export "procraft_pin_panels") (result i32) (i32.const 1)))"#).unwrap();
+        let mut running = started(&none);
+        assert_eq!(
+            (running.gesture_lock(0), running.view_look(), running.reference_windows()),
+            (Ok(false), Ok(None), Ok(1))
+        );
+    }
+
+    #[test]
+    fn a_paper_s_tile_comes_from_its_memory_and_its_look_stays_in_range() {
+        let paper = |at: i32, strength: &str, colour: i32| {
+            let text = format!(
+                r#"(module (memory (export "memory") 2)
+                (func (export "procraft_paper") (param i32) (result i32) (i32.const {at}))
+                (func (export "procraft_paper_look") (param i32) (result f32)
+                    (if (result f32) (i32.eqz (local.get 0))
+                        (then (f32.const {strength}))
+                        (else (if (result f32) (i32.eq (local.get 0) (i32.const 1))
+                            (then (f32.const 2))
+                            (else (f32.const 0.25))))))
+                (func (export "procraft_paper_colour") (result i32) (i32.const {colour})))"#
+            );
+            wat::parse_str(text).unwrap()
+        };
+        let bytes = paper(1024, "0.5", 0xF4_ECD8);
+        assert!(can_run(&bytes, &[Hook::Paper], false));
+        let given = started(&bytes).paper().unwrap().unwrap();
+        assert_eq!(given.tile, vec![0; PAPER_SIDE * PAPER_SIDE]);
+        assert_eq!((given.strength, given.scale, given.depth, given.colour), (0.5, 2.0, 0.25, Some(0xF4_ECD8)));
+        // the artwork's own colour, and none at all
+        assert_eq!(started(&paper(1024, "0.5", -1)).paper().unwrap().unwrap().colour, None);
+        assert_eq!(started(&paper(0, "0.5", -1)).paper(), Ok(None));
+        // a tile past its memory, a strength past 1, a colour that isn't one: it stops
+        for bytes in [paper(100_000, "0.5", -1), paper(1024, "3", -1), paper(1024, "0.5", 0x100_0000)] {
+            assert_eq!(started(&bytes).paper(), Err(Stop::Nonsense));
+        }
     }
 
     #[test]

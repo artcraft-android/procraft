@@ -157,6 +157,9 @@ pub enum PluginPlace {
     /// In Animation Assist's frame options, after the app's own; run with that frame's layer
     /// current.
     Frame,
+    /// In the Actions panel's Canvas tab, after the app's own rows (interface 8): an action, or a
+    /// switch or a slider shown as on the card.
+    Canvas,
 }
 
 impl PluginPlace {
@@ -167,6 +170,7 @@ impl PluginPlace {
             "adjustments" => Some(PluginPlace::Adjustments),
             "layer" => Some(PluginPlace::Layer),
             "frame" => Some(PluginPlace::Frame),
+            "canvas" => Some(PluginPlace::Canvas),
             _ => None,
         }
     }
@@ -494,6 +498,15 @@ pub struct PluginChoice {
     pub chosen: bool,
 }
 
+/// What a press of a plugin's own did (its manifest's `press`, see [`Plugins::plugin_press`]).
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum PluginPressed {
+    /// A switch flipped: the plugins changed, as a switch set on its card changes them.
+    Switched { control: PluginControl },
+    /// An action to run as its row runs it ([`Plugins::run_action`]), by its key.
+    Action { key: String },
+}
+
 /// `plugin` as its card shows it: what comes under a switch that is off left out.
 fn shown(plugin: &PluginInfo, shape: Option<&Shape>) -> PluginInfo {
     let Some(shape) = shape else { return plugin.clone() };
@@ -679,6 +692,9 @@ pub struct Plugins {
     hooks: Arc<Hooks>,
     /// A plugin's panel showing, with the copy of its code that showed it.
     panel: Mutex<Option<OpenPanel>>,
+    /// The artwork open, the last to take the plugins up: the controls kept with an artwork are
+    /// its, and setting one keeps it with it.
+    artwork: Mutex<std::sync::Weak<crate::CanvasSession>>,
 }
 
 /// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
@@ -748,7 +764,13 @@ impl Plugins {
             list.give_way(store);
         }
         let hooks = Arc::new(Hooks::kept_in(store.clone()));
-        Arc::new(Plugins { list: Mutex::new(list), hooks, store, panel: Mutex::new(None) })
+        Arc::new(Plugins {
+            list: Mutex::new(list),
+            hooks,
+            store,
+            panel: Mutex::new(None),
+            artwork: Mutex::new(std::sync::Weak::new()),
+        })
     }
 
     /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
@@ -956,15 +978,74 @@ impl Plugins {
     /// told the new value.
     fn change<T>(&self, key: &str, change: impl FnOnce(&mut PluginControl) -> Option<T>) -> Option<T> {
         let mut list = self.listed();
-        let (plugin, at) = list.control_mut(key)?;
+        let Listed { files, shapes, .. } = &mut *list;
+        let (plugin, at) = files.iter_mut().find_map(|plugin| {
+            let at = plugin.controls.iter().position(|c| c.key() == key)?;
+            Some((plugin, at))
+        })?;
         let changed = plugin.controls.get_mut(at).and_then(change)?;
+        let mut kept = None;
         if let Some(control) = plugin.controls.get(at) {
             self.hooks.control(&plugin.id, at, control.number());
+            if shapes.get(&plugin.id).is_some_and(|shape| shape.artwork.get(at) == Some(&true)) {
+                kept = Some((key.to_owned(), control.number()));
+            }
+        }
+        drop(list);
+        if let Some((key, value)) = kept {
+            self.keep_with_artwork(key, value);
         }
         Some(changed)
     }
 
-    #[cfg(test)]
+    /// `value` kept with the artwork open under `key`, a control's kept with each artwork.
+    fn keep_with_artwork(&self, key: String, value: f32) {
+        let artwork = self.artwork.lock().unwrap_or_else(|e| e.into_inner()).upgrade();
+        if let Some(session) = artwork {
+            session.keep_plugin_value(key, value);
+        }
+    }
+
+    /// `session` is the artwork open: the controls kept with an artwork take the values it keeps
+    /// (those it keeps none for, their `starts`), the plugins told, the first time it comes here.
+    /// Each plugin's are set whether it is on or not, so it starts with them.
+    pub(crate) fn take_up_artwork(&self, session: &Arc<crate::CanvasSession>) {
+        {
+            let mut artwork = self.artwork.lock().unwrap_or_else(|e| e.into_inner());
+            if artwork.upgrade().is_some_and(|open| Arc::ptr_eq(&open, session)) {
+                return;
+            }
+            *artwork = Arc::downgrade(session);
+        }
+        let kept = session.plugin_values();
+        let mut list = self.listed();
+        let Listed { files, shapes, .. } = &mut *list;
+        for plugin in files.iter_mut() {
+            let Some(shape) = shapes.get(&plugin.id) else { continue };
+            for (at, control) in plugin.controls.iter_mut().enumerate() {
+                if shape.artwork.get(at) != Some(&true) {
+                    continue;
+                }
+                let value = kept.get(control.key()).copied();
+                let changed = match control {
+                    PluginControl::Switch { control } => {
+                        let on = value.map_or(control.starts, |v| v >= 0.5);
+                        std::mem::replace(&mut control.on, on) != on
+                    }
+                    PluginControl::Slider { control } => {
+                        let to = control.stepped(value.unwrap_or(control.starts));
+                        std::mem::replace(&mut control.value, to) != to
+                    }
+                    PluginControl::File { .. } => false,
+                };
+                if changed {
+                    self.hooks.control(&plugin.id, at, control.number());
+                }
+            }
+        }
+    }
+
+    /// The control kept under `key`, as it is now.
     fn control(&self, key: &str) -> Option<PluginControl> {
         let mut list = self.listed();
         let (plugin, at) = list.control_mut(key)?;
@@ -1170,6 +1251,59 @@ impl Plugins {
         let list = self.listed();
         let on = list.files.iter().filter(|p| p.on && p.problem.is_none()).map(|p| list.shown(p));
         on.flat_map(|p| p.actions.into_iter().filter(|a| a.place == place)).collect()
+    }
+
+    /// The controls shown in `place` now besides their cards (interface 8), of the plugins that are
+    /// on, in the order the Plugins page lists them: each as its card shows it, set as on its card.
+    pub fn controls_in(&self, place: PluginPlace) -> Vec<PluginControl> {
+        if place == PluginPlace::Card {
+            return Vec::new();
+        }
+        let list = self.listed();
+        let mut placed = Vec::new();
+        for plugin in list.in_order().into_iter().filter(|p| p.on && p.problem.is_none()) {
+            let Some(shape) = list.shapes.get(&plugin.id) else { continue };
+            for (at, control) in plugin.controls.iter().enumerate() {
+                let shows = shape.shows(shape.under.get(at).copied().flatten(), &plugin.controls);
+                if shows && shape.places.get(at) == Some(&place) {
+                    placed.push(control.clone());
+                }
+            }
+        }
+        placed
+    }
+
+    /// A hardware keyboard's `press` on the canvas, as a plugin rebinding keys took it
+    /// ([`Plugins::key_press`]), that none of the app's shortcuts take, as a plugin that is on gives
+    /// it to one of its switches or actions in its manifest (interface 8): the switch flipped (for
+    /// the app to keep as one set on its card), or the action for the app to run. None: no
+    /// plugin's.
+    pub fn plugin_press(&self, press: KeyCombo) -> Option<PluginPressed> {
+        let press = KeyCombo::of(&press.key, press.command, press.shift, press.alt);
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|plugin| {
+                let shape = list.shapes.get(&plugin.id)?;
+                let shows = |under: &[Option<usize>], at: usize| {
+                    shape.shows(under.get(at).copied().flatten(), &plugin.controls)
+                };
+                let control = shape.presses.iter().position(|p| p.as_ref() == Some(&press));
+                if let Some(at) = control.filter(|&at| shows(&shape.under, at)) {
+                    return Some(Err(plugin.controls.get(at)?.key().to_owned()));
+                }
+                let action = shape.action_presses.iter().position(|p| p.as_ref() == Some(&press));
+                let at = action.filter(|&at| shows(&shape.action_under, at))?;
+                Some(Ok(plugin.actions.get(at)?.key.clone()))
+            })
+        };
+        match found? {
+            Ok(key) => Some(PluginPressed::Action { key }),
+            Err(key) => {
+                let on = matches!(self.control(&key), Some(PluginControl::Switch { control }) if control.on);
+                self.set_switch(key.clone(), !on);
+                Some(PluginPressed::Switched { control: self.control(&key)? })
+            }
+        }
     }
 
     /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
@@ -1737,6 +1871,12 @@ impl Plugins {
         }
     }
 
+    /// How many Reference windows may be open at once: the most a plugin on the reference
+    /// windows' hook says, 1 with none.
+    pub fn reference_windows(&self) -> u32 {
+        self.hooks().reference_windows()
+    }
+
     /// Whether a plugin lets `panel` be torn off into a window of its own.
     pub fn floats(&self, panel: crate::floating::FloatingPanel) -> bool {
         self.hooks().floating_panel(panel as i32)
@@ -1779,7 +1919,9 @@ impl Plugins {
             Some((plugin, choice.sets.clone()))
         });
         let Some((plugin, sets)) = found else { return Vec::new() };
+        let artwork: Vec<bool> = shapes.get(&plugin.id).map(|shape| shape.artwork.clone()).unwrap_or_default();
         let mut changed = Vec::new();
+        let mut kept = Vec::new();
         for (at, value) in sets {
             let Some(control) = plugin.controls.get_mut(at) else { continue };
             if control.number() == value {
@@ -1791,7 +1933,14 @@ impl Plugins {
                 PluginControl::File { .. } => continue,
             }
             self.hooks.control(&plugin.id, at, control.number());
+            if artwork.get(at) == Some(&true) {
+                kept.push((control.key().to_owned(), control.number()));
+            }
             changed.push(control.clone());
+        }
+        drop(list);
+        for (key, value) in kept {
+            self.keep_with_artwork(key, value);
         }
         changed
     }
@@ -1842,10 +1991,50 @@ impl Plugins {
     /// rebinding them says do each now.
     pub fn key_shortcut_list(&self, desktop: bool, mac: bool) -> Vec<crate::ShortcutGroup> {
         let hooks = self.hooks();
-        if !hooks.rebinds_keys() {
-            return crate::key_shortcut_list(desktop, mac);
+        let mut groups = if hooks.rebinds_keys() {
+            crate::keys::shortcut_list_now(desktop, mac, |press| hooks.key_shortcut_keys(press))
+        } else {
+            crate::key_shortcut_list(desktop, mac)
+        };
+        // the presses plugins give their switches and actions, under their names
+        let rows: Vec<crate::ShortcutRow> = self
+            .plugin_presses()
+            .into_iter()
+            .map(|(press, does)| crate::ShortcutRow { keys: press.label(mac), combos: vec![press], does })
+            .collect();
+        if !rows.is_empty() {
+            groups.push(crate::ShortcutGroup { heading: "Plugins".to_owned(), rows });
         }
-        crate::keys::shortcut_list_now(desktop, mac, |press| hooks.key_shortcut_keys(press))
+        groups
+    }
+}
+
+impl Plugins {
+    /// Each press a plugin that is on gives one of its switches or actions (each while it shows),
+    /// with what it does: the switch's or the action's words.
+    fn plugin_presses(&self) -> Vec<(KeyCombo, String)> {
+        let list = self.listed();
+        let mut presses = Vec::new();
+        for plugin in list.in_order().into_iter().filter(|p| p.on && p.problem.is_none()) {
+            let Some(shape) = list.shapes.get(&plugin.id) else { continue };
+            let shows =
+                |under: &[Option<usize>], at: usize| shape.shows(under.get(at).copied().flatten(), &plugin.controls);
+            for (at, press) in shape.presses.iter().enumerate() {
+                if let (Some(press), Some(PluginControl::Switch { control })) = (press, plugin.controls.get(at))
+                    && shows(&shape.under, at)
+                {
+                    presses.push((press.clone(), control.label.clone()));
+                }
+            }
+            for (at, press) in shape.action_presses.iter().enumerate() {
+                if let (Some(press), Some(action)) = (press, plugin.actions.get(at))
+                    && shows(&shape.action_under, at)
+                {
+                    presses.push((press.clone(), action.label.clone()));
+                }
+            }
+        }
+        presses
     }
 }
 

@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    PanelRow, PluginControl, PluginInfo, PluginPanel, PluginSlider, PluginSource, Plugins, plugin_slider_along,
-    plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown,
+    PanelRow, PluginAction, PluginControl, PluginInfo, PluginPanel, PluginSlider, PluginSource, Plugins,
+    plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen,
+    plugin_slider_shown,
 };
 
 use crate::alert::{Alert, Answer};
@@ -98,6 +99,10 @@ pub enum Act {
     PluginAction,
     /// A file a plugin makes of the artwork's layers, by its place in [`Showing::plugin_exports`].
     PluginExport(u8),
+    /// A row a plugin put in the Canvas tab, by its place among [`Showing::plugin_controls`] and
+    /// then [`Showing::plugin_actions`]: a switch flipped, a setting named at every step moved to
+    /// the next, an action run.
+    PluginPlaced(u8),
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -142,6 +147,8 @@ enum Slid {
     Stabilization,
     MotionFiltering,
     MotionExpression,
+    /// A plugin's slider in the Canvas tab, by its place in [`Showing::plugin_controls`].
+    Plugin(u8),
 }
 
 enum Row {
@@ -271,6 +278,47 @@ pub struct Showing {
     pub svg: bool,
     /// What Share Image calls the files plugins make of the artwork's layers of kinds they add.
     pub plugin_exports: Vec<String>,
+    /// The controls and actions plugins put in the Canvas tab, after its own rows.
+    pub plugin_controls: Vec<PluginControl>,
+    pub plugin_actions: Vec<PluginAction>,
+}
+
+/// The rows of what plugins put in the Canvas tab: each control as its card shows it, then each
+/// action; none for none.
+fn plugin_placed_rows(showing: &Showing) -> Vec<Row> {
+    let controls = showing.plugin_controls.iter().map(|control| match control {
+        PluginControl::Switch { control } => Row::Switch(kept_label(&control.label), control.on, None),
+        PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => {
+            let shown = plugin_slider_shown(control.clone(), control.value);
+            Row::Button(kept_label(&control.label), Some(kept_label(&shown)), None)
+        }
+        PluginControl::Slider { control } => Row::Slide(
+            kept_label(&control.label),
+            plugin_slider_shown(control.clone(), control.value),
+            plugin_slider_along(control.clone(), control.value),
+            SLIDE_HEIGHT,
+            Slid::Plugin(0),
+        ),
+        PluginControl::File { control } => Row::Button(kept_label(&control.label), None, None),
+    });
+    let actions = showing.plugin_actions.iter().map(|action| Row::Button(kept_label(&action.label), None, None));
+    // each by its place, as far as a number counts
+    controls
+        .chain(actions)
+        .take(usize::from(u8::MAX))
+        .enumerate()
+        .map(|(i, row)| {
+            let at = Act::PluginPlaced(i as u8);
+            match row {
+                Row::Switch(label, on, _) => Row::Switch(label, on, Some(at)),
+                Row::Slide(label, shown, along, tall, _) => {
+                    Row::Slide(label, shown, along, tall, Slid::Plugin(i as u8))
+                }
+                Row::Button(label, value, _) => Row::Button(label, value, Some(at)),
+                other => other,
+            }
+        })
+        .collect()
 }
 
 /// `label` for as long as the app runs, each once: a row's words are kept so.
@@ -333,7 +381,11 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Button("Flip vertical", None, Some(Act::Flip { horizontal: false })),
             ],
             vec![Button("Canvas information", None, Some(Act::CanvasInfo))],
-        ],
+        ]
+        .into_iter()
+        // what plugins put here
+        .chain(Some(plugin_placed_rows(showing)).filter(|rows| !rows.is_empty()))
+        .collect(),
         2 => vec![
             vec![
                 Heading("Share Image"),
@@ -566,6 +618,28 @@ impl Swipe {
 }
 
 impl Actions {
+    /// Row `i` of what plugins put in the Canvas tab ([`Act::PluginPlaced`]) tapped: a switch flipped
+    /// or a named setting moved to its next name (a setting changed), or an action to run.
+    fn plugin_placed(&mut self, showing: &Showing, prefs: &mut Prefs, i: u8) -> Option<Act> {
+        let i = usize::from(i);
+        let Some(control) = showing.plugin_controls.get(i) else {
+            let action = showing.plugin_actions.get(i.checked_sub(showing.plugin_controls.len())?)?;
+            self.plugin_action = Some(action.key.clone());
+            return Some(Act::PluginAction);
+        };
+        let changed = match control {
+            PluginControl::Switch { control } => prefs.plugins.set_switch(control.key.clone(), !control.on),
+            PluginControl::Slider { control } => {
+                let count = plugin_slider_choices(control.clone()).len().max(1) as u32;
+                let next = (plugin_slider_chosen(control.clone(), control.value) + 1) % count;
+                let to = plugin_slider_choice(control.clone(), next);
+                prefs.plugins.set_slider(control.key.clone(), to).is_some()
+            }
+            PluginControl::File { .. } => false,
+        };
+        changed.then_some(Act::Prefs)
+    }
+
     /// The key of the plugin action last tapped, once ([`Act::PluginAction`]).
     pub fn take_plugin_action(&mut self) -> Option<String> {
         self.plugin_action.take()
@@ -710,7 +784,16 @@ impl Actions {
                 prefs.reset_input();
                 Some(Act::Prefs)
             }
+            Some(Tapped::Act(Act::PluginPlaced(i))) => self.plugin_placed(showing, prefs, i),
             Some(Tapped::Act(a)) => Some(a),
+            Some(Tapped::Slid(Slid::Plugin(i), at)) => {
+                let slider = match showing.plugin_controls.get(usize::from(i)) {
+                    Some(PluginControl::Slider { control }) => Some(control.clone()),
+                    _ => None,
+                };
+                let to = slider.map(|s| (s.key.clone(), plugin_slider_at(s, at.clamp(0.0, 1.0))));
+                to.and_then(|(key, to)| prefs.plugins.set_slider(key, to)).map(|_| Act::Prefs)
+            }
             Some(Tapped::Slid(which, at)) => {
                 let at = at.clamp(0.0, 1.0);
                 match which {
@@ -721,6 +804,7 @@ impl Actions {
                     Slid::Stabilization => prefs.stabilization = at,
                     Slid::MotionFiltering => prefs.motion_filtering = at,
                     Slid::MotionExpression => prefs.motion_expression = at,
+                    Slid::Plugin(_) => {}
                 }
                 Some(Act::Prefs)
             }

@@ -31,6 +31,8 @@ pub enum PluginPermission {
     Panel,
     /// The data of a brush its own brush engine made, to read and change: its brush studio's.
     BrushData,
+    /// How the canvas is turned on the screen, to read and set (interface 8).
+    View,
 }
 
 impl PluginPermission {
@@ -43,6 +45,7 @@ impl PluginPermission {
             "notice" => Some(PluginPermission::Notice),
             "panel" => Some(PluginPermission::Panel),
             "brush.data" => Some(PluginPermission::BrushData),
+            "view" => Some(PluginPermission::View),
             _ => None,
         }
     }
@@ -60,6 +63,7 @@ impl PluginPermission {
             PluginPermission::BrushData => {
                 "It can read and change the settings of brushes it draws, in a studio of its own."
             }
+            PluginPermission::View => "It can turn the canvas on the screen when you tap one of its actions.",
         }
     }
 }
@@ -118,6 +122,8 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
     ("brush_data_len", PluginPermission::BrushData, &[], &[I32]),
     ("read_brush_data", PluginPermission::BrushData, &[I32], &[I32]),
     ("write_brush_data", PluginPermission::BrushData, &[I32, I32], &[I32]),
+    ("view_turn", PluginPermission::View, &[], &[F32]),
+    ("turn_view", PluginPermission::View, &[F32], &[]),
 ];
 
 /// The most bytes of a brush's data a plugin may hand back.
@@ -311,6 +317,20 @@ impl CanvasSession {
 /// to import.
 pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> Result<(), wasmi::Error> {
     link_utilities(linker)?;
+    if granted.contains(&PluginPermission::View) {
+        // how far the canvas is turned on the screen, clockwise, in radians (-pi to pi)
+        linker.func_wrap(FROM, "view_turn", |caller: Caller<'_, Host>| -> f32 {
+            session(&caller).map_or(0.0, |s| s.view_turn())
+        })?;
+        // turned to `radians` about the window's middle, its zoom and the canvas there kept
+        linker.func_wrap(FROM, "turn_view", |caller: Caller<'_, Host>, radians: f32| {
+            if let Some(s) = session(&caller)
+                && radians.is_finite()
+            {
+                s.turn_view_to(radians);
+            }
+        })?;
+    }
     let read = granted.contains(&PluginPermission::ArtworkRead);
     let write = granted.contains(&PluginPermission::ArtworkWrite);
     if read {

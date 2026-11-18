@@ -23,6 +23,7 @@ pub use canvas::{
     SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
     TipKind, most_resident, read_texture, start_reading, textures_bytes,
 };
+pub use canvas::{CanvasPaper, GREY_LOOK, ViewLook};
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{

@@ -57,7 +57,7 @@ impl State {
                 lut,
                 // the second display's own density isn't known: crisp once a pixel covers more
                 crisp_from: 1.0,
-                grey: false,
+                look: None,
             }),
         );
     }
@@ -137,8 +137,11 @@ impl State {
             let convert = colours_to(self.doc.profile, screen);
             self.render_sphere(view, format, size, convert);
             self.frames += 1;
-        } else if let (Some(canvas), Some(gpu), Some(to_screen)) = (self.canvas.as_mut(), self.gpu.as_ref(), to_screen)
+        } else if let (shown_look, Some(canvas), Some(gpu), Some(to_screen)) =
+            (self.shown_look(), self.canvas.as_mut(), self.gpu.as_ref(), to_screen)
         {
+            // the paper the plugins give, which a canvas made since hasn't taken yet
+            canvas.set_paper(gpu, self.plugin_paper.as_ref());
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
             let shown = selection_shown;
@@ -185,7 +188,7 @@ impl State {
                     convert,
                     lut,
                     crisp_from: self.display_scale,
-                    grey: self.grey_view,
+                    look: shown_look,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet

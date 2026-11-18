@@ -6076,6 +6076,29 @@ fn text_is_edited_as_one_step_and_rasterized() {
     assert_ne!(pixel(&s, 5, 5), [255, 0, 0, 255]);
 }
 
+/// The Reference windows that show the canvas share one picture of it: read back from the GPU
+/// once while the artwork stays as it is, however many windows ask, and again once it changes.
+#[test]
+fn the_reference_windows_read_the_canvas_once_while_it_stays_as_it_is() {
+    let Some(s) = session(1024, 512) else { return };
+    s.set_background_color(0.0, 0.0, 1.0, true);
+    let t = std::time::Instant::now();
+    let first = s.reference_canvas(700).unwrap();
+    let read = t.elapsed();
+    let t = std::time::Instant::now();
+    for _ in 0..4 {
+        assert_eq!(s.reference_canvas(700).as_ref(), Some(&first));
+    }
+    let shared = t.elapsed() / 4;
+    println!("the canvas read for the reference windows in {read:?}, shared again in {shared:?}");
+    assert!(shared < read, "{shared:?} shared, {read:?} read");
+    assert_eq!((first.width, first.height, &first.rgba[..4]), (700, 700, &[0, 0, 255, 255][..]));
+    // another size reads it again, and so does a change
+    assert_eq!(s.reference_canvas(64).map(|t| t.width), Some(64));
+    s.set_background_color(0.0, 1.0, 0.0, true);
+    assert_eq!(s.reference_canvas(700).map(|t| t.rgba[..4].to_vec()), Some(vec![0, 255, 0, 255]));
+}
+
 #[test]
 fn the_canvas_thumbnail_is_the_picture() {
     let Some(s) = session(64, 64) else { return };

@@ -82,6 +82,14 @@ struct ArtworkFile {
         skip_serializing_if = "Option::is_none"
     )]
     reference: Option<procraft_engine::reference_window::ReferenceWindow>,
+    /// The Reference windows opened besides its own, as they were left (each picture beside the
+    /// layers, `reference-2.png` and on).
+    #[serde(
+        default,
+        deserialize_with = "procraft_engine::document::or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    references: Vec<procraft_engine::reference_window::ReferenceWindow>,
     /// The kind of artwork it is, if a plugin makes it (`<id>.<key>`): the plugin's data is beside
     /// it in `plugin-data.bin`, and the layers are what it drew.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +97,14 @@ struct ArtworkFile {
     /// The layer a plugin's artwork's picture is in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin_layer: Option<u64>,
+    /// The values of plugins' controls kept with the artwork (`artwork` in their manifests), by
+    /// their keys (`<id>.<key>`), a switch 1 or 0.
+    #[serde(
+        default,
+        deserialize_with = "procraft_engine::document::or_default",
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    plugin_values: std::collections::BTreeMap<String, f32>,
 }
 
 /// A plugin's artwork's data in its folder.
@@ -158,6 +174,8 @@ pub(crate) struct SaveSnapshot {
     gpu: Option<procraft_gpu::Gpu>,
     /// The Reference window's picture, if it has one.
     reference_picture: Option<Arc<Vec<u8>>>,
+    /// The pictures of the windows opened besides it, each if it has one.
+    more_pictures: Vec<Option<Arc<Vec<u8>>>>,
     /// A plugin's artwork's data, if it is one.
     plugin_data: Option<Vec<u8>>,
     /// The data of each plugin's layer (empty while it has none yet), for its file beside the
@@ -198,8 +216,10 @@ pub(crate) struct Saved {
     sets: crate::scene3d::SavedSets,
     /// Which autosave may save: one started under another number has been stopped.
     autosave: u64,
-    /// A hash of the Reference window's picture as the folder has it, if it has one.
+    /// A hash of the Reference window's picture as the folder has it, if it has one, and of each
+    /// picture of the windows opened besides it.
     reference_picture: Option<u64>,
+    more_pictures: Vec<Option<u64>>,
     /// A hash of each plugin's layer's data as its file in the folder has it.
     pub(crate) layer_data: std::collections::HashMap<LayerId, u64>,
     /// Autosaves in a row that gave way to a change as their layers were read (see
@@ -219,6 +239,7 @@ impl Saved {
         self.dir = dir.to_path_buf();
         self.layers.clear();
         self.reference_picture = None;
+        self.more_pictures.clear();
         self.layer_data.clear();
     }
 
@@ -308,6 +329,7 @@ impl crate::State {
             turns: Some(self.turns).filter(|&t| t != 0),
             model: model.as_ref().map(|m| m.saved.clone()),
             reference: Some(self.reference_window.clone()).filter(|w| !w.is_unused()),
+            references: self.more_references.iter().map(|m| m.window.clone()).collect(),
             // (opened with its plugin off, it stays the plugin's: its kind and data kept as they were)
             plugin: self
                 .plugin_artwork
@@ -319,6 +341,7 @@ impl crate::State {
                 .as_ref()
                 .map(|a| a.layer.0)
                 .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.layer)),
+            plugin_values: self.plugin_values.clone(),
         };
         let mut layers = Vec::new();
         let mut reading = Vec::new();
@@ -450,6 +473,7 @@ impl crate::State {
         }
         let gpu = self.gpu.clone();
         let reference_picture = self.reference_picture.clone();
+        let more_pictures = self.more_references.iter().map(|m| m.picture.clone()).collect();
         let plugin_data = self
             .plugin_artwork
             .as_ref()
@@ -475,6 +499,7 @@ impl crate::State {
             model,
             gpu,
             reference_picture,
+            more_pictures,
             plugin_data,
             layer_data,
             stores,
@@ -662,6 +687,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         model,
         gpu,
         reference_picture,
+        more_pictures,
         plugin_data,
         layer_data,
         stores,
@@ -691,6 +717,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         saved.layers.clear();
         saved.sets.clear();
         saved.reference_picture = None;
+        saved.more_pictures.clear();
         saved.layer_data.clear();
     }
     let (w, h) = (file.document.width(), file.document.height());
@@ -760,6 +787,17 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
                 fs::write(p, png).map_err(|e| file_error("writing the reference picture", e))
             });
             stage(written, picture_path, &mut staged)?;
+        }
+        // those of the windows opened besides it likewise
+        for (i, png) in more_pictures.iter().enumerate() {
+            let path = dir.join(crate::reference_window::more_picture(i));
+            let Some(png) = png.as_deref() else { continue };
+            if saved.more_pictures.get(i).copied().flatten() == Some(pixels_hash(png)) && path.exists() {
+                continue;
+            }
+            let written =
+                write_beside(&path, |p| fs::write(p, png).map_err(|e| file_error("writing a reference picture", e)));
+            stage(written, path, &mut staged)?;
         }
         // plugins' layers' data, each whole, unless its file there has it already
         for (id, data) in &layer_data {
@@ -831,6 +869,12 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
     if reference_picture.is_none() {
         let _ = fs::remove_file(dir.join(crate::reference_window::REFERENCE_PICTURE));
+    }
+    saved.more_pictures = more_pictures.iter().map(|png| png.as_deref().map(|png| pixels_hash(png))).collect();
+    for i in 0..crate::reference_window::MOST_REFERENCE_WINDOWS {
+        if more_pictures.get(i).is_none_or(Option::is_none) {
+            let _ = fs::remove_file(dir.join(crate::reference_window::more_picture(i)));
+        }
     }
     for (id, _) in &files {
         // its pixels' hash isn't known: the next save writes it again
@@ -982,10 +1026,22 @@ impl CanvasSession {
         let session = CanvasSession::with_document(doc, file.name, Vec::new());
         // its files are as the last save left them: one unchanged since isn't written again
         let reference_picture = fs::read(dir.join(crate::reference_window::REFERENCE_PICTURE)).ok();
+        let more_references: Vec<crate::reference_window::MoreReference> = file
+            .references
+            .iter()
+            .take(crate::reference_window::MOST_REFERENCE_WINDOWS - 1)
+            .enumerate()
+            .map(|(i, window)| crate::reference_window::MoreReference {
+                window: window.clone(),
+                picture: fs::read(dir.join(crate::reference_window::more_picture(i))).ok().map(Arc::new),
+            })
+            .collect();
         {
             let mut saving = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
             saving.opened(&dir);
             saving.reference_picture = reference_picture.as_deref().map(pixels_hash);
+            saving.more_pictures =
+                more_references.iter().map(|m| m.picture.as_deref().map(|png| pixels_hash(png))).collect();
             saving.layer_data.extend(data_hashes);
         }
         {
@@ -998,6 +1054,8 @@ impl CanvasSession {
             st.scene = scene;
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
+            st.more_references = more_references;
+            st.plugin_values = file.plugin_values.into_iter().filter(|(_, v)| v.is_finite()).collect();
             // a plugin's artwork: its kind and data, for the app to open it with its plugin
             st.plugin_opened = file.plugin.map(|kind| crate::plugin_artwork::PluginOpened {
                 kind,

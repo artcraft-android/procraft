@@ -124,6 +124,8 @@ pub struct Interface {
     pub panel_lets_through: bool,
     /// The last press went to the canvas, which closes the panel in its own time.
     canvas_pressed: bool,
+    /// A plugin's action a press asked for, run on the next frame.
+    pressed_action: Option<String>,
     /// The file the artwork was last saved to (or opened from, if it saves back there).
     pub path: Option<PathBuf>,
     /// The artwork's edits when it was last saved: anything else is unsaved.
@@ -175,6 +177,8 @@ pub struct Interface {
     canvas_info: Option<crate::canvas_info::CanvasInfo>,
     /// The reference window.
     reference: crate::reference::Reference,
+    /// The Reference windows opened besides the artwork's own, while a plugin lets more be open.
+    more_references: Vec<crate::reference::Reference>,
     /// Crop and Resize.
     crop: crate::crop::Crop,
     /// The drawing guide's editor.
@@ -271,6 +275,7 @@ impl Interface {
             popover_open: false,
             panel_lets_through: false,
             canvas_pressed: false,
+            pressed_action: None,
             path: None,
             saved_edits: 0,
             saving: None,
@@ -300,6 +305,7 @@ impl Interface {
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
             reference: crate::reference::Reference::default(),
+            more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
@@ -367,10 +373,41 @@ impl Interface {
         false
     }
 
+    /// What a Reference window's top bar asked (by the window's index): another opened from it,
+    /// or it closed (one besides the artwork's own goes, its picture with it; those after it read
+    /// again, each taking the index before its own).
+    fn reference_asked(&mut self, session: &CanvasSession, asked: Option<(crate::reference::Asked, u32)>) {
+        match asked {
+            Some((crate::reference::Asked::Another, from)) => {
+                let state = if from == 0 {
+                    self.reference.another()
+                } else {
+                    let window = self.more_references.iter().find(|w| w.index == from);
+                    window.map_or_else(|| self.reference.another(), crate::reference::Reference::another)
+                };
+                if let Some(index) = session.add_reference_window(state) {
+                    self.more_references.push(crate::reference::Reference::at(session, index));
+                }
+            }
+            Some((crate::reference::Asked::Close, index)) if index > 0 => {
+                for window in &mut self.more_references {
+                    window.keep(session);
+                }
+                session.remove_reference_window(index);
+                self.more_references = (1..session.reference_window_count())
+                    .map(|i| crate::reference::Reference::at(session, i))
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+
     /// `session` is shown now (at `scale` window pixels a point): it paints in the colour chosen.
     pub fn opened(&mut self, session: &Arc<CanvasSession>, scale: f32) {
-        // each artwork its own Reference window, none if it never had one
+        // each artwork its own Reference windows, none if it never had one
         self.reference.restore(session);
+        self.more_references =
+            (1..session.reference_window_count()).map(|i| crate::reference::Reference::at(session, i)).collect();
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
@@ -405,6 +442,9 @@ impl Interface {
         self.prefs.plugins.close_panel();
         self.plugin_panel_held = None;
         self.reference.keep(session);
+        for window in &mut self.more_references {
+            window.keep(session);
+        }
         self.end_background_pick(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
@@ -813,6 +853,10 @@ impl Interface {
         if taps.modify_tapped && !used {
             self.tap_modify(&ctx, session);
         }
+        // a plugin's action a press asked for
+        if let Some(key) = self.pressed_action.take() {
+            self.run_plugin_action(&ctx, session, key);
+        }
         self.hover_cursor(&ctx, session, &info, input);
         self.selection_pointer(&ctx, input);
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
@@ -895,9 +939,21 @@ impl Interface {
             self.adjustment_asked(session, asked);
         }
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
-        let picked = self.reference.show(&ctx, &mut self.look, session, hold);
+        // + on each while a plugin lets more be open than are
+        let allowed = self.prefs.plugins.reference_windows() as usize;
+        let can_add = 1 + self.more_references.len() < allowed;
+        self.reference.can_add = can_add;
+        let mut picked = self.reference.show(&ctx, &mut self.look, session, hold);
         // kept with the artwork as it changes, a toggle elsewhere last frame included
         self.reference.keep(session);
+        let mut asked = self.reference.asked.take().map(|a| (a, 0));
+        for window in &mut self.more_references {
+            window.can_add = can_add;
+            picked = window.show(&ctx, &mut self.look, session, hold).or(picked);
+            window.keep(session);
+            asked = window.asked.take().map(|a| (a, window.index)).or(asked);
+        }
+        self.reference_asked(session, asked);
         match picked {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
                 self.overlays.pick_reference(&ctx, at, side, &rgba, rgb);
@@ -2604,6 +2660,8 @@ impl Interface {
                     paint_through: self.model && session.paint_through(),
                     svg: session.exports_svg(),
                     plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
+                    plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
+                    plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -2685,6 +2743,8 @@ impl Interface {
                         self.actions.push(Action::Export(format, 100));
                         self.open = None;
                     }
+                    // (the panel does these itself: a setting changed, or an action, says so)
+                    Some(Act::PluginPlaced(_)) => {}
                     Some(Act::PluginExport(i)) => {
                         self.actions.push(Action::PluginExport(i));
                         self.open = None;
@@ -2971,9 +3031,28 @@ impl Interface {
             press.alt,
             self.transform.on || self.selection.nudges(),
         );
-        let Some(shortcut) = shortcut else { return false };
+        let Some(shortcut) = shortcut else { return self.plugin_press(ctx, session, press) };
         self.key_shortcut(ctx, session, info, shortcut);
         true
+    }
+
+    /// A press none of the app's shortcuts take, as a plugin gives it one of its switches (flipped,
+    /// kept as the card keeps it) or actions (run as its row runs it); false if no plugin's.
+    fn plugin_press(&mut self, ctx: &egui::Context, session: &CanvasSession, press: &KeyCombo) -> bool {
+        match self.prefs.plugins.plugin_press(press.clone()) {
+            Some(procraft_core::PluginPressed::Switched { .. }) => {
+                self.prefs.apply(session);
+                self.prefs.keep();
+                true
+            }
+            Some(procraft_core::PluginPressed::Action { key }) => {
+                // run where the frame has the artwork to hand it
+                self.pressed_action = Some(key);
+                ctx.request_repaint();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Does what a keyboard shortcut says.

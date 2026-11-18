@@ -27,7 +27,9 @@ action beside a filter, `colour-triangle` is a picker, `vector-layers` adds laye
 `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds. `interface`,
 `layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches,
 `colour-triangle`'s picture draws its hue ring as its switch says and its [menu](#a-menu-of-its-own)
-switches its shape, and `floating-panels` lets panels float in windows of their own.
+switches its shape, and `floating-panels` lets panels float in windows of their own. `rotation-reset`
+has an action and a switch in the Canvas tab, `value-check` a switch there with a key of its own,
+`paper` controls kept with each artwork, and `reference-windows` a single slider.
 
 ## What you write
 
@@ -68,8 +70,9 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Layers of its own](#layers-of-its-own)) or one brush engine (see
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
 the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
-5, more than eight controls, or a picker's picture that reads its controls, 6, and the `hide_notices`
-and `floating_panels` hooks 7.
+5, more than eight controls, or a picker's picture that reads its controls, 6, the `hide_notices`
+and `floating_panels` hooks 7, and the `gesture_lock`, `view_look`, `paper` and `reference_windows`
+hooks, the `view` permission and actions in the Canvas tab 8.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -95,6 +98,9 @@ interface 6 and no filter; a plugin with code can have up to eight `file` contro
 | `live` | The value goes in as the slider moves, rather than as it lets go |
 | `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
 | `under` | The `key` of a switch it comes under: on the card it shows after that switch, while the switch is on (its value stays as it was while it's hidden). That switch is at the top of the list, or comes under one there (interface 6): two deep at most |
+| `place` | Where else a switch or a slider shows besides the card: `"canvas"`, see [below](#in-the-canvas-tab-on-a-key-and-with-each-artwork) |
+| `press` | A key that flips a switch, see [below](#in-the-canvas-tab-on-a-key-and-with-each-artwork) |
+| `artwork` | `true`: a switch or a slider kept with each artwork rather than with the plugin, see [below](#in-the-canvas-tab-on-a-key-and-with-each-artwork) |
 
 A plugin that does several things can have a switch for each, at the top of the list, with that
 thing's sliders `under` it. Turning the plugin on switches none of them on: each is the user's to
@@ -104,6 +110,28 @@ control). An action, and a filter of several, can come `under` a switch too.
 A `file` control shows Import, or the name of the file picked and Clear. The plugin is told 1 while a
 file is picked, 0 while none is, and is handed the file itself if it takes files (see below); what
 the file is for is up to the plugin.
+
+### In the Canvas tab, on a key, and with each artwork
+
+Three fields of a control's let it be reached and kept as the app's own settings are. An older app
+leaves them out, the control on the card alone, so they need no newer interface.
+
+- `"place": "canvas"` shows a switch or a slider in the Actions panel's Canvas tab too, after the
+  app's own rows, in a group of what the plugins on put there: a switch as a switch, a slider as on
+  the card (one named at every step as a choice). It is set there as on the card, and shows there
+  while the card shows it (under its switch, if it comes under one). `"card"` is where every control
+  shows anyway. A place this app doesn't have makes the file one for a newer ProCraft.
+- `"press": "alt+g"` gives a switch a hardware keyboard's press on the canvas, written as for the
+  [`key_shortcut`](#key_shortcut) hook: while the plugin is on and the switch shows, the press flips
+  it. The app's own shortcuts come first, so a press one of them has does what it does; a plugin
+  rebinding keys takes presses as others before either. Each press is used once in a file, and is
+  listed among the keyboard's shortcuts under Plugins, by the switch's label. An action can have one
+  too (see [Actions](#actions)).
+- `"artwork": true` keeps a switch's or a slider's value with each artwork: while an artwork is
+  open the control is the artwork's (its `starts` in an artwork that never set it), and setting it,
+  on the card, in the Canvas tab or from a menu, sets it in that artwork, saved with it. The plugin
+  is told each artwork's value as the artwork opens, as any control is told. It can't keep a
+  setting the app used to have (`keeps`).
 
 ### A menu of its own
 
@@ -424,6 +452,96 @@ procraft_hide_notice(kind: i32) -> i32
 Answer 0 for a kind you don't know: more may come. A notice that something went wrong, or that
 something couldn't be saved, is never asked about: it always shows. With several plugins on this
 hook, one that hides a kind hides it.
+
+### `gesture_lock`
+
+Whether two fingers on the canvas leave part of the view as it is (not 0) (interface 8):
+
+```
+procraft_gesture_lock(part: i32) -> i32
+```
+
+`part` 0 is the turn: while a plugin says yes, pinching and moving zoom and move the canvas but
+don't turn it, and the canvas doesn't settle onto a right angle as the fingers let go. It's asked as
+each finger lands, so a gesture already under way goes on as it started. A trackpad's turning on a
+desktop doesn't turn it either. Answer 0 for a part you don't know: more may come. With several
+plugins on this hook, one that locks a part locks it.
+
+### `view_look`
+
+How the canvas looks on the screen alone (interface 8): a matrix the canvas's colours go through
+as the window shows them, in linear light, asked entry by entry:
+
+```
+procraft_view_look(entry: i32) -> f32
+```
+
+Entries 0 to 3 are the red row, 4 to 7 the green and 8 to 11 the blue: three weights for a colour's
+linear red, green and blue, then what is added. The colour shown is clipped to 0..1 and goes on as
+the canvas would, into the screen's colour space. Answer the identity (each row's own colour 1, the
+rest 0) to change nothing. Nothing read, saved, exported, recorded or picked from the canvas goes
+through it, nor the eyedropper's loupe. An entry that isn't a number, or is past 16 either way,
+stops the plugin. The app asks as the plugins change, not as it draws. With several plugins on this
+hook, each plugin's matrix comes after the last's, in order of id, and the app's own grey view after
+them all.
+
+The Value check plugin the app comes with answers each colour as the grey of its luminance (each row
+`0.2126, 0.7152, 0.0722, 0`), its greys spread from a middle grey as far as its Contrast says.
+
+### `paper`
+
+A paper every stroke takes and the art shows on (interface 8). The module must export its
+`memory`.
+
+```
+procraft_paper(side: i32) -> i32            // where its tile is; 0 for no paper now
+procraft_paper_look(what: i32) -> f32       // how it is taken, by what
+procraft_paper_colour() -> i32              // the colour under the art
+```
+
+`procraft_paper` answers where in `memory` a tile `side` × `side` bytes is (the app asks for 256),
+rows from the top, each byte how high the paper stands there: 0 a hollow, 255 a peak. The tile
+repeats across the canvas, fixed to it. `procraft_paper_look` answers, by `what`:
+
+| `what` | |
+|---|---|
+| 0 | How strongly its hollows take a stroke's paint away, 0 to 1: where the paper stands at `h` (0 to 1), a stroke lays `1 - strength × (1 - h)` of what it would |
+| 1 | How many canvas pixels a pixel of the tile covers, .25 to 16 |
+| 2 | How deep it shows under the art, 0 to 1: the background there is its colour times `1 - depth × (1 - h)` |
+
+`procraft_paper_colour` answers the colour under the art, 0xRRGGBB, or -1 for the artwork's own
+background colour. Where the artwork's background is hidden, no paper shows.
+
+Every stroke laid by the app's brush engine from then on takes the paper on top of its brush's own
+grain, the eraser too, whatever the layer; a stroke laid with paint mixed on the layer in place (wet
+mixing, the smudge tool) takes none yet. With strength 0 and depth 0 every pixel is as it would be
+with no paper. What a stroke took from it is pixels, kept with the plugin off; the background shows
+it only while the plugin gives it, and files of flattened pictures have the background as shown (a
+layered file has the artwork's own background colour). The app asks as the plugins change, so answers the same each time unless a
+control changed, and the tile is drawn once a change, as a long call: 400,000,000 steps, for at most 3
+seconds. A strength or depth past 0 to 1, a tile's size past its range, a colour that isn't one or a
+tile past `memory` stops the plugin. With several plugins on this hook, the first by id that gives a
+paper is used.
+
+The Paper plugin the app comes with draws five papers of its own and keeps each artwork's choice,
+colour and grain with the artwork (see [`artwork`](#in-the-canvas-tab-on-a-key-and-with-each-artwork)).
+
+### `reference_windows`
+
+How many Reference windows may be open at once, 1 to 8 (interface 8):
+
+```
+procraft_reference_windows() -> i32
+```
+
+While a plugin answers more than 1, each Reference window's top bar has +, opening another a little
+below the one it was opened from, showing the canvas, until that many are open. Each is the
+Reference window as the app has it: moved, sized, zoomed and closed on its own, showing the canvas
+or a picture imported into it (a model shows itself only in the first). The first is the artwork's
+own, which Reference in the Canvas tab shows and hides; Close on another closes it for good, its
+picture with it. The artwork keeps them all as it keeps the first (each picture beside its layers,
+`reference-2.png` and on); with fewer allowed later, those open stay open but no more open. An
+answer past 1 to 8 stops the plugin. With several plugins on this hook, the most any says is used.
 
 ### `floating_panels`
 
@@ -775,13 +893,16 @@ undo takes back.
 
 A plugin can have up to eight actions. Each `key` is used once, and each `label` is the row's words.
 Its card lists them all (one `under` a switch only while that switch is on, and only then does it
-run); `"place"` lists one somewhere else too:
+run); `"press"` runs one from a key, as a switch's `press` flips it (see
+[above](#in-the-canvas-tab-on-a-key-and-with-each-artwork)); `"place"` lists one somewhere else too:
 
 - `"adjustments"`: in the Adjustments menu's Plugins list, after the filters, for something done
   to the artwork as an adjustment is;
 - `"layer"`: in the current layer's options, after the app's own rows;
 - `"frame"`: in Animation Assist's frame options, after the app's own rows, run with that frame's
-  layer current.
+  layer current;
+- `"canvas"`: in the Actions panel's Canvas tab, after the app's own rows, with what plugins put there
+  (interface 8).
 
 A place this app doesn't have makes the file one for a newer ProCraft. Actions need interface 2. The import screen
 says what each permission lets the plugin do.
@@ -793,6 +914,7 @@ says what each permission lets the plugin do.
 | `brush` | `brush_colour`, `set_brush_colour`, `brush_size`, `set_brush_size`, `brush_opacity`, `set_brush_opacity` |
 | `notice` | `notice` |
 | `panel` | `show_panel`, `close_panel` (see [Panels](#panels)) |
+| `view` | `view_turn() -> f32`, how far the canvas is turned on the screen (radians, clockwise, -π to π), and `turn_view(radians: f32)`, which turns it there about the middle of the window, its zoom and what is in the middle kept, settling into place (interface 8) |
 
 The module imports them from `"procraft"`, and the app checks each one's types. It exports
 `procraft_action(index: i32) -> i32`, called with the action's place in `actions`; it returns 0.
@@ -1517,10 +1639,13 @@ within it, the `key_shortcut` hook, panels that show keys or ask for a key press
 keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.data` permission and
 the utilities, interface 5 several filters in one plugin, interface 6 up to sixteen controls, a
 picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its own,
-a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks, and
-interface 7 the `hide_notices` and `floating_panels` hooks. What comes under a switch at the top of
-the list, taking the place of other plugins, and a menu of its own need no newer interface: an older
-app shows every control, leaves the others where they are, and shows no menu. What a
+a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks,
+interface 7 the `hide_notices` and `floating_panels` hooks, and interface 8 the `gesture_lock`,
+`view_look`, `paper` and `reference_windows` hooks, the `view` permission and actions in the Canvas
+tab. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
+interface: an older app shows every control, leaves the others where they are, shows no menu and
+keeps every control with the plugin. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin
 goes on working as it was written.
 

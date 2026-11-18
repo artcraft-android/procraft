@@ -350,7 +350,7 @@ fn draws_to_a_target_through_the_view() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 200, 100);
@@ -399,7 +399,7 @@ fn zoomed_in_to_its_mark_the_canvas_shows_each_pixel_as_a_square() {
                 convert: None,
                 lut: None,
                 crisp_from,
-                grey: false,
+                look: None,
             }),
         );
         let px = read(&gpu, &target, 100, 100);
@@ -451,7 +451,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -477,7 +477,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -528,7 +528,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 400, 100);
@@ -590,7 +590,7 @@ fn the_glass_is_blurred_again_only_when_what_it_shows_changes() {
                 convert: None,
                 lut: None,
                 crisp_from: f32::INFINITY,
-                grey: false,
+                look: None,
             }),
         );
     };
@@ -679,7 +679,7 @@ fn frosted_edge(gpu: &Gpu, regions: &[[f32; 6]], windows: &[[f32; 6]]) -> Vec<u8
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     read(gpu, &target, 400, 100)
@@ -745,7 +745,7 @@ fn a_window_in_the_glass_shows_a_slanted_edge_without_steps() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 400, 200);
@@ -791,7 +791,7 @@ fn shown_on_black(gpu: &Gpu, view: &View) -> Vec<u8> {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     read(gpu, &target, 400, 200)
@@ -875,7 +875,7 @@ fn glass_cost() {
                         convert: None,
                         lut: None,
                         crisp_from: f32::INFINITY,
-                        grey: false,
+                        look: None,
                     }),
                 );
                 gpu.flush();
@@ -933,7 +933,7 @@ fn the_canvas_is_shown_in_the_targets_colour_space() {
             convert,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -987,7 +987,7 @@ fn a_colour_table_moves_the_canvas_colours() {
             convert: None,
             lut: Some(&lut),
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -1059,7 +1059,7 @@ fn the_predicted_tail_shows_but_never_paints() {
                 convert: None,
                 lut: None,
                 crisp_from: f32::INFINITY,
-                grey: false,
+                look: None,
             }),
         );
         read(&gpu, &target, 100, 100)
@@ -1119,7 +1119,7 @@ fn a_predicted_tail_shows_a_tiny_stamp_as_strong_as_the_stamp_that_replaces_it()
                     convert: None,
                     lut: None,
                     crisp_from: f32::INFINITY,
-                    grey: false,
+                    look: None,
                 }),
             );
             let px = read(&gpu, &target, 100, 100);
@@ -1382,7 +1382,7 @@ fn a_selection_keeps_paint_inside_and_stripes_the_rest() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let shown = read(&gpu, &texture, 64, 64);
@@ -3937,7 +3937,7 @@ fn a_shape_at_its_own_size_lays_as_the_brush_images_do_where_they_hold_enough() 
                 convert: None,
                 lut: None,
                 crisp_from: f32::INFINITY,
-                grey: false,
+                look: None,
             }),
         );
         let px = read(&gpu, &target, w, h);
@@ -4027,7 +4027,7 @@ fn a_predicted_tail_shows_a_shape_at_its_own_size() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         }),
     );
     let px = read(&gpu, &target, w, h);
@@ -4472,7 +4472,7 @@ fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
                     convert: None,
                     lut: None,
                     crisp_from: f32::INFINITY,
-                    grey,
+                    look: grey.then_some(procraft_gpu::GREY_LOOK),
                 }),
             );
             pixel(&read(&gpu, &target, 10, 10), 10, 5, 5)
@@ -4490,6 +4490,62 @@ fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
             [byte(colour[0]), byte(colour[1]), byte(colour[2])]
         );
     }
+}
+
+#[test]
+fn a_look_shows_the_canvas_through_its_matrix_on_the_screen_alone() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut doc = Document::new(10, 10);
+    doc.background = [1.0, 0.0, 0.0];
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 10, height: 10, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let to_screen = View::fit((10, 10), (10, 10)).to_screen();
+    let mut shown = |look: Option<procraft_gpu::ViewLook>| {
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (10, 10),
+                to_screen,
+                surround: [0.0; 3],
+                grid: None,
+                selection: None,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                look,
+            }),
+        );
+        pixel(&read(&gpu, &target, 10, 10), 10, 5, 5)
+    };
+    // each colour taken from 1: red shows as cyan
+    let invert = [[-1.0, 0.0, 0.0, 1.0], [0.0, -1.0, 0.0, 1.0], [0.0, 0.0, -1.0, 1.0]];
+    assert_eq!(shown(Some(invert)), [0, 255, 255, 255]);
+    // red and green swapped: red shows as green
+    let swap = [[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+    assert_eq!(shown(Some(swap)), [0, 255, 0, 255]);
+    // more than all of a colour is clipped; what is added is linear light (0.3185 is sRGB's 0.6)
+    let brighter = [[4.0, 0.0, 0.0, 0.318_547], [0.0, 4.0, 0.0, 0.318_547], [0.0, 0.0, 4.0, 0.318_547]];
+    let [r, g, b, a] = shown(Some(brighter));
+    assert!(r == 255 && g.abs_diff(153) <= 1 && g == b && a == 255, "{r} {g} {b}");
+    assert_eq!(shown(None), [255, 0, 0, 255]);
+    // the composite itself (what's read, saved and picked from) keeps its colour
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 10, 5, 5)[..3], [255, 0, 0]);
 }
 
 #[test]
@@ -4921,4 +4977,216 @@ fn a_texture_rule_takes_a_dab_s_paint_by_its_strength() {
     assert!(laid(&mut canvas, &mut doc, 33, 0.5) <= 4);
     // softly, half strength takes half the texture: all but a quarter left
     assert!(laid(&mut canvas, &mut doc, 33 + 16, 0.5).abs_diff(191) <= 4);
+}
+
+#[test]
+fn a_paper_takes_paint_in_its_hollows_shows_in_the_background_and_changes_nothing_when_none() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a tile whose left half is a hollow and right half a peak: across a canvas pixel a tile
+    // pixel wide, its columns 0 to 127 hollow and 128 to 255 peak
+    let n = TEXTURE_SIZE;
+    let tile: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 { 0 } else { 255 }).collect();
+    let paper = |strength: f32, depth: f32, colour: Option<[f32; 3]>| procraft_gpu::CanvasPaper {
+        tile: tile.clone(),
+        strength,
+        scale: 1.0,
+        depth,
+        colour,
+    };
+    // a stroke across the canvas (painted, or erased from black), what it laid and the canvas
+    let laid = |paper: Option<&procraft_gpu::CanvasPaper>, tool: StrokeTool| {
+        let mut doc = Document::new(256, 16);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        if tool == StrokeTool::Erase {
+            canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+            canvas.add_stamps(&(0..33).map(|k| dot(Vec2::new(k as f32 * 8.0, 8.0), 12.0)).collect::<Vec<_>>());
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+        }
+        canvas.set_paper(&gpu, paper);
+        canvas.begin_stroke(doc.current(), style(tool, 1.0));
+        canvas.add_stamps(&(0..33).map(|k| dot(Vec2::new(k as f32 * 8.0, 8.0), 6.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        (canvas.read_layer(&gpu, doc.current()).unwrap(), canvas.read_composite(&gpu).unwrap())
+    };
+    for tool in [StrokeTool::Paint, StrokeTool::Erase] {
+        let (plain, plain_canvas) = laid(None, tool);
+        // a paper that takes nothing (strength 0, flat background) changes not a pixel
+        let (flat, flat_canvas) = laid(Some(&paper(0.0, 0.0, None)), tool);
+        assert!(plain == flat && plain_canvas == flat_canvas, "{tool:?}");
+        // a strong one: the hollows take three quarters of the paint, the peaks none
+        let (taken, _) = laid(Some(&paper(0.75, 0.0, None)), tool);
+        let (hollow, peak) = (pixel(&taken, 256, 60, 8), pixel(&taken, 256, 190, 8));
+        assert_eq!(peak, pixel(&plain, 256, 190, 8), "{tool:?}");
+        let before = f32::from(pixel(&plain, 256, 60, 8)[3]);
+        let expected = match tool {
+            // a quarter of what the eraser took is taken
+            StrokeTool::Erase => 255.0 - (255.0 - before) * 0.25,
+            _ => before * 0.25,
+        };
+        assert!((f32::from(hollow[3]) - expected).abs() <= 3.0, "{tool:?}: {hollow:?}, not {expected}");
+        assert!(before > 200.0 || tool == StrokeTool::Erase, "{before}");
+    }
+    // shown under the art: its colour, its hollows darker as deep as it says; hidden with the
+    // background
+    let mut doc = Document::new(256, 16);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.set_paper(&gpu, Some(&paper(0.0, 0.5, Some([1.0, 0.0, 0.0]))));
+    canvas.render(&gpu, &mut doc, None);
+    let shown = canvas.read_composite(&gpu).unwrap();
+    assert_eq!(pixel(&shown, 256, 190, 8), [255, 0, 0, 255]);
+    let hollow = pixel(&shown, 256, 60, 8);
+    assert!(hollow[0].abs_diff(128) <= 1 && hollow[1] == 0 && hollow[3] == 255, "{hollow:?}");
+    canvas.set_paper(&gpu, None);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 256, 60, 8), [255, 255, 255, 255]);
+}
+
+/// A target `size` pixels of `format` to show a canvas on, as the window does, and its view.
+fn window_target(gpu: &Gpu, size: (u32, u32), format: wgpu::TextureFormat) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
+
+/// The canvas shown on `view` as the window shows it, through `look`.
+fn shown_on<'a>(
+    view: &'a wgpu::TextureView,
+    format: wgpu::TextureFormat,
+    size: (u32, u32),
+    to_screen: procraft_engine::geom::Affine,
+    look: Option<procraft_gpu::ViewLook>,
+) -> Target<'a> {
+    Target {
+        view,
+        format,
+        size,
+        to_screen,
+        surround: [0.15; 3],
+        grid: None,
+        selection: None,
+        backdrop: None,
+        convert: None,
+        lut: None,
+        crisp_from: f32::INFINITY,
+        look,
+    }
+}
+
+/// The middle of `each` (milliseconds), its first few (warming up) left out.
+fn middle_ms(mut each: Vec<f64>) -> f64 {
+    each.drain(..each.len().min(5));
+    each.sort_by(f64::total_cmp);
+    each.get(each.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// What a paper costs a frame against none, on a canvas of the tablet's size shown in its window,
+/// waiting for the GPU each time: a stroke drawn across it (its live part composited each frame),
+/// and the whole canvas composited again (as after a change to every layer). A paper that takes
+/// nothing is, pixel for pixel, none. The times are printed; a frame with a paper may take at most
+/// half again as long (and a little, for a busy machine).
+#[test]
+fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (size, format) = ((1280u32, 800u32), wgpu::TextureFormat::Rgba8Unorm);
+    let (texture, view) = window_target(&gpu, size, format);
+    let n = TEXTURE_SIZE;
+    let tile: Vec<u8> = (0..n * n).map(|i| ((i * 37 + i / n * 11) % 256) as u8).collect();
+    let paper = |strength: f32, depth: f32, colour: Option<[f32; 3]>| procraft_gpu::CanvasPaper {
+        tile: tile.clone(),
+        strength,
+        scale: 1.5,
+        depth,
+        colour,
+    };
+    let to_screen = View::fit((2732, 2048), size).to_screen();
+    let run = |paper: Option<&procraft_gpu::CanvasPaper>| {
+        let mut doc = Document::new(2732, 2048);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_paper(&gpu, paper);
+        canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
+        gpu.flush();
+        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+        let drawing: Vec<f64> = (0..45)
+            .map(|k| {
+                let stamps: Vec<Stamp> =
+                    (0..4).map(|j| dot(Vec2::new(200.0 + (k * 4 + j) as f32 * 12.0, 1000.0), 40.0)).collect();
+                canvas.add_stamps(&stamps);
+                let t = std::time::Instant::now();
+                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
+                gpu.flush();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        canvas.end_stroke();
+        let whole: Vec<f64> = (0..25)
+            .map(|_| {
+                canvas.invalidate();
+                let t = std::time::Instant::now();
+                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, None)));
+                gpu.flush();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        let shown = read(&gpu, &texture, size.0, size.1);
+        (middle_ms(drawing), middle_ms(whole), shown, canvas.read_layer(&gpu, doc.current()).unwrap())
+    };
+    // once first, so what is made once (pipelines, textures) is made before any is timed
+    let _ = run(None);
+    let (none_drawing, none_whole, none_shown, none_layer) = run(None);
+    let (off_drawing, off_whole, off_shown, off_layer) = run(Some(&paper(0.0, 0.0, None)));
+    assert!(off_shown == none_shown && off_layer == none_layer, "a paper that takes nothing changes no pixel");
+    let (on_drawing, on_whole, on_shown, on_layer) = run(Some(&paper(0.6, 0.3, Some([0.96, 0.93, 0.85]))));
+    assert!(on_shown != none_shown && on_layer != none_layer, "a paper shows");
+    println!(
+        "a frame drawing: no paper {none_drawing:.3} ms, off {off_drawing:.3} ms, paper {on_drawing:.3} ms; \
+         the whole canvas again: no paper {none_whole:.3} ms, off {off_whole:.3} ms, paper {on_whole:.3} ms"
+    );
+    assert!(
+        on_drawing <= none_drawing * 1.5 + 2.0,
+        "drawing: {on_drawing:.3} ms with a paper, {none_drawing:.3} without"
+    );
+    assert!(on_whole <= none_whole * 1.5 + 2.0, "whole: {on_whole:.3} ms with a paper, {none_whole:.3} without");
+}
+
+/// What a look on the screen costs a frame against none, on a canvas of the tablet's size in its
+/// window, waiting for the GPU each time; printed, and at most half again as long (and a little).
+#[test]
+fn a_view_look_costs_a_frame_little_more_than_none() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (size, format) = ((1280u32, 800u32), wgpu::TextureFormat::Rgba8Unorm);
+    let (_texture, view) = window_target(&gpu, size, format);
+    let mut doc = Document::new(2732, 2048);
+    doc.background = [0.8, 0.5, 0.2];
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let to_screen = View::fit((2732, 2048), size).to_screen();
+    let mut frames = |look: Option<procraft_gpu::ViewLook>| {
+        let each: Vec<f64> = (0..60)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                canvas.render(&gpu, &mut doc, Some(shown_on(&view, format, size, to_screen, look)));
+                gpu.flush();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        middle_ms(each)
+    };
+    let _ = frames(Some(procraft_gpu::GREY_LOOK));
+    let none = frames(None);
+    let grey = frames(Some(procraft_gpu::GREY_LOOK));
+    println!("a frame: no look {none:.3} ms, values {grey:.3} ms");
+    assert!(grey <= none * 1.5 + 1.0, "{grey:.3} ms with a look, {none:.3} without");
 }

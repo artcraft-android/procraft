@@ -49,11 +49,12 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 144;
+const UNIFORM_SIZE: u64 = 160;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
-        && size_of::<FilterUniform>() as u64 <= UNIFORM_SIZE,
+        && size_of::<FilterUniform>() as u64 <= UNIFORM_SIZE
+        && size_of::<DisplayUniform>() as u64 <= UNIFORM_SIZE,
     "a uniform block outgrew its binding"
 );
 
@@ -450,6 +451,21 @@ impl StrokeStyle {
     }
 }
 
+/// A paper a plugin gives the canvas ([`Canvas::set_paper`]): a tile, `TEXTURE_SIZE` square, each
+/// byte how high the paper stands there (rows from the top), repeated over the canvas, each of its
+/// pixels `scale` canvas pixels across (0.25 to 16). Every stroke's paint is taken away where the
+/// paper is low, as far as `strength` says (0 to 1: a hollow takes `strength` of it); the
+/// background shows `colour` (none: the artwork's own), its hollows darker as far as `depth` says
+/// (0 to 1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanvasPaper {
+    pub tile: Vec<u8>,
+    pub strength: f32,
+    pub scale: f32,
+    pub depth: f32,
+    pub colour: Option<[f32; 3]>,
+}
+
 /// Where [`Canvas::render`] draws the canvas.
 pub struct Target<'a> {
     pub view: &'a wgpu::TextureView,
@@ -476,11 +492,21 @@ pub struct Target<'a> {
     /// a square of its own colour; less, smoothed between them. The screen's pixels per point
     /// makes them crisp from 100%; infinity keeps them smoothed.
     pub crisp_from: f32,
-    /// The canvas shown in perceptual greys (each colour as the grey of its Rec. 709 luminance, as
-    /// a soft proof to a grey profile shows it), to judge its values: the window's view only, never
-    /// what is read or recorded from it.
-    pub grey: bool,
+    /// A matrix the canvas's colours go through as the target shows them, in linear light (rows
+    /// red, green and blue: three weights and what is added), such as [`GREY_LOOK`] for its values
+    /// alone: the target's view only, never what is read or recorded from the canvas. None: as
+    /// they are.
+    pub look: Option<ViewLook>,
 }
+
+/// A look a target shows the canvas through ([`Target::look`]): rows red, green and blue, each
+/// three weights for a colour's linear red, green and blue, then what is added.
+pub type ViewLook = [[f32; 4]; 3];
+
+/// The canvas in perceptual greys: each colour as the grey of its Rec. 709 luminance (in linear
+/// light, as the colour panel's HSY' luma is, so colours of one Y' show as one grey), as a soft
+/// proof to a grey profile shows it, to judge its values.
+pub const GREY_LOOK: ViewLook = [[0.2126, 0.7152, 0.0722, 0.0]; 3];
 
 /// A colour table on the GPU for [`Target::lut`].
 pub struct DisplayLut {
@@ -536,7 +562,7 @@ struct FrostMade {
     convert: Option<[[f32; 3]; 3]>,
     /// The colour table's (see [`DisplayLut::id`]).
     lut: Option<u64>,
-    grey: bool,
+    look: Option<ViewLook>,
 }
 
 impl BackdropGpu {
@@ -1076,6 +1102,10 @@ struct LayerUniform {
     /// where its top left is in those (see [`Canvas::draw_scaled`]): what grain fixed to the
     /// canvas is read by.
     scaled: [f32; 4],
+    /// The paper (see [`CanvasPaper`]): how strongly its hollows take the stroke's paint away (0:
+    /// the stroke takes no paper), how many canvas pixels a pixel of its tile covers, and how deep
+    /// it shows in the background (0: a flat colour).
+    paper: [f32; 4],
 }
 
 impl Default for LayerUniform {
@@ -1108,6 +1138,7 @@ impl Default for LayerUniform {
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
             scaled: [1.0, 0.0, 0.0, 0.0],
+            paper: [0.0, 1.0, 0.0, 0.0],
         }
     }
 }
@@ -1130,6 +1161,11 @@ impl LayerUniform {
             Some(d) => LayerUniform { dual: d.uniform_mode(), dual_threshold: d.threshold, ..self },
             None => self,
         }
+    }
+
+    /// With the paper `paper` ([`Canvas::paper_look`]) the stroke, if there is one, takes.
+    fn with_paper(self, stroke: bool, paper: [f32; 4]) -> LayerUniform {
+        if stroke { LayerUniform { paper, ..self } } else { self }
     }
 
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
@@ -1168,19 +1204,44 @@ struct DisplayUniform {
     /// How far the quad reaches past the canvas's sides (its 0..1 across and down), then 1 to
     /// smooth the edge over that; all 0 for a quad drawn exactly.
     edge: [f32; 4],
+    /// The look's rows (see [`Target::look`]), applied while `m1`'s last number is 1.
+    look: [[f32; 4]; 3],
 }
 
 impl DisplayUniform {
+    /// Showing the canvas through `look`, if there is one.
+    fn looking(mut self, look: Option<ViewLook>) -> DisplayUniform {
+        if let Some(look) = look {
+            self.look = look;
+            self.m1[3] = 1.0;
+        }
+        self
+    }
+
     /// The map `m` and target encoding `srgb`, colours moved by `convert` if there is one, or by
     /// the bound table if `lut`.
     fn new(m0: [f32; 4], m1: [f32; 4], convert: Option<[[f32; 3]; 3]>, lut: bool) -> DisplayUniform {
         let row = |r: [f32; 3], on: f32| [r[0], r[1], r[2], on];
         let table = if lut { 1.0 } else { 0.0 };
         match convert.filter(|_| !lut) {
-            Some([r0, r1, r2]) => {
-                DisplayUniform { m0, m1, c0: row(r0, 1.0), c1: row(r1, 0.0), c2: row(r2, 0.0), edge: [0.0; 4] }
-            }
-            None => DisplayUniform { m0, m1, c0: [0.0; 4], c1: [0.0, 0.0, 0.0, table], c2: [0.0; 4], edge: [0.0; 4] },
+            Some([r0, r1, r2]) => DisplayUniform {
+                m0,
+                m1,
+                c0: row(r0, 1.0),
+                c1: row(r1, 0.0),
+                c2: row(r2, 0.0),
+                edge: [0.0; 4],
+                look: [[0.0; 4]; 3],
+            },
+            None => DisplayUniform {
+                m0,
+                m1,
+                c0: [0.0; 4],
+                c1: [0.0, 0.0, 0.0, table],
+                c2: [0.0; 4],
+                edge: [0.0; 4],
+                look: [[0.0; 4]; 3],
+            },
         }
     }
 
@@ -2635,6 +2696,12 @@ pub struct Canvas {
     sampler: wgpu::Sampler,
     grains_view: wgpu::TextureView,
     grain_sampler: wgpu::Sampler,
+    /// The paper's tile (see [`Canvas::set_paper`]), which every stroke takes and the background
+    /// shows while there is a paper: all peak (taking all of the paint) until a paper is given.
+    paper_texture: wgpu::Texture,
+    paper_view: wgpu::TextureView,
+    /// The paper as it is: none, or its tile as given and how it is taken.
+    paper: Option<CanvasPaper>,
     shapes_view: wgpu::TextureView,
     shape_sampler: wgpu::Sampler,
     /// The shape and grain arrays, and which images of the user's own their spare layers hold;
@@ -3006,7 +3073,10 @@ impl Canvas {
             [&shapes_view, &grains_view, &everything],
             [&shape_sampler, &grain_sampler],
         );
-        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &grains_view, &grain_sampler);
+        let paper_texture = paper_texture(gpu);
+        let paper_view = paper_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let stroke_bind =
+            quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &grains_view, &grain_sampler, &paper_view);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -3061,6 +3131,9 @@ impl Canvas {
             sampler,
             grains_view,
             grain_sampler,
+            paper_texture,
+            paper_view,
+            paper: None,
             shapes_view,
             shape_sampler,
             everything,
@@ -3358,6 +3431,7 @@ impl Canvas {
             [&self.stroke_view; 7],
             self.grain_view(),
             &self.grain_sampler,
+            &self.paper_view,
         );
     }
 
@@ -4960,6 +5034,41 @@ impl Canvas {
     pub fn invalidate(&mut self) {
         self.let_go_caches(true);
         self.dirty = self.full();
+    }
+
+    /// The paper every stroke takes from now on, and the background shows (see [`CanvasPaper`]);
+    /// none: none, every stroke laid as it would be without one. A tile not `TEXTURE_SIZE` square
+    /// is none.
+    pub fn set_paper(&mut self, gpu: &Gpu, paper: Option<&CanvasPaper>) {
+        let paper = paper.filter(|p| p.tile.len() == TEXTURE_SIZE * TEXTURE_SIZE);
+        if self.paper.as_ref() == paper {
+            return;
+        }
+        if let Some(p) = paper
+            && self.paper.as_ref().is_none_or(|was| was.tile != p.tile)
+        {
+            write_image_levels(gpu, &self.paper_texture, 0, TEXTURE_SIZE as u32, &p.tile);
+        }
+        self.paper = paper.cloned();
+        // the background and what strokes are shown with, again
+        self.invalidate();
+    }
+
+    /// The paper as a stroke's and the background's uniform take it ([`LayerUniform::paper`]).
+    fn paper_look(&self) -> [f32; 4] {
+        match &self.paper {
+            Some(p) => [p.strength.clamp(0.0, 1.0), p.scale.clamp(0.25, 16.0), p.depth.clamp(0.0, 1.0), 0.0],
+            None => [0.0, 1.0, 0.0, 0.0],
+        }
+    }
+
+    /// What draws the background: its colour (the paper's, if it has one) where it shows, with
+    /// the paper's depth.
+    fn background_uniform(&self, doc: &Document) -> LayerUniform {
+        let [r, g, b] = self.paper.as_ref().and_then(|p| p.colour).unwrap_or(doc.background);
+        let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
+        let scaled = self.scaled.map_or([1.0, 0.0, 0.0, 0.0], |([x, y], k)| [k, x, y, 0.0]);
+        LayerUniform { opacity: 1.0, solid, scaled, paper: self.paper_look(), ..Default::default() }
     }
 
     /// The frame Animation Assist is playing, if it is.
@@ -7408,6 +7517,7 @@ impl Canvas {
             }
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
             let scaled = self.scaled.map_or([1.0, 0.0, 0.0, 0.0], |([x, y], k)| [k, x, y, 0.0]);
+            let paper = self.paper_look();
             let locked = stroke.style.preserve_alpha;
             let burns = stroke.style.burnt_edges > 0.0 && !stroke.style.preview;
             // a dual brush's: its second's texture read too (the stroke has ended: told here)
@@ -7416,7 +7526,7 @@ impl Canvas {
             let quad = |layer: &wgpu::TextureView| {
                 let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view];
                 let grain = self.grain_view_of(&stroke.style);
-                quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
+                quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler, &self.paper_view)
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
             match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
@@ -7436,6 +7546,7 @@ impl Canvas {
                             ..Default::default()
                         }
                         .with_grain(Some(&stroke.style))
+                        .with_paper(true, paper)
                         .with_dual(Some(&stroke)),
                     );
                     if let Some(layer) = self.layers.get(&stroke.layer) {
@@ -7459,6 +7570,7 @@ impl Canvas {
                     let offset = uniforms.push(
                         &LayerUniform { opacity: 1.0, stroke_opacity: opacity, scaled, ..Default::default() }
                             .with_grain(Some(&stroke.style))
+                            .with_paper(true, paper)
                             .with_dual(Some(&stroke)),
                     );
                     let dual =
@@ -8365,10 +8477,8 @@ impl Canvas {
         uniforms: &mut UniformData,
         rect: IRect,
     ) {
-        let [r, g, b] = doc.background;
-        let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
         {
-            let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+            let offset = uniforms.push(&self.background_uniform(doc));
             let mut pass = render_pass(encoder, "background", &self.composite_view, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
             pass.set_pipeline(&self.pipelines.solid);
@@ -8570,9 +8680,7 @@ impl Canvas {
             let mut start = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("remake") });
             let mut start_uniforms = UniformData::default();
             if remake_below {
-                let [r, g, b] = doc.background;
-                let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
-                let offset = start_uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+                let offset = start_uniforms.push(&self.background_uniform(doc));
                 let mut pass =
                     render_pass(&mut start, "below", &caches.below.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
                 pass.set_pipeline(&self.pipelines.solid);
@@ -8612,9 +8720,7 @@ impl Canvas {
         }
         self.restore_all(gpu, needed, false);
         if remake_below {
-            let [r, g, b] = doc.background;
-            let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
-            let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+            let offset = uniforms.push(&self.background_uniform(doc));
             {
                 let mut pass =
                     render_pass(encoder, "below", &caches.below.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
@@ -9396,6 +9502,7 @@ impl Canvas {
             ..Default::default()
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
+        .with_paper(stroke.is_some(), self.paper_look())
         .with_dual(stroke.as_ref());
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
@@ -9518,10 +9625,11 @@ impl Canvas {
         let offset = uniforms.push(
             &DisplayUniform::new(
                 [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
                 target.convert,
                 target.lut.is_some(),
             )
+            .looking(target.look)
             .smoothed(&m, (w, h)),
         );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
@@ -9566,12 +9674,15 @@ impl Canvas {
             let [x, y, w, h] = sharp.rect;
             let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
             let m = unit_to_rect.then(target.to_screen).then(to_clip);
-            let offset = uniforms.push(&DisplayUniform::new(
-                [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-                target.convert,
-                target.lut.is_some(),
-            ));
+            let offset = uniforms.push(
+                &DisplayUniform::new(
+                    [m.a, m.b, m.c, m.d],
+                    [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+                    target.convert,
+                    target.lut.is_some(),
+                )
+                .looking(target.look),
+            );
             pass.set_bind_group(0, &sharp.bind, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..6, 0..1);
@@ -9595,12 +9706,15 @@ impl Canvas {
             let (x, y, w, h) = (r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32);
             let unit_to_rect = Affine { a: w, b: 0.0, c: 0.0, d: h, e: x, f: y };
             let m = unit_to_rect.then(target.to_screen).then(to_clip);
-            let offset = uniforms.push(&DisplayUniform::new(
-                [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
-                target.convert,
-                target.lut.is_some(),
-            ));
+            let offset = uniforms.push(
+                &DisplayUniform::new(
+                    [m.a, m.b, m.c, m.d],
+                    [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+                    target.convert,
+                    target.lut.is_some(),
+                )
+                .looking(target.look),
+            );
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, if crisp { &veil.crisp } else { &veil.bind }, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
@@ -9762,7 +9876,7 @@ impl Canvas {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
-            grey: false,
+            look: None,
         };
         let k = self.frost_ready(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
         if let (Some(small), Some(frost)) = (self.backdrop.as_ref(), self.screen.frost.get(&target.format)) {
@@ -9800,7 +9914,7 @@ impl Canvas {
             surround: target.surround,
             convert: target.convert,
             lut: target.lut.map(|l| l.id),
-            grey: target.grey,
+            look: target.look,
         };
         // the scene as drawn last still shows where the glass is: kept (another's scene never is)
         let reach = (radius + 2.0) * k;
@@ -9884,10 +9998,11 @@ impl Canvas {
         let offset = uniforms.push(
             &DisplayUniform::new(
                 [m.a, m.b, m.c, m.d],
-                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
+                [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
                 target.convert,
                 target.lut.is_some(),
             )
+            .looking(target.look)
             .smoothed(&m, (w, h)),
         );
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
@@ -10654,6 +10769,7 @@ impl Canvas {
             [a, b, c, d, mask, self.second_view(device), clip_mask],
             self.grain_view(),
             &self.grain_sampler,
+            &self.paper_view,
         )
     }
 
@@ -10770,6 +10886,17 @@ impl Pipelines {
                 tex_entry(6),
                 tex_entry(7),
                 tex_entry(8),
+                // the paper's tile, filtered (with the grains' sampler)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -12214,6 +12341,7 @@ fn quad_bind(
     views: [&wgpu::TextureView; 7],
     grains: &wgpu::TextureView,
     grain_sampler: &wgpu::Sampler,
+    paper: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     let [a, b, c, d, mask, second, clip_mask] = views;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -12229,8 +12357,27 @@ fn quad_bind(
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(mask) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(second) },
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clip_mask) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(paper) },
         ],
     })
+}
+
+/// The paper's tile ([`Canvas::set_paper`]): `TEXTURE_SIZE` square, a grey a pixel, every mip
+/// level; at first all peak, taking all of the paint.
+fn paper_texture(gpu: &Gpu) -> wgpu::Texture {
+    let n = TEXTURE_SIZE as u32;
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("paper"),
+        size: extent(n, n),
+        mip_level_count: n.ilog2() + 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_image_levels(gpu, &texture, 0, n, &vec![255; TEXTURE_SIZE * TEXTURE_SIZE]);
+    texture
 }
 
 /// The layer `first` is clipped to, and that layer's mask: what compositing it reads.

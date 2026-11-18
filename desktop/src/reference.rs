@@ -41,6 +41,8 @@ const GLASS_SIDE: usize = 24;
 /// Its picture's size at first, and how far up from the screen's bottom it first sits.
 const START: Vec2 = Vec2 { x: 350.0, y: 423.0 };
 const ABOVE_BOTTOM: f32 = 50.0;
+/// How far down and right of the window it is opened from another window opens (points).
+const ANOTHER_STEP: f32 = 24.0;
 /// The canvas is read again at most this often while it changes, this large.
 const REFRESH: Duration = Duration::from_millis(300);
 const CANVAS_PIXELS: u32 = 700;
@@ -119,8 +121,24 @@ enum Mode {
     Model,
 }
 
+/// What a window's top bar asked of the app, beside what the window does itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// Another window opened (+, while a plugin lets more be open).
+    Another,
+    /// A window opened besides the artwork's own closed (the artwork's own just hides).
+    Close,
+}
+
 pub struct Reference {
     pub on: bool,
+    /// Which of the artwork's windows it is: 0 its own (Reference in the Canvas tab), then those
+    /// opened besides it.
+    pub index: u32,
+    /// Whether + shows, opening another (a plugin lets more be open than are), and what the top
+    /// bar asked since the app last looked.
+    pub can_add: bool,
+    pub asked: Option<Asked>,
     mode: Mode,
     /// How far the model has been turned since it was last drawn (pixels).
     turned: (f32, f32),
@@ -160,6 +178,9 @@ impl Default for Reference {
     fn default() -> Reference {
         Reference {
             on: false,
+            index: 0,
+            can_add: false,
+            asked: None,
             mode: Mode::Canvas,
             turned: (0.0, 0.0),
             turn_from: None,
@@ -190,9 +211,14 @@ impl Reference {
     /// The window as artwork `session` left it, nothing of another's kept (none if it never had
     /// one).
     pub fn restore(&mut self, session: &CanvasSession) {
-        let w = session.reference_window();
+        let index = self.index;
+        let Some(w) = session.reference_window_at(index) else {
+            *self = Reference { index, ..Reference::default() };
+            return;
+        };
         *self = Reference {
             on: w.shown,
+            index,
             mode: match w.shows {
                 ReferenceShows::Image => Mode::Image,
                 // a face needs face tracking, which this app doesn't have: the canvas shows
@@ -204,9 +230,32 @@ impl Reference {
             canvas_view: w.canvas_view,
             image_view: w.image_view,
             kept: Some(w),
-            picture_due: session.reference_picture(),
+            picture_due: session.reference_picture_at(index),
             ..Reference::default()
         };
+    }
+
+    /// Window `index` of the artwork `session` has, as it left it.
+    pub fn at(session: &CanvasSession, index: u32) -> Reference {
+        let mut window = Reference { index, ..Reference::default() };
+        window.restore(session);
+        window
+    }
+
+    /// The window as the artwork keeps it, for another opened from it: a little down and right of
+    /// it, as big, showing the canvas as it fits.
+    pub fn another(&self) -> ReferenceWindowState {
+        let at = self.at.map(|p| p + vec2(ANOTHER_STEP, ANOTHER_STEP));
+        ReferenceWindowState {
+            shown: true,
+            shows: ReferenceShows::Canvas,
+            placed: at.is_some(),
+            x: at.map_or(0.0, |p| p.x),
+            y: at.map_or(0.0, |p| p.y),
+            canvas_view: ReferenceView::default(),
+            image_view: ReferenceView::default(),
+            ..self.state()
+        }
     }
 
     /// The window as it is now, as the artwork keeps it.
@@ -234,7 +283,7 @@ impl Reference {
     pub fn keep(&mut self, session: &CanvasSession) {
         let now = self.state();
         if self.kept != Some(now) {
-            session.set_reference_window(now);
+            session.set_reference_window_at(self.index, now);
             self.kept = Some(now);
         }
     }
@@ -265,7 +314,7 @@ impl Reference {
         let picture = if self.mode == Mode::Model {
             session.reference_model_picture(MODEL_PIXELS)
         } else {
-            session.canvas_thumbnail(CANVAS_PIXELS)
+            session.reference_canvas(CANVAS_PIXELS)
         };
         if let Some(t) = picture {
             let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
@@ -302,7 +351,7 @@ impl Reference {
                 // kept with the artwork as a PNG, whatever kind of file it came from
                 let mut png = std::io::Cursor::new(Vec::new());
                 if picture.to_rgba8().write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                    session.set_reference_picture(png.into_inner());
+                    session.set_reference_picture_at(self.index, png.into_inner());
                 }
             }
             Err(_) => crate::files::tell("Can't import it", "This picture can't be opened."),
@@ -348,11 +397,13 @@ impl Reference {
         let window = Rect::from_min_size(at, vec2(size.x, tall));
         // room round it for the handles, which reach past its corners
         let reach = window.expand2(vec2(HANDLE / 2.0 - 12.0, 0.0)).with_max_y(window.bottom() + HANDLE / 2.0 - 15.0);
-        let shown_bars = ctx.animate_bool_with_time(Id::unique("reference bars"), !self.bars_hidden, BARS_SLIDE);
+        let shown_bars =
+            ctx.animate_bool_with_time(Id::unique("reference bars").with(self.index), !self.bars_hidden, BARS_SLIDE);
         let mut close = false;
         let mut import = false;
         let mut picked = None;
-        egui::Area::new(Id::unique("reference")).fixed_pos(reach.min).order(Order::Middle).show(ctx, |ui| {
+        let id = Id::unique("reference").with(self.index);
+        egui::Area::new(id).fixed_pos(reach.min).order(Order::Middle).show(ctx, |ui| {
             // allocated, so the canvas under it takes no press
             ui.allocate_rect(reach, Sense::hover());
             let painter = ui.painter();
@@ -459,8 +510,20 @@ impl Reference {
                 painter.circle_stroke(x_button.center(), 21.0, Stroke::new(1.0, argb(CLOSE_EDGE)));
                 look.icon(ui, &icons::CROSS, x_button.center(), 20.0, argb(CLOSE_INK));
                 close = ui.interact(x_button, ui.scope_id().with("close"), Sense::click()).clicked();
+                // another window, while a plugin lets more be open
+                let mut left_of = x_button.left();
+                if self.can_add {
+                    let plus = x_button.translate(vec2(-43.0 - 8.0, 0.0));
+                    painter.circle_filled(plus.center(), 21.5, argb(CLOSE));
+                    painter.circle_stroke(plus.center(), 21.0, Stroke::new(1.0, argb(CLOSE_EDGE)));
+                    look.icon(ui, &icons::ADD, plus.center(), 28.0, argb(CLOSE_INK));
+                    if ui.interact(plus, ui.scope_id().with("another"), Sense::click()).clicked() {
+                        self.asked = Some(Asked::Another);
+                    }
+                    left_of = plus.left();
+                }
                 if self.mode == Mode::Image && self.image.is_some() {
-                    let mut right = x_button.left() - 6.0;
+                    let mut right = left_of - 6.0;
                     for (label, id) in [("Import", "import"), ("Clear", "clear")] {
                         let shown = text(
                             ui.painter(),
@@ -477,7 +540,7 @@ impl Reference {
                             } else {
                                 self.image = None;
                                 self.image_pixels = None;
-                                session.clear_reference_picture();
+                                session.clear_reference_picture_at(self.index);
                                 self.image_glass = None;
                                 self.image_view = ReferenceView::default();
                             }
@@ -493,7 +556,7 @@ impl Reference {
                 let track = Rect::from_center_size(bottom.center(), vec2(270.0, 35.0));
                 ui.painter().rect_filled(track, 17.5, argb(SEGMENT_TRACK));
                 let mut kinds = vec![(Mode::Canvas, "Canvas"), (Mode::Image, "Image")];
-                if session.model_info().is_some() {
+                if session.model_info().is_some() && self.index == 0 {
                     kinds.push((Mode::Model, "3D"));
                 }
                 let gaps = 11.0 * (kinds.len() - 1) as f32;
@@ -541,8 +604,10 @@ impl Reference {
                 }
             }
         });
-        if close {
+        if close && self.index == 0 {
             self.on = false;
+        } else if close {
+            self.asked = Some(Asked::Close);
         }
         if import {
             self.import(ctx, session);
