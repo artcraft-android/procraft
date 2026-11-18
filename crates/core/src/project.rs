@@ -402,13 +402,17 @@ impl crate::State {
             canvas.render_finished(gpu, &mut self.doc);
             composite = Some(canvas.start_composite_thumbnail_without(gpu, &mut self.doc, THUMBNAIL_SIDE, &private));
         } else {
-            // not shown yet: what was opened is still what there is. A layer still its file's
-            // bytes isn't decoded: it is written as they are, or not at all if that file is there
+            // not shown yet: what was opened is still what there is. A layer still its file isn't
+            // decoded: it is written as it is, or not at all if that file is there
             for (id, layer) in &self.pending_pixels {
                 match layer {
-                    Opened::Png(bytes) => {
-                        if fs::read(layer_path(dir, *id)).ok().as_ref() != Some(bytes) {
-                            files.push((*id, bytes.clone()));
+                    Opened::File(from) => {
+                        let to = layer_path(dir, *id);
+                        if *from != to {
+                            let bytes = fs::read(from).map_err(|e| file_error("reading a layer", e))?;
+                            if fs::read(&to).ok().as_ref() != Some(&bytes) {
+                                files.push((*id, bytes));
+                            }
                         }
                     }
                     Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
@@ -427,7 +431,7 @@ impl crate::State {
                 let (w, h) = (self.doc.width(), self.doc.height());
                 unshown = self.pending_pixels.iter().rev().find_map(|(_, layer)| match layer {
                     Opened::Pixels(rgba) => Some(thumbnail(rgba, w, h, THUMBNAIL_SIDE)),
-                    Opened::Png(_) => None,
+                    Opened::File(_) => None,
                 });
             }
         }
@@ -957,9 +961,9 @@ impl CanvasSession {
                 }
             }
         }
-        // each layer's file as it is, decoded as it goes to the GPU, and its store's, if it has one
+        // each layer's file, read and decoded only as it goes to the GPU (an artwork of many
+        // layers isn't all in memory as it opens), and its store's, if it has one
         let mut pngs = Vec::new();
-        let mut unread = Vec::new();
         let mut stores = Vec::new();
         for layer in doc.layers() {
             if let Ok(bytes) = fs::read(crate::layer_store::store_path(&dir, layer.id)) {
@@ -967,16 +971,8 @@ impl CanvasSession {
             }
             let path = layer_path(&dir, layer.id);
             // a layer with no file is empty
-            if !path.exists() {
-                continue;
-            }
-            // (tried twice: the file is there)
-            match fs::read(&path).or_else(|_| fs::read(&path)) {
-                Ok(bytes) => pngs.push((layer.id, Opened::Png(bytes))),
-                Err(e) => {
-                    log::error!("layer {:?}: {e}", layer.id);
-                    unread.push(layer.id);
-                }
+            if path.exists() {
+                pngs.push((layer.id, Opened::File(path)));
             }
         }
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
@@ -993,7 +989,6 @@ impl CanvasSession {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
             st.pending_stores = stores;
-            st.layers_unread(unread);
             st.layer_data_unread.extend(data_unread);
             st.info = file.info;
             st.turns = file.turns.unwrap_or(0) % 4;
@@ -1709,12 +1704,12 @@ fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>
     Ok(out)
 }
 
-/// A layer's pixels waiting for the GPU: as they are, or (an opened artwork's) still the PNG they
-/// were read from, decoded only as each goes up, so a large artwork isn't all in memory at once.
+/// A layer's pixels waiting for the GPU: as they are, or (an opened artwork's) still its PNG file,
+/// read and decoded only as each goes up, so a large artwork isn't all in memory at once.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Opened {
     Pixels(Vec<u8>),
-    Png(Vec<u8>),
+    File(PathBuf),
 }
 
 impl Opened {
@@ -1724,9 +1719,90 @@ impl Opened {
     pub(crate) fn pixels(self, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
         match self {
             Opened::Pixels(rgba) => Ok(rgba),
-            Opened::Png(bytes) => decode_png_into(std::io::Cursor::new(bytes), width, height, true),
+            Opened::File(path) => {
+                // (tried twice: the file was there)
+                let file = fs::File::open(&path)
+                    .or_else(|_| fs::File::open(&path))
+                    .map_err(|e| file_error("opening a layer", e))?;
+                decode_png_into(BufReader::new(file), width, height, true)
+            }
         }
     }
+}
+
+/// A layer's PNG `bytes` decoded as [`Opened::pixels`] decodes its file.
+#[cfg(test)]
+pub(crate) fn layer_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+    decode_png_into(std::io::Cursor::new(bytes), width, height, true)
+}
+
+/// Layers decoded on a few threads, `read(i)` making layer `i`'s, and handed to `put` in order on
+/// this thread, `at_once` of them held at most (being read, or read and waiting for one before
+/// them to be put): an artwork of many layers is never all in memory at once. `put` returning
+/// false stops the reading (what is being read is let go).
+pub(crate) fn read_in_order<T: Send>(
+    count: usize,
+    at_once: usize,
+    read: impl Fn(usize) -> T + Sync,
+    mut put: impl FnMut(usize, T) -> bool,
+) {
+    let at_once = at_once.max(1);
+    let workers =
+        std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6).min(at_once);
+    // how many more may be held, and whether the reading stops
+    let room = (parking_lot::Mutex::new((at_once, false)), parking_lot::Condvar::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        for _ in 0..workers {
+            let (send, room, next, read) = (send.clone(), &room, &next, &read);
+            scope.spawn(move || {
+                loop {
+                    // room for a layer first, then the next layer: those held are always the
+                    // first not yet put, so the one put next never waits for room
+                    {
+                        let mut r = room.0.lock();
+                        while r.0 == 0 && !r.1 {
+                            room.1.wait(&mut r);
+                        }
+                        if r.1 {
+                            break;
+                        }
+                        r.0 -= 1;
+                    }
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= count || send.send((i, read(i))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(send);
+        /// Stops the readers once the putting ends, however it ends.
+        struct Stop<'a>(&'a (parking_lot::Mutex<(usize, bool)>, parking_lot::Condvar));
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.0.lock().1 = true;
+                self.0.1.notify_all();
+            }
+        }
+        let _stop = Stop(&room);
+        let mut waiting = std::collections::BTreeMap::new();
+        let mut at = 0;
+        for (i, item) in receive {
+            waiting.insert(i, item);
+            while let Some(item) = waiting.remove(&at) {
+                let go_on = put(at, item);
+                at += 1;
+                // let go of: another may be read
+                room.0.lock().0 += 1;
+                room.1.notify_one();
+                if !go_on {
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Layers' pixels as they are, waiting for the GPU.
@@ -2181,15 +2257,15 @@ mod signature_tests {
         write_png(&path, w, h, &rgba, &[]).unwrap();
         let whole = fs::read(&path).unwrap();
         let _ = fs::remove_file(&path);
-        assert_eq!(Opened::Png(whole.clone()).pixels(w, h).unwrap(), rgba);
+        assert_eq!(layer_png(&whole, w, h).unwrap(), rgba);
         // cut short part way: the first rows as they were, the rest clear
-        let cut = Opened::Png(whole[..whole.len() * 2 / 3].to_vec()).pixels(w, h).unwrap();
+        let cut = layer_png(&whole[..whole.len() * 2 / 3], w, h).unwrap();
         let line = w as usize * 4;
         let kept = cut.chunks(line).zip(rgba.chunks(line)).take_while(|(a, b)| a == b).count();
         assert!(kept > 0 && kept < h as usize, "{kept} rows kept");
         assert!(cut[kept * line..].iter().all(|&v| v == 0));
         // cut before any row: none can be read
-        assert!(Opened::Png(whole[..40].to_vec()).pixels(w, h).is_err());
+        assert!(layer_png(&whole[..40], w, h).is_err());
     }
 
     #[test]
@@ -2202,13 +2278,13 @@ mod signature_tests {
         let _ = fs::remove_file(&path);
         let at = |px: &[u8], cw: u32, x: u32, y: u32| px[((y * cw + x) * 4) as usize..][..4].to_vec();
         // smaller: the top left part
-        let cut = Opened::Png(bytes.clone()).pixels(4, 3).unwrap();
+        let cut = layer_png(&bytes, 4, 3).unwrap();
         assert_eq!(cut.len(), 4 * 3 * 4);
         for (x, y) in [(0, 0), (3, 0), (0, 2), (3, 2)] {
             assert_eq!(at(&cut, 4, x, y), at(&rgba, w, x, y));
         }
         // bigger: all of it at the top left, clear around it
-        let grown = Opened::Png(bytes.clone()).pixels(8, 5).unwrap();
+        let grown = layer_png(&bytes, 8, 5).unwrap();
         assert_eq!(at(&grown, 8, 5, 3), at(&rgba, w, 5, 3));
         assert_eq!(at(&grown, 8, 6, 0), vec![0; 4]);
         assert_eq!(at(&grown, 8, 0, 4), vec![0; 4]);

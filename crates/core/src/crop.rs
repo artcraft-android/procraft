@@ -6,6 +6,7 @@ use procraft_engine::crop::{crop, resample};
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu};
 
+use crate::layers::CANVAS_LAYERS;
 use crate::{CanvasSession, State};
 
 /// How long the canvas takes to shrink into place as crop begins.
@@ -17,10 +18,6 @@ const LOST_SAID: &str =
 
 /// What the apps tell when a smudge stroke couldn't be begun, or couldn't go on.
 const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this canvas.";
-
-/// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
-/// caches (four).
-const CANVAS_LAYERS: u64 = 7;
 
 /// What the apps tell when a crop couldn't be made.
 fn crop_failure_said(e: &procraft_gpu::GpuError) -> String {

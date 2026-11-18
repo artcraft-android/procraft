@@ -355,6 +355,19 @@ pub(crate) fn resident_budget() -> u64 {
     RESIDENT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
+/// caches (four).
+pub(crate) const CANVAS_LAYERS: u64 = 7;
+
+/// What the layers' textures of a canvas `width` × `height` may take, bytes: the device's budget
+/// less what the canvas holds besides them, so that the canvas as a whole keeps to the budget (a
+/// layer's worth at least; 0, no budget, keeps every layer on the GPU).
+pub(crate) fn canvas_budget(width: u32, height: u32) -> u64 {
+    let budget = resident_budget();
+    let per = u64::from(width) * u64::from(height) * 4;
+    if budget == 0 { 0 } else { budget.saturating_sub(CANVAS_LAYERS * per).max(per.max(1)) }
+}
+
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {

@@ -2879,7 +2879,7 @@ fn artworks_save_and_open() {
         let file = |d: &std::path::Path| std::fs::read(d.join("layers").join(format!("{}.png", layer.id))).ok();
         let (before, after) = (file(&dir), file(&again));
         compared += usize::from(before.is_some());
-        let rgba = |png: Option<Vec<u8>>| png.map(|b| crate::project::Opened::Png(b).pixels(100, 100).unwrap());
+        let rgba = |png: Option<Vec<u8>>| png.map(|b| crate::project::layer_png(&b, 100, 100).unwrap());
         assert_eq!(rgba(after), rgba(before));
     }
     assert_eq!(compared, 2);
@@ -6386,13 +6386,13 @@ fn saves_before_and_after_a_crop_leave_nothing_beside_and_open_at_the_new_size()
         }
     }
     let opened = CanvasSession::open(d);
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(files.iter().all(|f| !f.ends_with(".tmp")), "{files:?}");
     let opened = opened.unwrap();
     assert_eq!((opened.info().width, opened.info().height), (40, 30));
-    // each layer's file read at that size
+    // each layer's file read at that size (as the canvas is made)
     let pending = std::mem::take(&mut opened.shared.lock().pending_pixels);
     assert_eq!(crate::project::opened_pixels(pending, 40, 30).0.len(), s.layers().len());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -9091,8 +9091,8 @@ fn a_group_shown_alone_shows_its_layers_and_opens_whole_once_hidden() {
     let _ = std::fs::remove_dir_all(&dir);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
     let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     opened.use_gpu(gpu);
+    let _ = std::fs::remove_dir_all(&dir);
     {
         let mut st = opened.shared.lock();
         st.window_size = (100, 100);
@@ -9121,8 +9121,8 @@ fn reopened(s: &CanvasSession, name: &str) -> std::sync::Arc<CanvasSession> {
     let _ = std::fs::remove_dir_all(&dir);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
     let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     opened.use_gpu(gpu);
+    let _ = std::fs::remove_dir_all(&dir);
     {
         let mut st = opened.shared.lock();
         let canvas = (st.doc.width(), st.doc.height());
@@ -11961,8 +11961,8 @@ fn group_work_undoes_and_redoes_whole_and_comes_back_saved() {
         let _ = std::fs::remove_dir_all(&dir);
         s.save(dir.to_string_lossy().into_owned()).unwrap();
         let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         opened.use_gpu(gpu);
+        let _ = std::fs::remove_dir_all(&dir);
         {
             let mut st = opened.shared.lock();
             st.window_size = (64, 64);
@@ -12134,8 +12134,8 @@ fn painting_in_every_mode_undoes_redoes_and_saves_whole() {
         let _ = std::fs::remove_dir_all(&dir);
         s.save(dir.to_string_lossy().into_owned()).unwrap();
         let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
         opened.use_gpu(gpu);
+        let _ = std::fs::remove_dir_all(&dir);
         {
             let mut st = opened.shared.lock();
             st.window_size = (64, 64);
@@ -13996,8 +13996,8 @@ fn picture_follows_the_panel(seed: u32, side: u32, resident: u64, steps: usize) 
     let _ = std::fs::remove_dir_all(&dir);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
     let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     opened.use_gpu(gpu);
+    let _ = std::fs::remove_dir_all(&dir);
     {
         let mut st = opened.shared.lock();
         st.window_size = (side, side);

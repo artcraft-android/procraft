@@ -2338,7 +2338,8 @@ fn to_waiting(gpu: &Gpu, set: &mut TextureSet) {
 /// A texture set's canvas becoming the session's: paged as the session's canvases are, its brush
 /// images made now so the first stroke doesn't wait for them.
 fn to_session(gpu: &Gpu, canvas: &mut Canvas) {
-    canvas.set_resident_budget(crate::layers::resident_budget());
+    let (w, h) = canvas.size();
+    canvas.set_resident_budget(crate::layers::canvas_budget(w, h));
     canvas.prepare_brush_images(gpu);
 }
 
@@ -5841,8 +5842,8 @@ f 1/1 2/2",
             let _ = std::fs::remove_dir_all(&dir);
             s.save(dir.to_string_lossy().into_owned()).unwrap();
             let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
-            let _ = std::fs::remove_dir_all(&dir);
             assert!(shown(&opened));
+            let _ = std::fs::remove_dir_all(&dir);
             assert!(all(&opened) == end, "seed {seed}: reopened, after {done:?}");
         }
     }

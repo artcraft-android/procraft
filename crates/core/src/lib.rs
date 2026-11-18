@@ -1129,45 +1129,21 @@ impl State {
         }
     }
 
-    /// Creates the canvas once there is a GPU.
+    /// Creates the canvas once there is a GPU: the opened layers decoded a few at a time, each put
+    /// on it (or kept compressed, past what fits) as it is decoded (see [`canvas_of_opened`]).
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
         // one that couldn't be made isn't made again: what was opened stays, and a save writes it
         if self.canvas.is_some() || self.closed || self.canvas_failed {
             return;
         }
-        let Some(gpu) = self.gpu.as_ref() else { return };
-        let (w, h) = (self.doc.width(), self.doc.height());
-        let (pixels, unread) = project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h);
-        // (its fields, as the GPU is borrowed: see [`State::layers_unread`])
-        for id in unread {
-            if self.unreadable.insert(id) {
-                self.unreadable_untold.push(id);
-            }
-        }
-        // the pixels of the layers with stores, to tell their stores were saved with them
-        let hashes: std::collections::HashMap<_, _> = pixels
-            .iter()
-            .filter(|(id, _)| self.pending_stores.iter().any(|(s, _)| s == id))
-            .map(|(id, px)| (*id, project::pixels_hash(px)))
-            .collect();
-        let doc = &self.doc;
-        // every layer up as it was read, or no canvas: one the GPU had no memory for would show
-        // empty, and be saved so once painted on
-        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
-            let mut c = Canvas::unfilled(gpu, doc)?;
-            c.set_resident_budget(crate::layers::resident_budget());
-            for (id, pixels) in &pixels {
-                // past what fits, kept compressed until needed
-                if c.has_room() { c.upload_layer(gpu, *id, pixels) } else { c.park_pixels(*id, pixels) }?;
-            }
-            c.fill_rest(gpu, doc);
-            // as read: not changed
-            c.take_changed();
-            Ok(c)
-        });
-        match made.and_then(|made| made) {
-            Ok(c) => {
+        let Some(gpu) = self.gpu.clone() else { return };
+        let pending = std::mem::take(&mut self.pending_pixels);
+        let ids: Vec<_> = pending.iter().map(|(id, _)| *id).collect();
+        let made = canvas_of_opened(&gpu, &self.doc, &ids, |i| pending.get(i).map(|(_, p)| p.clone()), |_, _| {});
+        match made {
+            Ok((c, hashes, unread)) => {
+                self.layers_unread(unread);
                 self.canvas = Some(c);
                 self.put_opened_stores(&hashes);
             }
@@ -1175,7 +1151,8 @@ impl State {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
                 self.canvas_failed = true;
-                self.pending_pixels = pixels.into_iter().map(|(id, px)| (id, project::Opened::Pixels(px))).collect();
+                // what was opened kept
+                self.pending_pixels = pending;
             }
         }
     }
@@ -1510,8 +1487,8 @@ impl Shared {
     /// opened layers sent to the GPU between holds of the state: an artwork of many layers takes
     /// seconds, and the app's own thread would wait that long on any call. Each layer is copied
     /// out (and decoded) as it goes, so what was opened stays in the state (a save meanwhile still
-    /// has it); if
-    /// the document or what was opened changed meanwhile, the canvas is made again under the hold.
+    /// has it); if the document or what was opened changed meanwhile, the canvas is made again
+    /// under the hold.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn make_canvas(&self) {
         let (gpu, doc, ids) = {
@@ -1519,132 +1496,33 @@ impl Shared {
             let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none() && !st.closed) else { return };
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
-        let started = std::time::Instant::now();
-        /// A layer read, for the GPU or (past what fits) to keep compressed.
-        enum Read {
-            /// Where it is painted (only that is sent), with its compressed copy when layers may
-            /// soon be paged.
-            Upload(Vec<u8>, Option<procraft_engine::geom::IRect>, Option<procraft_gpu::ReadyToPark>),
-            Park(procraft_gpu::ReadyToPark),
-        }
-        // every layer up as it was read, or no canvas (what was opened kept): one the GPU had no
-        // memory for would show empty, and be saved so once painted on
-        type Made = (Canvas, std::collections::HashMap<procraft_engine::document::LayerId, u64>);
-        let made = gpu.checked(|| -> Result<Made, procraft_gpu::GpuError> {
-            let budget = crate::layers::resident_budget();
-            let (w, h) = (doc.width(), doc.height());
-            // read on a few threads (each file decoded and its compressed copy made: those below
-            // the top layers that fit are parked, those that fit keep it, so letting them go
-            // later needs no reading back), put on the canvas here in order
-            let first_resident = ids.len().saturating_sub(procraft_gpu::most_resident(budget, w, h));
-            // the copies of layers that go up take an eighth of the textures' budget at most, and
-            // only those that pack to a quarter or less are kept
-            let copy_room = budget / 8;
-            let mut copies = 0u64;
-            // and only when the layers take half the textures' budget or more: far under it,
-            // none is likely to be let go (one that is is read back then)
-            let layers_bytes = ids.len() as u64 * u64::from(w) * u64::from(h) * 4;
-            let copying = budget > 0 && layers_bytes.saturating_mul(2) >= budget;
-            let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                let (send, receive) = std::sync::mpsc::sync_channel(workers);
-                for _ in 0..workers {
-                    let (send, next, ids) = (send.clone(), &next, &ids);
-                    scope.spawn(move || {
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let Some(id) = ids.get(i) else { break };
-                            // none if the artwork changed meanwhile: what is made is let go
-                            let layer =
-                                self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone());
-                            let read = layer.map(|l| {
-                                l.pixels(w, h).map(|px| {
-                                    let hash = project::pixels_hash(&px);
-                                    if i >= first_resident {
-                                        let copy = copying.then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
-                                        let painted = crate::layer_ops::painted_rect(&px, w);
-                                        (Read::Upload(px, painted, copy), hash)
-                                    } else {
-                                        (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
-                                    }
-                                })
-                            });
-                            if send.send((i, read)).is_err() {
-                                break;
-                            }
-                        }
-                    });
-                }
-                drop(send);
-                // the canvas made while the first layers are read (its textures take a while); if
-                // it can't be, the readers stop at their next layer, nothing taking what they read
-                let mut c = Canvas::unfilled(&gpu, &doc)?;
-                c.set_resident_budget(budget);
-                let mut hashes = std::collections::HashMap::new();
-                let mut waiting = std::collections::BTreeMap::new();
-                let mut at = 0;
-                let mut unread = Vec::new();
-                for (i, read) in receive {
-                    waiting.insert(i, read);
-                    while let Some(read) = waiting.remove(&at) {
-                        let Some(id) = ids.get(at) else { break };
-                        at += 1;
-                        match read {
-                            None => {}
-                            Some(Ok((layer, hash))) => {
-                                if let Ok(mut saved) = self.saving.lock() {
-                                    saved.read(*id, hash);
-                                }
-                                hashes.insert(*id, hash);
-                                match layer {
-                                    Read::Upload(px, painted, Some(copy))
-                                        if copy.bytes() * 4 <= px.len()
-                                            && copies + copy.bytes() as u64 <= copy_room =>
-                                    {
-                                        copies += copy.bytes() as u64;
-                                        c.upload_layer_kept(&gpu, *id, &px, copy, painted)
-                                    }
-                                    Read::Upload(px, painted, _) => c.upload_layer_painted(&gpu, *id, &px, painted),
-                                    Read::Park(ready) => {
-                                        c.park_ready(*id, ready);
-                                        Ok(())
-                                    }
-                                }?;
-                            }
-                            Some(Err(e)) => {
-                                log::error!("layer {id:?}: {e}");
-                                unread.push(*id);
-                            }
-                        }
-                    }
-                }
-                c.fill_rest(&gpu, &doc);
-                // as read: not changed
-                c.take_changed();
-                self.lock().layers_unread(unread);
-                log::info!(
-                    "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
-                    started.elapsed().as_millis(),
-                    ids.len(),
-                    c.parked_layers(),
-                    copies / 1024
-                );
-                Ok((c, hashes))
-            })
-        });
+        // none if the artwork changed meanwhile: what is made is let go
+        let opened = |i: usize| {
+            let id = ids.get(i)?;
+            self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
+        };
+        let read = |id, hash| {
+            if let Ok(mut saved) = self.saving.lock() {
+                saved.read(id, hash);
+            }
+        };
+        let made = canvas_of_opened(&gpu, &doc, &ids, opened, read);
         let mut st = self.lock();
         if st.canvas.is_some() {
             return;
         }
         let same = st.doc == doc && st.pending_pixels.iter().map(|(id, _)| *id).eq(ids.iter().copied());
-        match made.and_then(|made| made) {
-            Ok((c, hashes)) if same => {
+        match made {
+            Ok((c, hashes, unread)) if same => {
+                st.layers_unread(unread);
                 st.pending_pixels.clear();
                 st.canvas = Some(c);
                 st.put_opened_stores(&hashes);
             }
-            Ok(_) => st.ensure_canvas(),
+            Ok((_, _, unread)) => {
+                st.layers_unread(unread);
+                st.ensure_canvas();
+            }
             Err(e) => {
                 log::error!("canvas: {e}");
                 st.error = Some(e.to_string());
@@ -1652,6 +1530,153 @@ impl Shared {
             }
         }
     }
+}
+
+/// What [`canvas_of_opened`] makes: the canvas, each layer's hash as read, and the layers that
+/// couldn't be read (they show empty).
+type MadeCanvas = (Canvas, HashMap<procraft_engine::document::LayerId, u64>, Vec<procraft_engine::document::LayerId>);
+
+/// A canvas for `doc` made with the opened layers `ids` put on it, `opened(i)` giving layer `i`'s
+/// pixels as they were opened (none: the artwork changed meanwhile, and nothing is put). The
+/// layers are decoded on a few threads, a few at a time ([`layers_at_once`]), and each goes up or
+/// (past what the textures' budget holds) is kept compressed as soon as it is decoded, so an
+/// artwork of many layers is never all in memory at once; `read(id, hash)` hears each layer read.
+/// Every layer is up as it was read, or there is no canvas: one the GPU had no memory for would
+/// show empty, and be saved so once painted on.
+fn canvas_of_opened(
+    gpu: &Gpu,
+    doc: &Document,
+    ids: &[procraft_engine::document::LayerId],
+    opened: impl Fn(usize) -> Option<project::Opened> + Sync,
+    mut read: impl FnMut(procraft_engine::document::LayerId, u64),
+) -> Result<MadeCanvas, procraft_gpu::GpuError> {
+    /// A layer read, for the GPU or (past what fits) to keep compressed.
+    enum Read {
+        /// Where it is painted (only that is sent), with its compressed copy when layers may
+        /// soon be paged.
+        Upload(Vec<u8>, Option<procraft_engine::geom::IRect>, Option<procraft_gpu::ReadyToPark>),
+        Park(procraft_gpu::ReadyToPark),
+    }
+    let started = std::time::Instant::now();
+    let made = gpu.checked(|| {
+        let (w, h) = (doc.width(), doc.height());
+        let budget = crate::layers::canvas_budget(w, h);
+        // each file decoded and its compressed copy made on the readers' threads: those below the
+        // top layers that fit are parked, those that fit keep it, so letting them go later needs
+        // no reading back
+        let first_resident = ids.len().saturating_sub(procraft_gpu::most_resident(budget, w, h));
+        // the copies of layers that go up take an eighth of the textures' budget at most, and
+        // only those that pack to a quarter or less are kept
+        let copy_room = budget / 8;
+        let mut copies = 0u64;
+        // and only when the layers take half the textures' budget or more: far under it,
+        // none is likely to be let go (one that is is read back then)
+        let layers_bytes = ids.len() as u64 * u64::from(w) * u64::from(h) * 4;
+        let copying = budget > 0 && layers_bytes.saturating_mul(2) >= budget;
+        let decode = |i: usize| {
+            opened(i).map(|layer| {
+                layer.pixels(w, h).map(|px| {
+                    let hash = project::pixels_hash(&px);
+                    if i >= first_resident {
+                        // (kept only if it packs to a quarter or less: let go of here if not)
+                        let copy = copying
+                            .then(|| procraft_gpu::ReadyToPark::of(&px, w, h))
+                            .filter(|copy| copy.bytes() * 4 <= px.len());
+                        let painted = crate::layer_ops::painted_rect(&px, w);
+                        (Read::Upload(px, painted, copy), hash)
+                    } else {
+                        (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
+                    }
+                })
+            })
+        };
+        // the canvas made as the first layer comes (its textures take a while, and the next
+        // layers are read meanwhile)
+        let mut canvas: Option<Canvas> = None;
+        let mut failed = None;
+        let mut hashes = HashMap::new();
+        let mut unread = Vec::new();
+        project::read_in_order(ids.len(), layers_at_once(budget, w, h), decode, |i, layer| {
+            let Some(id) = ids.get(i) else { return true };
+            if canvas.is_none() {
+                match Canvas::unfilled(gpu, doc) {
+                    Ok(mut c) => {
+                        c.set_resident_budget(budget);
+                        canvas = Some(c);
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        return false;
+                    }
+                }
+            }
+            let Some(c) = canvas.as_mut() else { return false };
+            let put = match layer {
+                None => Ok(()),
+                Some(Ok((layer, hash))) => {
+                    read(*id, hash);
+                    hashes.insert(*id, hash);
+                    match layer {
+                        Read::Upload(px, painted, Some(copy)) if copies + copy.bytes() as u64 <= copy_room => {
+                            copies += copy.bytes() as u64;
+                            c.upload_layer_kept(gpu, *id, &px, copy, painted)
+                        }
+                        Read::Upload(px, painted, _) => c.upload_layer_painted(gpu, *id, &px, painted),
+                        Read::Park(ready) => {
+                            c.park_ready(*id, ready);
+                            Ok(())
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    log::error!("layer {id:?}: {e}");
+                    unread.push(*id);
+                    Ok(())
+                }
+            };
+            if let Err(e) = put {
+                failed = Some(e);
+                return false;
+            }
+            true
+        });
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        let mut c = match canvas {
+            Some(c) => c,
+            None => {
+                let mut c = Canvas::unfilled(gpu, doc)?;
+                c.set_resident_budget(budget);
+                c
+            }
+        };
+        c.fill_rest(gpu, doc);
+        // as read: not changed
+        c.take_changed();
+        // the buffers the layers went up through let go (two layers' worth, kept to be quicker)
+        if budget > 0 {
+            c.let_go_of_spares();
+        }
+        log::info!(
+            "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
+            started.elapsed().as_millis(),
+            ids.len(),
+            c.parked_layers(),
+            copies / 1024
+        );
+        Ok((c, hashes, unread))
+    });
+    made.and_then(|made| made)
+}
+
+/// How many layers `width` × `height` an artwork being opened holds decoded at once (being
+/// decoded, or waiting to go up): an eighth of the textures' `budget` at most, one at least, and
+/// no more than a few readers keep busy.
+fn layers_at_once(budget: u64, width: u32, height: u32) -> usize {
+    const MOST: usize = 6;
+    let per = (u64::from(width) * u64::from(height) * 4).max(1);
+    if budget == 0 { MOST } else { usize::try_from(budget / 8 / per).unwrap_or(MOST).clamp(1, MOST) }
 }
 
 /// A canvas being painted: the document, the brush, the input and the renderer.
