@@ -39,6 +39,13 @@ const LIST_CORNER: f32 = 8.0;
 const GROUP_HEIGHT: f32 = 44.0;
 const GROUP_INDENT: f32 = 21.0;
 const GROUP_LINE: u32 = 0xFF4E4E4E;
+/// A closed group's row is taller: its line (20 under the row's top and 20 over its bottom) opens
+/// into a window 4 in from them, on its layers' rows drawn small; opening or closing, over this
+/// long (seconds).
+const GROUP_CLOSED_HEIGHT: f32 = 82.0;
+const GROUP_LINE_INSET: f32 = 20.0;
+const GROUP_WINDOW_INSET: f32 = 4.0;
+const GROUP_TURN: f32 = 0.15;
 /// A row's thumbnail (a group's line) held over by a dragged row long enough to take it.
 const HELD_OUTLINE: Color32 = Color32::WHITE;
 const MASK_OWNER_ROW: u32 = 0xFF2C5281;
@@ -167,6 +174,9 @@ pub struct Layers {
     /// (held over it a moment, it goes onto it).
     drop_at: Option<RowDrop>,
     over: Option<(u64, Instant)>,
+    /// Each closed group's layers, as the list would show them open, with how far in each sits
+    /// under it: drawn small in its window.
+    closed_contents: HashMap<u64, Vec<(LayerInfo, u32)>>,
     last_rows: HashMap<u64, Rect>,
     list: Option<Rect>,
     /// The panel's box and its rows where the window has them, as last shown: where layers held out
@@ -353,9 +363,15 @@ impl Layers {
             false
         };
         let shown: Vec<&LayerInfo> = layers.iter().filter(|l| !hidden(l)).collect();
+        self.closed_contents = closed_contents(&layers);
         let masked = |l: &LayerInfo| layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
+        // a closed group's row grows as it closes
         let height_of = |l: &LayerInfo| match l.kind {
-            LayerType::Group => GROUP_HEIGHT,
+            LayerType::Group => {
+                let closed =
+                    ctx.animate_bool_with_time(egui::Id::unique(("group closed", l.id)), l.collapsed, GROUP_TURN);
+                GROUP_HEIGHT + (GROUP_CLOSED_HEIGHT - GROUP_HEIGHT) * closed
+            }
             LayerType::Mask => MASKED_ROW_HEIGHT,
             LayerType::Paint if masked(l) => MASKED_ROW_HEIGHT,
             LayerType::Paint => ROW_HEIGHT,
@@ -1728,8 +1744,9 @@ impl Layers {
         }
     }
 
-    /// A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its
-    /// box. Held over by a dragged row long enough to take it, the line is outlined.
+    /// A group's row: where a thumbnail would be, a line while it is open or, closed (the row
+    /// taller), a window on its layers' rows drawn small; its name, its open or closed arrow and
+    /// its box. Held over by a dragged row long enough to take it, the line or window is outlined.
     #[allow(clippy::too_many_arguments)]
     fn group_row(
         &mut self,
@@ -1743,10 +1760,17 @@ impl Layers {
         held: bool,
     ) {
         let x = row.left() + GROUP_INDENT * l.depth as f32;
-        let line = Rect::from_min_size(pos2(x + 4.0, row.center().y - 2.0), vec2(93.0, 4.0));
-        ui.painter().rect_filled(line, 2, argb(GROUP_LINE));
+        // 0 open, 1 closed: the line's 20 above and below become 4, the line the window between
+        let closed = ((row.height() - GROUP_HEIGHT) / (GROUP_CLOSED_HEIGHT - GROUP_HEIGHT)).clamp(0.0, 1.0);
+        let inset = GROUP_LINE_INSET + (GROUP_WINDOW_INSET - GROUP_LINE_INSET) * closed;
+        let corner = 2.0 + 2.0 * closed;
+        let line = Rect::from_min_max(pos2(x + 4.0, row.top() + inset), pos2(x + 4.0 + THUMB.0, row.bottom() - inset));
+        ui.painter().rect_filled(line, corner, argb(GROUP_LINE));
+        if closed > 0.0 {
+            self.group_contents(ui, look, session, l.id, line);
+        }
         if held {
-            ui.painter().rect_stroke(line, 2, egui::Stroke::new(2.0, HELD_OUTLINE), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(line, corner, egui::Stroke::new(2.0, HELD_OUTLINE), egui::StrokeKind::Inside);
         }
         let visibility = Rect::from_min_size(
             pos2(row.right() - 8.0 - 44.0, row.center().y - GROUP_HEIGHT / 2.0),
@@ -1762,6 +1786,98 @@ impl Layers {
         }
         check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
+    }
+
+    /// A closed group's layers' rows in its `window`, drawn small to fit its width less 1 on each
+    /// side, from its top: their fills, thumbnails, names, blend letters and boxes, as their rows
+    /// look in the list.
+    fn group_contents(&mut self, ui: &mut Ui, look: &mut Look, session: &CanvasSession, group: u64, window: Rect) {
+        let Some(rows) = self.closed_contents.get(&group).cloned() else { return };
+        let mut mini = ui.new_child(UiBuilder::new().max_rect(window));
+        mini.set_clip_rect(window.intersect(ui.clip_rect()));
+        let width = self.list.map_or(LAYERS_WIDTH - 24.0, |l| l.width());
+        let scale = (window.width() - 2.0) / width;
+        let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();
+        let modes = procraft_core::blend_modes();
+        let masked = |l: &LayerInfo| rows.iter().any(|(m, _)| m.kind == LayerType::Mask && m.parent == Some(l.id));
+        let mut y = window.top() + 1.0;
+        let mut read = 0;
+        for (l, depth) in &rows {
+            let group = l.kind == LayerType::Group;
+            let mask = l.kind == LayerType::Mask;
+            let full = if group {
+                GROUP_HEIGHT
+            } else if mask || masked(l) {
+                MASKED_ROW_HEIGHT
+            } else {
+                ROW_HEIGHT
+            };
+            let row = Rect::from_min_size(pos2(window.left() + 1.0, y), vec2(width, full) * scale);
+            y += (full + ROW_GAP) * scale;
+            if row.top() > window.bottom() {
+                break;
+            }
+            let fill = if l.current {
+                argb(pc::ACCENT)
+            } else if l.picked {
+                argb(PICKED_ROW)
+            } else {
+                argb(LAYER_ROW)
+            };
+            mini.painter().rect_filled(row, 0, fill);
+            let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
+            let left = row.left() + (GROUP_INDENT * *depth as f32 + 4.0) * scale;
+            let name_left = left + THUMB.0 * scale;
+            if group {
+                let line = Rect::from_center_size(
+                    pos2(left + THUMB.0 * scale / 2.0, row.center().y),
+                    vec2(THUMB.0, 4.0) * scale,
+                );
+                mini.painter().rect_filled(line, 2.0 * scale, argb(GROUP_LINE));
+            } else {
+                let shift = if mask {
+                    2.0
+                } else if masked(l) {
+                    -2.0
+                } else {
+                    0.0
+                };
+                let thumb = Rect::from_center_size(
+                    pos2(left + THUMB.0 * scale / 2.0, row.center().y + shift * scale),
+                    vec2(THUMB.0, THUMB.1) * scale,
+                );
+                self.thumbnail(&mini, look, session, l, thumb, versions.get(&l.id).copied(), &mut read);
+            }
+            let name = galley(
+                &mini,
+                &l.name,
+                17.0 * scale,
+                Weight::Regular,
+                ink,
+                (row.right() - 96.0 * scale - name_left).max(1.0),
+            );
+            mini.painter().galley(pos2(name_left + 29.0 * scale, row.center().y - name.size().y / 2.0), name, ink);
+            let right = row.right() - 8.0 * scale;
+            if !group && !mask {
+                let code = blend_code(&modes, l.blend);
+                let letter = if l.locked && !l.current && !l.picked { argb(LOCKED_LETTER) } else { ink };
+                let at = pos2(right - 44.0 * scale - 22.0 * scale + 8.0 * scale, row.center().y);
+                text(mini.painter(), at, Align2::CENTER_CENTER, &code, 14.0 * scale, Weight::SemiBold, letter);
+            }
+            let box_at = pos2(right - 22.0 * scale, row.center().y);
+            let box_fill = if l.current || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
+            let check = Rect::from_center_size(box_at, vec2(18.0, 18.0) * scale);
+            if l.visible && !l.soloed_out {
+                mini.painter().rect_filled(check, 5.0 * scale, box_fill);
+            } else {
+                mini.painter().rect_stroke(
+                    check,
+                    5.0 * scale,
+                    egui::Stroke::new(1.5 * scale, box_fill),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
     }
 
     /// A layer's thumbnail, read again when its pixels' version is new: what is drawn, fitted on
@@ -1933,6 +2049,40 @@ struct RowLook {
 /// The panel's rows where they are laid out, as the core places a drop by them.
 fn shown_rows(rows: &HashMap<u64, Rect>) -> Vec<ShownRow> {
     rows.iter().map(|(id, r)| ShownRow { id: *id, top: r.top(), bottom: r.bottom() }).collect()
+}
+
+/// Each closed group's layers as the list would show them open (a group closed inside it keeps
+/// its own out), top first, each with how many groups in it sits under the closed one.
+fn closed_contents(layers: &[LayerInfo]) -> HashMap<u64, Vec<(LayerInfo, u32)>> {
+    let parent = |id: u64| layers.iter().find(|l| l.id == id).and_then(|l| l.parent);
+    // the groups `l` is in, innermost first (a mask by its layer's)
+    let groups = |l: &LayerInfo| {
+        let mut out = Vec::new();
+        let mut at = if l.kind == LayerType::Mask { l.parent.and_then(parent) } else { l.parent };
+        while let Some(g) = at {
+            if out.contains(&g) || out.len() > layers.len() {
+                break;
+            }
+            out.push(g);
+            at = parent(g);
+        }
+        out
+    };
+    let closed = |id: u64| layers.iter().any(|g| g.id == id && g.kind == LayerType::Group && g.collapsed);
+    let mut contents: HashMap<u64, Vec<(LayerInfo, u32)>> = HashMap::new();
+    for l in layers {
+        let around = groups(l);
+        for (k, g) in around.iter().enumerate() {
+            if !closed(*g) {
+                continue;
+            }
+            // shown in the window only if no group between it and this one is closed
+            if around.iter().take(k).all(|inner| !closed(*inner)) {
+                contents.entry(*g).or_default().push((l.clone(), k as u32));
+            }
+        }
+    }
+    contents
 }
 
 /// How far a row slides left to show its buttons: 6 past them.
@@ -2344,6 +2494,7 @@ mod tests {
             frame(&mut layers, Vec::new());
         }
         let (from, to) = (layers.last_rows[&x], layers.last_rows[&group]);
+        assert!(to.height() > GROUP_HEIGHT + 30.0, "a closed group's row is taller: {to:?}");
         let press = |pos, pressed| Event::PointerButton {
             pos,
             button: PointerButton::Primary,

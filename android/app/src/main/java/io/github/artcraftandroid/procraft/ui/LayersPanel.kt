@@ -30,6 +30,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -112,6 +114,16 @@ private val ListCorner = 8.dp
 private val GroupHeight = 44.dp
 private val GroupIndent = 21.dp
 private val GroupLine = Color(0xFF4E4E4E)
+/**
+ * A closed group's row is taller: its line (20 under the row's top and 20 over its bottom) opens
+ * into a window 4 in from them, on its layers' rows drawn small; opening or closing, over this long.
+ */
+private val GroupClosedHeight = 82.dp
+private val GroupLineInset = 20.dp
+private val GroupWindowInset = 4.dp
+private const val GROUP_TURN_MS = 150
+/** The rows' width in the list, which a closed group's window draws its layers' rows to fit. */
+private val ListWidth = 360.dp
 /** A row's thumbnail (a group's line) held over by a dragged row long enough to take it. */
 private val HeldOutline = Color.White
 private val MaskOwnerRow = Color(0xFF2C5281)
@@ -744,8 +756,9 @@ private fun LockedName(l: LayerInfo, ink: Color, name: @Composable (Color, Modif
 }
 
 /**
- * A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box.
- * Held over by a dragged row long enough to take it ([held]), the line is outlined.
+ * A group's row: where a thumbnail would be, a line while it is open or, closed (the row taller),
+ * a window on its layers' rows drawn small; its name, its open or closed arrow and its box. Held
+ * over by a dragged row long enough to take it ([held]), the line or window is outlined.
  */
 @Composable
 private fun GroupRow(
@@ -758,24 +771,105 @@ private fun GroupRow(
     held: Boolean,
     onToggle: () -> Unit,
 ) {
+    val height by androidx.compose.animation.core.animateDpAsState(
+        if (l.collapsed) GroupClosedHeight else GroupHeight,
+        androidx.compose.animation.core.tween(GROUP_TURN_MS, easing = androidx.compose.animation.core.LinearEasing),
+        label = "group row",
+    )
+    // 0 open, 1 closed: the line's 20 above and below become 4, the line the window between
+    val closed = ((height - GroupHeight) / (GroupClosedHeight - GroupHeight)).coerceIn(0f, 1f)
+    val inset = androidx.compose.ui.unit.lerp(GroupLineInset, GroupWindowInset, closed)
+    val window = RoundedCornerShape(androidx.compose.ui.unit.lerp(2.dp, 4.dp, closed))
     Row(
-        Modifier.fillMaxWidth().height(GroupHeight).clip(shape)
+        Modifier.fillMaxWidth().height(height).clip(shape)
             .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else Pc.LayerRow)
             .clickable(onClick = onTap)
             .padding(start = indent + GroupIndent * l.depth.toInt()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
-        val line = RoundedCornerShape(2.dp)
         Box(
-            Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(line).background(GroupLine)
-                .then(if (held) Modifier.border(2.dp, HeldOutline, line) else Modifier),
-        )
+            Modifier.padding(start = 4.dp).size(93.dp, height - inset * 2).clip(window).background(GroupLine)
+                .then(if (held) Modifier.border(2.dp, HeldOutline, window) else Modifier),
+        ) {
+            if (closed > 0f) GroupContents(vm, l)
+        }
         LockedName(l, ink, name, Modifier.weight(1f))
         Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
         }
         Box(Modifier.size(44.dp, GroupHeight).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
+            CheckBox(l.visible && !l.soloedOut, if (l.current || l.picked) Color.White else Pc.CheckFill)
+        }
+        Spacer(Modifier.width(8.dp))
+    }
+}
+
+/**
+ * A closed group's layers' rows as the panel would list them open, drawn small to fit its window's
+ * width less 1 on each side, from its top: their fills, thumbnails, names, blend letters and boxes.
+ */
+@Composable
+private fun GroupContents(vm: CanvasViewModel, group: LayerInfo) {
+    // a group closed inside it keeps its own layers out
+    val inside = vm.layers.filter { l ->
+        vm.isInside(l, group.id) && vm.layers.none { it.kind == LayerType.GROUP && it.collapsed && it.id != group.id && vm.isInside(l, it.id) && vm.isInside(it, group.id) }
+    }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val scale = (maxWidth - 2.dp) / ListWidth
+        Column(
+            Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).requiredWidth(ListWidth)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                    translationX = 1.dp.toPx()
+                    translationY = 1.dp.toPx()
+                },
+            verticalArrangement = Arrangement.spacedBy(RowGap),
+        ) {
+            inside.forEach { MiniRow(vm, it, (it.depth.toInt() - group.depth.toInt() - 1).coerceAtLeast(0)) }
+        }
+    }
+}
+
+/** A row of a closed group's window, as its row in the list looks, without its controls. */
+@Composable
+private fun MiniRow(vm: CanvasViewModel, l: LayerInfo, depth: Int) {
+    val mask = l.kind == LayerType.MASK
+    val masked = vm.hasMask(l)
+    val group = l.kind == LayerType.GROUP
+    val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
+    Row(
+        Modifier.fillMaxWidth().height(if (group) GroupHeight else if (mask || masked) MaskedRowHeight else RowHeight)
+            .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else Pc.LayerRow)
+            .padding(start = GroupIndent * depth),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (group) {
+            Box(Modifier.padding(start = 4.dp).size(93.dp, 4.dp).clip(RoundedCornerShape(2.dp)).background(GroupLine))
+        } else {
+            val corner = 4.dp
+            val thumbShape = when {
+                mask -> RoundedCornerShape(topStart = corner, topEnd = corner)
+                masked -> RoundedCornerShape(bottomStart = corner, bottomEnd = corner)
+                else -> RoundedCornerShape(corner)
+            }
+            Box(Modifier.padding(start = 4.dp).offset(y = if (mask) 2.dp else if (masked) (-2).dp else 0.dp)) { Thumb(vm, l, thumbShape) }
+        }
+        Text(l.name, color = ink, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 29.dp, end = 6.dp))
+        if (group) {
+            Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight), contentAlignment = Alignment.Center) {
+                Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = null, tint = ink, modifier = Modifier.size(16.dp))
+            }
+        } else if (mask) {
+            Spacer(Modifier.width(36.dp))
+        } else {
+            Box(Modifier.offset(x = 8.dp).size(44.dp, 47.dp), contentAlignment = Alignment.Center) {
+                Text(blendCode(vm, l.blend), color = if (l.locked && !l.current && !l.picked) LockedLetter else ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Box(Modifier.size(44.dp, 47.dp), contentAlignment = Alignment.Center) {
             CheckBox(l.visible && !l.soloedOut, if (l.current || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
