@@ -571,6 +571,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         io.github.artcraftandroid.procraft.ui.Pc.partScales = io.github.artcraftandroid.procraft.core.InterfacePart.entries.map { plugins.interfacePartScale(it) }
         io.github.artcraftandroid.procraft.ui.Pc.floatingPickerOnly = plugins.floatingPickerOnly()
+        val choices = plugins.menuChoices(io.github.artcraftandroid.procraft.core.PluginMenuPlace.CLASSIC)
+        io.github.artcraftandroid.procraft.ui.Pc.classicMenu = choices.takeIf { it.isNotEmpty() }?.let { io.github.artcraftandroid.procraft.ui.ClassicMenu(it, ::choosePluginChoice) }
         tweensOn = plugins.tweens()
         followStrokeSound()
     }
@@ -747,6 +749,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun setPluginSwitch(key: String, on: Boolean) {
         if (!plugins.setSwitch(key, on)) return
         interfacePrefs.edit().putBoolean(key, on).apply()
+        pluginsChanged()
+    }
+
+    /** A choice picked from a plugin's menu by its [key]: the controls it set kept as the card keeps them; one no plugin on offers changes nothing. */
+    fun choosePluginChoice(key: String) {
+        val changed = plugins.choose(key)
+        if (changed.isEmpty()) return
+        val edit = interfacePrefs.edit()
+        for (c in changed) {
+            when (c) {
+                is io.github.artcraftandroid.procraft.core.PluginControl.Switch -> edit.putBoolean(c.control.key, c.control.on)
+                is io.github.artcraftandroid.procraft.core.PluginControl.Slider ->
+                    if (io.github.artcraftandroid.procraft.core.pluginSliderWhole(c.control)) edit.putInt(c.control.key, c.control.value.roundToInt()) else edit.putFloat(c.control.key, c.control.value)
+                is io.github.artcraftandroid.procraft.core.PluginControl.File -> Unit
+            }
+        }
+        edit.apply()
         pluginsChanged()
     }
 

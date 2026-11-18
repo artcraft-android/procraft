@@ -26,7 +26,8 @@ the largest. `effects` lists three filters, each under a switch of its own. `lay
 action beside a filter, `colour-triangle` is a picker, `vector-layers` adds layers of its own, and
 `keyboard-shortcuts` rebinds keys from a panel of its own and keeps what it binds. `interface`,
 `layer-tools` and `colordrop-tools` each answer several hooks, one for each of their switches, and
-`colour-triangle`'s picture draws its hue ring as its switch says.
+`colour-triangle`'s picture draws its hue ring as its switch says and its [menu](#a-menu-of-its-own)
+switches its shape.
 
 ## What you write
 
@@ -102,6 +103,40 @@ control). An action, and a filter of several, can come `under` a switch too.
 A `file` control shows Import, or the name of the file picked and Clear. The plugin is told 1 while a
 file is picked, 0 while none is, and is handed the file itself if it takes files (see below); what
 the file is for is up to the plugin.
+
+### A menu of its own
+
+A plugin with code can have a menu somewhere in the interface, from a button the app puts there:
+choices, each an icon and words, each setting some of its controls as if they were set on its card,
+and kept the same way.
+
+```json
+"menu": {
+  "place": "classic",
+  "choices": [
+    { "key": "square", "label": "Square", "icon": "M3 4.4L3 19.6L21 19.6L21 4.4Z", "sets": { "triangle": false } },
+    { "key": "ring", "label": "Hue ring", "icon": "M...Z", "sets": { "triangle": true, "ring": true } }
+  ]
+}
+```
+
+- `place` is where: `"classic"`, a button of three dots in the lower left corner of the colour
+  panel's Classic picker (in the panel hanging from its button, while it works in HSB). A place this
+  app doesn't have makes the file one for a newer ProCraft.
+- Up to eight choices, each with a `key` of its own and a `label` of at most 24 characters (what the
+  choice is called where its icon can't say, as to a screen reader or under a pointer).
+- `icon` is SVG path data on the interface icons' grid, 24 units each way: moves, lines (`L`, `H`,
+  `V`) and cubic curves (`C`), absolute or relative, and closes, every point from 0 to 24, filled
+  even-odd. The app draws it as its own icons are drawn, in the menu's ink, and in the accent while
+  the choice stands. `tools/icons/draw_icons.py` draws the icons of the plugins that come with the
+  app, to [the app's style](icons/STYLE_GUIDE.md).
+- `sets` names one to eight of its controls: a switch's value is `true` or `false`, a slider's a
+  number in its range (taken to its step).
+
+While the plugin is on, the button shows, and the menu lists every plugin's choices for that place,
+in order of id. A choice stands, shown chosen, while every control it sets is as it sets it. Picking
+one sets them, tells the plugin each as it changes, and closes the menu. An older ProCraft leaves the
+menu out, so a plugin with one needs no newer interface.
 
 ### Rows in the brush studio
 
@@ -1447,8 +1482,9 @@ keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.d
 the utilities, interface 5 several filters in one plugin, and interface 6 up to sixteen controls,
 a picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its
 own, a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks.
-What comes under a switch at the top of the list, and taking the place of other plugins, need no
-newer interface: an older app shows every control, and leaves the others where they are. What a
+What comes under a switch at the top of the list, taking the place of other plugins, and a menu of
+its own need no newer interface: an older app shows every control, leaves the others where they are,
+and shows no menu. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin
 goes on working as it was written.
 

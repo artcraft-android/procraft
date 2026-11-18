@@ -453,6 +453,35 @@ pub enum InterfacePart {
     Panels = 4,
 }
 
+/// Where in the interface a plugin's menu is, from a button of the app's
+/// ([`Plugins::menu_choices`]), by its name in a manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum PluginMenuPlace {
+    /// The colour panel's Classic picker, from a button in its lower left corner.
+    Classic,
+}
+
+impl PluginMenuPlace {
+    /// The place a manifest calls `name`, if this app has it.
+    pub(crate) fn named(name: &str) -> Option<PluginMenuPlace> {
+        match name {
+            "classic" => Some(PluginMenuPlace::Classic),
+            _ => None,
+        }
+    }
+}
+
+/// One of the choices a plugin's menu offers: what picks it ([`Plugins::choose`]), its words, its
+/// icon (SVG path data on a 24-unit grid, filled even-odd in the interface's ink), and whether it
+/// stands now (every control it sets is as it sets it).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginChoice {
+    pub key: String,
+    pub label: String,
+    pub icon: String,
+    pub chosen: bool,
+}
+
 /// `plugin` as its card shows it: what comes under a switch that is off left out.
 fn shown(plugin: &PluginInfo, shape: Option<&Shape>) -> PluginInfo {
     let Some(shape) = shape else { return plugin.clone() };
@@ -1682,6 +1711,60 @@ impl Plugins {
     /// icons or the other pickers.
     pub fn floating_picker_only(&self) -> bool {
         self.hooks().floating_picker_only()
+    }
+
+    /// The choices the menus at `place` offer, of each plugin on that has one there (in order of
+    /// id), as their manifests list them. None: the app shows no button for them.
+    pub fn menu_choices(&self, place: PluginMenuPlace) -> Vec<PluginChoice> {
+        let list = self.listed();
+        let mut on: Vec<&PluginInfo> = list.files.iter().filter(|p| p.on && p.problem.is_none()).collect();
+        on.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut choices = Vec::new();
+        for plugin in on {
+            let Some(menu) = list.shapes.get(&plugin.id).and_then(|shape| shape.menu.as_ref()) else { continue };
+            if menu.place != place {
+                continue;
+            }
+            for choice in &menu.choices {
+                let chosen =
+                    choice.sets.iter().all(|&(at, value)| plugin.controls.get(at).is_some_and(|c| c.number() == value));
+                choices.push(PluginChoice {
+                    key: choice.key.clone(),
+                    label: choice.label.clone(),
+                    icon: choice.icon.clone(),
+                    chosen,
+                });
+            }
+        }
+        choices
+    }
+
+    /// The menu choice `key` ([`PluginChoice::key`]) picked: each control it sets set so, as if on
+    /// its card, its plugin told. The controls it changed, as they are now, for the app to keep
+    /// (as it keeps a switch or a slider set on the card); none for a choice no plugin on offers.
+    pub fn choose(&self, key: String) -> Vec<PluginControl> {
+        let mut list = self.listed();
+        let Listed { files, shapes, .. } = &mut *list;
+        let found = files.iter_mut().filter(|p| p.on && p.problem.is_none()).find_map(|plugin| {
+            let choice = shapes.get(&plugin.id)?.menu.as_ref()?.choices.iter().find(|c| c.key == key)?;
+            Some((plugin, choice.sets.clone()))
+        });
+        let Some((plugin, sets)) = found else { return Vec::new() };
+        let mut changed = Vec::new();
+        for (at, value) in sets {
+            let Some(control) = plugin.controls.get_mut(at) else { continue };
+            if control.number() == value {
+                continue;
+            }
+            match control {
+                PluginControl::Switch { control } => control.on = value != 0.0,
+                PluginControl::Slider { control } => control.value = control.stepped(value),
+                PluginControl::File { .. } => continue,
+            }
+            self.hooks.control(&plugin.id, at, control.number());
+            changed.push(control.clone());
+        }
+        changed
     }
 
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
@@ -3055,6 +3138,51 @@ mod tests {
         let again = app_at(&dir);
         again.read_kept("fill_gap".to_owned(), "5".to_owned());
         assert!(!card(&again, COLORDROP).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_triangle_s_menu_switches_its_shape_and_what_it_sets_is_kept() {
+        let dir = store("bundled-menu");
+        let plugins = app_at(&dir);
+        // nothing at Classic while it's off
+        assert!(plugins.menu_choices(PluginMenuPlace::Classic).is_empty());
+        assert!(plugins.choose(format!("{TRIANGLE}.ring")).is_empty(), "none offers it");
+        assert!(plugins.set_on(TRIANGLE.to_owned(), true));
+        let chosen = |plugins: &Plugins| {
+            let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+            choices.iter().filter(|c| c.chosen).map(|c| c.label.clone()).collect::<Vec<_>>()
+        };
+        let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+        let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Square", "Triangle", "Hue ring"]);
+        assert!(choices.iter().all(|c| c.icon.starts_with('M') && c.icon.ends_with('Z')), "each its icon");
+        // the triangle starts on, its ring off
+        assert_eq!(chosen(&plugins), ["Triangle"]);
+        assert_eq!(plugins.picker_hue_point(0.25), None);
+        // the ring: its switch set, and told back to be kept
+        let changed = plugins.choose(format!("{TRIANGLE}.ring"));
+        let keys: Vec<&str> = changed.iter().map(PluginControl::key).collect();
+        assert_eq!(keys, [format!("{TRIANGLE}.ring")]);
+        assert_eq!(chosen(&plugins), ["Hue ring"]);
+        assert!(plugins.picker_hue_point(0.25).is_some(), "the ring has the hue");
+        // the square: Classic is the app's own again
+        let changed = plugins.choose(format!("{TRIANGLE}.square"));
+        assert!(matches!(changed.as_slice(), [PluginControl::Switch { control }] if !control.on));
+        assert_eq!(chosen(&plugins), ["Square"]);
+        assert!(!plugins.picker_on());
+        // picked again, nothing changes
+        assert!(plugins.choose(format!("{TRIANGLE}.square")).is_empty());
+        // kept, so through a restart, as if set on its card
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(chosen(&next), ["Square"]);
+        assert!(!next.picker_on());
+        assert!(!next.choose(format!("{TRIANGLE}.ring")).is_empty());
+        assert_eq!(chosen(&next), ["Hue ring"]);
+        // off, it offers nothing
+        assert!(next.set_on(TRIANGLE.to_owned(), false));
+        assert!(next.menu_choices(PluginMenuPlace::Classic).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

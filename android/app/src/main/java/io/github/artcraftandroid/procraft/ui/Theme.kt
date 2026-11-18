@@ -40,6 +40,8 @@ object Pc {
     /** A plugin has the floating colour window show Classic's picker alone: no title or mode icons. */
     var floatingPickerOnly by mutableStateOf(false)
 
+    /** Plugins' menus with choices for Classic's corner, while any has: a button there opens them. */
+    var classicMenu by mutableStateOf<ClassicMenu?>(null)
     /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
     var accentGiven by mutableStateOf<Color?>(null)
 
@@ -342,4 +344,10 @@ class ClassicPicker(
     val picture: (Float, Int) -> ByteArray?,
     val hue: (Float, Float) -> Float? = { _, _ -> null },
     val huePoint: (Float) -> List<Float>? = { null },
+)
+
+/** Plugins' menus at Classic's corner: their [choices] (each its icon, words and whether it stands now), and [choose], which picks one by its key. */
+class ClassicMenu(
+    val choices: List<io.github.artcraftandroid.procraft.core.PluginChoice>,
+    val choose: (String) -> Unit,
 )

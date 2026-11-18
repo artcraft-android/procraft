@@ -531,6 +531,8 @@ const ALL: Rect = Rect { min: pos2(0.0, 0.0), max: pos2(1.0, 1.0) };
 #[derive(Default)]
 pub struct Look {
     icons: HashMap<(&'static str, u32), TextureHandle>,
+    /// Icons a plugin draws (path data on the icons' grid), by it and their size in pixels.
+    path_icons: HashMap<(String, u32), TextureHandle>,
     /// Each drawn shape's texture and what it was drawn from.
     shapes: HashMap<&'static str, (u64, TextureHandle)>,
     /// How many times as big as its points what is drawn on a layer shows, where that isn't 1: a
@@ -566,6 +568,19 @@ impl Look {
             .or_insert_with(|| ui.ctx().load_texture(icon.name, raster_icon(icon, px), TextureOptions::LINEAR));
         let height = width * icon.height / icon.width;
         ui.painter().image(texture.id(), Rect::from_center_size(centre, vec2(width, height)), ALL, colour);
+    }
+
+    /// A plugin's icon, SVG path data on the interface icons' 24-unit grid (as the core checked and
+    /// wrote it), filled even-odd to fill `rect`, in `colour`.
+    pub fn path_icon(&mut self, ui: &Ui, d: &str, rect: Rect, colour: Color32) {
+        let ppp = self.pixels_per_point(ui);
+        let px = (rect.width() * ppp).round().max(1.0) as u32;
+        let texture = self.path_icons.entry((d.to_owned(), px)).or_insert_with(|| {
+            let icon = Icon { name: "plugin icon", width: 24.0, height: 24.0, parts: &[] };
+            let svg = format!(r##"<path d="{d}" fill="#fff" fill-rule="evenodd"/>"##);
+            ui.ctx().load_texture("plugin icon", raster_svg(&icon, &svg, px), TextureOptions::LINEAR)
+        });
+        ui.painter().image(texture.id(), rect, ALL, colour);
     }
 
     /// `icon` stretched to fill `rect` (drawn as wide as it, then squeezed or stretched to its
@@ -620,7 +635,7 @@ impl Look {
 
 /// `icon` drawn white `px` pixels across.
 fn raster_icon(icon: &Icon, px: u32) -> egui::ColorImage {
-    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}">"#, icon.width, icon.height);
+    let mut svg = String::new();
     for part in icon.parts {
         if part.fill {
             let rule = if part.even_odd { "evenodd" } else { "nonzero" };
@@ -633,7 +648,15 @@ fn raster_icon(icon: &Icon, px: u32) -> egui::ColorImage {
             ));
         }
     }
-    svg.push_str("</svg>");
+    raster_svg(icon, &svg, px)
+}
+
+/// The SVG elements `parts`, drawn in `icon`'s frame, `px` pixels across.
+fn raster_svg(icon: &Icon, parts: &str, px: u32) -> egui::ColorImage {
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}">{parts}</svg>"#,
+        icon.width, icon.height
+    );
     let ph = ((px as f32) * icon.height / icon.width).round().max(1.0) as u32;
     let drawn = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok().and_then(|tree| {
         let mut pixmap = tiny_skia::Pixmap::new(px, ph)?;

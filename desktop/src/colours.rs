@@ -275,6 +275,12 @@ pub struct Colours {
     /// How far the picker is scrolled, in a window too short for all of it.
     scrolled: f32,
     short_menu: crate::menu::Menu,
+    /// Plugins' menus at Classic's corner: their choices (none: no button), the button there and
+    /// its menu, and a choice picked from it, for the app to make and keep.
+    classic_choices: Vec<procraft_core::PluginChoice>,
+    classic_button: Rect,
+    classic_menu: crate::menu::Menu,
+    pub classic_chosen: Option<String>,
     /// Floating: where the window is (its top-left), where the pointer holds its grabber while
     /// it moves, and whether its Value shows red, green and blue.
     pub floating: Option<Pos2>,
@@ -327,6 +333,10 @@ impl Default for Colours {
             short_dots: Rect::NOTHING,
             scrolled: 0.0,
             short_menu: crate::menu::Menu::default(),
+            classic_choices: Vec::new(),
+            classic_button: Rect::NOTHING,
+            classic_menu: crate::menu::Menu::default(),
+            classic_chosen: None,
             floating: None,
             floating_grab: None,
             floating_rgb: false,
@@ -393,6 +403,11 @@ impl Colours {
     /// its.
     pub fn set_picker(&mut self, picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>) {
         self.pickers.picker = picker;
+    }
+
+    /// The choices plugins' menus offer at Classic's corner (none: no button there).
+    pub fn set_classic_menu(&mut self, choices: Vec<procraft_core::PluginChoice>) {
+        self.classic_choices = choices;
     }
 
     /// How big the floating window shows next to the rest of the interface (1: as the rest), and
@@ -828,6 +843,9 @@ impl Colours {
         if self.mode != Mode::Palettes {
             self.model_menu(ctx, look, backdrops);
         }
+        if self.mode == Mode::Classic {
+            self.classic_menu(ctx, look, backdrops);
+        }
         // the keypad by its row as it shows
         if self.mode == Mode::Value
             && let Some(rgb) = hex_pad(ctx, look, &mut self.hex, panel::to_window(ctx).mul_rect(hex_row))
@@ -1243,6 +1261,12 @@ impl Colours {
     fn classic(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32, side: f32) {
         let square = Rect::from_min_size(pos2(body.left() + 16.0, top), vec2(SQUARE, side));
         let mut changed = self.model_square(ui, square);
+        // plugins' menus, from a button in the square's lower left corner
+        if self.model() == ColourModel::Hsb && !self.classic_choices.is_empty() {
+            self.classic_menu_button(ui, square);
+        } else {
+            self.classic_button = Rect::NOTHING;
+        }
         let row = |i: f32| {
             Rect::from_min_size(
                 pos2(body.left() + 20.0, square.bottom() + SLIDER_ROW * i),
@@ -1257,6 +1281,61 @@ impl Colours {
         }
         if changed {
             self.send(session);
+        }
+    }
+
+    /// The button for plugins' menus at Classic's corner, in the lower left corner of `square`: three
+    /// dots on a dark disc, its touch 36 across; a tap opens them.
+    fn classic_menu_button(&mut self, ui: &Ui, square: Rect) {
+        let button = Rect::from_min_size(pos2(square.left(), square.bottom() - 36.0), vec2(36.0, 36.0));
+        ui.painter().circle_filled(button.center(), 13.0, Color32::from_black_alpha(115));
+        for i in -1..=1 {
+            ui.painter().circle_filled(button.center() + vec2(i as f32 * 5.5, 0.0), 1.6, Color32::WHITE);
+        }
+        self.classic_button = button;
+        if ui.interact(button, ui.scope_id().with("classic plugin menu"), Sense::click()).clicked() {
+            self.classic_menu.open();
+        }
+    }
+
+    /// Plugins' menus at Classic's corner: their choices' icons in a row above the button, those
+    /// that stand now lit; one picked closes it.
+    fn classic_menu(&mut self, ctx: &egui::Context, look: &mut Look, backdrops: &mut Vec<f32>) {
+        let button = self.classic_button;
+        if button == Rect::NOTHING {
+            self.classic_menu.close();
+            return;
+        }
+        let size = vec2(12.0 + 48.0 * self.classic_choices.len() as f32, 56.0);
+        let rect = Rect::from_min_size(pos2(button.left(), button.top() - 6.0 - size.y), size);
+        let glass = crate::menu::Glass {
+            fill: crate::menu::OVER_PANEL,
+            edge: Some(SHORT_MENU_EDGE),
+            frost: false,
+            corner: SHORT_MENU_CORNER,
+            shadow: false,
+        };
+        let choices = &self.classic_choices;
+        let mut chosen = None;
+        self.classic_menu.show(ctx, "classic plugin menu", rect, button.center_top(), glass, backdrops, |ui| {
+            for (i, choice) in choices.iter().enumerate() {
+                let cell =
+                    Rect::from_min_size(pos2(rect.left() + 6.0 + 48.0 * i as f32, rect.top() + 6.0), vec2(48.0, 44.0));
+                let accent = argb(pc::ACCENT);
+                if choice.chosen {
+                    ui.painter().rect_filled(cell, 11, accent.gamma_multiply(0.18));
+                }
+                let ink = if choice.chosen { accent } else { argb(crate::menu::INK) };
+                look.path_icon(ui, &choice.icon, Rect::from_center_size(cell.center(), vec2(26.0, 26.0)), ink);
+                let tapped = ui.interact(cell, ui.scope_id().with(("classic choice", i)), Sense::click());
+                if tapped.on_hover_text(&choice.label).clicked() {
+                    chosen = Some(choice.key.clone());
+                }
+            }
+        });
+        if let Some(key) = chosen {
+            self.classic_chosen = Some(key);
+            self.classic_menu.close();
         }
     }
 
@@ -1549,6 +1628,7 @@ impl Colours {
             || self.short_menu.is_open()
             || self.harmony_menu.is_open()
             || self.model_menu.is_open()
+            || self.classic_menu.is_open()
             || self.takes_keys()
     }
 

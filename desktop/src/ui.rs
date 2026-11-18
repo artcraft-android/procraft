@@ -2525,6 +2525,7 @@ impl Interface {
                 shown
             }
             Popover::Colour => {
+                self.colours.set_classic_menu(self.prefs.plugins.menu_choices(procraft_core::PluginMenuPlace::Classic));
                 self.colours.set_triangle(self.prefs.plugins.colour_triangle());
                 let picker =
                     self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
@@ -2533,6 +2534,12 @@ impl Interface {
                 let history = &mut self.prefs.colour_history_shown;
                 let rect = self.colours.show(ctx, &mut self.look, session, &mut self.drop, button, history, backdrops);
                 if self.prefs.colour_history_shown != shown {
+                    self.prefs.keep();
+                }
+                // a choice picked from a plugin's menu at Classic's corner: the controls it set, kept
+                if let Some(key) = self.colours.classic_chosen.take()
+                    && !self.prefs.plugins.choose(key).is_empty()
+                {
                     self.prefs.keep();
                 }
                 // dragged out, it floats instead

@@ -648,7 +648,11 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp,
         ModelClassic(m, compact, square)
         return
     }
-    SaturationBrightness(c, compact, square)
+    Box {
+        SaturationBrightness(c, compact, square)
+        // plugins' menus, from a button in the square's lower left corner (the panel's, not a compact picker's)
+        if (!compact) Pc.classicMenu?.let { ClassicMenuButton(it, Modifier.align(Alignment.BottomStart).padding(start = 16.dp)) }
+    }
     // a picker plugin's with the hue on a ring of its own takes the hue slider's place
     val ringed = Pc.picker?.huePoint?.invoke(c.hue) != null
     if (compact) {
@@ -663,6 +667,74 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp,
         if (!ringed) SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
         SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
+    }
+}
+
+/** The button for plugins' menus at Classic's corner: three dots on a dark disc, its touch 36 across. */
+private val ClassicMenuDisc = Color.Black.copy(alpha = 0.45f)
+
+/**
+ * Plugins' menus at Classic's corner: three dots on a dark disc in the square's lower left corner, opening a small
+ * menu above it of their choices' icons, the ones that stand now lit; picking one closes it.
+ */
+@Composable
+private fun ClassicMenuButton(menu: ClassicMenu, modifier: Modifier) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier.size(36.dp).clickable { open = true }, contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(26.dp).clip(CircleShape).background(ClassicMenuDisc).drawBehind {
+                val r = 1.6.dp.toPx()
+                for (i in -1..1) drawCircle(Color.White, r, center + Offset(i * 5.5.dp.toPx(), 0f))
+            },
+        )
+        MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(0f, 1f)) { look ->
+            val gap = with(LocalDensity.current) { 6.dp.roundToPx() }
+            PcPopup(Above(gap), properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
+                Row(
+                    look.clip(RoundedCornerShape(17.dp)).background(Pc.GlassMenuOverPanel)
+                        .border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(17.dp)).padding(6.dp),
+                ) {
+                    for (choice in menu.choices) {
+                        val icon = remember(choice.icon) { choiceIcon(choice.icon) }
+                        Box(
+                            Modifier.size(48.dp, 44.dp).clip(RoundedCornerShape(11.dp))
+                                .background(if (choice.chosen) Pc.Accent.copy(alpha = 0.18f) else Color.Transparent)
+                                .clickable {
+                                    open = false
+                                    menu.choose(choice.key)
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(icon, contentDescription = choice.label, tint = if (choice.chosen) Pc.Accent else Pc.MenuInk, modifier = Modifier.size(26.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A plugin's menu choice's icon: its path data on the icons' 24-unit grid, filled even-odd, tinted where it shows. */
+private fun choiceIcon(d: String): ImageVector =
+    ImageVector.Builder(name = "plugin choice", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f)
+        .addPath(
+            pathData = androidx.compose.ui.graphics.vector.addPathNodes(d),
+            pathFillType = androidx.compose.ui.graphics.PathFillType.EvenOdd,
+            fill = androidx.compose.ui.graphics.SolidColor(Color.White),
+        )
+        .build()
+
+/** Puts a popup above the anchor, [gap] over it, its left edge at the anchor's, inside the window. */
+private class Above(private val gap: Int) : androidx.compose.ui.window.PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: androidx.compose.ui.unit.IntRect,
+        windowSize: IntSize,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val x = anchorBounds.left.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        val y = (anchorBounds.top - gap - popupContentSize.height).coerceAtLeast(0)
+        return IntOffset(x, y)
     }
 }
 
