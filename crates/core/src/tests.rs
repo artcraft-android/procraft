@@ -1074,6 +1074,178 @@ fn stroke_cost_all() {
     assert_eq!(errors, 0, "GPU validation errors");
 }
 
+/// Strokes drawn into a window a frame at a time, as the apps draw them, show what the same
+/// canvas drawn whole shows: no part of the stroke late, missing or out of place (blocks seen while
+/// drawing). Each brush `STROKE_FRAMES_BRUSHES` names (`,` between; `all` for the library), mid
+/// stroke and once lifted; `WGPU_BACKEND` picks the GPU's API. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn strokes_drawn_a_frame_at_a_time_show_as_drawn_whole() {
+    let side = 1024;
+    let Some(s) = session(side, side) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    println!("{:?}", gpu.adapter.get_info().backend);
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let whole = |s: &CanvasSession| {
+        if let Some(c) = s.shared.lock().canvas.as_mut() {
+            c.invalidate();
+        }
+        framed(s, &texture, &gpu, side)
+    };
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p.iter().zip(q.iter()).any(|(u, v)| u.abs_diff(*v) > 2)).count()
+    };
+    let names = std::env::var("STROKE_FRAMES_BRUSHES").unwrap_or_else(|_| "all".to_owned());
+    let library = s.brush_library();
+    let mut bad = Vec::new();
+    for set in &library {
+        for b in &set.brushes {
+            if names != "all" && !names.split(',').any(|n| n == b.name) {
+                continue;
+            }
+            s.select_brush(b.set, b.index);
+            s.set_brush_size(0.5);
+            s.set_color(0.2, 0.3, 0.8);
+            let point =
+                |k: usize| sample(100.0 + k as f32 * 2.5, 500.0 + (k as f32 * 0.03).sin() * 300.0, k as f64 * 4.0);
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=160 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    framed(&s, &texture, &gpu, side);
+                }
+            }
+            let shown = framed(&s, &texture, &gpu, side);
+            let mid = differ(&shown, &whole(&s));
+            s.stroke_end(vec![]);
+            let shown = framed(&s, &texture, &gpu, side);
+            let lifted = differ(&shown, &whole(&s));
+            if mid > 0 || lifted > 0 {
+                println!("{}/{}: {mid} pixels differ mid stroke, {lifted} lifted", set.name, b.name);
+                bad.push(b.name.clone());
+            }
+            s.undo();
+        }
+    }
+    println!("{} brushes differ", bad.len());
+}
+
+/// Every brush's stroke draws alike through Vulkan and Direct3D 12 (the first two backends here)
+/// on the same GPU: its layer once lifted, and the window it shows in mid stroke and lifted. Each
+/// brush `STROKE_FRAMES_BRUSHES` names (`,` between; `all` for the library); `WGPU_POWER_PREF=low`
+/// picks a laptop's integrated GPU. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn strokes_draw_alike_through_vulkan_and_direct3d() {
+    let side = 512;
+    // the backends compared (`STROKE_ALIKE_BACKENDS`, `0,0` to compare one with itself)
+    let from: Vec<usize> = std::env::var("STROKE_ALIKE_BACKENDS")
+        .unwrap_or_else(|_| "0,1".to_owned())
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let (Some(&fa), Some(&fb)) = (from.first(), from.get(1)) else { return };
+    let gpus = [fa, fb].map(|from| procraft_gpu::Gpu::for_canvases_from(from, |_| {}));
+    let [Ok((a, ia)), Ok((b, ib))] = gpus else {
+        println!("no two backends to compare");
+        return;
+    };
+    assert_eq!((ia, ib), (fa, fb), "a backend gave way to another");
+    let pictures = std::env::var("STROKE_ALIKE_PNG").ok();
+    // controls set on each brush first (`STROKE_ALIKE_SET`, `key=value` and `,` between)
+    let set_too: Vec<(String, f32)> = std::env::var("STROKE_ALIKE_SET")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|kv| kv.split_once('=').and_then(|(k, v)| Some((k.trim().to_owned(), v.trim().parse().ok()?))))
+        .collect();
+    let info = |g: &procraft_gpu::Gpu| format!("{} ({:?})", g.adapter.get_info().name, g.adapter.get_info().backend);
+    println!("{} against {}", info(&a), info(&b));
+    let window = |g: &procraft_gpu::Gpu| {
+        g.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: procraft_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: procraft_gpu::wgpu::TextureDimension::D2,
+            format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+            usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let (wa, wb) = (window(&a), window(&b));
+    let sessions = [(session_on(a.clone(), side, side), wa, a), (session_on(b.clone(), side, side), wb, b)];
+    let differ = |p: &[u8], q: &[u8]| {
+        p.chunks(4).zip(q.chunks(4)).filter(|(p, q)| p.iter().zip(q.iter()).any(|(u, v)| u.abs_diff(*v) > 3)).count()
+    };
+    let names = std::env::var("STROKE_FRAMES_BRUSHES").unwrap_or_else(|_| "all".to_owned());
+    let library = sessions[0].0.brush_library();
+    let (mut tried, mut unlike) = (0, Vec::new());
+    for set in &library {
+        for brush in &set.brushes {
+            if names != "all" && !names.split(',').any(|n| n == brush.name) {
+                continue;
+            }
+            tried += 1;
+            let point =
+                |k: usize| sample(40.0 + k as f32 * 1.4, 250.0 + (k as f32 * 0.03).sin() * 150.0, k as f64 * 4.0);
+            let shown: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = sessions
+                .iter()
+                .map(|(s, texture, gpu)| {
+                    s.select_brush(brush.set, brush.index);
+                    if !set_too.is_empty() {
+                        s.studio_begin();
+                        for (k, v) in &set_too {
+                            s.set_studio_setting(k.clone(), *v);
+                        }
+                        s.studio_end(true);
+                    }
+                    s.set_brush_size(0.5);
+                    s.set_color(0.2, 0.3, 0.8);
+                    s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+                    for e in 1..=150 {
+                        s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                        if e % 2 == 0 {
+                            framed(s, texture, gpu, side);
+                        }
+                    }
+                    let mid = framed(s, texture, gpu, side);
+                    s.stroke_end(vec![]);
+                    let lifted = framed(s, texture, gpu, side);
+                    let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+                    let layer = layer_rgba(s, current);
+                    s.undo();
+                    (mid, lifted, layer)
+                })
+                .collect();
+            let [(m0, l0, p0), (m1, l1, p1)] = [&shown[0], &shown[1]];
+            let counts = [differ(m0, m1), differ(l0, l1), differ(p0, p1)];
+            if counts.iter().any(|&c| c > 0) {
+                println!(
+                    "{}/{}: pixels unlike mid stroke {}, lifted {}, in the layer {}",
+                    set.name, brush.name, counts[0], counts[1], counts[2]
+                );
+                if let Some(dir) = pictures.as_deref().filter(|_| unlike.len() < 12) {
+                    for (k, shown) in [m0, m1].into_iter().enumerate() {
+                        let png = crate::project::rgba_png(side, side, shown);
+                        let _ = std::fs::write(format!("{dir}/{}-{k}.png", brush.name), png);
+                    }
+                }
+                unlike.push(brush.name.clone());
+            }
+        }
+    }
+    println!("{} of {tried} brushes draw unlike", unlike.len());
+}
+
 /// What ColorDrop costs on a large canvas (`POUR_COST_SIDE`, 4096 square): a colour dropped into a
 /// small ring, its threshold slid, and let go, each timed as the app waits for it; then the same
 /// into the whole empty layer. Run on a device with `--ignored --nocapture`.
