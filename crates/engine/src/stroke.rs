@@ -3679,6 +3679,82 @@ mod tests {
         assert_eq!(few.finish().len(), many.finish().len());
     }
 
+    /// Speed dynamics as measured: the pen's speed on screen (points a frame of a 60 Hz display,
+    /// whatever the zoom), nothing up to 25 and full 100 further on, rising as the square root,
+    /// both scaled by the maximum speed distance; Max (1) takes a full-speed stroke down to the
+    /// brush's least size, -100% (-1) a still one. Straight strokes at steady speeds, slow and
+    /// fast, at several amounts, zooms and distances: the stamps' size and opacity against the
+    /// size and opacity worked out from the formula.
+    #[test]
+    fn speed_thins_and_fades_strokes_by_their_pace_on_screen_as_measured() {
+        // what a pace of `v` points a frame leaves at `amount` (`distance` the maximum speed
+        // distance), worked out apart from the engine
+        let expected = |amount: f32, v: f32, distance: f32| {
+            let s = ((v - 25.0 * distance) / (100.0 * distance)).max(0.0).sqrt().min(1.0);
+            if amount >= 0.0 { 1.0 - amount * s } else { 1.0 + amount * (1.0 - s) }
+        };
+        // a 240 Hz pen at `v` points a frame, the canvas seen at `zoom` points a pixel
+        let drawn = |control: &str, amount: f32, v: f32, zoom: f32, distance: f32| {
+            let mut b = Brush { min_size: 0.0, ..plain() };
+            b.set_setting(control, amount);
+            let step = v / 4.0 / zoom;
+            let samples: Vec<Sample> = (0..=60)
+                .map(|i| Sample::at(Vec2::new(20.0 + step * i as f32, 50.0), 1.0, f64::from(i) * 1000.0 / 240.0))
+                .collect();
+            let mut s = StrokeBuilder::new(b, 40.0, Pointer::Stylus)
+                .seen_at(zoom)
+                .with_input(InputSettings { speed_distance: distance, ..InputSettings::default() });
+            s.add(&samples);
+            let stamps = s.finish();
+            // a stamp well into the stroke, the speed settled
+            let mid = samples.get(40).map_or(0.0, |s| s.pos.x);
+            let at = stamps.iter().min_by(|a, b| (a.center.x - mid).abs().total_cmp(&(b.center.x - mid).abs()));
+            at.map_or((0.0, 0.0), |s| (s.radius * 2.0, s.alpha))
+        };
+        let mut worst: f32 = 0.0;
+        for (amount, v, zoom, distance) in [
+            // slow (none), fast (half, 0.71) and past full speed, at Max
+            (1.0, 20.0, 1.0, 1.0),
+            (1.0, 50.0, 1.0, 1.0),
+            (1.0, 75.0, 1.0, 1.0),
+            (1.0, 160.0, 1.0, 1.0),
+            // half, and below 0 (slow strokes thinned), at -50% and -100%
+            (0.5, 50.0, 1.0, 1.0),
+            (-0.5, 20.0, 1.0, 1.0),
+            (-0.5, 75.0, 1.0, 1.0),
+            (-1.0, 20.0, 1.0, 1.0),
+            (-1.0, 160.0, 1.0, 1.0),
+            // the pace is the screen's: zoomed in 3 times or out to a quarter, the same pace on
+            // screen goes as far
+            (1.0, 50.0, 3.0, 1.0),
+            (1.0, 75.0, 0.25, 1.0),
+            // the shortest maximum speed distance: a quarter the pace for as much
+            (1.0, 12.5, 1.0, 0.25),
+            (1.0, 40.0, 1.0, 0.25),
+        ] {
+            let want = expected(amount, v, distance);
+            let (size, _) = drawn("speed_size", amount, v, zoom, distance);
+            let (base, _) = drawn("speed_size", 0.0, v, zoom, distance);
+            // (a round tip is never drawn less than half a pixel across)
+            let off = (size - (want * base).max(0.5)).abs() / base;
+            worst = worst.max(off);
+            assert!(
+                off < 0.01,
+                "size at {amount} by {v} pt a frame (zoom {zoom}, distance {distance}): {size} of {base} for {want}"
+            );
+            // the opacity alike, through the brush's opacity range and its easing
+            let (_, alpha) = drawn("speed_opacity", amount, v, zoom, distance);
+            let (_, plain_alpha) = drawn("speed_opacity", 0.0, v, zoom, distance);
+            let want_alpha = want.max(0.01).powf(crate::brush::FLOW_POWER);
+            let ratio = alpha / plain_alpha;
+            assert!((ratio - want_alpha).abs() < 0.01, "opacity at {amount} by {v}: {ratio} for {want_alpha}");
+        }
+        eprintln!("speed size against the formula: off by at most {worst}");
+        // Max at full speed: the brush's least size, as the tip of a taper
+        let (fastest, _) = drawn("speed_size", 1.0, 200.0, 1.0, 1.0);
+        assert!(fastest < 0.05 * 40.0, "{fastest}");
+    }
+
     #[test]
     fn a_speed_amount_below_zero_thins_slow_input() {
         // above 0 faster input takes away; below, slower input does
