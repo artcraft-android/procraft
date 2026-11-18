@@ -193,8 +193,9 @@ pub(crate) struct LastStroke {
     /// What it drew (canvas points) and how fast it went.
     pub(crate) drawn: Vec<Vec2>,
     pub(crate) pace: f32,
-    /// The canvas's undo steps once it was kept: anything done since changes them.
-    pub(crate) steps: u64,
+    /// Which stroke the canvas counts it as (see `Canvas::step_of_stroke`): once it is laid, its
+    /// step is the last made unless something has been done since.
+    pub(crate) stroke: u64,
     /// Its builder as it began (none for a dual brush), and its input.
     pub(crate) fresh: Option<StrokeBuilder>,
     pub(crate) samples: Vec<Sample>,
@@ -389,15 +390,15 @@ impl State {
         }
     }
 
-    /// The stroke just kept is remembered, for QuickShape on the last stroke.
+    /// The stroke just kept is remembered, for QuickShape on the last stroke. It is laid by the next
+    /// render, not here: laying it at once held the pen's lift (and the next stroke) up for as long
+    /// as the canvas took to lay it.
     pub(crate) fn remember_last_stroke(&mut self) {
         let Some(mut last) = self.began.take() else { return };
-        // its step is made now, so that a later change shows against it
-        self.flush();
         let Some(canvas) = self.canvas.as_ref() else { return };
         last.drawn = self.drawn.clone();
         last.pace = self.pace();
-        last.steps = canvas.steps_made();
+        last.stroke = canvas.strokes_ended();
         last.samples = std::mem::take(&mut self.drawn_samples);
         self.last_stroke = Some(last);
     }
@@ -719,7 +720,7 @@ impl CanvasSession {
         }
         let line = st.without_end_hook(last.shape_line(&last.samples, &last.drawn));
         let canvas = st.canvas.as_mut()?;
-        if canvas.steps_made() != last.steps || canvas.can_redo() {
+        if canvas.step_of_stroke(last.stroke) != Some(canvas.steps_made()) || canvas.can_redo() {
             return None;
         }
         let found = st.recognised(&line);

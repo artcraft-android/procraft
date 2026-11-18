@@ -254,9 +254,12 @@ impl crate::State {
         self.tracking_since = Some(now);
     }
 
-    /// See [`CanvasSession::edits`].
+    /// See [`CanvasSession::edits`]. A stroke counts from its lift, before the canvas lays it (and
+    /// its step) at the next frame.
     pub(crate) fn edits(&self) -> u64 {
-        self.revision.wrapping_add(self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made))
+        let canvas = self.canvas.as_ref();
+        let steps = canvas.map_or(0, |c| c.steps_made().wrapping_add(c.strokes_ended()));
+        self.revision.wrapping_add(steps)
     }
 
     /// Nothing under way that saving would end or cut short.

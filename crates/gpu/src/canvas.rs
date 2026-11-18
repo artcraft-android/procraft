@@ -1785,6 +1785,8 @@ struct ActiveStroke {
     layer: LayerId,
     style: StrokeStyle,
     bounds: IRect,
+    /// Which stroke ended here it is, counted as [`Canvas::strokes_ended`] (0 while it is open).
+    number: u64,
     /// Painting an adjustment on: the stamps go into the adjustment's mask, not a layer.
     pencil: bool,
     /// A dual brush's second stroke, if it has one.
@@ -2729,6 +2731,10 @@ pub struct Canvas {
     /// start lays only what comes after (see [`Canvas::replace_stamps`]); none past
     /// [`LAID_KEPT_MOST`], or for a dual brush's.
     laid: Option<Vec<Stamp>>,
+    /// How many strokes have ended here, and the last put into its layer: its number and the
+    /// undo step it made (see [`Canvas::step_of_stroke`]).
+    strokes_ended: u64,
+    stroke_step: Option<(u64, u64)>,
     ops: Vec<Op>,
     dirty: IRect,
     /// Whether the composite is made around pictures of what isn't being worked on, and them.
@@ -3080,6 +3086,8 @@ impl Canvas {
             wet_capacity: 4,
             prediction: Vec::new(),
             laid: None,
+            strokes_ended: 0,
+            stroke_step: None,
             ops: Vec::new(),
             cache_composites: false,
             caches: None,
@@ -3466,7 +3474,8 @@ impl Canvas {
         self.prediction.clear();
         self.laid = Some(Vec::new());
         let within = self.lay_within;
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None, within });
+        self.active =
+            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, number: 0, pencil: false, second: None, within });
     }
 
     /// How a laid stroke is marked in this canvas's stroke (see `STROKE_LAID`).
@@ -3780,12 +3789,26 @@ impl Canvas {
         self.prediction.clear();
         self.laid = None;
         self.untip();
-        if let Some(active) = self.active.take() {
+        if let Some(mut active) = self.active.take() {
             self.last_ended = Some((active.bounds, active.style.in_place()));
             if !self.measuring {
+                self.strokes_ended += 1;
+                active.number = self.strokes_ended;
                 self.ops.push(Op::Commit(active));
             }
         }
+    }
+
+    /// How many strokes have ended here: the last one's number, for [`Canvas::step_of_stroke`].
+    pub fn strokes_ended(&self) -> u64 {
+        self.strokes_ended
+    }
+
+    /// The undo step stroke `number` (see [`Canvas::strokes_ended`]) made, once it has been put
+    /// into its layer, if it is the last stroke put into one and made a step (one painted on an
+    /// adjustment, or that laid nothing, makes none).
+    pub fn step_of_stroke(&self, number: u64) -> Option<u64> {
+        self.stroke_step.filter(|&(n, _)| n == number).map(|(_, step)| step)
     }
 
     /// Strokes begun from now on lay their pixels only within `rect` (none: wherever they reach),
@@ -3914,7 +3937,9 @@ impl Canvas {
         self.prediction.clear();
         self.laid = None;
         self.untip();
-        if let Some(active) = self.active.take() {
+        if let Some(mut active) = self.active.take() {
+            self.strokes_ended += 1;
+            active.number = self.strokes_ended;
             self.ops.push(Op::Within(rects));
             self.ops.push(Op::Commit(active));
         }
@@ -5008,8 +5033,15 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active =
-            Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None, within: None });
+        self.active = Some(ActiveStroke {
+            layer,
+            style,
+            bounds: IRect::EMPTY,
+            number: 0,
+            pencil: true,
+            second: None,
+            within: None,
+        });
     }
 
     /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
@@ -5479,6 +5511,11 @@ impl Canvas {
             if let Op::Commit(stroke) = &op {
                 committed.push(stroke.layer);
             }
+            // the step a stroke put into its layer makes, noted for `step_of_stroke`
+            let ending = match &op {
+                Op::Commit(stroke) => Some((stroke.number, self.steps_made)),
+                _ => None,
+            };
             // a stroke ends: the next has a second only if it says so
             if matches!(op, Op::Commit(_) | Op::Cancel) {
                 self.queued_second = None;
@@ -6417,6 +6454,11 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
+            }
+            if let Some((number, before)) = ending
+                && self.steps_made > before
+            {
+                self.stroke_step = Some((number, self.steps_made));
             }
         }
         if history_changed {

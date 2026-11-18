@@ -2126,7 +2126,7 @@ impl CanvasSession {
                 pointer,
                 drawn: Vec::new(),
                 pace: quickshape::SAMPLE_PACE,
-                steps: 0,
+                stroke: 0,
                 fresh: second.is_none().then(|| builder.clone()),
                 samples: Vec::new(),
                 line: builder.clone(),
@@ -2278,10 +2278,12 @@ impl CanvasSession {
         st.redraw_painted_on();
         st.bake_painted_on();
         st.remember_last_stroke();
+        // plugins told it was kept, before the next touch is taken: whether any listens is asked
+        // now, as taking the canvas again after would wait on the frame laying the stroke
+        let told = tells && st.hooks.as_ref().is_some_and(|h| h.listens(plugin_run::Hook::StrokeKept));
         self.shared.frame(st);
         drop(guard);
-        // plugins told it was kept, before the next touch is taken
-        if tells {
+        if told {
             self.tell_plugins(plugin_run::Hook::StrokeKept);
         }
     }
