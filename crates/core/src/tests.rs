@@ -15497,6 +15497,66 @@ fn brush_previews_come_out_the_same_on_a_device_starved_of_memory_and_threads() 
     assert_eq!(gpu.errors(), 0);
 }
 
+/// A dual brush whose second reaches past its first (a Normal second shows on its own, in the
+/// stroke's colour) keeps all of its second's paint as the stroke ends: dry, blending with burnt
+/// edges (an outline pen's way), laid in place, light and dark. The stroke laid again from scratch
+/// as it ended had kept only where its first reached, and the second was cut off along straight
+/// lines round the first.
+#[test]
+fn a_dual_brush_s_second_reaching_past_its_first_is_kept_whole_as_the_stroke_ends() {
+    use procraft_engine::brush::{Brush, Taper};
+    let Some(s) = session(240, 240) else { return };
+    let round = |max_size: f32| Brush {
+        max_size,
+        min_size: 0.0,
+        streamline: 0.0,
+        pressure_smoothing: 0.0,
+        pen_taper: Taper::NONE,
+        touch_taper: Taper::NONE,
+        ..Brush::round_pen()
+    };
+    let kinds = [("dry", 0.0, 0.0), ("blending, burnt edges", 5.0, 1.0), ("laid in place", 4.0, 0.0)];
+    for (kind, mode, burnt) in kinds {
+        for colour in [0.1, 1.0] {
+            let mut first = Brush { secondary: Some(Box::new(round(80.0))), ..round(24.0) };
+            first.set_setting("dual_blend", 0.0);
+            first.set_setting("rendering_mode", mode);
+            first.set_setting("burnt_edges", burnt);
+            {
+                let mut st = s.shared.lock();
+                let (set, index) = st.paint_brush;
+                st.library[set].brushes[index] = first;
+            }
+            s.set_brush_size(1.0);
+            s.set_color(colour, colour * 0.5, 0.2);
+            s.clear_layer();
+            s.stroke_begin(PointerKind::Finger, vec![sample(70.0, 120.0, 0.0)]);
+            for k in 1..=25 {
+                s.stroke_add(vec![sample(70.0 + k as f32 * 4.0, 120.0, f64::from(k) * 8.0)]);
+                if k % 5 == 0 {
+                    let _ = pixel(&s, 0, 0);
+                }
+            }
+            s.stroke_end(vec![]);
+            let _ = pixel(&s, 0, 0);
+            let id = s.shared.lock().doc.current();
+            let px = s.copy_layer_contents(id.0).unwrap().rgba;
+            let alpha = |x: u32, y: u32| px.get(((y * 240 + x) * 4 + 3) as usize).copied().unwrap_or(0);
+            // across the stroke's middle: the second's paint 20 to 36 pixels off the path, where
+            // its first (24 across) never reaches, up and down alike and with no step where
+            // the first's reach ends
+            let column: Vec<u8> = (80..=160).map(|y| alpha(120, y)).collect();
+            let (above, below) = (alpha(120, 120 - 30), alpha(120, 120 + 30));
+            let steepest = column.windows(2).map(|w| w[0].abs_diff(w[1])).max().unwrap_or(0);
+            eprintln!("{kind}, {colour}: 30 off the path {above} and {below}, steepest step {steepest}");
+            assert!(above > 200 && below > 200, "{kind}, {colour}: the second's paint cut off ({above}, {below})");
+            // past the stroke's ends too
+            let (before, after) = (alpha(70 - 30, 120), alpha(170 + 30, 120));
+            assert!(before > 200 && after > 200, "{kind}, {colour}: cut off past its ends ({before}, {after})");
+        }
+    }
+}
+
 /// Wet paint that keeps what it has laid tile by tile (building up gradually, it keeps how much
 /// each pixel has taken; with a second brush, its paint laid apart) comes out pixel for pixel the
 /// same where a copy from a texture can put its rows in a buffer only at multiples of 512 bytes,
