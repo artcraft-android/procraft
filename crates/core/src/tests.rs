@@ -15172,7 +15172,7 @@ fn strokes_laid_by_their_rule_draw_alike_through_vulkan_and_direct3d() {
     }
     let by_rule = |b: &Brush| {
         matches!(b.rendering, Rendering::Gradual | Rendering::Capped)
-            && b.grain.image.is_some()
+            && (b.grain.image.is_some() || b.grain.source.is_some())
             && b.grain.mode == GrainMode::Texturized
             && !b.mixes_wet()
     };
