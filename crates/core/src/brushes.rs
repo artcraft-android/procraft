@@ -29,6 +29,60 @@ static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), 
 /// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
 static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Draws the pictures `brushes` stand in with that are still to be drawn (each brush's shape and
+/// grain, and its second's), on a thread of their own: a brush chosen is ready by its first stroke,
+/// which otherwise waits for them under the canvas's lock. What a stroke or preview wants first is
+/// drawn once, by whichever gets to it first.
+pub(crate) fn warm_pictures<'a>(brushes: impl IntoIterator<Item = &'a procraft_engine::brush::Brush>) {
+    let waiting = undrawn(brushes);
+    if waiting.is_empty() {
+        return;
+    }
+    let thread = std::thread::Builder::new().name("procraft-brush-pictures".to_owned());
+    if let Err(e) = thread.spawn(move || draw_side_by_side(&waiting)) {
+        log::warn!("drawing a brush's pictures ahead: {e}");
+    }
+}
+
+/// Draws `brush`'s pictures still to be drawn now, side by side (see [`warm_pictures`]).
+pub(crate) fn draw_pictures(brush: &procraft_engine::brush::Brush) {
+    draw_side_by_side(&undrawn([brush]));
+}
+
+/// The pictures of `brushes` (each one's shape and grain, and its second's) still to be drawn.
+fn undrawn<'a>(
+    brushes: impl IntoIterator<Item = &'a procraft_engine::brush::Brush>,
+) -> Vec<procraft_engine::brush::Pixels> {
+    brushes
+        .into_iter()
+        .flat_map(|b| [Some(b), b.secondary.as_deref()])
+        .flatten()
+        .flat_map(|b| [&b.shape.source, &b.grain.source])
+        .flatten()
+        .filter(|s| !s.pixels.is_drawn())
+        .map(|s| s.pixels.clone())
+        .collect()
+}
+
+/// Draws `pictures`, each on a thread of its own (one on this one).
+fn draw_side_by_side(pictures: &[procraft_engine::brush::Pixels]) {
+    let Some((first, rest)) = pictures.split_first() else { return };
+    std::thread::scope(|s| {
+        for p in rest {
+            s.spawn(move || drop(p.shared()));
+        }
+        drop(first.shared());
+    });
+}
+
+impl crate::State {
+    /// The tools' brushes' pictures drawn ahead (see [`warm_pictures`]).
+    pub(crate) fn warm_tools_brushes(&self) {
+        use crate::ToolKind;
+        warm_pictures([ToolKind::Paint, ToolKind::Smudge, ToolKind::Erase].map(|tool| self.brush(tool)));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BrushInfo {
     pub set: u32,
@@ -279,6 +333,7 @@ impl CanvasSession {
             crate::ToolKind::Smudge => st.smudge_brush = (set, index),
         }
         st.note_choice((set, index));
+        warm_pictures([st.brush(st.tool)]);
         true
     }
 
@@ -413,6 +468,7 @@ impl CanvasSession {
             style = style.dry();
         }
         style.preview = true;
+        draw_pictures(&brush);
         canvas.use_sources(&gpu, &mut style, &brush);
         self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's

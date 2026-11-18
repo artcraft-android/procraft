@@ -962,6 +962,8 @@ impl State {
         style.secondary = paint.secondary;
         style.preview = preview;
         style.wetness = StrokeStyle::wetness_at(sliders.opacity);
+        // (any picture not drawn ahead drawn now, side by side)
+        crate::brushes::draw_pictures(&brush);
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
         }
@@ -2512,6 +2514,7 @@ impl CanvasSession {
             st.previous_tool = Some(st.tool);
         }
         st.tool = tool;
+        crate::brushes::warm_pictures([st.brush(tool)]);
     }
 
     /// The paint colour, sRGB 0..1 (red, green, blue).

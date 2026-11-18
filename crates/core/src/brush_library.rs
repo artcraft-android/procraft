@@ -1459,6 +1459,8 @@ impl CanvasSession {
             drop(st);
             crate::brush_pictures::forget_unnamed(&dir.join(crate::brush_pictures::FOLDER), &libraries);
         }
+        // the tools' brushes ready by the first stroke
+        self.shared.lock().warm_tools_brushes();
         loaded
     }
 }
