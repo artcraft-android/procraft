@@ -13,12 +13,11 @@
 //! - Liquify: its stamps' sums and its field in integers ([`LiquifyBits`]).
 
 use procraft_engine::geom::IRect;
-use wgpu::util::DeviceExt;
 
 use super::{
-    Canvas, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, SMUDGE_GRID, SMUDGE_UNIFORM_SIZE,
-    SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData, WET_PASS_SIZE, WET_PLOT_MOST, WET_PLOTS_TEXELS, by_rule,
-    copy_at, extent, quad_reach, rule_tiles, smudge, texture,
+    Canvas, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, RULE_LISTS_KEPT, SMUDGE_GRID,
+    SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData, WET_PASS_SIZE, WET_PLOT_MOST,
+    WET_PLOTS_TEXELS, by_rule, copy_at, extent, quad_reach, rule_lists, smudge, texture,
 };
 use crate::Gpu;
 
@@ -350,8 +349,29 @@ pub(super) struct BuiltUp {
 pub(super) struct Fragments {
     built: Vec<BuiltUp>,
     rule_out: Option<[(wgpu::Texture, wgpu::TextureView); 2]>,
+    /// The rule's lists, kept from render to render as the compute passes' are (see
+    /// `super::RuleLists`), taken in turn from the next.
+    pub(super) rule_lists: Vec<RuleList>,
+    rule_next: usize,
     tip_backup: Option<wgpu::Texture>,
     spares: Option<Spares>,
+}
+
+/// A list of the rule's tiles kept for the fragment passes: its words in a texture, the stamps it
+/// lists in a uniform buffer beside it, and its bind group with what that binds besides.
+pub(super) struct RuleList {
+    tiles: Tex,
+    stamps: wgpu::Buffer,
+    bind: Option<(RuleBinds, wgpu::BindGroup)>,
+}
+
+/// What a fragment rule pass's bind group binds besides its list: the uniforms, the stroke as it
+/// shows and its build-up.
+#[derive(Clone, PartialEq)]
+pub(super) struct RuleBinds {
+    uniforms: wgpu::Buffer,
+    shown: wgpu::TextureView,
+    built: wgpu::TextureView,
 }
 
 /// The most build-ups a canvas keeps (see [`Fragments`]).
@@ -361,7 +381,14 @@ impl Fragments {
     /// The textures it holds.
     pub(super) fn textures(&self) -> Vec<&wgpu::Texture> {
         let outs = self.rule_out.iter().flat_map(|pair| pair.iter().map(|(t, _)| t));
-        self.built.iter().map(|b| &b.texture).chain(outs).chain(self.tip_backup.as_ref()).collect()
+        let lists = self.rule_lists.iter().map(|l| &l.tiles.texture);
+        self.built.iter().map(|b| &b.texture).chain(outs).chain(lists).chain(self.tip_backup.as_ref()).collect()
+    }
+
+    /// A render begins: the rule's lists free for its work again, as many kept as are to be.
+    pub(super) fn rule_lists_begin(&mut self) {
+        self.rule_lists.truncate(RULE_LISTS_KEPT);
+        self.rule_next = 0;
     }
 }
 
@@ -441,19 +468,20 @@ impl Canvas {
         })
     }
 
-    /// Lays `instances` into the stroke texture `texture` by `rule` (see
+    /// Lays `instances` into the stroke texture `texture` (`shown` its view) by `rule` (see
     /// [`Canvas::fragment_rule`]) in fragment passes: a part of the canvas at most
-    /// [`super::RULE_PART`] pixels a side at a time, each pixel going through the stamps over its
-    /// tile in order as its paint stands after each (its build-up, where nothing else drew there
-    /// since), at most [`RULE_STAMPS_MOST`] stamps a pass; then the part copied into the stroke and
-    /// its build-up.
+    /// [`super::RULE_PART`] pixels a side at a time (smaller where its list would be longer than
+    /// a list may be: see `super::rule_lists`), each pixel going through the stamps over its tile
+    /// in order as its paint stands after each (its build-up, where nothing else drew there since),
+    /// at most [`RULE_STAMPS_MOST`] stamps a pass; then the part copied into the stroke and its
+    /// build-up. A part whose list couldn't be made (past the GPU's memory) is left out, said once.
     pub(super) fn lay_by_rule_in_fragments(
         &mut self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         (uniform, brush): (u32, &wgpu::BindGroup),
         instances: &[StampInstance],
-        texture: &wgpu::Texture,
+        (texture, shown): (&wgpu::Texture, &wgpu::TextureView),
         rule: u32,
     ) {
         let device = &gpu.device;
@@ -477,100 +505,148 @@ impl Canvas {
             None
         };
         let spare = self.spares(device).word.view.clone();
-        let built_view = built.as_ref().map_or(&spare, |(_, view)| view);
-        let shown = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let binds = RuleBinds {
+            uniforms: self.uniform_buffer.clone(),
+            shown: shown.clone(),
+            built: built.as_ref().map_or(spare, |(_, view)| view.clone()),
+        };
+        // as many rows of words as a texture may have
+        let rows_most = device.limits().max_texture_dimension_2d;
+        let most = self.rule_list_most.min(usize::try_from(RULE_ROW * rows_most).unwrap_or(usize::MAX));
         let full = self.full();
         for chunk in instances.chunks(RULE_STAMPS_MOST) {
             let bounds = chunk.iter().fold(IRect::EMPTY, |b, s| b.union(quad_reach(s))).intersect(full);
-            let mut data = bytemuck::cast_slice::<StampInstance, u8>(chunk).to_vec();
-            data.resize(RULE_STAMPS_BYTES as usize, 0);
-            let stamps = uniform_buffer(gpu, "stamp rule stamps", &data);
+            let mut stamps = bytemuck::cast_slice::<StampInstance, u8>(chunk).to_vec();
+            stamps.resize(RULE_STAMPS_BYTES as usize, 0);
             let step = part as i32;
             let mut y0 = bounds.y0;
             while y0 < bounds.y1 {
                 let mut x0 = bounds.x0;
                 while x0 < bounds.x1 {
-                    let rect = IRect { x0, y0, x1: (x0 + step).min(bounds.x1), y1: (y0 + step).min(bounds.y1) };
+                    let whole = IRect { x0, y0, x1: (x0 + step).min(bounds.x1), y1: (y0 + step).min(bounds.y1) };
                     x0 += step;
-                    let Some(mut words) = rule_tiles(chunk, 0, rect, rule) else { continue };
-                    let rows = (words.len() as u32).div_ceil(RULE_ROW);
-                    words.resize((rows * RULE_ROW) as usize, 0);
-                    let tiles = device.create_texture_with_data(
-                        &gpu.queue,
-                        &wgpu::TextureDescriptor {
-                            label: Some("stamp rule tiles"),
-                            size: extent(RULE_ROW, rows),
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::R32Uint,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                            view_formats: &[],
-                        },
-                        wgpu::util::TextureDataOrder::LayerMajor,
-                        bytemuck::cast_slice(&words),
-                    );
-                    let tiles_view = tiles.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("stamp rule in fragments"),
-                        layout: &fragments.rule_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &self.uniform_buffer,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(UNIFORM_SIZE),
-                                }),
-                            },
-                            wgpu::BindGroupEntry { binding: 1, resource: stamps.as_entire_binding() },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&tiles_view),
-                            },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&shown) },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::TextureView(built_view),
-                            },
-                        ],
-                    });
-                    let attachment = |view| {
-                        Some(wgpu::RenderPassColorAttachment {
-                            view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                        })
-                    };
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("stamp rule in fragments"),
-                        color_attachments: &[
-                            attachment(&out8_view),
-                            if eight { attachment(&out16_view) } else { None },
-                        ],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-                    pass.set_scissor_rect(0, 0, rect.width(), rect.height());
-                    pass.set_pipeline(&fragments.rule);
-                    pass.set_bind_group(0, &bind, &[uniform]);
-                    pass.set_bind_group(1, brush, &[]);
-                    pass.draw(0..3, 0..1);
-                    drop(pass);
-                    let size = extent(rect.width(), rect.height());
-                    encoder.copy_texture_to_texture(copy_at(&out8, 0, 0), copy_at(texture, rect.x0, rect.y0), size);
-                    if let Some((built, _)) = &built {
-                        encoder.copy_texture_to_texture(copy_at(&out16, 0, 0), copy_at(built, rect.x0, rect.y0), size);
+                    for (rect, words) in rule_lists(chunk, 0, whole, rule, most) {
+                        let Some(bind) =
+                            self.fragment_rule_list(gpu, (&words, &stamps), &binds, &fragments.rule_layout)
+                        else {
+                            continue;
+                        };
+                        let attachment = |view| {
+                            Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                            })
+                        };
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("stamp rule in fragments"),
+                            color_attachments: &[
+                                attachment(&out8_view),
+                                if eight { attachment(&out16_view) } else { None },
+                            ],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_scissor_rect(0, 0, rect.width(), rect.height());
+                        pass.set_pipeline(&fragments.rule);
+                        pass.set_bind_group(0, &bind, &[uniform]);
+                        pass.set_bind_group(1, brush, &[]);
+                        pass.draw(0..3, 0..1);
+                        drop(pass);
+                        let size = extent(rect.width(), rect.height());
+                        encoder.copy_texture_to_texture(copy_at(&out8, 0, 0), copy_at(texture, rect.x0, rect.y0), size);
+                        if let Some((built, _)) = &built {
+                            encoder.copy_texture_to_texture(
+                                copy_at(&out16, 0, 0),
+                                copy_at(built, rect.x0, rect.y0),
+                                size,
+                            );
+                        }
                     }
                 }
                 y0 += step;
             }
         }
     }
+
+    /// The bind group for the next part of this render's fragment rule passes, its list holding
+    /// `words` and the stamps it lists `stamps` (both written through the queue): a kept list,
+    /// grown if it is too small, bound with `binds`. None if it couldn't be made, said once.
+    fn fragment_rule_list(
+        &mut self,
+        gpu: &Gpu,
+        (words, stamps): (&[u32], &[u8]),
+        binds: &RuleBinds,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Option<wgpu::BindGroup> {
+        let device = &gpu.device;
+        let rows = u32::try_from(words.len().div_ceil(RULE_ROW as usize)).unwrap_or(u32::MAX).max(1);
+        let at = self.fragments.rule_next;
+        self.rule_lists.largest = self.rule_lists.largest.max(words.len());
+        let roomy = self.fragments.rule_lists.get(at).is_some_and(|l| l.tiles.texture.height() >= rows);
+        if !roomy {
+            // in steps, so that a list a little longer than the last doesn't make one each frame
+            let tall =
+                rows.next_power_of_two().max(RULE_ROWS_LEAST).min(device.limits().max_texture_dimension_2d).max(rows);
+            let list = self.made_or_told(device, |device| RuleList {
+                tiles: Tex::new(device, "stamp rule tiles", RULE_ROW, tall, wgpu::TextureFormat::R32Uint),
+                stamps: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("stamp rule stamps"),
+                    size: RULE_STAMPS_BYTES,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                bind: None,
+            })?;
+            match self.fragments.rule_lists.get_mut(at) {
+                Some(kept) => *kept = list,
+                None => self.fragments.rule_lists.push(list),
+            }
+        }
+        self.fragments.rule_next += 1;
+        let list = self.fragments.rule_lists.get_mut(at)?;
+        let mut padded = words.to_vec();
+        padded.resize((rows * RULE_ROW) as usize, 0);
+        gpu.queue.write_texture(
+            copy_at(&list.tiles.texture, 0, 0),
+            bytemuck::cast_slice(&padded),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(RULE_ROW * 4), rows_per_image: Some(rows) },
+            extent(RULE_ROW, rows),
+        );
+        gpu.queue.write_buffer(&list.stamps, 0, stamps);
+        if let Some((bound, bind)) = &list.bind
+            && bound == binds
+        {
+            return Some(bind.clone());
+        }
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stamp rule in fragments"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &binds.uniforms,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(UNIFORM_SIZE),
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: list.stamps.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&list.tiles.view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&binds.shown) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&binds.built) },
+            ],
+        });
+        list.bind = Some((binds.clone(), bind.clone()));
+        Some(bind)
+    }
 }
+
+/// The fewest rows a fragment rule list's texture is made with.
+const RULE_ROWS_LEAST: u32 = 16;
 
 /// A texture and its view.
 #[derive(Clone)]

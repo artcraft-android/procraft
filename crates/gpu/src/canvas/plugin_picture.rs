@@ -14,8 +14,6 @@ use std::borrow::Cow;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use wgpu::util::DeviceExt;
-
 use super::plugin_filter::{BIG_STACK, COMPILE_LIMIT, FilterCode, PICTURE, PICTURE_6, PICTURE_PLACES, read_kind};
 use super::{blended_pipeline, read_texture, render_pass, texture};
 use crate::{Gpu, GpuError};
@@ -191,11 +189,7 @@ impl Gpu {
         } else {
             bytemuck::bytes_of(&PictureUniform { a: [hue, 0.0, 0.0, 0.0], size }).to_vec()
         };
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("plugin picture"),
-            contents: &contents,
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let buffer = super::buffer_init(device, "plugin picture", &contents, wgpu::BufferUsages::UNIFORM);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("plugin picture"),
             layout: &program.layout,

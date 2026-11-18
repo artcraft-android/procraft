@@ -591,16 +591,18 @@ impl MeshView {
         let vertices: Vec<VertexGpu> =
             mesh.vertices.iter().map(|v| VertexGpu { position: v.position, normal: v.normal, uv: v.uv }).collect();
         let indices: Vec<u32> = mesh.triangles.iter().flatten().copied().collect();
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh indices"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let vertex_buffer = crate::canvas::buffer_init(
+            device,
+            "mesh vertices",
+            bytemuck::cast_slice(&vertices),
+            wgpu::BufferUsages::VERTEX,
+        );
+        let index_buffer = crate::canvas::buffer_init(
+            device,
+            "mesh indices",
+            bytemuck::cast_slice(&indices),
+            wgpu::BufferUsages::INDEX,
+        );
         let texture_entry = |binding, view_dimension| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -727,14 +729,15 @@ impl MeshView {
             .map(|(i, p)| {
                 // the material's own colour, roughness and metalness under what is painted
                 let ([r, g, b], roughness, metallic) = mesh.surface(i);
-                let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mesh part"),
-                    contents: bytemuck::bytes_of(&PartUniform {
+                let uniform = crate::canvas::buffer_init(
+                    device,
+                    "mesh part",
+                    bytemuck::bytes_of(&PartUniform {
                         base: [r, g, b, 1.0],
                         material: [roughness, metallic, 0.0, 0.0],
                     }),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                );
                 // nothing painted yet: its base colour shows through a clear albedo
                 let views = [blank.clone(), blank.clone(), blank.clone(), blank.clone(), blank.clone()];
                 let bind = part_bind(device, &part_layout, &sampler, &views, &uniform);

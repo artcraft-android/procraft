@@ -803,6 +803,96 @@ fn quad_reach(s: &StampInstance) -> IRect {
     IRect::around(at, (r + 1.0) * std::f32::consts::SQRT_2 + 1.0)
 }
 
+/// The lists of tiles the rule's passes read (see [`Canvas::lay_by_rule`]), kept from render to
+/// render: each part of a render's work reads one of its own (the queue writes them all before
+/// that work runs), taken in turn from `next`, each grown to the most a part has listed in it; and
+/// each one's bind group, kept with what it binds. Past [`RULE_LISTS_KEPT`] a render makes the rest
+/// for itself.
+#[derive(Default)]
+struct RuleLists {
+    kept: Vec<RuleList>,
+    next: usize,
+    /// Whether a list (or what the rule's passes write to) that couldn't be made has been said.
+    told: bool,
+    /// The most words a list has held.
+    largest: usize,
+}
+
+impl RuleLists {
+    /// A render begins: each list is free for its work again, as many kept as are to be.
+    fn begin(&mut self) {
+        self.kept.truncate(RULE_LISTS_KEPT);
+        self.next = 0;
+    }
+}
+
+/// A list of the rule's tiles kept (see [`RuleLists`]), and its bind group with what it binds.
+struct RuleList {
+    buffer: wgpu::Buffer,
+    bind: Option<(RuleBinds, wgpu::BindGroup)>,
+}
+
+/// What a rule pass's bind group binds besides its list (made again when any of it changes): the
+/// uniforms, the frame's stamps, the stroke as it stands and where the part goes.
+#[derive(Clone, PartialEq)]
+struct RuleBinds {
+    uniforms: wgpu::Buffer,
+    stamps: wgpu::Buffer,
+    target: wgpu::TextureView,
+    out: wgpu::Buffer,
+}
+
+/// The most lists of the rule's tiles kept between renders (see [`RuleLists`]).
+const RULE_LISTS_KEPT: usize = 8;
+
+/// The most words a list of the rule's tiles holds (8 MB): a part of the canvas whose list would
+/// hold more is laid in smaller parts (see [`rule_lists`]). A sample stroke of thousands of big
+/// stamps took hundreds of MB in one, past what a phone could make.
+const RULE_LIST_MOST: usize = 1 << 21;
+
+/// The fewest bytes a list of the rule's tiles is made with.
+const RULE_LIST_LEAST: u64 = 64 << 10;
+
+/// A buffer for a list of the rule's tiles, `size` bytes.
+fn rule_list_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    #[cfg(test)]
+    let size = if tests::fails("stamp rule tiles") { device.limits().max_buffer_size.saturating_add(4) } else { size };
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("stamp rule tiles"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// The lists of the rule's tiles (see [`rule_tiles`]) for part `rect` of the canvas, each with
+/// the part it is for: as many as it takes for none to hold more than `most` words, a part whose
+/// list would be cut in four on its tiles' edges. Every stamp over a pixel is in its part's list,
+/// so a pixel comes out the same however its part is cut.
+fn rule_lists(instances: &[StampInstance], first: u32, rect: IRect, rule: u32, most: usize) -> Vec<(IRect, Vec<u32>)> {
+    let mut lists = Vec::new();
+    let mut todo = vec![rect];
+    while let Some(r) = todo.pop() {
+        let Some(list) = rule_tiles(instances, first, r, rule) else { continue };
+        let (wide, tall) = (r.width() > RULE_TILE, r.height() > RULE_TILE);
+        if list.len() <= most || !(wide || tall) {
+            lists.push((r, list));
+            continue;
+        }
+        let half = |from: i32, n: u32| from + i32::try_from((n / 2).div_ceil(RULE_TILE) * RULE_TILE).unwrap_or(0);
+        let mx = if wide { half(r.x0, r.width()) } else { r.x1 };
+        let my = if tall { half(r.y0, r.height()) } else { r.y1 };
+        let quarters = [
+            IRect::new(mx, my, r.x1, r.y1),
+            IRect::new(r.x0, my, mx, r.y1),
+            IRect::new(mx, r.y0, r.x1, my),
+            IRect::new(r.x0, r.y0, mx, my),
+        ];
+        todo.extend(quarters.into_iter().filter(|q| !q.is_empty()));
+    }
+    lists
+}
+
 /// What the rule shader is given for a part `part` of the canvas: its corner, tiles across and
 /// the rule, then each tile's first stamp and count in the list after the table, then the list:
 /// the stamps (as their places among the frame's, `first` on) whose quads reach each tile, in
@@ -2399,6 +2489,12 @@ pub struct Canvas {
     /// Where stamps laid by their stroke's rule go before their part of the stroke takes them
     /// (see [`Canvas::lay_by_rule`]), made when first wanted.
     rule_out: Option<wgpu::Buffer>,
+    /// The lists of tiles the rule's passes read (see [`RuleLists`]), and the most words one may
+    /// hold (see [`RULE_LIST_MOST`]).
+    rule_lists: RuleLists,
+    rule_list_most: usize,
+    /// Work was left out since last asked, for want of what it takes on the GPU.
+    work_left_out: bool,
     /// What the fragment passes keep, on a GPU that has them in place of the compute passes.
     fragments: fragments::Fragments,
     /// The finished composite, and the other half of its ping-pong pair: where a layer of a
@@ -2494,6 +2590,8 @@ pub struct Canvas {
     stamps_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
+    /// Compute dispatches recorded for smudges, paint laid in place and stamps laid by their rule.
+    dispatched: AtomicU64,
     /// How the last plugin filter's draw went, not yet asked for.
     filter_run: Option<plugin_filter::FilterRun>,
     /// How many times the composite has been redrawn.
@@ -2826,6 +2924,9 @@ impl Canvas {
             tip: None,
             tip_backup: None,
             rule_out: None,
+            rule_lists: RuleLists::default(),
+            rule_list_most: RULE_LIST_MOST,
+            work_left_out: false,
             fragments: fragments::Fragments::default(),
             composite,
             composite_view,
@@ -2868,6 +2969,7 @@ impl Canvas {
             placed_copies: false,
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
+            dispatched: AtomicU64::new(0),
             filter_run: None,
             composites: 0,
             active: None,
@@ -3758,6 +3860,13 @@ impl Canvas {
     /// The most stamps one buffer of this device holds.
     fn stamps_in_a_buffer(device: &wgpu::Device) -> u64 {
         (device.limits().max_buffer_size / size_of::<StampInstance>() as u64).max(1)
+    }
+
+    /// How many compute dispatches smudges, paint laid in place and stamps laid by their rule have
+    /// recorded: for tests.
+    #[doc(hidden)]
+    pub fn compute_dispatches(&self) -> u64 {
+        self.dispatched.load(Ordering::Relaxed)
     }
 
     /// How many pieces of work were sent early, there being too much for one: for tests.
@@ -5145,6 +5254,9 @@ impl Canvas {
         });
         let depth = flattening.max().unwrap_or(0);
         self.make_groups(device, depth);
+        // the rule's lists free for this render's work (what read them before has been sent)
+        self.rule_lists.begin();
+        self.fragments.rule_lists_begin();
         // no more stamps than one upload takes (room left for the predicted tail): the rest wait for
         // a render after this one's
         let most_stamps = self.stamps_at_once.min(Self::stamps_in_a_buffer(device) / 2).max(1);
@@ -5341,22 +5453,24 @@ impl Canvas {
                     let in_fragments = self.pipelines.fragments.is_some();
                     let rule = by_rule(style.rendering).filter(|_| self.pipelines.compute.is_some());
                     if rule.is_some() && count > 0 && self.rule_out.is_none() {
-                        self.rule_out = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("stamp rule"),
-                            size: u64::from(RULE_PART * RULE_PART) * 8,
-                            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                            mapped_at_creation: false,
-                        }));
+                        self.rule_out = self.made_or_told(device, |device| {
+                            device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("stamp rule"),
+                                size: u64::from(RULE_PART * RULE_PART) * 8,
+                                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                                mapped_at_creation: false,
+                            })
+                        });
                     }
                     let (texture, target) = match (&self.pencil, pencil) {
                         _ if second => self.second_stroke.get(device),
                         (Some(mask), true) => (&mask.texture, &mask.view),
                         _ => (&self.stroke, &self.stroke_view),
                     };
+                    let (texture, target) = (texture.clone(), target.clone());
                     if in_fragments {
-                        let texture = texture.clone();
                         if clear {
-                            drop(render_pass(&mut encoder, "stamps clear", target, load));
+                            drop(render_pass(&mut encoder, "stamps clear", &target, load));
                             self.clear_built_up(&mut encoder, &texture);
                         }
                         if count > 0 {
@@ -5367,26 +5481,26 @@ impl Canvas {
                                 &mut encoder,
                                 (offset, &brush),
                                 &instances,
-                                &texture,
+                                (&texture, &target),
                                 rule,
                             );
                         }
                     } else if let (Some(rule), true) = (rule, count > 0) {
                         if clear {
-                            drop(render_pass(&mut encoder, "stamps clear", target, load));
+                            drop(render_pass(&mut encoder, "stamps clear", &target, load));
                         }
-                        let brush = own_grain.as_ref().unwrap_or(&self.brush_bind);
+                        let brush = own_grain.clone().unwrap_or_else(|| self.brush_bind.clone());
                         self.lay_by_rule(
-                            device,
+                            gpu,
                             &mut encoder,
-                            (offset, brush),
+                            (offset, &brush),
                             &instances,
                             first,
-                            (texture, target),
+                            (&texture, &target),
                             rule,
                         );
                     } else {
-                        let mut pass = render_pass(&mut encoder, "stamps", target, load);
+                        let mut pass = render_pass(&mut encoder, "stamps", &target, load);
                         if count > 0 {
                             pass.set_pipeline(match style.rendering {
                                 Rendering::Strongest => &self.pipelines.stamp_max,
@@ -8257,15 +8371,15 @@ impl Canvas {
         *uniforms = UniformData::default();
     }
 
-    /// Sends the work recorded so far with the three kinds of uniforms a render's painting uses,
-    /// going on with a new encoder (see [`WORK_AT_ONCE`]).
     /// Lays `instances` (the frame's stamps from `first` on, uploaded already) into `target` by
     /// their stroke's `rule` pixel by pixel (see [`by_rule`]): a part of the canvas at most
-    /// [`RULE_PART`] pixels a side at a time, each pixel going through the stamps over its tile in
-    /// order as its own paint stands after each, then the part copied into the stroke.
+    /// [`RULE_PART`] pixels a side at a time (smaller where its list of tiles would hold more than
+    /// a list may: see [`rule_lists`]), each pixel going through the stamps over its tile in order
+    /// as its own paint stands after each, then the part copied into the stroke. A part whose list
+    /// couldn't be made (past the GPU's memory) is left out, and that said once.
     fn lay_by_rule(
-        &self,
-        device: &wgpu::Device,
+        &mut self,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         (uniform, brush): (u32, &wgpu::BindGroup),
         instances: &[StampInstance],
@@ -8273,67 +8387,158 @@ impl Canvas {
         (texture, target): (&wgpu::Texture, &wgpu::TextureView),
         rule: u32,
     ) {
-        use wgpu::util::DeviceExt;
-        let Some(out) = self.rule_out.as_ref() else { return };
-        let Some(compute) = self.pipelines.compute.as_ref() else { return };
+        let Some(out) = self.rule_out.clone() else { return };
+        let pipelines = Arc::clone(&self.pipelines);
+        let Some(compute) = pipelines.compute.as_ref() else { return };
+        let limits = gpu.device.limits();
+        let room = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size) / 4;
+        let most = self.rule_list_most.min(usize::try_from(room).unwrap_or(usize::MAX));
+        let binds = RuleBinds {
+            uniforms: self.uniform_buffer.clone(),
+            stamps: self.stamp_buffer.clone(),
+            target: target.clone(),
+            out: out.clone(),
+        };
         let bounds = instances.iter().fold(IRect::EMPTY, |b, s| b.union(quad_reach(s))).intersect(self.full());
         let part = RULE_PART as i32;
         let mut y0 = bounds.y0;
         while y0 < bounds.y1 {
             let mut x0 = bounds.x0;
             while x0 < bounds.x1 {
-                let rect = IRect { x0, y0, x1: (x0 + part).min(bounds.x1), y1: (y0 + part).min(bounds.y1) };
+                let whole = IRect { x0, y0, x1: (x0 + part).min(bounds.x1), y1: (y0 + part).min(bounds.y1) };
                 x0 += part;
-                let Some(tiles) = rule_tiles(instances, first, rect, rule) else { continue };
-                let tiles = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("stamp rule tiles"),
-                    contents: bytemuck::cast_slice(&tiles),
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("stamp rule"),
-                    layout: &compute.rule_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &self.uniform_buffer,
+                for (rect, words) in rule_lists(instances, first, whole, rule, most) {
+                    let Some(bind) = self.rule_list(gpu, &words, &binds, &compute.rule_layout) else { continue };
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("stamp rule"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&compute.stamp_rule);
+                    pass.set_bind_group(0, &bind, &[uniform]);
+                    pass.set_bind_group(1, brush, &[]);
+                    pass.dispatch_workgroups(rect.width().div_ceil(RULE_TILE), rect.height().div_ceil(RULE_TILE), 1);
+                    drop(pass);
+                    self.dispatched.fetch_add(1, Ordering::Relaxed);
+                    encoder.copy_buffer_to_texture(
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &out,
+                            layout: wgpu::TexelCopyBufferLayout {
                                 offset: 0,
-                                size: NonZeroU64::new(UNIFORM_SIZE),
-                            }),
+                                bytes_per_row: Some(RULE_PART * 8),
+                                rows_per_image: Some(rect.height()),
+                            },
                         },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.stamp_buffer.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: tiles.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(target) },
-                        wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
-                    ],
-                });
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("stamp rule"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&compute.stamp_rule);
-                pass.set_bind_group(0, &bind, &[uniform]);
-                pass.set_bind_group(1, brush, &[]);
-                pass.dispatch_workgroups(rect.width().div_ceil(RULE_TILE), rect.height().div_ceil(RULE_TILE), 1);
-                drop(pass);
-                encoder.copy_buffer_to_texture(
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: out,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(RULE_PART * 8),
-                            rows_per_image: Some(rect.height()),
-                        },
-                    },
-                    copy_at(texture, rect.x0, rect.y0),
-                    extent(rect.width(), rect.height()),
-                );
+                        copy_at(texture, rect.x0, rect.y0),
+                        extent(rect.width(), rect.height()),
+                    );
+                }
             }
             y0 += part;
         }
     }
 
+    /// The bind group for the next part of this render's rule passes (see [`RuleLists`]), its list
+    /// holding `words` (written through the queue, ahead of the work it is read by): a kept list,
+    /// grown if it is too small, bound with `binds`. None if it couldn't be made, said once.
+    fn rule_list(
+        &mut self,
+        gpu: &Gpu,
+        words: &[u32],
+        binds: &RuleBinds,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Option<wgpu::BindGroup> {
+        let device = &gpu.device;
+        let bytes = (words.len() as u64 * 4).max(4);
+        let at = self.rule_lists.next;
+        self.rule_lists.largest = self.rule_lists.largest.max(words.len());
+        let roomy = self.rule_lists.kept.get(at).is_some_and(|l| l.buffer.size() >= bytes);
+        if !roomy {
+            // in steps, so that a list a little longer than the last doesn't make one each frame
+            let room = device.limits().max_storage_buffer_binding_size;
+            let most = u64::try_from(self.rule_list_most).unwrap_or(u64::MAX).saturating_mul(4).min(room);
+            let size = bytes.next_power_of_two().max(RULE_LIST_LEAST).min(most).max(bytes);
+            let buffer = self.made_or_told(device, |device| rule_list_buffer(device, size))?;
+            let list = RuleList { buffer, bind: None };
+            match self.rule_lists.kept.get_mut(at) {
+                Some(kept) => *kept = list,
+                None => self.rule_lists.kept.push(list),
+            }
+        }
+        self.rule_lists.next += 1;
+        let list = self.rule_lists.kept.get_mut(at)?;
+        gpu.queue.write_buffer(&list.buffer, 0, bytemuck::cast_slice(words));
+        if let Some((bound, bind)) = &list.bind
+            && bound == binds
+        {
+            return Some(bind.clone());
+        }
+        let room = device.limits().max_storage_buffer_binding_size;
+        let stamps = NonZeroU64::new(binds.stamps.size().min(room) / 4 * 4);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stamp rule"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &binds.uniforms,
+                        offset: 0,
+                        size: NonZeroU64::new(UNIFORM_SIZE),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &binds.stamps,
+                        offset: 0,
+                        size: stamps,
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: list.buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&binds.target) },
+                wgpu::BindGroupEntry { binding: 4, resource: binds.out.as_entire_binding() },
+            ],
+        });
+        list.bind = Some((binds.clone(), bind.clone()));
+        Some(bind)
+    }
+
+    /// What `make` makes, unless the device refuses it (past its memory, or lost): then none, the
+    /// work that wanted it left out, and the first such said in the log.
+    fn made_or_told<T>(&mut self, device: &wgpu::Device, make: impl FnOnce(&wgpu::Device) -> T) -> Option<T> {
+        let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let made = make(device);
+        let failed = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop()));
+        let Some(e) = failed else { return Some(made) };
+        if !std::mem::replace(&mut self.rule_lists.told, true) {
+            log::error!("stamps laid by their rule are left out: {e}");
+        }
+        self.work_left_out = true;
+        None
+    }
+
+    /// Whether work has been left out since this was last asked, for want of what it takes on the
+    /// GPU (see [`Canvas::lay_by_rule`]): what was drawn then isn't all of it.
+    pub fn take_work_left_out(&mut self) -> bool {
+        std::mem::take(&mut self.work_left_out)
+    }
+
+    /// The most words a list of the rule's tiles is to hold here, in place of [`RULE_LIST_MOST`]
+    /// (parts of the canvas that would take more laid in smaller ones): for tests.
+    #[doc(hidden)]
+    pub fn set_rule_list_most(&mut self, words: usize) {
+        self.rule_list_most = words.max(8);
+    }
+
+    /// The most words a list of the rule's tiles has held: for tests.
+    #[doc(hidden)]
+    pub fn largest_rule_list(&self) -> usize {
+        self.rule_lists.largest
+    }
+
+    /// Sends the work recorded so far with the three kinds of uniforms a render's painting uses,
+    /// going on with a new encoder (see [`WORK_AT_ONCE`]).
     fn send_piece(
         &mut self,
         gpu: &Gpu,
@@ -9698,11 +9903,12 @@ impl Canvas {
         self.pictures.remove(&id);
         let Some(layer) = self.layers.get(&id) else { return false };
         let [a, b, c, d, e, f] = to_old;
-        let map = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("crop"),
-            contents: bytemuck::cast_slice(&[a, b, c, d, e, f, 0.0, 0.0]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let map = buffer_init(
+            &gpu.device,
+            "crop",
+            bytemuck::cast_slice(&[a, b, c, d, e, f, 0.0, 0.0]),
+            wgpu::BufferUsages::UNIFORM,
+        );
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("crop"),
             layout: &self.pipelines.crop_layout,
@@ -11040,6 +11246,30 @@ fn cropped(pixels: &[u8], width: u32, rect: IRect) -> Vec<u8> {
         out.extend_from_slice(line.get(x0..x1).unwrap_or_default());
     }
     out
+}
+
+/// A buffer holding `contents`, made as wgpu's `create_buffer_init` makes one but never panicking:
+/// where the device can't make it (past its limits or its memory, or the device lost: that one
+/// panicked then), it comes back holding nothing, said in the log, and what uses it fails as the
+/// GPU's errors do (said, not fatal).
+pub(crate) fn buffer_init(
+    device: &wgpu::Device,
+    label: &str,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let size = (contents.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+    #[cfg(test)]
+    let size = if tests::fails(label) { device.limits().max_buffer_size.saturating_add(4) } else { size };
+    let buffer =
+        device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: true });
+    match buffer.get_mapped_range_mut(..) {
+        // (its size is at least as many bytes)
+        Ok(mut view) => view.slice(..contents.len()).copy_from_slice(contents),
+        Err(e) => log::error!("the buffer {label} couldn't be made: {e}"),
+    }
+    buffer.unmap();
+    buffer
 }
 
 fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -12579,6 +12809,110 @@ mod tests {
         }
         assert_eq!(full.errors(), 0);
         assert_eq!(old.errors(), 0);
+    }
+
+    /// Stamps laid by their rule come out pixel for pixel the same however the parts of the canvas
+    /// they are laid in are cut (each part's list of tiles held to a few words, as a sample stroke of
+    /// thousands of big stamps is held to what a list may be), on a full GPU and an old one; the
+    /// lists stay within that, and are made once and kept from frame to frame.
+    #[test]
+    fn stamps_laid_by_their_rule_come_out_alike_however_their_parts_are_cut() {
+        use procraft_engine::geom::Vec2;
+        let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return };
+        let stamps: Vec<Stamp> = (0..60)
+            .map(|i| Stamp {
+                transfer: 0.3 + 0.01 * i as f32,
+                ..Stamp::round(Vec2::new(20.0 + 21.0 * i as f32, 60.0 + 30.0 * (i as f32 * 0.2).sin()), 40.0, 0.3)
+            })
+            .collect();
+        let plain = StrokeStyle { hardness: 0.3, ..StrokeStyle::new(StrokeTool::Paint, [0.9, 0.6, 0.1], 0.8) };
+        for rendering in [Rendering::Gradual, Rendering::Capped] {
+            for gpu in [&full, &old] {
+                let laid = |most: Option<usize>| {
+                    let mut doc = procraft_engine::document::Document::new(1300, 140);
+                    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+                    let id = doc.current();
+                    if let Some(most) = most {
+                        canvas.set_rule_list_most(most);
+                    }
+                    canvas.begin_stroke(id, StrokeStyle { rendering, ..plain });
+                    for lot in stamps.chunks(15) {
+                        canvas.add_stamps(lot);
+                        canvas.render(gpu, &mut doc, None);
+                    }
+                    let kept = canvas.rule_lists.kept.len() + canvas.fragments.rule_lists.len();
+                    canvas.end_stroke();
+                    canvas.render(gpu, &mut doc, None);
+                    assert!(!canvas.take_work_left_out());
+                    (canvas.read_layer(gpu, id).unwrap(), canvas.largest_rule_list(), kept)
+                };
+                let (whole, longest, kept) = laid(None);
+                let (cut, held, _) = laid(Some(700));
+                assert_ne!(whole, vec![0; whole.len()], "{rendering:?}: painted");
+                assert!(longest > 700 && held <= 700, "{rendering:?}: lists of {longest}, then {held} words");
+                assert!(kept <= RULE_LISTS_KEPT, "{rendering:?}: {kept} lists kept");
+                let (worst, n) = differ(&whole, &cut);
+                assert!(n == 0, "{rendering:?} (old GPU {}): {n} channels differ, by {worst} at most", gpu.old);
+            }
+        }
+        assert_eq!(full.errors(), 0);
+        assert_eq!(old.errors(), 0);
+    }
+
+    /// Where the list a rule's pass reads can't be made (past the GPU's memory, as on a phone short
+    /// of it; the device lost), the frame goes on without that part, nothing panics, the GPU's
+    /// error is caught and the work left out said; the next frame with room lays it as ever. A
+    /// buffer made with what it holds that can't be made is said, not fatal (wgpu's own way to make
+    /// one panicked there, which closed the app as a brush's sample stroke was drawn).
+    #[test]
+    fn stamps_laid_by_their_rule_go_on_when_their_list_cant_be_made() {
+        use procraft_engine::document::Document;
+        use procraft_engine::geom::Vec2;
+        let Ok(gpu) = Gpu::headless() else { return };
+        if !gpu.computes() {
+            return;
+        }
+        let stamps: Vec<Stamp> =
+            (0..12).map(|i| Stamp::round(Vec2::new(10.0 + 6.0 * i as f32, 32.0), 9.0, 0.5)).collect();
+        let glaze =
+            StrokeStyle { rendering: Rendering::Capped, ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.5, 0.9], 1.0) };
+        let laid = |failing: bool| {
+            let mut doc = Document::new(96, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let id = doc.current();
+            if failing {
+                // a frame without room for the list, the stroke then let go
+                FAILING.with(|f| f.set(Some("stamp rule tiles")));
+                canvas.begin_stroke(id, glaze);
+                canvas.add_stamps(&stamps);
+                canvas.render(&gpu, &mut doc, None);
+                FAILING.with(|f| f.set(None));
+                assert!(canvas.take_work_left_out());
+                assert!(!canvas.take_work_left_out(), "said once");
+                canvas.cancel_stroke();
+                canvas.render(&gpu, &mut doc, None);
+            }
+            canvas.begin_stroke(id, glaze);
+            canvas.add_stamps(&stamps);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            assert!(!canvas.take_work_left_out());
+            canvas.read_layer(&gpu, id).unwrap()
+        };
+        let after = laid(true);
+        let roomy = laid(false);
+        assert_ne!(roomy, vec![0; roomy.len()], "painted");
+        assert_eq!(after, roomy, "laid as ever once there was room");
+        assert_eq!(gpu.errors(), 0, "the error was caught, not left to the device");
+        // a buffer made with its contents
+        FAILING.with(|f| f.set(Some("crop")));
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _empty = buffer_init(&gpu.device, "crop", &[1, 2, 3, 4, 5], wgpu::BufferUsages::UNIFORM);
+        assert!(pollster::block_on(scope.pop()).is_some());
+        FAILING.with(|f| f.set(None));
+        let made = buffer_init(&gpu.device, "crop", &[1, 2, 3, 4, 5], wgpu::BufferUsages::COPY_SRC);
+        assert_eq!(made.size(), 8);
+        assert_eq!(gpu.errors(), 0);
     }
 
     /// On an old GPU a stroke builds up in half floats as on a full one, though it shows in 8 bits:

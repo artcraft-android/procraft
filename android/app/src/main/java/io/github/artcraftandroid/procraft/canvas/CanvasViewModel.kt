@@ -5637,7 +5637,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
             val parts = withContext(Dispatchers.Default) {
                 listOf(false, true).map { second ->
-                    s.studioPartPreview(second, 680u, 222u)?.let { t ->
+                    previewOf { s.studioPartPreview(second, 680u, 222u) }?.let { t ->
                         val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                         bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                         bitmap.asImageBitmap()
@@ -6005,7 +6005,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         studioPreviewJob = viewModelScope.launch {
             kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
             val image = withContext(Dispatchers.Default) {
-                val t = s.brushPreview(b.set, b.index, 1060u, 324u) ?: return@withContext null
+                val t = previewOf { s.brushPreview(b.set, b.index, 1060u, 324u) } ?: return@withContext null
                 val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
@@ -6016,6 +6016,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The sample strokes are drawn one at a time (the core draws them so), waited for here without holding a thread. */
     private val previewTurn = Mutex()
+
+    /**
+     * A sample stroke from the core, or none if drawing it failed there (said in the log): a brush
+     * shown without its preview, never the app closing for it.
+     */
+    private fun previewOf(draw: () -> io.github.artcraftandroid.procraft.core.ThumbnailImage?) =
+        try {
+            draw()
+        } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
+            AppLog.e("ProCraft", "a brush's sample stroke failed in the core", fault)
+            null
+        }
 
     /**
      * Renders the brush's sample stroke once, off the main thread. Called from the brush's row: a row
@@ -6033,7 +6045,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             withContext(kotlinx.coroutines.NonCancellable) {
                 val made = withContext(Dispatchers.Default) {
                     // half the sample stroke's own canvas: the cell shows it across its width
-                    val t = s.brushPreview(b.set, b.index, 530u, 162u) ?: return@withContext null
+                    val t = previewOf { s.brushPreview(b.set, b.index, 530u, 162u) } ?: return@withContext null
                     // whether the stroke runs under the name: the name's box (19.5 in, 14 to 26 down, about
                     // 7.7 a letter wide, in a cell the picture fills 80 high and 261.7 wide) covered more
                     // than 2/255 on average

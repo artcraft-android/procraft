@@ -250,7 +250,6 @@ fn copy_to_window(
     size: wgpu::Extent3d,
     placed: bool,
 ) {
-    use wgpu::util::DeviceExt;
     let layout = into.layout;
     if !placed || layout.offset.is_multiple_of(u64::from(PLACEMENT)) {
         encoder.copy_texture_to_buffer(from, into, size);
@@ -258,11 +257,9 @@ fn copy_to_window(
     }
     let row = layout.bytes_per_row.unwrap_or(0);
     let bytes = u64::from(row) * u64::from(size.height.saturating_sub(1)) + 4 * u64::from(size.width);
-    let staged = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("placed copy"),
-        contents: &vec![255; usize::try_from(bytes).unwrap_or(0)],
-        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-    });
+    let filler = vec![255; usize::try_from(bytes).unwrap_or(0)];
+    let usage = wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let staged = super::buffer_init(device, "placed copy", &filler, usage);
     encoder.copy_texture_to_buffer(from, in_buffer(&staged, 0, row, size.height), size);
     encoder.copy_buffer_to_buffer(&staged, 0, into.buffer, layout.offset, bytes);
 }
@@ -577,6 +574,7 @@ impl Canvas {
                     Pipe::WetPlots => &compute.smudge_wet_plots,
                 });
                 pass.dispatch_workgroups(x, y, 1);
+                self.dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         drop(pass);

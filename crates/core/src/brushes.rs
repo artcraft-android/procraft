@@ -29,6 +29,9 @@ static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), 
 /// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
 static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Whether a sample stroke the GPU couldn't draw has been said in the log.
+static PREVIEW_FAILURE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Draws the pictures `brushes` stand in with that are still to be drawn (each brush's shape and
 /// grain, and its second's), on a thread of their own: a brush chosen is ready by its first stroke,
 /// which otherwise waits for them under the canvas's lock. What a stroke or preview wants first is
@@ -445,32 +448,71 @@ impl CanvasSession {
             let mut st = self.shared.lock();
             (st.gpu.clone()?, st.preview.take())
         };
-        // drawn on a canvas of the sample stroke's own, then fitted into the preview
-        let (mut canvas, mut doc) = match kept {
-            Some(kept) => kept,
-            None => {
-                let mut doc = Document::new(cw, ch);
-                doc.background_visible = false;
-                (Canvas::new(&gpu, &doc).ok()?, doc)
+        // a device lost draws nothing (and what it draws with can't be made there)
+        if gpu.is_lost() {
+            return None;
+        }
+        // drawn on a canvas of the sample stroke's own, then fitted into the preview; what the GPU
+        // couldn't do (no memory for it, the device lost meanwhile) costs this preview, never the
+        // app: none is shown, the canvas goes, and the first such is said
+        let drawn = gpu.checked(|| {
+            let (mut canvas, mut doc) = match kept {
+                Some(kept) => kept,
+                None => {
+                    let mut doc = Document::new(cw, ch);
+                    doc.background_visible = false;
+                    (Canvas::new(&gpu, &doc).ok()?, doc)
+                }
+            };
+            let rgba = self.draw_preview(&brush, hooks.as_ref(), &gpu, &mut canvas, &mut doc);
+            let whole = !canvas.take_work_left_out();
+            Some((rgba, whole, canvas, doc))
+        });
+        let failed = |why: &str| {
+            if !PREVIEW_FAILURE_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::error!("a brush's sample stroke couldn't be drawn: {why}");
             }
+            None
         };
+        let (rgba, whole, canvas, doc) = match drawn {
+            Ok(drawn) => drawn?,
+            Err(e) => return failed(&e.to_string()),
+        };
+        // kept for the next (one drawn meanwhile elsewhere already is)
+        self.shared.lock().preview.get_or_insert((canvas, doc));
+        if !whole {
+            return failed("part of it was left out");
+        }
+        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+    }
+
+    /// `brush`'s sample stroke drawn on `canvas` (its layer wiped first), white: the canvas's pixels
+    /// (by the brush engine that made it, while that is on and `hooks` has it).
+    fn draw_preview(
+        &self,
+        brush: &procraft_engine::brush::Brush,
+        hooks: Option<&std::sync::Arc<crate::hooks::Hooks>>,
+        gpu: &procraft_gpu::Gpu,
+        canvas: &mut Canvas,
+        doc: &mut Document,
+    ) -> Option<Vec<u8>> {
+        let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
         let layer = doc.current();
         canvas.wipe_layer(layer);
-        if let Some(hooks) = &hooks
-            && let Some(drawn) = self.engine_preview(hooks, &brush, &gpu, &mut canvas, &mut doc)
+        if let Some(hooks) = hooks
+            && let Some(drawn) = self.engine_preview(hooks, brush, gpu, canvas, doc)
         {
-            self.shared.lock().preview.get_or_insert((canvas, doc));
-            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&drawn, w, h) });
+            return Some(drawn);
         }
-        let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
+        let mut style = StrokeStyle::for_brush(brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
         // it mixes wet only where the brush's preview says to
         if brush.setting("preview_wet_mix") < 0.5 {
             style = style.dry();
         }
         style.preview = true;
-        draw_pictures(&brush);
-        canvas.use_sources(&gpu, &mut style, &brush);
-        self.use_full_sources(&gpu, &mut canvas, &mut style, &brush);
+        draw_pictures(brush);
+        canvas.use_sources(gpu, &mut style, brush);
+        self.use_full_sources(gpu, canvas, &mut style, brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
@@ -478,15 +520,15 @@ impl CanvasSession {
             let mut second_style =
                 StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
-            canvas.use_sources(&gpu, &mut second_style, &second);
-            self.use_full_sources(&gpu, &mut canvas, &mut second_style, &second);
+            canvas.use_sources(gpu, &mut second_style, &second);
+            self.use_full_sources(gpu, canvas, &mut second_style, &second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             let classic = brush.setting("classic_combine") >= 0.5;
             (!second_style.in_place()).then(|| {
                 let threshold = second_style.alpha_threshold;
                 let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
-                (second, dual, preview::diameter(&brush) * ratio)
+                (second, dual, preview::diameter(brush) * ratio)
             })
         });
         match &second {
@@ -501,7 +543,7 @@ impl CanvasSession {
             let side = (least + (most - least) * share).max(1.0);
             canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
         } else {
-            let samples = preview::samples(&brush);
+            let samples = preview::samples(brush);
             if let Some((second, _, diameter)) = second {
                 let tilts = brush.setting("preview_tilt") >= 0.5;
                 let mut stroke =
@@ -513,7 +555,7 @@ impl CanvasSession {
             // no stamps; the sample stroke tells no pen's turn, so a brush turned as the pen is held
             // turns its stamps with the stroke, as a finger's do
             let tilts = brush.setting("preview_tilt") >= 0.5;
-            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus)
+            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(brush), Pointer::Stylus)
                 .steady()
                 .on_pad(tilts)
                 .without_azimuth();
@@ -523,12 +565,9 @@ impl CanvasSession {
             canvas.replace_stamps(&stroke.finish());
         }
         canvas.end_stroke();
-        canvas.render(&gpu, &mut doc, None);
+        canvas.render(gpu, doc, None);
         canvas.forget_history();
-        let rgba = canvas.read_composite(&gpu).ok();
-        // kept for the next (one drawn meanwhile elsewhere already is)
-        self.shared.lock().preview.get_or_insert((canvas, doc));
-        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+        canvas.read_composite(gpu).ok()
     }
 
     /// `brush`'s sample stroke drawn by the brush engine that made it, white, at its preview size,

@@ -14874,6 +14874,33 @@ fn nothing_a_selection_leaves_out_changes_under_a_brush_that_moves_paint() {
     }
 }
 
+/// A brush's sample stroke drawn with its graphics device lost under it (as a phone's can be, short
+/// of memory or its driver reset) comes back as none and never panics, for a glaze (laid by its
+/// rule, whose tile lists wgpu's way of making panicked on there and closed the app from the
+/// brush studio) and wet paint; the session's next preview after a device lost is none too.
+#[test]
+fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
+    use procraft_engine::brush::Rendering;
+    let Some(s) = session(64, 64) else { return };
+    let pick = |want: fn(&procraft_engine::brush::Brush) -> bool| {
+        let st = s.shared.lock();
+        let found =
+            st.library.iter().enumerate().find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+        found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+    };
+    let glaze = pick(|b| !b.mixes_wet() && b.rendering == Rendering::Capped && b.thumbnail.is_none());
+    let wet = pick(|b| b.mixes_wet() && b.thumbnail.is_none());
+    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_some(), "drawn while the device stands");
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    // lost as the next is drawn: not yet seen as lost (that comes as the device is polled)
+    gpu.device.destroy();
+    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_none());
+    assert!(s.brush_preview(wet.0, wet.1, 106, 32).is_none());
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
+    assert!(gpu.is_lost());
+    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_none());
+}
+
 /// Wet paint that keeps what it has laid tile by tile (building up gradually, it keeps how much
 /// each pixel has taken; with a second brush, its paint laid apart) comes out pixel for pixel the
 /// same where a copy from a texture can put its rows in a buffer only at multiples of 512 bytes,
