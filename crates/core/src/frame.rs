@@ -177,7 +177,7 @@ impl State {
                 sigma: BACKDROP_SIGMA_PT * s,
             });
             // a dropped colour's fill spreading in: the canvas as it was over it, but for a hole
-            match self.reveal.as_ref().map(|r| r.hole_at(Instant::now())) {
+            match self.reveal.as_mut().map(|r| r.hole_at(Instant::now())) {
                 Some(Some(hole)) => {
                     canvas.veil_hole(&hole);
                     self.needs_frame = true;

@@ -287,6 +287,84 @@ fn frame_cost() {
 /// frames drawn, and the longest a frame held the lock. `QS_COST_SIDE` (the canvas, 2732 square),
 /// `QS_COST_BRUSHES` (names, `,` between) and `QS_COST_SIZE` (0.6) set the scene. Run with
 /// `--ignored --nocapture`.
+/// What a frame costs while a dropped colour spreads in over a whole tablet-sized view
+/// (SPREAD_COST_WINDOW, 2560x1600 by default), against a frame with nothing spreading: each
+/// frame waited for alone, over five drops.
+#[test]
+#[ignore]
+fn spread_cost() {
+    use procraft_gpu::wgpu;
+    let size = std::env::var("SPREAD_COST_WINDOW").unwrap_or_else(|_| "2560x1600".to_owned());
+    let (width, height) = size
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .unwrap_or((2560, 1600));
+    let side = 2048;
+    let Some(s) = session(side, width.max(height)) else { return };
+    s.resize_window(width, height);
+    s.set_display_scale(2.0);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = {
+        let mut st = s.shared.lock();
+        st.view = Some(View::fit((side, side), (width, height)));
+        let gpu = st.gpu.as_ref().unwrap();
+        let info = gpu.adapter.get_info();
+        println!("{} ({:?}), window {width}x{height}, canvas {side} square", info.name, info.backend);
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    };
+    let view = target.create_view(&Default::default());
+    let started = std::time::Instant::now();
+    // a frame drawn and waited for: how long it took, and whether a fill was still spreading in it
+    let frame = || {
+        let t = std::time::Instant::now();
+        let spreading = {
+            let mut st = s.shared.lock();
+            st.draw_frame(&view, format, (width, height), procraft_engine::profile::Profile::Srgb, started);
+            st.reveal.is_some()
+        };
+        if let Some(g) = s.shared.lock().gpu.clone() {
+            g.flush();
+        }
+        (t.elapsed().as_secs_f64() * 1000.0, spreading)
+    };
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        (v.get(v.len() / 2).copied().unwrap_or(0.0), v.get(v.len() * 9 / 10).copied().unwrap_or(0.0))
+    };
+    for _ in 0..10 {
+        frame();
+    }
+    let still: Vec<f64> = (0..60).map(|_| frame().0).collect();
+    let mut spreading = Vec::new();
+    for k in 0..5 {
+        let c = k as f32 / 5.0;
+        assert!(s.pour_drop(width as f32 / 2.0, height as f32 / 2.0, c, 1.0 - c, 0.5, 0.5));
+        s.pour_end(true, None);
+        frame();
+        loop {
+            let (ms, on) = frame();
+            if !on {
+                break;
+            }
+            spreading.push(ms);
+        }
+    }
+    let frames = spreading.len();
+    let (still, still_90) = median(still);
+    let (spread, spread_90) = median(spreading);
+    println!("nothing spreading: {still:.2} ms a frame (90% {still_90:.2})");
+    println!("spreading:         {spread:.2} ms a frame (90% {spread_90:.2}), {frames} frames over 5 drops");
+}
+
 #[test]
 #[ignore]
 fn quickshape_edit_cost() {

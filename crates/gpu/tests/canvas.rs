@@ -5333,3 +5333,110 @@ fn a_view_look_costs_a_frame_little_more_than_none() {
     println!("a frame: no look {none:.3} ms, values {grey:.3} ms");
     assert!(grey <= none * 1.5 + 1.0, "{grey:.3} ms with a look, {none:.3} without");
 }
+
+/// How much of canvas point `p` a veil covers when every pixel is tested against its hole
+/// (`hole`, canvas pixels), the hole's edge smoothed over `across` canvas pixels: as the veil's
+/// shader works it out in a cell the edge passes near.
+fn veil_cover(p: [f32; 2], hole: &[[f32; 2]], across: f32) -> f32 {
+    let n = hole.len();
+    let mut inside = false;
+    let mut near = f32::MAX;
+    for k in 0..n {
+        let (a, b) = (hole[k], hole[(k + 1) % n]);
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if p[0] < x {
+                inside = !inside;
+            }
+        }
+        let ab = [b[0] - a[0], b[1] - a[1]];
+        let t = (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]).max(1e-12))
+            .clamp(0.0, 1.0);
+        let d = [p[0] - a[0] - ab[0] * t, p[1] - a[1] - ab[1] * t];
+        near = near.min((d[0] * d[0] + d[1] * d[1]).sqrt());
+    }
+    ((if inside { -near } else { near }) / across + 0.5).clamp(0.0, 1.0)
+}
+
+/// A wavy hole of 60 points round (`cx`, `cy`), `r` across give or take a third.
+fn wavy_hole(cx: f32, cy: f32, r: f32) -> Vec<[f32; 2]> {
+    (0..60)
+        .map(|i| {
+            let a = i as f32 / 60.0 * std::f32::consts::TAU;
+            let k = r * (1.0 + 0.3 * (3.0 * a).sin() + 0.1 * (7.0 * a).cos());
+            [cx + k * a.cos(), cy + k * 0.8 * a.sin()]
+        })
+        .collect()
+}
+
+#[test]
+fn a_veil_drawn_a_cell_at_a_time_shows_its_hole_as_testing_every_pixel_does() {
+    use procraft_engine::geom::IRect;
+    use procraft_gpu::{VeilCell, VeilCells};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let side = 256;
+    let mut doc = Document::new(side, side);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // black all over, kept as the veil; then rubbed out, so white shows through the hole
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(128.0, 128.0), 600.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let all = IRect::new(0, 0, side as i32, side as i32);
+    canvas.veil_begin(&gpu, all, 1.0);
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Erase, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(128.0, 128.0), 600.0)]);
+    canvas.end_stroke();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    // a hole well inside, and one running off the veil's side; shown pixel for pixel, and zoomed
+    // in twice (the edge smoothed over half a canvas pixel)
+    for (hole, zoom) in
+        [(wavy_hole(120.0, 130.0, 70.0), 1), (wavy_hole(40.0, 200.0, 90.0), 1), (wavy_hole(120.0, 130.0, 70.0), 2)]
+    {
+        let cells = VeilCells::of(all, &hole, 1.0 / zoom as f32);
+        let edge = cells.share(VeilCell::Edge);
+        assert!(edge < 0.3 && cells.share(VeilCell::Open) > 0.05, "{edge}");
+        canvas.veil_hole(&hole);
+        let size = side * zoom;
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (size, size),
+                to_screen: View::fit((side, side), (size, size)).to_screen(),
+                surround: [0.2, 0.2, 0.2],
+                grid: None,
+                selection: None,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                look: None,
+            }),
+        );
+        let px = read(&gpu, &target, size, size);
+        let mut worst = 0;
+        for y in 0..size {
+            for x in 0..size {
+                let p = [(x as f32 + 0.5) / zoom as f32, (y as f32 + 0.5) / zoom as f32];
+                let expected = (255.0 * (1.0 - veil_cover(p, &hole, 1.0 / zoom as f32))).round() as u8;
+                worst = worst.max(pixel(&px, size, x, y)[0].abs_diff(expected));
+            }
+        }
+        assert!(worst <= 3, "zoom {zoom}: a pixel {worst} levels from testing every pixel");
+    }
+}

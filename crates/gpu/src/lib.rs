@@ -22,7 +22,7 @@ pub use canvas::{
     Backdrop, Canvas, DisplayLut, FillPreview, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode,
     LiquifyStamp, MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT,
     SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
-    Thumbnail, TipKind, most_resident, read_texture, start_reading, textures_bytes,
+    Thumbnail, TipKind, VEIL_GRID, VeilCell, VeilCells, most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use canvas::{CanvasPaper, GREY_LOOK, ViewLook};
 pub use kept::keep_pipelines_in;

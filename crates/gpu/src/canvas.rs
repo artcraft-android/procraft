@@ -1313,15 +1313,160 @@ impl DisplayUniform {
 /// The most points a veil's hole has (see [`Canvas::veil_hole`]).
 pub const VEIL_POINTS: usize = 64;
 
+/// The veil is drawn a cell at a time, this many across and down its rectangle: only the cells
+/// the hole's edge passes near test their pixels against the hole; the rest are wholly veiled,
+/// or wholly in the hole and not drawn (see [`VeilCells`]).
+pub const VEIL_GRID: usize = 64;
+/// The words the cells' kinds take, two bits a cell.
+const VEIL_CELL_WORDS: usize = VEIL_GRID * VEIL_GRID / 16;
+
 /// What the veil's shader is told: its rectangle on the canvas (left, top, width, height), the
-/// colour round the canvas as the target takes it and how many points the hole has, and the
-/// hole's outline (two points an entry), canvas pixels.
+/// colour round the canvas as the target takes it and how many points the hole has, the hole's
+/// outline (two points an entry), canvas pixels, and how each cell is drawn ([`VeilCells`]).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VeilUniform {
     rect: [f32; 4],
     surround: [f32; 4],
     points: [[f32; 4]; VEIL_POINTS / 2],
+    cells: [[u32; 4]; VEIL_CELL_WORDS / 4],
+}
+
+/// How one of a veil's cells is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VeilCell {
+    /// Wholly in the hole: not drawn.
+    Open = 0,
+    /// Wholly veiled: drawn without looking at the hole.
+    Veiled = 1,
+    /// The hole's edge passes through it or near it: each pixel tested against the hole.
+    Edge = 2,
+}
+
+/// How each of a veil's [`VEIL_GRID`] x [`VEIL_GRID`] cells is drawn, row by row, two bits a cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VeilCells([u32; VEIL_CELL_WORDS]);
+
+impl VeilCells {
+    /// The cells of a veil over `rect` (canvas pixels) with a hole outlined by `hole` (canvas
+    /// pixels; fewer than three points: no hole) whose edge is smoothed over `margin` canvas
+    /// pixels each way: a cell within `margin` of the outline is an edge cell; every other is
+    /// wholly in the hole or out of it, as its middle is (by the crossings to its right, as the
+    /// shader tells inside from outside).
+    pub fn of(rect: IRect, hole: &[[f32; 2]], margin: f32) -> VeilCells {
+        let mut cells = VeilCells([0; VEIL_CELL_WORDS]);
+        let points = hole.get(..hole.len().min(VEIL_POINTS)).unwrap_or_default();
+        let g = VEIL_GRID;
+        let (x, y) = (rect.x0 as f32, rect.y0 as f32);
+        let (cw, ch) = (rect.width() as f32 / g as f32, rect.height() as f32 / g as f32);
+        if points.len() < 3 || cw <= 0.0 || ch <= 0.0 {
+            for i in 0..g * g {
+                cells.set(i, VeilCell::Veiled);
+            }
+            return cells;
+        }
+        let margin = if margin.is_nan() { f32::MAX } else { margin.max(0.0) };
+        let n = points.len();
+        let segment = |k: usize| (points.get(k).copied(), points.get((k + 1) % n).copied());
+        // the cells each piece of the outline passes within the margin of
+        let mut edge = vec![false; g * g];
+        // the cells from `lo` to `hi` along one side, any of them on the veil
+        let span = |lo: f32, hi: f32, origin: f32, side: f32| {
+            let (a, b) = (((lo - origin) / side).floor(), ((hi - origin) / side).floor());
+            (b >= 0.0 && a < g as f32).then(|| (a.max(0.0) as usize)..=(b.min(g as f32 - 1.0) as usize))
+        };
+        for k in 0..n {
+            let (Some(a), Some(b)) = segment(k) else { continue };
+            let across = span(a[0].min(b[0]) - margin, a[0].max(b[0]) + margin, x, cw);
+            let down = span(a[1].min(b[1]) - margin, a[1].max(b[1]) + margin, y, ch);
+            let (Some(across), Some(down)) = (across, down) else { continue };
+            for cy in down {
+                for cx in across.clone() {
+                    let i = cy * g + cx;
+                    if edge.get(i) == Some(&false) {
+                        let grown = [
+                            x + cx as f32 * cw - margin,
+                            y + cy as f32 * ch - margin,
+                            x + (cx + 1) as f32 * cw + margin,
+                            y + (cy + 1) as f32 * ch + margin,
+                        ];
+                        if let Some(e) = edge.get_mut(i) {
+                            *e = segment_meets_box(a, b, grown);
+                        }
+                    }
+                }
+            }
+        }
+        // the rest by where the outline crosses the middle of each row of cells
+        let mut crossings: Vec<f32> = Vec::with_capacity(n);
+        for cy in 0..g {
+            let py = y + (cy as f32 + 0.5) * ch;
+            crossings.clear();
+            for k in 0..n {
+                let (Some(a), Some(b)) = segment(k) else { continue };
+                if (a[1] > py) != (b[1] > py) {
+                    crossings.push(a[0] + (py - a[1]) / (b[1] - a[1]) * (b[0] - a[0]));
+                }
+            }
+            for cx in 0..g {
+                let i = cy * g + cx;
+                let kind = if edge.get(i) == Some(&true) {
+                    VeilCell::Edge
+                } else {
+                    let px = x + (cx as f32 + 0.5) * cw;
+                    let right = crossings.iter().filter(|&&c| px < c).count();
+                    if right % 2 == 1 { VeilCell::Open } else { VeilCell::Veiled }
+                };
+                cells.set(i, kind);
+            }
+        }
+        cells
+    }
+
+    fn set(&mut self, i: usize, kind: VeilCell) {
+        if let Some(word) = self.0.get_mut(i / 16) {
+            let shift = (i % 16) * 2;
+            *word = (*word & !(3 << shift)) | ((kind as u32) << shift);
+        }
+    }
+
+    /// How cell (`x`, `y`) is drawn (counted from the rectangle's top left).
+    pub fn get(&self, x: usize, y: usize) -> VeilCell {
+        let i = y * VEIL_GRID + x;
+        match self.0.get(i / 16).map_or(1, |w| (w >> ((i % 16) * 2)) & 3) {
+            0 => VeilCell::Open,
+            2 => VeilCell::Edge,
+            _ => VeilCell::Veiled,
+        }
+    }
+
+    /// The share of the cells (so of the veil's pixels) that are `kind`.
+    pub fn share(&self, kind: VeilCell) -> f32 {
+        let n =
+            (0..VEIL_GRID).flat_map(|y| (0..VEIL_GRID).map(move |x| (x, y))).filter(|&(x, y)| self.get(x, y) == kind);
+        n.count() as f32 / (VEIL_GRID * VEIL_GRID) as f32
+    }
+
+    /// As the shader reads them: four words an entry.
+    fn packed(&self) -> [[u32; 4]; VEIL_CELL_WORDS / 4] {
+        let mut out = [[0; 4]; VEIL_CELL_WORDS / 4];
+        for (entry, words) in out.iter_mut().zip(self.0.as_chunks::<4>().0) {
+            *entry = *words;
+        }
+        out
+    }
+}
+
+/// Whether the segment from `a` to `b` meets the box (left, top, right, bottom).
+fn segment_meets_box(a: [f32; 2], b: [f32; 2], r: [f32; 4]) -> bool {
+    let [x0, y0, x1, y1] = r;
+    if a[0].max(b[0]) < x0 || a[0].min(b[0]) > x1 || a[1].max(b[1]) < y0 || a[1].min(b[1]) > y1 {
+        return false;
+    }
+    // the box's corners all on one side of the line: it passes by
+    let side = |x: f32, y: f32| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+    let s = [side(x0, y0), side(x1, y0), side(x0, y1), side(x1, y1)];
+    !(s.iter().all(|v| *v > 0.0) || s.iter().all(|v| *v < 0.0))
 }
 
 /// Part of the composite as it was before a change, drawn over the canvas but for a hole that
@@ -6876,10 +7021,13 @@ impl Canvas {
                 }
             }
             let r = veil.rect;
+            // the hole's edge is smoothed over a target pixel: that many canvas pixels
+            let margin = 1.0 / target.to_screen.scale_factor().max(1e-6);
             let uniform = VeilUniform {
                 rect: [r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32],
                 surround: [around[0], around[1], around[2], veil.hole.len() as f32],
                 points,
+                cells: VeilCells::of(r, &veil.hole, margin).packed(),
             };
             gpu.queue.write_buffer(&veil.uniform, 0, bytemuck::bytes_of(&uniform));
         }
@@ -9819,7 +9967,7 @@ impl Canvas {
                     veil_pipeline_layout,
                     display_module,
                     "veil",
-                    ("vs_display", "fs_veil"),
+                    ("vs_veil", "fs_veil"),
                     target.format,
                     Some(PREMULTIPLIED_OVER),
                 )
@@ -9842,7 +9990,8 @@ impl Canvas {
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.set_bind_group(2, target.lut.map_or(&self.identity_lut, |l| &l.bind), &[]);
             pass.set_bind_group(3, &veil.uniform_bind, &[]);
-            pass.draw(0..6, 0..1);
+            // a cell at a time: those wholly in the hole draw nothing
+            pass.draw(0..6, 0..(VEIL_GRID * VEIL_GRID) as u32);
         }
 
         // the selection: bands over what is not selected, or what is selected tinted or covered
@@ -11129,7 +11278,8 @@ impl Pipelines {
             label: Some("veil"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                // (the vertices read which cells to draw)
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
