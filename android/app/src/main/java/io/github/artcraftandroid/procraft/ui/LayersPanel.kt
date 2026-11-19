@@ -8,14 +8,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.gestures.snapping.SnapPosition
-import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -53,6 +53,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,7 +98,9 @@ import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.LayerOption
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.RowDrop
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val LayersWidth = 384.dp
@@ -1151,39 +1155,76 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo) {
             },
             onDone = { vm.setLayerOpacity(l, opacity, done = true) },
         )
-        // a picker: the rows snap to the list's middle and the row there is the layer's mode (set
-        // once a scroll settles); the ends padded so every row can reach the middle, the layer's
-        // mode there when it opens
         val modes = vm.blendModeList
         val layer by rememberUpdatedState(l)
         val list = rememberLazyListState(modes.indexOfFirst { it.id == l.blend }.coerceAtLeast(0))
         val scope = rememberCoroutineScope()
-        LaunchedEffect(list.isScrollInProgress) {
-            if (list.isScrollInProgress) return@LaunchedEffect
-            val info = list.layoutInfo
-            val middle = (info.viewportStartOffset + info.viewportEndOffset) / 2
-            val at = info.visibleItemsInfo.minByOrNull { kotlin.math.abs(it.offset + it.size / 2 - middle) } ?: return@LaunchedEffect
-            val m = modes.getOrNull(at.index) ?: return@LaunchedEffect
-            if (m.id != layer.blend) vm.setBlend(layer, m.id)
+        val (rowPx, before, after) = with(LocalDensity.current) {
+            val height = BlendRow.roundToPx()
+            val padding = BlendListHeight.roundToPx() - height
+            // Divide the padding in pixels so the last row can center at every density.
+            Triple(height, (padding / 2).toDp(), (padding - padding / 2).toDp())
         }
-        LazyColumn(
-            Modifier.padding(top = 11.dp).fillMaxWidth().height(BlendListHeight).clip(RoundedCornerShape(12.dp)).background(Pc.LayerRow),
-            state = list,
-            contentPadding = PaddingValues(vertical = (BlendListHeight - BlendRow) / 2),
-            flingBehavior = rememberSnapFlingBehavior(list, SnapPosition.Center),
+        val position by remember(list, rowPx) {
+            derivedStateOf { list.firstVisibleItemIndex * rowPx + list.firstVisibleItemScrollOffset }
+        }
+        val centered by remember(rowPx) { derivedStateOf { (position + rowPx / 2) / rowPx } }
+
+        // Let the ordinary Android fling finish, then gently center the nearest row.
+        LaunchedEffect(list, modes, rowPx) {
+            snapshotFlow { if (list.isScrollInProgress) null else position }.collect { idlePosition ->
+                if (idlePosition == null) return@collect
+                // Give a fling starting as the drag ends a frame to take over the list.
+                withFrameNanos { }
+                if (list.isScrollInProgress || position != idlePosition) return@collect
+                val mode = modes.getOrNull(centered) ?: return@collect
+                val distance = centered * rowPx - position
+                if (distance != 0) {
+                    // A new gesture can cancel this animation without cancelling the observer.
+                    coroutineScope { launch { list.animateScrollBy(distance.toFloat(), Motion.blendSnap()) } }
+                } else if (mode.id != layer.blend) {
+                    vm.setBlend(layer, mode.id)
+                }
+            }
+        }
+        LaunchedEffect(l.blend, rowPx) {
+            // Keep the picker lined up if Undo or Redo changes the mode while it is open.
+            val index = modes.indexOfFirst { it.id == l.blend }
+            if (index >= 0 && !list.isScrollInProgress && position != index * rowPx) list.scrollToItem(index)
+        }
+
+        val highlight = Pc.RowSelected
+        Box(
+            Modifier.padding(top = 11.dp).fillMaxWidth().height(BlendListHeight)
+                .clip(RoundedCornerShape(12.dp)).background(Pc.LayerRow)
+                .drawBehind {
+                    val height = rowPx.toFloat()
+                    drawRect(highlight, Offset(0f, (size.height - height) / 2f), Size(size.width, height))
+                },
         ) {
-            itemsIndexed(modes) { i, m ->
-                val chosen = m.id == l.blend
-                val ink = if (chosen) Color.White else Pc.PanelTitle
-                Row(
-                    Modifier.fillMaxWidth().height(BlendRow).background(if (chosen) Pc.RowSelected else Color.Transparent)
-                        .clickable { scope.launch { list.animateScrollToItem(i) } }.padding(start = 12.dp, end = 18.5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(m.name, color = ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                    // its 26 frame centred 31.5 in from the right; grey unless chosen
-                    PcIcons.BlendGlyphs[m.name]?.let {
-                        Icon(it, contentDescription = null, tint = if (chosen) Color.White else BlendGlyphInk, modifier = Modifier.size(26.dp))
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                state = list,
+                contentPadding = PaddingValues(top = before, bottom = after),
+            ) {
+                itemsIndexed(modes) { i, m ->
+                    val focused = i == centered
+                    val ink = if (focused) Color.White else Pc.PanelTitle
+                    Row(
+                        Modifier.fillMaxWidth().height(BlendRow)
+                            .clickable {
+                                scope.launch {
+                                    val distance = (i * rowPx - position).toFloat()
+                                    if (distance != 0f) list.animateScrollBy(distance, Motion.blendScroll(abs(distance) / rowPx))
+                                }
+                            }
+                            .padding(start = 12.dp, end = 18.5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(m.name, color = ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                        PcIcons.BlendGlyphs[m.name]?.let {
+                            Icon(it, contentDescription = null, tint = if (focused) Color.White else BlendGlyphInk, modifier = Modifier.size(26.dp))
+                        }
                     }
                 }
             }
