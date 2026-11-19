@@ -13846,64 +13846,70 @@ mod tests {
 
     /// What the shaders' `pooled_over` gives for each of `cs` on this GPU.
     fn pooled_on_gpu(gpu: &Gpu, cs: &[f32]) -> Vec<f32> {
+        let inputs: Vec<[f32; 4]> = cs.iter().map(|&c| [c, 0.0, 0.0, 0.0]).collect();
+        probe_on_gpu(gpu, "pooled_over(v.x)", &inputs)
+    }
+
+    /// What the WGSL expression `expr` gives on this GPU for each of `inputs`, as `v` (a vec4),
+    /// with the shaders' blend functions at hand.
+    fn probe_on_gpu(gpu: &Gpu, expr: &str, inputs: &[[f32; 4]]) -> Vec<f32> {
         let device = &gpu.device;
-        let source = concat!(
-            include_str!("shaders/blend.wgsl"),
-            "@group(0) @binding(0) var<storage, read_write> values: array<f32>;
-",
-            "@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
-",
-            "    if (id.x < arrayLength(&values)) { values[id.x] = pooled_over(values[id.x]); }
-",
-            "}
-",
-        );
+        let probe = [
+            "@group(0) @binding(0) var<storage, read_write> values: array<vec4<f32>>;",
+            "@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id: vec3<u32>) {",
+            "    if (id.x < arrayLength(&values)) {",
+            "        let v = values[id.x];",
+            &format!("        values[id.x] = vec4<f32>({expr}, 0.0, 0.0, 0.0);"),
+            "    }",
+            "}",
+        ];
+        let source = format!("{}\n{}\n", include_str!("shaders/blend.wgsl"), probe.join("\n"));
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pooled probe"),
+            label: Some("shader probe"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pooled probe"),
+            label: Some("shader probe"),
             layout: None,
             module: &module,
             entry_point: Some("probe"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        let bytes: Vec<u8> = cs.iter().flat_map(|c| c.to_le_bytes()).collect();
+        let bytes: Vec<u8> = inputs.iter().flatten().flat_map(|c| c.to_le_bytes()).collect();
         let size = bytes.len() as u64;
         let values = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pooled probe"),
+            label: Some("shader probe"),
             size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         gpu.queue.write_buffer(&values, 0, &bytes);
         let read = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pooled probe read"),
+            label: Some("shader probe read"),
             size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pooled probe"),
+            label: Some("shader probe"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: values.as_entire_binding() }],
         });
         let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pooled probe") });
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shader probe") });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups((cs.len() as u32).div_ceil(64), 1, 1);
+            pass.dispatch_workgroups((inputs.len() as u32).div_ceil(64), 1, 1);
         }
         encoder.copy_buffer_to_buffer(&values, 0, &read, 0, size);
         gpu.queue.submit([encoder.finish()]);
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = read.slice(..).get_mapped_range().unwrap();
-        mapped.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+        mapped.as_chunks::<16>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
     }
 
     #[test]
@@ -13934,6 +13940,47 @@ mod tests {
             assert!((f64::from(g) - want).abs() <= 1e-6 + 1e-3 * want, "{c}: {g}, not {want}");
             assert!(g * c <= 1.0 + 1e-5, "{c}: {g}");
         }
+    }
+
+    #[test]
+    fn coverage_divided_by_next_to_nothing_rises_only_as_far_as_the_least_half_float_lets_it() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        if !gpu.computes() {
+            return eprintln!("skipped: the shader is probed in a compute pass");
+        }
+        // the smallest normal half float
+        const LEAST: f32 = 1.0 / 16384.0;
+        // coverage, the other amount (a grain, a second), the mode (8 colour dodge, 17 hard mix,
+        // 21 divide), and what they come to
+        let cases: [(f32, f32, u32, f32); 14] = [
+            // divide: faint coverage over nothing rises only as far as the floor lets it, none
+            // stays none, stronger coverage is full
+            (3.0e-5, 0.0, 21, 3.0e-5 / LEAST),
+            (0.0, 0.0, 21, 0.0),
+            (0.02, 0.0, 21, 1.0),
+            (0.2, 0.4, 21, 0.5),
+            // colour dodge the same over all
+            (3.0e-5, 1.0, 8, 3.0e-5 / LEAST),
+            (0.0, 1.0, 8, 0.0),
+            (0.2, 0.6, 8, 0.5),
+            // hard mix: none (or next to none) over all stays none; full where vivid light comes
+            // to half or more
+            (0.0, 1.0, 17, 0.0),
+            (1.0e-5, 1.0, 17, 0.0),
+            (0.55, 0.5, 17, 1.0),
+            (0.45, 0.6, 17, 1.0),
+            (0.35, 0.6, 17, 0.0),
+            (1.0, 0.0, 17, 1.0),
+            (0.9, 0.0, 17, 0.0),
+        ];
+        let inputs: Vec<[f32; 4]> = cases.iter().map(|&(a, b, mode, _)| [a, b, mode as f32, 0.0]).collect();
+        let got = probe_on_gpu(&gpu, "blend_amount(v.x, v.y, u32(v.z))", &inputs);
+        for (&(a, b, mode, want), &g) in cases.iter().zip(&got) {
+            assert!((g - want).abs() < 1e-3, "mode {mode}: {a} with {b} came to {g}, not {want}");
+        }
+        // a stroke's second combines by it too
+        let second = probe_on_gpu(&gpu, "dual_combine(v.x, v.y, u32(v.z))", &[[1.0e-5, 1.0, 8.0, 0.0]]);
+        assert!((second[0] - 1.0e-5 / LEAST).abs() < 1e-3, "{second:?}");
     }
 
     #[test]

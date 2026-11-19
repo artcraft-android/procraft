@@ -153,18 +153,37 @@ fn blend_value(b: f32, s: f32, mode: u32) -> f32 {
     return blend_rgb(vec3<f32>(b), vec3<f32>(s), mode).x;
 }
 
+// The least a divisor of coverage goes: the smallest normal half float, as coverage is kept. Divided
+// by next to nothing (a black grain or second for divide, a white one for colour dodge), faint
+// coverage rises only as far as this lets it, and none stays none.
+const LEAST_DIVISOR: f32 = 0.00006103515625;
+
 // a stroke's coverage `a` combined with another amount `b` (its grain, its second's coverage) by
 // a blend mode: the modes that pick or carry over colour alone (darker and lighter colour, hue,
 // saturation, colour, luminosity) leave the coverage as it is; soft light lifts or lowers it
-// from a quarter of the way in, as far as `b` is past its middle; the rest as the colour blends
+// from a quarter of the way in, as far as `b` is past its middle; colour dodge, divide and hard
+// mix divide over LEAST_DIVISOR; the rest as the colour blends
 fn blend_amount(a: f32, b: f32, mode: u32) -> f32 {
     switch (mode) {
         case 5u, 10u, 22u, 23u, 24u, 25u: {
             return a;
         }
+        case 8u: {
+            return min(a / max(1.0 - b, LEAST_DIVISOR), 1.0);
+        }
         case 12u: {
             let k = 0.5 * a + 0.25;
             return clamp(select(1.0 - 2.0 * (1.0 - b) * (1.0 - k), 2.0 * b * k, b < 0.5), 0.0, 1.0);
+        }
+        case 17u: {
+            // full where vivid light (its burn below `b`'s middle, its dodge above, each over
+            // the floor) comes to half or more
+            let burned = 1.0 - min((1.0 - a) / max(2.0 * b, LEAST_DIVISOR), 1.0);
+            let dodged = min(a / max(2.0 - 2.0 * b, LEAST_DIVISOR), 1.0);
+            return select(0.0, 1.0, select(burned, dodged, b >= 0.5) >= 0.5);
+        }
+        case 21u: {
+            return min(a / max(b, LEAST_DIVISOR), 1.0);
         }
         default: {
             return blend_value(a, b, mode);
