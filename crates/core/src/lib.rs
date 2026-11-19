@@ -2251,6 +2251,7 @@ impl CanvasSession {
     /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
     /// never kept.
     pub fn stroke_predict(&self, samples: Vec<PenSample>) {
+        let samples = self.pen_predicted(samples);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if st.scene_shown() {
