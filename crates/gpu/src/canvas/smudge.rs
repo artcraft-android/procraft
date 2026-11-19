@@ -23,11 +23,11 @@ pub(super) const TILE: u32 = 256;
 
 /// Where a copy from a texture may put its rows in a window's buffer: at a multiple of this many
 /// bytes. Direct3D 12 without unrestricted copy pitches (on Windows 10, and with older drivers, as
-/// many integrated GPUs have) places them only so: wgpu copies to any other offset through a
-/// buffer of its own and copies that back whole, the rest of each row with it, so a tile copied
-/// into a window wider than it wrote over its neighbours in the window with whatever that buffer
-/// held (blocks of the layer gone, stale or doubled as the stroke went on).
-const PLACEMENT: u32 = 512;
+/// many integrated GPUs have) places them only so (see `crate::placed`): a tile copied into a
+/// window wider than it anywhere else wrote over its neighbours in the window with whatever
+/// wgpu's buffer for the copy held (blocks of the layer gone, stale or doubled as the stroke went
+/// on).
+const PLACEMENT: u32 = crate::placed::PLACEMENT as u32;
 const _: () = assert!(TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a column copies can start at");
 
 /// The most bytes a window takes for work laid together in it: past it, the work goes in windows of
@@ -238,32 +238,6 @@ pub(super) fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
 pub(super) fn tile_rect((x, y): (u32, u32)) -> IRect {
     let at = |n: u32| i32::try_from(n * TILE).unwrap_or(i32::MAX);
     IRect::new(at(x), at(y), at(x + 1), at(y + 1))
-}
-
-/// Copies `size` of a texture from `from` into a window's buffer at `into`; where `placed` says to
-/// (for tests), as Direct3D 12 without unrestricted copy pitches does (see [`PLACEMENT`]): a copy
-/// to an offset it can't place goes through a buffer of its own, holding anything (here every byte
-/// 255), and all of that is copied back.
-fn copy_to_window(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    from: wgpu::TexelCopyTextureInfo<'_>,
-    into: wgpu::TexelCopyBufferInfo<'_>,
-    size: wgpu::Extent3d,
-    placed: bool,
-) {
-    let layout = into.layout;
-    if !placed || layout.offset.is_multiple_of(u64::from(PLACEMENT)) {
-        encoder.copy_texture_to_buffer(from, into, size);
-        return;
-    }
-    let row = layout.bytes_per_row.unwrap_or(0);
-    let bytes = u64::from(row) * u64::from(size.height.saturating_sub(1)) + 4 * u64::from(size.width);
-    let filler = vec![255; usize::try_from(bytes).unwrap_or(0)];
-    let usage = wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-    let staged = super::buffer_init(device, "placed copy", &filler, usage);
-    encoder.copy_texture_to_buffer(from, in_buffer(&staged, 0, row, size.height), size);
-    encoder.copy_buffer_to_buffer(&staged, 0, into.buffer, layout.offset, bytes);
 }
 
 /// A buffer for a window.
@@ -581,7 +555,7 @@ impl Canvas {
             }
         }
         drop(pass);
-        self.window_out(encoder, reach, writes, (work, kept));
+        self.window_out(gpu, encoder, reach, writes, (work, kept));
         true
     }
 
@@ -615,7 +589,6 @@ impl Canvas {
         let device = &gpu.device;
         let full = self.full();
         let also = self.smudge_also();
-        let placed = self.placed_copies;
         let Some(smudge) = self.smudge.as_mut() else { return false };
         let Some(layer) = self.layers.get(&smudge.into) else { return false };
         let also: Vec<&wgpu::Texture> = also.iter().filter_map(|id| self.layers.get(id)).map(|l| &l.texture).collect();
@@ -708,12 +681,12 @@ impl Canvas {
         let size = extent(width, height);
         // the layer as the stroke has left it, and as it was where the stroke hasn't been
         let from_layer = copy_at(&layer.texture, reach.x0, reach.y0);
-        encoder.copy_texture_to_buffer(from_layer, in_buffer(&window.work, 0, row, height), size);
+        gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row, height), size);
         if before {
             encoder.copy_texture_to_texture(from_layer, copy_at(&window.before, 0, 0), size);
         }
         if let Some(grained) = &window.grained {
-            encoder.copy_texture_to_buffer(from_layer, in_buffer(grained, 0, row, height), size);
+            gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(grained, 0, row, height), size);
         }
         if let Some(amount) = &window.amount {
             encoder.clear_buffer(amount, 0, Some(bytes * keeps.halves()));
@@ -743,7 +716,7 @@ impl Canvas {
             for (kept, buffer, start) in halves {
                 if let (Some(kept), Some(buffer)) = (kept, buffer) {
                     let into = in_buffer(buffer, start + offset, row, r.height());
-                    copy_to_window(device, encoder, copy_at(kept, x, y), into, size, placed);
+                    gpu.copy_texture_to_buffer(encoder, copy_at(kept, x, y), into, size);
                 }
             }
         }
@@ -755,6 +728,7 @@ impl Canvas {
     /// keeps (`kept`).
     fn window_out(
         &mut self,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         reach: IRect,
         changed: IRect,
@@ -769,7 +743,8 @@ impl Canvas {
         let bytes = u64::from(row) * u64::from(reach.height());
         let offset = |r: IRect| in_window(reach, r);
         if work {
-            encoder.copy_buffer_to_texture(
+            gpu.copy_buffer_to_texture(
+                encoder,
                 in_buffer(&window.work, offset(changed), row, changed.height()),
                 copy_at(&layer.texture, changed.x0, changed.y0),
                 extent(changed.width(), changed.height()),
@@ -794,7 +769,8 @@ impl Canvas {
             ];
             for (kept, buffer, start) in halves {
                 if let (Some(kept), Some(buffer)) = (kept, buffer) {
-                    encoder.copy_buffer_to_texture(
+                    gpu.copy_buffer_to_texture(
+                        encoder,
                         in_buffer(buffer, start + offset(r), row, r.height()),
                         copy_at(kept, x, y),
                         size,

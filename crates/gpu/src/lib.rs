@@ -9,6 +9,7 @@ mod canvas;
 mod compiler;
 mod kept;
 mod lighting;
+mod placed;
 mod scene;
 mod sphere;
 
@@ -207,6 +208,9 @@ pub struct Gpu {
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
     /// Made as an old GPU's (see [`Gpu::headless_old`]).
     old: bool,
+    /// Whether its copies are made as Direct3D 12 without unrestricted copy pitches makes them
+    /// (see [`Gpu::emulate_placed_copies`]).
+    placed: Arc<placed::Placed>,
 }
 
 /// Elsewhere there's no Direct3D 12 to choose a shader compiler for.
@@ -494,6 +498,7 @@ impl Gpu {
             kept: Arc::default(),
             readbacks: Arc::default(),
             old,
+            placed: Arc::default(),
         };
         // what an old GPU can't do, and what the canvas does without it (in the shared log)
         for lack in gpu.lacks() {

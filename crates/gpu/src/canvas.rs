@@ -2430,7 +2430,8 @@ fn pack_region(gpu: &Gpu, band: &mut Option<wgpu::Buffer>, texture: &wgpu::Textu
             let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let mut encoder =
                 gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("history band") });
-            encoder.copy_texture_to_buffer(
+            gpu.copy_texture_to_buffer(
+                &mut encoder,
                 copy_at(texture, rect.x0, rect.y0 + y as i32),
                 wgpu::TexelCopyBufferInfo {
                     buffer,
@@ -2769,9 +2770,6 @@ pub struct Canvas {
     stamp_capacity: u64,
     /// The most stamps' work sent to the GPU as one piece (see [`WORK_AT_ONCE`]).
     work_at_once: u64,
-    /// Copies into a smudge window's buffers go as Direct3D 12 without unrestricted copy pitches
-    /// makes them (see [`Canvas::emulate_placed_copies`]).
-    placed_copies: bool,
     /// The most stamps one render uploads (see [`STAMPS_AT_ONCE`]).
     stamps_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
@@ -3180,7 +3178,6 @@ impl Canvas {
             stamp_buffer,
             stamp_capacity,
             work_at_once: WORK_AT_ONCE,
-            placed_copies: false,
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
             paced: false,
@@ -4147,14 +4144,6 @@ impl Canvas {
     #[doc(hidden)]
     pub fn set_work_at_once(&mut self, work: u64) {
         self.work_at_once = work;
-    }
-
-    /// Copies from textures into a smudge window's buffers made as Direct3D 12 without unrestricted
-    /// copy pitches makes them, where an offset isn't one it places (see `smudge::PLACEMENT`): for
-    /// tests on other GPUs.
-    #[doc(hidden)]
-    pub fn emulate_placed_copies(&mut self, on: bool) {
-        self.placed_copies = on;
     }
 
     /// Uploads at most this many stamps in a render, in place of [`STAMPS_AT_ONCE`]: for tests.
@@ -8909,7 +8898,8 @@ impl Canvas {
                     pass.dispatch_workgroups(rect.width().div_ceil(RULE_TILE), rect.height().div_ceil(RULE_TILE), 1);
                     drop(pass);
                     self.dispatched.fetch_add(1, Ordering::Relaxed);
-                    encoder.copy_buffer_to_texture(
+                    gpu.copy_buffer_to_texture(
+                        encoder,
                         wgpu::TexelCopyBufferInfo {
                             buffer: &out,
                             layout: wgpu::TexelCopyBufferLayout {
@@ -10190,7 +10180,8 @@ impl Canvas {
             gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("layer pixels") });
         for (i, id) in ids.iter().enumerate() {
             let Some(layer) = self.layers.get(id) else { continue };
-            encoder.copy_texture_to_buffer(
+            gpu.copy_texture_to_buffer(
+                &mut encoder,
                 copy_at(&layer.texture, i32::try_from(x).unwrap_or(0), i32::try_from(y).unwrap_or(0)),
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
@@ -13032,7 +13023,8 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
     // would give back what it held before, another layer's pixels perhaps: the read fails instead
     let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
-    encoder.copy_texture_to_buffer(
+    gpu.copy_texture_to_buffer(
+        &mut encoder,
         copy_at(texture, rect.x0, rect.y0),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,

@@ -16098,8 +16098,8 @@ fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_o
     let with_second = |b: &Brush| b.mixes_wet() && b.secondary.is_some();
     let kinds = [("gradual", gradual as fn(&Brush) -> bool), ("with a second", with_second)];
     let layers = [false, true].map(|placed| {
+        gpu.emulate_placed_copies(placed);
         let s = session_on(gpu.clone(), side, 800);
-        s.shared.lock().canvas.as_mut().unwrap().emulate_placed_copies(placed);
         let layer =
             s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
         let layer = layer.unwrap();
@@ -16164,6 +16164,135 @@ fn wet_paint_across_many_tiles_comes_out_alike_where_copies_start_at_multiples_o
     let pixels: usize = tiles.values().map(|t| t.0).sum();
     let most = tiles.values().map(|t| t.1).max().unwrap_or(0);
     assert!(most <= 1 && pixels <= 16, "tiles that came out otherwise (pixels, most): {tiles:?}");
+}
+
+/// Every picture the panels show and the strokes under them come out alike where a copy between a
+/// texture and a buffer can start in the buffer only at multiples of 512 bytes, as Direct3D 12
+/// without unrestricted copy pitches has it (on Windows 10, and with older drivers): the brushes'
+/// sample strokes (those that mix wet across the tiles of theirs), layer and canvas thumbnails,
+/// the layers under a touch (each layer's pixel read into its own row of a buffer), and dry, wet,
+/// smudged and erased strokes across tiles over a picture. Copies placed elsewhere broke the
+/// brushes' and layers' pictures into blocks.
+#[test]
+fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_512_bytes() {
+    use procraft_engine::brush::Brush;
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let side = 640u32;
+    let n = side as usize;
+    // every tile of the picture its own
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        *px = [(x / 3 % 256) as u8, (y / 3 % 256) as u8, ((x / 256 * 70 + y / 256 * 110) % 256) as u8, 255];
+    }
+    let runs = [false, true].map(|placed| {
+        gpu.emulate_placed_copies(placed);
+        let staged = gpu.placed_copies_staged();
+        let s = session_on(gpu.clone(), side, side);
+        let mut pictures: Vec<(String, Vec<u8>)> = Vec::new();
+        // the brushes' sample strokes: every one that mixes wet, and a few that don't
+        let brushes: Vec<(u32, u32, String)> = {
+            let st = s.shared.lock();
+            let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                set.brushes.iter().enumerate().map(move |(j, b)| (i as u32, j as u32, b.name.clone(), b.mixes_wet()))
+            });
+            let (wet, dry): (Vec<_>, Vec<_>) = all.partition(|b| b.3);
+            assert!(!wet.is_empty(), "stock brushes that mix wet");
+            wet.into_iter().chain(dry.into_iter().step_by(25)).map(|(i, j, name, _)| (i, j, name)).collect()
+        };
+        for (set, index, name) in &brushes {
+            let preview = s.brush_preview(*set, *index, 530, 162).unwrap_or_else(|| panic!("{name}'s preview"));
+            pictures.push((format!("{name}'s preview"), preview.rgba));
+        }
+        // strokes across the tiles over a picture, and on a layer of their own above it
+        let base =
+            s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
+        let base = base.unwrap();
+        let find = |want: &dyn Fn(&Brush) -> bool| {
+            let st = s.shared.lock();
+            let found =
+                st.library.iter().enumerate().find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+            found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+        };
+        // an inking brush's solid line
+        let dry = {
+            let st = s.shared.lock();
+            let set = st.library.iter().position(|set| set.name == "Inking").unwrap();
+            (set as u32, 0)
+        };
+        let gradual = find(&|b: &Brush| b.mixes_wet() && b.rendering == procraft_engine::brush::Rendering::Gradual);
+        let second = find(&|b: &Brush| b.mixes_wet() && b.secondary.is_some());
+        let swing = |k: f32| {
+            let at = |e: usize| {
+                let t = e as f32 / 60.0;
+                let (x, y) = (20.0 + t * 600.0, 320.0 + (t * 11.0 + k).sin() * 280.0);
+                PenSample { pressure: 0.4 + 0.5 * (e as f32 * 0.2 + k).sin().abs(), ..sample(x, y, e as f64 * 7.0) }
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=60 {
+                s.stroke_add(vec![at(e)]);
+                if e % 4 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+        };
+        // wet paint, smudged and erased on the picture's layer; dry paint above
+        for (k, (set, index)) in [gradual, second].into_iter().enumerate() {
+            assert!(s.select_layer(base));
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(0.6);
+            s.set_color(0.8 - 0.5 * k as f32, 0.3, 0.2 + 0.6 * k as f32);
+            swing(k as f32 * 2.0);
+        }
+        let above = s.add_layer();
+        assert!(s.select_layer(above));
+        assert!(s.select_brush(dry.0, dry.1));
+        s.set_brush_size(1.0);
+        s.set_color(0.1, 0.7, 0.3);
+        swing(1.0);
+        assert!(s.select_layer(base));
+        s.set_tool(ToolKind::Smudge);
+        swing(3.0);
+        s.set_tool(ToolKind::Erase);
+        swing(4.0);
+        s.set_tool(ToolKind::Paint);
+        pictures.push(("the canvas".into(), picture(&s)));
+        for id in [base, above] {
+            pictures.push((format!("layer {id}"), s.copy_layer_contents(id).unwrap().rgba));
+            pictures.push((format!("layer {id}'s thumbnail"), s.layer_thumbnail(id, 160).unwrap().rgba));
+        }
+        pictures.push(("the canvas's thumbnail".into(), s.canvas_thumbnail(256).unwrap().rgba));
+        // the layers under touches where the layer above has paint, and where it hasn't
+        let painted = s.copy_layer_contents(above).unwrap().rgba;
+        let (on, off): (Vec<usize>, Vec<usize>) = (0..n * n).partition(|i| painted[i * 4 + 3] > 200);
+        assert!(!on.is_empty(), "the stroke above painted");
+        let under: Vec<Vec<u64>> = on
+            .iter()
+            .step_by(on.len().div_ceil(12))
+            .chain(off.iter().step_by(off.len().div_ceil(4)))
+            .map(|i| s.layers_at((i % n) as f32 + 0.5, (i / n) as f32 + 0.5))
+            .collect();
+        assert!(under.iter().any(|u| u.len() == 2), "both layers under a touch: {under:?}");
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        gpu.emulate_placed_copies(false);
+        (pictures, under, gpu.placed_copies_staged() - staged)
+    });
+    let [(direct, under, _), (placed, placed_under, staged)] = runs;
+    assert!(staged > 0, "no copy started where it isn't placed");
+    // alike but for a level at a few pixels (the same stamps can come out so from one run to the
+    // next while other work shares the GPU)
+    let unlike: Vec<(String, u8, usize)> = direct
+        .iter()
+        .zip(&placed)
+        .filter_map(|((name, a), (_, b))| {
+            assert_eq!(a.len(), b.len(), "{name}");
+            let (most, count) = differ(a, b);
+            (most > 1 || count > 16).then(|| (name.clone(), most, count))
+        })
+        .collect();
+    assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels): {unlike:?}");
+    assert_eq!(under, placed_under, "the layers under touches");
 }
 
 /// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to

@@ -2720,7 +2720,8 @@ impl FootprintMarks {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
-        encoder.copy_texture_to_buffer(
+        gpu.copy_texture_to_buffer(
+            &mut encoder,
             self.marks.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.read,
