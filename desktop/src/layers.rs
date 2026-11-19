@@ -2388,9 +2388,10 @@ mod tests {
         let modes = procraft_core::blend_modes();
         let list = Rect::from_min_size(pos2(12.0, 12.0), vec2(360.0, BLEND_LIST_HEIGHT));
         for scroll in [0.0, 2.4 * BLEND_ROW, 5.0 * BLEND_ROW] {
-            let output = ctx.clone().run_ui(RawInput::default(), |ui| {
+            let mut output = ctx.clone().run_ui(RawInput::default(), |ui| {
                 blend_rows(ui, &mut look, list, &modes, scroll);
             });
+            output.textures_delta.clear();
             let mut highlights = output.shapes.iter().filter_map(|shape| match &shape.shape {
                 egui::Shape::Rect(rect) if rect.fill == argb(pc::ACCENT) => Some(rect.rect),
                 _ => None,
