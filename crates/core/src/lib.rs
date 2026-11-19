@@ -143,8 +143,8 @@ pub use blend_wheel::{
 };
 pub use brush_files::BrushEngines;
 pub use brush_files::{
-    BrushFileReading, BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes,
-    read_brushes_file, read_brushes_from,
+    BrushFileReading, BrushFileWriting, BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip,
+    read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
 };
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::prepare_brushes;

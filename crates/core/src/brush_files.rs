@@ -12,8 +12,8 @@ use procraft_engine::curve::Curve;
 use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
 
-use crate::CanvasSession;
 use crate::brush_library::LibrarySet;
+use crate::{CanvasSession, MobileError};
 
 /// The set brushes from single brush files go into.
 const IMPORTED: &str = "Imported";
@@ -514,29 +514,153 @@ impl CanvasSession {
 
     /// Brush `index` of `set` as a brush file.
     pub fn brush_as_file(&self, set: u32, index: u32) -> Option<Vec<u8>> {
+        self.write_brush_into(Vec::new(), set, index)?.ok()
+    }
+
+    /// Brush `index` of `set` written as a brush file at `path` (whole, or not at all).
+    pub fn write_brush_file(&self, set: u32, index: u32, path: String) -> Result<(), MobileError> {
+        write_file(&path, |out| {
+            self.write_brush_into(out, set, index).unwrap_or_else(|| Err(std::io::Error::other("no such brush")))
+        })
+    }
+
+    /// Set `set` as a set file (put together in memory: see [`CanvasSession::write_brush_set_file`]).
+    pub fn brush_set_as_file(&self, set: u32) -> Option<Vec<u8>> {
+        let (name, count) = self.set_name_and_count(set)?;
+        self.brushes_as_set_file(set, 0..count, &name, now_seed())
+    }
+
+    /// Set `set` written as a set file at `path` a brush at a time: each brush's pictures are made,
+    /// written and let go before the next's, so however big the set, only one brush's are held.
+    /// `writing` follows it and can stop it; stopped or failed, nothing is left at `path`.
+    pub fn write_brush_set_file(
+        &self,
+        set: u32,
+        path: String,
+        writing: Option<std::sync::Arc<BrushFileWriting>>,
+    ) -> Result<(), MobileError> {
+        let (name, count) = self.set_name_and_count(set).ok_or_else(|| file_error("no such set"))?;
+        let writing = writing.unwrap_or_default();
+        let seed = now_seed();
+        write_file(&path, |out| {
+            self.write_set_into(out, set, 0..count, &name, seed, &writing)
+                .unwrap_or_else(|| Err(std::io::Error::other("no such set")))
+        })
+    }
+
+    /// The library in use as a library file: its sets and their brushes in order, each tool's
+    /// brush; none if it has no brushes (put together in memory: see
+    /// [`CanvasSession::write_brush_library_file`]).
+    pub fn brush_library_as_file(&self) -> Option<Vec<u8>> {
+        self.write_library_into(Vec::new(), &BrushFileWriting::default())?.ok()
+    }
+
+    /// The library in use written as a library file at `path` a brush at a time, as
+    /// [`CanvasSession::write_brush_set_file`] writes a set; fails if it has no brushes.
+    pub fn write_brush_library_file(
+        &self,
+        path: String,
+        writing: Option<std::sync::Arc<BrushFileWriting>>,
+    ) -> Result<(), MobileError> {
+        let writing = writing.unwrap_or_default();
+        write_file(&path, |out| {
+            self.write_library_into(out, &writing).unwrap_or_else(|| Err(std::io::Error::other("no brushes")))
+        })
+    }
+}
+
+/// How far writing a brush set or library file has come, and whether it is to stop: the interface
+/// shows the one and may ask for the other, from another thread.
+#[derive(uniffi::Object, Default)]
+pub struct BrushFileWriting {
+    /// Brushes written so far, of how many there are (none known yet: 0).
+    done: std::sync::atomic::AtomicUsize,
+    of: std::sync::atomic::AtomicUsize,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+#[uniffi::export]
+impl BrushFileWriting {
+    #[uniffi::constructor]
+    pub fn new() -> std::sync::Arc<BrushFileWriting> {
+        std::sync::Arc::new(BrushFileWriting::default())
+    }
+
+    /// How far the writing has come, 0..1.
+    pub fn progress(&self) -> f32 {
+        let of = self.of.load(std::sync::atomic::Ordering::Relaxed);
+        let done = self.done.load(std::sync::atomic::Ordering::Relaxed);
+        if of == 0 { 0.0 } else { (done as f32 / of as f32).min(1.0) }
+    }
+
+    /// Stops the writing before the next brush: the file isn't made.
+    pub fn cancel(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl BrushFileWriting {
+    fn cancelled(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// There are `of` brushes to write.
+    fn begin(&self, of: usize) {
+        self.done.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.of.store(of, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn wrote_one(&self) {
+        self.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Why a file being written stopped part way: it was asked to.
+fn stopped() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped")
+}
+
+/// A number from the clock, to name a file's folders by.
+fn now_seed() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+fn file_error(why: impl std::fmt::Display) -> MobileError {
+    crate::project::file_error("writing the brush file", why)
+}
+
+/// The file at `path` written whole through a buffer by `write`, or not at all (what was begun is
+/// removed).
+fn write_file(
+    path: &str,
+    write: impl FnOnce(std::io::BufWriter<std::fs::File>) -> std::io::Result<std::io::BufWriter<std::fs::File>>,
+) -> Result<(), MobileError> {
+    crate::project::write_atomically(std::path::Path::new(path), |p| {
+        let file = std::fs::File::create(p).map_err(file_error)?;
+        let out = write(std::io::BufWriter::with_capacity(1 << 16, file)).map_err(file_error)?;
+        out.into_inner().map_err(|e| file_error(e.error()))?;
+        Ok(())
+    })
+}
+
+impl CanvasSession {
+    fn set_name_and_count(&self, set: u32) -> Option<(String, usize)> {
+        let st = self.shared.lock();
+        let entry = st.library.get(set as usize)?;
+        Some((entry.name.clone(), entry.brushes.len()))
+    }
+
+    /// Brush `index` of `set` as a brush file, written into `out`; none if there is no such brush.
+    fn write_brush_into<W: std::io::Write>(&self, out: W, set: u32, index: u32) -> Option<std::io::Result<W>> {
         let brush = {
             let st = self.shared.lock();
             st.with_sliders(st.library.get(set as usize)?.brushes.get(index as usize)?, set as usize, index as usize)
         };
         let made = self.brush_pictures(&brush, set, index);
         let brush = self.as_written(brush);
-        Some(brushfile::write(&brush, author_name(&brush), &made.pictures()))
+        Some(brushfile::write_to(out, &brush, author_name(&brush), &made.pictures()))
     }
 
-    /// Set `set` as a set file.
-    pub fn brush_set_as_file(&self, set: u32) -> Option<Vec<u8>> {
-        let (name, count) = {
-            let st = self.shared.lock();
-            let entry = st.library.get(set as usize)?;
-            (entry.name.clone(), entry.brushes.len())
-        };
-        let seed =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-        self.brushes_as_set_file(set, 0..count, &name, seed)
-    }
-}
-
-impl CanvasSession {
     /// Brushes `range` of set `set` as a set file called `name`, their folders named from `seed`.
     pub(crate) fn brushes_as_set_file(
         &self,
@@ -545,62 +669,83 @@ impl CanvasSession {
         name: &str,
         seed: u64,
     ) -> Option<Vec<u8>> {
-        let brushes: Vec<(usize, Brush)> = {
-            let st = self.shared.lock();
-            let entry = st.library.get(set as usize)?;
-            let brushes = entry.brushes.get(range.clone())?;
-            brushes.iter().zip(range).map(|(b, i)| (i, st.with_sliders(b, set as usize, i))).collect()
-        };
-        let made: Vec<Made> = brushes.iter().map(|(i, b)| self.brush_pictures(b, set, *i as u32)).collect();
-        let brushes: Vec<Brush> = brushes.into_iter().map(|(_, b)| self.as_written(b)).collect();
-        let list: Vec<(&Brush, &str, Pictures<'_>)> =
-            brushes.iter().zip(&made).map(|(b, m)| (b, author_name(b), m.pictures())).collect();
-        Some(brushfile::write_set(name, &list, |i| folder_id(seed, i)))
+        self.write_set_into(Vec::new(), set, range, name, seed, &BrushFileWriting::default())?.ok()
     }
-}
 
-#[uniffi::export]
-impl CanvasSession {
-    /// The library in use as a library file: its sets and their brushes in order, each tool's
-    /// brush; none if it has no brushes.
-    pub fn brush_library_as_file(&self) -> Option<Vec<u8>> {
+    /// Brushes `range` of set `set` as a set file called `name` written into `out` a brush at a
+    /// time (see [`CanvasSession::write_brush_set_file`]); none if the set has no such brushes.
+    fn write_set_into<W: std::io::Write>(
+        &self,
+        out: W,
+        set: u32,
+        range: std::ops::Range<usize>,
+        name: &str,
+        seed: u64,
+        writing: &BrushFileWriting,
+    ) -> Option<std::io::Result<W>> {
+        // none if the set hasn't these brushes
+        self.shared.lock().library.get(set as usize)?.brushes.get(range.clone())?;
+        writing.begin(range.len());
+        let mut file = brushfile::SetWriter::begin(out, name, range.len(), |i| folder_id(seed, i));
+        for i in range {
+            if writing.cancelled() {
+                file.fail(stopped());
+                break;
+            }
+            // each brush's settings taken as it is written, its pictures made, written and let go
+            let Some(brush) = self.brush_with_sliders(set as usize, i) else { break };
+            let made = self.brush_pictures(&brush, set, i as u32);
+            let brush = self.as_written(brush);
+            file.add(&brush, author_name(&brush), &made.pictures());
+            writing.wrote_one();
+        }
+        Some(file.finish())
+    }
+
+    /// The library in use as a library file written into `out` a brush at a time (see
+    /// [`CanvasSession::write_brush_library_file`]); none if it has no brushes.
+    fn write_library_into<W: std::io::Write>(&self, out: W, writing: &BrushFileWriting) -> Option<std::io::Result<W>> {
+        // the sets as they are now (each brush is taken as it is written)
         let (sets, tools) = {
             let st = self.shared.lock();
-            let sets: Vec<(String, u32, Vec<Brush>)> = st
-                .library
-                .iter()
-                .enumerate()
-                .map(|(s, set)| {
-                    let brushes = set.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, s, i)).collect();
-                    (set.name.clone(), set.icon, brushes)
-                })
-                .collect();
+            let sets: Vec<(String, u32, usize)> =
+                st.library.iter().map(|set| (set.name.clone(), set.icon, set.brushes.len())).collect();
             let tools = [crate::ToolKind::Paint, crate::ToolKind::Smudge, crate::ToolKind::Erase]
                 .map(|tool| Some(st.brush_ref(tool)));
             (sets, tools)
         };
-        if sets.iter().all(|(_, _, brushes)| brushes.is_empty()) {
+        if sets.iter().all(|(_, _, count)| *count == 0) {
             return None;
         }
-        let made: Vec<Vec<Made>> = sets
+        writing.begin(sets.iter().map(|(_, _, count)| count).sum());
+        let heads: Vec<(&str, Option<&str>)> = sets
             .iter()
-            .enumerate()
-            .map(|(s, (_, _, brushes))| {
-                brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, s as u32, i as u32)).collect()
-            })
-            .collect();
-        let out: Vec<brushlibrary::SetOut<'_>> = sets
-            .iter()
-            .zip(&made)
-            .map(|((name, icon, brushes), made)| brushlibrary::SetOut {
-                name,
-                icon: crate::brush_library::shipped_icon_name(*icon),
-                brushes: brushes.iter().zip(made).map(|(b, m)| (b, author_name(b), m.pictures())).collect(),
-            })
+            .map(|(name, icon, _)| (name.as_str(), crate::brush_library::shipped_icon_name(*icon)))
             .collect();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let seed = now.as_nanos() as u64;
-        Some(brushlibrary::write(&out, tools, |i| folder_id(seed, i).replace('-', "").to_lowercase(), now.as_secs()))
+        let id = |i| folder_id(seed, i).replace('-', "").to_lowercase();
+        let mut file = brushlibrary::LibraryWriter::begin(out, &heads, tools, id, now.as_secs());
+        'sets: for (s, (_, _, count)) in sets.iter().enumerate() {
+            for i in 0..*count {
+                if writing.cancelled() {
+                    file.fail(stopped());
+                    break 'sets;
+                }
+                // each brush's settings taken as it is written, its pictures made, written and let go
+                let Some(brush) = self.brush_with_sliders(s, i) else { continue 'sets };
+                let made = self.brush_pictures(&brush, s as u32, i as u32);
+                file.add(s, &brush, author_name(&brush), &made.pictures());
+                writing.wrote_one();
+            }
+        }
+        Some(file.finish())
+    }
+
+    /// Brush `index` of set `set` as the library has it now, with its sliders where they stand.
+    fn brush_with_sliders(&self, set: usize, index: usize) -> Option<Brush> {
+        let st = self.shared.lock();
+        Some(st.with_sliders(st.library.get(set)?.brushes.get(index)?, set, index))
     }
 }
 
@@ -4147,5 +4292,72 @@ mod tests {
         assert_eq!(id.len(), 36);
         assert_eq!(id.matches('-').count(), 4);
         assert_ne!(id, folder_id(42, 4));
+    }
+
+    /// Sharing the library as it ships on this machine's GPU (each brush's preview drawn): how long
+    /// it takes, and how much of that is the previews (drawn a piece at a time, each waited for, so
+    /// a weak GPU's driver never stops one), the other pictures and the file: writing the file adds
+    /// little to making the pictures. Absolute numbers:
+    /// `cargo test -p procraft-core --lib brush_library_export_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn brush_library_export_time() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 200);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(procraft_engine::view::View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let brushes: Vec<(u32, u32, Brush)> = {
+            let st = s.shared.lock();
+            st.library
+                .iter()
+                .enumerate()
+                .flat_map(|(set, entry)| {
+                    entry.brushes.iter().enumerate().map(move |(i, b)| (set as u32, i as u32, b.clone()))
+                })
+                .collect()
+        };
+        // each part alone
+        let started = std::time::Instant::now();
+        let mut previews = std::time::Duration::ZERO;
+        for (set, i, brush) in &brushes {
+            if brush.thumbnail.is_none() {
+                let t = std::time::Instant::now();
+                std::hint::black_box(s.brush_preview(*set, *i, THUMBNAIL.0, THUMBNAIL.1));
+                previews += t.elapsed();
+            }
+        }
+        let mut pictures = std::time::Duration::ZERO;
+        for (set, i, brush) in &brushes {
+            let t = std::time::Instant::now();
+            std::hint::black_box(s.brush_pictures(brush, *set, *i));
+            pictures += t.elapsed();
+        }
+        let parts = started.elapsed();
+        let dir = std::env::temp_dir().join(format!("procraft-library-time-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Library.brushlibrary").to_string_lossy().into_owned();
+        let t = std::time::Instant::now();
+        s.write_brush_library_file(path.clone(), None).unwrap();
+        let written = t.elapsed();
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let drawn = brushes.iter().filter(|(_, _, b)| b.thumbnail.is_none()).count();
+        println!(
+            "{} brushes ({drawn} previews drawn): previews {} ms ({:.1} ms each), all pictures {} ms \
+             (parts {} ms); the library file written in {} ms, {} KB",
+            brushes.len(),
+            previews.as_millis(),
+            previews.as_secs_f64() * 1000.0 / drawn.max(1) as f64,
+            pictures.as_millis(),
+            parts.as_millis(),
+            written.as_millis(),
+            bytes >> 10
+        );
+        assert!(written <= pictures * 3 / 2, "written in {written:?}, its pictures made in {pictures:?}");
     }
 }

@@ -4343,6 +4343,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The export card's Cancel: the export stops, and nothing is shared. */
     fun cancelExport() {
         exportCancelled = true
+        exportStops?.invoke()
     }
 
     /**
@@ -5502,47 +5503,53 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         libraryChanged()
     }
 
-    /** A brush, or (no brush) the shown set, written to a brush or set file to share. */
+    /**
+     * A brush, or (no brush) the shown set, written to a brush or set file to share. The core writes
+     * the file itself, a brush at a time (nothing of it comes through here); a set shows the export
+     * card meanwhile, its pie following the brushes written, and its Cancel stops it.
+     */
     suspend fun brushFileToShare(b: BrushInfo?): File? {
         val s = session ?: return null
-        val file = withContext(Dispatchers.IO) {
-            // a big set is put together in memory: running out of it, or a write that fails, is
-            // told rather than ending the app
-            runCatching {
-                val (name, bytes) = if (b != null) {
-                    b.name to (s.brushAsFile(b.set, b.index) ?: return@runCatching null)
-                } else {
-                    val set = brushSets.getOrNull(shownSet) ?: return@runCatching null
-                    set.name to (s.brushSetAsFile(shownSet.toUInt()) ?: return@runCatching null)
-                }
-                // in a folder of its own, so another of the same name can't write over it while
-                // it is being shared
-                val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
-                File(dir, brushFileName(name, single = b != null)).apply { writeBytes(bytes) }
-            }.getOrNull()
+        val name = b?.name ?: brushSets.getOrNull(shownSet)?.name ?: return null
+        val file = File(exportFolder(), brushFileName(name, single = b != null))
+        if (b != null) {
+            val written = withContext(Dispatchers.IO) {
+                runCatching { s.writeBrushFile(b.set, b.index, file.path) }.onFailure { AppLog.e(TAG, "sharing a brush", it) }.isSuccess
+            }
+            if (!written) showNotice("This brush couldn't be shared.", warning = true)
+            return file.takeIf { written }
         }
-        if (file == null) showNotice(if (b != null) "This brush couldn't be shared." else "This brush set couldn't be shared.", warning = true)
-        return file
+        val set = shownSet.toUInt()
+        val writing = io.github.artcraftandroid.procraft.core.BrushFileWriting()
+        return withCard("This brush set couldn't be shared.", writing::progress, writing::cancel) {
+            withContext(Dispatchers.IO) {
+                runCatching { s.writeBrushSetFile(set, file.path, writing) }
+                    .onFailure { if (!exportCancelled) AppLog.e(TAG, "sharing a brush set", it) }
+                    .getOrNull()?.let { file }
+            }
+        }
     }
 
-    /** The library in use written to a library file to share; none (and told) if it has no brushes. */
+    /**
+     * The library in use written to a library file to share, as [brushFileToShare] writes a set:
+     * the export card shows meanwhile. None (and told) if it has no brushes or couldn't be written.
+     */
     suspend fun libraryFileToShare(): File? {
         val s = session ?: return null
-        val name = libraryName
-        val file = withContext(Dispatchers.IO) {
-            // put together in memory: running out of it, or a write that fails, is told
-            runCatching {
-                val bytes = s.brushLibraryAsFile() ?: return@runCatching null
-                // in a folder of its own, so another of the same name can't write over it while
-                // it is being shared
-                val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
-                val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brushes" }
-                File(dir, "$safe.$BRUSH_LIBRARY_EXTENSION").apply { writeBytes(bytes) }
-            }.getOrNull()
+        val safe = libraryName.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brushes" }
+        val file = File(exportFolder(), "$safe.$BRUSH_LIBRARY_EXTENSION")
+        val writing = io.github.artcraftandroid.procraft.core.BrushFileWriting()
+        return withCard("This library couldn't be shared.", writing::progress, writing::cancel) {
+            withContext(Dispatchers.IO) {
+                runCatching { s.writeBrushLibraryFile(file.path, writing) }
+                    .onFailure { if (!exportCancelled) AppLog.e(TAG, "sharing a brush library", it) }
+                    .getOrNull()?.let { file }
+            }
         }
-        if (file == null) showNotice("This library couldn't be shared.", warning = true)
-        return file
     }
+
+    /** A folder of its own in the cache for a file to share, so another of the same name can't write over it while it is shared. */
+    private fun exportFolder(): File = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
 
     /**
      * A brush, set or library file from elsewhere, with the import card: it joins the library and
@@ -6566,10 +6573,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return withCard(failed, s::exportProgress) { work(s) }
     }
 
-    /** As [withExportCard], how far it has come told by [progress] (0..1). */
-    private suspend fun <T : Any> withCard(failed: String, progress: () -> Float, work: suspend () -> T?): T? {
+    /**
+     * As [withExportCard], how far it has come told by [progress] (0..1); the card's Cancel calls
+     * [cancel] too, if given, to stop the work.
+     */
+    private suspend fun <T : Any> withCard(failed: String, progress: () -> Float, cancel: (() -> Unit)? = null, work: suspend () -> T?): T? {
         if (exportShown != null || timeLapseExporting) return null
         exportCancelled = false
+        exportStops = cancel
         exportShown = ExportShown(0f)
         val following = viewModelScope.launch {
             while (true) {
@@ -6590,9 +6601,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return made
         } finally {
             following.cancel()
+            exportStops = null
             exportShown = null
         }
     }
+
+    /** What stops the export under way, if it can be stopped (see [withCard]). */
+    @Volatile
+    private var exportStops: (() -> Unit)? = null
 
     private suspend fun exportFiles(s: CanvasSession, kind: Export, pdfQuality: Int): List<File> =
         withContext(Dispatchers.IO) {
