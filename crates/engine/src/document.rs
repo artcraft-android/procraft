@@ -319,6 +319,10 @@ pub struct Layer {
     /// composites; none, or none of them on, for a plain layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<LayerStyle>,
+    /// A comic panel's frame: the shape the art above it in its panel is clipped to (see
+    /// [`crate::panels`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<crate::panels::PanelFrame>,
 }
 
 /// What an adjustment layer does: the adjustment it redraws what is below it through, with its
@@ -366,6 +370,11 @@ impl LayerEffect {
         self.on && self.opacity > 0.0 && (self.size > 0.0 || self.distance > 0.0)
     }
 
+    /// Whether, as a layer's Color, it colours anything: it has no size to it, only how strong.
+    pub fn colours(&self) -> bool {
+        self.on && self.opacity > 0.0
+    }
+
     /// Its values kept to what they can be (a file's, say).
     pub fn tidied(self) -> LayerEffect {
         let unit = |v: f32, or: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { or };
@@ -382,7 +391,8 @@ impl LayerEffect {
     }
 }
 
-/// A layer's styles: an outline, a drop shadow, and glows outside and inside its edge. Each is off
+/// A layer's styles: an outline, a drop shadow, glows outside and inside its edge, and a colour
+/// all that it shows is made (as opaque as it was: only its colour and opacity count). Each is off
 /// until turned on, with values that look right as soon as it is.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -391,6 +401,7 @@ pub struct LayerStyle {
     pub shadow: LayerEffect,
     pub outer_glow: LayerEffect,
     pub inner_glow: LayerEffect,
+    pub color: LayerEffect,
 }
 
 impl Default for LayerStyle {
@@ -401,14 +412,16 @@ impl Default for LayerStyle {
             shadow: LayerEffect { opacity: 0.6, size: 8.0, softness: 0.7, distance: 12.0, angle: 45.0, ..effect },
             outer_glow: LayerEffect { color: [1.0, 0.92, 0.6], opacity: 0.8, size: 24.0, softness: 1.0, ..effect },
             inner_glow: LayerEffect { color: [1.0, 1.0, 1.0], opacity: 0.75, size: 12.0, softness: 1.0, ..effect },
+            color: LayerEffect { size: 0.0, ..effect },
         }
     }
 }
 
 impl LayerStyle {
-    /// The four, in the order they are listed: outline, drop shadow, outer glow, inner glow.
-    pub fn effects(&self) -> [LayerEffect; 4] {
-        [self.outline, self.shadow, self.outer_glow, self.inner_glow]
+    /// The five, in the order they are listed: outline, drop shadow, outer glow, inner glow,
+    /// color.
+    pub fn effects(&self) -> [LayerEffect; 5] {
+        [self.outline, self.shadow, self.outer_glow, self.inner_glow, self.color]
     }
 
     /// The effect at `index` in [`Self::effects`]'s order.
@@ -418,13 +431,15 @@ impl LayerStyle {
             1 => Some(&mut self.shadow),
             2 => Some(&mut self.outer_glow),
             3 => Some(&mut self.inner_glow),
+            4 => Some(&mut self.color),
             _ => None,
         }
     }
 
     /// Whether any of them draws anything.
     pub fn shows(&self) -> bool {
-        self.effects().iter().any(LayerEffect::shows)
+        [self.outline, self.shadow, self.outer_glow, self.inner_glow].iter().any(LayerEffect::shows)
+            || self.color.colours()
     }
 
     /// How far beyond the layer's own pixels they reach (canvas pixels, whole): what a change
@@ -475,6 +490,7 @@ impl Layer {
             plugin: None,
             adjustment: None,
             style: None,
+            panel: None,
         }
     }
 
@@ -1281,7 +1297,7 @@ impl Document {
         true
     }
 
-    /// Makes a text layer, or a layer of a plugin's kind, an ordinary one, its pixels kept; false
+    /// Makes a text layer, a layer of a plugin's kind or a panel's frame an ordinary one, its pixels kept; false
     /// if it wasn't one.
     pub fn rasterize(&mut self, id: LayerId) -> bool {
         self.layer_mut(id).is_some_and(|l| {
@@ -1289,7 +1305,8 @@ impl Document {
             let text = l.text.take().is_some();
             let vector = l.vector.take().is_some();
             let plugin = l.plugin.take().is_some();
-            text || vector || plugin
+            let panel = l.panel.take().is_some();
+            text || vector || plugin || panel
         })
     }
 
@@ -1332,6 +1349,38 @@ impl Document {
     /// Whether layer `id` keeps its strokes as strokes.
     pub fn is_vector(&self, id: LayerId) -> bool {
         self.layer(id).is_some_and(|l| l.vector.is_some())
+    }
+
+    /// A new vector layer holding `content`, called `name`, just below paint layer `id` in the
+    /// group it is in, as opaque, blended, clipped and shown as it is: what was part of that layer
+    /// given a layer of its own under it. On a timeline a drawing of one layer is put in a group
+    /// first (as [`Document::add_layer_to_drawing`] puts it), so the new layer is in its drawing.
+    /// The current layer stays current. None if `id` is no paint layer, or there is no room.
+    pub fn add_vector_layer_below(
+        &mut self,
+        id: LayerId,
+        name: String,
+        content: crate::vector::VectorContent,
+    ) -> Option<LayerId> {
+        let from = self.layer(id).filter(|l| l.kind == LayerKind::Paint)?;
+        let (opacity, blend, clipped, visible) = (from.opacity, from.blend, from.clipped, from.visible);
+        if !self.has_room(1) {
+            return None;
+        }
+        if self.timeline.as_ref().is_some_and(|tl| tl.drawing_of(id).is_some()) {
+            self.drawing_group(id)?;
+        }
+        let (at, parent) = (self.index_of(id)?, self.group_of(id));
+        let mut layer = self.blank(LayerKind::Paint, name, parent);
+        layer.opacity = opacity;
+        layer.blend = blend;
+        layer.clipped = clipped;
+        layer.visible = visible;
+        layer.vector = Some(std::sync::Arc::new(content));
+        let made = layer.id;
+        self.layers.insert(at, layer);
+        self.fix_clips();
+        Some(made)
     }
 
     /// Vector layer `id`'s strokes all gone: whether it had any, none if it isn't one.
@@ -1379,6 +1428,13 @@ impl Document {
         let id = layer.id;
         self.layers.insert(at.min(self.layers.len()), layer);
         self.current = id;
+        // a comic panel's art is clipped to its frame
+        if parent.is_some_and(|g| self.frame_of_panel(g).is_some())
+            && self.can_clip(id)
+            && let Some(l) = self.layer_mut(id)
+        {
+            l.clipped = true;
+        }
         id
     }
 
@@ -1413,6 +1469,7 @@ impl Document {
             shadow: s.shadow.tidied(),
             outer_glow: s.outer_glow.tidied(),
             inner_glow: s.inner_glow.tidied(),
+            color: s.color.tidied(),
         });
         match self.layer_mut(id) {
             Some(l) if l.kind == LayerKind::Paint && l.adjustment.is_none() && l.style != style => {
@@ -2343,6 +2400,13 @@ mod tests {
         let g = d.group_chosen().unwrap();
         assert!(!d.set_style(g, Some(style)));
         assert!(d.set_style(l, None));
+        // a colour alone shows too, and reaches no further than the layer
+        let mut style = LayerStyle::default();
+        style.color.on = true;
+        assert!(style.shows());
+        assert_eq!(style.reach(), 2);
+        style.color.opacity = 0.0;
+        assert!(!style.shows());
     }
 
     #[test]

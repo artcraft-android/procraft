@@ -3,7 +3,7 @@
 //! the later cycles' repeats shown beside them), so they are picked, moved and trimmed there as on
 //! any track. And a cycling group's repeats counted and set by dragging its end.
 
-use make2d_engine::timeline::{ClipContent, ClipId, Group, Timeline, Track};
+use procraft_engine::timeline::{ClipContent, ClipId, Group, Timeline, Track};
 
 use super::{TimelineTrackInfo, clip_info};
 use crate::CanvasSession;
@@ -174,7 +174,7 @@ impl CanvasSession {
         let open = st.open_groups().last().copied();
         let whole = Place { offset: 0, from: 0, to: i64::from(u32::MAX) };
         let (tracks, place) = match open.and_then(|g| Some((tl.clip(g)?, tl.origin(g)?))) {
-            Some((c @ make2d_engine::timeline::Clip { content: ClipContent::Group(g), .. }, at)) => {
+            Some((c @ procraft_engine::timeline::Clip { content: ClipContent::Group(g), .. }, at)) => {
                 let at = i64::from(at);
                 (&g.tracks, Place { offset: at, from: at, to: at + i64::from(c.duration) })
             }

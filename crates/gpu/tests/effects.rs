@@ -2,10 +2,10 @@
 //! (skipped where the machine has none).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::document::{BlendMode, Document, LayerAdjustment, LayerId, LayerStyle};
-use make2d_engine::geom::Vec2;
-use make2d_engine::stroke::Stamp;
-use make2d_gpu::{Canvas, Filter, Gpu, StrokeStyle, StrokeTool};
+use procraft_engine::document::{BlendMode, Document, LayerAdjustment, LayerId, LayerStyle};
+use procraft_engine::geom::Vec2;
+use procraft_engine::stroke::Stamp;
+use procraft_gpu::{Canvas, Filter, Gpu, StrokeStyle, StrokeTool};
 
 const W: u32 = 32;
 
@@ -358,6 +358,56 @@ fn glows_fade_out_from_the_edge_and_in_from_it() {
 }
 
 #[test]
+fn a_color_makes_all_the_layer_shows_one_colour_as_opaque_as_it_was() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let layer = doc.current();
+    paint(&mut canvas, layer, [255, 0, 0], Vec2::new(16.0, 16.0), 6.0);
+    let plain = composite(&gpu, &mut doc, &mut canvas);
+    let style = styled(|s| {
+        s.color.on = true;
+        s.color.color = [0.0, 0.0, 1.0];
+    });
+    assert!(doc.set_style(layer, Some(style)));
+    canvas.invalidate();
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert_eq!(at(&px, 16, 16), [0, 0, 255, 255], "blue where it was red");
+    assert_eq!(at(&px, 16, 26), [255, 255, 255, 255], "nothing where the layer shows nothing");
+    // the layer's pixels are as they were
+    assert_eq!(at(&canvas.read_layer(&gpu, layer).unwrap(), 16, 16), [255, 0, 0, 255]);
+    // half as strong: half way from its own colour
+    assert!(doc.set_style(
+        layer,
+        Some(styled(|s| {
+            s.color.on = true;
+            s.color.color = [0.0, 0.0, 1.0];
+            s.color.opacity = 0.5;
+        }))
+    ));
+    canvas.invalidate();
+    let half = at(&composite(&gpu, &mut doc, &mut canvas), 16, 16);
+    assert!((120..=136).contains(&half[0]) && (120..=136).contains(&half[2]), "{half:?}");
+    // an inner glow is over it, and an outline round it
+    assert!(doc.set_style(
+        layer,
+        Some(styled(|s| {
+            s.color.on = true;
+            s.color.color = [0.0, 0.0, 1.0];
+            s.outline.on = true;
+            s.outline.color = [0.0, 1.0, 0.0];
+            s.outline.size = 3.0;
+        }))
+    ));
+    canvas.invalidate();
+    let px = composite(&gpu, &mut doc, &mut canvas);
+    assert_eq!(at(&px, 16, 16), [0, 0, 255, 255]);
+    assert_eq!(at(&px, 16, 24), [0, 255, 0, 255], "the outline, its own colour");
+    // off: as it was
+    assert!(doc.set_style(layer, Some(LayerStyle::default())));
+    canvas.invalidate();
+    assert_eq!(composite(&gpu, &mut doc, &mut canvas), plain);
+}
+
+#[test]
 fn styles_go_with_what_is_clipped_to_the_layer() {
     let Some((gpu, mut doc, mut canvas)) = setup() else { return };
     let base = doc.current();
@@ -448,7 +498,7 @@ fn merge_down_bakes_an_adjustment_layer_and_styles() {
     canvas.invalidate();
     let before_px = composite(&gpu, &mut doc, &mut canvas);
     assert_eq!(at(&before_px, 8, 12), [255, 255, 0, 255], "the outline");
-    canvas.merge_down(top, base, doc.clone(), Some(make2d_engine::geom::IRect::new(5, 5, 11, 11)));
+    canvas.merge_down(top, base, doc.clone(), Some(procraft_engine::geom::IRect::new(5, 5, 11, 11)));
     doc.finish_merge_down(top);
     let px = composite(&gpu, &mut doc, &mut canvas);
     assert!(close(&px, &before_px, 2), "looks as it did");
@@ -473,7 +523,7 @@ fn a_styled_layer_below_keeps_its_look_when_merged_into() {
     let top = doc.add_layer();
     paint(&mut canvas, top, [255, 0, 0], Vec2::new(26.0, 26.0), 2.0);
     let before_px = composite(&gpu, &mut doc, &mut canvas);
-    canvas.merge_down(top, base, doc.clone(), Some(make2d_engine::geom::IRect::new(23, 23, 29, 29)));
+    canvas.merge_down(top, base, doc.clone(), Some(procraft_engine::geom::IRect::new(23, 23, 29, 29)));
     doc.finish_merge_down(top);
     assert!(close(&composite(&gpu, &mut doc, &mut canvas), &before_px, 2));
 }
@@ -543,12 +593,12 @@ fn an_adjustment_clips_keys_ease_its_values_frame_to_frame() {
         .tracks
         .iter()
         .flat_map(|t| &t.clips)
-        .find(|c| matches!(&c.content, make2d_engine::timeline::ClipContent::Drawing(d) if d.root == a))
+        .find(|c| matches!(&c.content, procraft_engine::timeline::ClipContent::Drawing(d) if d.root == a))
         .map(|c| c.id)
         .unwrap();
     doc.mark_adjustment_clips();
     let keys = &mut doc.timeline.as_mut().unwrap().clip_mut(clip).unwrap().keys.adjustment;
-    let linear = make2d_engine::timeline::Easing::Linear;
+    let linear = procraft_engine::timeline::Easing::Linear;
     keys.set(0, Filter::Hsb { hue: 0.0, saturation: 1.0, brightness: 0.0 }, linear.clone());
     keys.set(2, GREY, linear);
     canvas.invalidate();

@@ -3,7 +3,7 @@
 //! Flood toolbar (adjust_panels.rs).
 
 use egui::{Color32, Id, Order, Pos2, Stroke, pos2, vec2};
-use make2d_core::CanvasSession;
+use procraft_core::CanvasSession;
 
 /// The reticle: four short bars around the point it fills from, 23 across, black over a light
 /// colour (`rgb`) and white over a dark one.

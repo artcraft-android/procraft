@@ -1,7 +1,7 @@
 //! The session on the host: input in window pixels → strokes → pixels, on a headless GPU.
 
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
@@ -173,14 +173,14 @@ fn readers_never_panic_on_damaged_files() {
             }
             tried += 1;
             let read = std::panic::catch_unwind(|| match extension.as_str() {
-                "psd" | "psb" => _ = make2d_engine::psd::read(&damaged),
-                "procreate" | "procraft" => _ = make2d_engine::native::read(&damaged),
-                "obj" => _ = make2d_engine::mesh::read_obj(&String::from_utf8_lossy(&damaged), None),
-                "usdz" => _ = make2d_engine::usd::read_usdz(&damaged),
-                "usd" | "usdc" | "usda" => _ = make2d_engine::usd::read_usd(&damaged),
-                "swatches" => _ = make2d_engine::palette::read_swatches(&damaged),
-                "ase" | "aco" => _ = make2d_engine::palette::read_other(&damaged, name.as_deref()),
-                "icc" | "icm" => _ = make2d_engine::cms::IccProfile::parse(&damaged),
+                "psd" | "psb" => _ = procraft_engine::psd::read(&damaged),
+                "procreate" | "procraft" => _ = procraft_engine::native::read(&damaged),
+                "obj" => _ = procraft_engine::mesh::read_obj(&String::from_utf8_lossy(&damaged), None),
+                "usdz" => _ = procraft_engine::usd::read_usdz(&damaged),
+                "usd" | "usdc" | "usda" => _ = procraft_engine::usd::read_usd(&damaged),
+                "swatches" => _ = procraft_engine::palette::read_swatches(&damaged),
+                "ase" | "aco" => _ = procraft_engine::palette::read_other(&damaged, name.as_deref()),
+                "icc" | "icm" => _ = procraft_engine::cms::IccProfile::parse(&damaged),
                 _ => _ = crate::brush_files::read_any_brushes(&damaged, name.clone()),
             });
             if read.is_err() {
@@ -772,7 +772,7 @@ fn merge_duplicate_blend_and_locks() {
     s.stroke_end(vec![]);
     let copy = s.duplicate_layer(bottom).unwrap();
     assert_eq!(s.layers().len(), 2);
-    assert!(s.set_layer_blend(copy, make2d_engine::document::BlendMode::Multiply.id()));
+    assert!(s.set_layer_blend(copy, procraft_engine::document::BlendMode::Multiply.id()));
     assert!(!s.set_layer_blend(copy, 999));
     assert_eq!(crate::layers::blend_modes().len(), 27);
     assert!(s.merge_down(copy));
@@ -827,7 +827,7 @@ fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
     let (set, index) = {
         let st = s.shared.lock();
         let found = st.library.iter().enumerate().find_map(|(set, l)| {
-            l.brushes.iter().position(make2d_engine::brush::Brush::mixes_wet).map(|index| (set, index))
+            l.brushes.iter().position(procraft_engine::brush::Brush::mixes_wet).map(|index| (set, index))
         });
         found.unwrap()
     };
@@ -871,7 +871,7 @@ fn a_ribbon_brush_s_preview_shows_its_shape_along_the_stroke() {
     assert_ne!(ribbon, preview());
     // a smudge with it smudges stamp by stamp
     let brush = s.shared.lock().library.get(set).and_then(|l| l.brushes.get(index)).cloned().unwrap();
-    let smudge = make2d_gpu::StrokeStyle::for_brush(&brush, make2d_gpu::StrokeTool::Smudge, [0.0; 3], 1.0, false);
+    let smudge = procraft_gpu::StrokeStyle::for_brush(&brush, procraft_gpu::StrokeTool::Smudge, [0.0; 3], 1.0, false);
     assert!(smudge.ribbon.is_none());
 }
 
@@ -918,7 +918,7 @@ fn brushes_keep_their_own_sliders() {
     s.set_brush_size(0.9);
     assert!(s.select_brush(0, 0));
     // at the size its preview shows (0.09 of its range: the slider's place for it)
-    let start = 0.09f32.powf(1.0 / make2d_engine::brush::SIZE_CURVE);
+    let start = 0.09f32.powf(1.0 / procraft_engine::brush::SIZE_CURVE);
     assert!((s.info().size - start).abs() < 1e-6, "a fresh brush starts at its default");
     s.set_brush_size(0.1);
     assert!(s.select_brush(1, 0));
@@ -932,7 +932,7 @@ fn brushes_keep_their_own_sliders() {
 }
 
 /// Writes every brush preview as raw RGBA (`<set>-<index>.rgba`, 480×120) into the directory in
-/// `PROCRAFT_DUMP`, for looking at the brushes: `cargo test -p make2d-core dump -- --ignored`.
+/// `PROCRAFT_DUMP`, for looking at the brushes: `cargo test -p procraft-core dump -- --ignored`.
 #[test]
 #[ignore]
 fn dump_brush_previews() {
@@ -956,11 +956,11 @@ fn dump_brush_previews() {
 /// A brush set's own previews beside the engine's, to see where a set's brushes differ: for each
 /// brush, `thumbnail.png` (the file's), `engine.png` (drawn here at the same size) and a line of
 /// their alpha's mean and root-mean-square difference in `summary.txt`, worst first.
-/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p make2d-core dump_brush_comparisons -- --ignored`
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_comparisons -- --ignored`
 #[test]
 #[ignore]
 fn dump_brush_comparisons() {
-    use make2d_engine::brushfile;
+    use procraft_engine::brushfile;
     let Ok(path) = std::env::var("BRUSH_SET") else { return };
     let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
     let Some(s) = session(100, 100) else { return };
@@ -1010,14 +1010,14 @@ fn dump_brush_comparisons() {
 /// and 1.0; or those `DUMP_SIZES` lists, `start` for the first), with the pen's pressure rising
 /// and falling, as `<brush>.png` in
 /// `PROCRAFT_DUMP` (beside the file's own thumbnail, `<brush>-thumbnail.png`, when it has one).
-/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p make2d-core dump_brush_strokes -- --ignored`
+/// `BRUSH_SET=set.brushset PROCRAFT_DUMP=dir cargo test -p procraft-core dump_brush_strokes -- --ignored`
 /// (`BRUSH_SET` can be another app's brush file too: .abr, .sut, .kpp and the rest; or
 /// `bundled:Name,Other Name` for those of the brushes the app comes with; `DUMP_FINGER=1` draws
 /// with a finger.)
 #[test]
 #[ignore]
 fn dump_brush_strokes() {
-    use make2d_engine::brushfile;
+    use procraft_engine::brushfile;
     let Ok(path) = std::env::var("BRUSH_SET") else { return };
     let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
     let Some(s) = session(1024, 1024) else { return };
@@ -1052,8 +1052,8 @@ fn dump_brush_strokes() {
         // pressure and canvas; the file's own preview left out), to set beside it
         if std::env::var_os("DUMP_PREVIEW").is_some() {
             let brush = s.shared.lock().library[set as usize].brushes[index as usize].clone();
-            let (w, h) = (make2d_engine::preview::CANVAS.0 as u32, make2d_engine::preview::CANVAS.1 as u32);
-            if let Some(p) = s.drawn_preview(make2d_engine::brush::Brush { thumbnail: None, ..brush }, w, h) {
+            let (w, h) = (procraft_engine::preview::CANVAS.0 as u32, procraft_engine::preview::CANVAS.1 as u32);
+            if let Some(p) = s.drawn_preview(procraft_engine::brush::Brush { thumbnail: None, ..brush }, w, h) {
                 let png = crate::project::rgba_png(p.width, p.height, &p.rgba);
                 std::fs::write(format!("{root}/{file_name}-preview.png"), png).unwrap();
             }
@@ -1073,7 +1073,7 @@ fn dump_brush_strokes() {
         // the slider at the size the brush's preview draws, the pen turned and pressed as there
         let (start, lean, least, gain) = {
             let brush = s.shared.lock().brush(ToolKind::Paint).clone();
-            let share = make2d_engine::preview::size_share(&brush).powf(1.0 / make2d_engine::brush::SIZE_CURVE);
+            let share = procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE);
             let lean = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
             (share, lean, brush.setting("preview_pressure_min"), 2.0 * brush.setting("preview_pressure_scale"))
         };
@@ -1113,7 +1113,7 @@ fn dump_brush_strokes() {
             s.stroke_add((1..120).map(at).collect());
             s.stroke_end(vec![at(120)]);
         }
-        let rgba = s.shared.lock().layer_pixels(make2d_engine::document::LayerId(layer)).unwrap();
+        let rgba = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
         std::fs::write(format!("{root}/{file_name}.png"), crate::project::rgba_png(1024, 1024, &rgba)).unwrap();
     }
 }
@@ -1256,7 +1256,7 @@ fn an_autosave_ends_with_the_graphics_device() {
         let st = s.shared.lock();
         let gpu = st.gpu.as_ref().unwrap();
         gpu.device.destroy();
-        let _ = gpu.device.poll(make2d_gpu::wgpu::PollType::wait_indefinitely());
+        let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
         assert!(gpu.is_lost());
     }
     std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
@@ -1355,7 +1355,7 @@ fn nothing_is_saved_from_a_lost_graphics_device() {
     s.stroke_end(vec![]);
     let gpu = s.shared.lock().gpu.clone().unwrap();
     gpu.device.destroy();
-    let _ = gpu.device.poll(make2d_gpu::wgpu::PollType::wait_indefinitely());
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
     assert!(gpu.is_lost());
     assert!(s.save(dir.to_string_lossy().into_owned()).is_err());
     assert_eq!(std::fs::read(dir.join("thumbnail.png")).unwrap(), kept);
@@ -1367,7 +1367,7 @@ fn a_stroke_on_a_canvas_whose_graphics_stopped_tells_so_again() {
     let Some(s) = session(64, 64) else { return };
     let gpu = s.shared.lock().gpu.clone().unwrap();
     gpu.device.destroy();
-    let _ = gpu.device.poll(make2d_gpu::wgpu::PollType::wait_indefinitely());
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
     assert!(gpu.is_lost());
     let told = s.take_failure();
     assert!(told.is_some());
@@ -1752,7 +1752,7 @@ fn where_layers_are_painted_is_found_on_the_gpu_as_on_the_cpu() {
     let mut guard = s.shared.lock();
     let st = &mut *guard;
     let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
-    let ids: Vec<_> = ids.into_iter().map(make2d_engine::document::LayerId).collect();
+    let ids: Vec<_> = ids.into_iter().map(procraft_engine::document::LayerId).collect();
     let found = canvas.painted_boxes(gpu, &ids);
     for (id, gpu_box) in ids.iter().zip(&found) {
         let cpu_box = crate::layer_ops::painted_rect(&canvas.read_layer(gpu, *id).unwrap(), 1100);
@@ -1891,13 +1891,95 @@ fn a_crop_by_whole_pixels_copies_the_layers_as_the_cpu_would() {
     // reaching past the left and the bottom edges
     let rect = [-30.0f32, 50.0, 250.0, 280.0];
     assert!(s.crop_canvas(rect[0], rect[1], rect[2], rect[3], 0.0, false, 0, 0));
-    let c = make2d_engine::crop::crop(rect, 0.0, None);
+    let c = procraft_engine::crop::crop(rect, 0.0, None);
     assert!(c.whole_pixels().is_some());
     let _ = pixel(&s, 0, 0);
     for (id, old) in ids.iter().zip(&before) {
         let now = s.copy_layer_contents(*id).unwrap();
         assert_eq!((now.width, now.height), (c.width, c.height));
-        assert!(now.rgba == make2d_engine::crop::resample(old, 300, 300, &c), "{id}");
+        assert!(now.rgba == procraft_engine::crop::resample(old, 300, 300, &c), "{id}");
+    }
+}
+
+#[test]
+fn a_crop_let_go_between_pixels_keeps_every_pixel_as_it_was() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 60.0, 0.0)]);
+    s.stroke_add(vec![sample(120.0, 110.0, 40.0)]);
+    s.stroke_end(vec![]);
+    let id = s.layers()[0].id;
+    let _ = pixel(&s, 0, 0);
+    let before = s.copy_layer_contents(id).unwrap().rgba;
+    // as a frame dragged on a canvas of pixel art leaves it: no side on a whole pixel
+    assert!(s.crop_canvas(10.3, 20.6, 100.4, 80.2, 0.0, false, 0, 0));
+    let _ = pixel(&s, 0, 0);
+    let now = s.copy_layer_contents(id).unwrap();
+    assert_eq!((now.width, now.height), (101, 80));
+    assert!(now.rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 0), "the stroke is on it");
+    // nothing blended, nothing resized: each pixel is the one 10 across and 21 down from it
+    for (y, row) in now.rgba.as_chunks::<{ 101 * 4 }>().0.iter().enumerate() {
+        let from = ((y + 21) * 300 + 10) * 4;
+        assert!(row[..] == before[from..from + 101 * 4], "row {y}");
+    }
+}
+
+#[test]
+fn a_pixelated_resize_keeps_whole_pixels_through_done_and_on_the_gpu_as_the_cpu_would() {
+    let painted = || {
+        let s = session(100, 100)?;
+        s.set_brush_size(0.3);
+        s.set_color(0.9, 0.3, 0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 30.0, 0.0)]);
+        s.stroke_add(vec![sample(70.0, 80.0, 40.0)]);
+        s.stroke_end(vec![]);
+        let id = s.layers()[0].id;
+        let _ = pixel(&s, 0, 0);
+        let before = s.copy_layer_contents(id).unwrap().rgba;
+        Some((s, id, before))
+    };
+    // through Crop and Resize, twice the size: every pixel a square of four of itself
+    let Some((s, id, before)) = painted() else { return };
+    s.crop_begin();
+    assert!(!s.crop_shown().unwrap().pixelated);
+    s.crop_set_pixelated(true);
+    s.crop_set_resample(true);
+    s.crop_set_size(Some(200), Some(200));
+    assert!(s.crop_shown().unwrap().pixelated);
+    assert!(s.crop_end(true));
+    let _ = pixel(&s, 0, 0);
+    let now = s.copy_layer_contents(id).unwrap();
+    assert_eq!((now.width, now.height), (200, 200));
+    assert!(now.rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 0), "the stroke is on it");
+    for (i, px) in now.rgba.as_chunks::<4>().0.iter().enumerate() {
+        let from = ((i / 200 / 2) * 100 + i % 200 / 2) * 4;
+        assert!(px[..] == before[from..from + 4], "pixel {i}");
+    }
+    // it stays on for the next crop, and undo puts the canvas back
+    s.crop_begin();
+    assert!(s.crop_shown().unwrap().pixelated);
+    assert!(!s.crop_end(false));
+    s.undo();
+    assert_eq!(s.copy_layer_contents(id).unwrap().rgba, before);
+    // resized to no whole number of times, and turned: the GPU takes the same pixels the CPU does,
+    // and none it makes is a colour the layer didn't have
+    for (rect, angle, size) in
+        [([5.0f32, 10.0, 80.0, 70.0], 0.0f32, Some((130u32, 45u32))), ([10.0, 5.0, 70.0, 80.0], 0.4, None)]
+    {
+        let Some((s, id, before)) = painted() else { return };
+        let (w, h) = size.unwrap_or((0, 0));
+        assert!(s.crop_canvas_as(rect[0], rect[1], rect[2], rect[3], angle, size.is_some(), w, h, true));
+        let c = procraft_engine::crop::crop(rect, angle, size);
+        let _ = pixel(&s, 0, 0);
+        let now = s.copy_layer_contents(id).unwrap();
+        assert_eq!((now.width, now.height), (c.width, c.height));
+        let cpu = procraft_engine::crop::resample_pixelated(&before, 100, 100, &c);
+        // (a pixel's middle that falls on the line between two may go either way)
+        let off = now.rgba.as_chunks::<4>().0.iter().zip(cpu.as_chunks::<4>().0).filter(|(a, b)| a != b).count();
+        assert!(off * 1000 <= cpu.len() / 4, "{off} pixels differ");
+        let had: std::collections::HashSet<[u8; 4]> =
+            before.as_chunks::<4>().0.iter().copied().chain([[0; 4]]).collect();
+        assert!(now.rgba.as_chunks::<4>().0.iter().all(|p| had.contains(p)), "{rect:?} {angle}");
     }
 }
 
@@ -1917,12 +1999,12 @@ fn a_crop_turned_or_resized_resamples_on_the_gpu_as_the_cpu_would() {
         let before = s.copy_layer_contents(id).unwrap().rgba;
         let (w, h) = size.unwrap_or((0, 0));
         assert!(s.crop_canvas(rect[0], rect[1], rect[2], rect[3], angle, size.is_some(), w, h));
-        let c = make2d_engine::crop::crop(rect, angle, size);
+        let c = procraft_engine::crop::crop(rect, angle, size);
         assert!(c.whole_pixels().is_none());
         let _ = pixel(&s, 0, 0);
         let now = s.copy_layer_contents(id).unwrap();
         assert_eq!((now.width, now.height), (c.width, c.height));
-        let cpu = make2d_engine::crop::resample(&before, 300, 300, &c);
+        let cpu = procraft_engine::crop::resample(&before, 300, 300, &c);
         let off = now.rgba.iter().zip(&cpu).filter(|(a, b)| a != b).count();
         let worst = now.rgba.iter().zip(&cpu).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
         eprintln!("crop {rect:?} {angle}: {off} of {} values differ, by {worst} at most", cpu.len());
@@ -2213,6 +2295,325 @@ fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
     assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
     assert!(!s.freehand_path().is_empty(), "still open");
     s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lasso_s_fill_shows_as_it_will_land_soft_edged_and_overlapping_alike() {
+    use crate::selection::SelectionJoin;
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-soft-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    s.set_brush_opacity(1.0);
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_lasso_preview_opacity(1.0);
+    s.set_input_settings(0.0, 0.0, 0.0, 0.0, true, Vec::new());
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    // slanting edges, and a loop that goes round part of itself twice (filled once, non-zero)
+    let corners = [(10.0, 15.0), (85.0, 30.0), (60.0, 90.0), (20.0, 70.0), (70.0, 40.0), (75.0, 60.0), (12.0, 22.0)];
+    s.touch_down(1, PointerKind::Stylus, vec![sample(10.0, 15.0, 0.0)]);
+    let mut t = 0.0;
+    for pair in corners.windows(2) {
+        let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+        let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+        for k in 1..=steps {
+            let f = k as f32 / steps as f32;
+            t += 4.0;
+            s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+        }
+    }
+    let shown = composite(&s);
+    s.touch_up(1, vec![sample(12.0, 22.0, t + 4.0)]);
+    let filled = composite(&s);
+    let soft = shown.as_chunks::<4>().0.iter().filter(|p| p[0] > 8 && p[0] < 247).count();
+    assert!(soft > 40, "its edges soft: {soft} pixels between");
+    let off: Vec<u8> = shown.iter().zip(&filled).map(|(a, b)| a.abs_diff(*b)).collect();
+    let most = off.iter().copied().max().unwrap_or(0);
+    let far = off.as_chunks::<4>().0.iter().filter(|d| d[0] > 40).count();
+    assert!(far <= 6 && most < 128, "shown as it fills: {far} pixels far off, at most {most}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lasso_s_fill_shows_on_the_canvas_as_it_is_drawn() {
+    use crate::selection::{SelectionJoin, StrokeFill};
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    // a square gone round with the pen, a move every 2 px, not lifted
+    let round = |s: &CanvasSession, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(20.0, 20.0, ms)]);
+        let corners = [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0), (20.0, 26.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        t
+    };
+    let white = [255, 255, 255, 255];
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    // Outline: the fill shows under the stroke as it is drawn, as strongly as the preview says
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    s.set_lasso_preview_opacity(1.0);
+    let t = round(&s, 0.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "the fill shown whole");
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over it: {r} {b}");
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    s.shared.lock().finish_stroke();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "filled as it showed");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white, "nothing shown once it is taken back");
+    // at 0 nothing shows as it is drawn, and it fills all the same
+    s.set_lasso_preview_opacity(0.0);
+    let t = round(&s, 1000.0);
+    assert_eq!(pixel(&s, 50, 50), white);
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    s.shared.lock().finish_stroke();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    s.undo();
+    // halfway: half the fill's colour shows over what is there
+    s.set_lasso_preview_opacity(0.5);
+    round(&s, 2000.0);
+    let [r, g, b, _] = pixel(&s, 50, 50);
+    assert!(r.abs_diff(128) <= 2 && g.abs_diff(128) <= 2 && b == 255, "{:?}", [r, g, b]);
+    s.stroke_cancel();
+    assert_eq!(pixel(&s, 50, 50), white, "a stroke let go of takes its preview with it");
+    s.set_stroke_fill(None);
+    // the Pen's own lasso: its fill shows as it goes, and goes when it fills
+    s.set_lasso_preview_opacity(1.0);
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    let t = round(&s, 3000.0);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255], "shown as it will fill");
+    assert_eq!(pixel(&s, 5, 5), white);
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255], "filled");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white, "and nothing left shown");
+    // the tool put away mid-lasso takes its preview with it
+    round(&s, 4000.0);
+    assert_ne!(pixel(&s, 50, 50), white);
+    s.set_touch_selecting(None);
+    assert_eq!(pixel(&s, 50, 50), white);
+    // its line is smoothed as the tool's strokes are: the app's motion filtering and stabilisation
+    // cut its corners further than without
+    let lasso = SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    };
+    let corner_cut = |s: &CanvasSession, ms: f64| {
+        s.set_touch_selecting(Some(lasso));
+        round(s, ms);
+        let path = s.freehand_path();
+        s.set_touch_selecting(None);
+        path.as_chunks::<2>().0.iter().map(|&[x, y]| ((x - 80.0).powi(2) + (y - 20.0).powi(2)).sqrt()).fold(f32::MAX, f32::min)
+    };
+    s.set_input_settings(0.0, 0.0, 0.0, 0.0, true, Vec::new());
+    let plain = corner_cut(&s, 5000.0);
+    s.set_input_settings(1.0, 1.0, 0.0, 0.0, true, Vec::new());
+    let smoothed = corner_cut(&s, 6000.0);
+    assert!(smoothed > plain + 1.0, "smoothed {smoothed}, plain {plain}");
+    // smoothed, it still reaches the pen as a stroke's tip does: nothing trails behind
+    s.set_touch_selecting(Some(lasso));
+    round(&s, 7000.0);
+    let path = s.freehand_path();
+    let [x, y] = path.as_chunks::<2>().0.last().copied().unwrap();
+    assert!((x - 20.0).abs() < 1.0 && (y - 26.0).abs() < 1.0, "ends at the pen: {x} {y}");
+    s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lasso_outline_fills_what_a_paint_stroke_goes_round_under_it_in_its_step() {
+    use crate::selection::StrokeFill;
+    let Some(s) = session(100, 100) else { return };
+    // a square gone round with the pen, a move every 2 px, lifted short of where it began
+    let round = |s: &CanvasSession, x0: f32, y0: f32, x1: f32, y1: f32, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(x0, y0, ms)]);
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0 + 6.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        s.touch_up(1, vec![sample(x0, y0 + 6.0, t + 4.0)]);
+        // (the stroke ended for good)
+        s.shared.lock().finish_stroke();
+    };
+    let white = [255, 255, 255, 255];
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: false, opacity: 1.0 }));
+    // Lasso Fill is the plugin's: without it on, a stroke only paints
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 0.0);
+    assert_eq!(pixel(&s, 50, 50), white, "nothing filled");
+    assert_ne!(pixel(&s, 50, 20), white, "the stroke painted");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 20), white);
+    // on: the stroke's colour fills what it went round, and nothing outside
+    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 1000.0);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 5, 5), white);
+    assert_eq!(pixel(&s, 95, 50), white);
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    // the secondary colour: it goes under the stroke, which shows over it along the path
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 2000.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over its fill: {r} {b}");
+    // stroke and fill are one undo step
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_eq!(pixel(&s, 50, 20), white, "the stroke went with it");
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "redone, the stroke over its fill: {r} {b}");
+    s.undo();
+    // at half opacity, half the fill's colour over what is there
+    s.set_secondary_color(0.0, 0.0, 0.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 0.5 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 3000.0);
+    let [r, g, b, a] = pixel(&s, 50, 50);
+    assert!(r.abs_diff(128) <= 1 && r == g && g == b && a == 255, "{:?}", [r, g, b, a]);
+    s.undo();
+    // a selection there limits the fill, as it does painting
+    s.select_shape(false, 0.0, 0.0, 50.0, 100.0, crate::selection::SelectionJoin::Add);
+    s.set_stroke_fill(Some(StrokeFill { secondary: false, opacity: 1.0 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 4000.0);
+    assert_eq!(pixel(&s, 35, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 65, 50), white);
+    s.undo();
+    s.select_none();
+    // off again: strokes only paint
+    s.set_stroke_fill(None);
+    round(&s, 20.0, 20.0, 80.0, 80.0, 5000.0);
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_ne!(pixel(&s, 50, 20), white);
+    s.undo();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lasso_outline_on_a_vector_layer_keeps_its_fill_as_a_shape_under_the_stroke() {
+    use crate::selection::StrokeFill;
+    let Some(s) = session(100, 100) else { return };
+    let round = |s: &CanvasSession, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(20.0, 20.0, ms)]);
+        let corners = [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0), (20.0, 26.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+        s.shared.lock().finish_stroke();
+    };
+    let white = [255, 255, 255, 255];
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-vector-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    let layer = s.add_vector_layer();
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    round(&s, 0.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "filled under the stroke");
+    assert_eq!(pixel(&s, 5, 5), white);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over its fill: {r} {b}");
+    // kept as a fill and a stroke, the fill first
+    assert_eq!(s.vector_fill_count(layer), 1);
+    assert_eq!(s.vector_stroke_count(layer), 1);
+    // drawn again from what the layer holds, it is the same
+    let before = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+    assert!(s.redraw_vector_layer(layer));
+    let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+    let furthest = before.iter().zip(&after).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(furthest <= 2, "redrawn {furthest} levels off");
+    s.undo();
+    // stroke and fill are one undo step
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_eq!(pixel(&s, 50, 20), white, "the stroke went with it");
+    assert_eq!(s.vector_fill_count(layer), 0);
+    assert_eq!(s.vector_stroke_count(layer), 0);
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    assert_eq!(s.vector_fill_count(layer), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2618,8 +3019,8 @@ fn newspaper_halftone_is_grey() {
 
 #[test]
 fn an_imported_brush_shows_its_own_preview_until_changed() {
-    use make2d_engine::brush::Brush;
-    use make2d_engine::brushfile::{self, Pictures};
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
     let Some(s) = session(100, 100) else { return };
     // a file whose preview is a solid white band across its middle
     let (w, h) = (327u32, 100u32);
@@ -4042,7 +4443,7 @@ fn a_picture_saved_before_it_is_shown_has_its_thumbnail() {
 #[test]
 fn a_picture_larger_than_a_canvas_may_be_is_scaled_down_to_fit() {
     use crate::layers::ThumbnailImage;
-    let most = make2d_engine::document::canvas_edge_most();
+    let most = procraft_engine::document::canvas_edge_most();
     let (w, h) = (most + most / 4, 8);
     // the left half red, the right half blue
     let rgba: Vec<u8> =
@@ -4246,7 +4647,7 @@ fn layers_export_as_animations() {
     let shared = std::fs::read(dir.join("b.gif")).unwrap();
     assert_eq!(shared[10] & 0x80, 0x80);
     let mut frames: Vec<Vec<u8>> = Vec::new();
-    make2d_engine::gif::frames(&shared, |canvas, _| {
+    procraft_engine::gif::frames(&shared, |canvas, _| {
         frames.push(canvas.to_vec());
         true
     });
@@ -4734,17 +5135,17 @@ fn a_shaped_brush_outlines_its_shape_and_the_round_tip_none() {
 
 #[test]
 fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
-    use make2d_engine::plist::Value;
+    use procraft_engine::plist::Value;
     // a file from before grain depth and behaviour were kept: a named grain, its movement only
     let file = |extra: Vec<(&str, Value)>| {
-        let mut b = make2d_engine::keyed::Builder::new();
+        let mut b = procraft_engine::keyed::Builder::new();
         let root = b.reserve();
         let name = b.string("Old Canvas");
         let grain = b.string("Canvas.jpg");
         let mut fields = vec![("name", name), ("bundledGrainPath", grain), ("textureMovement", Value::Real(0.4))];
         fields.extend(extra);
         b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], fields);
-        let mut zip = make2d_engine::zip::ZipWriter::new();
+        let mut zip = procraft_engine::zip::ZipWriter::new();
         zip.add("Brush.archive", &b.finish(root));
         zip.finish()
     };
@@ -4755,7 +5156,7 @@ fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
         let g = &st.library[set].brushes[0].grain;
         (g.depth, g.mode)
     };
-    use make2d_engine::brush::GrainMode;
+    use procraft_engine::brush::GrainMode;
     assert_eq!(grain_of(file(vec![])), (1.0, GrainMode::Moving));
     // a file that names them keeps its own
     let kept = grain_of(file(vec![("grainDepth", Value::Real(0.3)), ("textureApplication", Value::Int(1))]));
@@ -4885,7 +5286,7 @@ fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
     assert_ne!(t.studio_source(crate::studio::SourceKind::Shape), vec![255; n * n]);
     // the grains' library starts with the Blank, which isn't a shipped grain
     let library = crate::studio::source_library(true);
-    assert_eq!(library.len(), make2d_engine::textures::grains().len() + 1);
+    assert_eq!(library.len(), procraft_engine::textures::grains().len() + 1);
     assert!(library.first().is_some_and(|b| b.name == "Blank" && b.pixels.iter().all(|&v| v == 255)));
 }
 
@@ -5040,7 +5441,7 @@ fn a_jpeg_coded_in_stretches_reads_back_as_its_picture() {
     // tall enough to be coded in several stretches between restart markers
     let (w, h) = (96u32, 640u32);
     let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 2) as u8, (i / w % 256) as u8, 128]).collect();
-    let jpg = make2d_engine::jpeg::encode(&rgb, w, h, 95);
+    let jpg = procraft_engine::jpeg::encode(&rgb, w, h, 95);
     assert!(jpg.windows(2).any(|m| m == [0xFF, 0xDD]), "no restart interval");
     let back = image::load_from_memory_with_format(&jpg, image::ImageFormat::Jpeg).unwrap().to_rgb8();
     assert_eq!(back.dimensions(), (w, h));
@@ -5057,7 +5458,7 @@ fn a_p3_canvas_exports_with_its_profile() {
     s.export_png(path.to_string_lossy().into_owned()).unwrap();
     let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
     let icc = reader.info().icc_profile.as_ref().expect("an embedded profile").to_vec();
-    assert_eq!(icc, make2d_engine::icc::icc(make2d_engine::profile::Profile::DisplayP3));
+    assert_eq!(icc, procraft_engine::icc::icc(procraft_engine::profile::Profile::DisplayP3));
     let _ = std::fs::remove_file(path);
     // a JPEG carries it too, the see-through canvas laid onto white
     let path = std::env::temp_dir().join(format!("procraft-p3-{}.jpg", std::process::id()));
@@ -5072,7 +5473,7 @@ fn a_p3_canvas_exports_with_its_profile() {
 #[test]
 fn a_cmyk_canvas_keeps_rgb_pixels_and_prints_its_inks() {
     let Some(s) = session(20, 10) else { return };
-    let cmyk = make2d_engine::cmyk::NAME.to_owned();
+    let cmyk = procraft_engine::cmyk::NAME.to_owned();
     assert!(s.set_new_profile(cmyk.clone()));
     assert!(s.is_cmyk());
     assert_eq!(s.profile(), cmyk);
@@ -5096,7 +5497,7 @@ fn a_cmyk_canvas_keeps_rgb_pixels_and_prints_its_inks() {
     let mut reader =
         png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&png_path).unwrap())).read_info().unwrap();
     let icc = reader.info().icc_profile.as_ref().unwrap().to_vec();
-    assert_eq!(icc, make2d_engine::icc::icc(make2d_engine::profile::Profile::DisplayP3));
+    assert_eq!(icc, procraft_engine::icc::icc(procraft_engine::profile::Profile::DisplayP3));
     let mut buf = vec![0; reader.output_buffer_size().unwrap()];
     reader.next_frame(&mut buf).unwrap();
     let at = (5 * 20 + 10) * 4;
@@ -5331,8 +5732,8 @@ fn slider_notches_are_kept_with_the_library() {
 
 #[test]
 fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
-    use make2d_engine::brush::Brush;
-    use make2d_engine::brushfile::{self, Pictures};
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
     let Some(s) = session(100, 100) else { return };
     let png = crate::project::rgba_png(1, 1, &[255; 4]);
     let pictures = Pictures {
@@ -5378,9 +5779,9 @@ fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
 
 #[test]
 fn a_brushs_own_pressure_curves_are_kept_with_the_library() {
-    use make2d_engine::brush::PressureCurve;
-    use make2d_engine::curve::Curve;
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::curve::Curve;
+    use procraft_engine::geom::Vec2;
     let bend = Curve::new(&[Vec2::new(0.0, 0.2), Vec2::new(1.0, 0.6)]);
     let s = CanvasSession::new(64, 64);
     {
@@ -5455,22 +5856,22 @@ fn the_pad_turns_into_a_sphere_of_its_own_and_back() {
     let px = {
         let mut guard = pad.shared.lock();
         let st = &mut *guard;
-        let format = make2d_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
         let gpu = st.gpu.clone().unwrap();
-        let target = gpu.device.create_texture(&make2d_gpu::wgpu::TextureDescriptor {
+        let target = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
             label: Some("test frame"),
-            size: make2d_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
+            size: procraft_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
-            dimension: make2d_gpu::wgpu::TextureDimension::D2,
+            dimension: procraft_gpu::wgpu::TextureDimension::D2,
             format,
-            usage: make2d_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | make2d_gpu::wgpu::TextureUsages::COPY_SRC,
+            usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let view = target.create_view(&make2d_gpu::wgpu::TextureViewDescriptor::default());
+        let view = target.create_view(&procraft_gpu::wgpu::TextureViewDescriptor::default());
         st.render_sphere(&view, format, (300, 300), None);
         assert_eq!(gpu.errors(), 0, "GPU validation errors");
-        make2d_gpu::read_texture(&gpu, &target, 300, 300).unwrap()
+        procraft_gpu::read_texture(&gpu, &target, 300, 300).unwrap()
     };
     let at = |x: usize, y: usize| px[(y * 300 + x) * 4];
     assert!(at(2, 2).abs_diff(26) <= 1, "{}", at(2, 2));
@@ -5684,12 +6085,12 @@ fn set_sheet() {
 /// round brush 22 px across, spaced as its file keeps 0.042, at 49% flow, one pass along a line.
 #[test]
 fn rendering_modes_build_up_as_measured() {
-    use make2d_engine::brush::{Brush, Taper};
-    use make2d_engine::document::Document;
-    use make2d_engine::geom::Vec2;
-    use make2d_engine::input::{Pointer, Sample};
-    use make2d_engine::stroke::StrokeBuilder;
-    use make2d_gpu::{Canvas, StrokeStyle, StrokeTool};
+    use procraft_engine::brush::{Brush, Taper};
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::Vec2;
+    use procraft_engine::input::{Pointer, Sample};
+    use procraft_engine::stroke::StrokeBuilder;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
     let Ok(gpu) = Gpu::headless() else { return };
     let pass = |mode: f32| -> f32 {
         let mut b = Brush {
@@ -5761,7 +6162,7 @@ fn the_brushes_in_use_are_kept_between_sessions() {
 fn a_zip_of_brushes_is_told_from_other_zips() {
     let s = CanvasSession::new(64, 64);
     assert!(crate::brush_files::is_brush_zip(s.brush_as_file(0, 0).unwrap()));
-    let mut other = make2d_engine::zip::ZipWriter::new();
+    let mut other = procraft_engine::zip::ZipWriter::new();
     other.add("model.obj", b"v 0 0 0");
     assert!(!crate::brush_files::is_brush_zip(other.finish()));
     assert!(!crate::brush_files::is_brush_zip(b"not a zip".to_vec()));
@@ -5885,8 +6286,8 @@ fn brush_libraries_come_and_go_each_kept_in_its_own_files() {
 
 #[test]
 fn a_single_library_folder_opens_as_before_as_the_first_library_and_its_pictures_stay() {
-    use make2d_engine::brush::Source;
-    use make2d_engine::textures::TEXTURE_SIZE;
+    use procraft_engine::brush::Source;
+    use procraft_engine::textures::TEXTURE_SIZE;
     let dir = std::env::temp_dir().join(format!("procraft-libraries-upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let d = dir.to_string_lossy().into_owned();
@@ -6019,8 +6420,8 @@ fn a_lost_index_leaves_no_library_behind_and_a_bad_one_names_no_other_file() {
 
 #[test]
 fn a_brush_keeps_its_maker_and_a_reset_point() {
-    use make2d_engine::brush::Brush;
-    use make2d_engine::brushfile::{self, Pictures};
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
     let s = CanvasSession::new(64, 64);
     // a file by someone, with their picture (and a signature that isn't a picture)
     let face = crate::project::rgba_png(2, 2, &[200; 16]);
@@ -6076,13 +6477,13 @@ fn a_brush_keeps_its_maker_and_a_reset_point() {
 
 #[test]
 fn a_rolling_grain_stays_put_when_painting_wet() {
-    use make2d_engine::brush::{Brush, Grain, GrainMode};
+    use procraft_engine::brush::{Brush, Grain, GrainMode};
     let Some(s) = session(200, 200) else { return };
     // a wet brush whose fine grain rolls along with the stroke, light enough for the grain to
     // show (built up in full, it fills in)
     let mut b = Brush {
         grain: Grain {
-            image: Some(make2d_engine::textures::grain::NOISE),
+            image: Some(procraft_engine::textures::grain::NOISE),
             mode: GrainMode::Moving,
             scale: 256.0,
             depth: 1.0,
@@ -6116,15 +6517,15 @@ fn a_rolling_grain_stays_put_when_painting_wet() {
 
 #[test]
 fn a_canvas_grain_laid_stamp_by_stamp_lands_where_it_does_over_the_stroke_and_follows_the_pressure() {
-    use make2d_engine::brush::{Brush, GRAIN_HEIGHT, Grain, GrainMode, PressureCurve};
-    use make2d_engine::curve::Curve;
+    use procraft_engine::brush::{Brush, GRAIN_HEIGHT, Grain, GrainMode, PressureCurve};
+    use procraft_engine::curve::Curve;
     let Some(s) = session(200, 200) else { return };
     // a brush with a fine paper grain fixed to the canvas, keeping the strongest stamp at each
     // pixel, its size and opacity not following the pressure
     let paint = |each: bool, height: bool, pressure: f32| -> Vec<u8> {
         let mut b = Brush {
             grain: Grain {
-                image: Some(make2d_engine::textures::grain::NOISE),
+                image: Some(procraft_engine::textures::grain::NOISE),
                 mode: GrainMode::Texturized,
                 scale: 64.0,
                 depth: if height { 1.0 / 12.0 } else { 1.0 },
@@ -6183,12 +6584,12 @@ fn a_canvas_grain_laid_stamp_by_stamp_lands_where_it_does_over_the_stroke_and_fo
 
 #[test]
 fn a_moving_grain_streaks_along_the_stroke_however_the_stamps_turn() {
-    use make2d_engine::brush::{Brush, Grain, GrainMode};
+    use procraft_engine::brush::{Brush, Grain, GrainMode};
     let Some(s) = session(200, 200) else { return };
     // a wet brush turning each stamp at random, its fine grain moving a tenth of the way along
     let mut b = Brush {
         grain: Grain {
-            image: Some(make2d_engine::textures::grain::SPECKLED),
+            image: Some(procraft_engine::textures::grain::SPECKLED),
             mode: GrainMode::Moving,
             scale: 256.0,
             depth: 1.0,
@@ -6228,9 +6629,9 @@ fn a_moving_grain_streaks_along_the_stroke_however_the_stamps_turn() {
 
 #[test]
 fn stock_images_a_file_names_are_kept_and_named_again() {
-    use make2d_engine::brush::{Brush, StockImage, StockImages};
-    use make2d_engine::brushfile::{self, Pictures, Texture};
-    use make2d_engine::textures::grain;
+    use procraft_engine::brush::{Brush, StockImage, StockImages};
+    use procraft_engine::brushfile::{self, Pictures, Texture};
+    use procraft_engine::textures::grain;
     let s = CanvasSession::new(64, 64);
     let png = crate::project::rgba_png(1, 1, &[255; 4]);
     let named = |name: &str| Some(StockImage { name: name.to_owned(), inverted: true });
@@ -6274,7 +6675,7 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
         assert_eq!(b.stock.shape.as_ref().map(|g| (g.name.as_str(), g.inverted)), Some(("Hard-Round.png", true)));
         assert_eq!(b.grain.image, Some(grain::RECYCLED));
         // a stock metalness source we have nothing like: the amount all over, its name kept
-        assert_eq!(b.metallic, make2d_engine::brush::MaterialSource::default());
+        assert_eq!(b.metallic, procraft_engine::brush::MaterialSource::default());
         assert!(b.stock.metallic.is_some() && b.stock.roughness.is_none());
         set as u32
     };
@@ -6288,11 +6689,11 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
 
 #[test]
 fn keys_a_brush_file_has_that_nothing_draws_yet_are_kept_and_written_again() {
-    use make2d_engine::brushfile;
-    use make2d_engine::document::BlendMode;
-    use make2d_engine::keyed::Builder;
-    use make2d_engine::plist::Value;
-    use make2d_engine::zip::ZipWriter;
+    use procraft_engine::brushfile;
+    use procraft_engine::document::BlendMode;
+    use procraft_engine::keyed::Builder;
+    use procraft_engine::plist::Value;
+    use procraft_engine::zip::ZipWriter;
     let mut b = Builder::new();
     let root = b.reserve();
     let name = b.string("Carried");
@@ -6737,8 +7138,8 @@ fn recolor_follows_its_point_and_colour_and_is_a_named_step() {
 
 #[test]
 fn a_layered_psd_comes_in_as_an_artwork() {
-    use make2d_engine::document::BlendMode;
-    use make2d_engine::formats::{PsdKind, PsdLayer, psd};
+    use procraft_engine::document::BlendMode;
+    use procraft_engine::formats::{PsdKind, PsdLayer, psd};
     let dir = std::env::temp_dir().join(format!("procraft-psd-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7140,7 +7541,7 @@ fn a_photoshop_brush_files_tips_become_a_set() {
 /// preview, and a brush written out, read back and written out again comes out the same.
 #[test]
 fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
-    use make2d_engine::brushfile::{self, BrushFile};
+    use procraft_engine::brushfile::{self, BrushFile};
     let Ok(root) = std::env::var("BRUSH_CORPUS") else { return };
     let extension =
         |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
@@ -7269,7 +7670,7 @@ fn sliders_kept(a: &[Option<[f32; 2]>; 3], b: &[Option<[f32; 2]>; 3]) -> bool {
 
 /// What differs between two brush files (nothing: empty): the settings that changed, and the other
 /// fields.
-fn changes(a: &make2d_engine::brushfile::BrushFile, b: &make2d_engine::brushfile::BrushFile) -> String {
+fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brushfile::BrushFile) -> String {
     let mut out = Vec::new();
     for (k, v) in &a.settings {
         match b.settings.iter().find(|(k2, _)| k2 == k) {
@@ -7302,7 +7703,7 @@ fn changes(a: &make2d_engine::brushfile::BrushFile, b: &make2d_engine::brushfile
         ("author pictures", a.author_picture == b.author_picture && a.signature == b.signature),
     ];
     out.extend(fields.iter().filter(|f| !f.1).map(|f| f.0.to_owned()));
-    let order = |f: &make2d_engine::brushfile::BrushFile| f.settings.iter().map(|s| s.0.clone()).collect::<Vec<_>>();
+    let order = |f: &procraft_engine::brushfile::BrushFile| f.settings.iter().map(|s| s.0.clone()).collect::<Vec<_>>();
     if order(a) != order(b) {
         out.push("settings' order".to_owned());
     }
@@ -7382,8 +7783,8 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     let s = CanvasSession::new(64, 64);
     // its texture: a 100 px picture, half white, kept as the base64 of its base64
     let px: Vec<u8> = (0..100 * 100).flat_map(|i| if i % 100 < 50 { [255; 4] } else { [0, 0, 0, 255] }).collect();
-    let paper = make2d_engine::base64::encode(
-        make2d_engine::base64::encode(&crate::project::rgba_png(100, 100, &px)).as_bytes(),
+    let paper = procraft_engine::base64::encode(
+        procraft_engine::base64::encode(&crate::project::rgba_png(100, 100, &px)).as_bytes(),
     );
     let xml = format!(
         r#"<Preset paintopid="paintbrush" name="Soft Round"><param name="PressureSize"><![CDATA[false]]></param><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" useAutoSpacing="0"><MaskGenerator type="circle" ratio="0.5" hfade="0.25" vfade="0.25"/></Brush>]]></param><param name="Texture/Pattern/Enabled"><![CDATA[true]]></param><param name="Texture/Pattern/Pattern"><![CDATA[{paper}]]></param><param name="Texture/Pattern/Scale"><![CDATA[0.5]]></param><param name="Texture/Pattern/Strength"><![CDATA[0.7]]></param></Preset>"#
@@ -7436,7 +7837,7 @@ fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
     paper.extend_from_slice(b"GPAT");
     paper.push(0);
     paper.extend((0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 3] } else { [0; 3] }));
-    let (tip, paper) = (make2d_engine::base64::encode(&tip), make2d_engine::base64::encode(&paper));
+    let (tip, paper) = (procraft_engine::base64::encode(&tip), procraft_engine::base64::encode(&paper));
     let xml = format!(
         r#"<Preset paintopid="paintbrush" name="Gild" embedded_resources="2"><resources><resource md5sum="aa" filename="Tip.gbr" name="Tip" type="brushes"><![CDATA[{tip}]]></resource><resource md5sum="bb" filename="Grain.0001.pat" name="Grain" type="patterns"><![CDATA[{paper}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush md5sum="aa" type="gbr_brush" filename="Tip.gbr" useAutoSpacing="1"/>]]></param><param name="Texture/Pattern/Enabled"><![CDATA[true]]></param><param name="Texture/Pattern/Name"><![CDATA[Grain]]></param><param name="Texture/Pattern/PatternFileName"><![CDATA[Grain.0001.pat]]></param><param name="Texture/Pattern/PatternMD5Sum"><![CDATA[bb]]></param><param name="Texture/Pattern/Scale"><![CDATA[0.5]]></param></Preset>"#
     );
@@ -7459,7 +7860,7 @@ fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
     assert_eq!(b.name, "Gild");
     // its own tip, painting on the left and not the right
     let shape = b.shape.source.as_ref().unwrap();
-    let row = make2d_engine::textures::TEXTURE_SIZE * 128;
+    let row = procraft_engine::textures::TEXTURE_SIZE * 128;
     assert!(shape.pixels[row + 40] == 255 && shape.pixels[row + 216] == 0);
     // its texture as paper grain, its 64 px tiles at half size
     assert!(b.grain.source.is_some());
@@ -7468,7 +7869,7 @@ fn a_krita_preset_holding_its_pictures_keeps_its_tip_and_texture() {
 
 #[test]
 fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
-    use make2d_engine::document::BlendMode;
+    use procraft_engine::document::BlendMode;
     // the masking brush's tip: a GIMP brush 4 x 4, its top half painting, held in the preset
     let mut tip = Vec::new();
     for v in [29u32, 2, 4, 4, 1] {
@@ -7478,7 +7879,7 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
     tip.extend_from_slice(&10u32.to_be_bytes());
     tip.push(0);
     tip.extend((0..16).map(|i| if i < 8 { 255 } else { 0 }));
-    let tip = make2d_engine::base64::encode(&tip);
+    let tip = procraft_engine::base64::encode(&tip);
     let kpp = |op: &str| {
         let xml = format!(
             r#"<Preset paintopid="paintbrush" name="Eroded" embedded_resources="1"><resources><resource md5sum="dd" filename="Debris.gbr" name="Debris" type="brushes"><![CDATA[{tip}]]></resource></resources><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" hfade="0.8" vfade="0.8"/></Brush>]]></param><param name="MaskingBrush/Enabled"><![CDATA[true]]></param><param name="MaskingBrush/MaskingCompositeOp"><![CDATA[{op}]]></param><param name="MaskingBrush/UseMasterSize"><![CDATA[true]]></param><param name="MaskingBrush/MasterSizeCoeff"><![CDATA[0.5]]></param><param name="MaskingBrush/Preset/brush_definition"><![CDATA[<Brush md5sum="dd" type="gbr_brush" filename="Debris.gbr" spacing="0.3" useAutoSpacing="0"/>]]></param><param name="MaskingBrush/Preset/PressureSize"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowValue"><![CDATA[0.4]]></param><param name="MaskingBrush/Preset/OpacityValue"><![CDATA[0.9]]></param><param name="MaskingBrush/Preset/OpacityUseCurve"><![CDATA[false]]></param><param name="MaskingBrush/Preset/FlowUseCurve"><![CDATA[false]]></param></Preset>"#
@@ -7508,7 +7909,7 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         assert!(b.shape.source.is_none() && (b.hardness - hardness).abs() < 1e-6);
         let second = b.secondary.as_deref().unwrap();
         let shape = second.shape.source.as_ref().unwrap();
-        let n = make2d_engine::textures::TEXTURE_SIZE;
+        let n = procraft_engine::textures::TEXTURE_SIZE;
         assert!(shape.pixels[n * n / 4 + n / 2] == 255 && shape.pixels[n * n * 3 / 4 + n / 2] == 0);
         assert_eq!(b.setting("dual_blend"), BlendMode::Subtract.id() as f32);
         // half the main brush's size at every slider, its own spacing, flow, opacity and pressure
@@ -7520,14 +7921,14 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         assert_eq!((second.pressure_size, second.pressure_opacity), (0.0, 0.0));
         assert!(second.grain.source.is_none() && second.secondary.is_none());
         // as Krita masks, in its wash mode: the stroke builds up to its opacity and no further
-        assert_eq!((second.rendering, second.max_opacity), (make2d_engine::brush::Rendering::Capped, 1.0));
-        let most = second.pressure_curves.get(make2d_engine::brush::PressureCurve::Flow).unwrap();
+        assert_eq!((second.rendering, second.max_opacity), (procraft_engine::brush::Rendering::Capped, 1.0));
+        let most = second.pressure_curves.get(procraft_engine::brush::PressureCurve::Flow).unwrap();
         assert!((most.eval(0.2) - 0.9).abs() < 1e-3 && (most.eval(1.0) - 0.9).abs() < 1e-3);
         assert_eq!(second.setting("pressure_flow"), 1.0);
     }
     // written out it is a dual brush that comes back the same
     let file = s.brush_as_file(set, 0).unwrap();
-    let read = make2d_engine::brushfile::read(&file).unwrap();
+    let read = procraft_engine::brushfile::read(&file).unwrap();
     assert!(read.secondary.is_some());
     let t = CanvasSession::new(64, 64);
     let back = t.import_brushes(file).unwrap();
@@ -7540,7 +7941,7 @@ fn a_krita_preset_with_a_masking_brush_becomes_a_dual_brush() {
         ("burn", BlendMode::ColorBurn.id()),
         ("hard_mix_softer_photoshop", BlendMode::LinearBurn.id()),
         ("hard_mix_photoshop", BlendMode::HardMix.id()),
-        ("linear_height_photoshop", make2d_engine::brush::GRAIN_LINEAR_HEIGHT),
+        ("linear_height_photoshop", procraft_engine::brush::GRAIN_LINEAR_HEIGHT),
         ("no such op", BlendMode::Multiply.id()),
     ] {
         let set = s.import_other_brushes(kpp(op), "Krita".to_owned()).unwrap();
@@ -7556,13 +7957,13 @@ fn a_kept_view_that_leaves_the_canvas_off_the_page_is_not_used() {
     let fitted = View::fit(canvas, window);
     assert!(shows_canvas(&fitted, window, canvas));
     // centred on a point far beyond the canvas: none of it shows
-    let away = View::centred(make2d_engine::geom::Vec2::new(9000.0, -7000.0), 0.78, 0.0, window).unwrap();
+    let away = View::centred(procraft_engine::geom::Vec2::new(9000.0, -7000.0), 0.78, 0.0, window).unwrap();
     assert!(!shows_canvas(&away, window, canvas));
     // half off the right edge: still enough to work on
-    let half = View::centred(make2d_engine::geom::Vec2::new(0.0, 1024.0), 0.78, 0.0, window).unwrap();
+    let half = View::centred(procraft_engine::geom::Vec2::new(0.0, 1024.0), 0.78, 0.0, window).unwrap();
     assert!(shows_canvas(&half, window, canvas));
     // zoomed far out, small but whole on screen
-    let tiny = View::centred(make2d_engine::geom::Vec2::new(1024.0, 1024.0), 0.01, 0.0, window).unwrap();
+    let tiny = View::centred(procraft_engine::geom::Vec2::new(1024.0, 1024.0), 0.01, 0.0, window).unwrap();
     assert!(shows_canvas(&tiny, window, canvas));
 }
 
@@ -7852,7 +8253,7 @@ fn pictures_of_the_layers_made_again_in_kept_textures_show_what_changed() {
         let st = &mut *guard;
         let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
         let red = [200u8, 0, 0, 255].repeat(200 * 200);
-        canvas.upload_layer(gpu, make2d_engine::document::LayerId(bottom), &red).unwrap();
+        canvas.upload_layer(gpu, procraft_engine::document::LayerId(bottom), &red).unwrap();
     }
     let cached = composite(&s, true);
     assert!(cached != first);
@@ -8512,7 +8913,7 @@ fn a_mixed_artwork_through_a_layered_package_comes_back_the_same() {
 
 #[test]
 fn a_mixed_artwork_through_a_psd_comes_back_the_same() {
-    use make2d_engine::document::BlendMode;
+    use procraft_engine::document::BlendMode;
     // every mode the format names as it is (shade is written as darken)
     let modes: Vec<u32> = BlendMode::ALL.iter().filter(|m| **m != BlendMode::Shade).map(|m| m.id()).collect();
     for seed in [9u32, 44] {
@@ -9301,7 +9702,7 @@ fn brushes_set_anyhow_paint_smudge_and_erase_without_errors() {
         s.studio_end(true);
         // now and then a dual brush: a second set anyhow too, combined by any mode
         {
-            let mut second = make2d_engine::brush::Brush::round_pen();
+            let mut second = procraft_engine::brush::Brush::round_pen();
             for key in KEYS {
                 second.set_setting(key, next(1400) as f32 / 1000.0 - 0.2);
             }
@@ -9811,8 +10212,8 @@ fn a_layer_added_after_an_undo_starts_clear() {
 
 #[test]
 fn every_studio_setting_comes_back_from_the_library_and_a_brush_file() {
-    use make2d_engine::brushfile;
-    let mut keys: Vec<&str> = make2d_engine::studio::DRAWN.to_vec();
+    use procraft_engine::brushfile;
+    let mut keys: Vec<&str> = procraft_engine::studio::DRAWN.to_vec();
     for k in [
         "count_jitter",
         "flow",
@@ -9986,7 +10387,7 @@ fn merging_down_keeps_only_where_the_upper_layer_is_painted() {
 
 #[test]
 fn a_blend_mode_inside_a_group_blends_with_what_is_below_the_group() {
-    use make2d_engine::document::BlendMode;
+    use procraft_engine::document::BlendMode;
     let Some(s) = session(32, 32) else { return };
     // red below, a grey Multiply layer grouped above it
     let bottom = s.layers()[0].id;
@@ -10216,8 +10617,8 @@ fn luminance_blending_mixes_a_stroke_in_by_squared_colour() {
 
 #[test]
 fn a_dual_brush_keeps_its_second_through_the_library_and_its_file() {
-    use make2d_engine::brush::Brush;
-    use make2d_engine::brushfile::{self, Pictures};
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
     let Some(s) = session(100, 100) else { return };
     let png = crate::project::rgba_png(1, 1, &[255; 4]);
     let pictures = |secondary| Pictures {
@@ -10265,7 +10666,7 @@ fn a_dual_brush_keeps_its_second_through_the_library_and_its_file() {
 
 #[test]
 fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
-    use make2d_engine::brush::Brush;
+    use procraft_engine::brush::Brush;
     let Some(s) = session(120, 120) else { return };
     s.set_brush_size(0.5);
     s.set_color(0.0, 0.0, 0.0);
@@ -11164,7 +11565,7 @@ fn dots_listed(s: &CanvasSession, spots: &[(u32, u32)]) -> Vec<bool> {
         let alone = solo.is_none_or(|g| l.id == g || up.iter().any(|a| a.id == g));
         assert_eq!(l.soloed_out, !alone, "{} #{} shown alone or not", l.name, l.id);
         let shows = ticked(l) && up.iter().all(|g| ticked(g));
-        let px = canvas.read_layer(gpu, make2d_engine::document::LayerId(l.id)).unwrap();
+        let px = canvas.read_layer(gpu, procraft_engine::document::LayerId(l.id)).unwrap();
         for (k, &(x, y)) in spots.iter().enumerate() {
             if shows && px[((y * w + x) * 4 + 3) as usize] > 200 {
                 out[k] = true;
@@ -11442,7 +11843,7 @@ fn merge_down_keeps_a_multiply_layer_s_look() {
     s.set_color(0.0, 1.0, 1.0);
     s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
     s.stroke_end(vec![]);
-    assert!(s.set_layer_blend(upper, make2d_engine::document::BlendMode::Multiply.id()));
+    assert!(s.set_layer_blend(upper, procraft_engine::document::BlendMode::Multiply.id()));
     let shown = pixel(&s, 50, 50);
     assert_eq!(shown, [0, 255, 0, 255]);
     assert!(s.merge_down(upper));
@@ -11453,7 +11854,7 @@ fn merge_down_keeps_a_multiply_layer_s_look() {
 fn an_inbetween_frame_goes_between_a_frame_and_the_next_as_a_plugin_draws_it() {
     use crate::plugin_file::tests::{coded, pack};
     use crate::plugin_run::MODULE;
-    use make2d_engine::document::LayerId;
+    use procraft_engine::document::LayerId;
     let Some(s) = session(64, 64) else { return };
     assert!(s.set_animation_assist(true));
     let (a, b) = (s.add_frame(), s.add_frame());
@@ -11620,27 +12021,27 @@ fn the_selections_bands_ask_for_a_frame_when_they_have_moved_a_pixel_not_every_f
     let Some(s) = session(200, 300) else { return };
     let gpu = s.shared.lock().gpu.clone().unwrap();
     s.set_display_scale(3.0);
-    let format = make2d_gpu::wgpu::TextureFormat::Rgba8Unorm;
-    let texture = gpu.device.create_texture(&make2d_gpu::wgpu::TextureDescriptor {
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
         label: Some("window"),
-        size: make2d_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
+        size: procraft_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
-        dimension: make2d_gpu::wgpu::TextureDimension::D2,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
         format,
-        usage: make2d_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
     let started = std::time::Instant::now();
     let draw = || {
         // caches remade first: those frames are wanted at once
-        let mut after = s.draw(&view, format, (300, 300), make2d_engine::profile::Profile::Srgb, started);
+        let mut after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
         for _ in 0..50 {
             if after != Some(std::time::Duration::ZERO) {
                 break;
             }
-            after = s.draw(&view, format, (300, 300), make2d_engine::profile::Profile::Srgb, started);
+            after = s.draw(&view, format, (300, 300), procraft_engine::profile::Profile::Srgb, started);
         }
         after
     };
@@ -12196,10 +12597,10 @@ fn pixelated_selection_takes_whole_pixels_on_the_grid() {
     // points far apart (a fast stroke): the path shown between them keeps to the pixels' edges,
     // and what is selected is just the pixels it goes round
     let shown = crate::selection::pixel_path(vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9], true);
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::geom::Vec2;
     let corners: Vec<Vec2> = shown.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
     assert!(corners.windows(2).all(|w| w[0].x == w[1].x || w[0].y == w[1].y), "a slant in it");
-    assert_eq!(mask(&s), make2d_engine::selection::Mask::polygon_hard(100, 100, &corners));
+    assert_eq!(mask(&s), procraft_engine::selection::Mask::polygon_hard(100, 100, &corners));
     // every edge of what is selected lies on that path: a pixel in beside one out has the path
     // between them
     let m = mask(&s);
@@ -12343,7 +12744,7 @@ fn a_move_and_its_prediction_held_together_ask_for_one_frame_after_both() {
     s.stroke_end(vec![sample(110.0, 100.0, 24.0)]);
 }
 
-/// Upstream's plugin that adds vector layers, kept as a fixture (see `bundled::VECTOR_LAYERS_FIXTURE`).
+/// The plugin that adds vector layers, kept as a fixture (see `bundled::VECTOR_LAYERS_FIXTURE`).
 const VECTOR_ID: &str = "io.github.artcraftandroid.vector-layers";
 const VECTOR_KIND: &str = "io.github.artcraftandroid.vector-layers.vector";
 
@@ -12385,7 +12786,7 @@ fn stroke_down(s: &CanvasSession, x: f32, y0: f32, y1: f32) {
 
 /// Layer `id`'s pixels, as the canvas has them now.
 fn layer_rgba(s: &CanvasSession, id: u64) -> Vec<u8> {
-    s.shared.lock().layer_pixels(make2d_engine::document::LayerId(id)).unwrap()
+    s.shared.lock().layer_pixels(procraft_engine::document::LayerId(id)).unwrap()
 }
 
 /// The alpha at canvas (`x`, `y`) in `rgba` (a canvas `side` wide).
@@ -12396,7 +12797,7 @@ fn alpha_in(rgba: &[u8], side: u32, x: u32, y: u32) -> u8 {
 /// The items plugin layer `id` keeps now, as its plugin hands them back to draw.
 fn vector_items(s: &CanvasSession, id: u64) -> Vec<crate::plugin_layers::Item> {
     let st = s.shared.lock();
-    let layer = st.doc.layer(make2d_engine::document::LayerId(id)).unwrap();
+    let layer = st.doc.layer(procraft_engine::document::LayerId(id)).unwrap();
     let plugin = layer.plugin.clone().unwrap();
     let data = plugin.data.clone();
     let list = st.hooks.as_ref().unwrap().on_layer(&plugin.kind, |running, index| {
@@ -12543,7 +12944,7 @@ fn a_vector_layer_is_saved_with_its_items_beside_its_pixels_and_opens_again() {
 }
 
 /// The library's first brush (set, place) `wanted` says yes to.
-fn library_brush(s: &CanvasSession, wanted: impl Fn(&make2d_engine::brush::Brush) -> bool) -> Option<(u32, u32)> {
+fn library_brush(s: &CanvasSession, wanted: impl Fn(&procraft_engine::brush::Brush) -> bool) -> Option<(u32, u32)> {
     let st = s.shared.lock();
     st.library.iter().enumerate().find_map(|(set, entry)| {
         let at = entry.brushes.iter().position(&wanted)?;
@@ -12939,7 +13340,7 @@ fn the_strokes_a_selection_takes_show_their_box_and_arrows_nudge_them_with_the_s
     assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((1.0, 0.0)));
     assert_eq!(vector_items(&s, vector)[1].transform, None, "the other stays");
     let moved = s.shared.lock().selection.clone().unwrap();
-    let at = |m: &make2d_engine::selection::Mask, x: u32, y: u32| m.data[(y * 160 + x) as usize];
+    let at = |m: &procraft_engine::selection::Mask, x: u32, y: u32| m.data[(y * 160 + x) as usize];
     assert_eq!((at(&moved, 5, 30), at(&moved, 6, 30), at(&selection, 5, 30)), (0, 255, 255));
     assert_eq!(s.taken_plugin_items_box()[0], corners[0] + 1.0);
     // again, down: still taken
@@ -13079,7 +13480,7 @@ fn flipping_or_cropping_the_canvas_moves_vector_strokes_as_strokes() {
     assert!(s.layers().iter().any(|l| l.id == vector && l.plugin_kind.is_some()));
     assert_eq!(vector_items(&s, vector)[0].transform.map(|t| (t.e, t.f)), Some((-40.0, 0.0)));
     assert!(s.draw_plugin_layer_again(vector));
-    let cropped = s.shared.lock().layer_pixels(make2d_engine::document::LayerId(vector)).unwrap();
+    let cropped = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(vector)).unwrap();
     assert!(alpha_in(&cropped, 120, 20, 50) > 0, "its start now 40 pixels further left");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -13251,32 +13652,32 @@ fn an_edit_lays_again_only_where_it_changes_a_vector_layer_and_matches_it_laid_w
 }
 
 /// A window-sized picture drawn into and read back, and how to draw a frame into it.
-fn frame_target(s: &CanvasSession, side: u32) -> (make2d_gpu::wgpu::Texture, make2d_gpu::Gpu) {
+fn frame_target(s: &CanvasSession, side: u32) -> (procraft_gpu::wgpu::Texture, procraft_gpu::Gpu) {
     let gpu = s.shared.lock().gpu.clone().unwrap();
-    let texture = gpu.device.create_texture(&make2d_gpu::wgpu::TextureDescriptor {
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
         label: Some("window"),
-        size: make2d_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        size: procraft_gpu::wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
-        dimension: make2d_gpu::wgpu::TextureDimension::D2,
-        format: make2d_gpu::wgpu::TextureFormat::Rgba8Unorm,
-        usage: make2d_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | make2d_gpu::wgpu::TextureUsages::COPY_SRC,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     (texture, gpu)
 }
 
 /// A frame drawn into `texture` (`side` square), read back.
-fn framed(s: &CanvasSession, texture: &make2d_gpu::wgpu::Texture, gpu: &make2d_gpu::Gpu, side: u32) -> Vec<u8> {
+fn framed(s: &CanvasSession, texture: &procraft_gpu::wgpu::Texture, gpu: &procraft_gpu::Gpu, side: u32) -> Vec<u8> {
     let view = texture.create_view(&Default::default());
-    let format = make2d_gpu::wgpu::TextureFormat::Rgba8Unorm;
-    s.draw(&view, format, (side, side), make2d_engine::profile::Profile::Srgb, std::time::Instant::now());
-    make2d_gpu::read_texture(gpu, texture, side, side).unwrap()
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    s.draw(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+    procraft_gpu::read_texture(gpu, texture, side, side).unwrap()
 }
 
 /// Whether the canvas shows its plugins' layers drawn sharp now.
 fn shows_sharp(s: &CanvasSession) -> bool {
-    s.shared.lock().canvas.as_ref().is_some_and(make2d_gpu::Canvas::shows_sharp)
+    s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::shows_sharp)
 }
 
 /// How many of the `block` × `block` squares of `rgba` (`side` wide) aren't one colour.
@@ -13349,8 +13750,8 @@ fn zoomed_in_a_vector_layer_shows_sharp_once_the_view_settles_and_as_it_was_else
     // again, it is made again with it
     stroke_line(&s, (60.0, 300.0), (200.0, 250.0));
     let view = texture.create_view(&Default::default());
-    let format = make2d_gpu::wgpu::TextureFormat::Rgba8Unorm;
-    let after = s.draw(&view, format, (side, side), make2d_engine::profile::Profile::Srgb, std::time::Instant::now());
+    let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+    let after = s.draw(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
     assert!(!shows_sharp(&s));
     assert!(after.is_some_and(|due| due <= std::time::Duration::from_millis(200)), "{after:?}");
     settle();
@@ -13529,7 +13930,7 @@ fn on_a_vector_layer_a_soft_mask_hides_half_and_the_smudge_tool_nudges_strokes()
     let middle =
         items[1].samples.iter().min_by(|a, b| (a.pos.x - 80.0).abs().total_cmp(&(b.pos.x - 80.0).abs())).unwrap();
     assert!(middle.pos.y > 115.0, "pushed down: {:?}", middle.pos);
-    assert_eq!(items[1].samples[0].pos, make2d_engine::geom::Vec2::new(10.0, 110.0), "its end kept");
+    assert_eq!(items[1].samples[0].pos, procraft_engine::geom::Vec2::new(10.0, 110.0), "its end kept");
     assert_eq!(items[0].samples, vector_items(&s, vector)[0].samples, "the first untouched");
     let nudged = layer_rgba(&s, vector);
     assert!(alpha_in(&nudged, 160, 80, 120) > 0 && alpha_in(&nudged, 160, 80, 110) < alpha_in(&drawn, 160, 80, 110));
@@ -13649,7 +14050,7 @@ fn a_canvas_put_on_a_timeline_plays_and_exports_as_before() {
         let frame = s.animation_frame(place as u32, false, 0).unwrap();
         assert_eq!(&frame.rgba, shown, "exported frame {place}");
     }
-    let dir = std::env::temp_dir().join(format!("make2d-timeline-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-timeline-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let gif = dir.join("t.gif");
     s.export_gif(gif.to_string_lossy().into_owned(), 0, 15.0, false, false, false).unwrap();
@@ -13834,7 +14235,7 @@ fn clips_are_keyed_through_the_session() {
     {
         let st = s.shared.lock();
         let pivot =
-            st.doc.timeline.as_ref().unwrap().clip(make2d_engine::timeline::ClipId(clip)).unwrap().keys.pivot.unwrap();
+            st.doc.timeline.as_ref().unwrap().clip(procraft_engine::timeline::ClipId(clip)).unwrap().keys.pivot.unwrap();
         assert!((pivot[0] - 20.0).abs() < 4.0 && (pivot[1] - 30.0).abs() < 4.0, "{pivot:?}");
     }
     // undo takes the last key away; the live drag before it was one step
@@ -14081,7 +14482,7 @@ fn the_new_adjustments_keep_their_values_on_an_adjustment_layer() {
     // the file keeps them: read back, it opens on them
     let saved = s.shared.lock().doc.clone();
     let text = serde_json::to_string(&saved).unwrap();
-    let read: make2d_engine::document::Document = serde_json::from_str(&text).unwrap();
+    let read: procraft_engine::document::Document = serde_json::from_str(&text).unwrap();
     s.shared.lock().doc = read;
     assert_eq!(s.adjustment_layer_edit(id), Some(Adjustment::Dither));
     let shown = s.adjustment_shown();
@@ -14106,7 +14507,7 @@ fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
     red_bar(&s);
     let id = s.layers().iter().find(|l| l.current).unwrap().id;
     let effects = s.layer_effects(id);
-    assert_eq!(effects.len(), 4);
+    assert_eq!(effects.len(), 5);
     assert!(effects.iter().all(|e| !e.on));
     assert!(s.layer_options(id).iter().any(|r| r.option == crate::LayerOption::LayerStyle));
     // a blue outline, its size dragged then let go
@@ -14123,6 +14524,16 @@ fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
     assert!(s.layer_effects(id).iter().all(|e| !e.on));
     let around = (20..30).map(|y| pixel(&s, 32, y)).filter(|p| p[2] > 200 && p[0] < 40).count();
     assert_eq!(around, 0);
+    // a Color: the bar all green, as opaque as it was, and nothing round it
+    let inside = (0..64).find(|&y| pixel(&s, 32, y)[0] > 200 && pixel(&s, 32, y)[1] < 40).unwrap();
+    let green = LayerEffectInfo { on: true, r: 0.0, g: 1.0, b: 0.0, ..effects[4] };
+    assert!(s.set_layer_effect(id, 4, green, true));
+    assert!(s.layers().iter().find(|l| l.id == id).unwrap().styled);
+    let now = pixel(&s, 32, inside);
+    assert!(now[0] <= 2 && now[1] >= 253 && now[2] <= 2 && now[3] == 255, "{now:?}");
+    assert_eq!(pixel(&s, 32, 2), pixel(&s, 2, 2), "nothing where the layer shows nothing");
+    assert_eq!(s.undo().as_deref(), Some("Layer Style"));
+    assert!(pixel(&s, 32, inside)[0] > 200);
     // an adjustment layer takes none, and offers its settings instead
     assert!(s.adjustment_layer_add(crate::Adjustment::Hsb));
     assert!(s.adjustment_end(true));
@@ -14202,7 +14613,7 @@ fn the_frames_export_as_a_sprite_sheet_with_its_json() {
     let Some(s) = session(40, 40) else { return };
     three_frames(&s);
     s.set_name("Dots walk".into());
-    let dir = std::env::temp_dir().join(format!("make2d-sheet-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-sheet-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = |n: &str| dir.join(n).to_string_lossy().into_owned();
     let read = |p: &str| {
@@ -14304,17 +14715,17 @@ fn a_timeline_exports_as_a_harmony_scene() {
     s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
     s.stroke_end(vec![]);
 
-    let dir = std::env::temp_dir().join(format!("make2d-harmony-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-harmony-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let zip_path = dir.join("Dots.zip");
     let made = s.export_harmony(zip_path.to_string_lossy().into_owned(), Default::default()).unwrap();
     assert_eq!(s.export_progress(), 1.0);
     let bytes = std::fs::read(&zip_path).unwrap();
-    let zip = make2d_engine::zip::ZipReader::new(&bytes).unwrap();
+    let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
     let mut names: Vec<&str> = zip.names().collect();
     names.sort_unstable();
     let track = &tracks[0].name;
-    let plain = make2d_engine::harmony::Names::plain(track, "Layer");
+    let plain = procraft_engine::harmony::Names::plain(track, "Layer");
     let mut wanted = vec![
         "Dots/Dots.aux".to_owned(),
         "Dots/Dots.xstage".to_owned(),
@@ -14331,7 +14742,7 @@ fn a_timeline_exports_as_a_harmony_scene() {
     assert_eq!((made.layers, made.drawings, made.frames), (3, 5, 5));
 
     let stage = String::from_utf8(zip.read("Dots/Dots.xstage").unwrap()).unwrap();
-    let stage = make2d_engine::xml::parse(&stage).unwrap();
+    let stage = procraft_engine::xml::parse(&stage).unwrap();
     let columns = stage.find("columns").unwrap().all("column");
     let sheet: Vec<(String, Vec<(String, String)>)> = columns
         .iter()

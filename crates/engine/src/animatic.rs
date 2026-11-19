@@ -1,6 +1,6 @@
 //! The animatic detector: where a video of held drawings (a storyboard or animatic export)
-//! changes drawing, so a track of new drawings can be made with its timing (Koi Studio's "Make
-//! Timing Track").
+//! changes drawing, so a track of new drawings can be made with its timing (a
+//! timing track).
 //!
 //! Each frame a video clip covers is sampled at the time it shows there, shrunk to a small grey
 //! picture (on the platform, which decodes the video) and compared with the one before it. The

@@ -1,4 +1,4 @@
-//! Autokey, as Koi's Keyframe mode: with it on, the transform tool on a timeline moves, scales and
+//! Autokey (a keyframe mode): with it on, the transform tool on a timeline moves, scales and
 //! turns the drawing at the playhead by keying its clip's pose there, rather than moving its
 //! pixels.
 //!
@@ -22,11 +22,11 @@
 //! as it began, as one more step. With a selection, the transform moves the selected pixels as
 //! ever.
 
-use make2d_engine::animation::FrameLook;
-use make2d_engine::document::LayerId;
-use make2d_engine::geom::{Affine, IRect, Vec2};
-use make2d_engine::timeline::{Channel, ClipContent, ClipId, ClipKeys, Easing, Timeline};
-use make2d_engine::transform::{Transform, TransformMode};
+use procraft_engine::animation::FrameLook;
+use procraft_engine::document::LayerId;
+use procraft_engine::geom::{Affine, IRect, Vec2};
+use procraft_engine::timeline::{Channel, ClipContent, ClipId, ClipKeys, Easing, Timeline};
+use procraft_engine::transform::{Transform, TransformMode};
 
 use super::{TimelineEasing, easing_at};
 use crate::transform::{TransformBox, corners_affine};

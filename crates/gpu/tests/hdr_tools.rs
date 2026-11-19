@@ -3,11 +3,11 @@
 //! light above white.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-use make2d_engine::document::{Document, DynamicRange, LayerId};
-use make2d_engine::geom::Vec2;
-use make2d_engine::hdr;
-use make2d_engine::stroke::Stamp;
-use make2d_gpu::{Canvas, FilterRun, Gpu, ReadyToPark, StrokeStyle, StrokeTool, read_filter};
+use procraft_engine::document::{Document, DynamicRange, LayerId};
+use procraft_engine::geom::Vec2;
+use procraft_engine::hdr;
+use procraft_engine::stroke::Stamp;
+use procraft_gpu::{Canvas, FilterRun, Gpu, ReadyToPark, StrokeStyle, StrokeTool, read_filter};
 
 const W: u32 = 32;
 

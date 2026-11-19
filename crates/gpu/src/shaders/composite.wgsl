@@ -6,7 +6,9 @@
 struct LayerUniform {
     opacity: f32,
     // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked,
-    // 4: it takes the layer's place where it reaches, 5: it changes the light (see `lit`)
+    // 4: it takes the layer's place where it reaches, 5: it changes the light (see `lit`),
+    // 6: it has changed the layer itself and shows fainter than that: stroke_tex is the layer as
+    // it was before it, and the layer shows `stroke_opacity` of the way from that
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
@@ -56,6 +58,9 @@ struct LayerUniform {
     // a light stroke's mode (0 brighten, 1 dim, 2 tame), how many stops a stroke covering fully
     // moves the light, and the brightest a brightened colour's strongest channel goes (linear)
     light: vec4<f32>,
+    // a lasso's fill (premultiplied; none at 0 alpha), laid over the layer as much as lasso_tex
+    // covers, under the stroke
+    lasso: vec4<f32>,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -70,6 +75,7 @@ const STROKE_LUMINANCE: u32 = 256u;
 @group(0) @binding(6) var mask_tex: texture_2d<f32>;
 @group(0) @binding(7) var second_tex: texture_2d<f32>;
 @group(0) @binding(8) var clip_mask_tex: texture_2d<f32>;
+@group(0) @binding(9) var lasso_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -224,6 +230,10 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         let t = textureLoad(stroke_tex, p, 0);
         return select(c0, vec4<f32>(t.rgb, t.a - 1.0), t.a >= 0.5);
     }
+    if (lu.stroke_mode == 6u) {
+        // laid in place, shown fainter: part of the way from the layer as it was
+        return mix(textureLoad(stroke_tex, p, 0), c0, lu.stroke_opacity);
+    }
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);
         let s = px.s;
@@ -251,6 +261,11 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
     var m = vec4<f32>(1.0);
     if (lu.masked > 0.5) {
         m = textureLoad(mask_tex, p, 0);
+    }
+    // a lasso being drawn shows its fill on the layer, under the stroke, as much as it covers
+    if (lu.lasso.a > 0.0) {
+        let k = textureLoad(lasso_tex, p, 0).r;
+        c = lu.lasso * k + c * (1.0 - lu.lasso.a * k);
     }
     // the stroke goes into the layer, or into its mask: one place for it (its blend written once)
     let into_mask = lu.stroke_on_mask > 0.5;

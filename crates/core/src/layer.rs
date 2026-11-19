@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use make2d_gpu::wgpu;
+use procraft_gpu::wgpu;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -63,4 +63,15 @@ pub(crate) fn create_surface(instance: &wgpu::Instance, layer: &Layer) -> Result
     let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer.0).cast_mut().cast::<c_void>());
     // SAFETY: a live CAMetalLayer (checked as it was handed over), which the surface retains too
     unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
+}
+
+/// Sends what a configure just set on the layer (its colour space, and whether it shows the
+/// screen's extended range) on to the screen now. They are set from the render thread, which has
+/// no run loop: Core Animation only commits such changes "when the thread's run loop next
+/// iterates", so left alone they reach the screen late or not at all, and an HDR canvas shows no
+/// light above white until it does.
+pub(crate) fn commit() {
+    let Some(transaction) = AnyClass::get(c"CATransaction") else { return };
+    // SAFETY: `+[CATransaction flush]`, a class method without arguments, which any thread may call
+    let _: () = unsafe { msg_send![transaction, flush] };
 }

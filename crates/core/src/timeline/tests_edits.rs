@@ -21,7 +21,7 @@ fn grouped(s: &CanvasSession) -> (u64, Vec<u64>) {
 
 fn group_of(s: &CanvasSession, clip: u64) -> Option<u64> {
     let st = s.shared.lock();
-    st.doc.timeline.as_ref()?.group_of(make2d_engine::timeline::ClipId(clip)).map(|g| g.0)
+    st.doc.timeline.as_ref()?.group_of(procraft_engine::timeline::ClipId(clip)).map(|g| g.0)
 }
 
 /// The RGBA of pixel (`x`, `y`) of a `side`-wide frame.
@@ -60,7 +60,7 @@ fn a_motion_path_in_a_posed_group_is_drawn_where_the_clip_shows() {
     let h = bent.keys[0].handles.clone().unwrap();
     assert!(h.iter().zip([-4.0, 0.0, 4.0, 0.0]).all(|(a, b)| (a - b).abs() < 1e-3), "{h:?}");
     let st = s.shared.lock();
-    let stored = st.doc.timeline.as_ref().unwrap().clip(make2d_engine::timeline::ClipId(c)).unwrap();
+    let stored = st.doc.timeline.as_ref().unwrap().clip(procraft_engine::timeline::ClipId(c)).unwrap();
     assert_eq!(stored.keys.position.keys[0].path.unwrap().after, [2.0, 0.0]);
 }
 
@@ -113,7 +113,7 @@ fn clips_move_out_of_a_group_and_back_in() {
     let inner = {
         let st = s.shared.lock();
         let tl = st.doc.timeline.as_ref().unwrap();
-        tl.track_of_clip(make2d_engine::timeline::ClipId(clips[0])).unwrap().0
+        tl.track_of_clip(procraft_engine::timeline::ClipId(clips[0])).unwrap().0
     };
     assert!(s.move_timeline_clip(clips[2], inner, 0));
     assert_eq!(group_of(&s, clips[2]), Some(g));
@@ -184,7 +184,7 @@ fn clips_and_keys_paste_into_another_canvas_with_their_pixels() {
 }
 
 fn media_file(name: &str, seed: u8) -> String {
-    let dir = std::env::temp_dir().join(format!("make2d-edits-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-edits-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, (0..3000_u32).map(|i| (i as u8).wrapping_mul(seed)).collect::<Vec<_>>()).unwrap();
@@ -317,4 +317,30 @@ fn clips_picked_together_move_and_are_deleted_in_one_undo_step_each() {
     assert_eq!(s.shift_timeline_clips(vec![clips[2]], 3), 0);
     assert_eq!(s.timeline_shift_room(vec![clips[2]], 3), 0);
     assert!(!s.delete_timeline_clips(vec![clips[2]]));
+}
+
+#[test]
+fn clips_extend_through_the_empty_frames_after_them_as_one_step() {
+    let Some(s) = three_drawings() else { return };
+    s.set_timeline_simple(false);
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
+    // nothing empty after any of them
+    assert!(!s.timeline_clips_extend(clips.clone()));
+    assert!(!s.extend_timeline_clips(clips.clone()));
+    // the middle one gone: the first fills the frame it left, up to the last
+    assert!(s.delete_timeline_clips(vec![clips[1]]));
+    assert_eq!(spans(&s, 0), [(0, 1), (2, 1)]);
+    assert!(s.timeline_clips_extend(vec![clips[0], clips[2]]));
+    assert!(s.extend_timeline_clips(vec![clips[0], clips[2]]));
+    assert_eq!(spans(&s, 0), [(0, 2), (2, 1)]);
+    // it shows on the frame it now covers
+    assert_eq!(played(&s, 1), played(&s, 0));
+    assert_eq!(s.undo().as_deref(), Some("Extend Clips"));
+    assert_eq!(spans(&s, 0), [(0, 1), (2, 1)]);
+    // not on a locked track
+    let track = s.timeline_tracks()[0].id;
+    assert!(s.set_timeline_track(track, false, true));
+    assert!(!s.timeline_clips_extend(vec![clips[0]]));
+    assert!(!s.extend_timeline_clips(vec![clips[0]]));
 }

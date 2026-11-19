@@ -6,9 +6,9 @@
 //! drawing there current, and choosing a layer moves them to its drawing. Painting where the track
 //! has no drawing makes one.
 
-use make2d_engine::animation::Playback;
-use make2d_engine::document::{Document, LayerId, LayerKind};
-use make2d_engine::timeline::{
+use procraft_engine::animation::Playback;
+use procraft_engine::document::{Document, LayerId, LayerKind};
+use procraft_engine::timeline::{
     CameraPose, Clip, ClipContent, ClipId, Cycle, CycleKeys, MAX_EXPOSURE, MAX_FPS, MaskMode, Timeline, TrackId,
 };
 
@@ -302,7 +302,7 @@ impl CanvasSession {
         // the same count both sides, unless it is as it was (each side set apart, see
         // `set_timeline_onion`)
         if s.onion_frames != tl.onion.count[0].max(tl.onion.count[1]) {
-            tl.onion.count = [s.onion_frames.min(make2d_engine::animation::MAX_ONION_FRAMES); 2];
+            tl.onion.count = [s.onion_frames.min(procraft_engine::animation::MAX_ONION_FRAMES); 2];
         }
         tl.onion.opacity = if s.onion_opacity.is_finite() { s.onion_opacity.clamp(0.0, 1.0) } else { 0.4 };
         st.revision += 1;
@@ -734,8 +734,8 @@ pub enum TimelineEasing {
 }
 
 impl TimelineEasing {
-    pub(crate) fn easing(self) -> make2d_engine::timeline::Easing {
-        use make2d_engine::timeline::Easing;
+    pub(crate) fn easing(self) -> procraft_engine::timeline::Easing {
+        use procraft_engine::timeline::Easing;
         match self {
             TimelineEasing::Linear => Easing::Linear,
             TimelineEasing::Hold => Easing::Hold,
@@ -746,8 +746,8 @@ impl TimelineEasing {
         }
     }
 
-    fn of(e: &make2d_engine::timeline::Easing) -> TimelineEasing {
-        use make2d_engine::timeline::Easing;
+    fn of(e: &procraft_engine::timeline::Easing) -> TimelineEasing {
+        use procraft_engine::timeline::Easing;
         match e {
             Easing::Hold => TimelineEasing::Hold,
             Easing::Smooth => TimelineEasing::Smooth,
@@ -809,7 +809,7 @@ impl CanvasSession {
         let at = |frame: i32| u32::try_from(i64::from(origin) + i64::from(frame)).unwrap_or(0);
         let k = &clip.keys;
         let mut keys: Vec<TimelineKeyInfo> = Vec::new();
-        let mut add = |channel, frames: Vec<(i32, &make2d_engine::timeline::Easing)>| {
+        let mut add = |channel, frames: Vec<(i32, &procraft_engine::timeline::Easing)>| {
             keys.extend(frames.into_iter().map(|(f, e)| TimelineKeyInfo {
                 frame: at(f),
                 channel,
@@ -1002,8 +1002,8 @@ pub struct PathKey {
     pub handles: Option<Vec<f32>>,
 }
 
-use make2d_engine::geom::{Affine, Vec2};
-use make2d_engine::timeline::{Easing, FitMode, HandleMode, PathHandles, RepeatFit};
+use procraft_engine::geom::{Affine, Vec2};
+use procraft_engine::timeline::{Easing, FitMode, HandleMode, PathHandles, RepeatFit};
 
 /// An offset `d` on the canvas taken back through `pose`'s scale and turn (not its move); none
 /// if `pose` flattens everything.
@@ -1264,7 +1264,7 @@ impl CanvasSession {
 }
 
 /// How the key at `frame` among `keys` eases, if there is one.
-fn easing_at<T>(keys: &[make2d_engine::timeline::Key<T>], frame: i32) -> Option<Easing> {
+fn easing_at<T>(keys: &[procraft_engine::timeline::Key<T>], frame: i32) -> Option<Easing> {
     keys.iter().find(|k| k.frame == frame).map(|k| k.easing.clone())
 }
 
@@ -1458,7 +1458,7 @@ impl CanvasSession {
         let Ok(frame) = i32::try_from(frame) else { return false };
         let pose = CameraPose {
             center: [x, y],
-            zoom: zoom.clamp(make2d_engine::timeline::CAMERA_ZOOM.0, make2d_engine::timeline::CAMERA_ZOOM.1),
+            zoom: zoom.clamp(procraft_engine::timeline::CAMERA_ZOOM.0, procraft_engine::timeline::CAMERA_ZOOM.1),
             rotation: rotation.to_radians(),
         };
         let changed = self.change_live("Camera Key", done, |d| {
@@ -1513,7 +1513,7 @@ impl State {
 }
 
 /// How many group clips `tracks` hold, at any depth.
-fn count_groups(tracks: &[make2d_engine::timeline::Track]) -> usize {
+fn count_groups(tracks: &[procraft_engine::timeline::Track]) -> usize {
     tracks
         .iter()
         .flat_map(|t| &t.clips)

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use make2d_gpu::{Gpu, wgpu};
+use procraft_gpu::{Gpu, wgpu};
 
 use crate::files;
 
@@ -93,7 +93,7 @@ pub fn init() {
         before(info);
     }));
     let again = if tried > 0 { format!(", started again with {tried} graphics backends tried") } else { String::new() };
-    log::info!("Make2D {} on {} {}{again}", env!("PROCRAFT_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    log::info!("ProCraft {} on {} {}{again}", env!("PROCRAFT_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     #[cfg(windows)]
     native::watch();
 }
@@ -215,7 +215,7 @@ pub fn backend_order() -> &'static [usize] {
         // as Direct3D 12 sees them: Vulkan's driver is what may crash, so it isn't asked
         let started = Instant::now();
         let seen = std::panic::catch_unwind(|| Gpu::adapters(wgpu::Backends::DX12)).unwrap_or_else(|panic| {
-            log::warn!("the GPUs couldn't be listed: {}", make2d_gpu::panic_message(panic.as_ref()));
+            log::warn!("the GPUs couldn't be listed: {}", procraft_gpu::panic_message(panic.as_ref()));
             Vec::new()
         });
         if recorded() {
@@ -756,7 +756,7 @@ pub fn stopped(what: &str) {
         stop => stop,
     };
     let text = stopped_text(what, stop);
-    apart("make2d-stopped", move || files::tell("Make2D stopped", &text));
+    apart("procraft-stopped", move || files::tell("ProCraft stopped", &text));
 }
 
 /// This run's part in the record as it is now, if another thread lets go of it soon: a crash may
@@ -798,13 +798,13 @@ fn stopped_text(what: &str, stop: Stop) -> String {
         Stop::SayAllTried => "\n\nEach graphics backend has been tried. Updating the graphics driver may help.",
         Stop::Say => "",
     };
-    format!("Make2D stopped: {what}.{after}\n\nIts log is {}", files::app_dir().join(LOG).display())
+    format!("ProCraft stopped: {what}.{after}\n\nIts log is {}", files::app_dir().join(LOG).display())
 }
 
 /// What the app says when no backend could draw the window, `why` each failed.
 pub fn no_gpu_text(why: &str) -> String {
     format!(
-        "No graphics backend could draw the window.\n\n{why}\n\nUpdating the graphics driver may help. Make2D's log is {}",
+        "No graphics backend could draw the window.\n\n{why}\n\nUpdating the graphics driver may help. ProCraft's log is {}",
         files::app_dir().join(LOG).display()
     )
 }
@@ -970,8 +970,8 @@ mod tests {
     }
 
     use super::{INTEL, drawn_with, keeps_backend, order_for};
-    use make2d_gpu::wgpu::Backends;
-    use make2d_gpu::wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu, Other};
+    use procraft_gpu::wgpu::Backends;
+    use procraft_gpu::wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu, Other};
 
     /// Windows on x64's backends, as `Gpu::backends` lists them.
     const WINDOWS: [Backends; 3] = [Backends::VULKAN, Backends::DX12, Backends::GL];
@@ -980,7 +980,7 @@ mod tests {
     const MICROSOFT: u32 = 0x1414;
 
     /// The order for a machine whose GPUs (vendor, type) are `gpus`, as Direct3D 12 lists them.
-    fn order_with(backends: &[Backends], gpus: &[(u32, make2d_gpu::wgpu::DeviceType)]) -> Vec<usize> {
+    fn order_with(backends: &[Backends], gpus: &[(u32, procraft_gpu::wgpu::DeviceType)]) -> Vec<usize> {
         order_for(backends, drawn_with(gpus).and_then(|i| gpus.get(i).copied()))
     }
 
@@ -1252,11 +1252,11 @@ mod tests {
     #[test]
     fn a_stop_says_what_happened_and_where_the_log_is() {
         let text = super::stopped_text("wgpu error: Validation Error.\n", Stop::Say);
-        assert!(text.starts_with("Make2D stopped: wgpu error: Validation Error."), "{text}");
+        assert!(text.starts_with("ProCraft stopped: wgpu error: Validation Error."), "{text}");
         assert!(text.contains("procraft.log"), "{text}");
         assert!(!text.contains("graphics"), "{text}");
         let text = super::stopped_text("", Stop::Say);
-        assert!(text.starts_with("Make2D stopped: something went wrong."), "{text}");
+        assert!(text.starts_with("ProCraft stopped: something went wrong."), "{text}");
         let text = super::stopped_text("it crashed in igvk64.dll (exception 0xC0000005)", Stop::SayAnother);
         assert!(text.contains("Start it again to try another graphics backend."), "{text}");
         let text = super::stopped_text("it crashed in a driver (exception 0xC0000005)", Stop::SayAllTried);

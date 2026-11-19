@@ -275,7 +275,7 @@ fn to_rec2020(p3: bool) -> [[f32; 3]; 3] {
 }
 
 /// HLG's scene light (1: its peak) for the document's white: what the BT.2408 reference signal
-/// (0.75) stands for, as Koi Studio's HDR video has it.
+/// (0.75) stands for.
 fn hlg_white() -> f32 {
     let (a, b, c) = (0.178_832_77f32, 0.284_668_92f32, 0.559_910_7_f32);
     (((0.75 - c) / a).exp() + b) / 12.0

@@ -40,6 +40,9 @@
 //!   current layer, each as one step, rather than selected.
 //! - `procraft_opacity_together() -> i32`: for the hook `opacity_together`, whether a layer's
 //!   opacity changed while it is one of several picked sets every picked layer's (not 0).
+//! - `procraft_stroke_preview_opacity(tool: i32) -> f32`: for the hook `stroke_preview_opacity`,
+//!   how strongly a stroke shows while it is drawn, as a share of how it will be kept (0 to 1);
+//!   `tool` is what it does (0 paint, 1 erase, 2 smudge, 3 light).
 //! - `procraft_randomise(setting: i32, seed: i32) -> f32`: for the hook `randomise_brush`, where
 //!   a brush setting (by its place in [`crate::studio::RANDOMISED`]) goes, as a share of its range
 //!   (0 to 1), or below 0 to leave it; `seed` is the same for every setting of one press.
@@ -187,6 +190,7 @@ const PIN_PANELS: &str = "procraft_pin_panels";
 const LASSO_FILL: &str = "procraft_lasso_fill";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
+const STROKE_PREVIEW_OPACITY: &str = "procraft_stroke_preview_opacity";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
 const PICKER_PICK: &str = "procraft_picker_pick";
 const PICKER_POINT: &str = "procraft_picker_point";
@@ -296,6 +300,8 @@ pub(crate) enum Hook {
     Layers,
     /// Lasso Fill and the tools' lassos offered: shapes drawn are filled, not selected.
     LassoFill,
+    /// How strongly a stroke shows while it is drawn, short of how it is kept.
+    StrokePreviewOpacity,
 }
 
 impl Hook {
@@ -313,6 +319,7 @@ impl Hook {
             "pin_panels" => Some(Hook::PinPanels),
             "lasso_fill" => Some(Hook::LassoFill),
             "opacity_together" => Some(Hook::OpacityTogether),
+            "stroke_preview_opacity" => Some(Hook::StrokePreviewOpacity),
             "randomise_brush" => Some(Hook::RandomiseBrush),
             "colour_triangle" => Some(Hook::ColourTriangle),
             "quickshape_curve" => Some(Hook::QuickshapeCurve),
@@ -341,6 +348,7 @@ impl Hook {
             Hook::PinPanels => "This plugin can keep panels open while you paint.",
             Hook::LassoFill => "This plugin can fill or erase the shapes you draw with a lasso.",
             Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
+            Hook::StrokePreviewOpacity => "This plugin can change how strongly a stroke shows while you draw it.",
             Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
             Hook::QuickshapeCurve => "This plugin can make QuickShape snap strokes to curves.",
@@ -371,6 +379,7 @@ impl Hook {
             Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
             Hook::LassoFill => exports(module, LASSO_FILL, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
+            Hook::StrokePreviewOpacity => exports(module, STROKE_PREVIEW_OPACITY, &[ValType::I32], &[ValType::F32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
@@ -698,6 +707,7 @@ pub(crate) struct Running {
     lasso_fill: Option<TypedFunc<(), i32>>,
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
+    stroke_preview_opacity: Option<TypedFunc<i32, f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
     picker_pick: Option<TypedFunc<(f32, f32), i64>>,
     picker_point: Option<TypedFunc<(f32, f32), i64>>,
@@ -838,6 +848,7 @@ impl Running {
             let lasso_fill = instance.get_typed_func(&store, LASSO_FILL).ok();
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
+            let stroke_preview_opacity = instance.get_typed_func(&store, STROKE_PREVIEW_OPACITY).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
             let picker_pick = instance.get_typed_func(&store, PICKER_PICK).ok();
             let picker_point = instance.get_typed_func(&store, PICKER_POINT).ok();
@@ -920,6 +931,7 @@ impl Running {
                 lasso_fill,
                 opacity_together,
                 randomise,
+                stroke_preview_opacity,
                 colour_triangle,
                 picker_pick,
                 picker_point,
@@ -1647,6 +1659,18 @@ impl Running {
         } else {
             Ok(Some(said))
         }
+    }
+
+    /// How strongly it says a stroke of `tool` (0 paint, 1 erase, 2 smudge, 3 light) shows while
+    /// it is drawn, as a share of how it will be kept (1 if it has no say).
+    pub(crate) fn stroke_preview_opacity(&mut self, tool: i32) -> Result<f32, Stop> {
+        let Running { store, stroke_preview_opacity, .. } = self;
+        let Some(stroke_preview_opacity) = stroke_preview_opacity else { return Ok(1.0) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            stroke_preview_opacity.call(&mut *store, tool).map_err(|e| stop_of(&e))
+        })?;
+        if (0.0..=1.0).contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
     }
 
     /// Whether it says picked layers' opacity changes together.

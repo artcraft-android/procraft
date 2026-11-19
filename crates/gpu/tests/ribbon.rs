@@ -2,13 +2,13 @@
 //! along the stroke as one strip.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::brush::{Brush, Shape, Source, Taper};
-use make2d_engine::document::Document;
-use make2d_engine::geom::Vec2;
-use make2d_engine::input::{Pointer, Sample};
-use make2d_engine::stroke::{Stamp, StrokeBuilder};
-use make2d_engine::textures::TEXTURE_SIZE;
-use make2d_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_engine::brush::{Brush, Shape, Source, Taper};
+use procraft_engine::document::Document;
+use procraft_engine::geom::Vec2;
+use procraft_engine::input::{Pointer, Sample};
+use procraft_engine::stroke::{Stamp, StrokeBuilder};
+use procraft_engine::textures::TEXTURE_SIZE;
+use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
 fn gpu() -> Option<Gpu> {
     match Gpu::headless() {

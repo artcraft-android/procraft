@@ -652,6 +652,7 @@ fn add_item(
                 plugin: None,
                 adjustment: None,
                 style: None,
+                panel: None,
             });
         }
         _ => {
@@ -687,6 +688,7 @@ fn add_item(
                 plugin: None,
                 adjustment: None,
                 style: None,
+                panel: None,
             });
             if !uuid.is_empty() {
                 pixels.push((lid, canvas.pixels(&uuid, 4, 0)?));
@@ -714,6 +716,7 @@ fn add_item(
                     plugin: None,
                     adjustment: None,
                     style: None,
+                    panel: None,
                 });
                 if let Some(m) = mask.string("UUID") {
                     // a mask stores only the tiles painted on: the rest shows the layer

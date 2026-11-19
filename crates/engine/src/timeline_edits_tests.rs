@@ -294,3 +294,41 @@ fn a_layer_added_to_a_drawing_goes_inside_it() {
     assert!(doc.add_layer_to_drawing(LayerId(999)).is_none());
     let _ = second;
 }
+
+#[test]
+fn clips_fill_out_the_empty_frames_after_them() {
+    // a track with a gap between its clips and room after the last; another that sets the length
+    let mut tl = timeline(vec![
+        track(1, vec![drawing(10, 0, 2, 1), drawing(11, 5, 1, 2)]),
+        track(2, vec![drawing(20, 0, 12, 3)]),
+    ]);
+    assert_eq!(tl.duration, 12);
+    // the first up to the next clip, the last to the timeline's end: each on its own, as one
+    assert!(tl.fill_out(&[ClipId(10), ClipId(11)]));
+    let spans = |tl: &Timeline, t: u64| -> Vec<(u32, u32)> {
+        tl.track(TrackId(t)).unwrap().clips.iter().map(|c| (c.start, c.duration)).collect()
+    };
+    assert_eq!(spans(&tl, 1), [(0, 5), (5, 7)]);
+    assert_eq!(tl.duration, 12, "no longer than it was");
+    // nothing empty after them now, nor after the clip the timeline ends with
+    assert!(!tl.fill_out(&[ClipId(10), ClipId(11), ClipId(20), ClipId(99)]));
+    // in a group: to the next clip there, and to the group's end, not the timeline's
+    let inner = vec![track(3, vec![drawing(30, 0, 1, 4), drawing(31, 3, 1, 5)])];
+    let mut tl =
+        timeline(vec![track(1, vec![group(40, 2, 6, inner.clone(), None)]), track(2, vec![drawing(20, 0, 12, 3)])]);
+    assert!(tl.fill_out(&[ClipId(30), ClipId(31)]));
+    assert_eq!(spans(&tl, 3), [(0, 3), (3, 3)]);
+    assert_eq!(tl.clip(ClipId(40)).map(|g| (g.start, g.duration)), Some((2, 6)));
+    // a group that cycles plays only its first frames: no further than one cycle
+    let cycle = Cycle { length: 4, keys: CycleKeys::Repeat };
+    let mut tl =
+        timeline(vec![track(1, vec![group(40, 2, 9, inner, Some(cycle))]), track(2, vec![drawing(20, 0, 12, 3)])]);
+    assert!(!tl.fill_out(&[ClipId(31)]), "it ends where the cycle does");
+    assert_eq!(spans(&tl, 3), [(0, 1), (3, 1)]);
+    // a sound stops where its file does
+    let mut tl = timeline(vec![track(1, vec![sound_clip(60, 0, 3)]), track(2, vec![drawing(20, 0, 12, 3)])]);
+    let before = tl.clip(ClipId(60)).unwrap().duration;
+    tl.fill_out(&[ClipId(60)]);
+    let after = tl.clip(ClipId(60)).unwrap().duration;
+    assert!(after >= before && after <= 12, "{before} {after}");
+}

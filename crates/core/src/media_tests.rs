@@ -1,13 +1,13 @@
 use super::*;
 
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use crate::timeline::TimelineEdgePolicy;
 
 /// A folder of its own for test `name`, emptied.
 fn folder(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("make2d-media-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-media-test-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir

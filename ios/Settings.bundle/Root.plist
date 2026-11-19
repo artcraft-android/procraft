@@ -88,10 +88,10 @@
 			<key>Key</key>
 			<string>dragFormat</string>
 			<key>DefaultValue</key>
-			<string>Make2D</string>
+			<string>ProCraft</string>
 			<key>Titles</key>
 			<array>
-				<string>Make2D</string>
+				<string>ProCraft</string>
 				<string>PSD</string>
 				<string>JPEG</string>
 				<string>PNG</string>
@@ -99,7 +99,7 @@
 			</array>
 			<key>Values</key>
 			<array>
-				<string>Make2D</string>
+				<string>ProCraft</string>
 				<string>PSD</string>
 				<string>JPEG</string>
 				<string>PNG</string>

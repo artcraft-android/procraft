@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Galley, Id, Order, Rect, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
-use make2d_core::{Plugins, ShortcutGroup};
+use procraft_core::{Plugins, ShortcutGroup};
 
 use crate::look::{Weight, argb, pc, text};
 

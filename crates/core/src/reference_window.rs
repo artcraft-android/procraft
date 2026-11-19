@@ -5,7 +5,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use make2d_engine::reference_window::{ReferenceKind, ReferenceWindow};
+use procraft_engine::reference_window::{ReferenceKind, ReferenceWindow};
 
 use crate::{CanvasSession, ReferenceView};
 
@@ -130,7 +130,7 @@ pub struct ReferenceSize {
 /// and 230 to 650 tall with its bars, and no bigger than the screen while that leaves it that.
 #[uniffi::export]
 pub fn reference_window_size(width: f32, height: f32, screen_width: f32, screen_height: f32) -> ReferenceSize {
-    let [width, height] = make2d_engine::reference_window::fitted_size([width, height], [screen_width, screen_height]);
+    let [width, height] = procraft_engine::reference_window::fitted_size([width, height], [screen_width, screen_height]);
     ReferenceSize { width, height }
 }
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_package_s_window_and_picture_come_in_upright() {
-        use make2d_engine::document::Document;
+        use procraft_engine::document::Document;
         let mut png = Cursor::new(Vec::new());
         let two = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
         image::DynamicImage::ImageRgba8(two).write_to(&mut png, image::ImageFormat::Png).unwrap();
@@ -307,7 +307,7 @@ mod tests {
             ..ReferenceWindow::default()
         };
         let doc = Document::new(64, 48);
-        let bytes = make2d_engine::native::write(&make2d_engine::native::Export {
+        let bytes = procraft_engine::native::write(&procraft_engine::native::Export {
             document: &doc,
             pixels: &std::collections::HashMap::new(),
             composite: &[255; 64 * 48 * 4],
@@ -381,10 +381,10 @@ mod tests {
 
     #[test]
     fn a_package_keeps_the_model_shown_as_its_3d_flag() {
-        use make2d_engine::document::Document;
+        use procraft_engine::document::Document;
         let window = ReferenceWindow { shown: true, three_d: true, ..ReferenceWindow::default() };
         let doc = Document::new(64, 48);
-        let bytes = make2d_engine::native::write(&make2d_engine::native::Export {
+        let bytes = procraft_engine::native::write(&procraft_engine::native::Export {
             document: &doc,
             pixels: &std::collections::HashMap::new(),
             composite: &[255; 64 * 48 * 4],

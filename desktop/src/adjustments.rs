@@ -5,7 +5,7 @@
 //! (adjusting.rs); the touches swipe its amount.
 
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use make2d_core::{
+use procraft_core::{
     AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, PluginAction, PluginInfo,
     adjustment_groups, adjustment_label,
 };
@@ -199,7 +199,7 @@ impl Adjustments {
         look: &mut Look,
         session: &CanvasSession,
         bar_top: f32,
-        gradients: &make2d_core::Gradients,
+        gradients: &procraft_core::Gradients,
         colours: &crate::colours::Colours,
         backdrops: &mut Vec<f32>,
     ) -> Option<Asked> {
@@ -218,7 +218,7 @@ impl Adjustments {
         egui::Area::new(Id::unique("adjust modes button")).fixed_pos(band.min).order(Order::Foreground).show(
             ctx,
             |ui| {
-                if ui.allocate_rect(band, Sense::click()).clicked() && make2d_core::adjustment_paintable(a) {
+                if ui.allocate_rect(band, Sense::click()).clicked() && procraft_core::adjustment_paintable(a) {
                     self.modes_open = !self.modes_open;
                 }
             },
@@ -390,8 +390,8 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
     painter.rect_filled(band, 0, argb(MODE_BAR));
     let ink = argb(MODE_TEXT);
     let label = shown.plugin.as_ref().map_or_else(|| adjustment_label(a), |filter| filter.name.clone());
-    let swiped = make2d_core::adjustment_swiped(a);
-    let paintable = make2d_core::adjustment_paintable(a);
+    let swiped = procraft_core::adjustment_swiped(a);
+    let paintable = procraft_core::adjustment_paintable(a);
     let amount = format!("{}%", (shown.amount * 100.0).round() as i32);
     let measure = |s: &str, size: f32, w: Weight| painter.layout_no_wrap(s.into(), w.font(size), ink).size().x;
     let width = 33.0
@@ -595,7 +595,7 @@ fn hsb_row(ui: &Ui, row: Rect, label: &str, value: f32, track: Track) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use make2d_core::{PluginPart, PluginSource};
+    use procraft_core::{PluginPart, PluginSource};
 
     use super::*;
 
@@ -644,7 +644,7 @@ mod tests {
         let action = PluginAction {
             key: "org.example.halftone.dots".to_owned(),
             label: "Halftone".to_owned(),
-            place: make2d_core::PluginPlace::Adjustments,
+            place: procraft_core::PluginPlace::Adjustments,
         };
         let alone = menu_groups(&[], std::slice::from_ref(&action), false);
         assert_eq!(alone.last().unwrap(), &vec![("Plugins".to_owned(), MenuRow::Plugins)]);

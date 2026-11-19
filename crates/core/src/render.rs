@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use make2d_engine::profile::Profile;
-use make2d_gpu::{Gpu, wgpu};
+use procraft_engine::profile::Profile;
+use procraft_gpu::{Gpu, wgpu};
 
 use crate::Shared;
-use crate::frame::{configure, screen_profile};
+use crate::frame::{configure, extended_offered, screen_profile};
 
 /// The window drawn into: Android's native window, or the iPad app's `CAMetalLayer`.
 #[cfg(target_os = "android")]
@@ -16,6 +16,7 @@ type Window = ndk::native_window::NativeWindow;
 type Window = crate::layer::Layer;
 
 pub(crate) fn run(shared: Arc<Shared>, window: Window) {
+    let came = Instant::now();
     let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
     // the app's device (waited for while it is being made), else one made for this window and
     // kept for every artwork after
@@ -108,6 +109,10 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     let mut last_present: Option<Instant> = None;
     let started = Instant::now();
     let mut pipelines_kept = false;
+    // an HDR canvas given an 8-bit surface by a refused configure: when to ask again for the
+    // extended range, and how often it has been asked
+    let mut extended_retry: Option<Instant> = None;
+    let mut extended_asked = 0u32;
     loop {
         let (size, reconfigure) = {
             let mut st = shared.lock();
@@ -127,12 +132,31 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
             if st.stop {
                 break;
             }
-            (st.window_size, std::mem::replace(&mut st.reconfigure, false))
+            let retry = extended_retry.is_some_and(|at| Instant::now() >= at);
+            (st.window_size, std::mem::replace(&mut st.reconfigure, false) || retry)
         };
         if reconfigure || config.is_none() {
             let st = shared.lock();
             let Some(gpu) = st.gpu.as_ref() else { break };
-            config = configure(gpu, &surface, size, true, st.doc.range.is_high());
+            let hdr = st.doc.range.is_high();
+            config = configure(gpu, &surface, size, true, hdr);
+            // an HDR canvas left 8-bit (light above white shown as white) asks again shortly,
+            // else it stayed so until the artwork was opened again
+            let extended = config.as_ref().is_some_and(|c| c.format == wgpu::TextureFormat::Rgba16Float);
+            let missed = hdr && config.is_some() && !extended && extended_offered(gpu, &surface);
+            extended_retry = None;
+            if !missed {
+                if extended && extended_asked > 0 {
+                    log::info!("the surface took the extended range on asking again ({extended_asked}×)");
+                }
+                extended_asked = 0;
+            } else if extended_asked < EXTENDED_ASKS {
+                extended_asked += 1;
+                extended_retry = Some(Instant::now() + EXTENDED_RETRY);
+            } else if extended_asked == EXTENDED_ASKS {
+                extended_asked += 1;
+                log::warn!("the surface never took the extended range: the canvas shows no light above white");
+            }
         }
         let Some(format) = config.as_ref().map(|c| c.format) else {
             std::thread::sleep(Duration::from_millis(16));
@@ -173,6 +197,10 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
                 continue;
             }
             st.draw_frame(&view, format, size, screen, started);
+            // a frame then, for the surface to be asked again for the extended range
+            if let Some(at) = extended_retry {
+                st.frame_due = Some(st.frame_due.map_or(at, |due| due.min(at)));
+            }
             let now = Instant::now();
             if let Some(prev) = last_present {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
@@ -189,6 +217,8 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
         queue.present(frame);
         showing.shown();
         if !std::mem::replace(&mut pipelines_kept, true) {
+            // (until then the window shows nothing: what a slow start looks like from outside)
+            log::info!("the canvas first showed {} ms after its window came", came.elapsed().as_millis());
             keep_pipelines(&shared);
         }
     }
@@ -201,7 +231,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
 /// file).
 fn keep_pipelines(shared: &Shared) {
     let Some(gpu) = shared.lock().gpu.clone() else { return };
-    let thread = std::thread::Builder::new().name("make2d-keep-pipelines".to_owned());
+    let thread = std::thread::Builder::new().name("procraft-keep-pipelines".to_owned());
     if let Err(e) = thread.spawn(move || gpu.keep_pipelines()) {
         log::warn!("keeping the pipelines: {e}");
     }
@@ -209,6 +239,11 @@ fn keep_pipelines(shared: &Shared) {
 
 /// A frame that holds the canvas longer than this is logged: touches wait on it.
 const SLOW_FRAME: Duration = Duration::from_millis(200);
+
+/// How long an HDR canvas left on an 8-bit surface waits before asking again for the extended
+/// range, and how many times it asks (some ten seconds in all).
+const EXTENDED_RETRY: Duration = Duration::from_millis(250);
+const EXTENDED_ASKS: u32 = 40;
 
 /// How often the second display looks for a new frame of the main window.
 const PROJECTION_POLL: Duration = Duration::from_millis(8);

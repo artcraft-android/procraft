@@ -3,7 +3,7 @@
 //! stroke on it is painted live as on any layer, by the app's own brush engine, and then recorded as
 //! an item (its samples, its brush, colour, size and opacity, and its tool) and handed to the plugin
 //! that adds the kind, which keeps the layer's items in its data, in its own format. The app holds
-//! that data in the document (see [`make2d_engine::document::PluginLayer`]), saves it beside the
+//! that data in the document (see [`procraft_engine::document::PluginLayer`]), saves it beside the
 //! layer's pixels in `layers/<id>.layerdata`, and ties each change of it to the canvas step that changed
 //! the pixels: undo and redo put back both together, between other layers' steps. When the plugin
 //! changes items already drawn (the eraser taking whole strokes away, say), the app clears the layer
@@ -40,14 +40,14 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
-use make2d_engine::brush::Brush;
-use make2d_engine::curve::Curve;
-use make2d_engine::document::LayerId;
-use make2d_engine::geom::{Affine, IRect, Vec2};
-use make2d_engine::guide::{Guide, GuideKind, SymmetryKind};
-use make2d_engine::input::Sample;
-use make2d_engine::selection::Mask;
-use make2d_engine::stroke::{InputSettings, StrokeBuilder};
+use procraft_engine::brush::Brush;
+use procraft_engine::curve::Curve;
+use procraft_engine::document::LayerId;
+use procraft_engine::geom::{Affine, IRect, Vec2};
+use procraft_engine::guide::{Guide, GuideKind, SymmetryKind};
+use procraft_engine::input::Sample;
+use procraft_engine::selection::Mask;
+use procraft_engine::stroke::{InputSettings, StrokeBuilder};
 
 use crate::plugin_run::LayerAdded;
 use crate::{CanvasSession, PointerKind, Sliders, State, ToolKind};
@@ -1091,7 +1091,7 @@ impl State {
                 crate::close_stroke(canvas, builder, second, &guide);
                 self.flush();
                 // laid where it is laid now, after the rest
-                let ended = self.canvas.as_ref().and_then(make2d_gpu::Canvas::last_stroke);
+                let ended = self.canvas.as_ref().and_then(procraft_gpu::Canvas::last_stroke);
                 if let (Some(mut items), Some((bounds, in_place))) = (laid_before.clone(), ended) {
                     let key = Item::read(&record, &[]).and_then(|i| item_keys(&[i]).first().copied()).unwrap_or(0);
                     Arc::make_mut(&mut items).push(LaidItem { key, bounds, in_place });
@@ -1127,7 +1127,7 @@ impl State {
             }
         };
         self.flush();
-        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(make2d_gpu::Canvas::undo_step);
+        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
         let after = Some(Arc::new(after));
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
@@ -1439,7 +1439,7 @@ impl State {
         let t = item.transform.unwrap_or(Affine::IDENTITY);
         let to = self.lay_to.map_or(t, |to| t.then(to));
         let (width, height) = (self.doc.width(), self.doc.height());
-        let measuring = self.canvas.as_ref().is_some_and(make2d_gpu::Canvas::measuring);
+        let measuring = self.canvas.as_ref().is_some_and(procraft_gpu::Canvas::measuring);
         let Some((rect, coverage)) = region.coverage(to, width, height) else { return (IRect::EMPTY, false) };
         if !measuring && let Some(canvas) = self.canvas.as_mut() {
             let [r, g, b] = item.colour.map(|c| c.clamp(0.0, 1.0));
@@ -1479,9 +1479,9 @@ impl State {
         self.flush();
         let laid_before = self.laid_items(layer);
         self.laid.remove(&layer);
-        let steps = self.canvas.as_ref().map_or(0, make2d_gpu::Canvas::steps_made);
+        let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
         self.lay_items_again(layer, &read_drawn(&list), "Redraw layer");
-        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(make2d_gpu::Canvas::undo_step);
+        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
         if let Some(made) = made {
             let laid = laid_before.zip(self.laid_items(layer));
             self.note_layer_step(made, layer, data.clone(), data, laid);
@@ -1685,11 +1685,11 @@ impl State {
             Ok(Some((running.layer_save(MOST_DATA)?, running.layer_draw(MOST_DRAWN)?)))
         });
         let Some(Some((after, list))) = answer else { return false };
-        let steps = self.canvas.as_ref().map_or(0, make2d_gpu::Canvas::steps_made);
+        let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
         self.flush();
         let laid_before = self.laid_items(layer);
         self.lay_items_again(layer, &read_drawn(&list), name);
-        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(make2d_gpu::Canvas::undo_step);
+        let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
         let after = Some(Arc::new(after));
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
@@ -1822,7 +1822,7 @@ impl State {
     /// pixels with it): those whose plugin can't change their items become ordinary layers in
     /// `doc`, the others' data from then on given in it. The layers moved, and their data before and
     /// after.
-    pub(crate) fn move_all_items(&self, t: Affine, doc: &mut make2d_engine::document::Document) -> Vec<MovedData> {
+    pub(crate) fn move_all_items(&self, t: Affine, doc: &mut procraft_engine::document::Document) -> Vec<MovedData> {
         let plugin_layers: Vec<LayerId> =
             self.doc.layers().iter().filter(|l| l.plugin.is_some()).map(|l| l.id).collect();
         let mut moved = Vec::new();

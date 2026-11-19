@@ -8,8 +8,8 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-use make2d_engine::geom::Vec2;
-use make2d_gpu::{LiquifyMode, LiquifyStamp};
+use procraft_engine::geom::Vec2;
+use procraft_gpu::{LiquifyMode, LiquifyStamp};
 
 use crate::adjust::{LiquifyBrush, LiquifyKind};
 

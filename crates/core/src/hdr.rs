@@ -1,23 +1,23 @@
-//! HDR artworks (see [`make2d_engine::document::DynamicRange`]): choosing it as a canvas is made,
+//! HDR artworks (see [`procraft_engine::document::DynamicRange`]): choosing it as a canvas is made,
 //! the light tool's limit above white, the screen's headroom, layers saved with their light above
 //! white, and HDR exports.
 //!
 //! An HDR artwork's layer files are 16-bit PNGs whose samples are the layer's half floats as they
-//! are (premultiplied, sRGB-encoded, past 1 for light above white): read only by Make2D, which
+//! are (premultiplied, sRGB-encoded, past 1 for light above white): read only by ProCraft, which
 //! takes an 8-bit layer file as it always has.
 
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use make2d_engine::document::DynamicRange;
-use make2d_engine::hdr::{self as pixels, HDR_PIXEL};
+use procraft_engine::document::DynamicRange;
+use procraft_engine::hdr::{self as pixels, HDR_PIXEL};
 
 use crate::project::{file_error, write_atomically};
 use crate::{CanvasSession, MobileError};
 
 /// How far above white the light tool brightens an HDR canvas at first, stops (four times
-/// white's light), as Koi Studio has it.
+/// white's light).
 pub(crate) const LIGHT_LIMIT: f32 = 2.0;
 /// The most it may be set to.
 pub(crate) const LIGHT_LIMIT_MOST: f32 = 5.0;
@@ -41,10 +41,10 @@ pub(crate) fn ceiling(stops: f32) -> f32 {
 /// A layer `width` × `height` read back as it is saved: an HDR artwork's as half floats, a
 /// standard one's RGBA8.
 pub(crate) fn layer_pixels(
-    read: make2d_gpu::Readback,
+    read: procraft_gpu::Readback,
     hdr: bool,
     (width, height): (u32, u32),
-) -> Result<Vec<u8>, make2d_gpu::GpuError> {
+) -> Result<Vec<u8>, procraft_gpu::GpuError> {
     let rgba = if hdr { read.wide_pixels()? } else { read.pixels()? };
     Ok(as_saved(&rgba, hdr, (width, height)))
 }
@@ -192,7 +192,7 @@ impl CanvasSession {
     }
 
     /// Frame `index` of the animation as a frame of a 10-bit HLG video `width` × `height` (see
-    /// [`make2d_engine::hdr::hlg_frame`]): half floats, BT.2020, HLG-encoded. None past the last.
+    /// [`procraft_engine::hdr::hlg_frame`]): half floats, BT.2020, HLG-encoded. None past the last.
     pub fn animation_frame_hlg(&self, index: u32, width: u32, height: u32) -> Option<Vec<u8>> {
         let frame = self.animation_frame_hdr(index)?;
         Some(pixels::hlg_frame(&frame.half, (frame.width, frame.height), frame.p3, (width, height)))
@@ -227,7 +227,7 @@ mod tests {
     /// A line across window y = 100 of a 100 × 100 canvas shown 200 across, in `colour` lit `stops`
     /// above white, on an HDR canvas or a standard one; then what the eyedropper finds on it.
     fn picked(hdr: bool, colour: [f32; 3], stops: f32) -> Option<crate::pick::Pick> {
-        let gpu = match make2d_gpu::Gpu::headless() {
+        let gpu = match procraft_gpu::Gpu::headless() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("skipped: {e}");
@@ -239,7 +239,7 @@ mod tests {
         {
             let mut st = s.shared.lock();
             st.window_size = (200, 200);
-            st.view = Some(make2d_engine::view::View::fit((100, 100), (200, 200)));
+            st.view = Some(procraft_engine::view::View::fit((100, 100), (200, 200)));
             st.gpu = Some(gpu);
             st.ensure_canvas();
         }
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn an_hdr_layer_file_holds_its_half_floats() {
-        let dir = std::env::temp_dir().join(format!("make2d-hdr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("procraft-hdr-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("layer.png");
         let half = pixels::halves([3.0, 1.5, 0.25, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5]);

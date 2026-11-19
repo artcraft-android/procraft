@@ -5,9 +5,9 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::Path;
 
-use make2d_engine::animation::{self, Animation, Playback};
-use make2d_engine::document::{Document, LayerId, LayerKind};
-use make2d_engine::formats::GifWriter;
+use procraft_engine::animation::{self, Animation, Playback};
+use procraft_engine::document::{Document, LayerId, LayerKind};
+use procraft_engine::formats::GifWriter;
 
 use crate::layers::ThumbnailImage;
 use crate::project::{file_error, thumbnail, write_atomically};
@@ -137,11 +137,11 @@ impl CanvasSession {
             next += frames.len();
             let Some(&(w, h, _)) = frames.first() else { break };
             let frame_bytes = (w as usize * h as usize * 4).max(1);
-            few = (GIF_BATCH_BYTES / frame_bytes).clamp(1, make2d_engine::par::cores());
+            few = (GIF_BATCH_BYTES / frame_bytes).clamp(1, procraft_engine::par::cores());
             let writer = gif.get_or_insert_with(|| GifWriter::new(w, h));
             let made = {
                 let writer = &*writer;
-                make2d_engine::par::side_by_side(&frames, |(_, _, rgba)| {
+                procraft_engine::par::side_by_side(&frames, |(_, _, rgba)| {
                     writer.encoded_frame(rgba, delay.max(1), dither)
                 })
             };
@@ -262,7 +262,7 @@ impl CanvasSession {
 
     /// [`Self::render_shot_of`] at full size: premultiplied RGBA8 (an HDR canvas's light above
     /// white rolled off), or with `wide` an HDR canvas's half floats as they are (see
-    /// [`make2d_gpu::Canvas::read_composite_wide`]).
+    /// [`procraft_gpu::Canvas::read_composite_wide`]).
     pub(crate) fn render_shot_full(
         &self,
         shot: Shot,
@@ -301,7 +301,7 @@ impl CanvasSession {
             canvas.render_finished(gpu, &mut doc);
             let rgba = match (wide, canvas.is_hdr()) {
                 (true, _) => canvas.read_composite_wide(gpu),
-                (false, true) => canvas.read_composite_wide(gpu).map(|half| make2d_engine::hdr::tone_mapped(&half)),
+                (false, true) => canvas.read_composite_wide(gpu).map(|half| procraft_engine::hdr::tone_mapped(&half)),
                 (false, false) => canvas.read_composite(gpu),
             };
             canvas.set_play_frame(played);

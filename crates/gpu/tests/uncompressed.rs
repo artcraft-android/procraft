@@ -2,10 +2,10 @@
 //! switch is the whole process's).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::document::Document;
-use make2d_engine::geom::Vec2;
-use make2d_engine::stroke::Stamp;
-use make2d_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_engine::document::Document;
+use procraft_engine::geom::Vec2;
+use procraft_engine::stroke::Stamp;
+use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
 fn pixel(px: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let i = ((y * width + x) * 4) as usize;
@@ -14,7 +14,7 @@ fn pixel(px: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 
 #[test]
 fn a_canvas_kept_uncompressed_paints_layers_and_undoes_as_any() {
-    make2d_gpu::keep_textures_uncompressed(true);
+    procraft_gpu::keep_textures_uncompressed(true);
     let gpu = match Gpu::headless() {
         Ok(g) => g,
         Err(e) => return eprintln!("skipped: {e}"),

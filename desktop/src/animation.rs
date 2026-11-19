@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::emath::TSTransform;
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, pos2, vec2};
-use make2d_core::{AnimationPlayback, AnimationSettings, CanvasSession, Palettes, animation_next_step};
+use procraft_core::{AnimationPlayback, AnimationSettings, CanvasSession, Palettes, animation_next_step};
 
 use crate::colours::HarmonyKind;
 use crate::compact_colours::{self, CompactColours};
@@ -80,7 +80,7 @@ pub struct AnimationBar {
     pub tweens: bool,
     /// The plugins' actions for the frame options, and the one tapped there, to run (with that
     /// frame's layer current).
-    pub frame_actions: Vec<make2d_core::PluginAction>,
+    pub frame_actions: Vec<procraft_core::PluginAction>,
     pub run_action: Option<String>,
     settings_open: bool,
     options_open: bool,
@@ -469,7 +469,7 @@ impl AnimationBar {
         harmony: HarmonyKind,
     ) {
         let colours_page = self.colours.is_some();
-        let p3 = make2d_core::colours_in_p3(session.profile());
+        let p3 = procraft_core::colours_in_p3(session.profile());
         let content = if colours_page {
             34.0 + 7.0 + 26.0 + 11.0 + PICKER_BODY + compact_colours::TABS
         } else {

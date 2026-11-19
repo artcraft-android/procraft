@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The AppImage's entry point. First it gives this user Make2D's menu entry and icons (into
+# The AppImage's entry point. First it gives this user ProCraft's menu entry and icons (into
 # $XDG_DATA_HOME, its Exec this AppImage wherever it now is): the app menus list it, and Wayland
-# desktops find the window's icon through its app id (make2d) only that way. Then it runs the app.
+# desktops find the window's icon through its app id (procraft) only that way. Then it runs the app.
 HERE="$(dirname "$(readlink -f "$0")")"
 if [ -n "${APPIMAGE:-}" ] && [ -n "${HOME:-}" ]; then
   DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -11,7 +11,7 @@ if [ -n "${APPIMAGE:-}" ] && [ -n "${HOME:-}" ]; then
       mkdir -p "$DATA/icons/hicolor/$size/apps" && cp -f "$icon" "$DATA/icons/hicolor/$size/apps/procraft.png"
     done
     mkdir -p "$DATA/applications" &&
-      sed "s|^Exec=.*|Exec=\"$APPIMAGE\" %F|" "$HERE/make2d.desktop" >"$DATA/applications/make2d.desktop"
+      sed "s|^Exec=.*|Exec=\"$APPIMAGE\" %F|" "$HERE/procraft.desktop" >"$DATA/applications/procraft.desktop"
   } 2>/dev/null
 fi
-exec "$HERE/usr/bin/make2d" "$@"
+exec "$HERE/usr/bin/procraft" "$@"

@@ -1022,6 +1022,29 @@ pub fn trace(walls: &[Wall], width: u32, height: u32, seed: Vec2, factor: f32) -
     Some(Traced { loops, sources, area: area as f32 })
 }
 
+/// How much of what is inside `of` is inside `loops` too (0 none of it, to 1 all), near enough:
+/// by a grid of points over `of`. All of it for an `of` too slight for any point to land in.
+pub fn covered(loops: &[Vec<Vec2>], of: &[Vec<Vec2>]) -> f32 {
+    const ACROSS: usize = 32;
+    let mut points = of.iter().flatten().filter(|p| p.is_finite());
+    let Some(first) = points.next() else { return 1.0 };
+    let [x0, y0, x1, y1] = points.fold([first.x, first.y, first.x, first.y], |[x0, y0, x1, y1], p| {
+        [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)]
+    });
+    let (mut within, mut both) = (0u32, 0u32);
+    for i in 0..ACROSS * ACROSS {
+        let p = Vec2::new(
+            x0 + (x1 - x0) * ((i % ACROSS) as f32 + 0.5) / ACROSS as f32,
+            y0 + (y1 - y0) * ((i / ACROSS) as f32 + 0.5) / ACROSS as f32,
+        );
+        if inside(of, p) {
+            within += 1;
+            both += u32::from(inside(loops, p));
+        }
+    }
+    if within == 0 { 1.0 } else { both as f32 / within as f32 }
+}
+
 /// Whether `point` is inside `loops` by the even-odd rule.
 pub fn inside(loops: &[Vec<Vec2>], point: Vec2) -> bool {
     let mut crossings = 0;
@@ -1041,6 +1064,27 @@ mod tests {
 
     fn wall(source: u64, points: &[(f32, f32)]) -> Wall {
         Wall { line: points.iter().map(|&(x, y)| Vec2::new(x, y)).collect(), source }
+    }
+
+    #[test]
+    fn how_much_of_one_shape_another_covers() {
+        let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            vec![Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]
+        };
+        let big = vec![rect(0.0, 0.0, 400.0, 400.0)];
+        let small = vec![rect(100.0, 100.0, 200.0, 200.0)];
+        // the big one covers all of the small one, the small a sixteenth of the big
+        assert_eq!(covered(&big, &small), 1.0);
+        assert!((covered(&small, &big) - 1.0 / 16.0).abs() < 0.01, "{}", covered(&small, &big));
+        assert_eq!(covered(&small, &small), 1.0);
+        // with a hole where the small one is, the big one covers none of it
+        let holed = vec![rect(0.0, 0.0, 400.0, 400.0), rect(100.0, 100.0, 200.0, 200.0)];
+        assert_eq!(covered(&holed, &small), 0.0);
+        // half over it
+        let half = vec![rect(150.0, 0.0, 400.0, 400.0)];
+        assert!((covered(&half, &small) - 0.5).abs() < 0.05);
+        // nothing to cover is covered
+        assert_eq!(covered(&small, &[]), 1.0);
     }
 
     /// A square from 100 to 300, drawn as one closed line.

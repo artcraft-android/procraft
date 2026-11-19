@@ -1,4 +1,4 @@
-//! The Texture Packer's finding of sprites (from Koi Studio's `SpriteScanner`): the separate
+//! The Texture Packer's finding of sprites: the separate
 //! drawings on a picture with no background, each as the box round it, so each can be cut out as
 //! a PNG of its own.
 
@@ -21,7 +21,7 @@ impl SpriteBox {
     }
 
     /// Whether fewer than `separation` clear pixels lie between it and `other` (at 1, only
-    /// touching ones, a corner too), as Koi Studio's merge has it.
+    /// touching ones, a corner too).
     fn near(&self, other: &SpriteBox, separation: u32) -> bool {
         self.x < other.right() + separation
             && other.x < self.right() + separation

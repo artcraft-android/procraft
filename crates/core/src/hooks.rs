@@ -283,6 +283,16 @@ impl Hooks {
             && self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?))
     }
 
+    /// The stroke preview hook: how strongly a stroke of `tool` (0 paint, 1 erase, 2 smudge,
+    /// 3 light) shows while it is drawn, as a share of how it will be kept. Each plugin on it has
+    /// a say, one after another: their answers multiply. 1 with none on it.
+    pub(crate) fn stroke_preview_opacity(&self, tool: i32) -> f32 {
+        if !self.has(Hook::StrokePreviewOpacity) {
+            return 1.0;
+        }
+        self.through(Hook::StrokePreviewOpacity, 1.0, |running, said| Ok(said * running.stroke_preview_opacity(tool)?))
+    }
+
     /// The pin hook: whether a touch on the canvas with a panel open paints at once and leaves the
     /// panel up, rather than closing it (a tap) or fading it (a drag).
     pub(crate) fn pin_panels(&self) -> bool {
@@ -666,7 +676,7 @@ impl CanvasSession {
         let program = match cached.filter(|(was, code, _)| *was == id && *code == text) {
             Some((_, _, program)) => program,
             None => {
-                let code = make2d_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
+                let code = procraft_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
                 let made = code.ok().and_then(|code| gpu.make_picture(code).ok());
                 let Some(program) = made else {
                     hooks.stopped(&id, Stop::Damaged);
@@ -679,8 +689,8 @@ impl CanvasSession {
         match gpu.draw_picture(&program, hue, side) {
             Ok(rgba) => Some(rgba),
             // asked bigger than it can be drawn, or the device gone: not the plugin's doing
-            Err(make2d_gpu::PictureStop::TooBig | make2d_gpu::PictureStop::Lost) => None,
-            Err(make2d_gpu::PictureStop::Spent | make2d_gpu::PictureStop::Cut) => {
+            Err(procraft_gpu::PictureStop::TooBig | procraft_gpu::PictureStop::Lost) => None,
+            Err(procraft_gpu::PictureStop::Spent | procraft_gpu::PictureStop::Cut) => {
                 hooks.stopped(&id, Stop::TooSlow);
                 None
             }
@@ -703,8 +713,8 @@ impl CanvasSession {
 pub(crate) mod tests {
     use std::time::Instant;
 
-    use make2d_engine::view::View;
-    use make2d_gpu::Gpu;
+    use procraft_engine::view::View;
+    use procraft_gpu::Gpu;
     use serde_json::{Value, json};
 
     use super::*;
@@ -1438,7 +1448,7 @@ pub(crate) mod tests {
         s.stroke_end(vec![sample(160.0, 100.0, 248.0)]);
         let alpha_on = |s: &CanvasSession, layer: u64| {
             let mut st = s.shared.lock();
-            st.layer_pixels(make2d_engine::document::LayerId(layer)).unwrap()[(100 * 200 + 100) * 4 + 3]
+            st.layer_pixels(procraft_engine::document::LayerId(layer)).unwrap()[(100 * 200 + 100) * 4 + 3]
         };
         assert_eq!(alpha_on(&s, art_layer), 255, "drawn on the plugin's layer");
         assert_eq!(alpha_on(&s, added), 0, "not on the layer added");
@@ -1699,7 +1709,7 @@ pub(crate) mod tests {
             (rows[0].key.as_str(), rows[0].choices.len()),
             ("plugin:io.github.artcraftandroid.brush-sounds:sound", 8)
         );
-        let mut brush = make2d_engine::brush::Brush::round_pen();
+        let mut brush = procraft_engine::brush::Brush::round_pen();
         brush.set_setting(&rows[0].key, 5.0);
         assert_eq!(brush.setting(&rows[0].key), 5.0);
         brush.set_setting(&rows[0].key, 300.0);
@@ -1880,6 +1890,107 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), false));
         assert_eq!(s.step_notice(false, Some("Fill".into())).as_deref(), Some("Redo Fill"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stroke_shows_fainter_while_it_is_drawn_as_the_plugin_that_comes_with_the_app_says() {
+        const ID: &str = "io.github.artcraftandroid.stroke-preview-opacity";
+        let Some(s) = session() else { return };
+        let dir = store("stroke-preview");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "stroke-preview-opacity").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        s.use_plugins(Arc::clone(&plugins));
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.stroke_preview_opacity(0), 1.0, "imported, it says nothing");
+        // how dark the canvas shows at the stroke's middle
+        let dark = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            let px = canvas.read_composite(gpu).unwrap();
+            255 - i32::from(px[(50 * 200 + 60) * 4])
+        };
+        let begin = |s: &CanvasSession| {
+            s.stroke_begin(PointerKind::Stylus, vec![sample(30.0, 50.0, 0.0)]);
+            s.stroke_add((1..10).map(|i| sample(30.0 + i as f32 * 6.0, 50.0, f64::from(i) * 8.0)).collect());
+        };
+        let on = |s: &CanvasSession| {
+            s.stroke_add((10..20).map(|i| sample(30.0 + i as f32 * 6.0, 50.0, f64::from(i) * 8.0)).collect());
+        };
+        let end = |s: &CanvasSession| s.stroke_end(vec![sample(150.0, 50.0, 170.0)]);
+        s.set_color(0.0, 0.0, 0.0);
+        let wet =
+            s.brush_library().iter().enumerate().find_map(|(i, set)| {
+                set.brushes.iter().position(|b| b.name == "Oil Paint").map(|j| (i as u32, j as u32))
+            });
+        for brush in [None, wet] {
+            if let Some((set, index)) = brush {
+                assert!(s.select_brush(set, index));
+            }
+            assert!(plugins.set_on(ID.to_owned(), false) || brush.is_none());
+            assert!(plugins.set_slider(format!("{ID}.opacity"), 0.5).is_some());
+            // as it shows without: drawn, and kept
+            begin(&s);
+            let whole = dark(&s);
+            assert!(whole > 80, "{brush:?}: {whole}");
+            end(&s);
+            let kept = dark(&s);
+            s.undo();
+            assert_eq!(dark(&s), 0);
+            // on: half as strong while it is drawn
+            assert!(plugins.set_on(ID.to_owned(), true));
+            assert_eq!(hooks.stroke_preview_opacity(0), 0.5);
+            begin(&s);
+            let half = dark(&s);
+            assert!((half * 2 - whole).abs() <= whole / 8 + 4, "{brush:?}: {half} of {whole}");
+            // the slider moved while it is being drawn: the stroke follows
+            assert!(plugins.set_slider(format!("{ID}.opacity"), 0.25).is_some());
+            on(&s);
+            let quarter = dark(&s);
+            assert!(quarter < half - whole / 8, "{brush:?}: {quarter} after {half}");
+            // lifted, it is kept as it would have been
+            end(&s);
+            assert!((dark(&s) - kept).abs() <= 3, "{brush:?}: kept {} for {kept}", dark(&s));
+            s.undo();
+        }
+        // the light tool with paint; the eraser and the smudge once its switch is on
+        assert_eq!(hooks.stroke_preview_opacity(3), 0.25);
+        assert_eq!((hooks.stroke_preview_opacity(1), hooks.stroke_preview_opacity(2)), (1.0, 1.0));
+        assert!(plugins.set_switch(format!("{ID}.erasing"), true));
+        assert_eq!((hooks.stroke_preview_opacity(1), hooks.stroke_preview_opacity(2)), (0.25, 0.25));
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!(hooks.stroke_preview_opacity(0), 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn several_plugins_on_the_stroke_preview_hook_multiply_and_a_wild_answer_stops_one() {
+        let says = |share: &str| {
+            wat::parse_str(format!(
+                r#"(module (func (export "procraft_stroke_preview_opacity") (param i32) (result f32) (f32.const {share})))"#
+            ))
+            .unwrap()
+        };
+        let hooks = Hooks::default();
+        hooks.put_on("a".to_owned(), Running::start(&says("0.5"), &[]).unwrap(), &[Hook::StrokePreviewOpacity]);
+        assert_eq!(hooks.stroke_preview_opacity(0), 0.5);
+        hooks.put_on("b".to_owned(), Running::start(&says("0.5"), &[]).unwrap(), &[Hook::StrokePreviewOpacity]);
+        assert_eq!(hooks.stroke_preview_opacity(0), 0.25);
+        // past 1, below 0 or no number: stopped, and the stroke shows as the others say
+        for wild in ["1.5", "-0.1", "nan"] {
+            let dir = store(&format!("stroke-preview-{wild}"));
+            let plugins = Plugins::with_store(dir.clone());
+            let module = says(wild);
+            let mut manifest = coded(ID, &module);
+            manifest["hooks"] = json!(["stroke_preview_opacity"]);
+            assert_eq!(plugins.install(file(&manifest, &module)), None, "{wild}");
+            assert!(plugins.set_on(ID.to_owned(), true));
+            assert_eq!(plugins.hooks().stroke_preview_opacity(0), 1.0, "{wild}");
+            assert!(card(&plugins).problem.is_some(), "{wild}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -2208,7 +2319,7 @@ pub(crate) mod tests {
         for y in 60..120 {
             mask[y * 200..(y + 1) * 200].fill(255);
         }
-        s.shared.lock().selection = Some(make2d_engine::selection::Mask { width: 200, height: 200, data: mask });
+        s.shared.lock().selection = Some(procraft_engine::selection::Mask { width: 200, height: 200, data: mask });
         pour_at(&s, 30.0, 80.0);
         assert!(red_at(&s, 30, 80), "in the selection, this side of the cut");
         assert!(!red_at(&s, 30, 30), "out of the selection");
@@ -2353,7 +2464,7 @@ pub(crate) mod tests {
                 data[y * side + side / 2..y * side + side / 2 + 6].fill(0);
             }
             let filled = data.iter().filter(|&&v| v > 0).count();
-            let mask = make2d_engine::selection::Mask { width: side as u32, height: side as u32, data };
+            let mask = procraft_engine::selection::Mask { width: side as u32, height: side as u32, data };
             let start = Instant::now();
             let closed = crate::pour::closed_by(&hooks, mask, (side as u32 / 4, side as u32 / 4));
             let took = start.elapsed().as_secs_f64() * 1e3;
@@ -2542,7 +2653,7 @@ pub(crate) mod tests {
                 .view
                 .and_then(|v| v.to_screen().inverse())
                 .unwrap()
-                .apply(make2d_engine::geom::Vec2::new(10.0, 20.0));
+                .apply(procraft_engine::geom::Vec2::new(10.0, 20.0));
             assert_eq!(at[0].pos, plain, "the sample goes through unchanged");
         }
         assert_eq!(s.take_failure().as_deref(), Some("A plugin stopped. Switched off: it crashed."));

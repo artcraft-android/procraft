@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use wgpu::naga::{self, Arena, BinaryOperator, Block, Expression, Function, Handle, Literal, Module, Span, Statement};
 
-use make2d_engine::document::DynamicRange;
+use procraft_engine::document::DynamicRange;
 
 use super::{
     Canvas, FilterUniform, LAYER_FORMAT, Op, UniformData, blended_pipeline, copy_at, extent, layer_format, render_pass,

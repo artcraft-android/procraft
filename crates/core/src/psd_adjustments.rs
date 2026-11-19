@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use make2d_engine::document::{Document, Layer, LayerId};
-use make2d_engine::formats::{self, PsdKind};
+use procraft_engine::document::{Document, Layer, LayerId};
+use procraft_engine::formats::{self, PsdKind};
 
 use crate::project::straight_alpha;
 use crate::{CanvasSession, MobileError};
@@ -25,7 +25,7 @@ pub(crate) fn psd_kind<'a>(l: &Layer, mask: Option<&'a [u8]>, flattened: &'a Fla
 
 impl CanvasSession {
     /// Each adjustment layer of `doc` a PSD has no kind for, as it draws alone (see
-    /// [`make2d_gpu::Canvas::read_adjustment_alone`]).
+    /// [`procraft_gpu::Canvas::read_adjustment_alone`]).
     pub(crate) fn flattened_adjustments(&self, doc: &Document) -> Result<Flattened, MobileError> {
         let wanted: Vec<LayerId> = doc
             .layers()

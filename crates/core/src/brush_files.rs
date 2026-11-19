@@ -3,15 +3,15 @@
 //! from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
-use make2d_engine::brush::{
+use procraft_engine::brush::{
     Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, GrainMode, MaterialSource, ShapeFile, Source, StockImage,
     StockImages,
 };
-use make2d_engine::brushfile::{self, BrushFile, Pictures, Texture};
-use make2d_engine::brushlibrary;
-use make2d_engine::curve::Curve;
-use make2d_engine::stroke::LEAST_ROUNDNESS;
-use make2d_engine::textures::{self, TEXTURE_SIZE, grain, shape};
+use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
+use procraft_engine::brushlibrary;
+use procraft_engine::curve::Curve;
+use procraft_engine::stroke::LEAST_ROUNDNESS;
+use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
 
 use crate::CanvasSession;
 use crate::brush_library::LibrarySet;
@@ -61,7 +61,7 @@ impl Made {
     }
 }
 
-/// Who made `brush`, as its file is to say ("" for Make2D's own).
+/// Who made `brush`, as its file is to say ("" for ProCraft's own).
 fn author_name(brush: &Brush) -> &str {
     brush.author.as_ref().map_or("", |a| a.name.as_str())
 }
@@ -132,7 +132,7 @@ pub const OTHER_BRUSH_EXTENSIONS: [&str; 8] = ["abr", "gbr", "gih", "vbr", "kpp"
 /// file is called: a brush or set file sent on as a plain zip.
 #[uniffi::export]
 pub fn is_brush_zip(bytes: Vec<u8>) -> bool {
-    make2d_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| brush_names(zip.names()))
+    procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| brush_names(zip.names()))
 }
 
 /// Whether a zip holding `names` holds brushes (a library's among them).
@@ -167,7 +167,7 @@ fn read_library(bytes: &[u8], name: String) -> Option<ReadBrushes> {
         .map(|set| {
             // its icon as the stock set it names has it
             let icon = crate::brush_library::shipped_icon(set.icon.as_deref().unwrap_or(&set.name));
-            let brushes = make2d_engine::par::side_by_side(&set.brushes, brush_from).into_iter().flatten().collect();
+            let brushes = procraft_engine::par::side_by_side(&set.brushes, brush_from).into_iter().flatten().collect();
             (set.name.clone(), icon, brushes)
         })
         .collect();
@@ -203,7 +203,7 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
         .is_some_and(|(_, ext)| OTHER_BRUSH_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(ext)));
     // a library, by its name or by what the zip holds
     let library = name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case(brushlibrary::EXTENSION))
-        || make2d_engine::zip::ZipReader::new(bytes).is_some_and(|zip| brushlibrary::is_library(zip.names()));
+        || procraft_engine::zip::ZipReader::new(bytes).is_some_and(|zip| brushlibrary::is_library(zip.names()));
     if library && let Some(read) = read_library(bytes, stem.clone()) {
         return Some(read);
     }
@@ -418,12 +418,12 @@ fn folder_id(seed: u64, i: usize) -> String {
 /// A Photoshop tip fitted into a shape's square, centred on black: each pixel the average of the
 /// tip's pixels it covers, or (drawn up) between the four nearest, so a small tip made large is
 /// smooth, as other apps draw it, not in blocks.
-fn fitted(t: &make2d_engine::abr::AbrTip) -> Vec<u8> {
+fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
     fitted_at(t, TEXTURE_SIZE)
 }
 
 /// `t` fitted into a square `n` pixels a side, as [`fitted`] fits it.
-fn fitted_at(t: &make2d_engine::abr::AbrTip, n: usize) -> Vec<u8> {
+fn fitted_at(t: &procraft_engine::abr::AbrTip, n: usize) -> Vec<u8> {
     let (w, h) = (t.width as usize, t.height as usize);
     let mut out = vec![0u8; n * n];
     if w == 0 || h == 0 {
@@ -477,25 +477,25 @@ fn fitted_at(t: &make2d_engine::abr::AbrTip, n: usize) -> Vec<u8> {
 
 /// The brushes in another app's file, with the set's name (a bundle's own, else `name`).
 fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
-    use make2d_engine::krita;
+    use procraft_engine::krita;
     // each made a brush side by side (a big tip takes a while), in their order
     fn each<T: Sync>(items: &[T], f: impl Fn(&T) -> Brush + Sync) -> Vec<Brush> {
-        make2d_engine::par::side_by_side(items, f).into_iter().flatten().collect()
+        procraft_engine::par::side_by_side(items, f).into_iter().flatten().collect()
     }
-    if let Some(brushes) = make2d_engine::abr::read_brushes(bytes) {
+    if let Some(brushes) = procraft_engine::abr::read_brushes(bytes) {
         return Some((name, each(&brushes, abr_brush)));
     }
-    if let Some(tips) = make2d_engine::gbr::read(bytes) {
+    if let Some(tips) = procraft_engine::gbr::read(bytes) {
         return Some((name, each(&tips, tip_brush)));
     }
-    if let Some(g) = make2d_engine::gbr::read_generated(bytes) {
+    if let Some(g) = procraft_engine::gbr::read_generated(bytes) {
         return Some((name, vec![generated_brush(&g)]));
     }
     if let Some((title, presets)) = krita::read_bundle(bytes) {
         let name = if title.trim().is_empty() { name } else { title };
         return Some((name, each(&presets, krita_brush)));
     }
-    if let Some(brushes) = make2d_engine::csp::read(bytes) {
+    if let Some(brushes) = procraft_engine::csp::read(bytes) {
         return Some((name, each(&brushes, csp_brush)));
     }
     // a preset alone has only the pictures it holds itself (newer ones do): one it only names (one
@@ -506,7 +506,7 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
 
 /// A brush of a Clip Studio sub tool: its tip (an image, else round with its edge and roundness),
 /// spacing, angle and how it turns, size, opacity and flow, and its texture.
-fn csp_brush(c: &make2d_engine::csp::CspBrush) -> Brush {
+fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
     use std::f32::consts::{FRAC_PI_2, TAU};
     // the first of its pictures that lays any ink
     let tip = c.tip_pngs.iter().find_map(|png| csp_ink(png));
@@ -525,7 +525,7 @@ fn csp_brush(c: &make2d_engine::csp::CspBrush) -> Brush {
     };
     let picture = tip.as_ref().map(|t| (t.width as f32, t.height as f32));
     let mut b = match tip {
-        Some(t) => tip_brush(&make2d_engine::abr::AbrTip { name: c.name.clone(), ..t }),
+        Some(t) => tip_brush(&procraft_engine::abr::AbrTip { name: c.name.clone(), ..t }),
         None => Brush { name: c.name.clone(), ..Brush::round_pen() },
     };
     if let Some(h) = c.hardness {
@@ -576,7 +576,7 @@ fn csp_brush(c: &make2d_engine::csp::CspBrush) -> Brush {
     }
     // the texture's density by pressure, now that it has its grain
     if let (Some(d), true) = (&c.pen.texture_density, b.grain.source.is_some()) {
-        use make2d_engine::brush::PressureCurve;
+        use procraft_engine::brush::PressureCurve;
         // the depth scaled by the curve, from what it leaves at none up to all of it
         let curve = d.pressure.as_ref().map(|p| csp_curve(&p.points, p.least));
         b.pressure_curves.set(PressureCurve::GrainDepth, curve);
@@ -590,7 +590,7 @@ fn csp_brush(c: &make2d_engine::csp::CspBrush) -> Brush {
 /// random as far as the `area` the particles fall in reaches (nearer the middle the more they
 /// gather), turned as the particles are. The sub tool's spacing goes by the area; none (the app's
 /// own), ours.
-fn csp_spray(b: &mut Brush, s: &make2d_engine::csp::CspSpray, area: f32, stamp: f32, spacing: Option<f32>) {
+fn csp_spray(b: &mut Brush, s: &procraft_engine::csp::CspSpray, area: f32, stamp: f32, spacing: Option<f32>) {
     use std::f32::consts::{FRAC_PI_2, TAU};
     // the particle carries the tip's roundness: the area is round
     b.shape.roundness = 1.0;
@@ -600,7 +600,7 @@ fn csp_spray(b: &mut Brush, s: &make2d_engine::csp::CspSpray, area: f32, stamp: 
     b.shape.count = s.density.clamp(1, 16);
     // fewer with less pressure (down to the share it leaves), and at random
     if let Some(d) = &s.density_by {
-        use make2d_engine::brush::PressureCurve;
+        use procraft_engine::brush::PressureCurve;
         b.pressure_curves.set(PressureCurve::Count, d.pressure.as_ref().map(|p| csp_curve(&p.points, p.least)));
         b.set_setting("count_jitter", d.random.map_or(0.0, |least| 1.0 - least.clamp(0.0, 1.0)));
     }
@@ -620,12 +620,12 @@ fn csp_spray(b: &mut Brush, s: &make2d_engine::csp::CspSpray, area: f32, stamp: 
 /// bottom if `flattened.1`, else side to side) and turned by its `angle`. Each pixel is the mean
 /// of 16 places in it, so a particle a few pixels across keeps its ink.
 fn spray_tip(
-    particle: Option<&make2d_engine::abr::AbrTip>,
+    particle: Option<&procraft_engine::abr::AbrTip>,
     hardness: f32,
     flattened: (f32, bool),
     angle: f32,
     share: f32,
-) -> make2d_engine::abr::AbrTip {
+) -> procraft_engine::abr::AbrTip {
     const PLACES: usize = 4;
     let n = TEXTURE_SIZE;
     let side = (n as f32 * share.clamp(0.0, 1.0)).max(1.0);
@@ -678,14 +678,14 @@ fn spray_tip(
             (sum / (PLACES * PLACES) as f32 * 255.0).round() as u8
         })
         .collect();
-    make2d_engine::abr::AbrTip { name: String::new(), spacing: None, width: n as u32, height: n as u32, pixels }
+    procraft_engine::abr::AbrTip { name: String::new(), spacing: None, width: n as u32, height: n as u32, pixels }
 }
 
 /// Our jitter's control that throws a stamp of `b` at most `amount` of its diameters away: our
 /// jitter throws a stamp up to its control to the power 2.2 times the scale, of half its diagonal
 /// (for a round stamp a little over 0.7 of its diameter).
 fn jitter_control(b: &Brush, amount: f32) -> f32 {
-    use make2d_engine::stroke::JITTER_FILE_SCALE;
+    use procraft_engine::stroke::JITTER_FILE_SCALE;
     let reach = 0.5 * (1.0 + b.shape.roundness * b.shape.roundness).sqrt();
     (amount / reach / JITTER_FILE_SCALE).powf(1.0 / 2.2).clamp(0.0, 1.0)
 }
@@ -696,7 +696,7 @@ fn jitter_control(b: &Brush, amount: f32) -> f32 {
 /// its very end fell below nothing in its middle), so where it would stray from the file's it is
 /// given the file's at [`CSP_CURVE_PLACES`] places as well as at its own points.
 fn csp_curve(points: &[(f32, f32)], least: f32) -> Curve {
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::geom::Vec2;
     let least = least.clamp(0.0, 1.0);
     let scaled = |y: f32| least + (1.0 - least) * y;
     let own = Curve::new(&points.iter().map(|&(x, y)| Vec2::new(x, scaled(y))).collect::<Vec<_>>());
@@ -764,14 +764,14 @@ fn csp_curve_at(points: &[(f32, f32)], x: f32) -> f32 {
 /// fades to its least on any quick stroke. Of tilt, only fading the opacity and flattening the tip
 /// as the pen leans are ours (as far as tilt takes them, its curve left out); tilt growing or
 /// shrinking the size is not. What scales our opacity before it is eased (by the power
-/// [`make2d_engine::brush::FLOW_POWER`]) is unwound by that power, so a stamp lays what the file
+/// [`procraft_engine::brush::FLOW_POWER`]) is unwound by that power, so a stamp lays what the file
 /// says.
-fn csp_pen(b: &mut Brush, pen: &make2d_engine::csp::CspPen) {
-    use make2d_engine::brush::{FLOW_POWER, PressureCurve};
+fn csp_pen(b: &mut Brush, pen: &procraft_engine::csp::CspPen) {
+    use procraft_engine::brush::{FLOW_POWER, PressureCurve};
     let taken = |least: Option<f32>| least.map_or(0.0, |l| 1.0 - l.clamp(0.0, 1.0));
     let unwound = |least: Option<f32>| least.map(|l| l.clamp(0.0, 1.0).powf(1.0 / FLOW_POWER));
     // how far pressure takes a setting down, and its curve
-    fn pressed(d: &make2d_engine::csp::CspDynamics) -> Option<(f32, &make2d_engine::csp::CspCurve)> {
+    fn pressed(d: &procraft_engine::csp::CspDynamics) -> Option<(f32, &procraft_engine::csp::CspCurve)> {
         d.pressure.as_ref().map(|p| (1.0 - p.least.clamp(0.0, 1.0), p))
     }
     if let Some(d) = &pen.size {
@@ -819,8 +819,8 @@ fn csp_pen(b: &mut Brush, pen: &make2d_engine::csp::CspPen) {
 /// Gives `b` a Clip Studio sub tool's start and end, for a pen and a finger alike: as long as its
 /// own (as classic tapers, over canvas pixels; one kept as a share of the stroke taken of a stroke
 /// as long as a full taper), thinning and fading as far as it says.
-fn csp_taper(b: &mut Brush, t: &make2d_engine::csp::CspTaper) {
-    let span = make2d_engine::brush::CLASSIC_TAPER_SPAN;
+fn csp_taper(b: &mut Brush, t: &procraft_engine::csp::CspTaper) {
+    let span = procraft_engine::brush::CLASSIC_TAPER_SPAN;
     let length = |l: Option<f32>| l.map_or(0.0, |l| if t.of_stroke { l } else { l / span });
     b.set_setting("classic_taper", 1.0);
     for tool in ["pen", "touch"] {
@@ -840,9 +840,9 @@ const CSP_PIXEL_PATTERN: u32 = 64;
 /// picture lays (which the grain lets through; reversed, where it lays none), tiled at the size of
 /// the picture itself times its scale, as strongly as its density says (its differences made
 /// stronger: from half of it on, fully), combined with the stroke by the nearest of its modes.
-fn csp_paper(b: &mut Brush, t: &make2d_engine::csp::CspTexture) {
-    use make2d_engine::csp::TextureMode as M;
-    use make2d_engine::document::BlendMode;
+fn csp_paper(b: &mut Brush, t: &procraft_engine::csp::CspTexture) {
+    use procraft_engine::csp::TextureMode as M;
+    use procraft_engine::document::BlendMode;
     let Some(ink) = t.pngs.iter().find_map(|png| csp_ink(png)) else { return };
     // its thumbnail may be smaller than the picture
     let own = t.width.filter(|w| *w > 0).map_or(1.0, |w| w as f32 / ink.width.max(1) as f32);
@@ -858,7 +858,7 @@ fn csp_paper(b: &mut Brush, t: &make2d_engine::csp::CspTexture) {
         M::Overlay => BlendMode::Overlay.id(),
         M::ColorDodge => BlendMode::ColorDodge.id(),
         M::HardMix => BlendMode::HardMix.id(),
-        M::Height => make2d_engine::brush::GRAIN_HEIGHT,
+        M::Height => procraft_engine::brush::GRAIN_HEIGHT,
         M::Normal | M::Multiply | M::Other => BlendMode::Multiply.id(),
     };
     // a lighter picture lays less ink, which the grain is (reversed, more)
@@ -881,7 +881,7 @@ fn csp_paper(b: &mut Brush, t: &make2d_engine::csp::CspTexture) {
 /// A Clip Studio material's picture (PNG) as the ink it lays, a tip of it: its dark parts as far
 /// as they are opaque (a material is dark on clear, or a picture on white); a picture with next to
 /// no dark in it (light on clear) by how opaque it is. None if it lays none, or isn't a picture.
-fn csp_ink(png: &[u8]) -> Option<make2d_engine::abr::AbrTip> {
+fn csp_ink(png: &[u8]) -> Option<procraft_engine::abr::AbrTip> {
     let (w, h, channels, buf) = decode_picture(png)?;
     let (dark, cover): (Vec<u8>, Vec<u8>) = buf
         .chunks_exact(channels.max(1))
@@ -900,7 +900,7 @@ fn csp_ink(png: &[u8]) -> Option<make2d_engine::abr::AbrTip> {
     let sum = |v: &[u8]| v.iter().map(|&x| u64::from(x)).sum::<u64>();
     // the dark under one fiftieth of what the coverage lays: light on clear
     let pixels = if sum(&dark) * 50 < sum(&cover) { cover } else { dark };
-    (pixels.len() == w * h && pixels.iter().any(|&v| v > 0)).then(|| make2d_engine::abr::AbrTip {
+    (pixels.len() == w * h && pixels.iter().any(|&v| v > 0)).then(|| procraft_engine::abr::AbrTip {
         name: String::new(),
         spacing: None,
         width: w as u32,
@@ -922,13 +922,13 @@ fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32
         b.grain.image = None;
         b.grain.source = Some(source);
         b.grain.depth = depth.clamp(0.0, 1.0);
-        b.set_setting("grain_scale", width as f32 * scale / make2d_engine::studio::MAX_GRAIN_SCALE);
+        b.set_setting("grain_scale", width as f32 * scale / procraft_engine::studio::MAX_GRAIN_SCALE);
     }
 }
 
 /// A brush of a Photoshop preset: its sampled tip, or round with its hardness; its roundness,
 /// spacing and angle; its texture as its grain.
-fn abr_brush(a: &make2d_engine::abr::AbrBrush) -> Brush {
+fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     let mut b = match &a.tip {
         Some(t) => tip_brush(t),
         None => {
@@ -953,7 +953,7 @@ fn abr_brush(a: &make2d_engine::abr::AbrBrush) -> Brush {
     // Photoshop turns the other way (its 129 degrees are -129 here)
     b.shape.rotation = -a.angle;
     let d = a.dynamics;
-    if d.tip && d.angle_control == make2d_engine::abr::ANGLE_BY_DIRECTION {
+    if d.tip && d.angle_control == procraft_engine::abr::ANGLE_BY_DIRECTION {
         b.shape.follow = 1.0;
     }
     let flow = d.tool_flow.unwrap_or(1.0);
@@ -989,7 +989,7 @@ fn abr_brush(a: &make2d_engine::abr::AbrBrush) -> Brush {
         (Some(t), d) => Some(d.map_or(t.height as f32, |d| d.min(t.height as f32))),
     };
     if let Some(px) = pixels {
-        make2d_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
+        procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
     }
     // the shape dynamics: pressure or tilt (controls 2, 3) on the size, half of what it lets go
     // of; tilt to the full; its size jitter
@@ -1009,7 +1009,7 @@ fn abr_brush(a: &make2d_engine::abr::AbrBrush) -> Brush {
 
 /// The grain blend mode of a Photoshop texture's mode (its four-letter name), if we have it.
 fn texture_blend(name: &str) -> Option<u32> {
-    use make2d_engine::document::BlendMode;
+    use procraft_engine::document::BlendMode;
     Some(match name {
         "Mltp" => BlendMode::Multiply.id(),
         "Sbtr" => BlendMode::Subtract.id(),
@@ -1019,21 +1019,21 @@ fn texture_blend(name: &str) -> Option<u32> {
         "CBrn" => BlendMode::ColorBurn.id(),
         "linearBurn" => BlendMode::LinearBurn.id(),
         "hardMix" => BlendMode::HardMix.id(),
-        "Hght" => make2d_engine::brush::GRAIN_HEIGHT,
-        "linearHeight" => make2d_engine::brush::GRAIN_LINEAR_HEIGHT,
+        "Hght" => procraft_engine::brush::GRAIN_HEIGHT,
+        "linearHeight" => procraft_engine::brush::GRAIN_LINEAR_HEIGHT,
         _ => return None,
     })
 }
 
 /// A brush of a GIMP generated brush: round with its hardness and how round it is, or its square
 /// or diamond drawn; its spacing and angle.
-fn generated_brush(g: &make2d_engine::gbr::Generated) -> Brush {
-    let mut b = match make2d_engine::gbr::generated_tip(g) {
+fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
+    let mut b = match procraft_engine::gbr::generated_tip(g) {
         Some(tip) => tip_brush(&tip),
         None => {
             let mut b = Brush { name: g.name.clone(), ..Brush::round_pen() };
             // ours paints half halfway between its hardness and its edge: where GIMP's does
-            b.hardness = (2.0 * make2d_engine::gbr::generated_half(g.hardness) - 1.0).clamp(0.0, 1.0);
+            b.hardness = (2.0 * procraft_engine::gbr::generated_half(g.hardness) - 1.0).clamp(0.0, 1.0);
             b.shape.roundness = (1.0 / g.aspect).clamp(LEAST_ROUNDNESS, 1.0);
             b
         }
@@ -1047,21 +1047,21 @@ fn generated_brush(g: &make2d_engine::gbr::Generated) -> Brush {
 /// tip goes (a power of two no larger than its longer side, up to [`FULL_GRAIN_MOST`]): drawn large,
 /// a stamp then shows the tip's own detail rather than the small square's blown up. None for a
 /// tip no larger than a `Source`.
-fn full_tip(t: &make2d_engine::abr::AbrTip) -> Option<FullGrain> {
+fn full_tip(t: &procraft_engine::abr::AbrTip) -> Option<FullGrain> {
     let longest = t.width.max(t.height) as usize;
     let side = (1usize << longest.max(1).ilog2()).min(FULL_GRAIN_MOST);
     (side > TEXTURE_SIZE).then(|| FullGrain::new(side as u32, fitted_at(t, side))).flatten()
 }
 
 /// `b`'s shape as the sampled tip `t`: the small square, and the tip at its own size beside it.
-fn give_tip(b: &mut Brush, t: &make2d_engine::abr::AbrTip) {
+fn give_tip(b: &mut Brush, t: &procraft_engine::abr::AbrTip) {
     b.shape.image = None;
     b.shape.source = Source::new(fitted(t));
     b.shape_file = b.shape.source.as_ref().zip(full_tip(t)).map(|(source, full)| ShapeFile { source: source.id, full });
 }
 
 /// A brush of a sampled tip: its shape, with its spacing.
-fn tip_brush(t: &make2d_engine::abr::AbrTip) -> Brush {
+fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
     let mut b = Brush { name: t.name.clone(), ..Brush::round_pen() };
     give_tip(&mut b, t);
     if let Some(spacing) = t.spacing {
@@ -1072,8 +1072,8 @@ fn tip_brush(t: &make2d_engine::abr::AbrTip) -> Brush {
 
 /// A brush of a Krita preset: its tip (round, or an image), spacing, angle, and what pressure
 /// changes.
-fn krita_brush(k: &make2d_engine::krita::KritaBrush) -> Brush {
-    use make2d_engine::krita::KritaTip;
+fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
+    use procraft_engine::krita::KritaTip;
     let tip = match &k.tip {
         KritaTip::Round { .. } => None,
         KritaTip::Image(t) => Some(t.clone()),
@@ -1130,14 +1130,14 @@ fn krita_brush(k: &make2d_engine::krita::KritaBrush) -> Brush {
     }
     // the secondary colour (Krita's background) where pressure leaves its colour out
     if let Some(points) = &k.mix_pressure {
-        let left: Vec<make2d_engine::geom::Vec2> =
-            points.iter().map(|p| make2d_engine::geom::Vec2::new(p.x, 1.0 - p.y.clamp(0.0, 1.0))).collect();
+        let left: Vec<procraft_engine::geom::Vec2> =
+            points.iter().map(|p| procraft_engine::geom::Vec2::new(p.x, 1.0 - p.y.clamp(0.0, 1.0))).collect();
         b.set_setting("pressure_secondary", 1.0);
-        b.pressure_curves.set(make2d_engine::brush::PressureCurve::Secondary, Some(Curve::new(&left)));
+        b.pressure_curves.set(procraft_engine::brush::PressureCurve::Secondary, Some(Curve::new(&left)));
     }
     if let Some(points) = &k.ratio_pressure {
         b.set_setting("pressure_roundness", 1.0);
-        b.pressure_curves.set(make2d_engine::brush::PressureCurve::Roundness, Some(Curve::new(points)));
+        b.pressure_curves.set(procraft_engine::brush::PressureCurve::Roundness, Some(Curve::new(points)));
     }
     // the size from nothing up to all of it along its pressure curve, if pressure drives it
     match &k.size_pressure {
@@ -1169,7 +1169,7 @@ fn krita_brush(k: &make2d_engine::krita::KritaBrush) -> Brush {
         b.secondary = Some(Box::new(second));
         let mode = masking_mode(&m.op).unwrap_or_else(|| {
             log::warn!("Krita preset \"{}\": masking op {} combines as multiply", k.name, m.op);
-            make2d_engine::document::BlendMode::Multiply.id()
+            procraft_engine::document::BlendMode::Multiply.id()
         });
         b.set_setting("dual_blend", mode as f32);
     }
@@ -1186,9 +1186,9 @@ fn krita_brush(k: &make2d_engine::krita::KritaBrush) -> Brush {
 /// that follows the pressure, each stamp less the mask and less what its strength falls short of,
 /// as our height mode takes the mask from a stamp at a twelfth of the depth there; soft, the
 /// strength is how deep the mask goes. A strength that follows the pressure goes stamp by stamp.
-fn krita_paper(b: &mut Brush, t: &make2d_engine::krita::KritaTexture, name: &str) {
-    use make2d_engine::brush::{GRAIN_HEIGHT, PressureCurve};
-    use make2d_engine::krita::KritaPicture;
+fn krita_paper(b: &mut Brush, t: &procraft_engine::krita::KritaTexture, name: &str) {
+    use procraft_engine::brush::{GRAIN_HEIGHT, PressureCurve};
+    use procraft_engine::krita::KritaPicture;
     let mask = |grey: f32, alpha: f32| (t.mask_value(grey / 255.0, alpha / 255.0) * 255.0).round() as u8;
     let picture = match &t.picture {
         KritaPicture::Encoded(png) => decode_picture(png).map(|(w, h, channels, buf)| {
@@ -1220,7 +1220,7 @@ fn krita_paper(b: &mut Brush, t: &make2d_engine::krita::KritaTexture, name: &str
     }
     let mode = t.op().and_then(masking_mode).unwrap_or_else(|| {
         log::warn!("Krita preset \"{name}\": texturing mode {} combines as multiply", t.mode);
-        make2d_engine::document::BlendMode::Multiply.id()
+        procraft_engine::document::BlendMode::Multiply.id()
     });
     b.set_setting("grain_blend", mode as f32);
     let pressed = t.strength_pressure.as_deref().map(Curve::new);
@@ -1246,10 +1246,10 @@ fn krita_paper(b: &mut Brush, t: &make2d_engine::krita::KritaTexture, name: &str
 /// Two pressure curves (points 0..1 from the left) multiplied across, at 17 places; either alone
 /// as it is; none for neither.
 fn multiplied(
-    a: Option<&[make2d_engine::geom::Vec2]>,
-    b: Option<&[make2d_engine::geom::Vec2]>,
-) -> Option<Vec<make2d_engine::geom::Vec2>> {
-    use make2d_engine::geom::Vec2;
+    a: Option<&[procraft_engine::geom::Vec2]>,
+    b: Option<&[procraft_engine::geom::Vec2]>,
+) -> Option<Vec<procraft_engine::geom::Vec2>> {
+    use procraft_engine::geom::Vec2;
     match (a, b) {
         (None, None) => None,
         (Some(one), None) | (None, Some(one)) => Some(one.to_vec()),
@@ -1261,19 +1261,19 @@ fn multiplied(
 }
 
 /// The curve that, eased as a stamp's opacity is (to the power
-/// [`make2d_engine::brush::FLOW_POWER`]), lays what `curve` says: its root, taken across it (at 17
+/// [`procraft_engine::brush::FLOW_POWER`]), lays what `curve` says: its root, taken across it (at 17
 /// places and at its own points, so a straight one bends as it should).
 fn eased_root(curve: &Curve) -> Curve {
-    use make2d_engine::brush::FLOW_POWER;
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::brush::FLOW_POWER;
+    use procraft_engine::geom::Vec2;
     let places = (0..=16).map(|i| i as f32 / 16.0).chain(curve.points().iter().map(|p| p.x));
     Curve::new(&places.map(|x| Vec2::new(x, curve.eval(x).max(0.0).powf(1.0 / FLOW_POWER))).collect::<Vec<_>>())
 }
 
 /// Gives `b` a Krita preset's scatter as jitter along the stroke and across it: as far at most
 /// (its amount of diameters, up to as far as our jitter reaches) and as the pressure lets it.
-fn krita_scatter(b: &mut Brush, s: &make2d_engine::krita::KritaScatter) {
-    use make2d_engine::brush::PressureCurve;
+fn krita_scatter(b: &mut Brush, s: &procraft_engine::krita::KritaScatter) {
+    use procraft_engine::brush::PressureCurve;
     let control = jitter_control(b, s.amount);
     let curve = s.pressure.as_deref().map(Curve::new);
     for (on, key, by) in [
@@ -1289,7 +1289,7 @@ fn krita_scatter(b: &mut Brush, s: &make2d_engine::krita::KritaScatter) {
 
 /// Gives a masking brush's second how much it lays, as Krita's wash mode (the only one it masks
 /// in) has it (see [`krita_paint`]).
-fn masking_paint(second: &mut Brush, m: &make2d_engine::krita::KritaMasking) {
+fn masking_paint(second: &mut Brush, m: &procraft_engine::krita::KritaMasking) {
     krita_paint(second, m.opacity, m.flow, m.opacity_pressure.as_deref(), m.flow_pressure.as_deref(), true);
 }
 
@@ -1300,12 +1300,12 @@ fn krita_paint(
     b: &mut Brush,
     opacity: f32,
     flow: f32,
-    opacity_pressure: Option<&[make2d_engine::geom::Vec2]>,
-    flow_pressure: Option<&[make2d_engine::geom::Vec2]>,
+    opacity_pressure: Option<&[procraft_engine::geom::Vec2]>,
+    flow_pressure: Option<&[procraft_engine::geom::Vec2]>,
     wash: bool,
 ) {
-    use make2d_engine::brush::PressureCurve;
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::geom::Vec2;
     b.max_opacity = 1.0;
     let rooted = |points: &[Vec2]| eased_root(&Curve::new(points));
     b.pressure_opacity = 0.0;
@@ -1339,7 +1339,7 @@ fn krita_paint(
 /// is one. Each takes the main brush's coverage as the backdrop and the mask's as the source, as
 /// the dual modes do; Add and Vivid Light aren't ones the studio lists, but they draw.
 fn masking_mode(op: &str) -> Option<u32> {
-    use make2d_engine::document::BlendMode as B;
+    use procraft_engine::document::BlendMode as B;
     Some(match op {
         "normal" | "over" => B::Normal.id(),
         "multiply" => B::Multiply.id(),
@@ -1359,14 +1359,14 @@ fn masking_mode(op: &str) -> Option<u32> {
         "difference" => B::Difference.id(),
         "subtract" => B::Subtract.id(),
         "divide" => B::Divide.id(),
-        "height_photoshop" => make2d_engine::brush::GRAIN_HEIGHT,
-        "linear_height_photoshop" => make2d_engine::brush::GRAIN_LINEAR_HEIGHT,
+        "height_photoshop" => procraft_engine::brush::GRAIN_HEIGHT,
+        "linear_height_photoshop" => procraft_engine::brush::GRAIN_LINEAR_HEIGHT,
         _ => return None,
     })
 }
 
 /// A PNG tip as a grey one: its opaque pixels paint, the light ones if `white`, else the dark.
-fn png_tip(png: &[u8], white: bool) -> Option<make2d_engine::abr::AbrTip> {
+fn png_tip(png: &[u8], white: bool) -> Option<procraft_engine::abr::AbrTip> {
     let (w, h, channels, buf) = decode_picture(png)?;
     let pixels: Vec<u8> = buf
         .chunks_exact(channels.max(1))
@@ -1383,7 +1383,7 @@ fn png_tip(png: &[u8], white: bool) -> Option<make2d_engine::abr::AbrTip> {
             (ink * alpha / 255) as u8
         })
         .collect();
-    (pixels.len() == w * h).then(|| make2d_engine::abr::AbrTip {
+    (pixels.len() == w * h).then(|| procraft_engine::abr::AbrTip {
         name: String::new(),
         spacing: None,
         width: w as u32,
@@ -2132,7 +2132,7 @@ mod tests {
 
     #[test]
     fn a_small_tip_is_drawn_up_smoothly_and_a_large_one_down_by_its_average() {
-        use make2d_engine::abr::AbrTip;
+        use procraft_engine::abr::AbrTip;
         // two pixels side by side, black and white: drawn up, grey between them, not two blocks
         let small = AbrTip { name: String::new(), spacing: None, width: 2, height: 2, pixels: vec![0, 255, 0, 255] };
         let n = TEXTURE_SIZE;
@@ -2157,8 +2157,8 @@ mod tests {
 
     #[test]
     fn a_krita_texture_is_its_mask_combined_by_its_mode() {
-        use make2d_engine::document::BlendMode;
-        use make2d_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
+        use procraft_engine::document::BlendMode;
+        use procraft_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
         // black dots on clear, which Krita takes as white about them
         let dots: Vec<u8> = (0..16 * 16).flat_map(|i| [0, 0, 0, if i % 4 == 0 { 255 } else { 0 }]).collect();
         let texture = KritaTexture {
@@ -2225,10 +2225,10 @@ mod tests {
 
     #[test]
     fn a_krita_texture_s_strength_follows_the_pressure_as_krita_takes_it() {
-        use make2d_engine::brush::{GRAIN_HEIGHT, PressureCurve};
-        use make2d_engine::document::BlendMode;
-        use make2d_engine::geom::Vec2;
-        use make2d_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
+        use procraft_engine::brush::{GRAIN_HEIGHT, PressureCurve};
+        use procraft_engine::document::BlendMode;
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaPicture, KritaTexture, KritaTip};
         let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
         let dots: Vec<u8> = (0..16 * 16).flat_map(|i| [0, 0, 0, if i % 4 == 0 { 255 } else { 0 }]).collect();
         let pressed = vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
@@ -2300,9 +2300,9 @@ mod tests {
 
     #[test]
     fn a_krita_brush_follows_the_pen_and_lays_as_its_painting_mode_says() {
-        use make2d_engine::brush::{FLOW_POWER, PressureCurve};
-        use make2d_engine::geom::Vec2;
-        use make2d_engine::krita::{KritaBrush, KritaTip};
+        use procraft_engine::brush::{FLOW_POWER, PressureCurve};
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaTip};
         let near = |a: f32, b: f32| (a - b).abs() < 2e-3;
         let straight = vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
         let built = KritaBrush {
@@ -2349,9 +2349,9 @@ mod tests {
 
     #[test]
     fn a_krita_brush_turns_mirrors_and_scatters_as_its_preset_says() {
-        use make2d_engine::brush::PressureCurve;
-        use make2d_engine::geom::Vec2;
-        use make2d_engine::krita::{KritaBrush, KritaScatter, KritaTip};
+        use procraft_engine::brush::PressureCurve;
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaScatter, KritaTip};
         let straight = vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)];
         let k = KritaBrush {
             name: "Spray".into(),
@@ -2386,7 +2386,7 @@ mod tests {
         // half a diameter at most along the stroke: our jitter's control to the power 2.2, times its
         // scale, of half the round stamp's diagonal; by the pressure; none across
         let thrown =
-            make2d_engine::stroke::JITTER_FILE_SCALE * b.setting("jitter_linear").powf(2.2) * 0.5 * 2f32.sqrt();
+            procraft_engine::stroke::JITTER_FILE_SCALE * b.setting("jitter_linear").powf(2.2) * 0.5 * 2f32.sqrt();
         assert!((thrown - 0.5).abs() < 1e-3, "{thrown}");
         assert!(b.pressure_curves.get(PressureCurve::LinearJitter).is_some());
         assert!(b.pressure_curves.get(PressureCurve::LateralJitter).is_none());
@@ -2404,9 +2404,9 @@ mod tests {
 
     #[test]
     fn a_masking_brush_lays_as_krita_s_wash_mode_does() {
-        use make2d_engine::brush::{FLOW_POWER, PressureCurve, Rendering};
-        use make2d_engine::geom::Vec2;
-        use make2d_engine::krita::{KritaBrush, KritaMasking, KritaTip};
+        use procraft_engine::brush::{FLOW_POWER, PressureCurve, Rendering};
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::krita::{KritaBrush, KritaMasking, KritaTip};
         let brush = KritaBrush {
             name: "Mask".into(),
             tip: KritaTip::Round { hardness: 1.0, roundness: 1.0 },
@@ -2425,8 +2425,8 @@ mod tests {
             ratio_pressure: None,
             mix_pressure: None,
             size_pressure: Some(vec![
-                make2d_engine::geom::Vec2::new(0.0, 0.0),
-                make2d_engine::geom::Vec2::new(1.0, 1.0),
+                procraft_engine::geom::Vec2::new(0.0, 0.0),
+                procraft_engine::geom::Vec2::new(1.0, 1.0),
             ]),
             opacity_pressure: None,
             flow_pressure: None,
@@ -2542,9 +2542,9 @@ mod tests {
     fn a_sub_tools_texture_becomes_its_grain() {
         let px: Vec<u8> = (0..64 * 64).flat_map(|i| [(i % 64 * 4) as u8, 0, 0, 255]).collect();
         let paper = crate::project::rgba_png(64, 64, &px);
-        let c = make2d_engine::csp::CspBrush {
+        let c = procraft_engine::csp::CspBrush {
             name: "Pencil".into(),
-            texture: Some(make2d_engine::csp::CspTexture {
+            texture: Some(procraft_engine::csp::CspTexture {
                 pngs: vec![b"not a picture".to_vec(), crate::project::rgba_png(8, 8, &[0; 256]), paper],
                 density: Some(0.6),
                 scale: Some(2.0),
@@ -2557,13 +2557,13 @@ mod tests {
         assert!(b.grain.source.is_some() && b.grain.image.is_none());
         assert_eq!((b.grain.depth, b.grain.scale), (0.6, 128.0));
         // none: no grain
-        let plain = csp_brush(&make2d_engine::csp::CspBrush { texture: None, ..c });
+        let plain = csp_brush(&procraft_engine::csp::CspBrush { texture: None, ..c });
         assert!(plain.grain.source.is_none());
     }
 
     #[test]
     fn a_sub_tools_texture_comes_at_its_pictures_own_size_with_its_settings() {
-        use make2d_engine::csp::{CspBrush, CspTexture, TextureMode};
+        use procraft_engine::csp::{CspBrush, CspTexture, TextureMode};
         let shown = |b: &Brush, key: &str| (b.setting(key) * 100.0).round() / 100.0;
         // a thumbnail 100 px wide of a picture 600 px wide, black dots on clear
         let dots: Vec<u8> = (0..100 * 100).flat_map(|i| [0, 0, 0, if i % 7 == 0 { 255 } else { 0 }]).collect();
@@ -2582,7 +2582,7 @@ mod tests {
         let b = csp_brush(&c);
         // tiled at half the picture's 600 px, fixed to the canvas, 30 % deep, taking paint away
         assert_eq!((b.grain.scale, b.grain.mode, b.grain.depth), (300.0, GrainMode::Texturized, 0.3));
-        assert_eq!(b.setting("grain_blend") as u32, make2d_engine::document::BlendMode::Subtract.id());
+        assert_eq!(b.setting("grain_blend") as u32, procraft_engine::document::BlendMode::Subtract.id());
         // lighter is less ink; three quarters round is a quarter back; smooth, not a pixel pattern
         let kept = ["grain_brightness", "grain_contrast", "grain_turn", "grain_filtering"].map(|k| shown(&b, k));
         assert_eq!(kept, [-0.4, -0.2, -0.5, 2.0]);
@@ -2601,7 +2601,7 @@ mod tests {
 
     #[test]
     fn a_large_sampled_tip_keeps_its_own_detail_beside_the_small_square() {
-        use make2d_engine::abr::AbrTip;
+        use procraft_engine::abr::AbrTip;
         // a tip twice as wide as tall, solid across its top half and shading off left to right below
         let tip = |w: u32, h: u32| AbrTip {
             name: "Tip".into(),
@@ -2629,8 +2629,8 @@ mod tests {
 
     #[test]
     fn a_sprayed_sub_tool_lays_its_particles_about_each_place() {
-        use make2d_engine::csp::{CspBrush, CspSpray};
-        use make2d_engine::stroke::JITTER_FILE_SCALE;
+        use procraft_engine::csp::{CspBrush, CspSpray};
+        use procraft_engine::stroke::JITTER_FILE_SCALE;
         let spray = CspSpray {
             particle: 10.0,
             density: 24,
@@ -2673,20 +2673,20 @@ mod tests {
         let gathered = csp_brush(&CspBrush { spray: Some(CspSpray { bias: 1.0, ..spray.clone() }), ..c.clone() });
         assert!((reach(&gathered) - 0.25).abs() < 1e-3, "{}", reach(&gathered));
         // fewer with less pressure, down to a fifth, and some at random
-        let by = make2d_engine::csp::CspDynamics {
-            pressure: Some(make2d_engine::csp::CspCurve { points: vec![(0.0, 0.0), (1.0, 1.0)], least: 0.2 }),
+        let by = procraft_engine::csp::CspDynamics {
+            pressure: Some(procraft_engine::csp::CspCurve { points: vec![(0.0, 0.0), (1.0, 1.0)], least: 0.2 }),
             random: Some(0.6),
             ..Default::default()
         };
         let pressed = csp_brush(&CspBrush { spray: Some(CspSpray { density_by: Some(by), ..spray }), ..c });
-        let curve = pressed.pressure_curves.get(make2d_engine::brush::PressureCurve::Count).unwrap();
+        let curve = pressed.pressure_curves.get(procraft_engine::brush::PressureCurve::Count).unwrap();
         assert!((curve.eval(0.0) - 0.2).abs() < 0.02 && (curve.eval(1.0) - 1.0).abs() < 0.02);
         assert!((pressed.setting("count_jitter") - 0.4).abs() < 1e-5);
     }
 
     #[test]
     fn a_sub_tools_tip_turns_as_it_says_and_a_ribbon_lays_its_pictures_end_to_end() {
-        use make2d_engine::csp::CspBrush;
+        use procraft_engine::csp::CspBrush;
         use std::f32::consts::FRAC_PI_2;
         // a picture twice as wide as it is tall
         let wide: Vec<u8> = (0..40 * 20).flat_map(|_| [0, 0, 0, 255]).collect();
@@ -2725,8 +2725,8 @@ mod tests {
 
     #[test]
     fn a_sub_tools_pen_dynamics_and_its_start_and_end_become_ours() {
-        use make2d_engine::brush::PressureCurve;
-        use make2d_engine::csp::{CspBrush, CspCurve, CspDynamics, CspPen, CspTaper, CspTexture};
+        use procraft_engine::brush::PressureCurve;
+        use procraft_engine::csp::{CspBrush, CspCurve, CspDynamics, CspPen, CspTaper, CspTexture};
         let near = |a: f32, b: f32| (a - b).abs() < 5e-3;
         let straight = || CspCurve { least: 0.0, points: vec![(0.0, 0.0), (1.0, 1.0)] };
         let bent = CspCurve { least: 0.3, points: vec![(0.0, 0.0), (0.75, 0.25), (1.0, 1.0)] };
@@ -2765,7 +2765,7 @@ mod tests {
         // tenth: tilt scales it before it is eased, so by its root; speed is left out
         assert_eq!(b.pressure_opacity, 0.0);
         let kept = ["tilt_opacity", "speed_opacity", "jitter_opacity"].map(|k| b.setting(k));
-        let root = |v: f32| 1.0 - v.powf(1.0 / make2d_engine::brush::FLOW_POWER);
+        let root = |v: f32| 1.0 - v.powf(1.0 / procraft_engine::brush::FLOW_POWER);
         assert!(near(kept[0], root(0.2)) && kept[1] == 0.0 && near(kept[2], 0.1), "{kept:?}");
         // pressure on the opacity: a stamp lays what the curve says once eased
         let pressed = csp_brush(&CspBrush {
@@ -2775,7 +2775,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let laid = |p: f32| pressed.pressure_factors(p).1.powf(make2d_engine::brush::FLOW_POWER);
+        let laid = |p: f32| pressed.pressure_factors(p).1.powf(procraft_engine::brush::FLOW_POWER);
         assert!(near(laid(0.0), 0.3) && near(laid(1.0), 1.0), "{} {}", laid(0.0), laid(1.0));
         // and between, not only at its ends
         let want = csp_curve(&bent.points, 0.3).eval(0.5);
@@ -2802,7 +2802,7 @@ mod tests {
 
     #[test]
     fn a_sub_tools_curve_is_joined_without_swinging_past_its_points() {
-        use make2d_engine::geom::Vec2;
+        use procraft_engine::geom::Vec2;
         // a real pen's flow: from 30 % up to 75 %, steeply in its last few hundredths (a natural
         // spline through the three swings below nothing in the middle)
         let flow = [(0.0, 0.301), (0.967, 0.62), (1.0, 0.748)];
@@ -2826,7 +2826,7 @@ mod tests {
 
     #[test]
     fn a_sub_tools_pictures_lay_their_dark_ink_or_else_their_coverage() {
-        use make2d_engine::csp::{CspBrush, CspTexture};
+        use procraft_engine::csp::{CspBrush, CspTexture};
         let picture = |f: &dyn Fn(usize, usize) -> [u8; 4]| {
             let px: Vec<u8> = (0..16 * 16).flat_map(|i| f(i % 16, i / 16)).collect();
             crate::project::rgba_png(16, 16, &px)
@@ -2869,7 +2869,7 @@ mod tests {
 
     #[test]
     fn a_photoshop_preset_comes_in_at_its_size_with_its_dynamics() {
-        use make2d_engine::abr::{AbrBrush, AbrDynamics, AbrTip};
+        use procraft_engine::abr::{AbrBrush, AbrDynamics, AbrTip};
         let shown = |b: &Brush, key: &str| (b.setting(key) * 100.0).round();
         // a computed 10 px round, pressure on its size (down to 87%) and opacity
         let round = AbrBrush {
@@ -2932,7 +2932,7 @@ mod tests {
         // stylus page), size by tilt, and a still texture of its own in the Height mode
         let paper = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
         let kyle = abr_brush(&AbrBrush {
-            texture: Some(make2d_engine::abr::AbrTexture {
+            texture: Some(procraft_engine::abr::AbrTexture {
                 name: "Grainy".into(),
                 width: 64,
                 height: 64,
@@ -2965,7 +2965,7 @@ mod tests {
         );
         assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (50.0, 100.0));
         assert_eq!((shown(&kyle, "jitter_size"), shown(&kyle, "jitter_opacity")), (9.0, 10.0));
-        assert_eq!(kyle.setting("grain_blend") as u32, make2d_engine::brush::GRAIN_HEIGHT);
+        assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::brush::GRAIN_HEIGHT);
         assert_eq!((shown(&kyle, "grain_brightness"), shown(&kyle, "grain_contrast")), (12.0, 20.0));
         assert_eq!((shown(&kyle, "grain_depth_min"), kyle.setting("grain_behavior")), (17.0, 1.0));
     }

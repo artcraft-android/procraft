@@ -1,17 +1,17 @@
 [package]
-name = "make2d-gpu"
+name = "procraft-gpu"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Make2D's GPU renderer (wgpu): layer pixels, stroke rendering, compositing and presenting the canvas"
+description = "ProCraft's GPU renderer (wgpu): layer pixels, stroke rendering, compositing and presenting the canvas"
 
 [lints]
 workspace = true
 
 [dependencies]
-make2d-engine = { workspace = true }
+procraft-engine = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.stroke-preview-opacity",
+  "name": "Stroke preview opacity",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A stroke shows fainter while you draw it, as its slider says, and is kept at its own opacity once you lift.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["stroke_preview_opacity"],
+  "controls": [
+    { "key": "opacity", "type": "slider", "label": "While drawing", "least": 0.05, "most": 1, "step": 0.05,
+      "starts": 0.5, "shown_times": 100, "unit": "%", "live": true },
+    { "key": "erasing", "type": "switch", "label": "Erasing and smudging too", "starts": false }
+  ]
+}

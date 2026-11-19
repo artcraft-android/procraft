@@ -5,12 +5,12 @@
 
 use std::time::{Duration, Instant};
 
-use make2d_engine::animation::{self, Animation};
-use make2d_engine::document::{Document, LayerId};
-use make2d_engine::geom::Vec2;
-use make2d_engine::stroke::Stamp;
-use make2d_engine::timeline::{CameraPose, Channel, ClipId, Easing, Key, MaskMode};
-use make2d_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_engine::animation::{self, Animation};
+use procraft_engine::document::{Document, LayerId};
+use procraft_engine::geom::Vec2;
+use procraft_engine::stroke::Stamp;
+use procraft_engine::timeline::{CameraPose, Channel, ClipId, Easing, Key, MaskMode};
+use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
 const SIDE: u32 = 16;
 
@@ -151,7 +151,7 @@ fn clip_of(doc: &Document, root: LayerId) -> ClipId {
     tl.tracks
         .iter()
         .flat_map(|t| &t.clips)
-        .find(|c| matches!(c.content, make2d_engine::timeline::ClipContent::Drawing(ref d) if d.root == root))
+        .find(|c| matches!(c.content, procraft_engine::timeline::ClipContent::Drawing(ref d) if d.root == root))
         .unwrap()
         .id
 }
@@ -310,7 +310,7 @@ fn the_frames_used_least_lately_go_past_the_budget() {
 /// Scrubbing a 120-frame, 1920 × 1080 timeline frame by frame (24 drawings on fives, drawn on,
 /// two onion skins each side), with and without kept frames. Run on its own, in release, for the numbers in
 /// `docs/design/timeline.md`:
-/// `cargo test --release -p make2d-gpu --test frame_cache -- --ignored --nocapture`.
+/// `cargo test --release -p procraft-gpu --test frame_cache -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing: slow, and takes a gigabyte of GPU memory"]
 fn scrubbing_120_frames() {

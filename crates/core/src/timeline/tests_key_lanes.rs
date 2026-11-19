@@ -173,7 +173,7 @@ fn keys_on_two_clips_and_the_camera_go_together_as_one_step() {
 #[test]
 fn a_sounds_volume_keys_are_a_lane() {
     let Some(s) = session(32) else { return };
-    let dir = std::env::temp_dir().join(format!("make2d-lanes-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-lanes-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("level.wav");
     std::fs::write(&path, (0..3000_u32).map(|i| (i as u8).wrapping_mul(3)).collect::<Vec<_>>()).unwrap();

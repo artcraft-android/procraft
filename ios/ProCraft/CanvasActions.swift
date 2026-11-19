@@ -1,0 +1,300 @@
+import Foundation
+import SwiftUI
+import UIKit
+
+/// What the Share tab makes.
+enum ShareKind {
+    case psd, pdf, tiff, jpeg, png, layersPdf, layerPngs
+    /// A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes.
+    case svg
+    /// The artwork's vector layers as a page of shapes.
+    case vectorPdf
+    /// A model: the artwork whole (it comes back in another copy of the app), a USDZ, or an OBJ
+    /// zipped with its material file and textures.
+    case modelArtwork, modelUsdz, modelObj
+    /// A model as shown.
+    case modelJpeg, modelPng, modelTiff
+    /// A model's texture sets, a PNG each.
+    case modelTextures
+}
+
+/// How a picture comes in from the Add tab.
+enum InsertAsk {
+    case file, photo, camera
+}
+
+/// The Actions panel's work on the open artwork: what it shares, and what it brings in.
+extension CanvasModel {
+    /// Runs `work`, an export by the core, off the main thread with the export card showing how far
+    /// it has come and a check once made; what it made goes to the share sheet. Cancelled, nothing
+    /// is shared; made nothing, `failed` is told.
+    func exporting(
+        failed: @escaping @autoclosure () -> String, progress: (() -> Float)? = nil,
+        _ work: @escaping (CanvasSession) -> [URL]
+    ) {
+        guard exportShown == nil else { return }
+        let session = session
+        session.resetExportProgress()
+        exportCancelled = false
+        exportShown = ProgressShown(progress: 0)
+        let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.exportShown = ProgressShown(progress: progress?() ?? session.exportProgress())
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let files = work(session)
+            DispatchQueue.main.async {
+                poll.invalidate()
+                guard let self else { return }
+                if self.exportCancelled {
+                    self.exportShown = nil
+                } else if files.isEmpty {
+                    self.exportShown = nil
+                    self.showNotice(failed(), warning: true)
+                } else {
+                    self.exportShown = ProgressShown(progress: 1, done: true)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                        self.exportShown = nil
+                        Sharing.share(files)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The time-lapse as a video to share: all of it, or `seconds` long; its card shows how far it has
+    /// come. Which of two things went wrong, if it can't be made, is told: they are different faults.
+    func shareTimeLapse(seconds: Int?) {
+        let lapse = timeLapse.lapse
+        guard lapse.count > 0 else {
+            saying = ("Time-lapse", "There is no time-lapse to export yet.")
+            return
+        }
+        let meter = ExportMeter()
+        exporting(
+            failed: lapse.frame(0) != nil ? "The time-lapse video couldn't be made." : "The time-lapse can't be read on this device.",
+            progress: { meter.share }
+        ) { [weak self] session in
+            let out = Sharing.exportsDir.appendingPathComponent(exportFileName(name: session.name(), package: false) + ".mp4")
+            let made = lapse.export(to: out, seconds: seconds) { share in
+                meter.share = share
+                return self?.exportCancelled != true
+            }
+            return made ? [out] : []
+        }
+    }
+
+    /// The layered package, named with `suffix`.
+    func sharePackage(suffix: String) {
+        let lapse = timeLapse.lapse
+        let artworkDir = self.dir
+        let session = session
+        // the card: the time-lapse's frames made into video first (a long one takes a while), then
+        // the file written
+        let meter = ExportMeter()
+        exporting(
+            failed: "The artwork couldn't be exported.",
+            progress: { meter.share < 1 ? meter.share / 2 : 0.5 + session.exportProgress() / 2 }
+        ) { [weak self] session in
+            let started = Date()
+            let frames = lapse.count
+            guard let timeLapse = lapse.forPackage(going: { share in
+                meter.share = min(share, 0.999)
+                return self?.exportCancelled != true
+            }) else { return [] }
+            meter.share = 1
+            let lapseDone = Date()
+            let base = exportFileName(name: session.name(), package: true)
+            let out = Sharing.exportsDir.appendingPathComponent(base + suffix)
+            let seed = UInt64.random(in: 0 ... UInt64.max)
+            // ours keeps a timeline (the artwork's folder, whole); Procreate's is the package alone
+            let made = suffix == ".procreate"
+                ? (try? session.exportPackage(path: out.path, seed: seed, timeLapse: timeLapse)) != nil
+                : (try? session.exportArtwork(dir: artworkDir, saveFirst: true, path: out.path, seed: seed, timeLapse: timeLapse)) != nil
+            // how long each half took, for when an export is slow
+            let bytes = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            NSLog(
+                "ProCraft: export %@: time-lapse (%d frames) %.1f s, file %.1f s, %.1f MB",
+                suffix, frames, lapseDone.timeIntervalSince(started), Date().timeIntervalSince(lapseDone), Double(bytes) / 1_048_576
+            )
+            return made ? [out] : []
+        }
+    }
+
+    func share(_ kind: ShareKind, quality: UInt8 = PdfQuality.best) {
+        let artworkDir = self.dir
+        exporting(failed: "The artwork couldn't be exported.") { session in
+            let dir = Sharing.exportsDir
+            let base = exportFileName(name: session.name(), package: false)
+            func file(_ suffix: String) -> URL {
+                dir.appendingPathComponent(base + suffix)
+            }
+            do {
+                switch kind {
+                case .modelArtwork:
+                    let out = dir.appendingPathComponent(exportFileName(name: session.name(), package: true) + ".procraft")
+                    try session.exportModelArtwork(dir: artworkDir, path: out.path)
+                    return [out]
+                case .modelUsdz:
+                    try session.exportModelUsdz(path: file(".usdz").path)
+                    return [file(".usdz")]
+                case .modelObj:
+                    try session.exportModelObj(path: file(".zip").path)
+                    return [file(".zip")]
+                case .modelJpeg:
+                    try session.exportModelJpeg(path: file(".jpg").path)
+                    return [file(".jpg")]
+                case .modelPng:
+                    try session.exportModelRender(path: file(".png").path, transparent: false)
+                    return [file(".png")]
+                case .modelTiff:
+                    try session.exportModelTiff(path: file(".tif").path)
+                    return [file(".tif")]
+                case .modelTextures:
+                    let folder = dir.appendingPathComponent(base)
+                    try? FileManager.default.removeItem(at: folder)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    return try session.exportModelTextures(dir: folder.path).map { URL(fileURLWithPath: $0) }
+                case .psd:
+                    try session.exportPsd(path: file(".psd").path)
+                    return [file(".psd")]
+                case .tiff:
+                    try session.exportTiff(path: file(".tif").path)
+                    return [file(".tif")]
+                case .jpeg:
+                    try session.exportJpeg(path: file(".jpg").path)
+                    return [file(".jpg")]
+                case .png:
+                    try session.exportPng(path: file(".png").path)
+                    return [file(".png")]
+                case .svg:
+                    try session.exportSvg(path: file(".svg").path)
+                    return [file(".svg")]
+                case .vectorPdf:
+                    try session.exportVectorPdf(path: file(".pdf").path)
+                    return [file(".pdf")]
+                case .pdf:
+                    try session.exportPdf(path: file(".pdf").path, layers: false, quality: quality)
+                    return [file(".pdf")]
+                case .layersPdf:
+                    try session.exportPdf(path: file(".pdf").path, layers: true, quality: quality)
+                    return [file(".pdf")]
+                case .layerPngs:
+                    let folder = dir.appendingPathComponent(base)
+                    try? FileManager.default.removeItem(at: folder)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    return try session.exportLayerPngs(dir: folder.path).map { URL(fileURLWithPath: $0) }
+                }
+            } catch {
+                return []
+            }
+        }
+    }
+
+    /// The sprite sheet as `choices` ask, and its JSON, to share; `done` once it is made.
+    func shareSpriteSheet(_ choices: SpriteSheetChoices, done: @escaping () -> Void) {
+        exporting(failed: "The sprite sheet couldn't be made.") { session in
+            let files = Self.exportSpriteSheet(session, choices)?.0 ?? []
+            if !files.isEmpty {
+                DispatchQueue.main.async(execute: done)
+            }
+            return files
+        }
+    }
+
+    /// The animation as a Toon Boom Harmony scene folder, zipped, to share.
+    func shareHarmony() {
+        exporting(failed: "The Harmony scene couldn't be made.") { session in
+            let base = exportFileName(name: session.name(), package: false)
+            let out = Sharing.exportsDir.appendingPathComponent(base + " Harmony.zip")
+            let made = (try? HarmonyExport.export(session, to: out)) != nil
+            return made ? [out] : []
+        }
+    }
+
+    /// The file a plugin makes of the artwork's layers of a kind it adds (`e`), to share.
+    func sharePlugin(_ e: PluginExport) {
+        exporting(failed: "The artwork couldn't be exported.") { session in
+            let base = exportFileName(name: session.name(), package: false)
+            let out = Sharing.exportsDir.appendingPathComponent(base).appendingPathExtension(e.`extension`)
+            let made = (try? session.exportPlugin(key: e.key, path: out.path)) != nil
+            return made ? [out] : []
+        }
+    }
+
+    /// The bytes of a picture on a new layer, fitted to the canvas (a moving GIF's frames on the
+    /// timeline instead), with `transform` ready to transform; a message if it couldn't be.
+    func insertPicture(_ data: Data?, name: String?, isPrivate: Bool, transform: Bool = true) {
+        closePanels()
+        guard let data else {
+            showNotice("This picture can't be opened.", warning: true)
+            return
+        }
+        // a moving GIF: its frames (a still one is a picture)
+        if name?.lowercased().hasSuffix(".gif") == true, let done = session.insertGifFrames(bytes: data, private: isPrivate) {
+            if done.added == 0 {
+                showNotice(done.full ? noRoomSaid() : "This picture can't be opened.", warning: true)
+                return
+            }
+            refresh()
+            showNotice("Frames saved to timeline")
+            if done.full {
+                showNotice(noRoomSaid(), warning: true)
+            }
+            return
+        }
+        guard let image = GalleryModel.decode(data, p3: CanvasSpace.shared.p3)?.image else {
+            showNotice("This picture can't be opened.", warning: true)
+            return
+        }
+        guard session.insertImage(image: image, private: isPrivate) != nil else {
+            noRoomForLayers()
+            return
+        }
+        refresh()
+        if transform {
+            toggleTransform()
+        }
+    }
+
+    /// A file from the picker, read with the access it gave.
+    func insertFile(_ url: URL, isPrivate: Bool) {
+        // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+        if url.pathExtension.lowercased() == "svg" {
+            closePanels()
+            let name = url.deletingPathExtension().lastPathComponent
+            if let data = url.readPicked(), session.insertSvg(bytes: data, name: name) != 0 {
+                refresh()
+                showNotice("Vector Layer")
+            } else {
+                showNotice("This picture can't be opened.", warning: true)
+            }
+            return
+        }
+        insertPicture(url.readPicked(), name: url.lastPathComponent, isPrivate: isPrivate)
+    }
+
+    func insertPhoto(_ picture: UIImage?, isPrivate: Bool) {
+        insertPicture(picture?.jpegData(compressionQuality: 1), name: nil, isPrivate: isPrivate)
+    }
+
+    func changeRapidUndoDelay(_ share: Float) {
+        let range = AppSettings.rapidUndoRange
+        AppSettings.shared.rapidUndoDelay = range.lowerBound + share * (range.upperBound - range.lowerBound)
+    }
+
+    func changeSelectionVisibility(_ share: Float) {
+        AppSettings.shared.selectionVisibility = share
+        session.setSelectionVisibility(visibility: share)
+    }
+
+    /// Project canvas: the picture on a second display while there is one.
+    func changeProjectCanvas(_ on: Bool) {
+        AppSettings.shared.projectCanvas = on
+        Projection.shared.update()
+    }
+
+    func changeBrushScaling(onScreen: Bool) {
+        AppSettings.shared.brushOnScreen = onScreen
+        session.setBrushScaling(onScreen: onScreen)
+    }
+}

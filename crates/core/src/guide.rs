@@ -1,13 +1,13 @@
 //! The drawing guide: set from the guide editor, drawn over the canvas as lines, and followed by
 //! strokes with assisted drawing on (kept to the guide's directions, or mirrored by symmetry).
 
-use make2d_engine::geom::{Affine, Vec2};
-use make2d_engine::guide::{
+use procraft_engine::geom::{Affine, Vec2};
+use procraft_engine::guide::{
     FADE_AT_MAX, FADE_AT_MIN, FADE_FROM, Guide, GuideKind, LengthUnit, SymmetryKind, bar_color, zoom_fade,
 };
-use make2d_engine::input::Sample;
-use make2d_engine::stroke::Stamp;
-use make2d_engine::view::View;
+use procraft_engine::input::Sample;
+use procraft_engine::stroke::Stamp;
+use procraft_engine::view::View;
 
 use crate::{CanvasSession, State};
 
@@ -37,7 +37,7 @@ pub enum GuideUnit {
 }
 
 /// The sizes a grid can have, canvas pixels.
-const SIZE_MIN: f32 = make2d_engine::guide::SIZE_MIN;
+const SIZE_MIN: f32 = procraft_engine::guide::SIZE_MIN;
 const SIZE_MAX: f32 = 1000.0;
 
 /// The guide as the editor and the overlay show it. Points are window pixels, x and y in turn;
@@ -182,7 +182,7 @@ impl State {
                         a
                     }
                 };
-                s.pos = make2d_engine::guide::assist_along(start, s.pos, heading);
+                s.pos = procraft_engine::guide::assist_along(start, s.pos, heading);
             }
         }
         samples
@@ -191,7 +191,7 @@ impl State {
     /// The canvas's dots per inch, the usual where it has none that can be used.
     fn dpi(&self) -> f32 {
         let dpi = self.doc.dpi;
-        if dpi.is_finite() && dpi > 0.0 { dpi } else { make2d_engine::formats::DPI as f32 }
+        if dpi.is_finite() && dpi > 0.0 { dpi } else { procraft_engine::formats::DPI as f32 }
     }
 
     fn guide_info(&self) -> GuideInfo {
@@ -235,7 +235,7 @@ impl State {
             thickness: look.thickness,
             fade: look.fade,
             fade_at: look.fade_at,
-            fade_auto_at: FADE_FROM / look.size.max(make2d_engine::guide::SIZE_MIN),
+            fade_auto_at: FADE_FROM / look.size.max(procraft_engine::guide::SIZE_MIN),
             line_opacity: look.opacity * faded,
             size: look.size,
             unit: guide_unit(look.unit),
@@ -361,7 +361,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let current = st.doc.current();
         let owner = match st.doc.layer(current) {
-            Some(l) if l.kind == make2d_engine::document::LayerKind::Mask => l.parent.unwrap_or(current),
+            Some(l) if l.kind == procraft_engine::document::LayerKind::Mask => l.parent.unwrap_or(current),
             _ => current,
         };
         if st.doc.layer(owner).is_some_and(|l| l.assisted != assisted) {

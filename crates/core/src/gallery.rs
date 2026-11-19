@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const ARTWORK_FILE: &str = "artwork.json";
+pub(crate) const ARTWORK_FILE: &str = "artwork.json";
 const STACK_FILE: &str = "stack.json";
 /// The folders' order, one name a line, first first.
 const ORDER_FILE: &str = "order.txt";
@@ -74,11 +74,11 @@ fn modified(path: &Path) -> i64 {
     fs::metadata(path).and_then(|m| m.modified()).map_or(0, millis)
 }
 
-fn name_of(path: &Path) -> String {
+pub(crate) fn name_of(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-fn folders(at: &Path) -> Vec<PathBuf> {
+pub(crate) fn folders(at: &Path) -> Vec<PathBuf> {
     fs::read_dir(at).map_or_else(
         |_| Vec::new(),
         |entries| entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect(),
@@ -478,7 +478,8 @@ impl ArtworkStore {
 /// isn't read to find out): how Import takes it.
 #[derive(uniffi::Enum, Debug, PartialEq, Eq)]
 pub enum ZipKind {
-    /// A model's artwork, whole.
+    /// An artwork of ours, whole: its folder (a model's, or one on a timeline), as
+    /// [`crate::unpack_model_artwork`] unpacks it.
     ModelArtwork,
     /// Not an archive that can be read.
     NotZip,
@@ -494,11 +495,11 @@ pub enum ZipKind {
 
 #[uniffi::export]
 pub fn zip_file_kind(path: String) -> ZipKind {
-    let Some(names) = make2d_engine::zip::names_in_file(Path::new(&path)) else { return ZipKind::NotZip };
+    let Some(names) = procraft_engine::zip::names_in_file(Path::new(&path)) else { return ZipKind::NotZip };
     let names = || names.iter().map(String::as_str);
     if crate::brush_files::brush_names(names()) {
         ZipKind::Brushes
-    } else if names().any(|n| n.rsplit('/').next() == Some(make2d_engine::palette::SWATCHES_ENTRY)) {
+    } else if names().any(|n| n.rsplit('/').next() == Some(procraft_engine::palette::SWATCHES_ENTRY)) {
         ZipKind::Swatches
     } else if crate::scene3d::is_model_artwork(names()) {
         ZipKind::ModelArtwork
@@ -518,7 +519,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-zip-kind-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let zip = |file: &str, entries: &[&str]| {
-            let mut w = make2d_engine::zip::ZipWriter::new();
+            let mut w = procraft_engine::zip::ZipWriter::new();
             for e in entries {
                 w.add(e, b"x");
             }

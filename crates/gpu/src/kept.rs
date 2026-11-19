@@ -202,6 +202,7 @@ mod tests {
             crate::canvas::liquify_format(&gpu.adapter),
             wgpu::TextureFormat::Rgba8Unorm,
             Some(first.cache.clone()),
+            1,
         );
         first.made();
         first.save();
@@ -215,6 +216,7 @@ mod tests {
             crate::canvas::liquify_format(&gpu.adapter),
             wgpu::TextureFormat::Rgba8Unorm,
             Some(second.cache.clone()),
+            1,
         );
         second.made();
         assert!(!loading(&file).exists());

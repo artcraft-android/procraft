@@ -1,7 +1,7 @@
 //! Copy, cut and paste, the canvas flipped, and pictures brought in as layers.
 
-use make2d_engine::document::{LayerId, LayerKind};
-use make2d_engine::geom::IRect;
+use procraft_engine::document::{LayerId, LayerKind};
+use procraft_engine::geom::IRect;
 
 use crate::layers::ThumbnailImage;
 use crate::{CanvasSession, State};
@@ -222,14 +222,14 @@ impl CanvasSession {
     /// and each frame is held for as long as the file shows it at the animation's frame rate.
     /// None if it isn't a GIF of more than one frame (a still picture: insert it as one).
     pub fn insert_gif_frames(&self, bytes: Vec<u8>, private: bool) -> Option<FramesInserted> {
-        if make2d_engine::gif::frame_count(&bytes) < 2 {
+        if procraft_engine::gif::frame_count(&bytes) < 2 {
             return None;
         }
-        let (width, height) = make2d_engine::gif::size(&bytes)?;
+        let (width, height) = procraft_engine::gif::size(&bytes)?;
         // each frame's layer and how long it shows, ms
         let mut held: Vec<(LayerId, u32)> = Vec::new();
         let mut full = false;
-        make2d_engine::gif::frames(&bytes, |rgba, ms| {
+        procraft_engine::gif::frames(&bytes, |rgba, ms| {
             let mut image = ThumbnailImage { width, height, rgba: rgba.to_vec() };
             // straight to premultiplied
             for px in image.rgba.as_chunks_mut::<4>().0 {
@@ -281,9 +281,9 @@ impl CanvasSession {
         let before = st.doc.clone();
         let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
         let flip = if horizontal {
-            make2d_engine::geom::Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w, f: 0.0 }
+            procraft_engine::geom::Affine { a: -1.0, b: 0.0, c: 0.0, d: 1.0, e: w, f: 0.0 }
         } else {
-            make2d_engine::geom::Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h }
+            procraft_engine::geom::Affine { a: 1.0, b: 0.0, c: 0.0, d: -1.0, e: 0.0, f: h }
         };
         let mut doc = st.doc.clone();
         let moved = st.move_all_items(flip, &mut doc);
@@ -299,7 +299,7 @@ impl CanvasSession {
             canvas.flip_layers(ids, horizontal);
         }
         st.flush();
-        if let Some(made) = st.canvas.as_ref().and_then(make2d_gpu::Canvas::undo_step) {
+        if let Some(made) = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step) {
             st.note_moved_data(made, moved);
         }
         st.revision += 1;

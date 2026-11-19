@@ -1,4 +1,4 @@
-//! Make2D on the desktop: the engine draws the canvas into the window, and the interface is
+//! ProCraft on the desktop: the engine draws the canvas into the window, and the interface is
 //! drawn over it with egui, on the same device.
 
 // no console window behind the app on Windows (a debug build keeps it, for the log)
@@ -71,7 +71,7 @@ mod zoom;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use make2d_core::CanvasSession;
+use procraft_core::CanvasSession;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
@@ -233,9 +233,9 @@ fn main() {
     // grows with it), their textures up to 2 GiB of it; the composite is made around the layers
     // not being worked on, so a frame composites only those
     if let Some(total) = memory_total() {
-        make2d_core::set_layer_budget(total / 2);
+        procraft_core::set_layer_budget(total / 2);
     }
-    make2d_core::set_resident_budget(LAYERS_ON_GPU);
+    procraft_core::set_resident_budget(LAYERS_ON_GPU);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
@@ -248,7 +248,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     finder::watch();
     // the colour profiles imported before
-    make2d_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
+    procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
         wake: event_loop.create_proxy(),
         started: Instant::now(),
@@ -287,7 +287,7 @@ fn main() {
             if let Some(screen) = &app.screen {
                 screen.window.set_visible(false);
             }
-            startup::stopped(make2d_gpu::panic_message(panic.as_ref()));
+            startup::stopped(procraft_gpu::panic_message(panic.as_ref()));
             // what the app held is let go by the system: a driver that panicked may not take it back
             std::process::exit(101);
         }
@@ -363,7 +363,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("Make2D")
+            .with_title("ProCraft")
             .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(640.0, 480.0))
@@ -375,7 +375,7 @@ impl ApplicationHandler for App {
             use winit::platform::wayland::WindowAttributesExtWayland;
             use winit::platform::x11::WindowAttributesExtX11;
             let attributes = WindowAttributesExtWayland::with_name(attributes, "procraft", "procraft");
-            WindowAttributesExtX11::with_name(attributes, "procraft", "Make2D")
+            WindowAttributesExtX11::with_name(attributes, "procraft", "ProCraft")
         };
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
@@ -389,7 +389,7 @@ impl ApplicationHandler for App {
         pen::watch(&window, self.wake.clone());
         // the brushes read while the gallery shows, so the first artwork opens without reading them
         let read = std::thread::Builder::new().name("procraft-read-brushes".to_owned());
-        if let Err(e) = read.spawn(|| make2d_core::prepare_brushes(files::brushes_dir())) {
+        if let Err(e) = read.spawn(|| procraft_core::prepare_brushes(files::brushes_dir())) {
             log::warn!("reading the brushes ahead: {e}");
         }
         // in this machine's order, from the backend the last run used, or the next if that one
@@ -397,7 +397,7 @@ impl ApplicationHandler for App {
         let order = startup::backend_order();
         let from = startup::gpu_start(order);
         // the canvases' pipelines kept between runs, where the GPU can
-        make2d_gpu::keep_pipelines_in(files::app_dir());
+        procraft_gpu::keep_pipelines_in(files::app_dir());
         // what the start waits for logged while it does
         startup::watch_start(self.wake.clone());
         let tried = startup::gpu_tried();
@@ -409,7 +409,7 @@ impl ApplicationHandler for App {
             }
             Err(e) => {
                 log::error!("no GPU for the window:\n{e}");
-                files::tell("Make2D can't draw", &startup::no_gpu_text(&e));
+                files::tell("ProCraft can't draw", &startup::no_gpu_text(&e));
                 event_loop.exit();
                 return;
             }
@@ -768,7 +768,7 @@ impl App {
         let edits = session.edits();
         let saved = edits == self.ui.saved_edits || session.edits_saved() == Some(edits);
         let unsaved = if saved { "" } else { " •" };
-        let title = format!("{}{unsaved} — Make2D", session.name());
+        let title = format!("{}{unsaved} — ProCraft", session.name());
         if title != self.title {
             screen.window.set_title(&title);
             self.title = title;
@@ -853,9 +853,9 @@ impl App {
         if let Some(soon) = soon {
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
-        if self.title != "Make2D" {
-            screen.window.set_title("Make2D");
-            self.title = "Make2D".into();
+        if self.title != "ProCraft" {
+            screen.window.set_title("ProCraft");
+            self.title = "ProCraft".into();
         }
         self.zoom_on();
         // Project canvas is black while the gallery shows
@@ -886,7 +886,7 @@ impl App {
                 if !busy {
                     let (w, h) = self.gallery.screen_px;
                     let session = CanvasSession::new(w, h);
-                    session.set_new_profile(make2d_core::P3.into());
+                    session.set_new_profile(procraft_core::P3.into());
                     let dir = self.gallery.store.new_folder(folder);
                     self.open_artwork(session, dir);
                     self.ui.started_new();
@@ -899,7 +899,7 @@ impl App {
                 match canvas {
                     Some(canvas) if !busy => {
                         let session = CanvasSession::new(w, h);
-                        session.set_new_profile(make2d_core::P3.into());
+                        session.set_new_profile(procraft_core::P3.into());
                         if session.attach_plugin_canvas(kind, canvas) {
                             let dir = self.gallery.store.new_folder(folder);
                             self.open_artwork(session, dir);
@@ -1198,7 +1198,7 @@ impl App {
     /// An artwork dragged out of the window: written as Drag and Drop export's file format says,
     /// then dragged on as that file, for wherever it is let go (the system's drag carries it).
     #[cfg(any(windows, target_os = "macos"))]
-    fn drag_out(&mut self, artwork: &make2d_core::GalleryArtwork) {
+    fn drag_out(&mut self, artwork: &procraft_core::GalleryArtwork) {
         let format = self.ui.drag_format();
         let Some(screen) = self.screen.as_mut() else { return };
         let path = match files::drag_file(artwork, format) {
@@ -1226,7 +1226,7 @@ impl App {
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    fn drag_out(&mut self, _artwork: &make2d_core::GalleryArtwork) {}
+    fn drag_out(&mut self, _artwork: &procraft_core::GalleryArtwork) {}
 
     /// The graphics device was lost (its driver reset or stopped), and all it held: nothing is
     /// saved from it (the gallery keeps the artwork as it was last saved, seconds before); the
@@ -1245,7 +1245,7 @@ impl App {
                 startup::stopped("the graphics device stopped, and it couldn't start itself again");
             }
         } else {
-            files::tell("The graphics device stopped", "Make2D starts again, with the artwork as it was last saved.");
+            files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
             startup::start_again(None);
         }
         event_loop.exit();

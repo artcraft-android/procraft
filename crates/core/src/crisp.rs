@@ -16,13 +16,13 @@
 
 use std::time::{Duration, Instant};
 
-use make2d_engine::brush::Brush;
-use make2d_engine::document::{Document, LayerId};
-use make2d_engine::geom::{Affine, Homography, IRect, Vec2};
-use make2d_engine::profile::Profile;
-use make2d_engine::stroke::Stamp;
-use make2d_engine::vector::{Object, StrokeId, VectorContent, placed};
-use make2d_gpu::{Canvas, Gpu, GpuError, SecondStroke, StrokeEcho, StrokeStyle, StrokeTool};
+use procraft_engine::brush::Brush;
+use procraft_engine::document::{Document, LayerId};
+use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
+use procraft_engine::profile::Profile;
+use procraft_engine::stroke::Stamp;
+use procraft_engine::vector::{Object, StrokeId, VectorContent, placed};
+use procraft_gpu::{Canvas, Gpu, GpuError, SecondStroke, StrokeEcho, StrokeStyle, StrokeTool};
 
 use crate::grain_store::GrainStore;
 use crate::{State, ToolKind};
@@ -494,6 +494,9 @@ impl State {
                 StrokeEcho::Second(stamps) => canvas.add_second_stamps(&carried(stamps)),
                 StrokeEcho::ReplaceSecond(stamps) => canvas.replace_second_stamps(&carried(stamps)),
                 StrokeEcho::Tip(stamps) => canvas.set_tip(&carried(stamps)),
+                StrokeEcho::SecondTip(stamps) => canvas.set_second_tip(&carried(stamps)),
+                StrokeEcho::Ahead(stamps) => canvas.set_ahead(&carried(stamps)),
+                StrokeEcho::Shown(shown) => canvas.set_stroke_shown(shown),
                 StrokeEcho::Prediction(stamps) => canvas.set_prediction(&carried(stamps)),
                 StrokeEcho::DropSecond => canvas.drop_second(),
                 StrokeEcho::End => {

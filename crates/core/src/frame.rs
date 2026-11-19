@@ -3,9 +3,9 @@
 
 use std::time::{Duration, Instant};
 
-use make2d_engine::geom::Vec2;
-use make2d_engine::profile::Profile;
-use make2d_gpu::{Backdrop, Gpu, SelectionLook, Stripes, Target, wgpu};
+use procraft_engine::geom::Vec2;
+use procraft_engine::profile::Profile;
+use procraft_gpu::{Backdrop, Gpu, SelectionLook, Stripes, Target, wgpu};
 
 use crate::selection::SelectionDisplay;
 use crate::{
@@ -23,7 +23,7 @@ impl State {
         screen: Profile,
     ) {
         let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
-        let to_screen = make2d_engine::view::View::fit((self.doc.width(), self.doc.height()), size).to_screen();
+        let to_screen = procraft_engine::view::View::fit((self.doc.width(), self.doc.height()), size).to_screen();
         let convert = colours_to(self.doc.profile, screen);
         let key = crate::colour::table_key(&self.doc, screen);
         if self.display_lut.as_ref().map(|(k, _)| *k) != key {
@@ -95,6 +95,11 @@ impl State {
             canvas.set_display_peak(if extended { self.display_peak } else { 1.0 });
         }
         self.attach_media();
+        // a vector layer's warp, its strokes bent through the mesh as it is now (one that takes
+        // long to draw waits its turn, and asks for the frame after)
+        if self.vector_warp_draw(false) {
+            self.needs_frame = true;
+        }
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
@@ -110,6 +115,8 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
+        // while a transform is open, what is selected is what is being moved: no bands over the rest
+        let selection_hidden = self.transform.is_some();
         // vector layers drawn again as fine as the screen, once the view has rested zoomed in
         let crisp = if self.scene_shown() || self.sphere.is_some() {
             crate::crisp::CrispShown::No
@@ -119,7 +126,7 @@ impl State {
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
-            let selected = self.selection.is_some();
+            let selected = self.selection.is_some() && !selection_hidden;
             let look = selected.then_some(selection_shown);
             // the bands drift, so they keep drawing, a frame each time they have moved a pixel
             if matches!(look, Some(SelectionLook::Stripes(_))) {
@@ -137,7 +144,7 @@ impl State {
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
             let shown = selection_shown;
-            let look = canvas.has_selection().then_some(shown);
+            let look = (canvas.has_selection() && !selection_hidden).then_some(shown);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
@@ -177,7 +184,7 @@ impl State {
                 Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
                 None => (canvas, &mut self.doc, to_screen),
             };
-            let look = canvas.has_selection().then_some(shown);
+            let look = (canvas.has_selection() && !selection_hidden).then_some(shown);
             canvas.render(
                 gpu,
                 doc,
@@ -312,6 +319,8 @@ pub fn configure(
         log::warn!("the surface couldn't be configured yet: {e}");
         return None;
     }
+    #[cfg(target_os = "ios")]
+    crate::window::commit();
     log::info!(
         "surface {}×{} {:?} {:?} {:?}",
         config.width,
@@ -321,6 +330,23 @@ pub fn configure(
         config.color_space
     );
     Some(config)
+}
+
+/// Whether the surface has the screen's extended range for an HDR canvas: what [`configure`] gives
+/// it, unless the GPU refuses the configure just then (as while an artwork opens), when it is
+/// given an 8-bit surface and only white shows.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn extended_offered(gpu: &Gpu, surface: &wgpu::Surface<'_>) -> bool {
+    offers_extended(&surface.get_capabilities(&gpu.adapter))
+}
+
+/// Half floats in extended sRGB among `caps`. Extended sRGB only: wgpu's extended Display P3 looks
+/// its colour space up in a way that crashes on the iPad simulator. A Display P3 canvas's colours
+/// past sRGB go out as values below 0 and past 1, which extended sRGB carries (see `display.wgsl`).
+fn offers_extended(caps: &wgpu::SurfaceCapabilities) -> bool {
+    caps.format_capabilities.iter().any(|f| {
+        f.format == wgpu::TextureFormat::Rgba16Float && f.color_spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB)
+    })
 }
 
 /// [`configure`] for an HDR canvas: half floats in the screen's extended range (extended sRGB, which
@@ -333,11 +359,7 @@ fn configure_extended(
     size: (u32, u32),
 ) -> Option<wgpu::SurfaceConfiguration> {
     let format = wgpu::TextureFormat::Rgba16Float;
-    let spaces = caps.format_capabilities.iter().find(|f| f.format == format)?.color_spaces;
-    // extended sRGB only: wgpu's extended Display P3 looks its colour space up in a way that
-    // crashes on the iPad simulator. A Display P3 canvas's colours past sRGB go out as values below
-    // 0 and past 1, which extended sRGB carries (see `display.wgsl`).
-    if !spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB) {
+    if !offers_extended(caps) {
         return None;
     }
     let color_space = wgpu::SurfaceColorSpace::ExtendedSrgb;
@@ -361,6 +383,8 @@ fn configure_extended(
         log::warn!("the surface couldn't be configured for extended range: {e}");
         return None;
     }
+    #[cfg(target_os = "ios")]
+    crate::window::commit();
     log::info!("surface {}×{} {:?} {:?}", config.width, config.height, config.format, config.color_space);
     Some(config)
 }

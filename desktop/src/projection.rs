@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use make2d_core::{CanvasSession, configure, screen_profile};
-use make2d_gpu::{Gpu, wgpu};
+use procraft_core::{CanvasSession, configure, screen_profile};
+use procraft_gpu::{Gpu, wgpu};
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window};
@@ -24,7 +24,7 @@ impl Projection {
     /// A borderless window filling `monitor`, its surface on `gpu`'s device.
     pub fn open(event_loop: &ActiveEventLoop, monitor: MonitorHandle, gpu: &Gpu) -> Option<Projection> {
         let attributes = Window::default_attributes()
-            .with_title("Make2D")
+            .with_title("ProCraft")
             .with_decorations(false)
             .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))))
             // the keyboard stays with the main window

@@ -714,10 +714,11 @@ fn over(top: vec4<f32>, under: vec4<f32>) -> vec4<f32> {
 }
 
 // the layer (src) with its styles drawn round it from its distances (before), bottom up: drop
-// shadow, outer glow, outline, the layer, and the inner glow over it inside it. a: the reach, and
-// the shadow's offset (pixels); b, c, e, f: the outline's, shadow's, outer and inner glow's colour
-// and opacity (none when off); g: the outline's and shadow's size and softness; size (not the
-// canvas's here): the outer and inner glow's
+// shadow, outer glow, outline, the layer made its colour, and the inner glow over it inside it.
+// a: the reach, and the shadow's offset (pixels); b, c, e, f: the outline's, shadow's, outer and
+// inner glow's colour and opacity (none when off); d (not a fade here): the layer's colour, and
+// how much of it; g: the outline's and shadow's size and softness; size (not the canvas's here):
+// the outer and inner glow's
 @fragment
 fn fs_style(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = vec2<i32>(pos.xy);
@@ -730,7 +731,9 @@ fn fs_style(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let inner = fu.f.a * reached(here.y, fu.size.z, fu.size.w);
     var behind = over(vec4<f32>(fu.e.rgb * glow, glow), vec4<f32>(fu.c.rgb * shadow, shadow));
     behind = over(vec4<f32>(fu.b.rgb * outline, outline), behind);
+    // all the layer shows in its colour, as opaque as it was
+    let coloured = mix(c.rgb, fu.d.rgb * c.a, fu.d.a);
     // the inner glow over the layer, inside it only
-    let lit = vec4<f32>(mix(c.rgb, fu.f.rgb * c.a, inner), c.a);
+    let lit = vec4<f32>(mix(coloured, fu.f.rgb * c.a, inner), c.a);
     return over(lit, behind);
 }

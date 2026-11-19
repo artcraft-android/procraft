@@ -343,6 +343,27 @@ to the same (not 0), as one undo step. A layer that isn't picked still goes alon
 procraft_opacity_together() -> i32
 ```
 
+### `stroke_preview_opacity`
+
+How strongly a stroke shows while it is being drawn, as a share of how it will be kept: 0 (not at
+all) to 1 (as it is).
+
+```
+procraft_stroke_preview_opacity(tool: i32) -> f32
+```
+
+`tool` is what the stroke does: 0 paint, 1 erase, 2 smudge, 3 light. The app asks as the stroke
+begins and with each move of the pen, so a `live` slider moved while a stroke is being drawn changes
+that stroke, all of it. It only says how the stroke shows meanwhile: once the pen lifts, the stroke
+is kept at its own opacity, as if no plugin were on the hook. Paint laid into its layer as it goes
+(wet paint, a smudge) fades back towards the layer as it was before the stroke. An answer outside 0
+to 1, or not a number, stops the plugin. Several plugins on this hook each have a say, and their
+answers multiply. The brush studio's drawing pad, an adjustment painted on and a model being painted
+show their strokes as they are.
+
+The Stroke preview opacity plugin the app comes with answers by its slider (5% to 100%) for paint and
+the light tool, and for the eraser and the smudge too with its switch on.
+
 ### `randomise_brush`
 
 While a plugin on this hook is on, the brush studio shows Randomise. Tapping it asks the plugin about
@@ -968,8 +989,8 @@ The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and a
   its symmetry's copies, `paths`). It cuts samples into a new item (`with_samples`), and keeps the
   record as it came.
 
-Upstream's `plugins/vector-layers` (in the upstream repository; this fork keeps vector layers in
-the core instead, and has the plugin only packed, as a test fixture) is one to start from. It keeps each brush once, and its card chooses what
+The `vector-layers` plugin (here vector layers are built into the core, and the plugin is kept
+only packed, as a test fixture) is one to start from. It keeps each brush once, and its card chooses what
 the eraser does, and what a selection takes:
 
 - Eraser: Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so

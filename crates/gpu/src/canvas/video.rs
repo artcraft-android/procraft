@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use make2d_engine::document::Document;
-use make2d_engine::geom::{Affine, IRect, Vec2};
-use make2d_engine::timeline::MediaId;
+use procraft_engine::document::Document;
+use procraft_engine::geom::{Affine, IRect, Vec2};
+use procraft_engine::timeline::MediaId;
 
 use super::{
     Canvas, LAYER_FORMAT, LayerUniform, Look, Stack, TransformUniform, UniformData, render_pass, scissor, texture,
@@ -162,7 +162,7 @@ impl Canvas {
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
         }
-        let blend = look.blend.unwrap_or(make2d_engine::document::BlendMode::Normal);
+        let blend = look.blend.unwrap_or(procraft_engine::document::BlendMode::Normal);
         let uniform = LayerUniform { opacity: look.opacity, blend: blend.id(), tint: look.tint, ..Default::default() };
         self.draw_onto(device, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
     }

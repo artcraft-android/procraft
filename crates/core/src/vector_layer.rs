@@ -1,4 +1,4 @@
-//! Vector layers: layers whose strokes are kept as strokes (`make2d_engine::vector`).
+//! Vector layers: layers whose strokes are kept as strokes (`procraft_engine::vector`).
 //!
 //! A stroke on a vector layer is drawn as on any other, by the same builder onto the same pixels;
 //! as it ends, what it was drawn from (its input, its brush and how it was set up) is kept on the
@@ -11,18 +11,18 @@
 
 use std::sync::Arc;
 
-use make2d_engine::brush::Brush;
-use make2d_engine::document::{Document, LayerId};
-use make2d_engine::geom::Vec2;
-use make2d_engine::geom::{Homography, IRect};
-use make2d_engine::input::Sample;
-use make2d_engine::selection::Mask;
-use make2d_engine::stroke::{PathSpot, Stamp};
-use make2d_engine::vector::{
-    FillMode, Ink, Object, Second, Setup, StrokeId, TracedFrom, VectorContent, VectorFill, VectorStroke,
+use procraft_engine::brush::Brush;
+use procraft_engine::document::{Document, LayerId};
+use procraft_engine::geom::Vec2;
+use procraft_engine::geom::{Homography, IRect};
+use procraft_engine::input::Sample;
+use procraft_engine::selection::Mask;
+use procraft_engine::stroke::{PathSpot, Stamp};
+use procraft_engine::vector::{
+    FillMode, Ink, Object, ObjectKind, Second, Setup, StrokeId, TracedFrom, VectorContent, VectorFill, VectorStroke,
 };
-use make2d_engine::vector_fill::Wall;
-use make2d_gpu::{Canvas, SecondStroke, StrokeStyle, StrokeTool};
+use procraft_engine::vector_fill::Wall;
+use procraft_gpu::{Canvas, SecondStroke, StrokeStyle, StrokeTool};
 
 use crate::selection::LassoFill;
 use crate::{CanvasSession, State};
@@ -76,7 +76,7 @@ pub(crate) enum Carried {
     By(Homography),
     /// Warped: the mesh, and the rectangle of the canvas (its corners, top left first, clockwise)
     /// it was laid over.
-    Warped { mesh: make2d_engine::warp::Mesh, source: [Vec2; 4] },
+    Warped { mesh: procraft_engine::warp::Mesh, source: [Vec2; 4] },
 }
 
 impl Carried {
@@ -91,7 +91,7 @@ impl Carried {
                     return false;
                 }
                 content
-                    .bend(ids, &|p| make2d_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h))
+                    .bend(ids, &|p| procraft_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h))
             }
         }
     }
@@ -100,6 +100,70 @@ impl Carried {
 /// The name of the layer a vector layer's selected strokes and fills are picked up onto while they
 /// are transformed.
 const LIFTED_NAME: &str = "Transforming";
+
+/// A vector layer's warp shown as it will be kept. Any other transform shows the picture of the
+/// strokes moved, which is what keeping it gives (a stroke resized is as much wider). A warp bends
+/// each stroke along where its line goes, as wide as it was: the picture pulled through the mesh
+/// would show the lines thicker where it stretches and thinner where it squeezes, which is not
+/// what is kept. So while the mesh is up the strokes themselves are drawn again through it, on the
+/// layer shown moving, whose pixels are held meanwhile (nothing drawn so is a step of its own, and
+/// they are put back when the warp ends, kept or not: kept, the strokes are then bent for good and
+/// drawn once more).
+///
+/// Bending a stroke is drawing it again from its input along another line, which takes too long
+/// to do for every stroke each time a finger moves. So while a handle is held the strokes are
+/// drawn roughly: the stamps each was made of, worked out once, put where the mesh takes them,
+/// as big as they were (a line much stretched shows its stamps further apart than it will be
+/// kept with); and fills, their outlines carried, are laid without reading what is under them.
+/// When the handle is let go they are drawn exactly, as keeping the warp leaves them, unless
+/// that takes long enough to be felt each time ([`WARP_EXACT_WITHIN`]): a layer of very many
+/// strokes stays as it was drawn while dragged, and is exact once kept.
+///
+/// Either is done once for each frame drawn, however many times the mesh moved since the last,
+/// and less often than that on a layer that takes long, so the mesh's own handles keep up with
+/// the finger and the lines follow.
+pub(crate) struct VectorWarp {
+    /// The layer drawn on: the vector layer itself, or the one its selected strokes and fills
+    /// were picked up onto.
+    target: LayerId,
+    /// The layers whose picture was being moved before the mesh came up (the target and its mask),
+    /// to take up again should the warp be taken back.
+    moved: Vec<LayerId>,
+    /// What the target holds, unbent, and which of it is bent (none: all of it).
+    from: Arc<VectorContent>,
+    ids: Option<Vec<StrokeId>>,
+    /// Whether all the target holds goes through the mesh together (it does but for a selection
+    /// that couldn't be picked up onto a layer of its own): only then is it drawn roughly.
+    whole: bool,
+    /// The stamps each stroke of `from` is made of, as they lie unbent: worked out the first time
+    /// they are wanted, with whether drawing every stroke exactly is quick enough to do each time
+    /// a handle is let go.
+    stamps: Option<(Arc<StrokeStamps>, bool)>,
+    /// What the target shows now: the mesh it was drawn through, and whether exactly.
+    shown: Option<(procraft_engine::warp::Mesh, bool)>,
+    /// When it was last drawn, and how long that took.
+    drawn: Option<(std::time::Instant, std::time::Duration)>,
+}
+
+/// Each stroke's stamps as they lie on the canvas, and its second's if it has one, by name.
+pub(crate) type StrokeStamps = std::collections::HashMap<StrokeId, (Vec<Stamp>, Option<Vec<Stamp>>)>;
+
+/// Drawing a warp's strokes again within this long is done every frame; one that takes longer
+/// waits twice as long as it took before the next, so the rest of the app has most of the time.
+const WARP_EVERY_FRAME: std::time::Duration = std::time::Duration::from_millis(12);
+
+/// A warp's strokes are drawn exactly each time a handle is let go if that is reckoned to take no
+/// longer than this.
+const WARP_EXACT_WITHIN: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// `stroke`'s stamps as they lie on the canvas, and its second's: those `given` has for it (a
+/// warp drawn as it is dragged), else the stroke drawn again from its input.
+fn stamps_of(given: Option<&StrokeStamps>, stroke: &VectorStroke) -> (Vec<Stamp>, Option<Vec<Stamp>>) {
+    match given.and_then(|given| given.get(&stroke.id)) {
+        Some((first, second)) => (first.clone(), second.clone()),
+        None => (stroke.replay().placed_stamps(), stroke.placed_second()),
+    }
+}
 
 /// A colour being dropped on a vector layer (ColorDrop): the fill it makes is traced again as its
 /// threshold, point or colour changes, from the layer as it was, and kept when it ends.
@@ -121,6 +185,10 @@ pub(crate) struct VectorPour {
     /// A Continuous drag kept fills it made before this one in `was`.
     kept: bool,
 }
+
+/// A fill poured where another was traced takes its place if it covers this much of it; less,
+/// and the other stays, with the new one laid over it.
+const COVERS: f32 = 0.9;
 
 fn thousandths(threshold: f32) -> i32 {
     if threshold.is_finite() { (threshold.clamp(0.0, 1.0) * 1000.0).round() as i32 } else { 500 }
@@ -159,6 +227,8 @@ pub(crate) struct Scratch {
 pub(crate) struct OpenVector {
     layer: LayerId,
     stroke: VectorStroke,
+    /// Lasso Fill's Outline: what the stroke went round, kept as a fill just under it.
+    under: Option<VectorFill>,
 }
 
 impl State {
@@ -193,7 +263,7 @@ impl State {
         let mut stroke = VectorStroke::begin(content.next_id(), setup, ink);
         stroke.guide = Some(guide);
         stroke.second = second.map(|(setup, opacity)| Second { setup, opacity });
-        self.vector_open = Some(OpenVector { layer, stroke });
+        self.vector_open = Some(OpenVector { layer, stroke, under: None });
     }
 
     /// More of the open stroke's input, as its builder is given it.
@@ -203,10 +273,35 @@ impl State {
         }
     }
 
+    /// Lasso Fill's Outline on vector layer `layer`: the shape through `outline` (canvas pixels;
+    /// with `hard`, pixel art's, on whole pixels) filled with `colour` at `opacity` over what is
+    /// there, kept just under the open stroke as it is kept. The pixels it lays are the caller's.
+    pub(crate) fn vector_fill_under(
+        &mut self,
+        layer: LayerId,
+        outline: Vec<Vec2>,
+        hard: bool,
+        colour: [f32; 3],
+        opacity: f32,
+    ) {
+        let Some(open) = self.vector_open.as_mut().filter(|open| open.layer == layer) else { return };
+        let Some(content) = self.doc.layer(layer).and_then(|l| l.vector.as_ref()) else { return };
+        open.under = Some(VectorFill {
+            id: content.next_id(),
+            loops: vec![outline],
+            colour,
+            opacity,
+            mode: FillMode::Over,
+            hard,
+            traced: None,
+            takes_from: None,
+        });
+    }
+
     /// The open stroke has ended and its pixels are on their way to its layer: it is kept there,
     /// in the same undo step.
     pub(crate) fn vector_keep(&mut self) {
-        let Some(OpenVector { layer, stroke }) = self.vector_open.take() else { return };
+        let Some(OpenVector { layer, stroke, under }) = self.vector_open.take() else { return };
         let before = self.doc.clone();
         // (an eraser that went over nothing took nothing: kept, it would only be clutter)
         let idle = stroke.ink.erases
@@ -215,7 +310,11 @@ impl State {
                 .layer(layer)
                 .and_then(|l| l.vector.as_ref())
                 .is_some_and(|content| !stroke.reach().is_some_and(|reach| content.anything_to_erase(reach)));
-        if idle || stroke.samples().is_empty() || !self.doc.keep_stroke(layer, stroke) {
+        // Lasso Fill's Outline: the fill laid under the stroke, kept just before it
+        let filled =
+            under.is_some_and(|fill| self.doc.change_vector(layer, |content| content.push_fill(fill)).is_some());
+        let kept = !idle && !stroke.samples().is_empty() && self.doc.keep_stroke(layer, stroke);
+        if !kept && !filled {
             return;
         }
         if let Some(canvas) = self.canvas.as_mut() {
@@ -398,7 +497,12 @@ impl State {
             });
             match object {
                 Object::Fill(fill) => {
-                    self.lay_fill(layer, fill, left.as_ref(), within);
+                    // (a warp drawn as it is dragged lays its fills without reading what is under
+                    // them, where it can)
+                    let quickly = self.vector_stamps.is_some() && left.is_none() && within.is_none();
+                    if !(quickly && self.lay_fill_quickly(layer, fill)) {
+                        self.lay_fill(layer, fill, left.as_ref(), within);
+                    }
                 }
                 Object::Stroke(stroke) => {
                     let style = self.vector_style(stroke);
@@ -411,6 +515,7 @@ impl State {
                             canvas.set_selection(gpu, Some(&left.data));
                         }
                     }
+                    let (first_stamps, second_stamps) = stamps_of(self.vector_stamps.as_ref(), stroke);
                     let Some(canvas) = self.canvas.as_mut() else { return };
                     // its stamps and the copies its guide draws of them: those that reach the
                     // rectangle, drawing one only
@@ -421,7 +526,7 @@ impl State {
                             None => stamps,
                         };
                         let all = match shown_by {
-                            Some(by) => make2d_engine::vector::placed(all, by),
+                            Some(by) => procraft_engine::vector::placed(all, by),
                             None => all,
                         };
                         match within {
@@ -432,11 +537,11 @@ impl State {
                     match second {
                         Some(second) => {
                             canvas.begin_dual_stroke(layer, style, second);
-                            canvas.replace_second_stamps(&stamps(stroke.placed_second().unwrap_or_default()));
+                            canvas.replace_second_stamps(&stamps(second_stamps.unwrap_or_default()));
                         }
                         None => canvas.begin_stroke(layer, style),
                     }
-                    canvas.replace_stamps(&stamps(stroke.replay().placed_stamps()));
+                    canvas.replace_stamps(&stamps(first_stamps));
                     canvas.end_stroke();
                     if left.is_some() {
                         self.flush();
@@ -515,14 +620,15 @@ impl State {
                     None => stamps,
                 };
                 match shown_by {
-                    Some(by) => make2d_engine::vector::placed(all, by),
+                    Some(by) => procraft_engine::vector::placed(all, by),
                     None => all,
                 }
             };
-            let stamps = copies(kept.replay().placed_stamps());
+            let (first_stamps, second_stamps) = stamps_of(self.vector_stamps.as_ref(), kept);
+            let stamps = copies(first_stamps);
             let reach = if tool == StrokeTool::Paint { &mut own } else { &mut theirs };
             *reach = stamps.iter().fold(*reach, |reach, stamp| reach.union(stamp.bounds()));
-            drawn.push((style, second, stamps, copies(kept.placed_second().unwrap_or_default())));
+            drawn.push((style, second, stamps, copies(second_stamps.unwrap_or_default())));
         }
         let Scratch { doc, canvas } = self.vector_scratch.as_mut()?;
         let layer = doc.current();
@@ -635,6 +741,60 @@ impl State {
         true
     }
 
+    /// Lays `fill` on `layer` as [`State::lay_fill`] does, for a picture drawn again and again (a
+    /// warp as it is dragged): its cover worked out only across the rectangle it reaches, and laid
+    /// on the GPU over, under or out of what is there, nothing read back. (The two round a partly
+    /// covered pixel their own ways, a level of 255 apart at most.) False if it can't be laid so
+    /// (drawn for the screen), and nothing was.
+    fn lay_fill_quickly(&mut self, layer: LayerId, fill: &VectorFill) -> bool {
+        if self.vector_shown_by.is_some() {
+            return false;
+        }
+        let full = IRect::from_size(self.doc.width(), self.doc.height());
+        let mut points = fill.loops.iter().flatten().filter(|p| p.is_finite());
+        let Some(first) = points.next() else { return true };
+        let [x0, y0, x1, y1] = points.fold([first.x, first.y, first.x, first.y], |[x0, y0, x1, y1], p| {
+            [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)]
+        });
+        let rect = IRect::new(x0.floor() as i32 - 1, y0.floor() as i32 - 1, x1.ceil() as i32 + 1, y1.ceil() as i32 + 1)
+            .intersect(full);
+        if rect.is_empty() {
+            return true;
+        }
+        let (w, h) = (rect.width(), rect.height());
+        let corner = Vec2::new(rect.x0 as f32, rect.y0 as f32);
+        let mut cover = vec![0u8; w as usize * h as usize];
+        for outline in &fill.loops {
+            let outline: Vec<Vec2> = outline.iter().map(|p| *p - corner).collect();
+            let part = if fill.hard { Mask::polygon_hard(w, h, &outline) } else { Mask::polygon(w, h, &outline) };
+            // in one or the other, not both: an outline inside another cuts a hole
+            for (a, &b) in cover.iter_mut().zip(&part.data) {
+                let (x, y) = (u32::from(*a), u32::from(b));
+                *a = (x + y - (2 * x * y + 127) / 255).min(255) as u8;
+            }
+        }
+        let opacity = fill.opacity.clamp(0.0, 1.0);
+        let colour = fill.colour.map(|c| c.clamp(0.0, 1.0));
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // (premultiplied; an eraser's shape has no colour, only how much it takes)
+        let [r, g, b] = if fill.mode == FillMode::Erase { [0.0; 3] } else { colour };
+        let mut pixels = vec![0u8; cover.len() * 4];
+        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&cover) {
+            if m != 0 {
+                let k = f32::from(m) / 255.0 * opacity;
+                *px = [byte(r * k), byte(g * k), byte(b * k), byte(k)];
+            }
+        }
+        let how = match fill.mode {
+            FillMode::Over => procraft_gpu::Lay::Over,
+            FillMode::Behind => procraft_gpu::Lay::Under,
+            FillMode::Erase => procraft_gpu::Lay::Out,
+        };
+        let Some(canvas) = self.canvas.as_mut() else { return false };
+        canvas.lay_as(layer, rect, pixels, how);
+        true
+    }
+
     /// How much of each canvas pixel `fill` covers: inside its outlines by the even-odd rule,
     /// edge pixels partly (or, pixel art's, whole pixels only).
     fn fill_cover(&self, fill: &VectorFill) -> Mask {
@@ -731,7 +891,11 @@ impl State {
     /// What a vector layer holding `was` holds with the region around `seed` (canvas pixels)
     /// filled with `colour`: the region bounded by `walls`, an opening counting as a gap as readily
     /// as `factor` says, kept as a fill laid under what is there. A fill traced there before (one
-    /// the seed is inside) gives way to this one. None if nothing could be filled.
+    /// the seed is inside) gives way to this one if this covers it, all but ([`COVERS`]): the same
+    /// region poured again, or a smaller one whose lines have since gone. One that reaches further
+    /// (the colour round a shape drawn on it since, or a fill that got out through a gap into more
+    /// than this region) stays whole, and this one is laid over it. None if nothing could be
+    /// filled.
     fn poured(
         &self,
         was: &VectorContent,
@@ -740,12 +904,13 @@ impl State {
         colour: [f32; 3],
         factor: f32,
     ) -> Option<VectorContent> {
-        let traced = make2d_engine::vector_fill::trace(walls, self.doc.width(), self.doc.height(), seed, factor)?;
-        let replaced: Vec<_> = was
+        let traced = procraft_engine::vector_fill::trace(walls, self.doc.width(), self.doc.height(), seed, factor)?;
+        let (replaced, under): (Vec<_>, Vec<_>) = was
             .fills()
-            .filter(|f| f.traced.is_some() && make2d_engine::vector_fill::inside(&f.loops, seed))
-            .map(|f| f.id)
-            .collect();
+            .filter(|f| f.traced.is_some() && procraft_engine::vector_fill::inside(&f.loops, seed))
+            .partition(|f| procraft_engine::vector_fill::covered(&traced.loops, &f.loops) >= COVERS);
+        let (replaced, under): (Vec<StrokeId>, Vec<StrokeId>) =
+            (replaced.iter().map(|f| f.id).collect(), under.iter().map(|f| f.id).collect());
         let fill = VectorFill {
             id: was.next_id(),
             loops: traced.loops,
@@ -756,7 +921,7 @@ impl State {
             traced: Some(TracedFrom {
                 seed,
                 factor,
-                sources: traced.sources.into_iter().map(make2d_engine::vector::StrokeId).collect(),
+                sources: traced.sources.into_iter().map(procraft_engine::vector::StrokeId).collect(),
             }),
             takes_from: None,
         };
@@ -764,24 +929,28 @@ impl State {
         for id in replaced {
             now.remove(id);
         }
-        now.push_fill(fill);
+        now.push_fill_over(fill, &under);
         Some(now)
     }
 
     /// ColorDrop on vector layer `layer`: `colour` dropped at `seed` (canvas pixels) with
     /// `threshold` (0..1) fills the region around it that the strokes' lines bound, shown at once.
-    /// The lines are the reference layer's if another vector layer is it, else this layer's own.
+    /// The lines are those of [`State::vector_fill_lines`]: every vector layer's that shows with
+    /// All Layers on, else the reference layer's if another vector layer is it, else this layer's
+    /// own.
     /// The drop stays open, to be traced again as its threshold, point or colour changes, until
     /// [`State::vector_pour_end`] makes it one undo step. False if there is nothing to fill from
     /// (no lines at all, and no region found).
     pub(crate) fn vector_pour_begin(&mut self, layer: LayerId, seed: Vec2, colour: [f32; 3], threshold: f32) -> bool {
         self.finish_stroke();
         self.settle();
-        let lines = self.doc.reference().filter(|&r| r != layer && self.doc.is_vector(r)).unwrap_or(layer);
-        let Some(walls) = self.doc.layer(lines).and_then(|l| l.vector.as_ref()).map(|c| c.walls()) else {
-            return false;
-        };
         let Some(was) = self.doc.layer(layer).and_then(|l| l.vector.clone()) else { return false };
+        let walls: Vec<Wall> = self
+            .vector_fill_lines(layer)
+            .into_iter()
+            .filter_map(|id| self.doc.layer(id).and_then(|l| l.vector.as_ref()))
+            .flat_map(|content| content.walls())
+            .collect();
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.mark_steps();
         }
@@ -895,10 +1064,26 @@ impl State {
     /// Whether canvas point `at` on vector layer `layer` is unfilled, for a Continuous drag: no
     /// fill there, nor a stroke's ink, on the layer or on the layer whose lines it fills up to.
     pub(crate) fn vector_unfilled(&self, layer: LayerId, at: Vec2) -> bool {
-        let lines = self.doc.reference().filter(|&r| r != layer && self.doc.is_vector(r)).unwrap_or(layer);
         let clear =
             |id| self.doc.layer(id).and_then(|l| l.vector.as_ref()).is_none_or(|c| c.object_at(at, 0.0).is_none());
-        clear(layer) && clear(lines)
+        clear(layer) && self.vector_fill_lines(layer).into_iter().all(clear)
+    }
+
+    /// The vector layers whose strokes' lines a fill on vector layer `layer` stops at. With All
+    /// Layers on (as a fill on any other layer measures every layer that shows): every vector layer
+    /// that shows, and `layer` itself, shown or not. Else the reference layer alone if another
+    /// vector layer is it, else `layer` alone.
+    fn vector_fill_lines(&self, layer: LayerId) -> Vec<LayerId> {
+        if self.pour_all_layers {
+            return self
+                .doc
+                .layers()
+                .iter()
+                .filter(|l| l.vector.is_some() && (l.id == layer || self.doc.shows(l.id)))
+                .map(|l| l.id)
+                .collect();
+        }
+        vec![self.doc.reference().filter(|&r| r != layer && self.doc.is_vector(r)).unwrap_or(layer)]
     }
 
     /// A Continuous drag on vector layer `layer` reached unfilled `seed` (canvas pixels): the open
@@ -1064,7 +1249,7 @@ impl State {
                         x0 + (x1 - x0) * ((i % 24) as f32 + 0.5) / 24.0,
                         y0 + (y1 - y0) * ((i / 24) as f32 + 0.5) / 24.0,
                     );
-                    make2d_engine::vector_fill::inside(&fill.loops, p).then_some(p)
+                    procraft_engine::vector_fill::inside(&fill.loops, p).then_some(p)
                 });
                 fill.mode != FillMode::Erase && mostly(&mut inside)
             }
@@ -1195,6 +1380,190 @@ impl State {
         }
         self.selection = selection;
         self.show_selection();
+    }
+
+    /// The open transform of a vector layer has its mesh up: from now on its strokes are shown
+    /// drawn through it ([`VectorWarp`]), when the next frame is ([`State::vector_warp_draw`]).
+    /// The picture of them that was being moved is put back and the layer's pixels held. False if
+    /// there is nothing to show so (no such transform, or nothing to draw on), and the picture is
+    /// pulled through the mesh as any layer's is.
+    pub(crate) fn vector_warp_begin(&mut self) -> bool {
+        if self.vector_warp.is_some() {
+            return true;
+        }
+        let Some(layer) = self.vector_transform else { return false };
+        let Some(content) = self.doc.layer(layer).and_then(|l| l.vector.clone()) else { return false };
+        if self.canvas.is_none() || self.gpu.is_none() {
+            return false;
+        }
+        // picked up onto a layer of their own, that layer holds just them: all it holds is bent
+        let (target, from, ids) = match &self.vector_lifted {
+            Some(lifted) => (lifted.lifted, Arc::new(content.part(&lifted.ids, true)), Some(lifted.ids.clone())),
+            None => (layer, content, self.vector_selected(layer)),
+        };
+        let whole = self.vector_lifted.is_some() || ids.is_none();
+        let moved: Vec<LayerId> = std::iter::once(target).chain(self.doc.mask_of(target)).collect();
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.end_transform(false);
+            canvas.hold_layer_quietly(target);
+        }
+        self.vector_warp = Some(VectorWarp { target, moved, from, ids, whole, stamps: None, shown: None, drawn: None });
+        true
+    }
+
+    /// The warp shown ([`VectorWarp`]) brought up to the mesh as it is now, if it moved since it
+    /// was last drawn, or its handle was let go and its strokes are to be drawn exactly. Called as
+    /// each frame is drawn; one that takes long is put off (unless `now`) until twice as long as
+    /// it took has passed since the last, and says so (true: draw another frame soon).
+    pub(crate) fn vector_warp_draw(&mut self, now: bool) -> bool {
+        let Some((mesh, source, held)) =
+            self.transform.as_ref().and_then(|t| Some((t.warp()?, t.source(), t.dragging())))
+        else {
+            return false;
+        };
+        let Some(warp) = self.vector_warp.as_ref() else { return false };
+        // roughly while a handle is held (and after, where exactly takes too long): but only what
+        // goes through the mesh whole can be
+        let quick_enough = warp.stamps.as_ref().is_none_or(|(_, exact)| *exact);
+        let exactly = !warp.whole || (!held && quick_enough);
+        if warp.shown.is_some_and(|(shown, exact)| shown == mesh && (exact || !exactly)) {
+            return false;
+        }
+        let started = std::time::Instant::now();
+        if !now
+            && let Some((at, took)) = warp.drawn
+            && took > WARP_EVERY_FRAME
+            && started.duration_since(at) < took * 2
+        {
+            return true;
+        }
+        let Some(mut warp) = self.vector_warp.take() else { return false };
+        // each stroke's stamps as they lie unbent, the first time: what drawing them roughly
+        // starts from, and (by how long they took) how long drawing them exactly would
+        if warp.whole && warp.stamps.is_none() {
+            let stamps: StrokeStamps = warp.from.strokes().map(|stroke| (stroke.id, stamps_of(None, stroke))).collect();
+            // (a bent stroke's input is closer set than the stroke's own: drawing it again takes
+            // about half as long again)
+            let exact = started.elapsed() * 3 / 2 <= WARP_EXACT_WITHIN;
+            warp.stamps = Some((Arc::new(stamps), exact));
+        }
+        let exactly = !warp.whole || (!held && warp.stamps.as_ref().is_none_or(|(_, exact)| *exact));
+        let [top_left, top_right, _, bottom_left] = source;
+        let (w, h) = (top_right.x - top_left.x, bottom_left.y - top_left.y);
+        let through = |p: Vec2| procraft_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h);
+        let flat = !(w.abs() > 1e-6 && h.abs() > 1e-6);
+        // (the transform is set aside while they are drawn: what settles the canvas on the way, a
+        // fill reading what is under it, would end it)
+        let (transform, of) = (self.transform.take(), self.vector_transform.take());
+        match warp.stamps.as_ref().filter(|_| !exactly && !flat) {
+            Some((stamps, _)) => {
+                // the stamps where the mesh takes them, as big as they were; the fills' outlines
+                // carried; all else as it is
+                let carried = |stamps: &[Stamp]| -> Vec<Stamp> {
+                    stamps
+                        .iter()
+                        .map(|stamp| Stamp { center: through(stamp.center), ..*stamp })
+                        .filter(|stamp| stamp.center.is_finite())
+                        .collect()
+                };
+                let put: StrokeStamps = stamps
+                    .iter()
+                    .map(|(id, (first, second))| (*id, (carried(first), second.as_deref().map(carried))))
+                    .collect();
+                let mut content = (*warp.from).clone();
+                content.bend_fills(&through);
+                self.vector_stamps = Some(put);
+                self.draw_vector(warp.target, &content, None);
+                self.vector_stamps = None;
+            }
+            None => {
+                let mut bent = (*warp.from).clone();
+                Carried::Warped { mesh, source }.carry(&mut bent, warp.ids.as_deref());
+                self.draw_vector(warp.target, &bent, None);
+            }
+        }
+        self.transform = transform;
+        self.vector_transform = of;
+        warp.shown = Some((mesh, exactly));
+        warp.drawn = Some((std::time::Instant::now(), started.elapsed()));
+        self.vector_warp = Some(warp);
+        false
+    }
+
+    /// The warp shown ([`VectorWarp`]) ends: the layer's pixels back as they were before it. Its
+    /// layers, to take their picture up again if the transform goes on without a mesh; none if no
+    /// warp was shown.
+    pub(crate) fn vector_warp_end(&mut self) -> Option<Vec<LayerId>> {
+        let warp = self.vector_warp.take()?;
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.release_layer(false, None);
+        }
+        Some(warp.moved)
+    }
+
+    /// How many kinds of thing vector layer `layer` holds (lines, lassos, fills: see
+    /// [`ObjectKind`]): Separate Objects has something to do with two or more.
+    pub(crate) fn vector_kinds(&self, layer: LayerId) -> usize {
+        let content = self.doc.layer(layer).and_then(|l| l.vector.as_ref());
+        content.map_or(0, |c| {
+            ObjectKind::ALL.iter().filter(|k| c.objects().iter().any(|o| ObjectKind::of(o) == Some(**k))).count()
+        })
+    }
+
+    /// Separate Objects: vector layer `layer`'s lines, lassos and fills each given a vector layer
+    /// of its own, as one undo step. The layer keeps the first kind it has (its lines, if it has
+    /// any); each other kind goes to a new layer just under it, named after it ("Layer 3 Fills"),
+    /// lassos over fills: lines over colour, as colouring is stacked. Each layer has the erasers'
+    /// marks that were made on what it holds. What showed is the same but where a lasso's shape
+    /// lay over a line, which is now over it, and where an eraser took only part of one kind
+    /// lying over another (each is erased alone, so the lower shows through the upper). False if
+    /// the layer holds one kind only (or is no vector layer, or locked), or the canvas has no room
+    /// for the layers.
+    pub(crate) fn vector_separate(&mut self, layer: LayerId) -> bool {
+        self.finish_stroke();
+        self.settle();
+        if self.doc.is_locked(layer) || self.scene_shown() || self.canvas.is_none() || self.gpu.is_none() {
+            return false;
+        }
+        let Some(was) = self.doc.layer(layer).and_then(|l| l.vector.clone()) else { return false };
+        let name = self.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
+        let mut parts = ObjectKind::ALL.into_iter().zip(was.separated()).filter_map(|(kind, part)| Some((kind, part?)));
+        let Some((_, stays)) = parts.next() else { return false };
+        let moved: Vec<(ObjectKind, VectorContent)> = parts.collect();
+        if moved.is_empty() || !self.doc.has_room(moved.len()) {
+            return false;
+        }
+        // (what is selected on a vector layer is strokes and fills of it: some are leaving it)
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.mark_steps();
+        }
+        self.let_go_of_selection();
+        let before = self.doc.clone();
+        // each under the one before it
+        let mut made = Vec::new();
+        let mut above = layer;
+        for (kind, part) in moved {
+            let Some(new) = self.doc.add_vector_layer_below(above, format!("{name} {}", kind.name()), part.clone())
+            else {
+                break;
+            };
+            made.push((new, part));
+            above = new;
+        }
+        self.doc.set_vector(layer, stays);
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.name_next_step("Separate Objects");
+            canvas.record_document(before);
+        }
+        for (new, part) in &made {
+            self.draw_vector(*new, part, None);
+        }
+        self.redraw_vector_changed(layer, &was);
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.collapse_steps();
+        }
+        self.revision += 1;
+        true
     }
 
     /// The selection let go of, as one undo step, if there is one: before something is drawn on a
@@ -1606,7 +1975,7 @@ impl CanvasSession {
         st.let_go_of_selection();
         let hard = st.lasso_pixelated(lasso);
         let Some(points) = st.to_canvas_points(window) else { return true };
-        let points = if hard { make2d_engine::pixel::stepped(&points, true) } else { points };
+        let points = if hard { procraft_engine::pixel::stepped(&points, true) } else { points };
         let opacity = if lasso.tool_opacity { st.sliders(st.tool).opacity } else { st.fill_opacity };
         if st.vector_lasso(current, points, hard, lasso.erase, opacity) {
             self.shared.frame(st);
@@ -1627,6 +1996,21 @@ impl CanvasSession {
             Some(d.add_vector_layer().0)
         })
         .unwrap_or(0)
+    }
+
+    /// Separate Objects: vector layer `id`'s lines, lassos (shapes drawn by hand) and fills
+    /// (traced from lines) each given a vector layer of its own, as one undo step: the layer keeps
+    /// its lines, and its lassos and its fills go to new layers just under it, lassos over fills,
+    /// named after it. False if it holds one kind only, is no vector layer or is locked, or the
+    /// canvas has no room for the layers.
+    pub fn separate_vector_objects(&self, id: u64) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let done = st.vector_separate(LayerId(id));
+        if done {
+            self.shared.frame(st);
+        }
+        done
     }
 
     /// Whether layer `id` is a vector layer.
@@ -1753,10 +2137,10 @@ impl CanvasSession {
 mod tests {
     use std::sync::Arc;
 
-    use make2d_engine::document::LayerId;
-    use make2d_engine::geom::Vec2;
-    use make2d_engine::view::View;
-    use make2d_gpu::{Gpu, wgpu};
+    use procraft_engine::document::LayerId;
+    use procraft_engine::geom::Vec2;
+    use procraft_engine::view::View;
+    use procraft_gpu::{Gpu, wgpu};
 
     use super::{LIFTED_NAME, VectorApply, VectorEraser};
     use crate::selection::LassoFill;
@@ -1808,7 +2192,7 @@ mod tests {
 
     #[test]
     fn a_canvas_in_display_p3_shares_its_shapes_in_srgb_and_takes_svg_colours_into_p3() {
-        use make2d_engine::profile::Profile;
+        use procraft_engine::profile::Profile;
         let Some(s) = session() else { return };
         let layer = s.add_vector_layer();
         let colour = [0.2, 0.5, 0.8];
@@ -2143,6 +2527,100 @@ mod tests {
         let around = pixels(&s, layer);
         assert_eq!(pixel(&around, 20, 280), [0, 255, 0, 255]);
         assert_eq!(pixel(&around, 150, 150)[3], 0);
+    }
+
+    #[test]
+    fn with_all_layers_a_fill_stops_at_the_lines_of_every_vector_layer_that_shows() {
+        let Some(s) = session() else { return };
+        // the lines on one vector layer, the colour poured on another
+        let lines = s.add_vector_layer();
+        boxed(&s);
+        let colours = s.add_vector_layer();
+        // on its own layer, which has no lines, the fill is the whole canvas
+        assert!(s.pour_drop(150.0, 150.0, 1.0, 0.0, 0.0, 0.5));
+        assert_eq!(pixel(&pixels(&s, colours), 40, 150), [255, 0, 0, 255]);
+        s.undo();
+        assert_eq!(s.vector_fill_count(colours), 0);
+        // with All Layers it stops at the other layer's lines: the box's inside, on this layer
+        s.set_pour_all_layers(true);
+        assert!(s.pour_drop(150.0, 150.0, 1.0, 0.0, 0.0, 0.5));
+        assert_eq!((s.vector_fill_count(colours), s.vector_fill_count(lines)), (1, 0));
+        let filled = pixels(&s, colours);
+        assert_eq!(pixel(&filled, 150, 150), [255, 0, 0, 255]);
+        assert_eq!(pixel(&filled, 40, 150)[3], 0, "outside the box");
+        assert_eq!(s.undo().as_deref(), Some("ColorDrop"));
+        // lines that don't show are no lines
+        assert!(s.set_layer_visible(lines, false));
+        assert!(s.pour_drop(150.0, 150.0, 1.0, 0.0, 0.0, 0.5));
+        assert_eq!(pixel(&pixels(&s, colours), 40, 150), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_fill_inside_another_leaves_the_rest_of_it_and_lies_over_it() {
+        let Some(s) = session() else { return };
+        let layer = s.add_vector_layer();
+        // a box, and green poured round it: the rest of the canvas
+        boxed(&s);
+        assert!(s.pour_drop(20.0, 20.0, 0.0, 1.0, 0.0, 0.5));
+        assert_eq!(pixel(&pixels(&s, layer), 20, 280), [0, 255, 0, 255]);
+        // a small box drawn on the green, and red poured inside that: the green stays everywhere
+        // else, and the red shows in the small box, over it and under the lines
+        s.set_color(0.0, 0.0, 0.0);
+        straight(&s, (8.0, 10.0), (52.0, 10.0));
+        straight(&s, (50.0, 8.0), (50.0, 52.0));
+        straight(&s, (52.0, 50.0), (8.0, 50.0));
+        straight(&s, (10.0, 52.0), (10.0, 8.0));
+        let lined = pixels(&s, layer);
+        assert!(s.pour_drop(30.0, 30.0, 1.0, 0.0, 0.0, 0.5));
+        let both = pixels(&s, layer);
+        assert_eq!(s.vector_fill_count(layer), 2);
+        assert_eq!(pixel(&both, 30, 30), [255, 0, 0, 255]);
+        assert_eq!(pixel(&both, 20, 280), [0, 255, 0, 255], "the green still there");
+        assert_eq!(pixel(&both, 280, 20), [0, 255, 0, 255]);
+        assert_eq!(pixel(&both, 30, 10), pixel(&lined, 30, 10), "the line over both");
+        assert_eq!(pixel(&both, 150, 150)[3], 0, "the big box still empty");
+        // drawn again from what the layer holds: the same picture
+        assert!(s.redraw_vector_layer(layer));
+        assert_eq!(furthest(&pixels(&s, layer), &both), 0);
+        s.undo();
+        // one step, which leaves the green as it was
+        assert_eq!(s.undo().as_deref(), Some("ColorDrop"));
+        assert_eq!(furthest(&pixels(&s, layer), &lined), 0);
+        // poured again in the small box, in blue: that takes the red's place, and the green stays
+        assert!(s.pour_drop(30.0, 30.0, 1.0, 0.0, 0.0, 0.5));
+        assert!(s.pour_drop(32.0, 28.0, 0.0, 0.0, 1.0, 0.5));
+        let again = pixels(&s, layer);
+        assert_eq!(s.vector_fill_count(layer), 2);
+        assert_eq!(pixel(&again, 30, 30), [0, 0, 255, 255]);
+        assert_eq!(pixel(&again, 20, 280), [0, 255, 0, 255]);
+        // the eraser inside the small box (through the blue and the green under it), then poured
+        // there once more: the new fill is whole, made after the eraser's mark, which stays on
+        // what it was made on
+        s.set_tool(ToolKind::Erase);
+        s.set_brush_size(0.05);
+        straight(&s, (27.0, 30.0), (33.0, 30.0));
+        s.set_tool(ToolKind::Paint);
+        let erased = pixels(&s, layer);
+        assert!(pixel(&erased, 30, 30)[3] < 255, "erased through both");
+        assert_eq!(pixel(&erased, 30, 10), pixel(&lined, 30, 10), "and none of the lines");
+        assert_eq!(pixel(&erased, 50, 30), pixel(&lined, 50, 30));
+        assert!(s.pour_drop(30.0, 42.0, 1.0, 1.0, 0.0, 0.5));
+        let whole = pixels(&s, layer);
+        assert_eq!(s.vector_fill_count(layer), 2);
+        assert_eq!(pixel(&whole, 30, 30), [255, 255, 0, 255], "filled where the eraser went");
+        assert_eq!(pixel(&whole, 30, 42), [255, 255, 0, 255]);
+        assert_eq!(pixel(&whole, 20, 280), [0, 255, 0, 255]);
+        {
+            let st = s.shared.lock();
+            let content = st.doc.layer(LayerId(layer)).unwrap().vector.clone().unwrap();
+            let fills: Vec<_> = content.fills().map(|f| f.id).collect();
+            let eraser = content.strokes().find(|k| k.ink.erases).unwrap();
+            let takes = eraser.takes_from.clone().expect("it names what it took from");
+            // (the green, made before it; not the yellow, made after)
+            assert!(takes.iter().filter(|id| fills.contains(id)).count() == 1, "{takes:?} {fills:?}");
+        }
+        assert!(s.redraw_vector_layer(layer));
+        assert_eq!(furthest(&pixels(&s, layer), &whole), 0);
     }
 
     #[test]
@@ -3187,7 +3665,7 @@ mod tests {
         st.draw_frame(&view, format, (300, 300), Default::default(), std::time::Instant::now());
         let gpu = st.gpu.as_ref().unwrap();
         assert_eq!(gpu.errors(), 0, "GPU validation errors");
-        make2d_gpu::read_texture(gpu, &target, 300, 300).unwrap()
+        procraft_gpu::read_texture(gpu, &target, 300, 300).unwrap()
     }
 
     #[test]
@@ -3498,6 +3976,231 @@ mod tests {
         assert!(selected(&s, 150, 70) && !selected(&s, 150, 100));
         s.redo();
         assert!(!s.has_selection());
+    }
+
+    /// A frame drawn with the open warp's strokes drawn for it whatever the last took (a slow one
+    /// is otherwise put off a while, which a test run beside others can be).
+    fn warp_frame(s: &CanvasSession) -> Vec<u8> {
+        s.shared.lock().vector_warp_draw(true);
+        frame(s)
+    }
+
+    /// Layer `layer`'s pixels as they are shown now, with whatever is open left open.
+    fn shown_pixels(s: &CanvasSession, layer: u64) -> Vec<u8> {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        st.flush();
+        st.canvas.as_mut().unwrap().read_layer(st.gpu.as_ref().unwrap(), LayerId(layer)).unwrap()
+    }
+
+    #[test]
+    fn separate_objects_gives_lines_lassos_and_fills_a_vector_layer_each() {
+        let Some(s) = session() else { return };
+        // a box of lines, red poured inside it (a fill traced from them), a blue shape drawn by
+        // hand inside that, and a stroke of the eraser across the lot
+        let layer = s.add_vector_layer();
+        let separates = |s: &CanvasSession, id: u64| {
+            s.layer_options(id).into_iter().find(|r| r.option == crate::LayerOption::SeparateObjects).map(|r| r.enabled)
+        };
+        boxed(&s);
+        // lines alone: nothing to tell apart
+        assert_eq!(separates(&s, layer), Some(false));
+        assert!(!s.separate_vector_objects(layer));
+        assert!(s.pour_drop(150.0, 150.0, 1.0, 0.0, 0.0, 0.5));
+        s.set_color(0.0, 0.0, 1.0);
+        s.fill_polygon(
+            vec![100.0, 100.0, 140.0, 100.0, 140.0, 140.0, 100.0, 140.0],
+            LassoFill { erase: false, tool_opacity: false },
+        );
+        s.set_tool(ToolKind::Erase);
+        s.set_brush_size(0.2);
+        straight(&s, (60.0, 120.0), (240.0, 120.0));
+        s.set_tool(ToolKind::Paint);
+        let before = pixels(&s, layer);
+        let shown = frame(&s);
+        let names = |s: &CanvasSession| s.layers().iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+        let was = names(&s);
+        let own = was[0].clone();
+        assert_eq!(separates(&s, layer), Some(true));
+        assert!(s.separate_vector_objects(layer));
+        // the layer keeps its lines; its lassos and its fills are on layers of their own under it
+        let now = names(&s);
+        assert_eq!(now.len(), was.len() + 2);
+        assert_eq!(now[..3], [own.clone(), format!("{own} Lassos"), format!("{own} Fills")]);
+        let ids: Vec<u64> = s.layers().iter().take(3).map(|l| l.id).collect();
+        assert_eq!(ids[0], layer);
+        assert!(s.layers().iter().take(3).all(|l| l.vector));
+        assert!(s.layers().iter().find(|l| l.id == layer).unwrap().current);
+        let kinds = |id: u64| {
+            use procraft_engine::vector::ObjectKind;
+            let st = s.shared.lock();
+            let content = st.doc.layer(LayerId(id)).unwrap().vector.clone().unwrap();
+            let count = |kind| content.objects().iter().filter(|o| ObjectKind::of(o) == Some(kind)).count();
+            [count(ObjectKind::Line), count(ObjectKind::Lasso), count(ObjectKind::Fill)]
+        };
+        assert_eq!([kinds(ids[0]), kinds(ids[1]), kinds(ids[2])], [[4, 0, 0], [0, 1, 0], [0, 0, 1]]);
+        // together they show what the one layer showed, the eraser's mark on each (where it
+        // took only part and one kind lies over another, the lower shows through what is left of
+        // the upper: each is erased alone)
+        let away = |rgba: &[u8]| -> Vec<u8> {
+            (0..300)
+                .filter(|y| !(105..135).contains(y))
+                .flat_map(|y| (0..300).flat_map(move |x| pixel(rgba, x, y)))
+                .collect()
+        };
+        let apart = frame(&s);
+        assert!(furthest(&away(&apart), &away(&shown)) <= 1, "{}", furthest(&away(&apart), &away(&shown)));
+        let (lines, lassos, fills) = (pixels(&s, ids[0]), pixels(&s, ids[1]), pixels(&s, ids[2]));
+        assert_eq!(pixel(&lines, 150, 80), pixel(&before, 150, 80));
+        assert_eq!(pixel(&lines, 150, 150)[3], 0, "no fill left on the lines' layer");
+        assert_eq!(pixel(&lassos, 120, 135), [0, 0, 255, 255]);
+        assert_eq!(pixel(&lassos, 180, 180)[3], 0);
+        assert_eq!(pixel(&fills, 180, 180), [255, 0, 0, 255]);
+        assert_eq!(pixel(&fills, 120, 135), [255, 0, 0, 255], "the fill whole under the shape");
+        assert_eq!(pixel(&lassos, 120, 120)[3], pixel(&before, 120, 120)[3], "erased as it was");
+        assert_eq!(pixel(&fills, 180, 120)[3], pixel(&before, 180, 120)[3]);
+        assert!(pixel(&fills, 180, 120)[3] < 255);
+        // each is drawn again from what it holds just as it is
+        for (id, was) in ids.iter().zip([&lines, &lassos, &fills]) {
+            assert!(s.redraw_vector_layer(*id));
+            assert_eq!(furthest(&pixels(&s, *id), was), 0);
+            s.undo();
+        }
+        // nothing more to separate on any of them
+        assert!(ids.iter().all(|id| separates(&s, *id) == Some(false)));
+        // one step
+        assert_eq!(s.undo().as_deref(), Some("Separate Objects"));
+        assert_eq!(names(&s), was);
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        assert_eq!(furthest(&frame(&s), &shown), 0);
+        // no lines: the lassos stay, the fills go under them
+        let fills_only = s.add_vector_layer();
+        s.set_pour_all_layers(true);
+        assert!(s.pour_drop(150.0, 150.0, 0.0, 1.0, 0.0, 0.5));
+        s.fill_polygon(vec![10.0, 10.0, 30.0, 10.0, 30.0, 30.0], LassoFill { erase: false, tool_opacity: false });
+        let own = s.layers().iter().find(|l| l.id == fills_only).unwrap().name.clone();
+        assert!(s.separate_vector_objects(fills_only));
+        let at = s.layers().iter().position(|l| l.id == fills_only).unwrap();
+        assert_eq!(s.layers()[at + 1].name, format!("{own} Fills"));
+        assert_eq!(s.layers().len(), was.len() + 2);
+    }
+
+    #[test]
+    fn a_warp_is_drawn_roughly_while_a_handle_is_held_and_exactly_when_it_is_let_go() {
+        let Some(s) = session() else { return };
+        // a box of lines, red poured inside it (a fill laid under them), and a blue shape over
+        let layer = s.add_vector_layer();
+        boxed(&s);
+        assert!(s.pour_drop(150.0, 150.0, 1.0, 0.0, 0.0, 0.5));
+        s.set_color(0.0, 0.0, 1.0);
+        s.fill_polygon(
+            vec![100.0, 100.0, 140.0, 100.0, 140.0, 140.0, 100.0, 140.0],
+            LassoFill { erase: false, tool_opacity: false },
+        );
+        let before = pixels(&s, layer);
+        assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+        s.transform_set_kind(crate::TransformKind::Warp);
+        let shown =
+            |s: &CanvasSession| s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown).map(|(_, exact)| exact);
+        // the mesh up and nothing held: drawn exactly (and no differently yet: nothing has moved,
+        // but for how a stroke's input is spaced once it is bent)
+        warp_frame(&s);
+        assert_eq!(shown(&s), Some(true));
+        // a handle held and dragged: drawn roughly, each stroke's stamps where the mesh takes them
+        s.transform_grab(crate::TransformHandle::Mesh { index: 5 }, 150.0, 150.0);
+        s.transform_drag(170.0, 120.0);
+        warp_frame(&s);
+        assert_eq!(shown(&s), Some(false));
+        let rough = shown_pixels(&s, layer);
+        assert_ne!(furthest(&rough, &before), 0);
+        // let go: exactly, which is what keeping it leaves
+        s.transform_release();
+        warp_frame(&s);
+        assert_eq!(shown(&s), Some(true));
+        let exact = shown_pixels(&s, layer);
+        // the two are all but the same picture: lines as wide in both, the fills alike
+        let differ = rough
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(exact.as_chunks::<4>().0)
+            .filter(|(a, b)| a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 96))
+            .count();
+        assert!(differ * 50 < painted(&exact), "{differ} of {}", painted(&exact));
+        let ink =
+            |rgba: &[u8]| rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 128 && px[0] < 64 && px[2] < 64).count();
+        assert!(ink(&rough).abs_diff(ink(&exact)) * 20 < ink(&exact), "{} {}", ink(&rough), ink(&exact));
+        assert_eq!(pixel(&rough, 180, 180), [255, 0, 0, 255]);
+        assert_eq!(pixel(&exact, 180, 180), [255, 0, 0, 255]);
+        s.transform_end(true);
+        assert_eq!(furthest(&pixels(&s, layer), &exact), 0);
+        assert_eq!(s.undo().as_deref(), Some("warp transform"));
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+    }
+
+    #[test]
+    fn a_warp_shows_the_strokes_bent_as_keeping_it_leaves_them() {
+        let Some(s) = session() else { return };
+        let layer = two_lines_and_a_square(&s);
+        let before = pixels(&s, layer);
+        let plain = frame(&s);
+        // the whole layer warped: as a frame is drawn, the layer shows its strokes bent through
+        // the mesh, each as wide as it was, which is just what keeping the warp leaves
+        assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+        warp_up(&s);
+        let shown_frame = warp_frame(&s);
+        let shown = shown_pixels(&s, layer);
+        assert!((64..76).any(|row| pixel(&shown, 150, row)[3] > 128), "ink where it is bent to");
+        assert_eq!(pixel(&shown, 150, 100)[3], 0, "and none where it was");
+        // (the mesh as it is, drawn already: another frame draws nothing again)
+        assert!(!s.shared.lock().vector_warp_draw(true));
+        s.transform_end(true);
+        assert_eq!(furthest(&pixels(&s, layer), &shown), 0, "kept, it is what was shown");
+        assert_eq!(furthest(&frame(&s), &shown_frame), 0);
+        // one step, however many times it was drawn meanwhile
+        assert_eq!(s.undo().as_deref(), Some("warp transform"));
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        assert!(s.shared.lock().vector_warp.is_none());
+        // called off: the layer as it was, with nothing of it left to undo or redo
+        let step = s.shared.lock().canvas.as_ref().unwrap().undo_step();
+        assert!(s.transform_begin().is_some());
+        warp_up(&s);
+        warp_frame(&s);
+        assert_ne!(furthest(&shown_pixels(&s, layer), &before), 0);
+        s.transform_end(false);
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        assert_eq!(s.shared.lock().canvas.as_ref().unwrap().undo_step(), step);
+        assert_eq!(furthest(&frame(&s), &plain), 0);
+        // the first line alone, picked up onto a layer of its own: shown bent there, the rest of
+        // its layer whole under it
+        s.select_shape(false, 30.0, 80.0, 70.0, 120.0, SelectionJoin::Add);
+        assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+        warp_up(&s);
+        let shown_frame = warp_frame(&s);
+        assert_eq!(pixel(&shown_pixels(&s, layer), 150, 200), pixel(&before, 150, 200), "the line not picked");
+        s.transform_end(true);
+        let kept = pixels(&s, layer);
+        assert!((64..76).any(|row| pixel(&kept, 150, row)[3] > 128));
+        assert_eq!(furthest(&frame(&s), &shown_frame), 0, "kept, it is what was shown");
+        // (a transform kept lets go of the selection, a step of its own)
+        assert_eq!(s.undo().as_deref(), Some("clear selection"));
+        assert_eq!(s.undo().as_deref(), Some("warp transform"));
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        s.select_none();
+        // the mesh taken back: the picture of the strokes is moved again, as in any other transform
+        assert!(s.transform_begin().is_some());
+        warp_up(&s);
+        warp_frame(&s);
+        assert!(s.shared.lock().vector_warp.is_some());
+        s.transform_apply(crate::TransformAction::Reset);
+        assert!(s.shared.lock().vector_warp.is_none());
+        assert_eq!(furthest(&shown_pixels(&s, layer), &before), 0);
+        // (and the mesh up again shows them bent again)
+        warp_up(&s);
+        warp_frame(&s);
+        assert_eq!(furthest(&shown_pixels(&s, layer), &shown), 0);
+        s.transform_end(true);
+        assert_eq!(furthest(&pixels(&s, layer), &shown), 0);
     }
 
     #[test]

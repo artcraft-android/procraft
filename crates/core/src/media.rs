@@ -17,10 +17,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use make2d_engine::animatic;
-use make2d_engine::document::Document;
-use make2d_engine::media::{MEDIA_FOLDER, media_extension, media_id_of};
-use make2d_engine::timeline::{ClipContent, ClipId, Media, MediaId, MediaKind, Timeline, TrackId};
+use procraft_engine::animatic;
+use procraft_engine::document::Document;
+use procraft_engine::media::{MEDIA_FOLDER, media_extension, media_id_of};
+use procraft_engine::timeline::{ClipContent, ClipId, Media, MediaId, MediaKind, Timeline, TrackId};
 
 use crate::layers::ThumbnailImage;
 use crate::project::file_error;
@@ -159,7 +159,7 @@ struct Places {
 
 /// Where media brought in waits until a save copies it into an artwork's folder.
 fn waiting_folder() -> PathBuf {
-    std::env::temp_dir().join("make2d-media")
+    std::env::temp_dir().join("procraft-media")
 }
 
 impl MediaStore {
@@ -203,15 +203,15 @@ impl MediaStore {
     }
 }
 
-impl make2d_gpu::VideoSource for MediaStore {
-    fn picture(&self, media: MediaId, seconds: f64) -> Option<make2d_gpu::VideoPicture> {
+impl procraft_gpu::VideoSource for MediaStore {
+    fn picture(&self, media: MediaId, seconds: f64) -> Option<procraft_gpu::VideoPicture> {
         let path = self.path_of(media)?;
         let (frames, side) = {
             let p = self.places();
             (p.frames.clone()?, p.side)
         };
         let image = frames.picture(path.to_string_lossy().into_owned(), seconds, side)?;
-        Some(make2d_gpu::VideoPicture { width: image.width, height: image.height, rgba: image.rgba })
+        Some(procraft_gpu::VideoPicture { width: image.width, height: image.height, rgba: image.rgba })
     }
 }
 
@@ -546,7 +546,7 @@ fn timing_track(
     start: u32,
     duration: u32,
     holds: &[AnimaticHold],
-    layers: &[make2d_engine::document::LayerId],
+    layers: &[procraft_engine::document::LayerId],
 ) -> Option<TrackId> {
     let track = tl.add_track(name);
     // just above the video's track

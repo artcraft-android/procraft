@@ -25,7 +25,7 @@ pub struct CanvasPreset {
     pub time_lapse_quality: u32,
     pub time_lapse_hevc: bool,
     pub profile: String,
-    /// An HDR canvas: light above white kept (see `make2d_engine::document::DynamicRange`).
+    /// An HDR canvas: light above white kept (see `procraft_engine::document::DynamicRange`).
     pub hdr: bool,
 }
 
@@ -49,7 +49,7 @@ impl CanvasPreset {
 
     fn pixels(&self, v: f32) -> u32 {
         let px = per_inch(self.unit.clone()).map_or(v, |k| v / k * self.dpi);
-        (px.round().max(1.0) as u32).min(MAX_SIDE).min(make2d_engine::document::canvas_edge_most())
+        (px.round().max(1.0) as u32).min(MAX_SIDE).min(procraft_engine::document::canvas_edge_most())
     }
 
     fn to_json(&self) -> serde_json::Value {

@@ -50,6 +50,29 @@ impl Timeline {
 }
 
 impl Timeline {
+    /// Clips `ids` each made to last through the empty frames after it on its track: up to the
+    /// next clip there or, with none after it, to the end of the timeline it is on (the
+    /// document's; a group's own, which is as long as the group lasts, or as one cycle of it). Its
+    /// start, and what it holds from there, stay put; a sound or video goes no further than its
+    /// file lasts. One that has no empty frame after it is left as it is. Whether any grew.
+    pub fn fill_out(&mut self, ids: &[ClipId]) -> bool {
+        let mut grew = false;
+        for &id in ids {
+            let Some(end) = self.clip(id).map(Clip::end) else { continue };
+            let Some(groups) = self.track_of_clip(id).and_then(|track| self.groups_of_track(track)) else { continue };
+            let last = match groups.last() {
+                None => self.duration,
+                Some(group) => match &group.content {
+                    ClipContent::Group(Group { cycle: Some(cycle), .. }) => cycle.length.min(group.duration),
+                    _ => group.duration,
+                },
+            };
+            // (stopping at the clip after it, as an edge dragged there does)
+            grew |= last > end && self.trim(id, Edge::End, last, EdgePolicy::Clamp);
+        }
+        grew
+    }
+
     /// How far clips `ids` can go together along their own tracks toward `by` frames (later, or
     /// earlier when negative): as far as asked, or until the first of them meets a clip that
     /// isn't one of them, or frame 0. Clips that aren't there are left out.
@@ -286,7 +309,7 @@ mod tests {
         let long = tl.duration;
         assert!(tl.trim(ClipId(1), Edge::End, 9, EdgePolicy::Push));
         assert_eq!(spans(&tl), [(2, 9), (12, 16), (18, 20)]);
-        assert_eq!(tl.duration, long, "pushed past the end, they stay there as Koi's do");
+        assert_eq!(tl.duration, long, "pushed past the end, they stay there");
         assert!(tl.trim(ClipId(1), Edge::End, 3, EdgePolicy::Push));
         assert_eq!(spans(&tl), [(2, 3), (6, 10), (12, 14)]);
     }

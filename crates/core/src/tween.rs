@@ -2,9 +2,9 @@
 //! on the `inbetween` hook and puts the frame it draws just after the first, as one undo step. How
 //! the frame between is drawn is all the plugin's.
 
-use make2d_engine::animation;
-use make2d_engine::document::{LayerId, LayerKind};
-use make2d_engine::geom::IRect;
+use procraft_engine::animation;
+use procraft_engine::document::{LayerId, LayerKind};
+use procraft_engine::geom::IRect;
 
 use crate::CanvasSession;
 use crate::plugin_run::MOST_BETWEEN_MEMORY;

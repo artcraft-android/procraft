@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
-use make2d_engine::filter::LIMIT_OFF;
-use make2d_engine::geom::Vec2;
-use make2d_engine::view::View;
+use procraft_engine::filter::LIMIT_OFF;
+use procraft_engine::geom::Vec2;
+use procraft_engine::view::View;
 
 use crate::CanvasSession;
-use make2d_engine::document::{Document, LayerAdjustment, LayerId};
+use procraft_engine::document::{Document, LayerAdjustment, LayerId};
 
 use crate::adjust::{
     ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind,
@@ -35,7 +35,7 @@ const CURVE_CHANNELS: usize = 6;
 /// Curves' exposure untouched: no stops, from the darkest, half soft.
 const NO_EXPOSURE: [f32; 3] = [0.0, 0.0, 0.5];
 
-/// Curves' limit untouched: none, its knee where Koi Studio's starts.
+/// Curves' limit untouched: none, its knee at 80%.
 const NO_LIMIT: [f32; 2] = [LIMIT_OFF, 0.8];
 
 /// Curves' limit kept to its ranges.
@@ -824,7 +824,7 @@ impl CanvasSession {
             let name = crate::adjust_menu::adjustment_label(adjustment);
             // nothing changed until its values are set (sharpening by none)
             let blank = LayerAdjustment {
-                filter: make2d_gpu::Filter::Sharpen { amount: 0.0 },
+                filter: procraft_gpu::Filter::Sharpen { amount: 0.0 },
                 table: Vec::new(),
                 settings: serde_json::Value::Null,
             };

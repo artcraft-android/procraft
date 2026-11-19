@@ -1,10 +1,10 @@
 //! Brush files people bring in, run through what the iPad does with them: read, added to the
 //! library (kept in a folder of its own), the library opened again from that folder as the next
-//! artwork does, and every brush's preview drawn. `MAKE2D_BRUSH_FILES` (paths, one a line) names
+//! artwork does, and every brush's preview drawn. `PROCRAFT_BRUSH_FILES` (paths, one a line) names
 //! the files; with none, the test does nothing.
 
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use crate::CanvasSession;
 use crate::brush_files::read_brushes;
@@ -24,8 +24,8 @@ fn session(dir: &str) -> Option<std::sync::Arc<CanvasSession>> {
 }
 
 #[test]
-fn brush_files_named_by_make2d_brush_files_are_added_and_drawn() {
-    let Ok(list) = std::env::var("MAKE2D_BRUSH_FILES") else { return };
+fn brush_files_named_by_procraft_brush_files_are_added_and_drawn() {
+    let Ok(list) = std::env::var("PROCRAFT_BRUSH_FILES") else { return };
     for path in list.lines().filter(|l| !l.trim().is_empty()) {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned());
         let dir = std::env::temp_dir().join(format!("brush-import-{}", std::process::id()));

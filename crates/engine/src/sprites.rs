@@ -347,7 +347,7 @@ impl Sheet {
         let doc = serde_json::json!({
             "frames": frames,
             "meta": {
-                "app": "Make2D",
+                "app": "ProCraft",
                 "version": "1.0",
                 "image": image,
                 "format": "RGBA8888",

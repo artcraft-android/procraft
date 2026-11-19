@@ -1,8 +1,8 @@
 //! Selections: shapes drawn on the window become a selection on the canvas, which painting keeps
 //! inside, and which can be inverted, feathered, saved, filled or copied to a layer of its own.
 
-use make2d_engine::geom::Vec2;
-use make2d_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
+use procraft_engine::geom::Vec2;
+use procraft_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
 
 use crate::{CanvasSession, State};
 
@@ -38,6 +38,23 @@ pub(crate) struct LassoFill {
     pub erase: bool,
     pub tool_opacity: bool,
 }
+
+/// Lasso Fill with the Pen's brush (Lasso's Outline on): each paint stroke, as it ends, fills the
+/// shape its path goes round (closed from its end back to its start) under it, with the paint
+/// colour or the secondary one (`secondary`) at `opacity` (0..1), only where the selection
+/// reaches, the stroke and its fill one undo step.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct StrokeFill {
+    pub secondary: bool,
+    pub opacity: f32,
+}
+
+/// What a lasso's fill as it is drawn shows in where it erases: grey, as what it takes away.
+pub(crate) const ERASE_PREVIEW: [f32; 3] = [0.5, 0.5, 0.5];
+
+/// How wide (window pixels) the stroke a tool's own lasso follows the pen as is: small, so its line
+/// keeps close to the pen's path, its points near enough together.
+const LASSO_LINE_WIDTH: f32 = 6.0;
 
 /// Points around an ellipse drawn as a polygon.
 const ELLIPSE_POINTS: usize = 128;
@@ -133,7 +150,7 @@ impl State {
             self.scene_mask(window)
         } else if hard {
             // along the pixels' edges all the way round, so it takes just the pixels it goes round
-            let points = make2d_engine::pixel::stepped(&self.to_canvas_points(window)?, true);
+            let points = procraft_engine::pixel::stepped(&self.to_canvas_points(window)?, true);
             Some(Mask::polygon_hard(self.doc.width(), self.doc.height(), &points))
         } else {
             let points = self.to_canvas_points(window)?;
@@ -176,31 +193,7 @@ impl State {
         // only what the mask covers changes
         let Some(rect) = crate::layer_ops::mask_rect(mask) else { return false };
         let Some(mut pixels) = self.layer_part(current, rect) else { return false };
-        let [r, g, b] = self.color.map(|c| c.clamp(0.0, 1.0));
-        let opacity = opacity.clamp(0.0, 1.0);
-        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(mask, rect)) {
-            if m == 0 {
-                continue;
-            }
-            if erase {
-                // what is there (premultiplied), less as much as is covered at the opacity
-                let keep = 1.0 - f32::from(m) / 255.0 * opacity;
-                for c in px.iter_mut() {
-                    *c = to_byte(f32::from(*c) / 255.0 * keep);
-                }
-                continue;
-            }
-            let [pr, pg, pb, pa] = px;
-            // the colour over what is there, as much as is covered at the fill's opacity (only
-            // where there is paint, with the alpha locked)
-            let k = f32::from(m) / 255.0 * opacity;
-            let a = f32::from(*pa) / 255.0;
-            let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
-            for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
-                *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
-            }
-            *pa = to_byte(out_a);
-        }
+        fill_pixels(&mut pixels, &crate::layer_ops::mask_part(mask, rect), self.color, opacity, erase, alpha_lock);
         let Some(canvas) = self.canvas.as_mut() else { return false };
         if let Some(name) = name {
             canvas.name_next_step(name);
@@ -209,6 +202,114 @@ impl State {
         self.flush();
         self.revision += 1;
         true
+    }
+
+    /// Lasso Fill's Outline (see [`StrokeFill`]): the paint stroke `open`, about to end, has what
+    /// it goes round filled under it, given its layer to write as it goes on (on a vector layer,
+    /// kept there as a fill under the stroke). Whether it was: not for other tools, a stroke laid
+    /// in place, or a model's.
+    pub(crate) fn fill_under_stroke(&mut self, open: &procraft_engine::stroke::StrokeBuilder) -> bool {
+        let Some((layer, fill)) = self.stroke_fill_target() else { return false };
+        // the path its stamps go along (before jitter threw them), back from where it lifted to
+        // where it began
+        let mut line = open.clone();
+        line.finish();
+        let path = line.placed_line();
+        if path.len() < 3 {
+            return false;
+        }
+        let (width, height) = (self.doc.width(), self.doc.height());
+        // a pixelated brush fills whole pixels, as its lasso does
+        let hard = self.brush(self.tool).setting("pixelated") >= 0.5;
+        let outline = if hard { procraft_engine::pixel::stepped(&path, true) } else { path };
+        let mut shape =
+            if hard { Mask::polygon_hard(width, height, &outline) } else { Mask::polygon(width, height, &outline) };
+        if let Some(selection) = &self.selection {
+            for (a, &b) in shape.data.iter_mut().zip(&selection.data) {
+                *a = ((u16::from(*a) * u16::from(b) + 127) / 255) as u8;
+            }
+        }
+        let Some(rect) = crate::layer_ops::mask_rect(&shape) else { return false };
+        // the layer as it is under the stroke (drawn apart from it until it ends)
+        self.flush();
+        let colour = if fill.secondary { self.secondary } else { self.color };
+        // a vector layer keeps it as a fill under the stroke (drawn again as laid now: over what
+        // is there, no alpha lock)
+        let vector = self.doc.is_vector(layer);
+        if vector {
+            self.vector_fill_under(layer, outline, hard, colour, fill.opacity);
+        }
+        let alpha_lock = !vector && self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return false };
+        let Ok(mut pixels) = canvas.read_layer_part(gpu, layer, rect) else { return false };
+        fill_pixels(&mut pixels, &crate::layer_ops::mask_part(&shape, rect), colour, fill.opacity, false, alpha_lock);
+        canvas.set_stroke_under(rect, pixels);
+        true
+    }
+
+    /// What a tool's own lasso follows the pen with: a stroke of the current tool's brush as it
+    /// would be begun now, the app's input settings and the view's turn and zoom with it, small.
+    pub(crate) fn lasso_builder(&self) -> procraft_engine::stroke::StrokeBuilder {
+        let brush = self.brush(self.tool).clone();
+        let zoom = self.view.map_or(1.0, |v| v.zoom()).max(1e-3);
+        procraft_engine::stroke::StrokeBuilder::with_seed(
+            brush,
+            (LASSO_LINE_WIDTH / zoom).max(0.5),
+            procraft_engine::input::Pointer::Stylus,
+            0,
+        )
+        .with_input(self.input.clone())
+        .on_view_turned(self.view.map_or(0.0, |v| v.rotation()))
+        .seen_at(zoom / self.display_scale)
+    }
+
+    /// Where Lasso Fill's Outline fills under the paint stroke open, and how: none for other tools,
+    /// a stroke laid in place, one on a plugin's or a locked layer, or a model's.
+    fn stroke_fill_target(&self) -> Option<(procraft_engine::document::LayerId, StrokeFill)> {
+        let fill = self.stroke_fill?;
+        if self.scene_shown() || !self.hooks.as_ref().is_some_and(|hooks| hooks.lasso_fill()) {
+            return None;
+        }
+        let canvas = self.canvas.as_ref()?;
+        if canvas.stroke_tool() != Some(procraft_gpu::StrokeTool::Paint) || canvas.is_pencil() {
+            return None;
+        }
+        let layer = canvas.stroke_laid_apart()?;
+        // (a plugin's layer makes what is drawn on it its own way)
+        let plugins = self.doc.layer(layer).is_none_or(|l| l.plugin.is_some()) || self.recording.is_some();
+        (!plugins && !self.doc.is_locked(layer)).then_some((layer, fill))
+    }
+
+    /// Lasso Fill's Outline shown under the paint stroke open, as far as it shows drawn: its tip
+    /// reaching the input, and on to `predicted` (canvas samples expected next) as its tip is.
+    pub(crate) fn preview_stroke_fill(&mut self, predicted: &[procraft_engine::input::Sample]) {
+        let Some((layer, fill)) = self.stroke_fill_target() else { return };
+        let Some(open) = self.stroke.as_mut() else { return };
+        let line = open.shown_line(predicted);
+        let colour = if fill.secondary { self.secondary } else { self.color };
+        self.preview_lasso(layer, &line, colour, fill.opacity);
+    }
+
+    /// A lasso's fill shown as it is drawn on layer `layer`: what `line` (canvas pixels) goes
+    /// round, in `colour` at `strength` (as it will fill) times the preview's opacity.
+    pub(crate) fn preview_lasso(&mut self, layer: procraft_engine::document::LayerId, line: &[Vec2], colour: [f32; 3], strength: f32) {
+        let a = (strength * self.lasso_preview).clamp(0.0, 1.0);
+        let [r, g, b] = colour.map(|c| c.clamp(0.0, 1.0) * a);
+        let preview = (a > 0.0 && line.len() >= 3).then(|| procraft_gpu::LassoPreview {
+            layer,
+            points: line.iter().map(|p| [p.x, p.y]).collect(),
+            color: [r, g, b, a],
+        });
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.set_lasso_preview(preview);
+        }
+    }
+
+    /// The lasso's fill shown as it was drawn taken away.
+    pub(crate) fn end_lasso_preview(&mut self) {
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.set_lasso_preview(None);
+        }
     }
 
     /// The current layer's pixels, after any queued work.
@@ -461,7 +562,20 @@ impl CanvasSession {
         u32::try_from(self.shared.lock().saved_selections.len()).unwrap_or(u32::MAX)
     }
 
-    /// How strongly Color Fill fills, by selection or Lasso Fill (its popover's Opacity), 0..1.
+    /// How strongly a lasso's fill shows as it is drawn, 0..1, times the strength it will fill at:
+    /// none at 0, as it will be at 1. Shown on the canvas, at its own resolution, on the layer
+    /// (under a paint stroke whose Outline it is).
+    pub fn set_lasso_preview_opacity(&self, opacity: f32) {
+        self.shared.lock().lasso_preview = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 0.5 };
+    }
+
+    /// Lasso Fill's Outline from now on (see [`StrokeFill`]), or none: paint strokes only paint.
+    /// Taken up only while a plugin offers Lasso Fill.
+    pub fn set_stroke_fill(&self, fill: Option<StrokeFill>) {
+        self.shared.lock().stroke_fill = fill;
+    }
+
+    /// How strongly Color Fill fills, by selection or Lasso Fill, 0..1.
     pub fn set_fill_opacity(&self, opacity: f32) {
         self.shared.lock().fill_opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
     }
@@ -510,7 +624,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let (Some(canvas), Some(gpu), Some((rect, pixels))) = (st.canvas.as_mut(), st.gpu.as_ref(), part) {
-            let _ = canvas.upload_layer_part(gpu, make2d_engine::document::LayerId(id), rect, &pixels);
+            let _ = canvas.upload_layer_part(gpu, procraft_engine::document::LayerId(id), rect, &pixels);
         }
         st.revision += 1;
         self.shared.frame(st);
@@ -577,12 +691,12 @@ impl CanvasSession {
 
 /// A path drawn by hand (`points`: x, y in turn, canvas pixels) as Pixelated takes it, for showing
 /// it as it is drawn: along the pixels' edges, a pixel across or down at a time, and `closed`,
-/// back to where it began the same way (`make2d_engine::pixel::stepped`). The shape it then
+/// back to where it began the same way (`procraft_engine::pixel::stepped`). The shape it then
 /// selects or fills is just the pixels inside this.
 #[uniffi::export]
 pub fn pixel_path(points: Vec<f32>, closed: bool) -> Vec<f32> {
     let points: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-    make2d_engine::pixel::stepped(&points, closed).iter().flat_map(|p| [p.x, p.y]).collect()
+    procraft_engine::pixel::stepped(&points, closed).iter().flat_map(|p| [p.x, p.y]).collect()
 }
 
 /// A rectangle (or with `ellipse`, the ellipse in it) between window points (`x0`, `y0`) and
@@ -599,6 +713,37 @@ fn shape_outline(ellipse: bool, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<Vec2>
             .collect()
     } else {
         vec![a, Vec2::new(b.x, a.y), b, Vec2::new(a.x, b.y)]
+    }
+}
+
+/// `pixels` (premultiplied RGBA8) with `colour` laid over them where `mask` (a byte each) covers,
+/// at `opacity`; or with `erase`, taken away there. With `alpha_lock`, the colour goes only where
+/// there is paint, as much as there is.
+fn fill_pixels(pixels: &mut [u8], mask: &[u8], colour: [f32; 3], opacity: f32, erase: bool, alpha_lock: bool) {
+    let [r, g, b] = colour.map(|c| c.clamp(0.0, 1.0));
+    let opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
+    for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(mask) {
+        if m == 0 {
+            continue;
+        }
+        if erase {
+            // what is there (premultiplied), less as much as is covered at the opacity
+            let keep = 1.0 - f32::from(m) / 255.0 * opacity;
+            for c in px.iter_mut() {
+                *c = to_byte(f32::from(*c) / 255.0 * keep);
+            }
+            continue;
+        }
+        let [pr, pg, pb, pa] = px;
+        // the colour over what is there, as much as is covered at the fill's opacity (only
+        // where there is paint, with the alpha locked)
+        let k = f32::from(m) / 255.0 * opacity;
+        let a = f32::from(*pa) / 255.0;
+        let (cover, out_a) = if alpha_lock { (k * a, a) } else { (k, k + a * (1.0 - k)) };
+        for (dst, src) in [(&mut *pr, r), (&mut *pg, g), (&mut *pb, b)] {
+            *dst = to_byte(src * cover + f32::from(*dst) / 255.0 * (1.0 - k));
+        }
+        *pa = to_byte(out_a);
     }
 }
 

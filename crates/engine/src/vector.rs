@@ -552,6 +552,40 @@ impl std::fmt::Debug for KeptBounds {
     }
 }
 
+/// The kinds of thing a vector layer holds, as Separate Objects tells them apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// A stroke.
+    Line,
+    /// A shape drawn by hand (Lasso Fill's, or one brought in): a fill traced from nothing.
+    Lasso,
+    /// A fill traced from the lines round it (the bucket's, ColorDrop's).
+    Fill,
+}
+
+impl ObjectKind {
+    /// Top first, as they are stacked apart: lines over lassos over fills.
+    pub const ALL: [ObjectKind; 3] = [ObjectKind::Line, ObjectKind::Lasso, ObjectKind::Fill];
+
+    /// What `object` is; none for an eraser's marks, which are of what they were made on.
+    pub fn of(object: &Object) -> Option<ObjectKind> {
+        match object {
+            Object::Stroke(stroke) => (!stroke.ink.erases).then_some(ObjectKind::Line),
+            Object::Fill(fill) if fill.mode == FillMode::Erase => None,
+            Object::Fill(fill) => Some(if fill.traced.is_some() { ObjectKind::Fill } else { ObjectKind::Lasso }),
+        }
+    }
+
+    /// What a layer of them is called after the layer they came from.
+    pub fn name(self) -> &'static str {
+        match self {
+            ObjectKind::Line => "Lines",
+            ObjectKind::Lasso => "Lassos",
+            ObjectKind::Fill => "Fills",
+        }
+    }
+}
+
 /// How a filled shape goes onto its layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FillMode {
@@ -795,6 +829,43 @@ impl VectorContent {
         self.objects.push(Object::Fill(Arc::new(fill)));
     }
 
+    /// `fill` (one laid behind) kept so that it lies over the fills named in `under`, which were
+    /// laid behind before it and would hide it: put in the order just before the earliest of them
+    /// (of fills laid behind, one made later lies lower), so it is under all that was there before
+    /// that one, lines and all, and over it. It is still the newest made: the erasers made since
+    /// then that named nothing first name what they took from (as when something is carried), so
+    /// none takes from it. With none of `under` there, it is kept as [`Self::push_fill`] keeps it.
+    pub fn push_fill_over(&mut self, mut fill: VectorFill, under: &[StrokeId]) {
+        let Some(at) = self.objects.iter().position(|o| under.contains(&o.id())) else {
+            return self.push_fill(fill);
+        };
+        self.name_erasers(at + 1);
+        fill.id = self.named(fill.id);
+        self.objects.insert(at, Object::Fill(Arc::new(fill)));
+    }
+
+    /// Each eraser from place `from` on that names nothing yet (so takes from all made before it)
+    /// names what lies under it: from then on its marks are those things', wherever they go and
+    /// whatever comes to be before it in the order.
+    fn name_erasers(&mut self, from: usize) {
+        for at in from..self.objects.len() {
+            if !self.erases(at) || self.objects.get(at).is_some_and(|o| o.takes_from().is_some()) {
+                continue;
+            }
+            let reach = self.objects.get(at).and_then(Object::reach);
+            let under: Vec<StrokeId> = self
+                .objects
+                .iter()
+                .take(at)
+                .filter(|o| !o.erases() && o.reach().zip(reach).is_some_and(|(r, reach)| reaches_meet(r, reach)))
+                .map(Object::id)
+                .collect();
+            if let Some(object) = self.objects.get_mut(at) {
+                object.set_takes_from(Some(under));
+            }
+        }
+    }
+
     /// The canvas pixels that differ between what this holds and what `other` (the same layer at
     /// another time) holds: all that the strokes and fills only one of them has, or that are not
     /// the same in both, can touch. What draws the layer again need only draw there.
@@ -811,6 +882,15 @@ impl VectorContent {
                 .fold(IRect::EMPTY, |all, o| all.union(o.bounds()))
         };
         only_or_changed(self, other).union(only_or_changed(other, self))
+    }
+
+    /// Every fill's outline carried `through` a map of the canvas onto itself, point by point (as
+    /// [`Self::bend`] carries one), the strokes left where they are and nothing else changed: for
+    /// what is shown while such a map is being dragged about, the strokes drawn by other means.
+    pub fn bend_fills(&mut self, through: &dyn Fn(Vec2) -> Vec2) {
+        for object in self.objects.iter_mut().filter(|o| matches!(o, Object::Fill(_))) {
+            object.bend(through);
+        }
     }
 
     /// The strokes and fills named in `ids` given `colour` (an eraser's marks have none to give).
@@ -865,6 +945,27 @@ impl VectorContent {
             part.remove(id);
         }
         part
+    }
+
+    /// This apart by kind (see [`ObjectKind`]), in [`ObjectKind::ALL`]'s order: for each kind it
+    /// has any of, what it holds with only those (and the erasers that take from them, as
+    /// [`Self::part`] keeps them; an eraser left with nothing made before it to take from goes).
+    /// None for a kind it has none of. Together the parts hold every stroke and fill once.
+    pub fn separated(&self) -> [Option<VectorContent>; 3] {
+        ObjectKind::ALL.map(|kind| {
+            let ids: Vec<StrokeId> =
+                self.objects.iter().filter(|o| ObjectKind::of(o) == Some(kind)).map(Object::id).collect();
+            if ids.is_empty() {
+                return None;
+            }
+            let mut part = self.part(&ids, true);
+            let mut any = false;
+            part.objects.retain(|o| {
+                any |= Self::pickable(o);
+                any || o.takes_from().is_some()
+            });
+            Some(part)
+        })
     }
 
     /// The stroke or fill named `id` gone; whether there was one.
@@ -1025,22 +1126,7 @@ impl VectorContent {
             .collect();
         let Some(first) = self.objects.iter().position(|o| carried.contains(&o.id())) else { return false };
         // each eraser made after it, that names none yet, names what lies under it
-        for at in first + 1..self.objects.len() {
-            if !self.erases(at) || self.objects.get(at).is_some_and(|o| o.takes_from().is_some()) {
-                continue;
-            }
-            let reach = self.objects.get(at).and_then(Object::reach);
-            let under: Vec<StrokeId> = self
-                .objects
-                .iter()
-                .take(at)
-                .filter(|o| !o.erases() && o.reach().zip(reach).is_some_and(|(r, reach)| reaches_meet(r, reach)))
-                .map(Object::id)
-                .collect();
-            if let Some(object) = self.objects.get_mut(at) {
-                object.set_takes_from(Some(under));
-            }
-        }
+        self.name_erasers(first + 1);
         let mut placed = Vec::with_capacity(self.objects.len());
         for mut object in std::mem::take(&mut self.objects) {
             if carried.contains(&object.id()) {

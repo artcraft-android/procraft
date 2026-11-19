@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use make2d_engine::zip::ZipReader;
+use procraft_engine::zip::ZipReader;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -82,17 +82,17 @@ pub(crate) enum Refusal {
 impl Refusal {
     pub(crate) fn text(self) -> &'static str {
         match self {
-            Refusal::NotAPlugin => "This isn't a Make2D plugin.",
+            Refusal::NotAPlugin => "This isn't a ProCraft plugin.",
             Refusal::TooBig => "This plugin is too big to import.",
             Refusal::Unsafe => "This plugin file isn't safe to open.",
             Refusal::Mismatch => "This plugin's files don't match its list.",
             Refusal::Damaged => "This plugin file is damaged.",
             Refusal::Described => "This plugin describes itself wrongly.",
-            Refusal::Permissions => "This plugin asks for permissions Make2D doesn't give.",
-            Refusal::Code => "This plugin's code can't run in Make2D.",
-            Refusal::FilterCode => "This filter's code can't run in Make2D.",
-            Refusal::Newer => "This plugin needs a newer Make2D.",
-            Refusal::OtherApp => "This plugin isn't for Make2D.",
+            Refusal::Permissions => "This plugin asks for permissions ProCraft doesn't give.",
+            Refusal::Code => "This plugin's code can't run in ProCraft.",
+            Refusal::FilterCode => "This filter's code can't run in ProCraft.",
+            Refusal::Newer => "This plugin needs a newer ProCraft.",
+            Refusal::OtherApp => "This plugin isn't for ProCraft.",
             Refusal::NewerInstalled => "A newer version of this plugin is already imported.",
             Refusal::Clash => "Another plugin already holds a setting this one needs.",
             Refusal::NotKept => "This plugin couldn't be saved.",
@@ -757,13 +757,13 @@ pub(crate) fn value_names(controls: &[PluginControl]) -> Vec<String> {
 fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal> {
     if manifest.holds.contains(&PluginPart::Filter) && path == FILTER_CODE {
         let text = std::str::from_utf8(data).map_err(|e| e.to_string());
-        let read = text.and_then(|text| make2d_gpu::read_filter(text, &value_names(&manifest.controls)));
+        let read = text.and_then(|text| procraft_gpu::read_filter(text, &value_names(&manifest.controls)));
         let refused = read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_err();
         return refused.then_some(Refusal::FilterCode);
     }
     if manifest.hooks.contains(&Hook::Picker) && path == PICTURE_CODE {
         let text = std::str::from_utf8(data).map_err(|e| e.to_string());
-        let read = text.and_then(|text| make2d_gpu::read_picture(text).map(|_| ()));
+        let read = text.and_then(|text| procraft_gpu::read_picture(text).map(|_| ()));
         let refused = read.map_err(|why| log::warn!("a picture's code was refused: {why}")).is_err();
         return refused.then_some(Refusal::Code);
     }
@@ -1298,7 +1298,7 @@ pub(crate) fn sha256(data: &[u8]) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use make2d_engine::zip::ZipWriter;
+    use procraft_engine::zip::ZipWriter;
     use serde_json::json;
 
     use super::*;

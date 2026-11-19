@@ -1,13 +1,13 @@
-//! The Texture Packer (from Koi Studio): the separate drawings on the canvas, as it shows now with
-//! no background, found as boxes (`make2d_engine::sprite_scan`) to pick, name and share each as a
+//! The Texture Packer: the separate drawings on the canvas, as it shows now with
+//! no background, found as boxes (`procraft_engine::sprite_scan`) to pick, name and share each as a
 //! PNG of its own, in sRGB (what game engines take a PNG's colours to be).
 
 use std::fs;
 use std::path::Path;
 
-use make2d_engine::cms::{Lut, builtin};
-use make2d_engine::profile::Profile;
-use make2d_engine::sprite_scan::{self, SpriteBox};
+use procraft_engine::cms::{Lut, builtin};
+use procraft_engine::profile::Profile;
+use procraft_engine::sprite_scan::{self, SpriteBox};
 
 use crate::project::{file_error, png_bytes, straight_alpha, thumbnail, write_atomically};
 use crate::{CanvasSession, MobileError};
@@ -73,7 +73,7 @@ impl CanvasSession {
             canvas.render_finished(gpu, &mut doc);
             // an HDR canvas's light above white rolled off into the standard picture
             let rgba = if canvas.is_hdr() {
-                canvas.read_composite_wide(gpu).map(|half| make2d_engine::hdr::tone_mapped(&half))
+                canvas.read_composite_wide(gpu).map(|half| procraft_engine::hdr::tone_mapped(&half))
             } else {
                 canvas.read_composite(gpu)
             };

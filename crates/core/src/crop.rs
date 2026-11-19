@@ -2,9 +2,9 @@
 //! resampled; the canvas from before is kept, history and all, and undoing past the new canvas's
 //! first step puts it back.
 
-use make2d_engine::crop::{crop, resample};
-use make2d_engine::view::View;
-use make2d_gpu::{Canvas, Gpu};
+use procraft_engine::crop::{crop, resample, resample_pixelated};
+use procraft_engine::view::View;
+use procraft_gpu::{Canvas, Gpu};
 
 use crate::{CanvasSession, State};
 
@@ -23,9 +23,9 @@ const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this 
 const CANVAS_LAYERS: u64 = 7;
 
 /// What the apps tell when a crop couldn't be made.
-fn crop_failure_said(e: &make2d_gpu::GpuError) -> String {
+fn crop_failure_said(e: &procraft_gpu::GpuError) -> String {
     match e {
-        make2d_gpu::GpuError::Lost => LOST_SAID,
+        procraft_gpu::GpuError::Lost => LOST_SAID,
         _ => "The canvas couldn't be cropped, most likely for lack of graphics memory. Nothing was changed.",
     }
     .to_owned()
@@ -61,6 +61,27 @@ impl CanvasSession {
         new_width: u32,
         new_height: u32,
     ) -> bool {
+        self.crop_canvas_as(x, y, width, height, angle, resample_to, new_width, new_height, false)
+    }
+}
+
+impl CanvasSession {
+    /// [`CanvasSession::crop_canvas`]; with `pixelated`, for pixel art, what is resized or turned
+    /// takes for each pixel the one old pixel its middle falls in, where it is otherwise smoothed
+    /// between the four around it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn crop_canvas_as(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        angle: f32,
+        resample_to: bool,
+        new_width: u32,
+        new_height: u32,
+        pixelated: bool,
+    ) -> bool {
         self.text_end(true);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -87,17 +108,17 @@ impl CanvasSession {
         // the old canvas stays for undo, so this is all more: refused while there is still room,
         // not left to the system to find out
         let budget = old.resident_budget();
-        let pixel_bytes = if old.is_hdr() { make2d_engine::hdr::HDR_PIXEL as u32 } else { 4 };
+        let pixel_bytes = if old.is_hdr() { procraft_engine::hdr::HDR_PIXEL as u32 } else { 4 };
         let per = u64::from(c.width) * u64::from(c.height) * u64::from(pixel_bytes);
-        let resident = ids.len().min(make2d_gpu::most_resident(budget, c.width, c.height, pixel_bytes)) as u64;
+        let resident = ids.len().min(procraft_gpu::most_resident(budget, c.width, c.height, pixel_bytes)) as u64;
         if crate::device::short_of_memory((resident + CANVAS_LAYERS) * per) {
             log::error!("cropping: {} layers of {per} bytes won't fit in the memory free", resident);
-            st.crop_edit.failure = Some(crop_failure_said(&make2d_gpu::GpuError::OutOfMemory(String::new())));
+            st.crop_edit.failure = Some(crop_failure_said(&procraft_gpu::GpuError::OutOfMemory(String::new())));
             return false;
         }
         // the new canvas made beside the old, which stays as it is unless every layer went across
         // as it should: a texture the GPU had no memory for would otherwise come over empty
-        let made = gpu.checked(|| -> Result<Canvas, make2d_gpu::GpuError> {
+        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
             old.render(gpu, &mut st.doc, None);
             let mut canvas = Canvas::unfilled(gpu, &doc)?;
             canvas.set_resident_budget(budget);
@@ -110,10 +131,12 @@ impl CanvasSession {
                 let on_gpu = room
                     && match c.whole_pixels() {
                         Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
-                        None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
+                        None => canvas.magnify_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f], pixelated),
                     };
                 if !on_gpu {
-                    let pixels = resample(&old.read_layer(gpu, id)?, sw, sh, &c);
+                    let read = old.read_layer(gpu, id)?;
+                    let pixels =
+                        if pixelated { resample_pixelated(&read, sw, sh, &c) } else { resample(&read, sw, sh, &c) };
                     // past what fits, kept compressed until needed
                     if room {
                         canvas.upload_layer(gpu, id, &pixels)?;
@@ -223,7 +246,7 @@ impl CanvasSession {
     /// window's middle, as crop does so its frame's handles can be reached. The canvas shrinks
     /// into place over [`CROP_SHRINK_SECONDS`], slowing to a stop.
     pub fn fit_canvas_scaled(&self, scale: f32) {
-        use make2d_engine::geom::{Affine, Vec2};
+        use procraft_engine::geom::{Affine, Vec2};
         let scale = if scale.is_finite() { scale.clamp(0.05, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -306,8 +329,8 @@ impl CanvasSession {
 
 #[cfg(test)]
 mod tests {
-    use make2d_engine::view::View;
-    use make2d_gpu::{Gpu, wgpu};
+    use procraft_engine::view::View;
+    use procraft_gpu::{Gpu, wgpu};
 
     use crate::{CanvasSession, PenSample, PointerKind};
 
@@ -497,7 +520,7 @@ mod tests {
             }
             assert!(fits.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert!(parks.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
-            assert_eq!(parks.shared.lock().canvas.as_ref().map(make2d_gpu::Canvas::parked_layers), Some(2));
+            assert_eq!(parks.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(2));
             assert_eq!(contents(&parks), contents(&fits));
             assert!(parks.undo().is_some());
             assert!(fits.undo().is_some());

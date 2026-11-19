@@ -1,8 +1,8 @@
 //! Scrubbing a timeline through the session's own calls takes frames kept from before, and
 //! painting at the playhead composites again only the frames that show what was painted.
 
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use crate::{CanvasSession, PenSample, PointerKind};
 

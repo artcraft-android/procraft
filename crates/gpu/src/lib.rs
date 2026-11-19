@@ -1,4 +1,4 @@
-//! Make2D's GPU renderer (wgpu): layer pixels, stroke rendering, compositing, and drawing the
+//! ProCraft's GPU renderer (wgpu): layer pixels, stroke rendering, compositing, and drawing the
 //! canvas to a window surface. Layers are premultiplied RGBA8 textures the size of the canvas.
 //!
 //! Every blend here uses fixed-function blending or reads from a different texture than it writes:
@@ -17,7 +17,8 @@ pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filte
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture};
 pub use canvas::video::{VideoPicture, VideoSource};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, FrameCacheStats, LayerThumbnailStep, LightMode, LightTool,
+    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, FrameCacheStats, LassoPreview, Lay, LayerThumbnailStep, LightMode,
+    LightTool,
     LiquifyMode, LiquifyStamp, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke,
     SelectionLook, SharedStroke, SmallScene, Stripes, StrokeEcho, StrokeStyle, StrokeTool, SurroundGrid, Target,
     Thumbnail, frame_cache_budget, most_resident, read_texture, set_frame_cache_budget, start_reading, textures_bytes,
@@ -46,6 +47,9 @@ pub fn keep_textures_uncompressed(on: bool) {
 pub(crate) fn textures_uncompressed() -> bool {
     UNCOMPRESSED.load(Ordering::Relaxed)
 }
+
+/// The most of a canvas's pipelines made at a time (see [`Gpu::pipeline_makers`]).
+const MOST_PIPELINE_MAKERS: usize = 8;
 
 /// What a panic said (its message, when it gave one as text).
 pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
@@ -345,7 +349,7 @@ impl Gpu {
         .map_err(|e| GpuError::Device(e.to_string()))?;
         log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
         // new canvases and crops kept to what its textures can be
-        make2d_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
+        procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
         log::info!(
             "GPU capped strokes (dual-source blending): {}",
             device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
@@ -441,7 +445,7 @@ impl Gpu {
         let _ = self.canvas_pipelines();
         self.keep_pipelines();
         let pipelines = started.elapsed().as_millis();
-        make2d_engine::textures::prepare();
+        procraft_engine::textures::prepare();
         log::info!(
             "canvases prepared: their pipelines in {pipelines} ms, the brushes' shapes and grains in {} ms",
             started.elapsed().as_millis().saturating_sub(pipelines)
@@ -451,7 +455,7 @@ impl Gpu {
     /// The pipelines canvases draw with, made by the first canvas on this device: from their
     /// compiled form kept by an earlier run, where there is one (see [`keep_pipelines_in`]).
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        self.canvas_pipelines_for(canvas::layer_format(make2d_engine::document::DynamicRange::Standard))
+        self.canvas_pipelines_for(canvas::layer_format(procraft_engine::document::DynamicRange::Standard))
     }
 
     /// The pipelines canvases whose layers are `layer_format` draw with: a standard canvas's, or
@@ -464,13 +468,31 @@ impl Gpu {
                 .kept
                 .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
             let format = canvas::liquify_format(&self.adapter);
-            let pipelines =
-                canvas::Pipelines::new(&self.device, format, layer_format, kept.as_ref().map(|k| k.cache.clone()));
+            let cache = kept.as_ref().map(|k| k.cache.clone());
+            let started = std::time::Instant::now();
+            let pipelines = canvas::Pipelines::new(&self.device, format, layer_format, cache, self.pipeline_makers());
+            log::info!(
+                "{} canvases' pipelines made in {} ms",
+                if high { "HDR" } else { "standard" },
+                started.elapsed().as_millis()
+            );
             if let Some(kept) = kept {
                 kept.made();
             }
             Arc::new(pipelines)
         }))
+    }
+
+    /// How many of a canvas's pipelines are made at a time. Several on Metal, whose compiler takes
+    /// them from as many threads as ask and keeps what it compiled between runs itself; one after
+    /// another elsewhere, where drivers differ in what they stand (OpenGL has one thread's context
+    /// anyway) and the pipelines' compiled form is kept by the app where it can be.
+    fn pipeline_makers(&self) -> usize {
+        if self.adapter.get_info().backend == wgpu::Backend::Metal {
+            std::thread::available_parallelism().map_or(2, std::num::NonZero::get).clamp(1, MOST_PIPELINE_MAKERS)
+        } else {
+            1
+        }
     }
 
     /// Keeps the pipelines made so far for the next run, where they are kept (see

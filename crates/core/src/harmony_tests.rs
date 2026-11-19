@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use make2d_engine::document::BlendMode;
-use make2d_engine::view::View;
-use make2d_engine::xml::{self, Element};
-use make2d_engine::zip::ZipReader;
-use make2d_gpu::Gpu;
+use procraft_engine::document::BlendMode;
+use procraft_engine::view::View;
+use procraft_engine::xml::{self, Element};
+use procraft_engine::zip::ZipReader;
+use procraft_gpu::Gpu;
 
 use crate::media::{MediaImport, TimelineMediaKind};
 use crate::timeline::TimelineMask;
@@ -40,7 +40,7 @@ fn session(side: u32) -> Option<Arc<CanvasSession>> {
 
 /// A folder of its own for test `name`, emptied.
 fn folder(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("make2d-harmony-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-harmony-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

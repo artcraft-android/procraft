@@ -2,8 +2,8 @@
 //! label, name and whether it shows; a track's opacity and place among the others, and showing it
 //! alone; the part of the timeline played over and over; the onion skins either side.
 
-use make2d_engine::document::BlendMode;
-use make2d_engine::timeline::{ClipId, Timeline, TrackId};
+use procraft_engine::document::BlendMode;
+use procraft_engine::timeline::{ClipId, Timeline, TrackId};
 
 use crate::CanvasSession;
 use crate::animation::PlayStep;
@@ -38,7 +38,7 @@ fn unpacked(rgb: u32) -> [f32; 3] {
 }
 
 /// Clip `id` in `tl` changed by `f`, unless it is on a locked track. Whether `f` changed it.
-fn clip_edit(tl: &mut Timeline, id: u64, f: impl FnOnce(&mut make2d_engine::timeline::Clip) -> bool) -> bool {
+fn clip_edit(tl: &mut Timeline, id: u64, f: impl FnOnce(&mut procraft_engine::timeline::Clip) -> bool) -> bool {
     let id = ClipId(id);
     let Some(track) = tl.track_of_clip(id) else { return false };
     if tl.track(track).is_none_or(|t| t.locked) {
@@ -226,7 +226,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(tl) = st.doc.timeline.as_mut() else { return };
-        let most = make2d_engine::animation::MAX_ONION_FRAMES;
+        let most = procraft_engine::animation::MAX_ONION_FRAMES;
         tl.onion.count = [onion.before.min(most), onion.after.min(most)];
         tl.onion.colors = [unpacked(onion.before_color), unpacked(onion.after_color)];
         st.revision += 1;

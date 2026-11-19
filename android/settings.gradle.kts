@@ -21,5 +21,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Make2D"
+rootProject.name = "ProCraft"
 include(":app")

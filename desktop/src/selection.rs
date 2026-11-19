@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use egui::{
     Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, pos2, vec2,
 };
-use make2d_core::{CanvasSession, SelectKind, SelectTouch, SelectionDisplay, SelectionJoin};
+use procraft_core::{CanvasSession, SelectKind, SelectTouch, SelectionDisplay, SelectionJoin};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, text};

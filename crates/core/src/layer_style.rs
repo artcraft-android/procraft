@@ -1,8 +1,8 @@
-//! A layer's styles, the same in every app: its outline, drop shadow, outer glow and inner glow,
-//! each one's values as its panel shows them, and how a change to them is kept (shown at once, one
+//! A layer's styles, the same in every app: its outline, drop shadow, outer glow, inner glow and
+//! color, each one's values as its panel shows them, and how a change to them is kept (shown at once, one
 //! undo step when let go). The canvas draws them as it composites (see the GPU crate).
 
-use make2d_engine::document::{LayerEffect, LayerId, LayerStyle, STYLE_MOST_SIZE};
+use procraft_engine::document::{LayerEffect, LayerId, LayerStyle, STYLE_MOST_SIZE};
 
 use crate::CanvasSession;
 
@@ -53,10 +53,11 @@ impl From<LayerEffectInfo> for LayerEffect {
     }
 }
 
-/// The styles' names, in the order [`CanvasSession::layer_effects`] gives them.
+/// The styles' names, in the order [`CanvasSession::layer_effects`] gives them. The last, Color,
+/// makes all the layer shows one colour: it has a colour and an opacity, and no size or softness.
 #[uniffi::export]
 pub fn layer_effect_names() -> Vec<String> {
-    ["Outline", "Drop Shadow", "Outer Glow", "Inner Glow"].map(str::to_owned).to_vec()
+    ["Outline", "Drop Shadow", "Outer Glow", "Inner Glow", "Color"].map(str::to_owned).to_vec()
 }
 
 /// A size or distance slider (0..1) in canvas pixels: finer low down, up to the most a style
@@ -75,12 +76,12 @@ pub fn style_size_slider(size: f32) -> f32 {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Layer `id`'s four styles (see [`layer_effect_names`]): as set, or as each starts (off) when
+    /// Layer `id`'s five styles (see [`layer_effect_names`]): as set, or as each starts (off) when
     /// it has none yet. None for a layer that takes none (a group, a mask, an adjustment layer).
     pub fn layer_effects(&self, id: u64) -> Vec<LayerEffectInfo> {
         let st = self.shared.lock();
         match st.doc.layer(LayerId(id)) {
-            Some(l) if l.kind == make2d_engine::document::LayerKind::Paint && !l.is_adjustment() => {
+            Some(l) if l.kind == procraft_engine::document::LayerKind::Paint && !l.is_adjustment() => {
                 l.style.unwrap_or_default().effects().map(LayerEffectInfo::from).to_vec()
             }
             _ => Vec::new(),

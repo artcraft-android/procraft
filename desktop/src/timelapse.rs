@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel, sync_channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Rect, Sense, TextureHandle, pos2, vec2};
-use make2d_core::{
+use procraft_core::{
     CanvasSession, TIME_LAPSE_FPS, ThumbnailImage, TimeLapse, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_side,
 };
@@ -74,7 +74,7 @@ impl TimeLapseUi {
     }
 
     /// The video's size, quality and codec, kept with the artwork.
-    pub fn settings(&self) -> make2d_core::TimeLapseSettings {
+    pub fn settings(&self) -> procraft_core::TimeLapseSettings {
         self.lapse.as_ref().map(|(_, t)| t.settings()).unwrap_or_default()
     }
 
@@ -289,7 +289,7 @@ It can't be brought back."
 
 /// The time-lapse of the artwork in folder `dir` as a package keeps it, its frames made into
 /// videos first (only those since the last share, when the videos made then still hold).
-pub fn for_package(dir: &str) -> make2d_core::PackageTimeLapse {
+pub fn for_package(dir: &str) -> procraft_core::PackageTimeLapse {
     let lapse = TimeLapse::new(dir.to_owned());
     let mut plan = lapse.segment_plan();
     while let Some(p) = plan {
@@ -390,8 +390,8 @@ fn read_in_order(lapse: Arc<TimeLapse>, wanted: Vec<u32>, stop: Arc<AtomicBool>)
 }
 
 /// `plan`'s frames as a video, fitted on white; one added to those before comes out their size.
-fn make_segment(lapse: &TimeLapse, plan: &make2d_core::SegmentPlan) -> Result<(u32, u32), String> {
-    let settings = make2d_core::TimeLapseSettings { hevc: plan.hevc, ..lapse.settings() };
+fn make_segment(lapse: &TimeLapse, plan: &procraft_core::SegmentPlan) -> Result<(u32, u32), String> {
+    let settings = procraft_core::TimeLapseSettings { hevc: plan.hevc, ..lapse.settings() };
     let (width, height, side) = if plan.width > 0 && plan.height > 0 {
         (plan.width, plan.height, plan.width.max(plan.height))
     } else {
@@ -420,7 +420,7 @@ fn make_segment(lapse: &TimeLapse, plan: &make2d_core::SegmentPlan) -> Result<(u
 pub fn take_package(package: &std::path::Path, dir: &str) {
     let temp = std::env::temp_dir().join(format!("procraft-segments-{}", std::process::id()));
     let taken =
-        make2d_core::package_time_lapse(package.to_string_lossy().into_owned(), temp.to_string_lossy().into_owned());
+        procraft_core::package_time_lapse(package.to_string_lossy().into_owned(), temp.to_string_lossy().into_owned());
     let t = match taken {
         Ok(Some(t)) => t,
         Ok(None) => return,
@@ -453,7 +453,7 @@ pub fn take_package(package: &std::path::Path, dir: &str) {
 }
 
 /// `frame` fitted into `w` × `h` on white, as RGBA rows.
-fn on_white(frame: &make2d_core::ThumbnailImage, w: u32, h: u32) -> Vec<u8> {
+fn on_white(frame: &procraft_core::ThumbnailImage, w: u32, h: u32) -> Vec<u8> {
     let mut out = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
     if let Some(picture) = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone()) {
         let k = (w as f32 / frame.width.max(1) as f32).min(h as f32 / frame.height.max(1) as f32);

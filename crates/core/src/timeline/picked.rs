@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use make2d_engine::document::LayerKind;
-use make2d_engine::timeline::{ClipId, Edge, Timeline, TrackId};
+use procraft_engine::document::LayerKind;
+use procraft_engine::timeline::{ClipId, Edge, Timeline, TrackId};
 
 use super::TimelineClipInfo;
 use super::edits::TimelineEdgePolicy;

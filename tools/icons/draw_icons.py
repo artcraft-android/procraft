@@ -1,4 +1,4 @@
-"""Draws Make2D's own interface icons from plain geometry (docs/icons/STYLE_GUIDE.md) and puts them
+"""Draws ProCraft's own interface icons from plain geometry (docs/icons/STYLE_GUIDE.md) and puts them
 in place: an SVG master per icon (assets/icons/procraft/<name>.svg, a 24-unit grid), and its path
 data, scaled into its slot (assets/icons/slots.tsv), in Icons.kt.
 Needs shapely. Run from anywhere:
@@ -1691,7 +1691,7 @@ def main():
         shape = draw().simplify(0.02)
         with open(os.path.join(MASTERS, f'{name}.svg'), 'w', encoding='utf-8', newline='\n') as f:
             f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\n'
-                    f'  <!-- Make2D {name} icon: original, drawn by tools/icons/draw_icons.py. MIT OR Apache-2.0. -->\n'
+                    f'  <!-- ProCraft {name} icon: original, drawn by tools/icons/draw_icons.py. MIT OR Apache-2.0. -->\n'
                     f'  <path fill="currentColor" fill-rule="evenodd" d="{path_data(shape)}"/>\n</svg>\n')
         w, h, (x0, y0, x1, y1) = places[name]
         bx0, by0, bx1, by1 = shape.bounds

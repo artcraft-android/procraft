@@ -6,8 +6,8 @@
 //! mode, with no mask and no layer style, none above the lowest clipped. Any other merge draws
 //! them into pixels as before.
 
-use make2d_engine::document::{BlendMode, Document, LayerId, LayerKind};
-use make2d_engine::vector::{Merging, VectorContent};
+use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind};
+use procraft_engine::vector::{Merging, VectorContent};
 
 use crate::State;
 
@@ -85,9 +85,9 @@ impl State {
 mod tests {
     use std::sync::Arc;
 
-    use make2d_engine::document::LayerId;
-    use make2d_engine::view::View;
-    use make2d_gpu::Gpu;
+    use procraft_engine::document::LayerId;
+    use procraft_engine::view::View;
+    use procraft_gpu::Gpu;
 
     use crate::vector_layer::VectorEraser;
     use crate::{CanvasSession, PenSample, PointerKind, ToolKind};

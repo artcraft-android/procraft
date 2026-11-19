@@ -1,8 +1,8 @@
 //! How far a change composites again round adjustment layers that read their neighbours.
 
-use make2d_engine::document::{Document, LayerAdjustment};
-use make2d_engine::filter::Filter;
-use make2d_engine::geom::IRect;
+use procraft_engine::document::{Document, LayerAdjustment};
+use procraft_engine::filter::Filter;
+use procraft_engine::geom::IRect;
 
 use super::{band_strips, composited_rects};
 

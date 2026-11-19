@@ -2,16 +2,16 @@
 # draft GitHub release named after the tag (with an empty "What's Changed" section: fill it in on
 # GitHub and publish the draft) of:
 #
-#   make2d-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
-#   make2d-<version>-android-legacy-arm32.apk   older 32-bit ARM tablets, signed likewise (named to list after arm64)
-#   make2d-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
-#   make2d-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
-#   make2d-<version>-windows-arm64.msi          the same for Windows on ARM (Snapdragon PCs)
-#   make2d-<version>-windows-arm64-portable.zip
-#   make2d-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
-#   make2d-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
-#   make2d-<version>-linux-x86_64.tar.gz        the plain tree
-#   make2d-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
+#   procraft-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
+#   procraft-<version>-android-legacy-arm32.apk   older 32-bit ARM tablets, signed likewise (named to list after arm64)
+#   procraft-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
+#   procraft-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
+#   procraft-<version>-windows-arm64.msi          the same for Windows on ARM (Snapdragon PCs)
+#   procraft-<version>-windows-arm64-portable.zip
+#   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
+#   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
+#   procraft-<version>-linux-x86_64.tar.gz        the plain tree
+#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
 #                                                 signed with a Developer ID and notarized when
 #                                                 the APPLE_* secrets exist, else ad hoc
 #   SHA256SUMS.txt                                each file's SHA-256
@@ -55,7 +55,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^make2d\.version=//p' android/gradle.properties)"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
             echo "::error::'$v' is not a version like 1.2.3 or 1.2.3-beta"
@@ -63,7 +63,7 @@ jobs:
           fi
           # the tag must be the version gradle.properties names
           if [ "$v" != "$listed" ]; then
-            echo "::error::the tag is v$v but gradle.properties says make2d.version=$listed: set it (and make2d.versionCode) before tagging"
+            echo "::error::the tag is v$v but gradle.properties says procraft.version=$listed: set it (and procraft.versionCode) before tagging"
             exit 1
           fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
@@ -115,8 +115,8 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           for build in arm64-v8a:arm64 armeabi-v7a:legacy-arm32; do
-            ./gradlew --no-daemon :app:assembleRelease "-Pmake2d.abis=${build%:*}" "-Pmake2d.version=$VERSION"
-            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/make2d-$VERSION-android-${build#*:}.apk"
+            ./gradlew --no-daemon :app:assembleRelease "-Pprocraft.abis=${build%:*}" "-Pprocraft.version=$VERSION"
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-$VERSION-android-${build#*:}.apk"
           done
 
       - name: APK
@@ -167,7 +167,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^make2d\.version=//p' android/gradle.properties | tr -d '\r')"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
 
@@ -229,7 +229,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^make2d\.version=//p' android/gradle.properties | tr -d '\r')"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
 
@@ -284,7 +284,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^make2d\.version=//p' android/gradle.properties | tr -d '\r')"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
 
@@ -330,7 +330,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^make2d\.version=//p' android/gradle.properties | tr -d '\r')"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
 

@@ -5,9 +5,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use make2d_engine::document::Document;
-use make2d_engine::timeline::{Media, MediaId, MediaKind, Timeline};
-use make2d_gpu::{Canvas, Gpu, VideoPicture, VideoSource};
+use procraft_engine::document::Document;
+use procraft_engine::timeline::{Media, MediaId, MediaKind, Timeline};
+use procraft_gpu::{Canvas, Gpu, VideoPicture, VideoSource};
 
 const SIDE: u32 = 8;
 

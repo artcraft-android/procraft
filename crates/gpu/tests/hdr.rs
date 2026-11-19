@@ -3,11 +3,11 @@
 //! adjustments, the light tool and what is read back for export.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::document::{BlendMode, Document, DynamicRange, LayerAdjustment, LayerId};
-use make2d_engine::geom::Vec2;
-use make2d_engine::hdr;
-use make2d_engine::stroke::Stamp;
-use make2d_gpu::{Canvas, Filter, Gpu, LightMode, LightTool, StrokeStyle, StrokeTool};
+use procraft_engine::document::{BlendMode, Document, DynamicRange, LayerAdjustment, LayerId};
+use procraft_engine::geom::Vec2;
+use procraft_engine::hdr;
+use procraft_engine::stroke::Stamp;
+use procraft_gpu::{Canvas, Filter, Gpu, LightMode, LightTool, StrokeStyle, StrokeTool};
 
 const W: u32 = 32;
 
@@ -126,7 +126,7 @@ fn a_standard_document_draws_as_it_always_has() {
     // read wide, a standard canvas's pixels are its 8-bit ones
     assert_eq!(canvas.read_composite_wide(&gpu).unwrap(), px);
     assert_eq!(canvas.read_layer_wide(&gpu, doc.current()).unwrap(), canvas.read_layer(&gpu, doc.current()).unwrap());
-    let apple = gpu.adapter.get_info().backend == make2d_gpu::wgpu::Backend::Metal;
+    let apple = gpu.adapter.get_info().backend == procraft_gpu::wgpu::Backend::Metal;
     if apple {
         assert_eq!(fingerprint(&px), STANDARD_SCENE, "a standard canvas's picture changed");
     }
@@ -326,7 +326,7 @@ fn curves_limit_eases_light_past_its_peak_back_keeping_its_hue() {
     // the others scaled with it
     assert!((g - 0.73 * r / 1.468).abs() < 0.02 && (b - 0.39 * r / 1.468).abs() < 0.02, "{r} {g} {b}");
     // off (its peak at LIMIT_OFF) it leaves the light as it was
-    let off = Filter::CURVES.with_values(&[2.0, 0.0, 0.0, make2d_engine::filter::LIMIT_OFF, 0.8]);
+    let off = Filter::CURVES.with_values(&[2.0, 0.0, 0.0, procraft_engine::filter::LIMIT_OFF, 0.8]);
     let (canvas, _doc) = curves_scene(&gpu, DynamicRange::High, off);
     let [r, _, _, _] = wide_at(&canvas.read_composite_wide(&gpu).unwrap(), 16, 16);
     assert!((r - 1.468).abs() < 0.03, "{r}");

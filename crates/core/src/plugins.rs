@@ -423,7 +423,7 @@ fn can_do(manifest: &Manifest) -> String {
 pub(crate) struct FilterToOpen {
     pub name: String,
     pub controls: Vec<PluginControl>,
-    pub code: make2d_gpu::FilterCode,
+    pub code: procraft_gpu::FilterCode,
 }
 
 #[derive(Debug)]
@@ -788,7 +788,7 @@ impl Plugins {
         let store = self.store.as_deref().ok_or_else(|| FILTER_DAMAGED.to_owned())?;
         let read = plugin_file::read_filter_code(store, id, &plugin.version);
         let (manifest, text) = read.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
-        let code = make2d_gpu::read_filter(&text, &plugin_file::value_names(&manifest.controls));
+        let code = procraft_gpu::read_filter(&text, &plugin_file::value_names(&manifest.controls));
         let code = code.map_err(|why| {
             log::warn!("a kept filter's code was refused: {why}");
             FILTER_DAMAGED.to_owned()
@@ -1719,7 +1719,7 @@ mod tests {
         // nothing was kept by asking
         assert!(filters(&plugins).is_empty());
         let refused = plugins.inspect(b"nothing".to_vec());
-        assert_eq!(refused.refused.as_deref(), Some("This isn't a Make2D plugin."));
+        assert_eq!(refused.refused.as_deref(), Some("This isn't a ProCraft plugin."));
         assert!(refused.name.is_empty());
     }
 
@@ -2035,7 +2035,7 @@ mod tests {
         let mut asks = filter("org.example.filter");
         asks["permissions"] = json!(["network"]);
         let said = plugins.install(filter_file(&asks));
-        assert_eq!(said.as_deref(), Some("This plugin asks for permissions Make2D doesn't give."));
+        assert_eq!(said.as_deref(), Some("This plugin asks for permissions ProCraft doesn't give."));
         assert!(filters(&plugins).is_empty());
         assert!(!dir_holds(&dir, "org.example.filter"));
         let _ = std::fs::remove_dir_all(&dir);

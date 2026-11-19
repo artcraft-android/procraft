@@ -1,5 +1,5 @@
-//! The timeline: tracks of clips placed in time, each clip with keyed channels of its own. Drawn
-//! from Koi Studio's Timeline v2 (see `docs/design/timeline.md`).
+//! The timeline: tracks of clips placed in time, each clip with keyed channels of its own
+//! (see `docs/design/timeline.md`).
 //!
 //! The pixels stay where they are today: a drawing clip names a layer or group in the document's
 //! layer tree ([`LayerId`]), so its layers keep their textures, parking, undo and file format. The
@@ -350,7 +350,7 @@ pub enum HandleMode {
 }
 
 /// How a value goes from one key to the next, as progress 0..1 over the span to progress (which
-/// may overshoot 0..1). Koi Studio's easings, with their parameters.
+/// may overshoot 0..1), with their parameters.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Easing {
     #[default]
@@ -1181,7 +1181,7 @@ impl Timeline {
     }
 
     /// As long as its clips at least: after what adds clips (a new drawing, sound or video, a
-    /// duplicate, a paste, more cycles), as Koi's grows. Moves and trims leave the length as it
+    /// duplicate, a paste, more cycles). Moves and trims leave the length as it
     /// is, so that clips can be parked past its end.
     pub(crate) fn fit(&mut self) {
         let end = self.tracks.iter().flat_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(1);
@@ -2225,7 +2225,7 @@ fn scaled_u32(frame: u32, ratio: f64) -> u32 {
 impl Timeline {
     /// Played at `fps` frames a second with its timing kept: every clip's start and length, every
     /// key (clips', the camera's, sounds' volume), the groups' cycles, the length, the loop and
-    /// the markers scaled by the change, as Koi Studio's "Keep Timing". Whole ratios (12 to 24)
+    /// the markers scaled by the change ("Keep Timing"). Whole ratios (12 to 24)
     /// are exact; others round to the nearest frame, and a clip rounded onto the one before it
     /// starts where that one ends. A sound keeps its start in seconds: what rounding loses is
     /// carried in its offset. False if the rate stays as it is.
@@ -2960,16 +2960,16 @@ mod tests {
         ]);
         assert_eq!(s.value_at(10.0), Some([10.0, 10.0]));
         let mid = s.value_at(5.0).unwrap();
-        assert!(near(mid[0], 4.375) && near(mid[1], 5.625), "Koi's curve, easing away from its first key: {mid:?}");
+        assert!(near(mid[0], 4.375) && near(mid[1], 5.625), "the curve easing away from its first key: {mid:?}");
         let two = keys(&[(0, 0.0_f32, Easing::Smooth), (10, 10.0, Easing::Smooth)]);
         assert!(near(two.value_at(5.0).unwrap(), 5.0));
         assert!(near(Easing::Reversed(Box::new(ease.clone())).progress(0.5), 0.5));
     }
 
-    /// Koi Studio's own easing code, compiled and run on these samples (ProceduralEasing.swift,
-    /// CurveSpline.swift), gave these values: the port matches them.
+    /// Each easing's progress at these samples, from a reference implementation of the curves:
+    /// the engine matches them.
     #[test]
-    fn easings_match_koi_studio_s() {
+    fn easings_match_reference_values() {
         let at = [0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0];
         let cases: [(&str, Easing, [f32; 9]); 8] = [
             (
@@ -3009,10 +3009,10 @@ mod tests {
                 [0.0, -0.010245, 0.079673, 0.436399, 0.805326, 1.132071, 1.307631, 1.171568, 1.0],
             ),
         ];
-        for (name, easing, koi) in cases {
-            for (t, want) in at.iter().zip(koi) {
+        for (name, easing, reference) in cases {
+            for (t, want) in at.iter().zip(reference) {
                 let got = easing.progress(*t);
-                assert!((got - want).abs() < 2e-4, "{name} at {t}: {got} where Koi gives {want}");
+                assert!((got - want).abs() < 2e-4, "{name} at {t}: {got} where {want} is expected");
             }
         }
     }

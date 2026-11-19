@@ -1,11 +1,11 @@
 //! Transform: the current layer's content moved, scaled, rotated or distorted as a whole through
 //! the box around it, shown live and kept as one undo step.
 
-use make2d_engine::document::{Document, Layer, LayerId, LayerKind};
-use make2d_engine::geom::{Affine, Homography, IRect, Vec2};
-use make2d_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
-use make2d_engine::warp;
-use make2d_gpu::Resample;
+use procraft_engine::document::{Document, Layer, LayerId, LayerKind};
+use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
+use procraft_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
+use procraft_engine::warp;
+use procraft_gpu::Resample;
 
 use crate::vector_layer::Carried;
 use crate::{CanvasSession, State};
@@ -176,8 +176,8 @@ const MAX_SNAP_LAYERS: usize = 16;
 /// first, for a moved box to snap onto: found on the GPU, every one of them read.
 fn snap_bounds(
     doc: &Document,
-    canvas: &make2d_gpu::Canvas,
-    gpu: &make2d_gpu::Gpu,
+    canvas: &procraft_gpu::Canvas,
+    gpu: &procraft_gpu::Gpu,
     targets: &[LayerId],
 ) -> Vec<[f32; 4]> {
     let others: Vec<_> = doc
@@ -237,12 +237,16 @@ impl State {
                 None => Homography::quad_to_quad(t.source(), t.content()).map(Carried::By),
             });
             let name = match self.transform_mode {
-                make2d_engine::transform::TransformMode::Uniform => "uniform transform",
-                make2d_engine::transform::TransformMode::Distort => "distort transform",
-                make2d_engine::transform::TransformMode::Warp => "warp transform",
-                make2d_engine::transform::TransformMode::Freeform => "non-uniform transform",
+                procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                procraft_engine::transform::TransformMode::Distort => "distort transform",
+                procraft_engine::transform::TransformMode::Warp => "warp transform",
+                procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
             };
+            // (a warp shown as its strokes bent held the layer's pixels: they are back as they were,
+            // and no picture of them is being moved)
+            let warped = self.vector_warp_end().is_some();
             if self.transform.take().is_some()
+                && !warped
                 && let Some(canvas) = self.canvas.as_mut()
             {
                 canvas.end_transform(false);
@@ -273,7 +277,7 @@ impl State {
             }
             if let Some(moved) = moved {
                 let name = match self.transform_mode {
-                    make2d_engine::transform::TransformMode::Uniform => "uniform transform",
+                    procraft_engine::transform::TransformMode::Uniform => "uniform transform",
                     _ => "non-uniform transform",
                 };
                 self.move_taken_items(layer, Some(&ids), moved, name);
@@ -286,10 +290,10 @@ impl State {
         {
             if commit {
                 canvas.name_next_step(match self.transform_mode {
-                    make2d_engine::transform::TransformMode::Freeform => "non-uniform transform",
-                    make2d_engine::transform::TransformMode::Uniform => "uniform transform",
-                    make2d_engine::transform::TransformMode::Distort => "distort transform",
-                    make2d_engine::transform::TransformMode::Warp => "warp transform",
+                    procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
+                    procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                    procraft_engine::transform::TransformMode::Distort => "distort transform",
+                    procraft_engine::transform::TransformMode::Warp => "warp transform",
                 });
             }
             match within {
@@ -313,6 +317,18 @@ impl State {
         if self.posing() {
             self.autokey_show();
             return;
+        }
+        // a vector layer's warp is shown as its strokes bent, drawn with the next frame, not as
+        // their picture pulled through the mesh (which would widen and narrow them with it)
+        let warped = self.transform.as_ref().is_some_and(|t| t.warp().is_some());
+        if warped && self.vector_transform.is_some() && self.vector_warp_begin() {
+            return;
+        }
+        // (the mesh taken back, by Reset or the transform's undo: their picture is moved again)
+        if let Some(moved) = self.vector_warp_end()
+            && let Some(canvas) = self.canvas.as_mut()
+        {
+            canvas.begin_transform_layers(&moved);
         }
         let (Some(t), Some(canvas)) = (self.transform.as_ref(), self.canvas.as_mut()) else { return };
         // pixel art blends nothing, whatever Interpolation says: along the canvas's own axes (and
@@ -619,9 +635,14 @@ impl CanvasSession {
 
     /// The drag ends: its change becomes a step the transform's undo takes back.
     pub fn transform_release(&self) -> Option<TransformBox> {
-        let mut st = self.shared.lock();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
         st.transform.as_mut()?.release();
         st.autokey_settle(true);
+        // a vector layer's warp, drawn roughly while the handle was held, is drawn exactly now
+        if st.vector_warp.is_some() {
+            self.shared.frame(st);
+        }
         st.transform_box()
     }
 
@@ -790,7 +811,7 @@ impl CanvasSession {
         let window = (width.max(1), height.max(1));
         let view = st.view.unwrap_or_else(|| {
             st.saved_view.and_then(|v| v.view(window)).unwrap_or_else(|| {
-                make2d_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
+                procraft_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
             })
         });
         let m = view.to_screen();

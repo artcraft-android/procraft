@@ -2,10 +2,10 @@
 //! taming the paint under the brush without changing its hue.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::document::Document;
-use make2d_engine::geom::Vec2;
-use make2d_engine::stroke::Stamp;
-use make2d_gpu::{Canvas, Gpu, LightMode, LightTool, StrokeStyle, StrokeTool};
+use procraft_engine::document::Document;
+use procraft_engine::geom::Vec2;
+use procraft_engine::stroke::Stamp;
+use procraft_gpu::{Canvas, Gpu, LightMode, LightTool, StrokeStyle, StrokeTool};
 
 fn gpu() -> Option<Gpu> {
     match Gpu::headless() {

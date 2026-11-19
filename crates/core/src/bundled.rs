@@ -28,11 +28,12 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("quickshape-curves", include_bytes!("../bundled-plugins/quickshape-curves.procraft-plugin")),
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
     ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
+    ("stroke-preview-opacity", include_bytes!("../bundled-plugins/stroke-preview-opacity.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
 ];
 
-/// Upstream's Vector layers plugin, as packed for v0.0.6. It doesn't come with this app, whose
+/// The Vector layers plugin, as packed for v0.0.6. It doesn't come with this app, whose
 /// vector layers are the core's own (`vector_layer.rs`): it is kept only for the tests of plugins'
 /// kinds of layer, which draw with it.
 #[cfg(test)]

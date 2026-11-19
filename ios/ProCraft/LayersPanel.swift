@@ -1,0 +1,1559 @@
+import SwiftUI
+import UIKit
+
+private let layersWidth: CGFloat = 384
+/// The space the rows' bars report their places in, and one finger's holds and slides follow.
+private let layersSpace = "layers"
+private let rowHeight: CGFloat = 69
+/// A layer with a mask, and its mask: their rows sit closer.
+private let maskedRowHeight: CGFloat = 65
+private let rowGap: CGFloat = 1
+private let listCorner: CGFloat = 8
+private let groupHeight: CGFloat = 44
+private let groupIndent: CGFloat = 21
+private let groupLine = Color(argb: 0xFF4E_4E4E)
+private let maskOwnerRow = Color(argb: 0xFF2C_5281)
+private let pickedRow = Color(argb: 0xFF2C_5281)
+private let lockedLetter = Color(argb: 0xFF80_8080)
+/// Blend modes shown by their first two letters (their first is another mode's).
+private let twoLetterBlends: Set<String> = ["Darken", "Shade", "Lighten", "Subtract", "Divide", "Saturation"]
+/// Swiping a row left shows these buttons, each this wide, this far apart.
+private let swipeButton: CGFloat = 82
+private let swipeGap: CGFloat = 2
+/// The badge behind a plugin's layer's glyph on its thumbnail.
+private let pluginBadgeBehind = Color(argb: 0x9900_0000)
+/// A kind's badge as a menu row's glyph: its box 1.6 times a thumbnail's (18 by 14), its lines as
+/// thick as the menu glyphs'.
+private let menuBadgeWidth: CGFloat = 28.8
+private let menuBadgeHeight: CGFloat = 22.4
+private let menuBadgeLine: CGFloat = 2.4
+private let swipeFill = Color(argb: 0xFF3F_3F3F)
+private let swipeInk = Color(argb: 0xFFC1_C1C1)
+private let swipeDelete = Color(argb: 0xFFFF_473D)
+/// How far right a row slides to be picked.
+private let pickReach: CGFloat = 72
+/// The options never go higher than this from the screen's top (the top bar and a gap).
+private let optionsTop: CGFloat = 57
+/// The layer's blend list: nine rows showing, its glyphs a darker grey than its names.
+private let blendRowHeight: CGFloat = 38.8
+private let blendListHeight: CGFloat = 349
+private let blendGlyphInk = Color(argb: 0xFF80_8080)
+/// How long the blend modes take to open and close, and the rows under them to come back.
+private let blendOpen = 0.25
+private let blendClose = 0.1
+private let blendRowsWait = 0.1
+private let blendRowsBack = 0.12
+/// How much of its finger's way a pinched row moves, and how close two rows are pinched to merge
+/// (of how far apart they were), as measured.
+private let squeezeFollow: CGFloat = 0.3
+private let pinchMerge: CGFloat = 0.65
+
+/// Two rows being pinched: each moved a share of its finger's way, the upper on top.
+private struct Squeeze {
+    let upper: UInt64
+    let lower: UInt64
+    let upperBy: CGFloat
+    let lowerBy: CGFloat
+
+    func offset(_ id: UInt64) -> CGFloat? {
+        id == upper ? upperBy * squeezeFollow : id == lower ? lowerBy * squeezeFollow : nil
+    }
+}
+
+/// What the panel's rows share while it is open.
+@Observable
+private final class LayersUi {
+    /// The layer whose options are open, and whose blend modes.
+    var options: UInt64?
+    var blendFor: UInt64?
+    /// The layer whose styles are open.
+    var styleFor: UInt64?
+    /// The row the blend modes open under (-1 when nothing is moving), and how far the rows under
+    /// it have come back.
+    var blendAt = -1
+    var belowShown = 1.0
+    var renaming: UInt64?
+    var swiped: UInt64?
+    var titleMenu = false
+    /// The plus's menu, with the kinds of layer the plugins on add.
+    var addKinds: [PluginKind]?
+    /// A row held and dragged, and how far.
+    var dragId: UInt64?
+    var dragOffset: CGFloat = 0
+    var squeeze: Squeeze?
+    /// Where each row is on the screen.
+    @ObservationIgnored var rows: [UInt64: CGRect] = [:]
+    /// Where each row's own bar is in the panel, without the blend modes open under it: what a
+    /// finger holds and slides.
+    @ObservationIgnored var bars: [UInt64: CGRect] = [:]
+    /// The row a finger is sliding along, and how far it has gone.
+    var slid: UInt64?
+    var slidBy: CGFloat = 0
+    /// How far down the panel the finger took hold of the dragged row.
+    @ObservationIgnored var heldAt: CGFloat = 0
+    /// The rows' scroll view: a touch on a row is one that went down in it, not on a menu over it.
+    @ObservationIgnored weak var list: UIScrollView?
+    @ObservationIgnored private var blendJob: DispatchWorkItem?
+
+    /// The layer whose row is at `y` on the screen.
+    func row(at y: CGFloat) -> UInt64? {
+        rows.first { y >= $0.value.minY && y <= $0.value.maxY }?.key
+    }
+
+    /// Blend modes opening under a layer: the rows under it go at once and the panel grows over
+    /// where they were; closing, it shrinks back to them and they come back a moment later.
+    func changeBlend(_ id: UInt64?, shown: [LayerInfo]) {
+        guard id != blendFor else { return }
+        let places = [blendFor, id].compactMap { $0 }.compactMap { b in shown.firstIndex { $0.id == b } }
+        let opening = id != nil
+        blendAt = places.min() ?? -1
+        belowShown = 0
+        withAnimation(Motion.easeInOut(opening ? blendOpen : blendClose)) {
+            blendFor = id
+        }
+        blendJob?.cancel()
+        let job = DispatchWorkItem { [weak self] in
+            withAnimation(Motion.easeInOut(blendRowsBack)) {
+                self?.belowShown = 1
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + blendRowsBack) {
+                self?.blendAt = -1
+            }
+        }
+        blendJob = job
+        DispatchQueue.main.asyncAfter(deadline: .now() + (opening ? blendOpen : blendClose + blendRowsWait), execute: job)
+    }
+
+    /// The layer whose bar a place in the panel is on.
+    func bar(at: CGPoint) -> UInt64? {
+        bars.first { $0.value.contains(at) }?.key
+    }
+
+    /// A finger held still on a row (but a mask's, which stays with its layer) lifts it, to go up
+    /// or down the list.
+    func hold(_ model: CanvasModel, at: CGPoint) -> Bool {
+        guard dragId == nil, let id = bar(at: at), model.layers.contains(where: { $0.id == id && $0.kind != .mask }) else {
+            return false
+        }
+        heldAt = at.y
+        dragOffset = 0
+        swiped = nil
+        dragId = id
+        return true
+    }
+
+    /// The held row let go of.
+    func letGo(_ model: CanvasModel) {
+        if let l = model.layers.first(where: { $0.id == dragId }) {
+            drop(model, l)
+        } else {
+            dragId = nil
+            dragOffset = 0
+        }
+    }
+
+    /// Lets `l` go where its row's middle came to rest: just above or below the row it is over.
+    func drop(_ model: CanvasModel, _ l: LayerInfo) {
+        let y = (rows[l.id]?.midY ?? 0) + dragOffset
+        dragId = nil
+        dragOffset = 0
+        let unit = model.movingWith(l)
+        let others = model.layers.filter { !unit.contains($0.id) && !model.hidden($0) }.compactMap { o in
+            rows[o.id].map { (layer: o, row: $0) }
+        }
+        let over = others.first { y >= $0.row.minY && y < $0.row.maxY }
+            ?? others.min { abs($0.row.midY - y) < abs($1.row.midY - y) }
+        if let over {
+            model.moveNextTo(l, over.layer, above: y < over.row.midY)
+        }
+    }
+}
+
+private struct LayerFrames: PreferenceKey {
+    static let defaultValue: [UInt64: CGRect] = [:]
+    static func reduce(value: inout [UInt64: CGRect], nextValue: () -> [UInt64: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+private struct LayerBars: PreferenceKey {
+    static let defaultValue: [UInt64: CGRect] = [:]
+    static func reduce(value: inout [UInt64: CGRect], nextValue: () -> [UInt64: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// The layers panel: top layer first (a closed group's left out), each its thumbnail, name, blend
+/// mode's letters and visibility box, and the background colour's row under them. Tap a layer to
+/// make it current, tap the current one for its options, tap the blend letter for blend mode and
+/// opacity, hold and drag to reorder, swipe left for lock, duplicate and delete, swipe right to
+/// pick it to act on with the current one (the title's menu then groups, merges, shares,
+/// duplicates or deletes them). Two fingers swiped right on a row set its alpha lock, held there
+/// select what is on it, and pinching two rows merges them and every layer between.
+struct LayersPanel: View {
+    let model: CanvasModel
+    let arrowX: CGFloat
+    /// The most the panel may be tall: its list scrolls past that.
+    let maxHeight: CGFloat
+    /// How tall the rows are together.
+    @State private var listHeight: CGFloat = 0
+    @State private var ui = LayersUi()
+
+    var body: some View {
+        // on a timeline, only the drawing drawn on
+        let drawing = model.session.timelineDrawingShown()
+        let shown = model.layers.filter { !model.hidden($0) && model.listed($0, in: drawing) }
+        let ids = shown.map(\.id)
+        Popover(width: layersWidth, arrowX: arrowX) {
+            PanelHeader(
+                title: "Layers",
+                chevronOn: model.anyPicked,
+                onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } }
+            ) {
+                PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
+                    .frame(width: 40, height: 41)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        // with plugins' kinds of layer on, a menu of them under a plain layer
+                        let kinds = model.layerKinds()
+                        if kinds.isEmpty {
+                            model.addLayer()
+                        } else {
+                            withAnimation(Motion.menuOpen) { ui.addKinds = kinds }
+                        }
+                    }
+                    // held (a short while: it is a way to a kind of layer, not a menu): a vector layer
+                    .onLongPressGesture(minimumDuration: 0.25) { model.addVectorLayer() }
+                    .padding(.top, 12)
+            }
+            ScrollViewReader { reader in
+                ScrollView {
+                    VStack(spacing: rowGap) {
+                        // on a model: its texture sets, the one painted on lit; the layers are its
+                        if model.modelOpen {
+                            TextureSetRows(model: model)
+                                .padding(.bottom, 10)
+                        }
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, l in
+                            LayerItem(model: model, ui: ui, layer: l, index: index, shown: shown)
+                                .id(l.id)
+                        }
+                        // a texture has no background: the model's own colour shows under it
+                        if !model.modelOpen {
+                            BackgroundRow(model: model)
+                                .padding(.top, 10)
+                                .opacity(ui.blendAt >= 0 ? ui.belowShown : 1)
+                        }
+                    }
+                    .animation(Motion.rowMove, value: ids)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .background(ListFinder { ui.list = $0 })
+                    .background {
+                        GeometryReader { rows in
+                            Color.clear
+                                .onAppear { listHeight = rows.size.height }
+                                .onChange(of: rows.size.height) { _, height in listHeight = height }
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .scrollDisabled(ui.dragId != nil)
+                // a layer added at the top of what shows comes in there
+                .onChange(of: ids) { before, now in
+                    if let added = now.first(where: { !before.contains($0) }) {
+                        withAnimation(Motion.rowMove) { reader.scrollTo(added, anchor: .top) }
+                    }
+                }
+            }
+            // as tall as its rows, up to what the screen leaves under the header
+            .frame(height: max(0, min(listHeight, maxHeight - 64 - Pc.arrowHeight)))
+        }
+        .background(RowFingers(model: model, ui: ui).frame(width: 0, height: 0))
+        // one finger's holds and slides on the rows: behind all of the panel, in the space the
+        // bars report their places in
+        .background(RowTouches(
+            takes: { view in ui.list.map { view.isDescendant(of: $0) } == true },
+            held: { ui.hold(model, at: $0) },
+            heldMoved: { ui.dragOffset = $0.y - ui.heldAt },
+            heldEnded: { ui.letGo(model) },
+            slides: { ui.dragId == nil && ui.bar(at: $0) != nil },
+            slideBegan: {
+                ui.slidBy = 0
+                ui.slid = ui.bar(at: $0)
+            },
+            slid: { ui.slidBy = $0 },
+            slideEnded: { ui.slid = nil }
+        ))
+        .coordinateSpace(.named(layersSpace))
+        .onPreferenceChange(LayerFrames.self) { ui.rows = $0 }
+        .onPreferenceChange(LayerBars.self) { ui.bars = $0 }
+        .overlay(alignment: .topLeading) { LayersMenus(model: model, ui: ui, maxHeight: maxHeight) }
+        #if DEBUG
+        .onAppear {
+            guard let current = model.layers.first(where: { $0.current }) else { return }
+            switch ScreenCapture.layersShows {
+            case "swipe":
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ui.swiped = current.id }
+            case "options":
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ui.options = current.id }
+            case "blend":
+                ui.changeBlend(current.id, shown: shown)
+            case "menu":
+                ui.titleMenu = true
+            case "add":
+                ui.addKinds = model.layerKinds()
+            case "rename":
+                ui.renaming = current.id
+            case "style":
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ui.styleFor = current.id }
+            default:
+                break
+            }
+        }
+        #endif
+    }
+}
+
+/// A row of the list: the layer or group, what it swipes to show, and the blend modes opening
+/// under it.
+private struct LayerItem: View {
+    let model: CanvasModel
+    let ui: LayersUi
+    let layer: LayerInfo
+    let index: Int
+    let shown: [LayerInfo]
+
+    private func tapped() {
+        let l = layer
+        ui.swiped = nil
+        if model.anyPicked {
+            // picks give way to the layer tapped, the current one too
+            model.selectLayer(l.id)
+            ui.options = nil
+        } else if l.current {
+            withAnimation(Motion.menuOpen) {
+                ui.options = ui.options == l.id ? nil : l.id
+            }
+            ui.changeBlend(nil, shown: shown)
+        } else {
+            model.selectLayer(l.id)
+            ui.options = nil
+        }
+    }
+
+    var body: some View {
+        let l = layer
+        let dragging = ui.dragId == l.id
+        // the list's ends are rounded
+        let first = index == 0
+        let last = index == shown.count - 1
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: first ? listCorner : 0, bottomLeadingRadius: last ? listCorner : 0,
+            bottomTrailingRadius: last ? listCorner : 0, topTrailingRadius: first ? listCorner : 0,
+            style: .circular
+        )
+        let renaming = ui.renaming == l.id
+        let onRenamed: (String) -> Void = {
+            model.rename(l, $0)
+            ui.renaming = nil
+        }
+        VStack(spacing: 0) {
+            LayerSwipe(
+                model: model, layer: l, open: ui.swiped == l.id, slide: ui.slid == l.id ? ui.slidBy : nil,
+                onOpen: { ui.swiped = $0 ? l.id : nil },
+                onPick: { model.pickLayer(l) }
+            ) {
+                if l.kind == .group {
+                    GroupRow(model: model, layer: l, shape: shape, renaming: renaming, onRenamed: onRenamed, onTap: tapped)
+                } else {
+                    LayerRow(
+                        model: model, layer: l, shape: shape,
+                        // the current mask's layer, or the current layer's mask
+                        owner: model.layers.contains {
+                            $0.current && (($0.kind == .mask && $0.parent == l.id) || (l.kind == .mask && l.parent == $0.id))
+                        },
+                        renaming: renaming, onRenamed: onRenamed, onTap: tapped,
+                        onBlend: {
+                            ui.changeBlend(ui.blendFor == l.id ? nil : l.id, shown: shown)
+                            ui.options = nil
+                        }
+                    )
+                }
+            }
+            .background(GeometryReader { g in
+                Color.clear.preference(key: LayerBars.self, value: [l.id: g.frame(in: .named(layersSpace))])
+            })
+            if ui.blendFor == l.id {
+                BlendEditor(model: model, layer: l)
+                    .transition(.opacity)
+            }
+        }
+        .offset(y: dragging ? ui.dragOffset : ui.squeeze?.offset(l.id) ?? 0)
+        .opacity(ui.blendAt >= 0 && ui.blendAt < index ? ui.belowShown : 1)
+        .background(GeometryReader { g in
+            Color.clear.preference(key: LayerFrames.self, value: [l.id: g.frame(in: .global)])
+        })
+        .zIndex(dragging || ui.squeeze?.upper == l.id ? 1 : 0)
+    }
+}
+
+/// A row that slides left to show Lock, Duplicate (not for a mask) and Delete, or a little right to
+/// pick it, springing back.
+private struct LayerSwipe<Content: View>: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    let open: Bool
+    /// How far a finger has slid along the row, while one does (the panel's `RowTouches` tell).
+    let slide: CGFloat?
+    let onOpen: (Bool) -> Void
+    let onPick: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var offset: CGFloat = 0
+
+    /// How far it slides open: 6 past the buttons.
+    private var reach: CGFloat {
+        let buttons: CGFloat = layer.kind == .mask ? 2 : 3
+        return swipeButton * buttons + swipeGap * (buttons - 1) + 6
+    }
+
+    private func button(_ label: String, fill: Color, ink: Color, action: @escaping () -> Void) -> some View {
+        Text(verbatim: label)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(ink)
+            .lineLimit(1)
+            .frame(width: swipeButton)
+            .frame(maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 8, style: .circular).fill(fill))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                action()
+                onOpen(false)
+            }
+    }
+
+    var body: some View {
+        let l = layer
+        // the only layer can't go: it is cleared instead
+        let alone = model.layers.filter { $0.kind != .mask }.count == 1
+        ZStack(alignment: .trailing) {
+            if offset < 0 {
+                HStack(spacing: swipeGap) {
+                    button(l.locked ? "Unlock" : "Lock", fill: swipeFill, ink: swipeInk) { model.toggleLocked(l) }
+                    if l.kind != .mask {
+                        button("Duplicate", fill: swipeFill, ink: swipeInk) { model.duplicate(l) }
+                    }
+                    button(alone ? "Clear" : "Delete", fill: swipeDelete, ink: .white) {
+                        if alone {
+                            model.clear(l)
+                        } else {
+                            model.delete(l)
+                        }
+                    }
+                }
+            }
+            content()
+                .offset(x: offset)
+        }
+        // the list only clips top and bottom; a slid row stops at its edge
+        .clipped()
+        .onChange(of: open, initial: true) { _, now in
+            withAnimation(Motion.swipeSettle) { offset = now ? -reach : 0 }
+        }
+        .onChange(of: slide) { _, now in
+            if let now {
+                // closed, it goes right as far as picking takes
+                offset = min(max((open ? -reach : 0) + now, -reach), open ? 0 : pickReach)
+                return
+            }
+            if offset > pickReach / 2 {
+                onPick()
+                withAnimation(Motion.swipeSettle) { offset = 0 }
+                return
+            }
+            let opened = offset < -reach / 2
+            if opened == open {
+                withAnimation(Motion.swipeSettle) { offset = open ? -reach : 0 }
+            } else {
+                onOpen(opened)
+            }
+        }
+    }
+}
+
+/// Two fingers on the rows. These are UIKit's: a SwiftUI gesture over the rows would take their
+/// one-finger touches, which these leave alone (they watch from the window, for as long as the
+/// panel is up).
+private struct RowFingers: UIViewRepresentable {
+    let model: CanvasModel
+    let ui: LayersUi
+
+    final class Anchor: UIView, UIGestureRecognizerDelegate {
+        var model: CanvasModel?
+        fileprivate var ui: LayersUi?
+        private var watching: [UIGestureRecognizer] = []
+        /// The two rows pinched, where their fingers went down, and how far apart.
+        private var ends: (upper: UInt64, lower: UInt64)?
+        private var starts: (upper: CGFloat, lower: CGFloat) = (0, 0)
+        private var apart: CGFloat = 0
+        private var pinched = false
+
+        override func willMove(toWindow window: UIWindow?) {
+            super.willMove(toWindow: window)
+            watching.forEach { $0.view?.removeGestureRecognizer($0) }
+            watching = []
+            guard let window else { return }
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
+            swipe.direction = .right
+            swipe.numberOfTouchesRequired = 2
+            let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
+            hold.numberOfTouchesRequired = 2
+            hold.minimumPressDuration = 0.5
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinching(_:)))
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+            tap.numberOfTouchesRequired = 2
+            for recognizer in [swipe, hold, pinch, tap] {
+                recognizer.cancelsTouchesInView = false
+                recognizer.delaysTouchesBegan = false
+                recognizer.delaysTouchesEnded = false
+                recognizer.delegate = self
+                window.addGestureRecognizer(recognizer)
+                watching.append(recognizer)
+            }
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        /// Only on the rows: elsewhere two fingers are the canvas's.
+        override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            ui?.row(at: g.location(in: nil).y) != nil && insidePanel(g.location(in: nil).x)
+        }
+
+        private func insidePanel(_ x: CGFloat) -> Bool {
+            guard let rows = ui?.rows.values, let any = rows.first else { return false }
+            return x >= any.minX && x <= any.maxX
+        }
+
+        /// The paint layer under a two-finger touch.
+        private func paintLayer(_ g: UIGestureRecognizer) -> LayerInfo? {
+            guard let id = ui?.row(at: g.location(in: nil).y) else { return nil }
+            return model?.layers.first { $0.id == id && $0.kind == .paint }
+        }
+
+        @objc private func swiped(_ g: UISwipeGestureRecognizer) {
+            if let l = paintLayer(g) {
+                model?.toggleAlphaLock(l)
+            }
+        }
+
+        /// Two fingers tapped on a layer: its opacity, dragged across the canvas.
+        @objc private func tapped(_ g: UITapGestureRecognizer) {
+            if let l = paintLayer(g) {
+                model?.selectLayer(l.id)
+                model?.startLayerOpacity()
+            }
+        }
+
+        @objc private func held(_ g: UILongPressGestureRecognizer) {
+            if g.state == .began, let l = paintLayer(g) {
+                model?.selectLayerContents(l)
+            }
+        }
+
+        @objc private func pinching(_ g: UIPinchGestureRecognizer) {
+            guard let ui else { return }
+            switch g.state {
+            case .began:
+                guard g.numberOfTouches >= 2 else { return }
+                let a = g.location(ofTouch: 0, in: nil).y
+                let b = g.location(ofTouch: 1, in: nil).y
+                let upper = min(a, b)
+                let lower = max(a, b)
+                pinched = false
+                ends = nil
+                if let top = ui.row(at: upper), let bottom = ui.row(at: lower), top != bottom {
+                    ends = (top, bottom)
+                    starts = (upper, lower)
+                    apart = lower - upper
+                }
+            case .changed:
+                guard let ends, g.numberOfTouches >= 2 else { return }
+                let a = g.location(ofTouch: 0, in: nil).y
+                let b = g.location(ofTouch: 1, in: nil).y
+                let upper = min(a, b)
+                let lower = max(a, b)
+                if lower - upper <= apart * pinchMerge {
+                    pinched = true
+                }
+                ui.squeeze = Squeeze(upper: ends.upper, lower: ends.lower, upperBy: upper - starts.upper, lowerBy: lower - starts.lower)
+            default:
+                ui.squeeze = nil
+                // as a finger lets go
+                if g.state == .ended, pinched, let ends {
+                    model?.mergeBetween(ends.upper, ends.lower)
+                }
+                ends = nil
+            }
+        }
+    }
+
+    func makeUIView(context: Context) -> Anchor {
+        let view = Anchor()
+        view.isUserInteractionEnabled = false
+        view.model = model
+        view.ui = ui
+        return view
+    }
+
+    func updateUIView(_ view: Anchor, context: Context) {}
+}
+
+/// The panel's menus, over it: the title's and the current layer's options.
+private struct LayersMenus: View {
+    let model: CanvasModel
+    let ui: LayersUi
+    let maxHeight: CGFloat
+
+    private func closeAll() {
+        withAnimation(Motion.menuClose) {
+            ui.titleMenu = false
+            ui.addKinds = nil
+            ui.options = nil
+            ui.styleFor = nil
+        }
+    }
+
+    /// The plus with plugins' kinds of layer on: a plain layer, or one of each kind, named as the
+    /// plugin names it beside its badge, as its layers' thumbnails show it (a plug when it draws
+    /// none). It hangs from the plus, their right edges in line.
+    private func addMenu(_ kinds: [PluginKind]) -> some View {
+        // the plus's lower right corner: the header's end in from the right, its 41 under the
+        // header's first 12 (the header starting under the arrow)
+        let plus = CGPoint(x: layersWidth - 18, y: Pc.arrowHeight + 12 + 41)
+        return GlassMenu(overPanel: true) {
+            MenuRow(icon: PcIcons.menuNewLayer, label: "Layer") {
+                closeAll()
+                model.addLayer()
+            }
+            ForEach(kinds, id: \.key) { kind in
+                GlyphMenuRow(label: kind.label, action: {
+                    closeAll()
+                    model.addPluginLayer(kind.key)
+                }) {
+                    PluginBadgeView(badge: pluginKindBadge(kind: kind), ink: Pc.menuInk, width: menuBadgeLine)
+                        .frame(width: menuBadgeWidth, height: menuBadgeHeight)
+                }
+            }
+        }
+        .offset(x: plus.x - glassMenuWidth, y: plus.y)
+        .menuTransition(.topTrailing)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if ui.titleMenu {
+                MenuDismissal { closeAll() }
+                titleMenu
+            }
+            if let kinds = ui.addKinds {
+                MenuDismissal { closeAll() }
+                addMenu(kinds)
+            }
+            if let id = ui.options, let l = model.layers.first(where: { $0.id == id }), let row = ui.rows[id] {
+                MenuDismissal { closeAll() }
+                LayerOptionsMenu(model: model, ui: ui, layer: l, rowY: row.midY, maxHeight: maxHeight) { closeAll() }
+            }
+            if let id = ui.styleFor, let l = model.layers.first(where: { $0.id == id }), let row = ui.rows[id] {
+                MenuDismissal { closeAll() }
+                LayerStyleMenu(model: model, layer: l, rowY: row.midY, maxHeight: maxHeight)
+            }
+        }
+    }
+
+    /// Under the title: Select All; Group and Merge (with layers picked); Share and Duplicate;
+    /// Delete. Mostly over the panel, whose rows the canvas's frosting doesn't blur: nearly solid.
+    private var titleMenu: some View {
+        GlassMenu(overPanel: true) {
+            MenuRow(icon: PcIcons.menuSelectAll, label: "Select All") {
+                closeAll()
+                model.pickAllLayers()
+            }
+            MenuLine()
+            if model.anyPicked {
+                MenuRow(icon: PcIcons.menuGroup, label: "Group") {
+                    closeAll()
+                    model.groupPicked()
+                }
+                MenuRow(icon: PcIcons.menuMerge, label: "Merge") {
+                    closeAll()
+                    model.mergePicked()
+                }
+                MenuLine()
+            }
+            MenuRow(icon: PcIcons.menuShare, label: "Share") {
+                closeAll()
+                model.shareChosenLayers()
+            }
+            MenuRow(icon: PcIcons.menuDuplicate, label: "Duplicate") {
+                closeAll()
+                model.duplicatePicked()
+            }
+            MenuLine()
+            MenuRow(icon: PcIcons.menuTrash, label: "Delete", ink: Pc.menuDanger) {
+                closeAll()
+                model.question = Question(title: "Delete these layers?", message: "Undo brings them back.") {
+                    // as measured, a locked one among them stops it, said why
+                    if model.chosenLocked() {
+                        model.lockedDeleteTold = true
+                    } else {
+                        model.deletePicked()
+                    }
+                }
+            }
+        }
+        // under the title row, whose foot is 60 down with the arrow above it
+        .offset(x: 74 - glassMenuWidth / 2, y: 60)
+        .menuTransition(.top)
+    }
+}
+
+/// The current layer's options, left of the panel and centred on its row, kept below the top bar.
+/// What doesn't apply to it is left out; lock, duplicate and delete are on the row's swipe.
+private struct LayerOptionsMenu: View {
+    let model: CanvasModel
+    let ui: LayersUi
+    let layer: LayerInfo
+    /// The row's middle on the screen.
+    let rowY: CGFloat
+    let maxHeight: CGFloat
+    let onDone: () -> Void
+
+    private func act(_ option: LayerOption) {
+        let l = layer
+        switch option {
+        case .rename:
+            ui.renaming = l.id
+        case .ungroup:
+            model.ungroup(l)
+        case .flatten:
+            model.flattenGroup(l)
+        case .select:
+            model.selectLayerContents(l)
+        case .copy:
+            model.copyLayerContents(l)
+        case .fill:
+            model.fillLayer(l)
+        case .clear:
+            model.clear(l)
+        case .alphaLock:
+            model.toggleAlphaLock(l)
+        case .mask:
+            model.addMask(l)
+        case .clippingMask:
+            model.toggleClipped(l)
+        case .drawingAssist:
+            model.setGuideAssisted(!l.assisted)
+        case .invert:
+            model.invertLayer(l)
+        case .reference:
+            model.toggleReference(l)
+        case .editText:
+            model.text.edit(l)
+        case .rasterize:
+            model.rasterize(l)
+        case .separateObjects:
+            model.separateObjects(l)
+        case .recolour:
+            model.restyleStrokes(l, colour: true)
+        case .applyBrush:
+            model.restyleStrokes(l, colour: false)
+        case .mergeDown:
+            model.mergeDown(l)
+        case .combineDown:
+            model.combineDown(l)
+        case .mergeMask:
+            model.mergeMask(l)
+        case .adjustmentSettings:
+            model.editAdjustmentLayer(l)
+        case .layerStyle:
+            withAnimation(Motion.menuClose) { ui.styleFor = l.id }
+        }
+    }
+
+    var body: some View {
+        let rows = model.layerOptions(layer)
+        // a plugin's actions for the layer, after the app's own
+        let actions = PluginsModel.shared.store.actionsIn(place: .layer)
+        let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
+        // a vector layer's own row: whether it is drawn as fine as the screen when zoomed in (how
+        // the eraser works on it is chosen in the Eraser band, while erasing)
+        let vector = layer.vector && !layer.locked
+        // and, with strokes or fills picked on it, what the brush as it is set can give them
+        let applying = vector && model.vectorPicked(layer)
+        let own = (vector ? 1 : 0) + (applying ? 3 : 0)
+        let tall = max(CGFloat(rows.count + actions.count + own) * 38 + 14, 64)
+        // the panel hangs from the bar: its own top is the bar's height down the screen
+        let top = optionsTop - Pc.barHeight
+        let y = min(max(rowY - Pc.barHeight - tall / 2, top), max(maxHeight - tall, top))
+        VStack(spacing: 0) {
+            ForEach(rows, id: \.option) { r in
+                let ink = r.enabled ? Pc.menuInk : Pc.menuDisabled
+                HStack(spacing: 0) {
+                    Text(verbatim: r.label)
+                        .font(.system(size: 17))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if r.switchOn == true {
+                        PcIconView(PcIcons.tick, size: 18, color: ink)
+                    }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 16)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if r.enabled {
+                        // the menu closed first: a row may open another (Layer Style)
+                        onDone()
+                        act(r.option)
+                    }
+                }
+            }
+            if vector {
+                HStack(spacing: 0) {
+                    Text(verbatim: "Crisp Zoom")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if model.vectorCrisp {
+                        PcIconView(PcIcons.tick, size: 18, color: Pc.menuInk)
+                    }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 16)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    model.toggleVectorCrisp()
+                    onDone()
+                }
+            }
+            if applying {
+                let gives: [(String, VectorApply)] = [("Apply Color", .colour), ("Apply Brush", .brush), ("Apply Size", .size)]
+                ForEach(gives, id: \.0) { row in
+                    Text(verbatim: row.0)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                        .padding(.leading, 19)
+                        .padding(.trailing, 16)
+                        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            model.vectorApply(row.1)
+                            onDone()
+                        }
+                }
+            }
+            ForEach(actions, id: \.key) { action in
+                Text(verbatim: action.label)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.menuInk)
+                    .lineLimit(1)
+                    .padding(.leading, 19)
+                    .padding(.trailing, 16)
+                    .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onDone()
+                        model.runPluginAction(action.key)
+                    }
+            }
+        }
+        .padding(.vertical, 7)
+        .frame(width: 194)
+        .frame(minHeight: 64)
+        .background {
+            // empty (a locked group's or mask's), as measured, the frost alone, untinted
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                if !rows.isEmpty {
+                    shape.fill(Pc.glassMenu)
+                }
+            }
+        }
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.14), radius: 15, y: 6)
+        .offset(x: -183, y: y)
+        .menuTransition(.trailing)
+    }
+}
+
+/// A layer's styles, left of the panel by its row as its options are: each style's switch, and
+/// under the one opened (a tap on its name) its colour, given the paint colour with a tap, and its
+/// sliders. Each change shows at once and is one undo step when let go. The last, Color, makes all
+/// the layer shows one colour: it has a colour and an opacity only, and takes the paint colour as
+/// it is first switched on.
+private struct LayerStyleMenu: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    /// The row's middle on the screen.
+    let rowY: CGFloat
+    let maxHeight: CGFloat
+
+    @State private var effects: [LayerEffectInfo] = []
+    @State private var open = 0
+
+    private let names = layerEffectNames()
+    /// Where Color is among them: the style with no size or softness.
+    private static let colorStyle = 4
+    private let width: CGFloat = 300
+    private let rowTall: CGFloat = 44
+    private let sliderTall: CGFloat = 46
+
+    /// Style `i` changed by `change`, kept as a step when `done`.
+    private func set(_ i: Int, done: Bool, _ change: (inout LayerEffectInfo) -> Void) {
+        guard effects.indices.contains(i) else { return }
+        change(&effects[i])
+        model.setLayerEffect(layer, i, effects[i], done: done)
+    }
+
+    /// A slider of `value` (0..1), read as `shown`.
+    private func slider(_ label: String, _ value: Float, _ shown: String, _ onChange: @escaping (Float, Bool) -> Void) -> some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 0) {
+                Text(verbatim: label)
+                Spacer(minLength: 0)
+                Text(verbatim: shown)
+            }
+            .font(.system(size: 15))
+            .foregroundStyle(Pc.menuInk)
+            GeometryReader { g in
+                let w = g.size.width
+                let part = CGFloat(min(max(value, 0), 1))
+                let x = min(max(w * part, 13), max(w - 13, 13))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Pc.sliderRest).frame(height: 3)
+                    Capsule().fill(Pc.accent).frame(width: w * part, height: 3)
+                    Capsule().fill(Color.white)
+                        .frame(width: 26, height: 15)
+                        .shadow(color: .black.opacity(0.2), radius: 1, y: 0.5)
+                        .offset(x: x - 13)
+                }
+                .frame(width: w, height: 16)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in onChange(Float(min(max(drag.location.x / max(w, 1), 0), 1)), false) }
+                        .onEnded { drag in onChange(Float(min(max(drag.location.x / max(w, 1), 0), 1)), true) }
+                )
+            }
+            .frame(height: 16)
+        }
+        .padding(.horizontal, 19)
+        .frame(height: sliderTall)
+    }
+
+    /// Style `i`'s colour and sliders.
+    @ViewBuilder
+    private func details(_ i: Int) -> some View {
+        let e = effects[i]
+        HStack(spacing: 0) {
+            Text(verbatim: "Color")
+                .font(.system(size: 15))
+                .foregroundStyle(Pc.menuInk)
+            Spacer(minLength: 0)
+            Text(verbatim: "Tap for the paint color")
+                .font(.system(size: 12))
+                .foregroundStyle(Pc.menuInk.opacity(0.55))
+                .padding(.trailing, 8)
+            Circle()
+                .fill(Color(red: Double(e.r), green: Double(e.g), blue: Double(e.b)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.5))
+                .frame(width: 26, height: 26)
+        }
+        .padding(.horizontal, 19)
+        .frame(height: rowTall)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            let (r, g, b) = model.paintColourParts()
+            set(i, done: true) {
+                $0.r = r
+                $0.g = g
+                $0.b = b
+            }
+        }
+        if i != Self.colorStyle {
+            slider("Size", styleSizeSlider(size: e.size), "\(Int(e.size.rounded())) px") { v, done in
+                set(i, done: done) { $0.size = styleSize(slider: v) }
+            }
+        }
+        slider("Opacity", e.opacity, "\(wholeNumber(e.opacity * 100))%") { v, done in
+            set(i, done: done) { $0.opacity = v }
+        }
+        if i != Self.colorStyle {
+            slider("Softness", e.softness, "\(wholeNumber(e.softness * 100))%") { v, done in
+                set(i, done: done) { $0.softness = v }
+            }
+        }
+        // a drop shadow falls some way off, one way
+        if i == 1 {
+            slider("Distance", styleSizeSlider(size: e.distance), "\(Int(e.distance.rounded())) px") { v, done in
+                set(i, done: done) { $0.distance = styleSize(slider: v) }
+            }
+            slider("Angle", e.angle / 360, "\(Int(e.angle.rounded()))°") { v, done in
+                set(i, done: done) { $0.angle = (v * 360).rounded() }
+            }
+        }
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
+        let opened = effects.indices.contains(open) && effects[open].on
+        let sliders: CGFloat = opened ? (open == 1 ? 5 : open == Self.colorStyle ? 1 : 3) : 0
+        let tall = rowTall * CGFloat(names.count + 1 + (opened ? 1 : 0)) + sliderTall * sliders + 14
+        let top = optionsTop - Pc.barHeight
+        let y = min(max(rowY - Pc.barHeight - tall / 2, top), max(maxHeight - tall, top))
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: "Layer Style")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(Pc.menuInk)
+                .lineLimit(1)
+                .padding(.leading, 19)
+                .frame(height: rowTall)
+            ForEach(effects.indices, id: \.self) { i in
+                let chosen = i == open && effects[i].on
+                HStack(spacing: 0) {
+                    Text(verbatim: names.indices.contains(i) ? names[i] : "")
+                        .font(.system(size: 17, weight: chosen ? .semibold : .regular))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    PcSwitch(on: effects[i].on)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            open = i
+                            // Color, switched on as it started out (black, never given a colour):
+                            // the paint colour, which is the one wanted more often than not
+                            let fresh = i == Self.colorStyle && !effects[i].on
+                                && effects[i].r == 0 && effects[i].g == 0 && effects[i].b == 0
+                            let (r, g, b) = model.paintColourParts()
+                            set(i, done: true) {
+                                $0.on.toggle()
+                                if fresh {
+                                    $0.r = r
+                                    $0.g = g
+                                    $0.b = b
+                                }
+                            }
+                        }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 14)
+                .frame(height: rowTall)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation(Motion.rowMove) { open = i } }
+                if chosen {
+                    details(i)
+                }
+            }
+        }
+        .padding(.vertical, 7)
+        .frame(width: width)
+        .background {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Pc.glassMenu)
+            }
+        }
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.14), radius: 15, y: 6)
+        .offset(x: -183 - (width - 194), y: y)
+        .menuTransition(.trailing)
+        .onAppear {
+            effects = model.layerEffects(layer)
+            open = effects.firstIndex(where: { $0.on }) ?? 0
+            #if DEBUG
+            if let shows = ScreenCapture.styleOpens {
+                open = shows
+            }
+            #endif
+        }
+    }
+}
+
+/// A layer's opacity and blend mode, under its row. The modes are a picker: the rows snap to the
+/// list's middle and the row there is the layer's mode (set once a scroll settles), the ends padded
+/// so every row can reach the middle, the layer's mode there when it opens.
+private struct BlendEditor: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+
+    @State private var opacity: Float = 1
+    /// The mode in the list's middle.
+    @State private var centred: UInt32?
+    @State private var settling: DispatchWorkItem?
+
+    private func slider(_ width: CGFloat) -> some View {
+        let part = CGFloat(min(max(opacity, 0), 1))
+        let x = min(max(width * part, 13), max(width - 13, 13))
+        return ZStack(alignment: .leading) {
+            Capsule().fill(Pc.sliderRest).frame(height: 3)
+            Capsule().fill(Pc.accent).frame(width: width * part, height: 3)
+            Capsule().fill(Color.white)
+                .frame(width: 26, height: 15)
+                .offset(x: x - 13)
+        }
+        .frame(width: width, height: 16)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { drag in
+                    opacity = Float(min(max(drag.location.x / max(width, 1), 0), 1))
+                    model.setLayerOpacity(layer, opacity, done: false)
+                }
+                .onEnded { _ in model.setLayerOpacity(layer, opacity, done: true) }
+        )
+    }
+
+    var body: some View {
+        let modes = model.blendModeList
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Text(verbatim: "Opacity")
+                Spacer(minLength: 0)
+                Text(verbatim: opacity >= 0.995 ? "Max" : "\(wholeNumber(opacity * 100))%")
+            }
+            .font(.system(size: 17))
+            .foregroundStyle(Pc.panelTitle)
+            .padding(.horizontal, 13)
+            GeometryReader { g in
+                slider(g.size.width)
+            }
+            .frame(height: 16)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 2)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(modes, id: \.id) { m in
+                        let chosen = m.id == layer.blend
+                        HStack(spacing: 0) {
+                            Text(verbatim: m.name)
+                                .font(.system(size: 17))
+                                .foregroundStyle(chosen ? Color.white : Pc.panelTitle)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            // its 26 frame centred 31.5 in from the right; grey unless chosen
+                            if let glyph = PcIcons.blendGlyphs.first(where: { $0.0 == m.name })?.1 {
+                                PcIconView(glyph, size: 26, color: chosen ? .white : blendGlyphInk)
+                            }
+                        }
+                        .padding(.leading, 12)
+                        .padding(.trailing, 18.5)
+                        .frame(height: blendRowHeight)
+                        .background(chosen ? Pc.rowSelected : Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(Motion.rowMove) { centred = m.id }
+                        }
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .contentMargins(.vertical, (blendListHeight - blendRowHeight) / 2, for: .scrollContent)
+            .scrollTargetBehavior(.viewAligned)
+            .scrollPosition(id: $centred, anchor: .center)
+            .scrollIndicators(.hidden)
+            .frame(height: blendListHeight)
+            .background(RoundedRectangle(cornerRadius: 12, style: .circular).fill(Pc.layerRow))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .circular))
+            .padding(.top, 11)
+        }
+        .padding(.top, 22)
+        .padding(.bottom, 15)
+        .onAppear {
+            opacity = layer.opacity
+            centred = layer.blend
+        }
+        .onChange(of: centred) { _, id in
+            // once the scroll settles
+            settling?.cancel()
+            guard let id, id != layer.blend else { return }
+            let l = layer
+            let job = DispatchWorkItem { model.setBlend(l, id) }
+            settling = job
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: job)
+        }
+    }
+}
+
+/// A layer's row.
+private struct LayerRow: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    let shape: UnevenRoundedRectangle
+    /// The layer whose mask is the current one: a darker blue.
+    let owner: Bool
+    let renaming: Bool
+    let onRenamed: (String) -> Void
+    let onTap: () -> Void
+    let onBlend: () -> Void
+
+    var body: some View {
+        let l = layer
+        let mask = l.kind == .mask
+        let masked = model.hasMask(l)
+        let selected = l.current
+        let ink = selected || l.picked ? Color.white : Pc.panelTitle
+        let fill = selected ? Pc.rowSelected : l.picked ? pickedRow : owner ? maskOwnerRow : Pc.layerRow
+        HStack(spacing: 0) {
+            if l.clipped {
+                PcIconView(PcIcons.clip, size: 16, color: ink)
+            }
+            // a mask's thumbnail and its layer's join into one, rounded only at the outer corners
+            Thumb(model: model, layer: l, top: !masked, bottom: !mask)
+                .padding(.leading, 4)
+                .offset(y: mask ? 2 : masked ? -2 : 0)
+                // an adjustment layer's thumbnail opens its settings
+                .onTapGesture {
+                    if l.adjustment != nil, !l.locked {
+                        model.editAdjustmentLayer(l)
+                    } else {
+                        onTap()
+                    }
+                }
+            ZStack(alignment: .leading) {
+                LockedName(layer: l, ink: ink, renaming: renaming, onRenamed: onRenamed)
+                if let tag = tag(l) {
+                    Text(verbatim: tag)
+                        .font(.system(size: 13))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                        .padding(.leading, 29)
+                        .offset(y: 17.5)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            // the blend and visibility buttons overlap by 8, as measured; a mask has no blend
+            if mask {
+                Spacer().frame(width: 36)
+            } else {
+                Text(verbatim: blendCode(l.blend))
+                    .font(.system(size: 14, weight: .semibold))
+                    // a locked layer's mode is greyed
+                    .foregroundStyle(l.locked && !l.current && !l.picked ? lockedLetter : ink)
+                    .frame(width: 44, height: 47)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onBlend)
+                    .offset(x: 8)
+            }
+            VisibilityBox(model: model, layer: l, fill: selected || l.picked ? Color.white : Pc.checkFill, height: 47)
+            Spacer().frame(width: 8)
+        }
+        .padding(.leading, (l.clipped ? 18 : 0) + groupIndent * CGFloat(l.depth))
+        .frame(maxWidth: .infinity)
+        .frame(height: mask || masked ? maskedRowHeight : rowHeight)
+        .background(shape.fill(fill))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+    }
+
+    /// What the layer is, under its name: the reference layer, one drawing assist is on for, a
+    /// private one.
+    private func tag(_ l: LayerInfo) -> String? {
+        if l.reference && l.assisted {
+            return "Assisted Reference"
+        }
+        if l.reference {
+            return "Reference"
+        }
+        if l.assisted {
+            return "Assisted"
+        }
+        if l.private {
+            return "Private"
+        }
+        if let a = l.adjustment {
+            // named after its adjustment unless renamed
+            return l.name == adjustmentLabel(adjustment: a) ? "Adjustment" : adjustmentLabel(adjustment: a)
+        }
+        if l.styled {
+            return "Layer Style"
+        }
+        return nil
+    }
+
+    /// The letters on a layer's row for its mode: a two-word name's initials (the second small), a
+    /// one-word name's first letter, or its first two where one letter is already taken.
+    private func blendCode(_ blend: UInt32) -> String {
+        guard let name = model.blendModeList.first(where: { $0.id == blend })?.name else { return "N" }
+        if twoLetterBlends.contains(name) {
+            return String(name.prefix(2))
+        }
+        let words = name.split(separator: " ")
+        if words.count == 1 {
+            return String(name.prefix(1))
+        }
+        return String(words[0].prefix(1)) + words[1].prefix(1).lowercased()
+    }
+}
+
+/// A layer's visibility box: tapped, shown or hidden (or, with a layer shown alone, every layer
+/// again); held, shown alone (or every layer again). A layer another's solo hides shows unticked.
+private struct VisibilityBox: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    let fill: Color
+    let height: CGFloat
+
+    var body: some View {
+        CheckBox(checked: layer.visible && !layer.soloedOut, fill: fill)
+            .frame(width: 44, height: height)
+            .contentShape(Rectangle())
+            .onTapGesture { model.toggleVisible(layer) }
+            .onLongPressGesture { model.toggleSolo(layer) }
+    }
+}
+
+/// A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its
+/// box.
+private struct GroupRow: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    let shape: UnevenRoundedRectangle
+    let renaming: Bool
+    let onRenamed: (String) -> Void
+    let onTap: () -> Void
+
+    var body: some View {
+        let l = layer
+        let ink = l.current || l.picked ? Color.white : Pc.panelTitle
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 2, style: .circular)
+                .fill(groupLine)
+                .frame(width: 93, height: 4)
+                .padding(.leading, 4)
+            LockedName(layer: l, ink: ink, renaming: renaming, onRenamed: onRenamed)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            PcIconView(l.collapsed ? PcIcons.chevronRight : PcIcons.chevronDown, size: 16, color: ink)
+                .frame(width: 44, height: groupHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { model.toggleCollapsed(l) }
+                .offset(x: 8)
+            VisibilityBox(model: model, layer: l, fill: l.current || l.picked ? Color.white : Pc.checkFill, height: groupHeight)
+            Spacer().frame(width: 8)
+        }
+        .padding(.leading, groupIndent * CGFloat(l.depth))
+        .frame(maxWidth: .infinity)
+        .frame(height: groupHeight)
+        .background(shape.fill(l.current ? Pc.rowSelected : l.picked ? pickedRow : Pc.layerRow))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+    }
+}
+
+/// A layer's name, renamed in place, with a padlock before it when it is locked (the glyph ends 12
+/// short of the name).
+private struct LockedName: View {
+    let layer: LayerInfo
+    let ink: Color
+    let renaming: Bool
+    let onRenamed: (String) -> Void
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if layer.locked {
+                PcIconView(PcIcons.lockRow, size: 17, color: ink)
+                    .offset(x: 3)
+            }
+            Group {
+                if renaming {
+                    InlineName(name: layer.name, color: ink, fontSize: 17, onDone: onRenamed)
+                } else {
+                    Text(verbatim: layer.name)
+                        .font(.system(size: 17))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.leading, 29)
+            .padding(.trailing, 6)
+        }
+    }
+}
+
+/// A layer's thumbnail, 93 x 61: what is drawn, fitted (small drawings show their pixels), on
+/// grey, white for a mask, a checkerboard with alpha lock; a text layer's is its glyph. `top` and
+/// `bottom` say which corners are rounded.
+private struct Thumb: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    let top: Bool
+    let bottom: Bool
+
+    var body: some View {
+        let corner: CGFloat = 4
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: top ? corner : 0, bottomLeadingRadius: bottom ? corner : 0,
+            bottomTrailingRadius: bottom ? corner : 0, topTrailingRadius: top ? corner : 0,
+            style: .circular
+        )
+        ZStack {
+            if layer.alphaLock {
+                Checker()
+            } else {
+                Rectangle().fill(layer.kind == .mask ? Color.white : Pc.thumbBackground)
+            }
+            if layer.adjustment != nil {
+                // an adjustment layer has no pixels of its own: the Adjustments glyph
+                PcIconView(PcIcons.adjustments, size: 40, color: Pc.textLayerGlyph)
+            } else if layer.text {
+                PcIconView(PcIcons.textLayer, size: 61, color: Pc.textLayerGlyph)
+            } else if let picture = model.thumbnails[layer.id] {
+                Image(uiImage: picture)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+            }
+        }
+        .frame(width: 93, height: 61)
+        // a vector layer is marked in its corner
+        .overlay(alignment: .bottomLeading) {
+            if layer.vector {
+                Text(verbatim: "V")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 15, height: 15)
+                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .padding(3)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            // a plugin's layer: its kind's badge in its corner, as its manifest draws it
+            if let badge = layer.pluginBadge {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4, style: .circular).fill(pluginBadgeBehind)
+                    PluginBadgeView(badge: badge, ink: .white, width: 1.5)
+                }
+                .frame(width: 18, height: 14)
+                .padding(3)
+            }
+        }
+        .clipShape(shape)
+    }
+}
+
+/// The transparency checkerboard behind thumbnails.
+private struct Checker: View {
+    var body: some View {
+        Canvas { context, size in
+            let cell: CGFloat = 6
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.white))
+            var y = 0
+            while CGFloat(y) * cell < size.height {
+                var x = 0
+                while CGFloat(x) * cell < size.width {
+                    if (x + y) % 2 == 1 {
+                        context.fill(Path(CGRect(x: CGFloat(x) * cell, y: CGFloat(y) * cell, width: cell, height: cell)), with: .color(Color(argb: 0xFFD6_D6D6)))
+                    }
+                    x += 1
+                }
+                y += 1
+            }
+        }
+    }
+}
+
+/// A visibility box: filled with the tick cut out of it (the row showing through), or an outline.
+struct CheckBox: View {
+    let checked: Bool
+    let fill: Color
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 5, style: .circular)
+        ZStack {
+            if checked {
+                shape.fill(fill)
+                // the tick is cut out of the box
+                PcIconView(PcIcons.tick, size: 14, color: .black)
+                    .blendMode(.destinationOut)
+            } else {
+                shape.strokeBorder(fill, lineWidth: 1.5)
+            }
+        }
+        .frame(width: 18, height: 18)
+        .compositingGroup()
+    }
+}
+
+/// The background colour's row: its swatch (none shown while hidden) and its visibility box.
+private struct BackgroundRow: View {
+    let model: CanvasModel
+
+    var body: some View {
+        let bg = model.background
+        // hidden, the swatch shows no colour: a faint white over the row
+        let swatch = bg.visible ? Color(.sRGB, red: Double(bg.r), green: Double(bg.g), blue: Double(bg.b)) : Color.white.opacity(0.06)
+        HStack(spacing: 0) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 14, style: .circular)
+                    .fill(swatch)
+                    .frame(width: 92, height: 42)
+                    .padding(.leading, 4)
+                Text(verbatim: "Background color")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.panelTitle)
+                    .lineLimit(1)
+                    .padding(.leading, 14)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { model.pickBackground() }
+            CheckBox(checked: bg.visible, fill: Pc.checkFill)
+                .frame(width: 44, height: 41)
+                .contentShape(Rectangle())
+                .onTapGesture { model.toggleBackground() }
+            Spacer().frame(width: 8)
+        }
+        .frame(height: 50)
+        .background(RoundedRectangle(cornerRadius: 17, style: .circular).fill(Pc.backgroundRow))
+    }
+}
+
+/// A model's texture sets (one for each of its materials), a row each: the one painted on is lit,
+/// and a tap on another paints on it from then on.
+private struct TextureSetRows: View {
+    let model: CanvasModel
+
+    var body: some View {
+        VStack(spacing: rowGap) {
+            ForEach(Array(model.textureSets.enumerated()), id: \.offset) { index, name in
+                let current = index == model.textureSet
+                HStack(spacing: 0) {
+                    PcIconView(PcIcons.tab3D, size: 34, color: current ? Pc.text : Pc.tabIdle)
+                        .frame(width: 44, height: 44)
+                        .padding(.leading, 4)
+                    Text(verbatim: name.isEmpty ? "Texture Set \(index + 1)" : name)
+                        .font(.system(size: 17, weight: current ? .semibold : .regular))
+                        .foregroundStyle(current ? Pc.text : Pc.panelTitle)
+                        .lineLimit(1)
+                        .padding(.leading, 6)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: groupHeight)
+                .background(current ? pickedRow : Pc.backgroundRow)
+                .contentShape(Rectangle())
+                .onTapGesture { model.chooseTextureSet(index) }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: listCorner, style: .circular))
+    }
+}
+
+/// The layers panel's width.
+let layersPanelWidth = layersWidth

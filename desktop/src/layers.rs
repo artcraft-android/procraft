@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
-use make2d_core::{
+use procraft_core::{
     BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, ThumbnailImage,
     VectorApply,
 };
@@ -174,9 +174,9 @@ pub struct Layers {
     pub share: bool,
     pub edit_text: Option<u64>,
     /// The plugins' actions for the current layer's options, and the one tapped there, to run.
-    pub plugin_actions: Vec<make2d_core::PluginAction>,
+    pub plugin_actions: Vec<procraft_core::PluginAction>,
     /// The kinds of layer the plugins on add, which the + offers beside a plain layer.
-    pub layer_kinds: Vec<make2d_core::PluginKind>,
+    pub layer_kinds: Vec<procraft_core::PluginKind>,
     pub run_action: Option<String>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
@@ -240,7 +240,7 @@ fn items<'a>(
     };
     let mut out = Vec::new();
     for (set, name) in model.texture_sets.iter().enumerate() {
-        let meshes: Vec<(usize, &make2d_core::SubmeshInfo)> =
+        let meshes: Vec<(usize, &procraft_core::SubmeshInfo)> =
             model.submeshes.iter().enumerate().filter(|(_, m)| m.texture_set as usize == set).collect();
         if meshes.is_empty() {
             continue;
@@ -320,7 +320,7 @@ impl Layers {
         let top = screen.top() + pc::BAR_HEIGHT;
         let layers = session.layers();
         let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();
-        let modes = make2d_core::blend_modes();
+        let modes = procraft_core::blend_modes();
         // a closed group's layers are left out
         let collapsed: Vec<u64> =
             layers.iter().filter(|l| l.kind == LayerType::Group && l.collapsed).map(|l| l.id).collect();
@@ -1440,6 +1440,7 @@ impl Layers {
                 session.rasterize_layer(l.id);
                 self.notice = Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true));
             }
+            LayerOption::SeparateObjects => _ = session.separate_vector_objects(l.id),
             // a plugin's layer: its strokes recoloured, or given the paint brush, as strokes
             LayerOption::Recolour | LayerOption::ApplyBrush => {
                 let colour = does == LayerOption::Recolour;
@@ -1802,16 +1803,16 @@ impl Layers {
 
 /// The +'s menu's rows: a plain layer, then each kind of layer, named as its plugin names it, beside
 /// its badge (or a plug, when it draws none).
-fn add_entries(kinds: &[make2d_core::PluginKind]) -> Vec<Entry<'_>> {
+fn add_entries(kinds: &[procraft_core::PluginKind]) -> Vec<Entry<'_>> {
     let mut entries = vec![Entry::Item(&icons::MENU_NEW_LAYER, "Layer", menu::INK)];
-    let badged = |k: &make2d_core::PluginKind| make2d_core::plugin_kind_badge(k.clone());
+    let badged = |k: &procraft_core::PluginKind| procraft_core::plugin_kind_badge(k.clone());
     entries.extend(kinds.iter().map(|k| Entry::Badge(badged(k), k.label.as_str(), menu::INK)));
     entries
 }
 
 /// A plugin's layer's badge (its drawing in white over a dark rounded box) in the bottom right
 /// corner of its thumbnail's `rect`.
-fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &make2d_core::PluginBadge) {
+fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &procraft_core::PluginBadge) {
     let area = Rect::from_min_size(rect.right_bottom() - vec2(3.0 + 18.0, 3.0 + 14.0), vec2(18.0, 14.0));
     painter.rect_filled(area, 4u8, Color32::from_black_alpha(0x99));
     badge_drawing(painter, area, badge, Color32::WHITE, 1.5);
@@ -1819,7 +1820,7 @@ fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &make2d_core::Plugin
 
 /// A plugin's badge's lines and dots in `ink` over `area` (its box, 0 to 1 across and down): its
 /// lines `width` thick, its dots squares twice that across.
-pub fn badge_drawing(painter: &egui::Painter, area: Rect, badge: &make2d_core::PluginBadge, ink: Color32, width: f32) {
+pub fn badge_drawing(painter: &egui::Painter, area: Rect, badge: &procraft_core::PluginBadge, ink: Color32, width: f32) {
     let at = |x: f32, y: f32| pos2(area.left() + area.width() * x, area.top() + area.height() * y);
     let stroke = egui::Stroke::new(width, ink);
     for line in &badge.lines {
@@ -2216,9 +2217,9 @@ mod tests {
 
     #[test]
     fn the_plus_menu_offers_a_new_layer_then_each_kind_of_layer_beside_its_badge() {
-        let curve = make2d_core::BadgeLine { points: vec![0.2, 0.7, 0.4, 0.1, 0.6, 0.9, 0.8, 0.3], curved: true };
-        let badge = make2d_core::PluginBadge { lines: vec![curve], dots: vec![0.2, 0.7, 0.8, 0.3] };
-        let kind = |key: &str, label: &str, badge| make2d_core::PluginKind {
+        let curve = procraft_core::BadgeLine { points: vec![0.2, 0.7, 0.4, 0.1, 0.6, 0.9, 0.8, 0.3], curved: true };
+        let badge = procraft_core::PluginBadge { lines: vec![curve], dots: vec![0.2, 0.7, 0.8, 0.3] };
+        let kind = |key: &str, label: &str, badge| procraft_core::PluginKind {
             key: key.to_owned(),
             label: label.to_owned(),
             badge,
@@ -2233,7 +2234,7 @@ mod tests {
         let first = matches!(&entries[0], Entry::Item(icon, "Layer", _) if icon.name == "menunewlayer");
         assert!(first, "a plain layer first, beside the new layer glyph");
         assert!(matches!(&entries[1], Entry::Badge(b, "Curves", _) if *b == badge), "a kind beside its badge");
-        let plug = make2d_core::PluginBadge::plug();
+        let plug = procraft_core::PluginBadge::plug();
         assert!(matches!(&entries[2], Entry::Badge(b, "Plain", _) if *b == plug), "a plug when a kind draws none");
         // drawn, a click on the last row picks it
         let (ctx, mut look) = (egui::Context::default(), Look::default());

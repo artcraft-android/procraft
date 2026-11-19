@@ -1,7 +1,7 @@
 //! Clips moved into and out of group clips, a sound's level keyed over time, and the layers
 //! panel's + on a timeline (a layer in the drawing at the playhead).
 
-use make2d_engine::timeline::{ClipContent, ClipId, Easing, Edge, EdgePolicy, Timeline, TrackId};
+use procraft_engine::timeline::{ClipContent, ClipId, Easing, Edge, EdgePolicy, Timeline, TrackId};
 
 use super::TimelineClipInfo;
 use crate::CanvasSession;
@@ -85,6 +85,27 @@ impl CanvasSession {
             Some(tl.shift_clips(&ids, i64::from(by))).filter(|went| *went != 0)
         });
         went.and_then(|w| i32::try_from(w).ok()).unwrap_or(0)
+    }
+
+    /// Clips `ids` each made to last through the empty frames after it on its track, as one undo
+    /// step: up to the next clip there or, with none after it, to the end of the timeline (or of
+    /// the group it is in). See [`Timeline::fill_out`]. False if none had an empty frame after it,
+    /// or any is on a locked track.
+    pub fn extend_timeline_clips(&self, ids: Vec<u64>) -> bool {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        self.change("Extend Clips", |d| {
+            let tl = d.timeline.as_mut()?;
+            (!any_locked(tl, &ids) && tl.fill_out(&ids)).then_some(())
+        })
+        .is_some()
+    }
+
+    /// Whether [`CanvasSession::extend_timeline_clips`] would make any of clips `ids` longer: for
+    /// the panel to offer it only where it does something.
+    pub fn timeline_clips_extend(&self, ids: Vec<u64>) -> bool {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        let st = self.shared.lock();
+        st.doc.timeline.clone().is_some_and(|mut tl| !any_locked(&tl, &ids) && tl.fill_out(&ids))
     }
 
     /// How far [`CanvasSession::shift_timeline_clips`] would move clips `ids` if asked for `by`
@@ -178,7 +199,7 @@ impl CanvasSession {
             let ClipContent::Audio(a) = &mut clip.content else { return false };
             let easing =
                 a.volume_keys.keys.iter().find(|k| k.frame == local).map_or(Easing::Linear, |k| k.easing.clone());
-            a.volume_keys.set(local, volume.clamp(0.0, make2d_engine::media::MAX_VOLUME), easing);
+            a.volume_keys.set(local, volume.clamp(0.0, procraft_engine::media::MAX_VOLUME), easing);
             true
         })
     }
@@ -201,7 +222,7 @@ impl CanvasSession {
 impl CanvasSession {
     /// After a clip moved into or out of a group: the track it went on is drawn on, and the canvas
     /// drawn again.
-    fn landed(&self, onto: Option<make2d_engine::timeline::TrackId>) -> bool {
+    fn landed(&self, onto: Option<procraft_engine::timeline::TrackId>) -> bool {
         let Some(track) = onto else { return false };
         let mut guard = self.shared.lock();
         let st = &mut *guard;

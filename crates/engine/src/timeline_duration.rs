@@ -10,7 +10,7 @@ impl Timeline {
     }
 
     /// `frames` long, at least a frame: the looped frames kept within it (left out when none of
-    /// them are) and markers past it dropped. It may end before its clips, as Koi's may: what is
+    /// them are) and markers past it dropped. It may end before its clips: what is
     /// past the end stays where it is but neither plays, exports nor is drawn on (see
     /// [`Timeline::trim`] and the moves, which leave the length as it is). False if it is that
     /// long already.
@@ -88,7 +88,7 @@ mod tests {
         assert!(tl.set_length(0));
         assert_eq!(tl.duration, 1, "a frame at least");
         assert!(tl.set_length(4));
-        assert_eq!(tl.duration, 4, "shorter than the clips, as Koi's may be");
+        assert_eq!(tl.duration, 4, "shorter than the clips, as it may be");
         assert_eq!(tl.content_end(), 12, "the clips past the end are kept");
         assert_eq!(tl.tracks[0].clips[1].start, 8);
         assert!(tl.fit_to_content());

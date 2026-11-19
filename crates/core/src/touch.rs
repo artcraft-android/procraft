@@ -561,6 +561,10 @@ pub(crate) struct Touches {
     /// or a QuickShape's): the rest, dragged, are smoothed by the app's Stabilization.
     freehand: Vec<(f32, f32)>,
     freehand_fixed: Vec<bool>,
+    /// The Pen's or Eraser's own lasso: its path followed as a stroke of that tool follows the pen
+    /// (the brush's streamline, the app's stabilisation and motion filtering), in place of the
+    /// freehand path while that has nothing kept as it is (tapped, or snapped to a shape).
+    lasso_line: Option<procraft_engine::stroke::StrokeBuilder>,
     /// A transform is open; what its touch took, and whether it has started dragging it.
     transforming: Option<TransformTouch>,
     transform_handle: crate::TransformHandle,
@@ -675,6 +679,7 @@ impl Default for Touches {
             select_threshold: 0.5,
             freehand: Vec::new(),
             freehand_fixed: Vec::new(),
+            lasso_line: None,
             transforming: None,
             transform_handle: crate::TransformHandle::Move,
             transform_grabbed: false,
@@ -900,6 +905,11 @@ impl CanvasSession {
         if how.is_none() {
             t.freehand.clear();
             t.freehand_fixed.clear();
+            t.lasso_line = None;
+            drop(t);
+            let mut st = self.shared.lock();
+            st.end_lasso_preview();
+            self.shared.frame(&mut st);
         }
     }
 
@@ -921,8 +931,11 @@ impl CanvasSession {
     }
 
     /// The freehand selection's path drawn so far, in window pixels (x, y pairs), smoothed by the
-    /// app's Stabilization as it will select or fill.
+    /// app's Stabilization as it will select or fill (a tool's own lasso, as its strokes are).
     pub fn freehand_path(&self) -> Vec<f32> {
+        if let Some(window) = self.lasso_line(false).and_then(|l| self.canvas_to_window_flat(&l)) {
+            return window;
+        }
         let points = {
             let t = self.touches();
             (t.freehand.clone(), t.freehand_fixed.clone())
@@ -933,7 +946,7 @@ impl CanvasSession {
         points
             .iter()
             .flat_map(|&(x, y)| {
-                let p = view.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
+                let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
                 [p.x, p.y]
             })
             .collect()
@@ -949,6 +962,79 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The Pen's or Eraser's own lasso goes on to window point `at` at `ms` (it came down at
+    /// `start`), its line smoothed as that tool's strokes are, and its fill shown.
+    fn follow_lasso_line(&self, start: (f32, f32), at: (f32, f32), ms: f64) {
+        let line = self.touches().lasso_line.take();
+        let line = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let mut line = line.or_else(|| {
+                let first = st.window_to_canvas(start.0, start.1)?;
+                let mut line = st.lasso_builder();
+                line.add(&[procraft_engine::input::Sample::at(first, 1.0, ms)]);
+                Some(line)
+            });
+            if let (Some(line), Some(p)) = (line.as_mut(), st.window_to_canvas(at.0, at.1)) {
+                line.add(&[procraft_engine::input::Sample::at(p, 1.0, ms)]);
+            }
+            line
+        };
+        self.touches().lasso_line = line;
+        self.show_lasso_line();
+    }
+
+    /// A tool's own lasso's line (canvas pixels): as a stroke shows while drawn, reaching the pen,
+    /// or `finished` up to where the pen lifted. None where it isn't drawing one, or its freehand
+    /// path has points kept as they are (tapped, or snapped to a shape), which the path then goes by.
+    fn lasso_line(&self, finished: bool) -> Option<Vec<procraft_engine::geom::Vec2>> {
+        let mut t = self.touches();
+        if t.freehand_fixed.iter().any(|&f| f) {
+            return None;
+        }
+        let line = t.lasso_line.as_mut()?;
+        let line = if finished {
+            let mut line = line.clone();
+            line.finish();
+            line.placed_line()
+        } else {
+            line.shown_line(&[])
+        };
+        (line.len() >= 3).then_some(line)
+    }
+
+    /// Canvas points as window points (x, y pairs), if the canvas is shown.
+    fn canvas_to_window_flat(&self, points: &[procraft_engine::geom::Vec2]) -> Option<Vec<f32>> {
+        let view = self.shared.lock().view?;
+        let to_screen = view.to_screen();
+        Some(points.iter().flat_map(|&p| {
+            let w = to_screen.apply(p);
+            [w.x, w.y]
+        }).collect())
+    }
+
+    /// A tool's own lasso's fill shown on the canvas as it is drawn: what its line (or its
+    /// freehand path, snapped or tapped) goes round, as it will fill or erase.
+    fn show_lasso_line(&self) {
+        let Some(how) = self.touches().selecting.filter(|h| h.lasso_tool && h.lasso_fill) else { return };
+        let line = self.lasso_line(false).or_else(|| {
+            let (path, fixed) = {
+                let t = self.touches();
+                (t.freehand.clone(), t.freehand_fixed.clone())
+            };
+            let stabilization = self.shared.lock().input.stabilization;
+            let path = steadied(&path, &fixed, stabilization);
+            Some(path.iter().map(|&(x, y)| procraft_engine::geom::Vec2::new(x, y)).collect())
+        });
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let layer = st.doc.current();
+        let strength = st.sliders(st.tool).opacity;
+        let colour = if how.lasso_erase { crate::selection::ERASE_PREVIEW } else { st.color };
+        st.preview_lasso(layer, &line.unwrap_or_default(), colour, strength);
+        self.shared.frame(st);
+    }
+
     /// The freehand path taken (none left), smoothed by the app's Stabilization, as window points
     /// (x, y pairs), if it has three or more.
     fn take_freehand(&self) -> Option<Vec<f32>> {
@@ -965,7 +1051,7 @@ impl CanvasSession {
         Some(
             path.iter()
                 .flat_map(|&(x, y)| {
-                    let p = view.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
+                    let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
                     [p.x, p.y]
                 })
                 .collect(),
@@ -975,8 +1061,17 @@ impl CanvasSession {
     /// The freehand path closed: filled (or erased) as Lasso Fill says (`lasso`), else made a
     /// selection.
     fn end_freehand(&self, lasso: Option<crate::selection::LassoFill>, out: &mut Vec<TouchCommand>) {
+        // a tool's own lasso fills what its smoothed line goes round, finished where the pen lifted
+        let line = self.lasso_line(true);
+        self.touches().lasso_line = None;
+        {
+            let mut st = self.shared.lock();
+            st.end_lasso_preview();
+        }
         if let Some(lasso) = lasso {
-            if let Some(window) = self.take_freehand() {
+            let taken = self.take_freehand();
+            let line = line.filter(|_| lasso.tool_opacity).and_then(|l| self.canvas_to_window_flat(&l));
+            if let Some(window) = line.or(taken) {
                 self.fill_polygon(window, lasso);
             }
             out.push(TouchCommand::FreehandChanged);
@@ -1578,6 +1673,9 @@ impl CanvasSession {
                     t.freehand_fixed = vec![true; t.freehand.len()];
                     t.lasso_snapped = true;
                     out.push(TouchCommand::FreehandChanged);
+                    drop(t);
+                    self.show_lasso_line();
+                    t = self.touches();
                 }
             }
         }
@@ -1864,6 +1962,7 @@ impl CanvasSession {
             t.stroke_pointer = id;
             t.select_moved = false;
             t.lasso_snapped = false;
+            t.lasso_line = None;
             t.hold_at = at;
             t.pour_last = (at.0, now);
             t.select_threshold = t.selecting.map_or(0.5, |s| s.threshold);
@@ -2511,7 +2610,7 @@ impl CanvasSession {
                     let view = st.view;
                     (
                         st.window_to_canvas(at.0, at.1).map(|p| (p.x, p.y)),
-                        last.and_then(|(x, y)| view.map(|v| v.to_screen().apply(make2d_engine::geom::Vec2::new(x, y)))),
+                        last.and_then(|(x, y)| view.map(|v| v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y)))),
                     )
                 };
                 let first_canvas = self.shared.lock().window_to_canvas(start.0, start.1).map(|p| (p.x, p.y));
@@ -2520,7 +2619,7 @@ impl CanvasSession {
                     let mut t = self.touches();
                     let first = t.freehand.first().copied();
                     let near_first = first.zip(self.shared.lock().view).is_some_and(|((x, y), v)| {
-                        let p = v.to_screen().apply(make2d_engine::geom::Vec2::new(x, y));
+                        let p = v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
                         dist((p.x, p.y), at) <= FREEHAND_CLOSE * scale
                     });
                     if t.freehand.len() > 2 && near_first {
@@ -2546,6 +2645,10 @@ impl CanvasSession {
                         t.freehand_fixed.push(false);
                     }
                     out.push(TouchCommand::FreehandChanged);
+                }
+                // a tool's own lasso follows every move, smoothed as its strokes are, its fill shown
+                if moved && how.lasso_tool && lasso.is_some() {
+                    self.follow_lasso_line(start, at, ms);
                 }
                 // Lasso Fill: a path dragged closes as the touch lifts
                 if done && moved && lasso.is_some() {
@@ -2586,7 +2689,7 @@ impl CanvasSession {
     fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
         let (shown, view, density, warping) = {
             let st = self.shared.lock();
-            let warping = st.transform_mode == make2d_engine::transform::TransformMode::Warp;
+            let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
             (st.transform_box(), st.view.map(|v| v.to_screen()), st.interface_scale(), warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
@@ -2875,7 +2978,7 @@ pub(crate) type TouchState = Mutex<Touches>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use make2d_engine::geom::Vec2;
+    use procraft_engine::geom::Vec2;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
         vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }]
@@ -3871,7 +3974,7 @@ mod tests {
         let s = CanvasSession::new(1000, 800);
         {
             let mut st = s.shared.lock();
-            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
             st.adjust = crate::adjusting::Adjusting::opened(Adjustment::PerspectiveBlur);
         }
         s.adjustment_perspective_kind(kind);
@@ -3969,7 +4072,7 @@ mod tests {
         {
             let mut st = s.shared.lock();
             st.window_size = (400, 400);
-            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
         }
         s.set_touch_selecting(Some(SelectTouch {
             kind: SelectKind::Freehand,
@@ -4047,11 +4150,11 @@ mod tests {
 
     #[test]
     fn after_a_warp_the_other_kinds_drag_the_box_s_nodes() {
-        use make2d_engine::transform::{Transform, TransformMode};
+        use procraft_engine::transform::{Transform, TransformMode};
         let s = session();
         {
             let mut st = s.shared.lock();
-            st.view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
             let mut t = Transform::new(100.0, 100.0, 200.0, 100.0, Vec::new());
             t.start_warp();
             st.transform = Some(t);
@@ -4137,7 +4240,7 @@ mod tests {
     #[test]
     fn recolor_s_touch_drags_its_reticle_or_taps_it_elsewhere_and_paints_nothing() {
         let s = session();
-        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
         s.recolor_start(32.0, 32.0, 0.0, 0.0, 1.0, 0.0);
         // the app moves the reticle where the touches say
         let obey = |out: Vec<TouchCommand>| {
@@ -4168,7 +4271,7 @@ mod tests {
     #[test]
     fn the_companion_s_move_takes_a_lone_press_and_moves_the_view_without_painting() {
         let s = session();
-        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
         s.set_touch_companion(Some(CompanionMode::Move));
         s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
         let out = s.touch_move(1, at(130.0, 120.0, 16.0));
@@ -4191,7 +4294,7 @@ mod tests {
     #[test]
     fn one_finger_set_to_move_the_canvas_moves_it_and_the_pen_still_paints() {
         let s = session();
-        s.shared.lock().view = Some(make2d_engine::view::View::from_affine(make2d_engine::geom::Affine::IDENTITY));
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
         let g = crate::gestures::GestureSettings::new(crate::gestures::KeptGestures::default());
         let changed = g.set(crate::gestures::GesturePurpose::General, "ONE_FINGER_PAN".into(), true);
         // painting with a finger goes off with it, and back on turns it off again

@@ -1,4 +1,4 @@
-//! A clip put down over others, pushing them aside as Koi does; clips picked together moved to
+//! A clip put down over others, pushing them aside; clips picked together moved to
 //! other tracks, trimmed and duplicated as one.
 
 use std::collections::{HashMap, HashSet};
@@ -9,8 +9,8 @@ impl Timeline {
     /// Clip `id` put on track `track` (on any level: into a group clip or out of one) starting
     /// exactly on frame `start` of that track's level, the clips there that it would cover pushed
     /// aside: later when `later`, else earlier. Each clip pushed goes just past what it meets (the
-    /// moved clip, or a clip pushed before it), so the push ripples on only as far as it has to,
-    /// as Koi's does. Pushed earlier past frame 0, they are pushed later instead. A group it goes
+    /// moved clip, or a clip pushed before it), so the push ripples on only as far as it has to.
+    /// Pushed earlier past frame 0, they are pushed later instead. A group it goes
     /// into grows to cover it. False if it can't go there (a group into itself).
     pub fn place_clip(&mut self, id: ClipId, track: TrackId, start: u32, later: bool) -> bool {
         if self.groups_of_track(track).is_none_or(|gs| gs.iter().any(|g| g.id == id)) {
@@ -241,7 +241,7 @@ impl Timeline {
     /// The group clips holding track `id` grown to cover their clips, innermost first, each
     /// pushing the clips after it on its own track along as far as it grows, and the timeline to
     /// cover them: after clips are put down on a group's own track from outside the engine
-    /// (pasted, say). A group that cycles grows its cycle to hold them, as Koi's does, playing as
+    /// (pasted, say). A group that cycles grows its cycle to hold them, playing as
     /// many cycles as before (and as much of a last one cut short).
     pub fn grow_groups_pushing(&mut self, id: TrackId) {
         let mut track = id;
@@ -365,7 +365,7 @@ mod tests {
         let mut tl = base.clone();
         assert!(tl.place_clip(ClipId(9), TrackId(1), 12, true));
         assert_eq!(spans(&tl, 0), [(1, 0, 4), (2, 6, 10), (9, 12, 15), (3, 15, 17)]);
-        assert_eq!(tl.duration, base.duration, "the last one parked past the end, as Koi's is");
+        assert_eq!(tl.duration, base.duration, "the last one parked past the end");
         // pushing earlier: the middle one goes before it, then the first one before that
         let mut tl = base.clone();
         assert!(tl.place_clip(ClipId(9), TrackId(1), 8, false));

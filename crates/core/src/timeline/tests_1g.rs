@@ -1,7 +1,7 @@
 //! Timeline step 1g through the session: the clipboard, retiming and sync markers.
 
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use super::clipboard::TimelineClipboardInfo;
 use super::{TimelineChannel, TimelineEasing, TimelineSettings};

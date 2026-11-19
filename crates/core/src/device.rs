@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use make2d_gpu::Gpu;
+use procraft_gpu::Gpu;
 
 static DEVICE: Mutex<Option<Gpu>> = Mutex::new(None);
 
@@ -104,7 +104,7 @@ pub fn warm_gpu() {
             *kept = Some(gpu);
         }
         Ok(Err(e)) => log::error!("making the GPU device: {e}"),
-        Err(panic) => log::error!("making the GPU device panicked: {}", make2d_gpu::panic_message(panic.as_ref())),
+        Err(panic) => log::error!("making the GPU device panicked: {}", procraft_gpu::panic_message(panic.as_ref())),
     }
 }
 
@@ -115,13 +115,46 @@ pub fn warm_gpu() {
 pub fn set_gpu_record_folder(dir: String) {
     start_log();
     // the canvases' pipelines kept there between runs as well, where the GPU can
-    make2d_gpu::keep_pipelines_in(PathBuf::from(&dir));
+    procraft_gpu::keep_pipelines_in(PathBuf::from(&dir));
     *RECORD_FOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(PathBuf::from(dir));
 }
 
+/// The iPad app's log: to the standard error, which Xcode's console shows (and `simctl launch
+/// --console`). Without it nothing the core logs there is seen: how long the device, the
+/// pipelines and a canvas took to make among it.
+#[cfg(target_os = "ios")]
+struct ToStandardError;
+
+#[cfg(target_os = "ios")]
+impl log::Log for ToStandardError {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        // ours at info; of the rest (wgpu's, naga's) only errors: wgpu warns at each start of what
+        // the simulator's GPU lacks, a screenful
+        let level = if metadata.target().starts_with("procraft") { log::Level::Info } else { log::Level::Error };
+        metadata.level() <= level
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("ProCraft core: [{}] {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 /// The log, to Android's (tag "procraft"), with a panic's message and place in it (the platform
-/// drops what the standard error says); once.
+/// drops what the standard error says), and to the standard error on the iPad; once.
 pub(crate) fn start_log() {
+    #[cfg(target_os = "ios")]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if log::set_logger(&ToStandardError).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+        });
+    }
     #[cfg(target_os = "android")]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
@@ -304,7 +337,7 @@ mod tests {
 
     #[test]
     fn the_record_follows_the_tries_and_keeps_a_backend_that_drew() {
-        let dir = std::env::temp_dir().join(format!("make2d-gpu-record-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("procraft-gpu-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let _ = std::fs::remove_file(dir.join(RECORD));
         assert_eq!(start_in(&dir, 2), 0);

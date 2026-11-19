@@ -27,8 +27,8 @@ dbg_macro = "warn"
 too_many_arguments = "allow"
 
 [workspace.dependencies]
-make2d-engine = { path = "crates/engine" }
-make2d-gpu = { path = "crates/gpu" }
+procraft-engine = { path = "crates/engine" }
+procraft-gpu = { path = "crates/gpu" }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "wgsl", "naga-ir"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
@@ -42,6 +42,9 @@ parking_lot = "0.12"
 
 [profile.dev]
 opt-level = 1
+# Line numbers in backtraces and the debugger, but no variable or type info:
+# keeps target/debug a fraction of the size, which matters with a build per worktree.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2

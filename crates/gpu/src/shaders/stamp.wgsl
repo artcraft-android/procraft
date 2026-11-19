@@ -130,7 +130,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     return o;
 }
 
-// A ribbon's piece (see make2d_engine::ribbon): its two rungs, each its middle and the way to its
+// A ribbon's piece (see procraft_engine::ribbon): its two rungs, each its middle and the way to its
 // left edge (as long as half the strip's width), and their alphas and places along the image (in
 // tiles). The stamp it is laid for, beside it, gives its look.
 struct RibbonIn {

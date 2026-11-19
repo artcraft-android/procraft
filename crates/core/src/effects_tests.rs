@@ -1,11 +1,11 @@
 //! Adjustment layers through the session's own calls: merged with the layers below, keyed on a
 //! timeline's Keys panel, and written into a PSD.
 
-use make2d_engine::document::{LayerAdjustment, LayerId};
-use make2d_engine::filter::Filter;
-use make2d_engine::timeline::{ClipContent, ClipId};
-use make2d_engine::view::View;
-use make2d_gpu::Gpu;
+use procraft_engine::document::{LayerAdjustment, LayerId};
+use procraft_engine::filter::Filter;
+use procraft_engine::timeline::{ClipContent, ClipId};
+use procraft_engine::view::View;
+use procraft_gpu::Gpu;
 
 use crate::timeline::{TimelineChannel, TimelineEasing};
 use crate::{CanvasSession, PenSample, PointerKind};
@@ -140,7 +140,7 @@ fn a_psd_keeps_hue_as_an_adjustment_layer_and_a_blur_as_pixels() {
         }
         id
     };
-    let dir = std::env::temp_dir().join(format!("make2d-effects-psd-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-effects-psd-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("out.psd");
     assert!(s.export_psd(path.to_string_lossy().into_owned()).is_ok());
@@ -148,7 +148,7 @@ fn a_psd_keeps_hue_as_an_adjustment_layer_and_a_blur_as_pixels() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(bytes.windows(8).any(|w| w == b"8BIMhue2"), "the hue layer as Photoshop's own");
     // the blur came as a layer of pixels: what it drew (grey, from the hue below it)
-    let read = make2d_engine::psd::read(&bytes).unwrap_or_else(|e| panic!("{e:?}"));
+    let read = procraft_engine::psd::read(&bytes).unwrap_or_else(|e| panic!("{e:?}"));
     let soft = read.document.layers().iter().find(|l| l.name == "Soft").map(|l| l.id);
     let px = soft.and_then(|id| read.pixels.iter().find(|(l, _)| *l == id)).map(|(_, p)| p.clone());
     let at = px.as_ref().and_then(|p| p.get((20 * 40 + 20) * 4..(20 * 40 + 20) * 4 + 4)).unwrap_or(&[0; 4]);
@@ -185,7 +185,7 @@ fn curves_exposure_is_set_from_its_panel_and_kept_by_its_layer() {
     assert_eq!(s.adjustment_layer_edit(a.0), Some(crate::Adjustment::Curves));
     assert_eq!(s.adjustment_shown().exposure, vec![-1.0, 0.0, 1.0]);
     // its limit, the next channel: off until its peak is brought down
-    assert_eq!(s.adjustment_shown().limit, vec![make2d_engine::filter::LIMIT_OFF, 0.8]);
+    assert_eq!(s.adjustment_shown().limit, vec![procraft_engine::filter::LIMIT_OFF, 0.8]);
     s.adjustment_curve_channel(5);
     s.adjustment_limit(0, 1.5);
     s.adjustment_limit(1, 2.0);

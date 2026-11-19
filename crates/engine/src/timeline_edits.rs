@@ -282,9 +282,17 @@ impl Document {
         if !self.has_room(1) {
             return None;
         }
+        let group = self.drawing_group(root)?;
+        self.add_layer_into(group)
+    }
+
+    /// The group the drawing `root` is: `root` itself, or, for a drawing of one layer, a group it
+    /// is put in now, which its clip shows from then on (the layer keeping its name in it as
+    /// "Layer 1"). None if `root` isn't a drawing's.
+    pub fn drawing_group(&mut self, root: LayerId) -> Option<LayerId> {
         let (_, clip) = self.timeline.as_ref()?.drawing_of(root)?;
-        let group = match self.layer(root)?.kind {
-            crate::document::LayerKind::Group => root,
+        match self.layer(root)?.kind {
+            crate::document::LayerKind::Group => Some(root),
             crate::document::LayerKind::Paint => {
                 let group = self.wrap_in_group(root, "Layer 1")?;
                 if let Some(ClipContent::Drawing(d)) =
@@ -292,11 +300,10 @@ impl Document {
                 {
                     d.root = group;
                 }
-                group
+                Some(group)
             }
-            crate::document::LayerKind::Mask => return None,
-        };
-        self.add_layer_into(group)
+            crate::document::LayerKind::Mask => None,
+        }
     }
 }
 

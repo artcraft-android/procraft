@@ -126,7 +126,7 @@ pub(crate) fn read(folder: &Path, json: &str) -> HashMap<String, Arc<Vec<u8>>> {
 pub(crate) fn bytes_of(text: &str, pictures: &HashMap<String, Arc<Vec<u8>>>) -> Option<Vec<u8>> {
     match text.strip_prefix(MARK) {
         Some(name) => pictures.get(name).map(|bytes| bytes.to_vec()),
-        None => make2d_engine::base64::decode(text),
+        None => procraft_engine::base64::decode(text),
     }
 }
 
@@ -154,10 +154,10 @@ fn is_leftover(name: &str) -> bool {
 
 /// The shape or grain a kept brush's `text` gives: the pixels read from a picture's file (see
 /// [`read`]), shared with every other brush naming it, or those the text holds itself.
-pub(crate) fn source_of(text: &str, pictures: &HashMap<String, Arc<Vec<u8>>>) -> Option<make2d_engine::brush::Source> {
+pub(crate) fn source_of(text: &str, pictures: &HashMap<String, Arc<Vec<u8>>>) -> Option<procraft_engine::brush::Source> {
     match text.strip_prefix(MARK) {
-        Some(name) => pictures.get(name).cloned().and_then(make2d_engine::brush::Source::shared),
-        None => make2d_engine::brush::Source::from_text(text),
+        Some(name) => pictures.get(name).cloned().and_then(procraft_engine::brush::Source::shared),
+        None => procraft_engine::brush::Source::from_text(text),
     }
 }
 
@@ -213,9 +213,9 @@ mod tests {
         assert_eq!(bytes_of(&format!("{MARK}{name}"), &read), Some(vec![1, 2, 3, 4]));
         assert_eq!(bytes_of(&format!("{MARK}0000000000000000.pixels"), &read), None);
         // the way the library kept them before: inside it
-        assert_eq!(bytes_of(&make2d_engine::base64::encode(&[9, 8]), &read), Some(vec![9, 8]));
+        assert_eq!(bytes_of(&procraft_engine::base64::encode(&[9, 8]), &read), Some(vec![9, 8]));
         // a shape from its file: the same pixels for every brush naming it, not a copy each
-        let side = make2d_engine::textures::TEXTURE_SIZE;
+        let side = procraft_engine::textures::TEXTURE_SIZE;
         let pixels: Arc<Vec<u8>> = Arc::new((0..side * side).map(|i| (i % 7) as u8).collect());
         let shapes = HashMap::from([(pixels_name(1), Arc::clone(&pixels))]);
         let text = format!("{MARK}{}", pixels_name(1));

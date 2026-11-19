@@ -1387,6 +1387,27 @@ impl StrokeBuilder {
         Some(self.pixel_all(stamps, false))
     }
 
+    /// Where the stroke's stamps are placed so far, before any jitter threw them: the line it
+    /// follows, as stabilisation, motion filtering and streamline have smoothed it (finished, up
+    /// to where the pen lifted).
+    pub fn placed_line(&self) -> Vec<Vec2> {
+        self.placed.iter().map(|p| p.center - p.thrown).collect()
+    }
+
+    /// The line as the stroke shows while drawn ([`StrokeBuilder::placed_line`], then on through
+    /// what smoothing still holds back to the input itself, and on to `predicted`, input expected
+    /// next): where its tip is drawn reaching, the stroke left as it is.
+    pub fn shown_line(&mut self, predicted: &[Sample]) -> Vec<Vec2> {
+        let mut ahead = self.open_copy(self.placed.len());
+        if !predicted.is_empty() {
+            ahead.add_unsnapped(predicted);
+        }
+        ahead.reach_input(&mut Vec::new());
+        let mut line = self.placed_line();
+        line.extend(ahead.placed_line());
+        line
+    }
+
     /// The line a shape is fitted to, from this builder as its stroke began and the stroke's
     /// input: stabilisation and motion filtering smooth it as they smooth the stroke, streamline
     /// doesn't, no taper changes how its stamps are spaced and nothing runs on past the lift. Each

@@ -2,9 +2,9 @@
 //! every frame drawn on with its onion skins (skipped where the machine has no GPU).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use make2d_engine::animation::{self, Animation};
-use make2d_engine::document::{Document, LayerId};
-use make2d_gpu::{Canvas, Gpu};
+use procraft_engine::animation::{self, Animation};
+use procraft_engine::document::{Document, LayerId};
+use procraft_gpu::{Canvas, Gpu};
 
 const SIDE: u32 = 8;
 
@@ -156,7 +156,7 @@ fn a_timeline_fades_a_drawing_by_its_clip() {
 
 #[test]
 fn a_drawing_moves_turns_and_fades_by_its_keys() {
-    use make2d_engine::timeline::{Channel, Easing, Key};
+    use procraft_engine::timeline::{Channel, Easing, Key};
     let Some(gpu) = gpu() else { return };
     let mut doc = Document::new(SIDE, SIDE);
     let layer = doc.current();
@@ -190,7 +190,7 @@ fn a_drawing_moves_turns_and_fades_by_its_keys() {
     assert_eq!(gpu.errors(), 0, "GPU validation errors");
 }
 
-fn first_clip(doc: &mut Document) -> &mut make2d_engine::timeline::Clip {
+fn first_clip(doc: &mut Document) -> &mut procraft_engine::timeline::Clip {
     &mut doc.timeline.as_mut().unwrap().tracks[0].clips[0]
 }
 
@@ -235,7 +235,7 @@ fn row(p: &[u8]) -> Vec<[u8; 3]> {
 
 #[test]
 fn mattes_mask_the_clip_above() {
-    use make2d_engine::timeline::MaskMode;
+    use procraft_engine::timeline::MaskMode;
     let Some(gpu) = gpu() else { return };
     let (mut doc, mut canvas) = matte_canvas(&gpu);
     let mask = |doc: &mut Document, m| doc.timeline.as_mut().unwrap().tracks[1].clips[0].mask = m;
@@ -259,7 +259,7 @@ fn mattes_mask_the_clip_above() {
 
 #[test]
 fn a_group_clip_composites_as_one() {
-    use make2d_engine::timeline::{ClipId, MaskMode};
+    use procraft_engine::timeline::{ClipId, MaskMode};
     let Some(gpu) = gpu() else { return };
     let (mut doc, mut canvas) = matte_canvas(&gpu);
     let tl = doc.timeline.as_mut().unwrap();
@@ -282,7 +282,7 @@ fn a_group_clip_composites_as_one() {
 
 #[test]
 fn played_frames_show_through_the_camera() {
-    use make2d_engine::timeline::{CameraPose, Easing};
+    use procraft_engine::timeline::{CameraPose, Easing};
     let Some(gpu) = gpu() else { return };
     let mut doc = Document::new(SIDE, SIDE);
     let layer = doc.current();

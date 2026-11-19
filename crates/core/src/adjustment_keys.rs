@@ -1,8 +1,8 @@
 //! An adjustment clip's values keyed on the timeline: the Keys panel lists them as plain rows at
 //! the playhead, and a row moved keys the whole adjustment there.
 
-use make2d_engine::filter::ParamUnit;
-use make2d_engine::timeline::ClipId;
+use procraft_engine::filter::ParamUnit;
+use procraft_engine::timeline::ClipId;
 
 use crate::CanvasSession;
 use crate::timeline::TimelineEasing;

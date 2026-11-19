@@ -29,7 +29,7 @@ fn busy() -> Option<std::sync::Arc<CanvasSession>> {
     assert!(s.set_timeline_loop(Some(TimelineLoop { start: 0, end: 4 })));
     // the sound starts at the playhead
     s.set_timeline_frame(0);
-    let dir = std::env::temp_dir().join(format!("make2d-panel-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-panel-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("level.wav");
     std::fs::write(&path, (0..3000_u32).map(|i| (i as u8).wrapping_mul(3)).collect::<Vec<_>>()).unwrap();

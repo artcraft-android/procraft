@@ -4,7 +4,7 @@
 //! reading is numbered: a reading the same as the last is given the same number, and the panel,
 //! asking with the number it has, is told nothing has changed rather than sent it all again.
 
-use make2d_engine::document::{Document, LayerId, LayerKind};
+use procraft_engine::document::{Document, LayerId, LayerKind};
 
 use super::{
     TimelineCamera, TimelineClipKind, TimelineInfo, TimelineKeyInfo,

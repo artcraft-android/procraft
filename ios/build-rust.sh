@@ -2,11 +2,11 @@
 # Builds the core (crates/core) for the iPad app as a static library, with its Swift bindings and
 # the app's icon, into ios/Generated:
 #
-#   lib/<platform>/libmake2d_core.a     the core for the iPad (iphoneos) or the simulator
+#   lib/<platform>/libprocraft_core.a     the core for the iPad (iphoneos) or the simulator
 #                                         (iphonesimulator), always optimized (a debug engine is too
 #                                         slow to paint with)
-#   Make2DCore.swift                    the bindings, compiled into the app
-#   include/Make2DCoreFFI.h             their C half, a module on the Swift import path
+#   ProCraftCore.swift                    the bindings, compiled into the app
+#   include/ProCraftCoreFFI.h             their C half, a module on the Swift import path
 #   include/module.modulemap
 #   Assets.xcassets                       the app icon (assets/app-icon/procraft-1024.png)
 #
@@ -37,20 +37,20 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 cd "$ROOT"
 echo "==> the core for $PLATFORM ($TARGET)"
-cargo rustc --locked --release --target "$TARGET" -p make2d-core --lib --crate-type staticlib
+cargo rustc --locked --release --target "$TARGET" -p procraft-core --lib --crate-type staticlib
 mkdir -p "$OUT/lib/$PLATFORM" "$OUT/include"
-cp "$TARGET_DIR/$TARGET/release/libmake2d_core.a" "$OUT/lib/$PLATFORM/libmake2d_core.a"
+cp "$TARGET_DIR/$TARGET/release/libprocraft_core.a" "$OUT/lib/$PLATFORM/libprocraft_core.a"
 
 echo "==> its Swift bindings"
 BINDINGS="$OUT/bindings"
 rm -rf "$BINDINGS"
-cargo run --quiet --locked -p make2d-bindgen -- generate "$OUT/lib/$PLATFORM/libmake2d_core.a" \
+cargo run --quiet --locked -p procraft-bindgen -- generate "$OUT/lib/$PLATFORM/libprocraft_core.a" \
   --language swift --out-dir "$BINDINGS" --no-format
 # written only when changed, so Xcode doesn't compile them again for nothing
 update() { cmp -s "$1" "$2" || cp "$1" "$2"; }
-update "$BINDINGS/Make2DCore.swift" "$OUT/Make2DCore.swift"
-update "$BINDINGS/Make2DCoreFFI.h" "$OUT/include/Make2DCoreFFI.h"
-update "$BINDINGS/Make2DCoreFFI.modulemap" "$OUT/include/module.modulemap"
+update "$BINDINGS/ProCraftCore.swift" "$OUT/ProCraftCore.swift"
+update "$BINDINGS/ProCraftCoreFFI.h" "$OUT/include/ProCraftCoreFFI.h"
+update "$BINDINGS/ProCraftCoreFFI.modulemap" "$OUT/include/module.modulemap"
 rm -rf "$BINDINGS"
 
 echo "==> the app icon"

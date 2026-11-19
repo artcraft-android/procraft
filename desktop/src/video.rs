@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use make2d_core::FrameRate;
+use procraft_core::FrameRate;
 
 /// What is said where videos are made and read with ffmpeg and it isn't installed.
 pub const NO_FFMPEG: &str = "Making and opening videos needs ffmpeg: install it from your system's packages.";
@@ -592,7 +592,7 @@ pub fn write_mp4(
     count: usize,
     frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
 ) -> Result<(u32, u32), String> {
-    let rate = make2d_core::frame_rate(fps);
+    let rate = procraft_core::frame_rate(fps);
     #[cfg(any(windows, target_os = "macos"))]
     {
         let _ = std::fs::remove_file(out);
@@ -818,7 +818,7 @@ mod ffmpeg {
             let dir = std::env::temp_dir().join(format!("procraft-ffmpeg-slow-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             let out = dir.join("slow.mp4");
-            let rate = make2d_core::frame_rate(0.1);
+            let rate = procraft_core::frame_rate(0.1);
             let made = super::write(&out, 64, 48, rate, false, 1_000_000, 3, |i, w, h| {
                 Some([(i * 80) as u8, 90, 200, 255].repeat(w as usize * h as usize))
             });
@@ -843,7 +843,7 @@ mod ffmpeg {
             let out = dir.join("made.mp4");
             // six frames, each a flat colour
             let colour = |i: usize| [(i * 40) as u8, 200 - (i * 30) as u8, 90, 255];
-            let rate = make2d_core::frame_rate(6.0);
+            let rate = procraft_core::frame_rate(6.0);
             let made = super::write(&out, 64, 48, rate, false, 1_000_000, 6, |i, w, h| {
                 Some(colour(i).repeat(w as usize * h as usize))
             });

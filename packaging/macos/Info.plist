@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Make2D.app's Info.plist, its two versions filled in by package.sh: the release's as numbers
-  alone (a beta's suffix left out, as the MSI's) and the build, make2d.versionCode.
-  The files the Finder may open with it: Make2D's own artworks (its type, declared here), and
+  ProCraft.app's Info.plist, its two versions filled in by package.sh: the release's as numbers
+  alone (a beta's suffix left out, as the MSI's) and the build, procraft.versionCode.
+  The files the Finder may open with it: ProCraft's own artworks (its type, declared here), and
   the pictures, PSDs, PDFs, brushes and palettes the gallery's Import takes, as another app's.
 -->
 <plist version="1.0">
@@ -11,17 +11,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Make2D</string>
+	<string>ProCraft</string>
 	<key>CFBundleExecutable</key>
-	<string>make2d</string>
+	<string>procraft</string>
 	<key>CFBundleIconFile</key>
 	<string>procraft</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.make2d.app</string>
+	<string>io.github.artcraftandroid.procraft</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Make2D</string>
+	<string>ProCraft</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -38,7 +38,7 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>Make2D Artwork</string>
+			<string>ProCraft Artwork</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
@@ -47,7 +47,7 @@
 			<string>procraft</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.make2d.app.artwork</string>
+				<string>io.github.artcraftandroid.procraft.artwork</string>
 			</array>
 		</dict>
 		<dict>
@@ -96,9 +96,9 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
-			<string>com.make2d.app.artwork</string>
+			<string>io.github.artcraftandroid.procraft.artwork</string>
 			<key>UTTypeDescription</key>
-			<string>Make2D Artwork</string>
+			<string>ProCraft Artwork</string>
 			<key>UTTypeIconFile</key>
 			<string>procraft</string>
 			<key>UTTypeConformsTo</key>
