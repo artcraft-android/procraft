@@ -4460,6 +4460,205 @@ fn color_fill_fills_as_the_selection_tool_closes_and_ends_the_selection_in_the_s
     assert_eq!(pixel(&s, 20, 20), white);
 }
 
+/// A frame of `s` drawn as the screen shows it (`side` x `side` window pixels), read back: RGBA8.
+fn frame_of(s: &CanvasSession, side: u32) -> Vec<u8> {
+    use procraft_gpu::wgpu;
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test frame"),
+        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    st.draw_frame(&view, format, (side, side), procraft_engine::profile::Profile::Srgb, std::time::Instant::now());
+    let gpu = st.gpu.as_ref().unwrap();
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    procraft_gpu::read_texture(gpu, &target, side, side).unwrap()
+}
+
+/// Pixel (`x`, `y`) of a frame `side` pixels wide.
+fn frame_at(frame: &[u8], side: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * side + x) * 4) as usize;
+    [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+}
+
+#[test]
+fn color_fill_shows_in_the_current_layer_s_place_under_the_layers_above() {
+    use crate::selection::{SelectionDisplay, SelectionJoin};
+    let Some(s) = session(100, 100) else { return };
+    let (white, black, red, blue) = ([255, 255, 255, 255], [0, 0, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255]);
+    let below = s.layers()[0].id;
+    // a black bar across the middle on a layer above
+    let above = s.add_layer();
+    s.set_color(0.0, 0.0, 0.0);
+    s.select_shape(false, 0.0, 45.0, 100.0, 55.0, SelectionJoin::Add);
+    assert!(s.fill_layer(above));
+    s.select_none();
+    // Color Fill in red over a box on the layer below, the bar crossing it; no panel opened
+    assert!(s.select_layer(below));
+    s.set_color(1.0, 0.0, 0.0);
+    s.select_shape(false, 20.0, 20.0, 80.0, 80.0, SelectionJoin::Add);
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    let frame = frame_of(&s, 100);
+    let at = |x, y| frame_at(&frame, 100, x, y);
+    // the bar on the layer above stays over the fill (it was covered by it), the fill shows round
+    // it, and nothing outside what is selected changes
+    assert_eq!(at(50, 50), black, "the layer above covers the fill");
+    assert_eq!(at(30, 30), red);
+    assert_eq!(at(50, 70), red);
+    assert_eq!(at(90, 90), white);
+    assert_eq!(at(10, 50), black);
+    // the composite as read back agrees, and the layer's own pixels are as they were
+    assert_eq!(pixel(&s, 50, 50), black);
+    assert_eq!(pixel(&s, 30, 30), red);
+    let layer_at = |s: &CanvasSession, x: u32, y: u32| {
+        let st = s.shared.lock();
+        let px = st
+            .canvas
+            .as_ref()
+            .unwrap()
+            .read_layer(st.gpu.as_ref().unwrap(), procraft_engine::document::LayerId(below))
+            .unwrap();
+        let i = ((y * 100 + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    assert_eq!(layer_at(&s, 30, 30), [0, 0, 0, 0]);
+    // the selection grown while it shows: the fill follows at once, still under the bar
+    s.select_shape(false, 70.0, 70.0, 95.0, 95.0, SelectionJoin::Add);
+    let frame = frame_of(&s, 100);
+    assert_eq!(frame_at(&frame, 100, 90, 90), red);
+    assert_eq!(frame_at(&frame, 100, 50, 50), black);
+    // another colour: the fill follows
+    s.set_color(0.0, 0.0, 1.0);
+    let frame = frame_of(&s, 100);
+    assert_eq!(frame_at(&frame, 100, 30, 30), blue);
+    assert_eq!(frame_at(&frame, 100, 90, 50), black);
+    // Color Fill off: no fill left anywhere (bands only over what isn't selected)
+    s.set_selection_display(SelectionDisplay::Stripes);
+    let frame = frame_of(&s, 100);
+    assert_eq!(frame_at(&frame, 100, 30, 30), white);
+    assert_eq!(frame_at(&frame, 100, 90, 90), white);
+    assert_eq!(pixel(&s, 30, 30), white);
+    // on again, the tool closing fills the layer: the same picture, now the layer's pixels
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    let shown = frame_of(&s, 100);
+    assert!(s.close_selection_tool(true));
+    assert_eq!(layer_at(&s, 30, 30), blue);
+    let filled = frame_of(&s, 100);
+    assert_eq!(frame_at(&filled, 100, 50, 50), black);
+    assert_eq!(frame_at(&filled, 100, 30, 30), blue);
+    assert_eq!(shown, filled, "the fill shown is the fill made");
+}
+
+#[test]
+fn color_fill_shows_exactly_the_fill_it_makes_on_an_alpha_locked_faded_layer() {
+    use crate::selection::{SelectionDisplay, SelectionJoin};
+    let Some(s) = session(100, 100) else { return };
+    let layer = s.layers()[0].id;
+    // soft-edged green paint on a layer at half opacity, blended by Multiply over a grey layer
+    // below, its alpha locked
+    let grey = s.add_layer();
+    s.set_color(0.5, 0.5, 0.5);
+    assert!(s.fill_layer(grey));
+    assert!(s.move_layer(grey, 0));
+    assert!(s.select_layer(layer));
+    s.set_color(0.0, 0.8, 0.2);
+    s.select_shape(true, 15.0, 15.0, 85.0, 85.0, SelectionJoin::Add);
+    s.select_feather(0.05);
+    assert!(s.fill_layer(layer));
+    s.select_none();
+    assert!(s.set_layer_alpha_lock(layer, true));
+    assert!(s.set_layer_opacity(layer, 0.5, true));
+    assert!(s.set_layer_blend(layer, procraft_engine::document::BlendMode::Multiply.id()));
+    let before = frame_of(&s, 100);
+    // a soft selection filled in red, shown and then made
+    s.set_color(1.0, 0.1, 0.0);
+    s.select_shape(false, 30.0, 5.0, 95.0, 70.0, SelectionJoin::Add);
+    s.select_feather(0.02);
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    let shown = frame_of(&s, 100);
+    assert!(s.close_selection_tool(true));
+    s.set_selection_display(SelectionDisplay::Stripes);
+    let filled = frame_of(&s, 100);
+    let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+    let changed = before.chunks(4).zip(filled.chunks(4)).filter(|(p, q)| differ(p, q) > 8).count();
+    assert!(changed > 1500, "the fill shows: {changed} pixels changed");
+    // shown as it is made, to a level or two (the layer keeps whole levels)
+    let most = differ(&shown, &filled);
+    assert!(most <= 2, "the fill shown is the fill made, to {most} levels");
+}
+
+#[test]
+fn a_reference_layer_above_bounds_colordrop_and_color_fill_on_the_layer_below() {
+    use crate::selection::{SelectionDisplay, SelectionJoin};
+    let Some(s) = session(100, 100) else { return };
+    let below = s.layers()[0].id;
+    // a ring of line art on a layer above, made the reference; the empty layer below current
+    let lines = s.add_layer();
+    s.set_brush_size(0.2);
+    s.set_color(0.0, 0.0, 0.0);
+    let ring: Vec<PenSample> = (0..=64)
+        .map(|i| {
+            let t = i as f32 / 64.0 * std::f32::consts::TAU;
+            sample(50.0 + 30.0 * t.cos(), 50.0 + 30.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, ring[..1].to_vec());
+    s.stroke_add(ring[1..].to_vec());
+    s.stroke_end(vec![]);
+    assert!(s.set_layer_reference(lines, true));
+    assert!(s.select_layer(below));
+    let layer_at = |s: &CanvasSession, id: u64, x: u32, y: u32| {
+        let st = s.shared.lock();
+        let px = st
+            .canvas
+            .as_ref()
+            .unwrap()
+            .read_layer(st.gpu.as_ref().unwrap(), procraft_engine::document::LayerId(id))
+            .unwrap();
+        let i = ((y * 100 + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    let red = |p: [u8; 4]| p[0] > 200 && p[1] < 60 && p[2] < 60;
+    let blue = |p: [u8; 4]| p[2] > 200 && p[0] < 60 && p[1] < 60;
+    let dark = |p: [u8; 4]| p[0] < 40 && p[1] < 40 && p[2] < 40;
+    // a colour dropped inside the ring fills inside it only, on the layer below, the ring over it
+    assert!(s.pour_drop(50.0, 50.0, 1.0, 0.0, 0.0, 0.2));
+    s.pour_end(true, None);
+    s.shared.lock().end_reveal();
+    assert!(red(pixel(&s, 50, 50)) && red(pixel(&s, 60, 35)), "{:?}", pixel(&s, 50, 50));
+    assert_eq!(pixel(&s, 5, 5), [255, 255, 255, 255], "outside the ring left out");
+    // the ring passes (80, 50): its darkest pixel there
+    let ring_at = |at: &dyn Fn(u32) -> [u8; 4]| {
+        (74..=86).map(at).min_by_key(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])).unwrap()
+    };
+    assert!(
+        dark(ring_at(&|x| pixel(&s, x, 50))),
+        "the line art shows over the fill: {:?}",
+        ring_at(&|x| pixel(&s, x, 50))
+    );
+    assert!(red(layer_at(&s, below, 50, 50)) && layer_at(&s, lines, 50, 50)[3] == 0, "filled on the layer below");
+    s.undo();
+    // the selection tool's Automatic tap with Color Fill: the same, shown before it is made
+    s.select_by_colour(50.0, 50.0, 0.2, SelectionJoin::Add, false);
+    s.set_color(0.0, 0.0, 1.0);
+    s.set_selection_display(SelectionDisplay::ColourFill);
+    let frame = frame_of(&s, 100);
+    assert!(blue(frame_at(&frame, 100, 50, 50)), "{:?}", frame_at(&frame, 100, 50, 50));
+    assert_eq!(frame_at(&frame, 100, 5, 5), [255, 255, 255, 255]);
+    assert!(dark(ring_at(&|x| frame_at(&frame, 100, x, 50))), "the line art shows over the fill shown");
+    assert!(s.close_selection_tool(true));
+    assert!(blue(layer_at(&s, below, 50, 50)) && layer_at(&s, below, 5, 5)[3] == 0);
+    assert!(dark(ring_at(&|x| pixel(&s, x, 50))) && blue(pixel(&s, 60, 35)));
+}
+
 #[test]
 fn perspective_blur_opens_positional_and_directional_blurs_only_ahead_of_its_arrow() {
     use crate::{Adjustment, PerspectiveKind};

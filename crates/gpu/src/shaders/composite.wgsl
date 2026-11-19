@@ -6,7 +6,9 @@
 struct LayerUniform {
     opacity: f32,
     // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked,
-    // 4: it takes the layer's place where it reaches
+    // 4: it takes the layer's place where it reaches (5: the same, 8 bits a channel); 6: the
+    // colour `solid` fills what is selected (the selection bound as the stroke), 7: the same
+    // alpha-locked
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
@@ -222,6 +224,14 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         // the same in a stroke of 8 bits a channel: its alpha a half more, halved
         let t = textureLoad(stroke_tex, p, 0);
         return select(c0, vec4<f32>(t.rgb, 2.0 * t.a - 1.0), t.a >= 0.25);
+    }
+    if (lu.stroke_mode == 6u || lu.stroke_mode == 7u) {
+        // a colour (solid) filling what is selected (the stroke's red): over the layer as much as
+        // is selected (6), or only over its paint with its alpha kept (7)
+        let k = textureLoad(stroke_tex, p, 0).r;
+        let locked = vec4<f32>(lu.solid.rgb * (k * c0.a) + c0.rgb * (1.0 - k), c0.a);
+        let over = vec4<f32>(lu.solid.rgb * k, k) + c0 * (1.0 - k);
+        return select(over, locked, lu.stroke_mode == 7u);
     }
     if (lu.stroke_mode != 0u) {
         let px = stroke_pixel(p);

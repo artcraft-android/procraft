@@ -703,6 +703,20 @@ struct SelectionGpu {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
+    /// Holds every pixel it has selected since it was made (it may hold more).
+    bounds: IRect,
+}
+
+/// A colour shown filling what is selected on a layer, in that layer's place among the others
+/// (those above it cover it, its opacity, blend mode and mask apply), its pixels left as they are
+/// (see [`Canvas::set_fill_preview`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillPreview {
+    pub layer: LayerId,
+    /// The colour in the canvas's own colours (straight, 0..1).
+    pub colour: [f32; 3],
+    /// Only over the layer's paint, its alpha kept (as an alpha-locked layer is filled).
+    pub alpha_lock: bool,
 }
 
 /// Grid lines around the canvas, fixed to the target: `width` pixels wide (their edges smoothed),
@@ -1186,6 +1200,20 @@ impl LayerUniform {
         }
     }
 
+    /// With a fill shown over what is selected, if there is one: into the layer, or into its
+    /// mask when that is `fill`'s layer.
+    fn with_fill(self, fill: Option<FillPreview>, mask: Option<LayerId>) -> LayerUniform {
+        let Some(f) = fill else { return self };
+        let [r, g, b] = f.colour.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 });
+        LayerUniform {
+            stroke_mode: if f.alpha_lock { STROKE_FILL_LOCKED } else { STROKE_FILL },
+            stroke_opacity: 1.0,
+            stroke_on_mask: if Some(f.layer) == mask { 1.0 } else { 0.0 },
+            solid: [r, g, b, 1.0],
+            ..self
+        }
+    }
+
     /// With the paper `paper` ([`Canvas::paper_look`]) the stroke, if there is one, takes.
     fn with_paper(self, stroke: bool, paper: [f32; 4]) -> LayerUniform {
         if stroke { LayerUniform { paper, ..self } } else { self }
@@ -1358,6 +1386,10 @@ const STROKE_PAINT_LOCKED: u32 = 3;
 const STROKE_LAID: u32 = 4;
 /// As `STROKE_LAID`, in a stroke of 8 bits a channel: its alpha marked within it (see the shader).
 const STROKE_LAID_HALVED: u32 = 5;
+/// A colour filling what is selected (the selection bound as the stroke, the colour as `solid`):
+/// over the layer, or with its alpha kept (see [`FillPreview`]).
+const STROKE_FILL: u32 = 6;
+const STROKE_FILL_LOCKED: u32 = 7;
 
 /// How a paint layer is clipped as it composites (a layer uniform's `clipped`): not at all;
 /// through the alpha of the base it is clipped to, drawn without that base (shown alone, or the
@@ -2809,6 +2841,8 @@ pub struct Canvas {
     /// Part of the composite kept as it was, drawn over the canvas but for a hole (see
     /// [`Canvas::veil_begin`]).
     veil: Option<Veil>,
+    /// A colour shown filling what is selected on a layer (see [`Canvas::set_fill_preview`]).
+    fill_preview: Option<FillPreview>,
     /// Counts the undo steps ever made, so that a change since some moment shows.
     steps_made: u64,
     /// The steps made when [`Canvas::mark_steps`] was last done.
@@ -3204,6 +3238,7 @@ impl Canvas {
             held: None,
             held_quietly: false,
             veil: None,
+            fill_preview: None,
             steps_made: 0,
             mark: None,
             next_name: None,
@@ -5190,6 +5225,15 @@ impl Canvas {
             let last = rows().rposition(differs);
             if let (Some(first), Some(last)) = (first, last) {
                 let changed = coverage.get(first * row..(last + 1) * row).unwrap_or_default();
+                // what it selected before in those rows, and what it selects now
+                let before = shown.coverage.get(first * row..(last + 1) * row).unwrap_or_default();
+                let rows =
+                    coverage_bounds(changed, self.width, first).union(coverage_bounds(before, self.width, first));
+                shown.bounds = shown.bounds.union(rows);
+                // a fill shown over what is selected follows it
+                if self.fill_preview.is_some() {
+                    self.dirty = self.dirty.union(rows);
+                }
                 queue.write_texture(
                     copy_at(&shown.texture, 0, i32::try_from(first).unwrap_or(0)),
                     changed,
@@ -5206,12 +5250,21 @@ impl Canvas {
             }
             return;
         }
-        self.selection = coverage.map(|coverage| {
+        let width = self.width;
+        let selection = coverage.map(|coverage| {
             let texture = coverage_texture(device, queue, self.width, self.height, &coverage);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind = sampled_bind(device, &self.pipelines.sampled_layout, &view, &self.sampler);
-            SelectionGpu { coverage: coverage.into_owned(), texture, view, bind }
+            let bounds = coverage_bounds(&coverage, width, 0);
+            SelectionGpu { coverage: coverage.into_owned(), texture, view, bind, bounds }
         });
+        // a fill shown over what was selected goes from there, and shows over what is now
+        if self.fill_preview.is_some() {
+            for s in self.selection.iter().chain(selection.iter()) {
+                self.dirty = self.dirty.union(s.bounds);
+            }
+        }
+        self.selection = selection;
         let mask = self.selection.as_ref().map_or(&self.everything, |s| &s.view);
         self.brush_bind = brush_bind(
             device,
@@ -5237,6 +5290,26 @@ impl Canvas {
 
     pub fn has_selection(&self) -> bool {
         self.selection.is_some()
+    }
+
+    /// Shows `preview`'s colour filling what is selected on its layer, in that layer's place
+    /// among the others, from the next render on (none: the layers as they are). The layer's
+    /// pixels don't change. Shown only while something is selected; follows the selection as it
+    /// changes.
+    pub fn set_fill_preview(&mut self, preview: Option<FillPreview>) {
+        if self.fill_preview == preview {
+            return;
+        }
+        // composited again where it showed and will show
+        if let Some(selection) = self.selection.as_ref() {
+            self.dirty = self.dirty.union(selection.bounds);
+        }
+        self.fill_preview = preview;
+    }
+
+    /// The fill shown while something is selected (see [`Canvas::set_fill_preview`]).
+    pub fn fill_preview(&self) -> Option<FillPreview> {
+        self.fill_preview
     }
 
     /// Copies `layer` aside to transform it (ending a transform still open, kept).
@@ -8599,7 +8672,8 @@ impl Canvas {
             .into_iter()
             .chain(self.smudge.as_ref().map(|s| s.layer))
             .chain(self.transforming.iter().chain(&self.transform_more).map(|t| t.layer))
-            .chain(self.held.as_ref().map(|h| h.layer));
+            .chain(self.held.as_ref().map(|h| h.layer))
+            .chain(self.fill_preview.filter(|_| self.selection.is_some()).map(|f| f.layer));
         if worked.into_iter().any(|id| !live.contains(&id)) {
             return None;
         }
@@ -9517,6 +9591,10 @@ impl Canvas {
         let mask_view = mask.and_then(|m| self.layers.get(&m)).map(|m| &m.view);
         // the stroke being drawn shows on its layer, or through the mask it is painting
         let stroke = self.active.filter(|s| (s.layer == layer.id || Some(s.layer) == mask) && !s.pencil);
+        // else a fill shown over what is selected, on the layer or its mask
+        let fill = self
+            .fill_preview
+            .filter(|f| stroke.is_none() && self.selection.is_some() && (f.layer == layer.id || Some(f.layer) == mask));
         let uniform = LayerUniform {
             opacity: opacity * look.opacity,
             tint: look.tint,
@@ -9541,7 +9619,8 @@ impl Canvas {
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
         .with_paper(stroke.is_some(), self.paper_look())
-        .with_dual(stroke.as_ref());
+        .with_dual(stroke.as_ref())
+        .with_fill(fill, mask);
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             device,
@@ -9579,9 +9658,14 @@ impl Canvas {
         let offset = uniforms.push(&uniform);
         // the base clipped to and its mask
         let (clip, clip_mask) = clip.unwrap_or((&self.stroke_view, &self.stroke_view));
+        // a fill shown over what is selected reads the selection where a stroke is read
+        let stroke = match (uniform.stroke_mode, self.selection.as_ref()) {
+            (STROKE_FILL | STROKE_FILL_LOCKED, Some(selection)) => &selection.view,
+            _ => &self.stroke_view,
+        };
         let first = stack.first.1;
         if blend == BlendMode::Normal || uniform.clipped == CLIP_BASE {
-            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask, clip_mask);
+            let bind = self.quad_masked(device, [view, stroke, clip, &self.stroke_view], mask, clip_mask);
             let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
@@ -9597,7 +9681,7 @@ impl Canvas {
         } else {
             let second = stack.second().1;
             let (backdrop, target) = if *current == 0 { (first, second) } else { (second, first) };
-            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, backdrop], mask, clip_mask);
+            let bind = self.quad_masked(device, [view, stroke, clip, backdrop], mask, clip_mask);
             let mut pass = render_pass(encoder, "blend", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
             pass.set_pipeline(&self.pipelines.blend);
@@ -12726,6 +12810,22 @@ fn brush_bind(
 }
 
 /// A one-channel texture of coverage, `width` × `height`, from `data` (one byte a pixel).
+/// The rectangle holding every pixel `rows` (whole rows of a coverage `width` pixels wide, the
+/// first of them row `first`) selects any of; empty where none is.
+fn coverage_bounds(rows: &[u8], width: u32, first: usize) -> IRect {
+    let w = (width as usize).max(1);
+    let mut bounds = IRect::EMPTY;
+    for (j, row) in rows.chunks(w).enumerate() {
+        let (Some(left), Some(right)) = (row.iter().position(|&c| c > 0), row.iter().rposition(|&c| c > 0)) else {
+            continue;
+        };
+        let y = i32::try_from(first + j).unwrap_or(i32::MAX);
+        let at = |x: usize| i32::try_from(x).unwrap_or(i32::MAX);
+        bounds = bounds.union(IRect::new(at(left), y, at(right).saturating_add(1), y.saturating_add(1)));
+    }
+    bounds
+}
+
 fn coverage_texture(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, data: &[u8]) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("selection"),

@@ -62,18 +62,21 @@ impl State {
         );
     }
 
+    /// The bands over what is not selected, `started` being when drawing began.
+    fn stripes_shown(&self, started: Instant) -> SelectionLook {
+        let s = self.display_scale;
+        let period = STRIPE_PERIOD_PT * s;
+        let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
+        SelectionLook::Stripes(Stripes { period, drift, coverage: STRIPE_COVERAGE * self.selection_visibility })
+    }
+
     /// How the selection looks, `started` being when drawing began.
     fn selection_shown(&self, started: Instant, screen: Profile) -> SelectionLook {
-        let s = self.display_scale;
         match self.selection_display {
-            SelectionDisplay::Stripes => {
-                let period = STRIPE_PERIOD_PT * s;
-                let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
-                SelectionLook::Stripes(Stripes { period, drift, coverage: STRIPE_COVERAGE * self.selection_visibility })
-            }
+            SelectionDisplay::Stripes => self.stripes_shown(started),
             SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
             SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
-            // the paint colour is in the canvas's colours
+            // the paint colour is in the canvas's colours (a model shows it over what is selected)
             SelectionDisplay::ColourFill => SelectionLook::Fill(self.doc.profile.convert(self.color, screen)),
         }
     }
@@ -119,6 +122,19 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
+        // Color Fill's colour shows on the canvas in the current layer's place, those above it
+        // over it; bands while that layer can't be filled
+        let fill_preview = self.colour_fill_preview();
+        let canvas_selection = match self.selection_display {
+            SelectionDisplay::ColourFill if fill_preview.is_some() => None,
+            SelectionDisplay::ColourFill => Some(self.stripes_shown(started)),
+            _ => Some(selection_shown),
+        };
+        // (a model or the drawing pad as a sphere shows the canvas as its layers are)
+        let flat = !self.scene_shown() && self.sphere.is_none();
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.set_fill_preview(fill_preview.filter(|_| flat));
+        }
         // while a transform is open the selection shows no bands: its box shows what moves
         let banded = self.transform.is_none();
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
@@ -144,8 +160,7 @@ impl State {
             canvas.set_paper(gpu, self.plugin_paper.as_ref());
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
-            let shown = selection_shown;
-            let look = (canvas.has_selection() && banded).then_some(shown);
+            let look = canvas_selection.filter(|_| canvas.has_selection() && banded);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
