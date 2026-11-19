@@ -2539,6 +2539,70 @@ fn a_pen_s_smudge_drags_as_its_pressure_says_whatever_its_tilt_or_rate() {
     assert!(flat >= 15.0 && flat >= 8.0 * at_half.max(1.0) && flat < mouse, "{flat} {at_half} {mouse}");
 }
 
+/// The ink across a pen stroke (black on white, along y = 100) at columns 42, 46 and 50 (its start),
+/// 200 (its middle) and 330, 334 and 338 (its end), drawn by the current brush with its pressure
+/// taper set as `taper` says (start, end, tip, pressure; no taper size), at pressure 0.8 and 240
+/// samples a second, a render each four.
+fn tapered_widths(taper: [f32; 4]) -> Option<Vec<usize>> {
+    let s = session(400, 400)?;
+    s.set_color(0.0, 0.0, 0.0);
+    s.studio_begin();
+    let [start, end, tip, fade] = taper;
+    for (k, v) in [
+        ("pen_taper_start", start),
+        ("pen_taper_end", end),
+        ("pen_taper_size", 0.0),
+        ("pen_taper_opacity", 0.0),
+        ("pen_taper_tip", tip),
+        ("pen_taper_pressure", fade),
+        ("pressure_size", 1.0),
+        ("streamline", 0.0),
+    ] {
+        s.set_studio_setting(k.to_owned(), v);
+    }
+    s.studio_end(true);
+    s.set_brush_size(0.5);
+    let at = |i: usize| {
+        let mut p = sample(40.0 + i as f32 * 2.5, 100.0, i as f64 * 1000.0 / 240.0);
+        p.pressure = 0.8;
+        p
+    };
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    for chunk in (1..120).collect::<Vec<_>>().chunks(4) {
+        s.stroke_add(chunk.iter().map(|&i| at(i)).collect());
+        picture(&s);
+    }
+    s.stroke_end(vec![at(120)]);
+    let px = picture(&s);
+    let width = |x: usize| (0..200).filter(|&y| px[(y * 400 + x) * 4] < 200).count();
+    Some([42, 46, 50, 200, 330, 334, 338].iter().map(|&x| width(x)).collect())
+}
+
+/// #315: a pen stroke's pressure taper with its Pressure up fades the pen's pressure into both
+/// ends, thinning them (a brush whose size follows the pressure) as far as its Tip lets it: a
+/// sharp tip all the way to a point, a blunt one only at its very end (the tip's power, 1 for a
+/// sharp tip and 1/64 for a blunt one). With it at none the ends stay as the pressure leaves them.
+#[test]
+fn a_pen_s_taper_pressure_thins_its_ends_as_far_as_its_tip_lets_it() {
+    let Some(none) = tapered_widths([0.5, 0.5, 0.0, 0.0]) else { return };
+    let sharp = tapered_widths([0.5, 0.5, 0.0, 1.0]).unwrap_or_default();
+    let blunt = tapered_widths([0.5, 0.5, 1.0, 1.0]).unwrap_or_default();
+    let half = tapered_widths([0.5, 0.5, 0.0, 0.5]).unwrap_or_default();
+    eprintln!("none {none:?}; sharp {sharp:?}; half {half:?}; blunt {blunt:?}");
+    // the middle as it is; the ends whole without it
+    for w in [&sharp, &blunt, &half] {
+        assert_eq!(w[3], none[3], "{w:?} {none:?}");
+    }
+    assert!(none.iter().all(|&w| w + 3 >= none[3]), "{none:?}");
+    // a sharp tip: each end down to a fifth of the middle at its tip, and growing into it
+    assert!(sharp[0] * 5 <= none[3] && sharp[6] * 5 <= none[3], "{sharp:?}");
+    assert!(sharp[0] < sharp[1] && sharp[1] < sharp[2] && sharp[4] > sharp[5] && sharp[5] > sharp[6], "{sharp:?}");
+    // half of it, half way
+    assert!(half[0] > sharp[0] && half[0] < none[0], "{half:?}");
+    // a blunt tip barely
+    assert!(blunt[0] + 3 >= none[0] && blunt[6] + 4 >= none[6], "{blunt:?}");
+}
+
 /// The picture `s` shows, every pixel.
 fn picture(s: &CanvasSession) -> Vec<u8> {
     let mut guard = s.shared.lock();
