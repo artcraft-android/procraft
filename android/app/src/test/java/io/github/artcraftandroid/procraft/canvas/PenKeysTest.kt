@@ -151,6 +151,47 @@ class PenKeysTest {
         assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
     }
 
+    /** The buttons pressed and let go by an event of [action] with [buttonState], as the canvas reads one. */
+    private fun PenButtons.event(action: Int, buttonState: Int) =
+        next(buttonState, penIn = true, penTouching(action), penLifting(action), penLeaving(action))
+
+    @Test
+    fun a_button_held_as_the_pen_goes_down_is_still_held_though_its_hover_exit_leaves_it_out() {
+        // #322: the Galaxy Tab S6 Lite's S Pen, Erase's Pen button on: held while hovering, then
+        // drawing. Its hover exit and touches leave the button out: it is held all through, one
+        // press, let go only when a hover says so
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val b = PenButtons()
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_DOWN, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_MOVE, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_UP, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_ENTER, first))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        // a click while hovering is still a press and a let go
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        // let go out of range: the pen's next hover lets it go
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_ENTER, 0))
+        // a pen whose touches show the button: one press and one let go, never let go and pressed
+        // again on the way down (which, left alone in Gesture controls, switched to the eraser and
+        // straight back)
+        val shows = PenButtons()
+        assertEquals(FIRST_BUTTON to 0, shows.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_DOWN, first))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_MOVE, first))
+        assertEquals(0 to FIRST_BUTTON, shows.event(MotionEvent.ACTION_UP, 0))
+        assertEquals(true, penLeaving(MotionEvent.ACTION_HOVER_EXIT))
+        for (a in listOf(MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+            assertEquals(false, penLeaving(a))
+        }
+    }
+
     @Test
     fun a_pen_whose_touches_show_its_buttons_lets_go_as_it_lifts_without_one() {
         val first = MotionEvent.BUTTON_STYLUS_PRIMARY

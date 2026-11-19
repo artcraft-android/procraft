@@ -100,13 +100,17 @@ internal class PenButtons {
      * begins. As the pen [lifting] lifts it is let go, unless its touches have never shown a button:
      * then the lift leaves it out too, and the next hover says whether it is still held (let go
      * there and pressed again as the pen hovers on, one press would switch to the eraser and
-     * straight back, and the size slider with it).
+     * straight back, and the size slider with it). Nor is it let go as the pen [leaving] leaves
+     * hover, as it does on its way down onto the glass: some pens' hover exit leaves out a button
+     * still held (the Galaxy Tab S6 Lite's), which handed the eraser back just before the stroke,
+     * so a press only switched to the eraser and back. Leaving for good, its next hover or touch
+     * says.
      */
-    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false, lifting: Boolean = false): Pair<Int, Int> {
+    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false, lifting: Boolean = false, leaving: Boolean = false): Pair<Int, Int> {
         if (!penIn) return 0 to 0
         val shown = penButtonsIn(buttonState)
         if ((touching || lifting) && shown != 0) touchesShowButtons = true
-        val kept = touching || (lifting && !touchesShowButtons)
+        val kept = touching || leaving || (lifting && !touchesShowButtons)
         val now = shown or (if (kept) held else 0)
         val change = (now and held.inv()) to (held and now.inv())
         held = now
@@ -121,6 +125,9 @@ internal fun penTouching(action: Int): Boolean = when (action) {
 }
 
 internal fun penLifting(action: Int): Boolean = action == MotionEvent.ACTION_UP
+
+/** Whether a motion event of [action] is the pen leaving hover ([PenButtons.next]'s leaving). */
+internal fun penLeaving(action: Int): Boolean = action == MotionEvent.ACTION_HOVER_EXIT
 
 /** Tells a pen's next double-tap from the second press of the one just heard. */
 internal class PenDoubleTaps {

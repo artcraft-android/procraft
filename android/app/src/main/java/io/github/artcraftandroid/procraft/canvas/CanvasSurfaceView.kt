@@ -413,7 +413,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // by what the event says is held: some pens' drivers send no press of their own, only their
         // hover and touch events with the button in them
         val penIn = (0 until e.pointerCount).any { isPen(e.getToolType(it), e.source) }
-        val (pressed, letGo) = penButtons.next(e.buttonState, penIn, penTouching(e.actionMasked), penLifting(e.actionMasked))
+        val a = e.actionMasked
+        val (pressed, letGo) = penButtons.next(e.buttonState, penIn, penTouching(a), penLifting(a), penLeaving(a))
         val own = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || e.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
         // let go, whatever is open: one held to erase gives the eraser back (before this event's
         // touch, so a stroke that begins as it is let go paints)
