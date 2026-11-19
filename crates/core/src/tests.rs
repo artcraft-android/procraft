@@ -2338,11 +2338,11 @@ fn dump_brush_strokes() {
             _ => s.set_color(1.0, 1.0, 1.0),
         }
         // the slider at the size the brush's preview draws, the pen turned and pressed as there
-        let (start, lean, least, gain) = {
+        let (start, lean, brush) = {
             let brush = s.shared.lock().brush(ToolKind::Paint).clone();
             let share = procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE);
             let lean = (brush.setting("preview_tilt_offset") - 1.0) * std::f32::consts::FRAC_PI_2;
-            (share, lean, brush.setting("preview_pressure_min"), 2.0 * brush.setting("preview_pressure_scale"))
+            (share, lean, brush)
         };
         let sizes: Vec<f32> = match std::env::var("DUMP_SIZES") {
             Ok(listed) => listed.split(',').map(|v| if v == "start" { start } else { v.parse().unwrap() }).collect(),
@@ -2435,7 +2435,7 @@ fn dump_brush_strokes() {
                 let mut p = sample((100.0 + t * 820.0) * across, y + (t * 6.0).sin() * wave * across, i as f64 * step);
                 p.pressure = if size == start {
                     // the preview's swell: light at the ends, full in the middle
-                    (least + gain * 1.005 * (-9.0 * (t - 0.5) * (t - 0.5)).exp()).clamp(0.0, 1.0)
+                    procraft_engine::preview::pressure_at(&brush, t)
                 } else {
                     (std::f32::consts::PI * t).sin().max(0.05)
                 };
@@ -4861,6 +4861,12 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
     s.studio_begin();
     s.set_studio_setting("spacing".to_owned(), 0.3);
     assert_eq!(alpha(&s).0, 0);
+    // written out so, it carries the preview drawn whole on the sample stroke's canvas
+    s.studio_end(true);
+    let redrawn = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
+    let (width, height, pixels) = crate::brush_files::thumbnail_pixels(redrawn.thumbnail.as_deref().unwrap()).unwrap();
+    assert_eq!((width, height), (1060, 324));
+    assert!(pixels == s.brush_preview(set, 0, width, height).unwrap().rgba, "the written preview differs");
 }
 
 #[test]
@@ -8225,6 +8231,94 @@ fn a_stamp_preview_shows_the_stamp_alone() {
     let expected = (least + (biggest - least) * share) * 327.0 / 1060.0;
     let wide = (right - left) as f32;
     assert!((wide - expected).abs() < expected * 0.2 + 3.0, "{wide} against {expected}");
+}
+
+/// The columns from `x0` to `x1` of a premultiplied RGBA picture `width` across where the stroke
+/// is weak: their strongest pixel under half the picture's strongest.
+fn weak_columns(rgba: &[u8], width: usize, x0: usize, x1: usize) -> Vec<usize> {
+    let column = |x: usize| rgba.chunks(4 * width).filter_map(|row| row.get(x * 4 + 3)).copied().max().unwrap_or(0);
+    let strongest = rgba.chunks(4).map(|p| p[3]).max().unwrap_or(0);
+    (x0..x1).filter(|&x| u32::from(column(x)) * 2 < u32::from(strongest)).collect()
+}
+
+/// The stock dual pen modelled on an outline pen (no spacing to speak of, a little jitter, turned
+/// as the pen is held) draws one unbroken line, in its preview and on the canvas: none of it
+/// breaks into dashes.
+#[test]
+fn the_fine_dual_outline_pen_draws_an_unbroken_line_in_its_preview_and_on_the_canvas() {
+    let Some(s) = session(1024, 1024) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Hamilton") else { panic!("no Hamilton") };
+    let (w, h) = (1060, 324);
+    let p = s.brush_preview(set, index, w, h).unwrap();
+    let painted = p.rgba.chunks(4).filter(|px| px[3] > 0).count();
+    assert!(painted > 2000, "{painted}");
+    // the wave runs from about 117 to 934 across: every column between its ends inked
+    let weak = weak_columns(&p.rgba, w as usize, 140, 910);
+    assert!(weak.is_empty(), "preview weak at {} columns: {:?}", weak.len(), weak.get(..weak.len().min(20)));
+    // on the canvas, at the size its preview draws, pressed as there
+    assert!(s.select_brush(set, index));
+    s.set_color(1.0, 1.0, 1.0);
+    s.set_brush_opacity(1.0);
+    let brush = s.shared.lock().brush(ToolKind::Paint).clone();
+    s.set_brush_size(procraft_engine::preview::size_share(&brush).powf(1.0 / procraft_engine::brush::SIZE_CURVE));
+    let layer = s.add_layer();
+    let at = |i: usize| {
+        let t = i as f32 / 120.0;
+        PenSample {
+            pressure: procraft_engine::preview::pressure_at(&brush, t),
+            ..sample(100.0 + t * 820.0, 512.0 + (t * 6.0).sin() * 25.0, i as f64 * 8.0)
+        }
+    };
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    s.stroke_add((1..120).map(at).collect());
+    s.stroke_end(vec![at(120)]);
+    let rgba = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+    let weak = weak_columns(&rgba, 1024, 130, 890);
+    assert!(weak.is_empty(), "canvas weak at {} columns: {:?}", weak.len(), weak.get(..weak.len().min(20)));
+}
+
+/// The library's sample stroke presses as its pen does, whatever the brush's pressure smoothing
+/// (as no streamline holds its path back), and draws as by a pen that doesn't say how it leans: a
+/// brush that fades as the pen leans draws as strong as without that fade.
+#[test]
+fn the_sample_stroke_takes_its_pressure_as_it_comes_and_tells_no_lean() {
+    let Some(s) = session(100, 100) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Round Brush") else { panic!("no Round Brush") };
+    let brush = s.shared.lock().library[set as usize].brushes[index as usize].clone();
+    let (w, h) = (1060, 324);
+    let drawn = |b: procraft_engine::brush::Brush| s.drawn_preview(b, w, h).unwrap().rgba;
+    let plain = drawn(brush.clone());
+    assert!(plain.chunks(4).filter(|p| p[3] > 0).count() > 2000);
+    assert!(plain == drawn(procraft_engine::brush::Brush { pressure_smoothing: 0.9, ..brush.clone() }), "smoothed");
+    // a brush that previews tilt, and the same fading fully as the pen leans
+    let mut tilting = brush.clone();
+    tilting.set_setting("preview_tilt", 1.0);
+    let upright = drawn(tilting.clone());
+    tilting.set_setting("tilt_opacity", 1.0);
+    assert!(upright == drawn(tilting), "faded by a lean");
+}
+
+/// A stamp brush whose jitter throws its stamps far (as far as its control goes) still shows its
+/// stamp in its preview: the stamp alone in the middle, not thrown off the preview.
+#[test]
+fn a_stamp_brush_thrown_far_by_its_jitter_still_shows_its_stamp_in_its_preview() {
+    let Some(s) = session(100, 100) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Blotch") else { panic!("no Blotch") };
+    {
+        let st = s.shared.lock();
+        let b = &st.library[set as usize].brushes[index as usize];
+        assert!(b.setting("preview_stamp") >= 0.5 && b.setting("jitter_lateral") >= 0.99, "not a thrown stamp brush");
+    }
+    let (w, h) = (1060, 324);
+    let p = s.brush_preview(set, index, w, h).unwrap();
+    let painted = p.rgba.chunks(4).filter(|px| px[3] > 0).count();
+    // a big blot: a good share of the preview
+    assert!(painted > (w * h / 20) as usize, "{painted} of {}", w * h);
+    // in the middle third across
+    let cols: Vec<usize> =
+        (0..w as usize).filter(|&x| (0..h as usize).any(|y| p.rgba[(y * w as usize + x) * 4 + 3] > 0)).collect();
+    let middle = (cols.first().unwrap() + cols.last().unwrap()) / 2;
+    assert!((middle as i32 - 530).abs() < 60, "{middle}");
 }
 
 #[test]

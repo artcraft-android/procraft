@@ -5,7 +5,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Pointer;
 use procraft_engine::preview;
-use procraft_engine::stroke::{LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
+use procraft_engine::stroke::{InputSettings, LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
 use crate::CanvasSession;
@@ -591,21 +591,23 @@ impl CanvasSession {
             canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
         } else {
             let samples = preview::samples(brush);
+            // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
+            // no stamps; by a pen that tells its pressure and how it is turned (a brush turned as
+            // the pen is held turns its stamps so, not with the stroke) but not how far it leans,
+            // so no lean shades or sizes the stamps and the tilt switches are out of the way; its
+            // pressure taken as it comes, as its path is (no streamline holds either back)
+            let tilts = brush.setting("preview_tilt") >= 0.5;
+            let pen = InputSettings { tilt_known: false, ..InputSettings::default() };
+            let sample_stroke = |part: procraft_engine::brush::Brush, diameter: f32| {
+                let part = procraft_engine::brush::Brush { pressure_smoothing: 0.0, ..part };
+                StrokeBuilder::new(part, diameter, Pointer::Stylus).with_input(pen.clone()).steady().on_pad(tilts)
+            };
             if let Some((second, _, diameter)) = second {
-                let tilts = brush.setting("preview_tilt") >= 0.5;
-                let mut stroke =
-                    StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts).without_azimuth();
+                let mut stroke = sample_stroke(second, diameter);
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }
-            // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
-            // no stamps; the sample stroke tells no pen's turn, so a brush turned as the pen is held
-            // turns its stamps with the stroke, as a finger's do
-            let tilts = brush.setting("preview_tilt") >= 0.5;
-            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(brush), Pointer::Stylus)
-                .steady()
-                .on_pad(tilts)
-                .without_azimuth();
+            let mut stroke = sample_stroke(brush.clone(), preview::diameter(brush));
             // (its first stamps as they turned to the way it goes, so its end lays only the rest)
             let added = stroke.add(&samples);
             canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });

@@ -18,8 +18,8 @@ use crate::brush_library::LibrarySet;
 /// The set brushes from single brush files go into.
 const IMPORTED: &str = "Imported";
 
-/// The size of the preview a brush file carries.
-const THUMBNAIL: (u32, u32) = (327, 100);
+/// The size of the preview a brush file carries: the sample stroke's canvas, whole.
+const THUMBNAIL: (u32, u32) = (procraft_engine::preview::CANVAS.0 as u32, procraft_engine::preview::CANVAS.1 as u32);
 
 /// The most a brush file's picture may decode to (8192 × 8192 in colour), bytes.
 const MOST_PNG_BYTES: usize = 256 << 20;
