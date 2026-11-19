@@ -8520,6 +8520,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setLayerOpacity(l: LayerInfo, value: Float, done: Boolean) = layerChange(thumbs = false) { it.setLayerOpacity(l.id, value, done) }
 
+    fun setBlend(l: LayerInfo, blend: UInt) = layerChange(thumbs = false) { it.setLayerBlend(l.id, blend) }
+
     fun previewBlend(owner: CanvasSession?, id: ULong, blend: UInt) {
         if (session === owner && owner?.previewLayerBlend(id, blend) == true) refresh()
     }

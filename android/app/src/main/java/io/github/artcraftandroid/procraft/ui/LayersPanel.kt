@@ -7,8 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -98,9 +98,12 @@ import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.LayerOption
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.RowDrop
+import io.github.artcraftandroid.procraft.core.blendCoast
+import io.github.artcraftandroid.procraft.core.blendCoastAt
+import io.github.artcraftandroid.procraft.core.blendTap
+import io.github.artcraftandroid.procraft.core.blendTapAt
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val LayersWidth = 384.dp
@@ -1155,43 +1158,49 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo, open: Boolean) {
             },
             onDone = { vm.setLayerOpacity(l, opacity, done = true) },
         )
+        // a picker: the rows slide under a band fixed in the middle, the row there the layer's mode
+        // as it moves (one undo step a movement); let go, the list slows straight onto a row; a
+        // tap on another row makes it the mode at once and scrolls it to the band, untouchable
         val modes = vm.blendModeList
         val owner = vm.session
         var shownMode by remember(owner, l.id) { mutableStateOf(l.blend) }
+        var tapping by remember(owner, l.id) { mutableStateOf(false) }
         val list = rememberLazyListState(modes.indexOfFirst { it.id == l.blend }.coerceAtLeast(0))
         val scope = rememberCoroutineScope()
+        val density = LocalDensity.current.density
         val (rowPx, before, after) = with(LocalDensity.current) {
             val height = BlendRow.roundToPx()
             val padding = BlendListHeight.roundToPx() - height
             // Divide the padding in pixels so the last row can center at every density.
             Triple(height, (padding / 2).toDp(), (padding - padding / 2).toDp())
         }
+        val bandTop = with(LocalDensity.current) { before.roundToPx() }
         val position by remember(list, rowPx) {
             derivedStateOf { list.firstVisibleItemIndex * rowPx + list.firstVisibleItemScrollOffset }
         }
         val centered by remember(rowPx) { derivedStateOf { (position + rowPx / 2) / rowPx } }
+        val fling = remember(rowPx, density, modes.size) { BlendFling(rowPx, density, modes.size) { position } }
 
         fun preview(index: Int) {
             val mode = modes.getOrNull(index) ?: return
-            if (mode.id != shownMode) {
-                shownMode = mode.id
-                vm.previewBlend(owner, l.id, mode.id)
-            }
+            if (tapping || mode.id == shownMode) return
+            shownMode = mode.id
+            vm.previewBlend(owner, l.id, mode.id)
         }
 
         LaunchedEffect(open, owner, list, modes, rowPx) {
             if (!open) return@LaunchedEffect
-            // Apply the nearest mode during a drag, fling or tap animation.
+            // the mode under the band as the list moves, by finger or by itself
             launch { snapshotFlow { centered }.collect { preview(it) } }
             snapshotFlow { if (list.isScrollInProgress) null else position }.collect { idlePosition ->
                 if (idlePosition == null) return@collect
                 // Give a fling starting as the drag ends a frame to take over the list.
                 withFrameNanos { }
-                if (list.isScrollInProgress || position != idlePosition) return@collect
-                val distance = centered * rowPx - position
-                if (distance != 0) {
-                    // A new gesture can cancel this animation without cancelling the observer.
-                    coroutineScope { launch { list.animateScrollBy(distance.toFloat(), Motion.blendSnap()) } }
+                if (list.isScrollInProgress || position != idlePosition || tapping) return@collect
+                if (position % rowPx != 0) {
+                    // stopped between rows (a touch caught it moving): onto the nearest
+                    val coast = blendCoast(position / density, 0f, rowPx / density, modes.size.toUInt())
+                    coroutineScope { launch { list.scroll { followBlend(rowPx, density, { position }) { blendCoastAt(coast, it) } } } }
                 } else {
                     preview(centered)
                     vm.finishBlend(owner)
@@ -1213,25 +1222,34 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo, open: Boolean) {
         Box(
             Modifier.padding(top = 11.dp).fillMaxWidth().height(BlendListHeight)
                 .clip(RoundedCornerShape(12.dp)).background(Pc.LayerRow)
-                .drawBehind {
-                    val height = rowPx.toFloat()
-                    drawRect(highlight, Offset(0f, (size.height - height) / 2f), Size(size.width, height))
-                },
+                .drawBehind { drawRect(highlight, Offset(0f, bandTop.toFloat()), Size(size.width, rowPx.toFloat())) },
         ) {
             LazyColumn(
                 Modifier.fillMaxSize(),
                 state = list,
                 contentPadding = PaddingValues(top = before, bottom = after),
+                flingBehavior = fling,
+                userScrollEnabled = !tapping,
             ) {
                 itemsIndexed(modes) { i, m ->
                     val focused = i == centered
                     val ink = if (focused) Color.White else Pc.PanelTitle
                     Row(
                         Modifier.fillMaxWidth().height(BlendRow)
-                            .clickable {
+                            .clickable(enabled = !tapping) {
+                                val from = position / density
+                                val to = blendTap(i.toUInt(), from, rowPx / density, modes.size.toUInt()) ?: return@clickable
+                                shownMode = m.id
+                                vm.setBlend(l, m.id)
+                                tapping = true
                                 scope.launch {
-                                    val distance = (i * rowPx - position).toFloat()
-                                    if (distance != 0f) list.animateScrollBy(distance, Motion.blendScroll(abs(distance) / rowPx))
+                                    try {
+                                        list.scroll(MutatePriority.PreventUserInput) {
+                                            followBlend(rowPx, density, { position }) { blendTapAt(from, to, it) }
+                                        }
+                                    } finally {
+                                        tapping = false
+                                    }
                                 }
                             }
                             .padding(start = 12.dp, end = 18.5.dp),
