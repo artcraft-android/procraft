@@ -15,8 +15,9 @@ use std::time::Instant;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind, RowDrop,
-    ShownRow, ThumbnailImage,
+    BlendCoast, BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind,
+    RowDrop, ShownRow, ThumbnailImage, blend_centred, blend_coast, blend_coast_at, blend_pull_for, blend_pulled,
+    blend_tap, blend_tap_at,
 };
 use resvg::tiny_skia;
 
@@ -89,13 +90,8 @@ const SLIDER_REST: Themed = Themed(0xFF5A5A5A, 0xFFBEBEBE);
 /// Opening, the blend editor grows over this long; closing, it goes faster.
 const BLEND_OPEN: f32 = 0.25;
 const BLEND_CLOSE: f32 = 0.1;
-/// Let wheel and trackpad scrolling finish before snapping to a row.
-const BLEND_WHEEL_PAUSE: f32 = 0.12;
-const BLEND_SNAP: f32 = 0.18;
-const BLEND_REBOUND: f32 = 0.42;
-const BLEND_STRETCH: f32 = BLEND_ROW * 1.5;
-const BLEND_FLING_DECAY: f32 = 4.5;
-const BLEND_FLING_STOP: f32 = 20.0;
+/// A wheel or trackpad left alone this long (seconds) lets the modes go, to settle on a row.
+const BLEND_WHEEL_PAUSE: f64 = 0.12;
 /// A row slid left shows its buttons, each this wide, this far apart; slid right this far, it is
 /// picked.
 const SWIPE_BUTTON: f32 = 82.0;
@@ -140,82 +136,68 @@ struct RowPress {
 }
 
 /// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
-/// in the middle at 0), where a tap sent them, and when they were last moved.
+/// in the band at 0; past an end while stretched) and how they are moving.
 struct Blend {
     id: u64,
     scroll: f32,
     motion: BlendMotion,
 }
 
+/// How a blend editor's modes are moving.
 #[derive(Clone, Copy)]
 enum BlendMotion {
+    /// At rest on a row.
     Resting,
-    Dragging,
-    Wheel(Instant),
-    Coasting(f32),
-    Centering { from: f32, to: f32, since: Instant, duration: f32, rebound: bool },
+    /// Held, pressed with the list where a pull of `start` (points, unstretched) takes it, and
+    /// following the finger from there, last at `y`; `caught` when it was moving as it was
+    /// pressed, for letting go without dragging then only to stop it.
+    Held { start: f32, caught: bool, y: f32 },
+    /// Scrolled by a wheel or trackpad, last at `last` (seconds).
+    Wheel { last: f64 },
+    /// Let go at `since` (seconds), moving on as `coast` says.
+    Coasting { coast: BlendCoast, since: f64 },
+    /// A tapped mode scrolling from `from` to the band at `to` since `since` (seconds): the list
+    /// takes no touches and shows no modes on the way.
+    Tapped { from: f32, to: f32, since: f64 },
 }
 
 impl Blend {
+    /// Moving under a finger or a wheel, or by itself after them: each mode reaching the band
+    /// shows on the layer, the whole movement one undo step.
     fn moving(&self) -> bool {
-        !matches!(self.motion, BlendMotion::Resting)
+        matches!(self.motion, BlendMotion::Held { .. } | BlendMotion::Wheel { .. } | BlendMotion::Coasting { .. })
     }
 
-    fn outside(&self, most: f32) -> bool {
-        self.scroll < 0.0 || self.scroll > most
+    /// Where a finger or a wheel has to have taken the list (unstretched) for it to be where it is.
+    fn pull(&self, rows: u32) -> f32 {
+        blend_pull_for(self.scroll, BLEND_ROW, rows, BLEND_LIST_HEIGHT)
     }
 
-    fn move_by(&mut self, distance: f32, most: f32) {
-        let to = self.scroll + distance;
-        let edge = to.clamp(0.0, most);
-        let stretch = (to - edge).abs();
-        let kept = if self.scroll.clamp(0.0, most) == edge { (self.scroll - edge).abs().min(stretch) } else { 0.0 };
-        // The farther past an edge, the more the list resists being pulled farther.
-        let resisted = (stretch - kept) * 0.35 * (1.0 - kept / BLEND_STRETCH);
-        self.scroll = edge + (kept + resisted).min(BLEND_STRETCH) * (to - edge).signum();
+    /// Taken to `pull`: there between the ends, stretched past them.
+    fn pull_to(&mut self, pull: f32, rows: u32) {
+        self.scroll = blend_pulled(pull, BLEND_ROW, rows, BLEND_LIST_HEIGHT);
     }
 
-    fn center_on(&mut self, to: f32, now: Instant, duration: f32) {
-        self.motion = BlendMotion::Centering { from: self.scroll, to, since: now, duration, rebound: false };
+    /// Let go at `now` (seconds) going `speed` (points a second, down the list).
+    fn let_go(&mut self, speed: f32, now: f64, rows: u32) {
+        self.motion = BlendMotion::Coasting { coast: blend_coast(self.scroll, speed, BLEND_ROW, rows), since: now };
     }
 
-    fn settle(&mut self, now: Instant, most: f32) {
-        let to = (self.scroll.clamp(0.0, most) / BLEND_ROW).round() * BLEND_ROW;
-        if self.outside(most) {
-            self.motion =
-                BlendMotion::Centering { from: self.scroll, to, since: now, duration: BLEND_REBOUND, rebound: true };
-        } else {
-            self.center_on(to, now, BLEND_SNAP);
+    /// Moves on to `now` (seconds): a wheel left alone lets go, and what moves by itself goes on.
+    fn advance(&mut self, now: f64, rows: u32) {
+        if let BlendMotion::Wheel { last, .. } = self.motion
+            && now - last >= BLEND_WHEEL_PAUSE
+        {
+            self.let_go(0.0, now, rows);
         }
-    }
-
-    fn advance(&mut self, now: Instant, dt: f32, most: f32) {
-        match self.motion {
-            BlendMotion::Wheel(last) if now.duration_since(last).as_secs_f32() >= BLEND_WHEEL_PAUSE => {
-                self.settle(now, most);
-            }
-            BlendMotion::Coasting(velocity) => {
-                let decay = (-BLEND_FLING_DECAY * dt).exp();
-                let distance = velocity * (1.0 - decay) / BLEND_FLING_DECAY;
-                self.move_by(distance, most);
-                let velocity = velocity * decay;
-                if velocity.abs() < BLEND_FLING_STOP || self.outside(most) {
-                    self.settle(now, most);
-                } else {
-                    self.motion = BlendMotion::Coasting(velocity);
-                }
-            }
-            BlendMotion::Centering { from, to, since, duration, rebound } => {
-                let t = (now.duration_since(since).as_secs_f32() / duration).min(1.0);
-                if t == 1.0 || from == to {
-                    self.scroll = to;
-                    self.motion = BlendMotion::Resting;
-                } else {
-                    let fraction = if rebound { crate::look::spring(duration, 0.82, 0.0, t) } else { ease(t) };
-                    self.scroll = egui::lerp(from..=to, fraction);
-                }
-            }
-            _ => {}
+        let step = match self.motion {
+            BlendMotion::Coasting { coast, since } => blend_coast_at(coast, (now - since) as f32),
+            BlendMotion::Tapped { from, to, since } => blend_tap_at(from, to, (now - since) as f32),
+            _ => return,
+        };
+        self.scroll = step.position;
+        if step.done {
+            self.motion = BlendMotion::Resting;
         }
     }
 }
@@ -1675,11 +1657,11 @@ impl Layers {
             blend_rows(ui, look, list, modes, at);
             return;
         };
+        let rows = modes.len() as u32;
         let was_moving = b.moving();
-        let most = modes.len().saturating_sub(1) as f32 * BLEND_ROW;
         let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
         let response = ui.interact(list, ui.scope_id().with(("modes", l.id)), Sense::click_and_drag());
-        let now = Instant::now();
+        let now = ui.input(|i| i.time);
         let wheel = if response.hovered() {
             // The picker owns the wheel here, inside the scrollable Layers panel.
             ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
@@ -1687,44 +1669,59 @@ impl Layers {
             0.0
         };
 
-        if response.is_pointer_button_down_on() {
-            b.move_by(-response.drag_delta().y, most);
-            b.motion = BlendMotion::Dragging;
-        } else if wheel != 0.0 {
-            b.move_by(-wheel, most);
-            b.motion = BlendMotion::Wheel(now);
-        } else if response.clicked()
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            let i = ((p.y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
-            if i >= 0.0 && (i as usize) < modes.len() {
-                let to = i * BLEND_ROW;
-                let rows = (to - b.scroll).abs() / BLEND_ROW;
-                b.center_on(to, now, (0.30 + 0.04 * rows).min(0.60));
-            } else if matches!(b.motion, BlendMotion::Dragging) {
-                b.settle(now, most);
+        if matches!(b.motion, BlendMotion::Tapped { .. }) {
+            // a tapped mode on its way to the band: touches and the wheel do nothing meanwhile
+        } else if response.is_pointer_button_down_on() {
+            // it follows the finger from where it was pressed
+            let origin = ui.input(|i| i.pointer.press_origin());
+            let (start, caught, mut y) = match b.motion {
+                BlendMotion::Held { start, caught, y } => (start, caught, y),
+                _ => (b.pull(rows), b.moving(), origin.map_or(list.center().y, |o| o.y)),
+            };
+            if let Some((o, p)) = origin.zip(response.interact_pointer_pos()) {
+                b.pull_to(start + o.y - p.y, rows);
+                y = p.y;
             }
-        } else if response.drag_stopped() && !b.outside(most) {
-            let scale = ui.ctx().layer_transform_from_global(ui.layer_id()).map_or(1.0, |t| t.scaling);
-            let velocity = ui.input(|i| -i.pointer.velocity().y) * scale;
-            b.motion = BlendMotion::Coasting(velocity);
-        } else if matches!(b.motion, BlendMotion::Dragging) {
-            b.settle(now, most);
-        } else if !b.moving() {
+            b.motion = BlendMotion::Held { start, caught, y };
+        } else if wheel != 0.0 {
+            b.pull_to(b.pull(rows) - wheel, rows);
+            b.motion = BlendMotion::Wheel { last: now };
+        } else if let BlendMotion::Held { caught, y, .. } = b.motion {
+            // let go: a tap on a row away from the band makes it the mode at once and scrolls it
+            // there; else the list moves on as it was going (a tap on a moving list only stops it)
+            let row = ((y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
+            let tapped = (response.clicked() && !caught && row >= 0.0)
+                .then(|| Some((row as usize, blend_tap(row as u32, b.scroll, BLEND_ROW, rows)?)))
+                .flatten();
+            if let Some((i, to)) = tapped {
+                if let Some(m) = modes.get(i) {
+                    session.set_layer_blend(l.id, m.id);
+                }
+                b.motion = BlendMotion::Tapped { from: b.scroll, to, since: now };
+            } else {
+                let scale = ui.ctx().layer_transform_from_global(ui.layer_id()).map_or(1.0, |t| t.scaling);
+                let speed = if response.clicked() { 0.0 } else { ui.input(|i| -i.pointer.velocity().y) * scale };
+                b.let_go(speed, now, rows);
+            }
+        } else if matches!(b.motion, BlendMotion::Resting) {
             // Undo or redo can change the applied mode while the picker is open.
             b.scroll = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
         }
 
-        let dt = ui.input(|i| i.stable_dt).min(0.05);
-        b.advance(now, dt, most);
-        if let Some(m) = modes.get(centered_blend(b.scroll, modes.len())).filter(|m| m.id != l.blend) {
-            session.preview_layer_blend(l.id, m.id);
-            ui.ctx().request_repaint();
+        b.advance(now, rows);
+        // while it moves (and as it stops), the mode in the band shows on the layer
+        let tapped = matches!(b.motion, BlendMotion::Tapped { .. });
+        if (was_moving || b.moving()) && !tapped {
+            let centred = blend_centred(b.scroll, BLEND_ROW, rows) as usize;
+            if let Some(m) = modes.get(centred).filter(|m| m.id != l.blend) {
+                session.preview_layer_blend(l.id, m.id);
+                ui.ctx().request_repaint();
+            }
         }
         if was_moving && !b.moving() {
             session.finish_layer_blend();
         }
-        if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Dragging) {
+        if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Held { .. }) {
             ui.ctx().request_repaint();
         }
         blend_rows(ui, look, list, modes, b.scroll);
@@ -2220,18 +2217,13 @@ fn swipe_reach(l: &LayerInfo) -> f32 {
     SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
 }
 
-/// The nearest row, keeping the end mode active during elastic overscroll.
-fn centered_blend(scroll: f32, count: usize) -> usize {
-    ((scroll / BLEND_ROW).round() as usize).min(count.saturating_sub(1))
-}
-
 /// The list moves behind a highlight fixed to its center.
 fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], scroll: f32) {
     let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
     let painter = ui.painter_at(list);
     let highlight = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
     painter.rect_filled(highlight, 0, argb(pc::ACCENT));
-    let centered = centered_blend(scroll, modes.len());
+    let centered = blend_centred(scroll, BLEND_ROW, modes.len() as u32) as usize;
     for (i, m) in modes.iter().enumerate() {
         let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
         let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
@@ -2450,46 +2442,226 @@ mod tests {
         }
     }
 
-    #[test]
-    fn blend_drag_coasts_and_crosses_modes_before_settling() {
-        use std::time::Duration;
-
-        let start = Instant::now();
-        let mut blend = Blend { id: 1, scroll: BLEND_ROW, motion: BlendMotion::Coasting(900.0) };
-        let most = 20.0 * BLEND_ROW;
-        blend.advance(start + Duration::from_millis(16), 0.016, most);
-        assert_eq!(centered_blend(blend.scroll, 21), 1);
-        assert!(matches!(blend.motion, BlendMotion::Coasting(v) if v < 900.0));
-        blend.advance(start + Duration::from_millis(32), 0.016, most);
-        assert_eq!(centered_blend(blend.scroll, 21), 2);
-        assert!(blend.moving());
-        for step in 3..90 {
-            blend.advance(start + Duration::from_millis(step * 16), 0.016, most);
-        }
-        assert!(!blend.moving());
-        assert_eq!(blend.scroll, centered_blend(blend.scroll, 21) as f32 * BLEND_ROW);
+    /// A blend editor open on a new artwork's first layer, drawn a frame at a time, 1/60 s apart.
+    struct BlendEditorRun {
+        ctx: egui::Context,
+        look: Look,
+        session: std::sync::Arc<CanvasSession>,
+        layers: Layers,
+        modes: Vec<BlendModeInfo>,
+        id: u64,
+        frame: u32,
     }
 
-    #[test]
-    fn the_blend_list_stretches_and_springs_back_at_either_end() {
-        use std::time::Duration;
-
-        let start = Instant::now();
-        let most = 20.0 * BLEND_ROW;
-        for (edge, direction, mode) in [(0.0, -1.0, 0), (most, 1.0, 20)] {
-            let mut blend = Blend { id: 1, scroll: edge, motion: BlendMotion::Dragging };
-            blend.move_by(direction * 200.0, most);
-            let stretch = (blend.scroll - edge).abs();
-            assert!(stretch > 0.0 && stretch < 200.0);
-            assert_eq!(centered_blend(blend.scroll, 21), mode);
-            blend.settle(start, most);
-            blend.advance(start + Duration::from_millis(90), 0.016, most);
-            assert!((blend.scroll - edge).abs() < stretch);
-            assert!(blend.moving());
-            blend.advance(start + Duration::from_millis(500), 0.016, most);
-            assert_eq!(blend.scroll, edge);
-            assert!(!blend.moving());
+    impl BlendEditorRun {
+        /// Opened on the first mode in the list.
+        fn new(session: std::sync::Arc<CanvasSession>) -> BlendEditorRun {
+            let (ctx, look) = (egui::Context::default(), Look::default());
+            crate::look::install_fonts(&ctx);
+            let id = session.layers()[0].id;
+            let modes = procraft_core::blend_modes();
+            let mut run = BlendEditorRun { ctx, look, session, layers: Layers::default(), modes, id, frame: 0 };
+            run.put(0);
+            // a frame first, for the editor's parts to be there to touch
+            run.frame(Vec::new());
+            run
         }
+
+        /// The layer's mode the list's `index`th, there in the band.
+        fn put(&mut self, index: usize) {
+            self.session.set_layer_blend(self.id, self.modes[index].id);
+            let scroll = index as f32 * BLEND_ROW;
+            self.layers.blend = Some(Blend { id: self.id, scroll, motion: BlendMotion::Resting });
+        }
+
+        /// The middle of the band, `rows` rows down from it.
+        fn row(&self, rows: f32) -> Pos2 {
+            // the list's top: under the opacity line and slider, 11 points down
+            pos2(150.0, 22.0 + 23.0 + 18.0 + 2.0 + 11.0 + BLEND_LIST_HEIGHT / 2.0 + rows * BLEND_ROW)
+        }
+
+        /// One frame with `events`: then the layer's mode, and how far the list is scrolled.
+        fn frame(&mut self, events: Vec<Event>) -> (u32, f32) {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 640.0))),
+                time: Some(f64::from(self.frame) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            self.frame += 1;
+            let l = self.session.layers().into_iter().find(|l| l.id == self.id).unwrap();
+            let rect = Rect::from_min_size(Pos2::ZERO, vec2(384.0, BLEND_EDITOR_HEIGHT));
+            let (layers, look, session, modes) = (&mut self.layers, &mut self.look, &self.session, &self.modes);
+            let mut output = self.ctx.clone().run_ui(raw, |ui| layers.blend_editor(ui, look, session, &l, rect, modes));
+            output.textures_delta.clear();
+            (self.mode(), self.layers.blend.as_ref().unwrap().scroll)
+        }
+
+        fn mode(&self) -> u32 {
+            self.session.layers().into_iter().find(|l| l.id == self.id).unwrap().blend
+        }
+
+        fn resting(&self) -> bool {
+            matches!(self.layers.blend.as_ref().unwrap().motion, BlendMotion::Resting)
+        }
+
+        fn press(at: Pos2, pressed: bool) -> Event {
+            Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+        }
+
+        /// A press at `from`, moved `by` points down in `steps` steps a frame apart, held still
+        /// `still` frames, then let go: each frame's mode and scroll, the last after letting go.
+        fn drag(&mut self, from: Pos2, by: f32, steps: u32, still: u32) -> Vec<(u32, f32)> {
+            let mut seen = vec![self.frame(vec![Event::PointerMoved(from), Self::press(from, true)])];
+            let mut at = from;
+            for _ in 0..steps {
+                at.y += by / steps as f32;
+                seen.push(self.frame(vec![Event::PointerMoved(at)]));
+            }
+            for _ in 0..still {
+                seen.push(self.frame(Vec::new()));
+            }
+            seen.push(self.frame(vec![Self::press(at, false)]));
+            seen
+        }
+
+        /// Frames with nothing done until the list rests (at most `most` of them): each frame's
+        /// mode and scroll.
+        fn settle(&mut self, most: usize) -> Vec<(u32, f32)> {
+            let mut seen = Vec::new();
+            while !self.resting() {
+                assert!(seen.len() < most, "still moving after {most} frames");
+                seen.push(self.frame(Vec::new()));
+            }
+            seen
+        }
+
+        /// A click at `at`: the mode and scroll after it.
+        fn click(&mut self, at: Pos2) -> (u32, f32) {
+            self.frame(vec![Event::PointerMoved(at), Self::press(at, true)]);
+            self.frame(vec![Self::press(at, false)])
+        }
+    }
+
+    /// Flicked at 1000 points a second, the modes coast about 500 points, slowing straight onto a
+    /// row: each frame they move less than the last (the last about a quarter point onto the row
+    /// at most), never turning, with no second move to centre them.
+    #[test]
+    fn a_flicked_blend_list_coasts_about_500_points_straight_onto_a_row() {
+        let rows = procraft_core::blend_modes().len() as u32;
+        let mut blend = Blend { id: 1, scroll: 0.0, motion: BlendMotion::Resting };
+        blend.let_go(1000.0, 0.0, rows);
+        let (mut last, mut last_moved, mut frames) = (0.0f32, f32::MAX, 0);
+        while blend.moving() {
+            frames += 1;
+            assert!(frames < 120 * 10, "still coasting after 10 s");
+            blend.advance(f64::from(frames) / 120.0, rows);
+            let moved = blend.scroll - last;
+            let most = if blend.moving() { last_moved + 5e-4 } else { 0.3 };
+            assert!((0.0..=most).contains(&moved), "sped up or turned at frame {frames}: {moved} after {last_moved}");
+            (last, last_moved) = (blend.scroll, moved);
+        }
+        assert!((blend.scroll - 500.0).abs() <= 50.0, "coasted {} points", blend.scroll);
+        assert_eq!(blend.scroll, (blend.scroll / BLEND_ROW).round() * BLEND_ROW, "between rows");
+        eprintln!("flicked at 1000 pt/s: {} pt, at rest after {:.2} s", blend.scroll, frames as f32 / 120.0);
+    }
+
+    /// Pulled past either end the modes stretch, about 48 points for a 100 point pull and 84 for
+    /// 200 (no hard stop), the end mode staying the layer's; let go, they spring back.
+    #[test]
+    fn the_blend_list_stretches_past_either_end_and_springs_back() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let first = run.mode();
+        // the first mode in the band, pulled down past the top: 100 points, then 100 more
+        let seen = run.drag(run.row(0.0), 100.0, 25, 0);
+        let at_100 = -seen[seen.len() - 2].1;
+        assert!((at_100 - 48.0).abs() < 2.0, "100 points stretched {at_100}");
+        run.settle(120);
+        let seen = run.drag(run.row(0.0), 200.0, 50, 0);
+        let at_200 = -seen[seen.len() - 2].1;
+        assert!((at_200 - 84.0).abs() < 2.5, "200 points stretched {at_200}");
+        assert!(seen.iter().all(|(mode, _)| *mode == first), "the first mode stays");
+        assert_eq!(run.settle(120).last().unwrap().1, 0.0);
+        eprintln!("stretched: 100 pt {at_100:.1} pt, 200 pt {at_200:.1} pt");
+        // the last mode in the band, pulled up past the bottom
+        let last = (run.modes.len() - 1) as f32 * BLEND_ROW;
+        run.put(run.modes.len() - 1);
+        let seen = run.drag(run.row(0.0), -100.0, 25, 0);
+        let stretched = seen[seen.len() - 2].1 - last;
+        assert!((stretched - 48.0).abs() < 2.0, "100 points stretched {stretched}");
+        assert_eq!(run.settle(120).last().unwrap().1, last);
+    }
+
+    /// Dragged slowly through the modes, each shows on the layer as it reaches the band, in turn;
+    /// let go, the list rests on a row and its mode is the layer's.
+    #[test]
+    fn a_dragged_blend_list_shows_each_mode_reaching_the_band() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let mut seen = run.drag(run.row(0.0), -3.3 * BLEND_ROW, 64, 20);
+        seen.extend(run.settle(600));
+        let mut shown: Vec<u32> = Vec::new();
+        for (mode, _) in &seen {
+            if shown.last() != Some(mode) {
+                shown.push(*mode);
+            }
+        }
+        let (mode, scroll) = *seen.last().unwrap();
+        let row = (scroll / BLEND_ROW).round();
+        assert_eq!(scroll, row * BLEND_ROW, "rests between rows");
+        assert!(row >= 3.0, "dragged 3.3 rows, rests on row {row}");
+        let expected: Vec<u32> = run.modes[..=row as usize].iter().map(|m| m.id).collect();
+        assert_eq!(shown, expected, "each mode in turn");
+        assert_eq!(mode, run.modes[row as usize].id);
+    }
+
+    /// A tap on a mode below the band makes it the layer's at once, with none between shown on
+    /// the way; the list takes 0.3 s to bring it to the band, ignoring presses meanwhile. A tap on
+    /// the band's own mode does nothing.
+    #[test]
+    fn a_tapped_blend_mode_applies_at_once_with_none_between_shown() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let target = run.modes[3].id;
+        let (mode, scroll) = run.click(run.row(3.0));
+        assert_eq!((mode, scroll), (target, 0.0), "the mode at once, the list not yet moved");
+        let mut seen = vec![(mode, scroll)];
+        // a drag meanwhile does nothing
+        seen.extend(run.drag(run.row(0.0), 60.0, 6, 0));
+        seen.extend(run.settle(60));
+        let names: Vec<String> =
+            seen.iter().map(|(m, _)| run.modes.iter().find(|i| i.id == *m).unwrap().name.clone()).collect();
+        assert!(seen.iter().all(|(mode, _)| *mode == target), "modes shown: {names:?}");
+        assert_eq!(seen.last().unwrap().1, 3.0 * BLEND_ROW);
+        // 0.3 s: 18 frames after the tap's
+        let arrived = seen.iter().position(|(_, scroll)| *scroll == 3.0 * BLEND_ROW).unwrap();
+        assert!((17..=19).contains(&arrived), "arrived after {arrived} frames");
+        // the band's own mode: nothing
+        assert_eq!(run.click(run.row(0.0)), (target, 3.0 * BLEND_ROW));
+        assert!(run.resting());
+        eprintln!("tapped 3 rows down: shown {:?}, in the band after {arrived} frames", names.first());
+    }
+
+    /// A movement through the modes is one undo step, "blend mode", and a tap after it another.
+    #[test]
+    fn a_blend_movement_is_one_undo_step_and_a_tap_another() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        // the first mode put before there are steps to undo
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        run.session.use_gpu(gpu);
+        run.session.show_in(200, 200);
+        let first = run.mode();
+        run.drag(run.row(0.0), -2.2 * BLEND_ROW, 40, 20);
+        let (moved, _) = *run.settle(600).last().unwrap();
+        assert_ne!(moved, first);
+        let (tapped, _) = run.click(run.row(2.0));
+        run.settle(60);
+        assert_ne!(tapped, moved);
+        assert_eq!(run.session.undo().as_deref(), Some("blend mode"));
+        assert_eq!(run.mode(), moved);
+        assert_eq!(run.session.undo().as_deref(), Some("blend mode"));
+        assert_eq!(run.mode(), first);
+        // no third step
+        run.session.undo();
+        assert_eq!(run.mode(), first);
     }
 
     /// A tap on the background's row, on its box or left of it: whether the row asked for its
