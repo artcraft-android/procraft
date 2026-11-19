@@ -1993,6 +1993,30 @@ fn layers_change_undoably() {
 }
 
 #[test]
+fn blend_picker_updates_live_and_keeps_one_undo_step() {
+    use procraft_engine::document::BlendMode;
+
+    let Some(s) = session(32, 32) else { return };
+    let id = s.layers()[0].id;
+    let mode = || s.layers()[0].blend;
+    for blend in [BlendMode::Multiply, BlendMode::Darken, BlendMode::Screen] {
+        assert!(s.preview_layer_blend(id, blend.id()));
+        assert_eq!(mode(), blend.id());
+    }
+    assert!(s.finish_layer_blend());
+    assert_eq!(s.undo().as_deref(), Some("blend mode"));
+    assert_eq!(mode(), BlendMode::Normal.id());
+    assert_eq!(s.redo().as_deref(), Some("blend mode"));
+    assert_eq!(mode(), BlendMode::Screen.id());
+
+    assert!(s.preview_layer_blend(id, BlendMode::Multiply.id()));
+    assert!(s.preview_layer_blend(id, BlendMode::Screen.id()));
+    assert!(s.finish_layer_blend());
+    assert_eq!(s.undo().as_deref(), Some("blend mode"));
+    assert_eq!(mode(), BlendMode::Normal.id(), "a round trip adds no step");
+}
+
+#[test]
 fn merge_duplicate_blend_and_locks() {
     let Some(s) = session(100, 100) else { return };
     let bottom = s.layers()[0].id;

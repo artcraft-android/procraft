@@ -92,6 +92,8 @@ const BLEND_CLOSE: f32 = 0.1;
 /// Let wheel and trackpad scrolling finish before snapping to a row.
 const BLEND_WHEEL_PAUSE: f32 = 0.12;
 const BLEND_SNAP: f32 = 0.18;
+const BLEND_REBOUND: f32 = 0.42;
+const BLEND_STRETCH: f32 = BLEND_ROW * 1.5;
 const BLEND_FLING_DECAY: f32 = 4.5;
 const BLEND_FLING_STOP: f32 = 20.0;
 /// A row slid left shows its buttons, each this wide, this far apart; slid right this far, it is
@@ -151,47 +153,70 @@ enum BlendMotion {
     Dragging,
     Wheel(Instant),
     Coasting(f32),
-    Centering { from: f32, to: f32, since: Instant, duration: f32 },
+    Centering { from: f32, to: f32, since: Instant, duration: f32, rebound: bool },
 }
 
 impl Blend {
-    fn nearest(&self) -> f32 {
-        (self.scroll / BLEND_ROW).round() * BLEND_ROW
+    fn moving(&self) -> bool {
+        !matches!(self.motion, BlendMotion::Resting)
+    }
+
+    fn outside(&self, most: f32) -> bool {
+        self.scroll < 0.0 || self.scroll > most
+    }
+
+    fn move_by(&mut self, distance: f32, most: f32) {
+        let to = self.scroll + distance;
+        let edge = to.clamp(0.0, most);
+        let stretch = (to - edge).abs();
+        let kept = if self.scroll.clamp(0.0, most) == edge { (self.scroll - edge).abs().min(stretch) } else { 0.0 };
+        // The farther past an edge, the more the list resists being pulled farther.
+        let resisted = (stretch - kept) * 0.35 * (1.0 - kept / BLEND_STRETCH);
+        self.scroll = edge + (kept + resisted).min(BLEND_STRETCH) * (to - edge).signum();
     }
 
     fn center_on(&mut self, to: f32, now: Instant, duration: f32) {
-        self.motion = BlendMotion::Centering { from: self.scroll, to, since: now, duration };
+        self.motion = BlendMotion::Centering { from: self.scroll, to, since: now, duration, rebound: false };
     }
 
-    /// Move the list, returning the row to apply only when centering finishes.
-    fn advance(&mut self, now: Instant, dt: f32, most: f32) -> Option<usize> {
+    fn settle(&mut self, now: Instant, most: f32) {
+        let to = (self.scroll.clamp(0.0, most) / BLEND_ROW).round() * BLEND_ROW;
+        if self.outside(most) {
+            self.motion =
+                BlendMotion::Centering { from: self.scroll, to, since: now, duration: BLEND_REBOUND, rebound: true };
+        } else {
+            self.center_on(to, now, BLEND_SNAP);
+        }
+    }
+
+    fn advance(&mut self, now: Instant, dt: f32, most: f32) {
         match self.motion {
             BlendMotion::Wheel(last) if now.duration_since(last).as_secs_f32() >= BLEND_WHEEL_PAUSE => {
-                self.center_on(self.nearest(), now, BLEND_SNAP);
+                self.settle(now, most);
             }
             BlendMotion::Coasting(velocity) => {
                 let decay = (-BLEND_FLING_DECAY * dt).exp();
                 let distance = velocity * (1.0 - decay) / BLEND_FLING_DECAY;
-                self.scroll = (self.scroll + distance).clamp(0.0, most);
+                self.move_by(distance, most);
                 let velocity = velocity * decay;
-                if velocity.abs() < BLEND_FLING_STOP || self.scroll == 0.0 || self.scroll == most {
-                    self.center_on(self.nearest(), now, BLEND_SNAP);
+                if velocity.abs() < BLEND_FLING_STOP || self.outside(most) {
+                    self.settle(now, most);
                 } else {
                     self.motion = BlendMotion::Coasting(velocity);
                 }
             }
-            BlendMotion::Centering { from, to, since, duration } => {
+            BlendMotion::Centering { from, to, since, duration, rebound } => {
                 let t = (now.duration_since(since).as_secs_f32() / duration).min(1.0);
                 if t == 1.0 || from == to {
                     self.scroll = to;
                     self.motion = BlendMotion::Resting;
-                    return Some((to / BLEND_ROW).round() as usize);
+                } else {
+                    let fraction = if rebound { crate::look::spring(duration, 0.82, 0.0, t) } else { ease(t) };
+                    self.scroll = egui::lerp(from..=to, fraction);
                 }
-                self.scroll = egui::lerp(from..=to, ease(t));
             }
             _ => {}
         }
-        None
     }
 }
 
@@ -683,12 +708,17 @@ impl Layers {
             } else {
                 self.options = Some(l.id);
                 self.options_menu.open();
-                self.blend = None;
+                if self.blend.take().is_some() {
+                    session.finish_layer_blend();
+                }
             }
         }
         if let Some(id) = blend_tapped {
             self.options_menu.close();
             let open = self.blend.as_ref().is_some_and(|b| b.id == id);
+            if self.blend.is_some() {
+                session.finish_layer_blend();
+            }
             self.blend = (!open).then(|| {
                 let at = layers
                     .iter()
@@ -1324,7 +1354,11 @@ impl Layers {
     }
 
     /// The panel closed: no rows to drop on.
-    pub fn closed(&mut self) {
+    pub fn closed(&mut self, session: &CanvasSession) {
+        if let Some(blend) = self.blend.as_mut().filter(|b| b.moving()) {
+            blend.motion = BlendMotion::Resting;
+            session.finish_layer_blend();
+        }
         self.box_on_window = None;
         self.rows_on_window.clear();
     }
@@ -1609,6 +1643,10 @@ impl Layers {
         let response = ui.interact(slider, ui.scope_id().with(("opacity", l.id)), Sense::click_and_drag());
         let held = response.is_pointer_button_down_on();
         if let Some(p) = response.interact_pointer_pos().filter(|_| held || response.clicked()) {
+            if let Some(blend) = self.blend.as_mut().filter(|b| b.id == l.id && b.moving()) {
+                blend.motion = BlendMotion::Resting;
+                session.finish_layer_blend();
+            }
             let v = ((p.x - slider.left()) / slider.width()).clamp(0.0, 1.0);
             session.set_layer_opacity(l.id, v, !held);
         } else if response.drag_stopped() {
@@ -1637,6 +1675,7 @@ impl Layers {
             blend_rows(ui, look, list, modes, at);
             return;
         };
+        let was_moving = b.moving();
         let most = modes.len().saturating_sub(1) as f32 * BLEND_ROW;
         let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
         let response = ui.interact(list, ui.scope_id().with(("modes", l.id)), Sense::click_and_drag());
@@ -1649,10 +1688,10 @@ impl Layers {
         };
 
         if response.is_pointer_button_down_on() {
-            b.scroll = (b.scroll - response.drag_delta().y).clamp(0.0, most);
+            b.move_by(-response.drag_delta().y, most);
             b.motion = BlendMotion::Dragging;
         } else if wheel != 0.0 {
-            b.scroll = (b.scroll - wheel).clamp(0.0, most);
+            b.move_by(-wheel, most);
             b.motion = BlendMotion::Wheel(now);
         } else if response.clicked()
             && let Some(p) = response.interact_pointer_pos()
@@ -1663,26 +1702,29 @@ impl Layers {
                 let rows = (to - b.scroll).abs() / BLEND_ROW;
                 b.center_on(to, now, (0.30 + 0.04 * rows).min(0.60));
             } else if matches!(b.motion, BlendMotion::Dragging) {
-                b.center_on(b.nearest(), now, BLEND_SNAP);
+                b.settle(now, most);
             }
-        } else if response.drag_stopped() {
+        } else if response.drag_stopped() && !b.outside(most) {
             let scale = ui.ctx().layer_transform_from_global(ui.layer_id()).map_or(1.0, |t| t.scaling);
             let velocity = ui.input(|i| -i.pointer.velocity().y) * scale;
             b.motion = BlendMotion::Coasting(velocity);
         } else if matches!(b.motion, BlendMotion::Dragging) {
-            b.center_on(b.nearest(), now, BLEND_SNAP);
-        } else if matches!(b.motion, BlendMotion::Resting) {
+            b.settle(now, most);
+        } else if !b.moving() {
             // Undo or redo can change the applied mode while the picker is open.
             b.scroll = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
         }
 
         let dt = ui.input(|i| i.stable_dt).min(0.05);
-        if let Some(i) = b.advance(now, dt, most) {
-            if let Some(m) = modes.get(i).filter(|m| m.id != l.blend) {
-                session.set_layer_blend(l.id, m.id);
-            }
+        b.advance(now, dt, most);
+        if let Some(m) = modes.get(centered_blend(b.scroll, modes.len())).filter(|m| m.id != l.blend) {
+            session.preview_layer_blend(l.id, m.id);
             ui.ctx().request_repaint();
-        } else if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Dragging) {
+        }
+        if was_moving && !b.moving() {
+            session.finish_layer_blend();
+        }
+        if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Dragging) {
             ui.ctx().request_repaint();
         }
         blend_rows(ui, look, list, modes, b.scroll);
@@ -2178,13 +2220,18 @@ fn swipe_reach(l: &LayerInfo) -> f32 {
     SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
 }
 
+/// The nearest row, keeping the end mode active during elastic overscroll.
+fn centered_blend(scroll: f32, count: usize) -> usize {
+    ((scroll / BLEND_ROW).round() as usize).min(count.saturating_sub(1))
+}
+
 /// The list moves behind a highlight fixed to its center.
 fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], scroll: f32) {
     let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
     let painter = ui.painter_at(list);
     let highlight = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
     painter.rect_filled(highlight, 0, argb(pc::ACCENT));
-    let centered = (scroll / BLEND_ROW).round() as usize;
+    let centered = centered_blend(scroll, modes.len());
     for (i, m) in modes.iter().enumerate() {
         let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
         let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
@@ -2404,20 +2451,45 @@ mod tests {
     }
 
     #[test]
-    fn blend_drag_coasts_then_applies_one_centered_mode() {
+    fn blend_drag_coasts_and_crosses_modes_before_settling() {
         use std::time::Duration;
 
         let start = Instant::now();
         let mut blend = Blend { id: 1, scroll: BLEND_ROW, motion: BlendMotion::Coasting(900.0) };
         let most = 20.0 * BLEND_ROW;
-        assert_eq!(blend.advance(start + Duration::from_millis(16), 0.016, most), None);
-        assert!(blend.scroll > BLEND_ROW);
+        blend.advance(start + Duration::from_millis(16), 0.016, most);
+        assert_eq!(centered_blend(blend.scroll, 21), 1);
         assert!(matches!(blend.motion, BlendMotion::Coasting(v) if v < 900.0));
-        let selected = (2..90).find_map(|step| blend.advance(start + Duration::from_millis(step * 16), 0.016, most));
-        let selected = selected.expect("coasting and snapping finish");
-        assert!(selected > 1);
-        assert_eq!(blend.scroll, selected as f32 * BLEND_ROW);
-        assert_eq!(blend.advance(start + Duration::from_secs(2), 0.016, most), None);
+        blend.advance(start + Duration::from_millis(32), 0.016, most);
+        assert_eq!(centered_blend(blend.scroll, 21), 2);
+        assert!(blend.moving());
+        for step in 3..90 {
+            blend.advance(start + Duration::from_millis(step * 16), 0.016, most);
+        }
+        assert!(!blend.moving());
+        assert_eq!(blend.scroll, centered_blend(blend.scroll, 21) as f32 * BLEND_ROW);
+    }
+
+    #[test]
+    fn the_blend_list_stretches_and_springs_back_at_either_end() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let most = 20.0 * BLEND_ROW;
+        for (edge, direction, mode) in [(0.0, -1.0, 0), (most, 1.0, 20)] {
+            let mut blend = Blend { id: 1, scroll: edge, motion: BlendMotion::Dragging };
+            blend.move_by(direction * 200.0, most);
+            let stretch = (blend.scroll - edge).abs();
+            assert!(stretch > 0.0 && stretch < 200.0);
+            assert_eq!(centered_blend(blend.scroll, 21), mode);
+            blend.settle(start, most);
+            blend.advance(start + Duration::from_millis(90), 0.016, most);
+            assert!((blend.scroll - edge).abs() < stretch);
+            assert!(blend.moving());
+            blend.advance(start + Duration::from_millis(500), 0.016, most);
+            assert_eq!(blend.scroll, edge);
+            assert!(!blend.moving());
+        }
     }
 
     /// A tap on the background's row, on its box or left of it: whether the row asked for its
