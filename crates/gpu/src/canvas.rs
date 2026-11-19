@@ -264,9 +264,12 @@ pub struct StrokeStyle {
     pub shape_lod_cap: f32,
     /// The secondary colour (sRGB, 0..1), mixed in as far as each stamp says.
     pub secondary: [f32; 3],
-    /// Drawn as a brush preview (the studio's drawing pad, the library's strokes), which draws
-    /// wet edges only as a firmer rim and burns nothing.
+    /// Drawn as a brush preview (the studio's drawing pad, the library's strokes), which burns
+    /// nothing and, on the pad, draws wet edges only as a firmer rim.
     pub preview: bool,
+    /// Drawn as the library's sample stroke (a preview, not the pad): its wet edges pool as they
+    /// do on the canvas.
+    pub sample: bool,
     /// Luminance blending: the stroke mixed into its layer by its coverage in squared colour
     /// (nearer to light), not as the colour's numbers are.
     pub luminance: bool,
@@ -364,6 +367,7 @@ impl StrokeStyle {
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
+            sample: false,
             luminance: false,
             laid_in_place: false,
             store: 0,
@@ -437,6 +441,7 @@ impl StrokeStyle {
             },
             secondary: [1.0, 1.0, 1.0],
             preview: false,
+            sample: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
             store: 0,
@@ -1190,7 +1195,7 @@ impl LayerUniform {
     fn with_grain(self, style: Option<&StrokeStyle>) -> LayerUniform {
         let Some(s) = style else { return self };
         let look = LayerUniform {
-            wet: if s.preview { -s.wet_edges } else { s.wet_edges },
+            wet: if s.preview && !s.sample { -s.wet_edges } else { s.wet_edges },
             burnt: if s.preview { 0.0 } else { s.burnt_edges },
             threshold: s.alpha_threshold,
             grain_brightness: s.grain_brightness,

@@ -557,6 +557,8 @@ impl CanvasSession {
             style = style.dry();
         }
         style.preview = true;
+        // its wet edges pooling as on the canvas, where the pad shows them only as a firmer rim
+        style.sample = true;
         draw_pictures(brush);
         canvas.use_sources(gpu, &mut style, brush);
         self.use_full_sources(gpu, canvas, &mut style, brush);
@@ -567,6 +569,7 @@ impl CanvasSession {
             let mut second_style =
                 StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
+            second_style.sample = true;
             canvas.use_sources(gpu, &mut second_style, &second);
             self.use_full_sources(gpu, canvas, &mut second_style, &second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);

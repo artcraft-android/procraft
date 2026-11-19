@@ -4376,6 +4376,33 @@ fn a_wet_edged_stroke_s_grain_rise_is_held_to_what_its_stamps_laid_not_to_its_po
 }
 
 #[test]
+fn the_library_s_sample_stroke_pools_wet_edges_as_the_canvas_does_and_the_pad_keeps_its_middle() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the middle of a wide dot laid fully with wet edges at full: pooled to about 0.78 on the
+    // canvas and in the library's sample stroke, kept whole on the studio's pad
+    let middle = |preview: bool, sample: bool| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_edges: 1.0,
+            preview,
+            sample,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 64, 32, 32)[3]
+    };
+    let (on_canvas, pad, sample) = (middle(false, false), middle(true, false), middle(true, true));
+    assert!(on_canvas.abs_diff(200) <= 4, "{on_canvas}");
+    assert_eq!(sample, on_canvas);
+    assert_eq!(pad, 255);
+}
+
+#[test]
 fn a_tapered_round_tip_thins_its_rim_too() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
