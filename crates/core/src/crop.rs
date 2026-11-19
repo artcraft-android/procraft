@@ -28,6 +28,56 @@ fn crop_failure_said(e: &procraft_gpu::GpuError) -> String {
     .to_owned()
 }
 
+/// How a crop's new canvas takes the layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Across {
+    /// Copied (moved by whole pixels) or resampled on the GPU, as many as its textures' budget
+    /// holds; the rest worked out on the CPU and kept compressed.
+    Gpu,
+    /// Every one read back, worked out on the CPU and kept compressed until needed: no GPU work
+    /// of the crop's own, and no layer's texture made at once.
+    Compressed,
+}
+
+/// The canvas cropped as `c` says from `old` (`sw` × `sh`), its layers `ids` taken `across` so;
+/// `doc` is the document cropped, `budget` its textures' budget.
+#[allow(clippy::too_many_arguments)]
+fn cropped(
+    gpu: &Gpu,
+    old: &Canvas,
+    doc: &procraft_engine::document::Document,
+    ids: &[procraft_engine::document::LayerId],
+    c: &procraft_engine::crop::Crop,
+    (sw, sh): (u32, u32),
+    budget: u64,
+    across: Across,
+) -> Result<Canvas, procraft_gpu::GpuError> {
+    let mut canvas = Canvas::unfilled(gpu, doc)?;
+    canvas.set_resident_budget(budget);
+    for &id in ids {
+        let m = c.to_old;
+        let room = across == Across::Gpu && canvas.has_room();
+        let on_gpu = room
+            && match c.whole_pixels() {
+                Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
+                None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
+            };
+        if !on_gpu {
+            let pixels = resample(&old.read_layer(gpu, id)?, sw, sh, c);
+            // past what fits, kept compressed until needed
+            if room {
+                canvas.upload_layer(gpu, id, &pixels)?;
+            } else {
+                canvas.park_pixels(id, &pixels)?;
+            }
+        }
+    }
+    canvas.fill_rest(gpu, doc);
+    #[cfg(test)]
+    tests::fail_here(gpu, across);
+    Ok(canvas)
+}
+
 impl State {
     /// Whether redoing would put an undone crop back: only while nothing new was done since.
     pub(crate) fn crop_redo_ready(&self) -> bool {
@@ -81,52 +131,49 @@ impl CanvasSession {
         }
         let (Some(old), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
         let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
+        // the canvas as it is, drawn up to date first and outside what is checked below: a fault
+        // in drawing it (one a weak GPU's limits make, logged and lived with as ever) isn't the
+        // crop's to fail on
+        old.render(gpu, &mut st.doc, None);
+        #[cfg(test)]
+        tests::fault_drawing(gpu);
         // the old canvas stays for undo, so this is all more: refused while there is still room,
-        // not left to the system to find out
+        // not left to the system to find out. The layers that fit go across on the GPU; where
+        // that fails, or the memory free can't hold them twice, each layer is worked out on the
+        // CPU and kept compressed until needed
         let budget = old.resident_budget();
         let per = u64::from(c.width) * u64::from(c.height) * 4;
         let resident = ids.len().min(procraft_gpu::most_resident(budget, c.width, c.height)) as u64;
-        if crate::device::short_of_memory((resident + CANVAS_LAYERS) * per) {
+        let short = |layers: u64| crate::device::short_of_memory((layers + CANVAS_LAYERS) * per);
+        let ways: Vec<Across> = [(Across::Gpu, !short(resident)), (Across::Compressed, !short(0))]
+            .into_iter()
+            .filter(|w| w.1)
+            .map(|w| w.0)
+            .collect();
+        if ways.is_empty() {
             log::error!("cropping: {} layers of {per} bytes won't fit in the memory free", resident);
             st.crop_edit.failure = Some(crop_failure_said(&procraft_gpu::GpuError::OutOfMemory(String::new())));
             return false;
         }
         // the new canvas made beside the old, which stays as it is unless every layer went across
         // as it should: a texture the GPU had no memory for would otherwise come over empty
-        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
-            old.render(gpu, &mut st.doc, None);
-            let mut canvas = Canvas::unfilled(gpu, &doc)?;
-            canvas.set_resident_budget(budget);
-            for id in ids {
-                // copied (moved by whole pixels) or resampled on the GPU, nothing read back
-                let m = c.to_old;
-                let room = canvas.has_room();
-                let on_gpu = room
-                    && match c.whole_pixels() {
-                        Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
-                        None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
-                    };
-                if !on_gpu {
-                    let pixels = resample(&old.read_layer(gpu, id)?, sw, sh, &c);
-                    // past what fits, kept compressed until needed
-                    if room {
-                        canvas.upload_layer(gpu, id, &pixels)?;
-                    } else {
-                        canvas.park_pixels(id, &pixels)?;
-                    }
+        let mut made = Err(procraft_gpu::GpuError::Failed("not tried".to_owned()));
+        for way in ways {
+            made = gpu.checked(|| cropped(gpu, old, &doc, &ids, &c, (sw, sh), budget, way)).and_then(|made| made);
+            match &made {
+                Ok(_) | Err(procraft_gpu::GpuError::Lost) => break,
+                Err(e) => {
+                    log::warn!("cropping {way:?}: {e}");
+                    // memory may be short: the buffers kept for reads go
+                    gpu.let_go_of_kept_buffers();
                 }
             }
-            canvas.fill_rest(gpu, &doc);
-            #[cfg(test)]
-            tests::fail_here(gpu);
-            Ok(canvas)
-        });
-        let canvas = match made.and_then(|made| made) {
+        }
+        let canvas = match made {
             Ok(canvas) => canvas,
             Err(e) => {
                 log::error!("cropping: {e}");
                 st.crop_edit.failure = Some(crop_failure_said(&e));
-                // memory is short: the buffers kept for reads go too
                 gpu.let_go_of_kept_buffers();
                 return false;
             }
@@ -312,30 +359,52 @@ mod tests {
 
     use crate::{CanvasSession, PenSample, PointerKind};
 
+    use super::Across;
+
     std::thread_local! {
-        static FAIL_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// The ways this thread's next crop fails (see [`fail_here`]).
+        static FAILING: std::cell::RefCell<Vec<Across>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// Whether drawing the canvas as the next crop begins makes a fault (see [`fault_drawing`]).
+        static FAULT_DRAWING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
-    /// Makes this thread's next crop fail on the GPU, as one whose new canvas's textures there
-    /// was no memory for does.
+    /// Makes this thread's next crop fail on the GPU every way it is tried, as one whose new
+    /// canvas's textures there was no memory for does.
     fn fail_next_crop() {
-        FAIL_NEXT.with(|f| f.set(true));
+        FAILING.with(|f| *f.borrow_mut() = vec![Across::Gpu, Across::Compressed]);
     }
 
-    /// Where a crop's work fails, if [`fail_next_crop`] said so: a texture the GPU won't make.
-    pub(super) fn fail_here(gpu: &Gpu) {
-        if FAIL_NEXT.with(|f| f.replace(false)) {
-            let most = gpu.device.limits().max_texture_dimension_2d;
-            drop(gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("too large"),
-                size: wgpu::Extent3d { width: most + 1, height: 1, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            }));
+    /// A texture the GPU won't make: a validation error, as a texture there is no memory for.
+    fn invalid_texture(gpu: &Gpu) {
+        let most = gpu.device.limits().max_texture_dimension_2d;
+        drop(gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("too large"),
+            size: wgpu::Extent3d { width: most + 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
+    }
+
+    /// Where a crop's work taken `across` so fails, if that way was set to fail.
+    pub(super) fn fail_here(gpu: &Gpu, across: Across) {
+        let fails = FAILING.with(|f| {
+            let mut f = f.borrow_mut();
+            let at = f.iter().position(|w| *w == across);
+            at.map(|i| f.remove(i)).is_some()
+        });
+        if fails {
+            invalid_texture(gpu);
+        }
+    }
+
+    /// Where drawing the canvas as a crop begins makes a fault, if the next was set to.
+    pub(super) fn fault_drawing(gpu: &Gpu) {
+        if FAULT_DRAWING.with(|f| f.replace(false)) {
+            invalid_texture(gpu);
         }
     }
 
@@ -345,7 +414,11 @@ mod tests {
 
     /// A canvas `side` square on a window its size, with a stroke on each of three layers.
     fn painted(side: u32) -> Option<std::sync::Arc<CanvasSession>> {
-        let gpu = Gpu::headless().ok()?;
+        Some(painted_on(Gpu::headless().ok()?, side))
+    }
+
+    /// [`painted`] on `gpu`.
+    fn painted_on(gpu: Gpu, side: u32) -> std::sync::Arc<CanvasSession> {
         let s = CanvasSession::new(side, side);
         {
             let mut st = s.shared.lock();
@@ -365,7 +438,7 @@ mod tests {
             s.stroke_add((1..12).map(|i| pen(10.0 + i as f32 * side as f32 / 13.0, y, i as f64 * 8.0)).collect());
             s.stroke_end(vec![]);
         }
-        Some(s)
+        s
     }
 
     /// Each layer's pixels, and the canvas's size.
@@ -510,6 +583,99 @@ mod tests {
             }
             assert!(parks.undo().is_some());
             assert!(fits.undo().is_some());
+        }
+    }
+
+    /// Each layer of `a` and `b` alike to within `most` levels, and the canvases the same size.
+    fn alike(a: &CanvasSession, b: &CanvasSession, most: u8) {
+        let ((a, a_size), (b, b_size)) = (contents(a), contents(b));
+        assert_eq!((a.len(), a_size), (b.len(), b_size));
+        for (p, q) in a.iter().zip(&b) {
+            assert_eq!(p.len(), q.len());
+            let off = p.iter().zip(q).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+            assert!(off <= most, "{off} levels apart");
+        }
+    }
+
+    /// The crop's own work on the GPU failing, each layer is worked out on the CPU and kept
+    /// compressed instead: the crop is made, nothing lost, nothing said.
+    #[test]
+    fn a_crop_the_gpu_cant_copy_goes_across_compressed() {
+        let (Some(gpu_way), Some(cpu_way)) = (painted(120), painted(120)) else { return };
+        for (x, angle, most) in [(10.0, 0.0, 0u8), (10.5, 0.2, 1)] {
+            FAILING.with(|f| *f.borrow_mut() = vec![Across::Gpu]);
+            assert!(cpu_way.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
+            assert!(FAILING.with(|f| f.borrow().is_empty()), "the GPU's way was tried first");
+            assert!(gpu_way.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
+            assert_eq!(cpu_way.take_failure(), None);
+            assert_eq!(cpu_way.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(3));
+            alike(&cpu_way, &gpu_way, most);
+            assert!(cpu_way.undo().is_some() && gpu_way.undo().is_some());
+            assert_eq!(contents(&cpu_way), contents(&gpu_way));
+        }
+    }
+
+    /// Memory free for the new canvas but not for its layers on the GPU too: they go across
+    /// compressed.
+    #[test]
+    fn a_crop_with_room_only_for_the_canvas_keeps_its_layers_compressed() {
+        let (Some(short), Some(roomy)) = (painted(120), painted(120)) else { return };
+        // 2000 square: the layers on the GPU and the canvas's own (3 + 7) 160 MB, beside what the
+        // system keeps (512): 672 won't fit in 650, the canvas's own alone (624) will
+        crate::device::MEMORY_FREE.with(|f| f.set(Some(650 << 20)));
+        assert!(short.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, true, 2000, 2000));
+        crate::device::MEMORY_FREE.with(|f| f.set(None));
+        assert!(roomy.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, true, 2000, 2000));
+        assert_eq!(short.take_failure(), None);
+        assert_eq!(short.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(3));
+        alike(&short, &roomy, 1);
+    }
+
+    /// A fault drawing the canvas as it is (one a weak GPU makes, and the app lives with) doesn't
+    /// stop a crop: only the crop's own work is checked.
+    #[test]
+    fn a_fault_drawing_the_canvas_doesnt_stop_a_crop() {
+        let Some(s) = painted(120) else { return };
+        FAULT_DRAWING.with(|f| f.set(true));
+        assert!(s.crop_canvas(10.0, 10.0, 80.0, 70.0, 0.0, false, 0, 0));
+        assert!(!FAULT_DRAWING.with(std::cell::Cell::get));
+        assert_eq!(s.take_failure(), None);
+        assert_eq!(contents(&s).1, (80, 70));
+    }
+
+    /// On an old GPU (no storage buffers or compute, no half floats to draw into, its textures at
+    /// most 4096: see `Gpu::headless_old`), crops by whole pixels, turned and resampled come out as
+    /// the CPU works them out, each an undo step, nothing said.
+    #[test]
+    fn a_crop_on_an_old_gpu_comes_out_as_the_cpu_works_it_out() {
+        let Ok(old) = Gpu::headless_old() else { return };
+        let s = painted_on(old, 120);
+        let before = contents(&s);
+        let crops = [
+            (10.0, 0.0, None, 0u8),
+            (10.5, 0.2, None, 1),
+            (0.0, 0.0, Some((200, 150)), 1),
+            (-20.0, 0.0, Some((40, 30)), 1),
+        ];
+        for (x, angle, size, most) in crops {
+            let c = procraft_engine::crop::crop([x, 10.0, 80.0, 70.0], angle, size);
+            let (w, h) = size.unwrap_or((0, 0));
+            assert!(s.crop_canvas(x, 10.0, 80.0, 70.0, angle, size.is_some(), w, h));
+            assert_eq!(s.take_failure(), None);
+            // made on the GPU, every layer there: not the way through the CPU kept for when that fails
+            assert_eq!(s.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(0));
+            let (after, made) = contents(&s);
+            assert_eq!(made, (c.width, c.height));
+            for (was, is) in before.0.iter().zip(&after) {
+                let expected = procraft_engine::crop::resample(was, 120, 120, &c);
+                assert_eq!(expected.len(), is.len());
+                let off = expected.iter().zip(is).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+                assert!(off <= most, "{off} levels off at {x}, {angle}, {size:?}");
+            }
+            let gpu = s.shared.lock().gpu.clone().unwrap();
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            assert!(s.undo().is_some());
+            assert_eq!(contents(&s), before);
         }
     }
 
