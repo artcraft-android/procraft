@@ -459,7 +459,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
                             androidx.compose.animation.fadeIn(Motion.blendOpen()),
                         exit = androidx.compose.animation.shrinkVertically(Motion.blendCloseSize(), shrinkTowards = Alignment.Top) +
                             androidx.compose.animation.fadeOut(Motion.blendClose()),
-                    ) { BlendEditor(vm, l) }
+                    ) { BlendEditor(vm, l, open = blendFor == l.id) }
                 }
             }
             if (!vm.modelOpen) {
@@ -1140,7 +1140,7 @@ private fun blendCode(vm: CanvasViewModel, blend: UInt): String {
 private val TWO_LETTER_BLENDS = setOf("Darken", "Shade", "Lighten", "Subtract", "Divide", "Saturation")
 
 @Composable
-private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo) {
+private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo, open: Boolean) {
     var opacity by remember(l.id) { mutableFloatStateOf(l.opacity) }
     Column(Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 15.dp)) {
         Row(Modifier.padding(horizontal = 13.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1156,7 +1156,8 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo) {
             onDone = { vm.setLayerOpacity(l, opacity, done = true) },
         )
         val modes = vm.blendModeList
-        val layer by rememberUpdatedState(l)
+        val owner = vm.session
+        var shownMode by remember(owner, l.id) { mutableStateOf(l.blend) }
         val list = rememberLazyListState(modes.indexOfFirst { it.id == l.blend }.coerceAtLeast(0))
         val scope = rememberCoroutineScope()
         val (rowPx, before, after) = with(LocalDensity.current) {
@@ -1170,27 +1171,42 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo) {
         }
         val centered by remember(rowPx) { derivedStateOf { (position + rowPx / 2) / rowPx } }
 
-        // Let the ordinary Android fling finish, then gently center the nearest row.
-        LaunchedEffect(list, modes, rowPx) {
+        fun preview(index: Int) {
+            val mode = modes.getOrNull(index) ?: return
+            if (mode.id != shownMode) {
+                shownMode = mode.id
+                vm.previewBlend(owner, l.id, mode.id)
+            }
+        }
+
+        LaunchedEffect(open, owner, list, modes, rowPx) {
+            if (!open) return@LaunchedEffect
+            // Apply the nearest mode during a drag, fling or tap animation.
+            launch { snapshotFlow { centered }.collect { preview(it) } }
             snapshotFlow { if (list.isScrollInProgress) null else position }.collect { idlePosition ->
                 if (idlePosition == null) return@collect
                 // Give a fling starting as the drag ends a frame to take over the list.
                 withFrameNanos { }
                 if (list.isScrollInProgress || position != idlePosition) return@collect
-                val mode = modes.getOrNull(centered) ?: return@collect
                 val distance = centered * rowPx - position
                 if (distance != 0) {
                     // A new gesture can cancel this animation without cancelling the observer.
                     coroutineScope { launch { list.animateScrollBy(distance.toFloat(), Motion.blendSnap()) } }
-                } else if (mode.id != layer.blend) {
-                    vm.setBlend(layer, mode.id)
+                } else {
+                    preview(centered)
+                    vm.finishBlend(owner)
                 }
             }
         }
-        LaunchedEffect(l.blend, rowPx) {
-            // Keep the picker lined up if Undo or Redo changes the mode while it is open.
+        DisposableEffect(open, owner, l.id) {
+            onDispose { if (open) vm.finishBlend(owner) }
+        }
+        LaunchedEffect(open, l.blend, rowPx) {
+            if (!open || l.blend == shownMode) return@LaunchedEffect
+            // Undo and redo can change the mode while the picker is open.
+            shownMode = l.blend
             val index = modes.indexOfFirst { it.id == l.blend }
-            if (index >= 0 && !list.isScrollInProgress && position != index * rowPx) list.scrollToItem(index)
+            if (index >= 0) list.scrollToItem(index)
         }
 
         val highlight = Pc.RowSelected
