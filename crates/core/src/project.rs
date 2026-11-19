@@ -24,7 +24,8 @@ use crate::{CanvasSession, MobileError};
 pub const THUMBNAIL_SIDE: u32 = 512;
 /// [`CanvasSession::edits_saved`] before any save.
 pub(crate) const NOT_SAVED: u64 = u64::MAX;
-/// How often an open artwork kept saved looks for changes to save.
+/// How long after a change an open artwork kept saved looks for what to save (it waits for a
+/// change first: nothing changing, it never looks).
 const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 50 } else { 3000 });
 /// How soon it looks again when something under way kept it from saving: fast painting leaves
 /// only short gaps between strokes, and what isn't saved is gone if the GPU's device goes.
@@ -537,18 +538,44 @@ impl CanvasSession {
         };
         let mut kept = self.edits();
         let session = Arc::downgrade(&self);
+        // (its own handle on the changes: waiting on them keeps nothing else of the session alive)
+        let nudge = Arc::clone(&self.shared.nudge);
+        let mut seen = nudge.seen();
         let started = std::thread::Builder::new().name("autosave".into()).spawn(move || {
             let mut wait = every;
+            // how long it waits for a change before it looks again anyway, while something it
+            // couldn't save yet waits (a tool left open): longer each time, none once all is saved
+            let mut unsaved: Option<std::time::Duration> = None;
             loop {
-                std::thread::sleep(wait);
+                // nothing is looked for until something changes (or, the app away, it shows again)
+                let Some(now) = nudge.wait_past(seen, unsaved) else { return };
+                let woken = now != seen;
+                seen = now;
+                {
+                    let Some(session) = session.upgrade() else { return };
+                    if session.shared.saving.lock().unwrap_or_else(|e| e.into_inner()).autosave != mine {
+                        return;
+                    }
+                    if session.shared.lock().hidden {
+                        unsaved = None;
+                        continue;
+                    }
+                }
+                // changes come in runs (a stroke after another): saved a little after one, once
+                // (a look again after a wait for nothing is made at once)
+                if woken {
+                    std::thread::sleep(wait);
+                }
                 wait = every;
                 let Some(session) = session.upgrade() else { return };
                 let mut saved = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
                 if saved.autosave != mine {
                     return;
                 }
+                crate::activity::Counts::add(&session.shared.counts.autosave_looks);
                 let now = session.edits();
                 if now == kept {
+                    unsaved = None;
                     continue;
                 }
                 let lost = || session.shared.lock().gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost);
@@ -557,6 +584,7 @@ impl CanvasSession {
                 }
                 if !session.shared.lock().idle() {
                     wait = again;
+                    unsaved = Some(unsaved.map_or(again, |w| (w * 2).min(AUTOSAVE_LONGEST)));
                     continue;
                 }
                 let started = std::time::Instant::now();
@@ -570,15 +598,21 @@ impl CanvasSession {
                     Ok(true) => {
                         kept = now;
                         failure.1 = false;
+                        unsaved = None;
                         // a slow save, a longer wait before the next
                         wait = autosave_wait(every, started.elapsed());
                     }
-                    Ok(false) => wait = again,
+                    Ok(false) => {
+                        wait = again;
+                        unsaved = Some(unsaved.map_or(again, |w| (w * 2).min(AUTOSAVE_LONGEST)));
+                    }
                     Err(e) => {
                         log::error!("keeping the artwork saved: {e}");
                         if !failure.1 {
                             *failure = (Some(e.to_string()), true);
                         }
+                        // tried again with the next change, or before long
+                        unsaved = Some(AUTOSAVE_LONGEST);
                     }
                 }
             }
@@ -1105,9 +1139,10 @@ impl CanvasSession {
         Some(self.shared.edits_saved.load(std::sync::atomic::Ordering::Relaxed)).filter(|&e| e != NOT_SAVED)
     }
 
-    /// Keeps the artwork saved into `dir` while it is open, from a thread of its own: every few
-    /// seconds, when it has changed, as soon as nothing is under way that saving would cut short
-    /// (only the layers that changed are written). Ends with [`CanvasSession::stop_autosave`],
+    /// Keeps the artwork saved into `dir` while it is open, from a thread of its own: a few
+    /// seconds after it changes, as soon as nothing is under way that saving would cut short
+    /// (only the layers that changed are written). The thread waits for a change: while nothing
+    /// changes, or the app is away ([`CanvasSession::set_shown`]), it does nothing at all. Ends with [`CanvasSession::stop_autosave`],
     /// with another start, when the session is let go, or with the GPU's device: what that held
     /// can't be read, the last save stands, and [`CanvasSession::take_failure`] tells it.
     pub fn start_autosave(self: Arc<Self>, dir: String) {
@@ -1124,6 +1159,8 @@ impl CanvasSession {
     pub fn stop_autosave(&self) {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
         saved.autosave = saved.autosave.wrapping_add(1);
+        // its thread, waiting for a change, sees it is to end
+        self.shared.nudge.nudge();
     }
 
     /// Gives an artwork opened only to be exported (never shown) a GPU device, so its exports

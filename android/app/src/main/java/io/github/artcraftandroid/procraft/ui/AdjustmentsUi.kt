@@ -1371,8 +1371,9 @@ fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 @Composable
 fun PluginFilterPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val controls = vm.pluginFilter?.controls ?: return
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        while (true) {
+    // (not while the app is away: nothing changes there)
+    androidx.compose.runtime.LaunchedEffect(vm.inFront) {
+        while (vm.inFront) {
             kotlinx.coroutines.delay(150)
             vm.checkPluginFilter()
         }

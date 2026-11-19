@@ -41,6 +41,9 @@ impl CanvasSession {
             return None;
         }
         st.draw_frame(view, format, size, screen, started);
+        crate::activity::Counts::add(&self.shared.counts.frames);
+        // what the frame laid (a stroke committed) may be new to save
+        self.shared.nudge.nudge();
         if st.needs_frame {
             return Some(Duration::ZERO);
         }

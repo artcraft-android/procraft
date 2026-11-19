@@ -12,6 +12,7 @@
 
 uniffi::setup_scaffolding!();
 
+mod activity;
 mod adjust;
 mod adjust_menu;
 mod adjusting;
@@ -34,6 +35,7 @@ mod crop_edit;
 mod device;
 mod floating;
 mod frame;
+mod frame_loop;
 mod gallery;
 mod gestures;
 mod gradients;
@@ -122,6 +124,7 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
+pub use activity::Activity;
 pub use adjust::{
     ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
 };
@@ -638,6 +641,9 @@ pub(crate) struct State {
     pub(crate) holding_frames: bool,
     pub(crate) frame_held: bool,
     pub(crate) stop: bool,
+    /// The app is away (in the background, or its window out of sight): nothing is drawn, and the
+    /// autosave rests, until it shows again.
+    pub(crate) hidden: bool,
     /// Project canvas: the second display's size, and that its thread should end.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) projection_size: (u32, u32),
@@ -1457,6 +1463,11 @@ pub(crate) struct Shared {
     pub(crate) studio_previews: std::sync::atomic::AtomicU64,
     /// Where `state` was last taken, for the log when a wait on it is long.
     holder: held::Holder,
+    /// What the session's own threads have done (see [`CanvasSession::activity`]).
+    pub(crate) counts: activity::Counts,
+    /// Changes told to the autosave, which waits for one (shared with its thread, which mustn't
+    /// keep the rest alive).
+    pub(crate) nudge: Arc<activity::Nudge>,
 }
 
 impl Shared {
@@ -1542,6 +1553,7 @@ impl Shared {
         }
         st.needs_frame = true;
         self.wake.notify_all();
+        self.nudge.nudge();
     }
 
     /// Creates the canvas once there is a GPU, as [`State::ensure_canvas`] does, but with the
@@ -1866,6 +1878,7 @@ impl CanvasSession {
             holding_frames: false,
             frame_held: false,
             stop: false,
+            hidden: false,
             projection_size: (1, 1),
             projection_stop: false,
             frames: 0,
@@ -1978,6 +1991,8 @@ impl CanvasSession {
                 pad_sync: Mutex::new(studio::PadSync::default()),
                 studio_previews: std::sync::atomic::AtomicU64::new(0),
                 holder: held::Holder::default(),
+                counts: activity::Counts::default(),
+                nudge: Arc::new(activity::Nudge::default()),
             }),
         })
     }
@@ -2442,6 +2457,27 @@ impl CanvasSession {
     /// no more often than that (a little more, so none is missed), however fast input comes.
     pub fn set_refresh_rate(&self, hertz: f32) {
         self.shared.lock().frame_spacing = crate::frame::frame_spacing(hertz);
+    }
+
+    /// The app shows (`shown`), or has gone away (into the background, its window out of sight):
+    /// while away nothing is drawn, even if the window lingers, and the autosave rests (the app
+    /// saves as it goes); shown again, a frame is drawn at once.
+    pub fn set_shown(&self, shown: bool) {
+        let mut st = self.shared.lock();
+        if st.hidden == !shown {
+            return;
+        }
+        st.hidden = !shown;
+        if shown {
+            self.shared.frame(&mut st);
+        }
+    }
+
+    /// What the session has done by itself since it began: frames drawn, the render thread's
+    /// wakeups and retries, and the autosave's looks for changes. Unchanged over a time nothing
+    /// changed on screen, or the app was away, means it did nothing meanwhile.
+    pub fn activity(&self) -> Activity {
+        self.shared.counts.now()
     }
 
     /// How many window pixels make one interface point (the screen's density).
@@ -3010,5 +3046,7 @@ impl CanvasSession {
 impl Drop for CanvasSession {
     fn drop(&mut self) {
         self.detach_window();
+        // the autosave's thread, waiting for a change, ends
+        self.shared.nudge.close();
     }
 }

@@ -19121,3 +19121,285 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
     let r = crate::layer_ops::painted_rect(&px.rgba, 400).unwrap();
     assert_eq!((r.x0, r.y0, r.x1, r.y1), (270, 270, 290, 290));
 }
+
+/// A stand-in for the window the render loop draws into: an offscreen texture of the session's
+/// window size, giving images as `mode` says ([`READY`], [`NO_IMAGE`], [`OUTDATED`],
+/// [`SUBOPTIMAL`]), counting the configures asked for.
+struct TestScreen {
+    texture: procraft_gpu::wgpu::Texture,
+    mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+const READY: u8 = 0;
+const NO_IMAGE: u8 = 1;
+const OUTDATED: u8 = 2;
+const SUBOPTIMAL: u8 = 3;
+
+impl crate::frame_loop::Screen for TestScreen {
+    type Image = procraft_gpu::wgpu::Texture;
+
+    fn configure(
+        &mut self,
+        _gpu: &Gpu,
+        _size: (u32, u32),
+        _wide: bool,
+    ) -> Option<(procraft_gpu::wgpu::TextureFormat, procraft_engine::profile::Profile)> {
+        self.configures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some((procraft_gpu::wgpu::TextureFormat::Rgba8Unorm, procraft_engine::profile::Profile::Srgb))
+    }
+
+    fn acquire(&mut self) -> crate::frame_loop::Acquired<procraft_gpu::wgpu::Texture> {
+        use crate::frame_loop::Acquired;
+        match self.mode.load(std::sync::atomic::Ordering::Relaxed) {
+            NO_IMAGE => Acquired::Unavailable,
+            OUTDATED => Acquired::Outdated,
+            SUBOPTIMAL => Acquired::Suboptimal(self.texture.clone()),
+            _ => Acquired::Ready(self.texture.clone()),
+        }
+    }
+
+    fn view(&self, image: &procraft_gpu::wgpu::Texture) -> procraft_gpu::wgpu::TextureView {
+        image.create_view(&Default::default())
+    }
+
+    fn present(&mut self, _image: procraft_gpu::wgpu::Texture) {}
+}
+
+/// The render loop running on a thread of its own for a session, into a [`TestScreen`]; stopped
+/// when dropped.
+struct LoopRunning {
+    shared: std::sync::Arc<crate::Shared>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for LoopRunning {
+    fn drop(&mut self) {
+        {
+            let mut st = self.shared.lock();
+            st.stop = true;
+            self.shared.wake.notify_all();
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        self.shared.lock().stop = false;
+    }
+}
+
+/// `s`'s render loop started, the window giving images as `mode` says.
+fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
+    let size = s.shared.lock().window_size;
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: procraft_gpu::wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: procraft_gpu::wgpu::TextureDimension::D2,
+        format: procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+        usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(mode));
+    let configures = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut screen =
+        TestScreen { texture, mode: std::sync::Arc::clone(&mode), configures: std::sync::Arc::clone(&configures) };
+    let shared = std::sync::Arc::clone(&s.shared);
+    {
+        let mut st = shared.lock();
+        st.reconfigure = true;
+        st.needs_frame = true;
+    }
+    let running = std::sync::Arc::clone(&shared);
+    let thread = std::thread::spawn(move || crate::frame_loop::draw_loop(&running, &mut screen, || {}));
+    LoopRunning { shared, thread: Some(thread), mode, configures }
+}
+
+/// Waits until `s` has drawn no frame for a while (its caches made, the first frames drawn), at
+/// most a few seconds.
+fn settled(s: &CanvasSession) {
+    let started = std::time::Instant::now();
+    let mut last = s.activity().frames;
+    let mut still_since = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let now = s.activity().frames;
+        if now != last {
+            last = now;
+            still_since = std::time::Instant::now();
+        } else if still_since.elapsed() >= std::time::Duration::from_millis(200) {
+            return;
+        }
+    }
+}
+
+/// What `s` did over `time` with nothing changing.
+fn idle_for(s: &CanvasSession, time: std::time::Duration) -> crate::Activity {
+    let before = s.activity();
+    std::thread::sleep(time);
+    s.activity().since(&before)
+}
+
+/// Nothing changing on screen, the render loop draws nothing and never wakes: the canvas alone,
+/// with frosted panels over it, and with a tinted selection. Drifting bands draw only as often as
+/// they move a pixel (30 a second on a 3x screen), not at the screen's rate.
+#[test]
+fn an_idle_canvas_draws_no_frames_and_its_render_thread_sleeps() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_display_scale(3.0);
+    s.set_refresh_rate(120.0);
+    let running = run_loop(&s, READY);
+    settled(&s);
+    assert!(s.activity().frames >= 1, "the first frame drawn");
+    let second = std::time::Duration::from_secs(1);
+    let alone = idle_for(&s, second);
+    // frosted glass over the canvas: drawn once, then nothing
+    s.set_glass(vec![20.0, 20.0, 200.0, 120.0, 12.0, 1.0], Vec::new());
+    settled(&s);
+    let glass = idle_for(&s, second);
+    // a selection shown tinted: nothing drifts
+    s.select_shape(false, 40.0, 40.0, 120.0, 120.0, crate::SelectionJoin::Add);
+    s.set_selection_display(crate::selection::SelectionDisplay::Tint);
+    settled(&s);
+    let tinted = idle_for(&s, second);
+    // shown as drifting bands: a frame each time they have moved a pixel
+    s.set_selection_display(crate::selection::SelectionDisplay::Stripes);
+    let bands = idle_for(&s, second);
+    drop(running);
+    eprintln!("a second idle: alone {alone:?}; under glass {glass:?}; tinted selection {tinted:?}; bands {bands:?}");
+    for (what, a) in [("alone", alone), ("under glass", glass), ("with a tinted selection", tinted)] {
+        assert_eq!((a.frames, a.wakeups, a.retries), (0, 0, 0), "idle {what}: {a:?}");
+    }
+    assert!((10..=40).contains(&bands.frames), "the bands at 30 frames a second, not 120: {bands:?}");
+    assert!(bands.wakeups <= bands.frames + 2, "a wakeup for each band frame, no more: {bands:?}");
+}
+
+/// The app away (its window possibly still there), nothing is drawn however much is asked for,
+/// and the render thread doesn't wake to draw; shown again, it draws at once.
+#[test]
+fn the_app_away_draws_nothing_however_much_changes() {
+    let Some(s) = session(300, 300) else { return };
+    let running = run_loop(&s, READY);
+    settled(&s);
+    s.set_shown(false);
+    let before = s.activity();
+    // what would each want a frame: the view moving, panels coming and going, a selection
+    for i in 0..100 {
+        s.view_gesture(150.0, 150.0, 1.0, 0.0, 1.0, 0.0);
+        s.set_glass(vec![10.0, 10.0, 100.0 + i as f32, 80.0, 12.0, 1.0], Vec::new());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    s.select_shape(false, 40.0, 40.0, 120.0, 120.0, crate::SelectionJoin::Add);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let away = s.activity().since(&before);
+    s.set_shown(true);
+    let shown = std::time::Instant::now();
+    let back = (0..200).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        s.activity().frames > before.frames
+    });
+    let took = shown.elapsed();
+    drop(running);
+    eprintln!("away, 100 changes and a selection: {away:?}; shown again, a frame within {} ms", took.as_millis());
+    assert_eq!(away.frames, 0, "nothing drawn while away: {away:?}");
+    // (each ask wakes it to find the app away: 201 asks here)
+    assert!(away.wakeups <= 300, "woken by the asks alone, never by itself: {away:?}");
+    assert!(back, "drawn again once shown");
+}
+
+/// A window that gives no image (or a surface that must be configured again and again) is asked
+/// ever less often, down to four times a second, instead of every 4 ms as before (250 a second);
+/// one whose images keep saying they'd do better configured again is configured once, not every
+/// frame.
+#[test]
+fn a_window_that_gives_no_image_is_asked_ever_less_often() {
+    let Some(s) = session(200, 200) else { return };
+    let two = std::time::Duration::from_secs(2);
+    let running = run_loop(&s, NO_IMAGE);
+    let none = idle_for(&s, two);
+    // outdated: configured again before each ask
+    running.mode.store(OUTDATED, std::sync::atomic::Ordering::Relaxed);
+    let configures = running.configures.load(std::sync::atomic::Ordering::Relaxed);
+    let outdated = idle_for(&s, two);
+    let outdated_configures = running.configures.load(std::sync::atomic::Ordering::Relaxed) - configures;
+    drop(running);
+    // images that keep saying so, while the view moves (a frame each move)
+    let running = run_loop(&s, SUBOPTIMAL);
+    settled(&s);
+    let configures = running.configures.load(std::sync::atomic::Ordering::Relaxed);
+    let frames = s.activity().frames;
+    for _ in 0..30 {
+        s.view_gesture(100.0, 100.0, 1.0, 0.0, 1.0, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    settled(&s);
+    let suboptimal_frames = s.activity().frames - frames;
+    let suboptimal_configures = running.configures.load(std::sync::atomic::Ordering::Relaxed) - configures;
+    drop(running);
+    eprintln!(
+        "2 s of no image: {none:?}; 2 s outdated: {outdated:?}, {outdated_configures} configures; \
+         {suboptimal_frames} suboptimal frames: {suboptimal_configures} configures"
+    );
+    // 4, 8, 16 ... 250 ms apart: 6 asks in the first quarter second, then 4 a second
+    assert!((5..=20).contains(&none.retries), "{none:?}");
+    assert_eq!(none.frames, 0);
+    assert!(outdated.retries <= 20 && outdated_configures <= 21, "{outdated:?}, {outdated_configures} configures");
+    assert!(suboptimal_frames >= 10, "frames drawn: {suboptimal_frames}");
+    assert!(
+        suboptimal_configures <= 1,
+        "configured again {suboptimal_configures} times over {suboptimal_frames} frames"
+    );
+}
+
+/// The autosave waits for a change: nothing changing (or the app away), it never looks, where it
+/// used to look every few seconds for as long as the artwork was open; a change is saved a little
+/// after it, as before, and one made while away once the app shows again.
+#[test]
+fn the_autosave_does_nothing_while_nothing_changes() {
+    let Some(s) = session(64, 64) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-autosave-idle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // (looking 50 ms after a change in tests, as against 3 s)
+    std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
+    let paint = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 30.0, 0.0)]);
+        s.stroke_end(vec![]);
+        let _ = pixel(&s, 0, 0);
+    };
+    let saved_now = || {
+        let edits = s.edits();
+        (0..300).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            s.edits_saved() == Some(edits)
+        })
+    };
+    paint(20.0);
+    assert!(saved_now(), "a change saved");
+    // a second with nothing changing: twenty of its old turns
+    let idle = idle_for(&s, std::time::Duration::from_secs(1));
+    // away: a change made meanwhile waits for the app to show
+    s.set_shown(false);
+    paint(30.0);
+    let away = idle_for(&s, std::time::Duration::from_millis(500));
+    let unsaved = s.edits_saved() != Some(s.edits());
+    s.set_shown(true);
+    let saved_after = saved_now();
+    // something under way over a change (a stroke held): looked at ever less often
+    paint(40.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 30.0, 0.0)]);
+    let held = idle_for(&s, std::time::Duration::from_secs(2));
+    s.stroke_end(vec![]);
+    let _ = pixel(&s, 0, 0);
+    let saved_ended = saved_now();
+    s.stop_autosave();
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("autosave: idle a second {idle:?}; away half a second {away:?}; a stroke held 2 s {held:?}");
+    assert_eq!(idle.autosave_looks, 0, "no looks while nothing changes: {idle:?}");
+    assert_eq!(away.autosave_looks, 0, "none while away: {away:?}");
+    assert!(unsaved && saved_after, "saved once shown again");
+    assert!(held.autosave_looks <= 12, "a few looks with a stroke held, not one every 5 ms: {held:?}");
+    assert!(saved_ended, "saved once the stroke ended");
+}

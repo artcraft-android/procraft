@@ -613,8 +613,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The strokes' sound (a plugin's), played while an artwork is open and the app in front. */
     private val strokeSound = StrokeSound()
 
-    /** Whether the app is in front (started), for the strokes' sound. */
-    private var inFront = true
+    /**
+     * Tells why the open artwork's autosave failed, or what the GPU couldn't do (a smudge it had no
+     * memory for, its device lost), a few seconds apart after each change and for as long as the
+     * artwork has changes not yet saved; nothing while all is saved or the app is away.
+     */
+    private val failureWatch = WhileNeeded(viewModelScope, SAVE_FAILURE_POLL_MS, Dispatchers.IO) {
+        val s = session ?: return@WhileNeeded false
+        s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
+        s.takeFailure()?.let { withContext(Dispatchers.Main) { showNotice(it, warning = true) } }
+        session === s && s.editsSaved() != s.edits()
+    }
+
+    /**
+     * Whether the app is in front (started): away, the canvas draws nothing, the autosave and the
+     * failure watch rest, the strokes' sound and an animation playing stop, and the interface's
+     * own timers (a plugin filter's poll, an animated preview) wait.
+     */
+    var inFront by mutableStateOf(true)
+        private set
 
     /** Plays the open artwork's strokes while a plugin makes their sound and the app is in front. */
     private fun followStrokeSound() {
@@ -625,10 +642,48 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         strokeSound.follow(session?.takeIf { inFront && screen == Screen.CANVAS }, strokeSoundOn)
     }
 
-    /** The app came to the front ([front]) or went behind: the strokes' sound follows. */
+    /** The app came to the front ([front]) or went behind: everything that runs by itself follows. */
     fun appInFront(front: Boolean) {
+        if (front == inFront) return
         inFront = front
         followStrokeSound()
+        session?.setShown(front)
+        pad?.setShown(front)
+        if (front) {
+            failureWatch.resume()
+        } else {
+            failureWatch.pause()
+            stopPlaying()
+        }
+        logActivity(front)
+    }
+
+    /** A touch landed on the canvas: the strokes' sound wakes if it rests. */
+    fun canvasTouched() = strokeSound.wake()
+
+    /** The open artwork's session's own work as last logged, and when (see [logActivity]). */
+    private var activityLogged: Pair<Long, io.github.artcraftandroid.procraft.core.Activity>? = null
+
+    /**
+     * Puts in the log what the open artwork's session did by itself while the app was in front
+     * (now going away, not [front]) or away (now back): frames drawn, the render thread's wakeups
+     * and retries, the autosave's looks. Away, all should be none.
+     */
+    private fun logActivity(front: Boolean) {
+        val s = session ?: run { activityLogged = null; return }
+        val now = android.os.SystemClock.elapsedRealtime() to runCatching { s.activity() }.getOrNull()
+        val (at, before) = activityLogged ?: (now.first to null)
+        val after = now.second
+        if (before != null && after != null) {
+            val seconds = (now.first - at) / 1000
+            AppLog.i(
+                "activity",
+                "${if (front) "away" else "in front"} $seconds s: ${after.frames - before.frames} frames drawn, " +
+                    "${after.wakeups - before.wakeups} render wakeups, ${after.retries - before.retries} retries, " +
+                    "${after.autosaveLooks - before.autosaveLooks} autosave looks",
+            )
+        }
+        activityLogged = after?.let { now.first to it }
     }
 
     /** How big the interface shows now, as a plugin says (1: as measured). */
@@ -3237,14 +3292,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // kept saved by the core, a few seconds after it changes, once nothing is under way that
         // saving would cut short (only the layers that changed are written); a failure told
         s.startAutosave(dir.path)
-        viewModelScope.launch(Dispatchers.IO) {
-            while (session === s) {
-                kotlinx.coroutines.delay(SAVE_FAILURE_POLL_MS)
-                s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
-                // a smudge the GPU had no memory for, or its device lost
-                s.takeFailure()?.let { withContext(Dispatchers.Main) { showNotice(it, warning = true) } }
-            }
-        }
+        s.setShown(inFront)
+        activityLogged = null
+        logActivity(true)
+        failureWatch.poke()
         // a canvas the device's graphics can't draw says so (one opened from its cell, by the zoom)
         if (galleryZoom == null) viewModelScope.launch { awaitCanvasDrawn() }
     }
@@ -8826,6 +8877,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Re-reads the layers and undo state from the session. */
     fun refresh() {
         val s = session ?: return
+        // what this change may make fail (its save, a smudge the GPU has no memory for) is told
+        failureWatch.poke()
         watchFill(s)
         refreshReference()
         recordFrame()

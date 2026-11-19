@@ -249,7 +249,19 @@ pub fn configure(
     size: (u32, u32),
     wide: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
-    let caps = surface.get_capabilities(&gpu.adapter);
+    configure_with(gpu, surface, &surface.get_capabilities(&gpu.adapter), size, wide)
+}
+
+/// [`configure`] with the surface's capabilities as asked before: they don't change while the
+/// surface lasts, and asking for them can be slow (some systems try out a buffer of each format to
+/// tell, each time they are asked).
+pub(crate) fn configure_with(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'_>,
+    caps: &wgpu::SurfaceCapabilities,
+    size: (u32, u32),
+    wide: bool,
+) -> Option<wgpu::SurfaceConfiguration> {
     // an 8-bit one first: a float surface (Rgba16Float, offered first on some Linux drivers) is
     // read by the compositor as linear, so the sRGB-encoded colours drawn on it show washed out
     let eight_bit = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
@@ -259,13 +271,22 @@ pub fn configure(
         .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
         .or_else(|| caps.formats.first().copied())?;
 
-    let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
-    config.format = format;
-    config.view_formats = Vec::new();
-    config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else {
-        wgpu::PresentMode::Fifo
+    // (a surface that presents no way at all can't be configured)
+    caps.present_modes.first()?;
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.0.max(1),
+        height: size.1.max(1),
+        present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        },
+        desired_maximum_frame_latency: 1,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: Vec::new(),
+        color_space: wgpu::SurfaceColorSpace::Auto,
     };
     if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
         config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;

@@ -701,7 +701,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 opening = null
             }
         }
-        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion, previewFrom) { previewing = null } }
+        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion, previewFrom, playing = vm.inFront) { previewing = null } }
         // a sheet sliding up over the gallery, and back down
         androidx.compose.animation.AnimatedVisibility(
             vm.customCanvasOpen,
@@ -1584,7 +1584,7 @@ private fun PinchOpeningOverlay(o: PinchOpening, version: Int, done: (Boolean) -
  * close it, as measured).
  */
 @Composable
-private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClose: () -> Unit) {
+private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, playing: Boolean, onClose: () -> Unit) {
     var index by remember(list, start) { mutableIntStateOf(start) }
     // a tap shows (or hides) the close button and the arrows to the other picked artworks
     var controls by remember { mutableStateOf(false) }
@@ -1615,11 +1615,12 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
             value = withContext(Dispatchers.Default) { readFrames(a.dir.path, side) }
         }
         var frame by remember(played) { mutableStateOf<ImageBitmap?>(null) }
-        androidx.compose.runtime.LaunchedEffect(played) {
+        // (held while the app is away)
+        androidx.compose.runtime.LaunchedEffect(played, playing) {
             val p = played ?: return@LaunchedEffect
             var at = 0u
             var step = 1
-            while (true) {
+            while (playing) {
                 frame = p.pictures.getOrNull(p.order.getOrElse(at.toInt()) { 0 })
                 kotlinx.coroutines.delay(1000L / p.fps.coerceAtLeast(1))
                 // round again, turned back, or (a single pass) staying on its last frame

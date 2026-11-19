@@ -340,6 +340,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         if (penButton(e)) return true
         predictor.record(e)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            // the strokes' sound, resting while none was drawn, wakes for this one
+            vm.canvasTouched()
             // Continue filling on a layer that takes no fill: the dialog says why, and the touch does nothing
             if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges(paint = true)) {
                 skipping = true
