@@ -3,7 +3,7 @@
 //! plugins need, and each is as narrow as it can be.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::plugin_file;
@@ -24,8 +24,8 @@ pub(crate) fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
 struct OnHook {
     id: String,
     running: Shared,
-    /// The hooks it is on, as bits.
-    hooks: u32,
+    /// The hooks it is on, as bits (see [`Hook::bit`]).
+    hooks: u64,
     /// The keys of its rows in the brush studio, in their order.
     brush_keys: Vec<String>,
     /// On the picker hook: its picture.
@@ -65,7 +65,7 @@ struct Working {
 #[derive(Default)]
 pub(crate) struct Hooks {
     /// The hooks with a plugin on them, as bits: all a stroke with none pays for is reading this.
-    hooked: AtomicU32,
+    hooked: AtomicU64,
     working: Mutex<Working>,
     /// Where a stop is written down, to stay off through a restart.
     store: Option<PathBuf>,
@@ -3149,6 +3149,125 @@ pub(crate) mod tests {
         rows.filter(|(_, row)| row.chunks(4).any(|p| p[3] > 0)).map(|(y, _)| y).collect()
     }
 
+    /// Every hook, by its name in a manifest (the two a manifest never names, `Layers` and
+    /// `Brushes`, go by their kinds of layer and brush engines).
+    pub(crate) const EVERY_HOOK: &[&str] = &[
+        "position",
+        "pick_layer",
+        "interface_scale",
+        "paste_mask",
+        "fill_mask",
+        "fill_all_layers",
+        "radial_segments",
+        "hide_undo_notice",
+        "interface_colour",
+        "pin_panels",
+        "opacity_together",
+        "randomise_brush",
+        "colour_triangle",
+        "quickshape_curve",
+        "stroke_sound",
+        "inbetween",
+        "picker",
+        "stroke_kept",
+        "layer_added",
+        "key_shortcut",
+        "keep_clear",
+        "interface_part_scale",
+        "floating_picker_only",
+        "hide_notices",
+        "floating_panels",
+        "gesture_lock",
+        "view_look",
+        "paper",
+        "reference_windows",
+        "pressure",
+    ];
+
+    /// Every hook, `Layers` and `Brushes` too.
+    pub(crate) fn every_hook() -> Vec<Hook> {
+        let named = EVERY_HOOK.iter().map(|name| Hook::named(name).unwrap_or_else(|| panic!("{name}")));
+        named.chain([Hook::Layers, Hook::Brushes]).collect()
+    }
+
+    #[test]
+    fn a_set_of_hooks_has_room_for_64_each_its_own_bit() {
+        let every = every_hook();
+        // each hook its own bit, every one of them in the set
+        let mut all = 0u64;
+        for hook in &every {
+            assert_eq!(all & hook.bit(), 0, "{hook:?} shares a bit");
+            all |= hook.bit();
+        }
+        assert_eq!(all.count_ones() as usize, every.len());
+        // the set as the app holds it: each hook found by its bit, past the 32nd as before it
+        assert_eq!(every.len(), 32, "a new hook goes in the list");
+        assert_eq!(all, u64::from(u32::MAX), "the first 32 bits, as the set held them before it grew");
+        let hooks = Hooks::default();
+        let module = wat::parse_str(PRESSES).unwrap();
+        hooks.put_on("a".to_owned(), Running::start(&module, &[]).unwrap(), &every);
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed), all);
+        assert!(every.iter().all(|&hook| hooks.has(hook)));
+        // the bit a 33rd hook to 64th would take sits in the set the same
+        hooks.hooked.store(all | 1 << 32 | 1 << 63, Ordering::Relaxed);
+        assert!(every.iter().all(|&hook| hooks.has(hook)));
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 34);
+        hooks.take_off("a");
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
+        assert!(!every.iter().any(|&hook| hooks.has(hook)));
+    }
+
+    #[test]
+    fn plugins_written_to_interface_8_and_9_still_load_and_answer_on_the_wider_set() {
+        const LOCKS: &str = r#"(module
+            (func (export "procraft_gesture_lock") (param i32) (result i32) (i32.eqz (local.get 0))))"#;
+        for (interface, hook, code) in [(8, "gesture_lock", LOCKS), (9, "pressure", PRESSES)] {
+            let dir = store(&format!("interface-{interface}"));
+            let module = wat::parse_str(code).unwrap();
+            let mut manifest = coded(ID, &module);
+            manifest["compat"]["procraft"]["interface"] = json!(interface);
+            manifest["hooks"] = json!([hook]);
+            let plugins = Plugins::with_store(dir.clone());
+            assert_eq!(plugins.install(file(&manifest, &module)), None, "interface {interface}");
+            assert!(plugins.set_on(ID.to_owned(), true));
+            // on its hook, answering, then read back as the next start reads it, on it again
+            for plugins in [Arc::clone(&plugins), restarted(&dir, &plugins)] {
+                let hooks = plugins.hooks();
+                assert!(card(&plugins).on && card(&plugins).problem.is_none(), "interface {interface}");
+                match interface {
+                    8 => assert!(hooks.gesture_lock(GESTURE_TURN) && !hooks.gesture_lock(1)),
+                    _ => assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.5)),
+                }
+                assert_eq!(hooks.hooked.load(Ordering::Relaxed), Hook::named(hook).unwrap().bit());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// What a stroke with no plugin on pays for each hook it passes: reading the set. Printed, and
+    /// failing past 50 ns a look (about 5 among a whole test run; a 240 Hz pen sends a sample every
+    /// 4,000,000 ns, and passes a few hooks).
+    #[test]
+    fn a_hook_with_none_on_costs_a_read_of_the_set() {
+        let hooks = Hooks::default();
+        let every = every_hook();
+        const ROUNDS: u32 = 200_000;
+        let looked = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                let mut on = 0u32;
+                for i in 0..ROUNDS {
+                    let hook = every.get(i as usize % every.len()).copied().unwrap_or(Hook::Position);
+                    on += u32::from(std::hint::black_box(&hooks).has(std::hint::black_box(hook)));
+                }
+                assert_eq!(on, 0);
+                t.elapsed().as_secs_f64() * 1e9 / f64::from(ROUNDS)
+            })
+            .fold(f64::MAX, f64::min);
+        println!("a hook with none on looked at in {looked:.2} ns");
+        assert!(looked < 50.0, "{looked} ns");
+    }
+
     fn finger_at(x: f32) -> crate::plugin_run::PressureAsked {
         crate::plugin_run::PressureAsked { pointer: 0, first: true, x, y: 0.0, ms: 0.0, pressure: 0.9 }
     }
@@ -3156,7 +3275,7 @@ pub(crate) mod tests {
     #[test]
     fn the_pressure_hook_presses_as_its_plugins_say_in_turn_and_with_none_on_nothing() {
         use crate::plugin_run::PressureAsked;
-        // (the last a set of hooks has room for: another needs a wider set)
+        // (the last a set of 32 had room for: the set holds 64 now)
         assert_eq!(Hook::Pressure.bit(), 1 << 31);
         let hooks = Hooks::default();
         assert_eq!(hooks.pressure(finger_at(50.0)), None);

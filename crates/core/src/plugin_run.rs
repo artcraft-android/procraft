@@ -495,9 +495,10 @@ impl Hook {
         }
     }
 
-    /// It as a bit, in a set of hooks.
-    pub(crate) fn bit(self) -> u32 {
-        1 << self as u32
+    /// It as a bit, in a set of hooks: a set has room for 64 (the first 32 filled a narrower set,
+    /// which a set read nowhere but here could grow past without any plugin noticing).
+    pub(crate) fn bit(self) -> u64 {
+        1 << (self as u32 % u64::BITS)
     }
 
     /// Whether `module` exports what this hook calls.
