@@ -14139,6 +14139,80 @@ fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
     assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
 }
 
+/// A studio slider (`key`) swept from 0 to 1 in `steps` steps `apart` ms apart, as the studio
+/// does at each: the setting, the pad drawn again, and the brush's sample stroke asked for on a
+/// thread of its own (by `ask`, true if it drew one). Returns the slider's own calls' times (the
+/// setting and the pad's ask, on the caller's thread), how many strokes were drawn and whether the
+/// last ask's was, and how long the asks went on after the last step.
+fn swept(
+    s: &std::sync::Arc<CanvasSession>,
+    pad: &std::sync::Arc<CanvasSession>,
+    key: &str,
+    (steps, apart): (usize, u64),
+    ask: fn(&CanvasSession) -> bool,
+) -> (Vec<std::time::Duration>, usize, bool, std::time::Duration) {
+    use std::time::{Duration, Instant};
+    let mut calls = Vec::new();
+    let mut asks = Vec::new();
+    for k in 0..=steps {
+        let t = Instant::now();
+        s.set_studio_setting(key.to_owned(), k as f32 / steps as f32);
+        std::sync::Arc::clone(pad).sync_pad(std::sync::Arc::clone(s), 0.0, 0.0, 0.0);
+        calls.push(t.elapsed());
+        let asker = std::sync::Arc::clone(s);
+        asks.push(std::thread::spawn(move || ask(&asker)));
+        std::thread::sleep(Duration::from_millis(apart));
+    }
+    let last_step = Instant::now();
+    let drawn: Vec<bool> = asks.into_iter().map(|h| h.join().unwrap_or(false)).collect();
+    let after = last_step.elapsed();
+    while pad.pad_syncing() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    (calls, drawn.iter().filter(|&&d| d).count(), drawn.last() == Some(&true), after)
+}
+
+/// #314: dragging a studio slider (Stabilization's, as reported) asks for the brush's sample
+/// stroke at every step. Only the newest ask is drawn, so the strokes never pile up behind the
+/// slider (they took the frames' place on a slow GPU), and the slider's own calls stay quick.
+#[test]
+fn a_studio_slider_swept_draws_only_the_newest_sample_stroke_and_stays_quick() {
+    let (Some(s), Some(pad)) = (session(256, 256), session(600, 400)) else { return };
+    s.studio_begin();
+    pad.keep_strokes();
+    pad.draw_sample_scribble();
+    // one sample stroke's time, drawn warm (its canvas kept from the first)
+    s.studio_preview(1060, 324);
+    let t = std::time::Instant::now();
+    assert!(s.studio_preview(1060, 324).is_some());
+    let one = t.elapsed();
+    let every: fn(&CanvasSession) -> bool = |s| {
+        let (set, index) = s.shared.lock().brush_ref(ToolKind::Paint);
+        s.brush_preview(set as u32, index as u32, 1060, 324).is_some()
+    };
+    let newest: fn(&CanvasSession) -> bool = |s| s.studio_preview(1060, 324).is_some();
+    // as the studio asked before: every step's stroke drawn, one after another
+    let (_, before, _, piled) = swept(&s, &pad, "stabilization", (40, 2), every);
+    // as it asks now, three sweeps (the quickest judged)
+    let runs: Vec<_> = (0..3).map(|_| swept(&s, &pad, "stabilization", (40, 2), newest)).collect();
+    let quickest = runs.iter().min_by_key(|r| r.3).expect("three runs");
+    let (calls, drawn, last, after) = quickest;
+    let mut sorted = calls.clone();
+    sorted.sort();
+    let middle = sorted[sorted.len() / 2];
+    eprintln!(
+        "one stroke {one:?}; before: {before} of 41 drawn, {piled:?} after the last step; \
+         now: {drawn} drawn (the last: {last}), {after:?} after; the slider's calls: middle {middle:?}, most {:?}",
+        sorted.last()
+    );
+    // the newest is always drawn, and few others
+    assert!(*last && *drawn <= 20, "{drawn} {last}");
+    // nothing piles up: done within two strokes' time of the last step
+    assert!(*after <= one * 2 + std::time::Duration::from_millis(50), "{after:?} ({one:?} a stroke)");
+    // the slider's own calls never wait on the strokes
+    assert!(middle <= std::time::Duration::from_millis(5), "{middle:?}");
+}
+
 #[test]
 fn a_pad_is_drawn_again_off_the_caller_s_thread_the_newest_ask_last() {
     let Some(pad) = session(200, 200) else { return };

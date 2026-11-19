@@ -1441,6 +1441,9 @@ pub(crate) struct Shared {
     /// The brush studio's pad being drawn again off the caller's thread (see
     /// [`CanvasSession::sync_pad`]).
     pub(crate) pad_sync: Mutex<studio::PadSync>,
+    /// How many times the brush studio has asked for its brush's sample stroke: the newest ask
+    /// is the one drawn (see [`CanvasSession::studio_preview`]).
+    pub(crate) studio_previews: std::sync::atomic::AtomicU64,
     /// Where `state` was last taken, for the log when a wait on it is long.
     holder: held::Holder,
 }
@@ -1961,6 +1964,7 @@ impl CanvasSession {
                 save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
                 pad_sync: Mutex::new(studio::PadSync::default()),
+                studio_previews: std::sync::atomic::AtomicU64::new(0),
                 holder: held::Holder::default(),
             }),
         })

@@ -6161,16 +6161,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         addBrushesRead()
     }
 
-    /** Draws the brush's sample stroke again, a moment after the last change. */
+    /**
+     * Draws the brush's sample stroke again, a moment after the last change. The core draws only
+     * the newest one asked for: those still waiting when a slider moves on come back with none
+     * (the stroke shown stays until the newest is drawn).
+     */
     private fun refreshStudioPreview() {
         val s = session ?: return
-        val b = currentBrush ?: return
         refreshStudioParts()
         studioPreviewJob?.cancel()
         studioPreviewJob = viewModelScope.launch {
             kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
             val image = withContext(Dispatchers.Default) {
-                val t = previewOf { s.brushPreview(b.set, b.index, 1060u, 324u) } ?: return@withContext null
+                val t = previewOf { s.studioPreview(1060u, 324u) } ?: return@withContext null
                 val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()

@@ -29,6 +29,10 @@ static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), 
 /// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
 static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Held by the brush studio's ask for its sample stroke while it waits for its turn and draws it
+/// (see [`CanvasSession::studio_preview`]).
+static STUDIO_PREVIEW_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Whether a sample stroke the GPU couldn't draw has been said in the log.
 static PREVIEW_FAILURE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -362,6 +366,26 @@ impl CanvasSession {
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {
         let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        self.drawn_preview(brush, width, height)
+    }
+
+    /// The sample stroke of the brush open in the studio (a dual brush's whole), as
+    /// [`CanvasSession::brush_preview`] draws one, for the studio to show as its controls change.
+    /// A slider being dragged asks again at every step: only the newest ask is drawn, and one still
+    /// waiting for its turn when a newer comes gives up (none), so the strokes drawn never pile up
+    /// behind the slider (on a slow GPU they took the frames' place, then its memory).
+    pub fn studio_preview(&self, width: u32, height: u32) -> Option<ThumbnailImage> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ask = self.shared.studio_previews.fetch_add(1, SeqCst).wrapping_add(1);
+        let _turn = STUDIO_PREVIEW_TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shared.studio_previews.load(SeqCst) != ask {
+            return None;
+        }
+        let brush = {
+            let st = self.shared.lock();
+            let (set, index) = st.studio.as_ref()?.0;
+            st.library.get(set)?.brushes.get(index)?.clone()
+        };
         self.drawn_preview(brush, width, height)
     }
 
