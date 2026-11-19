@@ -6,6 +6,7 @@ use procraft_engine::guide::{Guide, GuideKind, LengthUnit, SymmetryKind, bar_col
 use procraft_engine::input::Sample;
 use procraft_engine::stroke::Stamp;
 use procraft_engine::view::View;
+use procraft_gpu::{LiquifyMode, LiquifyStamp};
 
 use crate::{CanvasSession, State, ViewCurve, ViewMotion};
 
@@ -144,6 +145,31 @@ pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
                 copy.grain_turn = s.grain_turn - turn;
             }
             out.push(copy);
+        }
+    }
+    out
+}
+
+/// Liquify `stamps` and the copies the guide's symmetry makes of them, as a stroke's are (with
+/// Drawing Assist on the layer): each moved as the canvas is by the copy's mirror or turn, the way
+/// it pushes with it, and a twirl mirrored turning the other way.
+pub(crate) fn mirrored_liquify(guide: &Guide, stamps: &[LiquifyStamp]) -> Vec<LiquifyStamp> {
+    let mut out = stamps.to_vec();
+    for s in stamps {
+        let [x, y] = s.way;
+        for (at, turn, mirror) in guide.copies(Vec2::new(s.centre[0], s.centre[1])) {
+            let (sin, cos) = turn.sin_cos();
+            let (way, mode) = if mirror {
+                let mode = match s.mode {
+                    LiquifyMode::TwirlRight => LiquifyMode::TwirlLeft,
+                    LiquifyMode::TwirlLeft => LiquifyMode::TwirlRight,
+                    other => other,
+                };
+                ([x * cos + y * sin, x * sin - y * cos], mode)
+            } else {
+                ([x * cos - y * sin, x * sin + y * cos], s.mode)
+            };
+            out.push(LiquifyStamp { centre: [at.x, at.y], way, mode, ..*s });
         }
     }
     out
@@ -560,6 +586,31 @@ impl CanvasSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_liquify_stamp_is_mirrored_or_turned_with_its_way_and_twirl() {
+        let mut guide = Guide { on: true, kind: GuideKind::Symmetry, assisted: true, ..Guide::new(100, 100) };
+        let stamp = |mode| LiquifyStamp { centre: [30.0, 40.0], way: [3.0, 1.0], radius: 9.0, amount: 0.5, mode };
+        let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+        // mirrored across the upright line: its way too, and a twirl turns the other way
+        let out = mirrored_liquify(&guide, &[stamp(LiquifyMode::Push), stamp(LiquifyMode::TwirlRight)]);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0], stamp(LiquifyMode::Push));
+        let copy = out[2];
+        assert!(near(copy.centre, [70.0, 40.0]) && near(copy.way, [-3.0, 1.0]), "{copy:?}");
+        assert_eq!((copy.radius, copy.amount, copy.mode), (9.0, 0.5, LiquifyMode::Push));
+        assert_eq!(out[3].mode, LiquifyMode::TwirlLeft);
+        // turned a half round: the way with it, the twirl as it was
+        guide.rotational = true;
+        let out = mirrored_liquify(&guide, &[stamp(LiquifyMode::TwirlLeft)]);
+        assert_eq!(out.len(), 2);
+        assert!(near(out[1].centre, [70.0, 60.0]) && near(out[1].way, [-3.0, -1.0]), "{:?}", out[1]);
+        assert_eq!(out[1].mode, LiquifyMode::TwirlLeft);
+        // without Drawing Assist, or another guide: only the stamp
+        for g in [Guide { assisted: false, ..guide.clone() }, Guide { kind: GuideKind::Grid, ..guide.clone() }] {
+            assert_eq!(mirrored_liquify(&g, &[stamp(LiquifyMode::Push)]), [stamp(LiquifyMode::Push)]);
+        }
+    }
 
     #[test]
     fn the_grid_size_shows_in_its_unit_whole_or_to_two_decimals() {

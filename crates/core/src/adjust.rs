@@ -331,9 +331,11 @@ impl Shared {
         if steps.is_empty() {
             return;
         }
+        // with Drawing Assist on the layer, the symmetry's copies too, as a stroke's
+        let guide = st.doc.stroke_guide();
         if let Some(canvas) = st.canvas.as_mut() {
             for step in &steps {
-                canvas.liquify_stamps(step);
+                canvas.liquify_stamps(&crate::guide::mirrored_liquify(&guide, step));
             }
             if let Some(f) = st.last_filter {
                 canvas.set_filter(f);

@@ -4400,6 +4400,85 @@ fn liquify_moves_paint_as_one_undo_step() {
     assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
 }
 
+/// With Drawing Assist on the layer, the symmetry mirrors smudge, erase and Liquify as it does
+/// paint; on a layer without it, Liquify works only where it is.
+#[test]
+fn symmetry_mirrors_smudge_erase_and_liquify() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    use crate::guide::{GuideType, SymmetryType};
+    let Some(s) = session(200, 200) else { return };
+    s.set_guide_on(true);
+    s.set_guide_kind(GuideType::Symmetry);
+    s.set_guide_symmetry(SymmetryType::Vertical, false);
+    s.set_guide_assisted(true);
+    // the most any pixel on the row at `y` and its mirror's are apart
+    let apart = |s: &CanvasSession, y: u32| {
+        let off = (0..100)
+            .map(|x| {
+                let (a, b) = (pixel(s, x, y), pixel(s, 199 - x, y));
+                ((0..4).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0), x, a, b)
+            })
+            .max_by_key(|o| o.0)
+            .unwrap();
+        eprintln!("row {y}: at most {} apart, at {} ({:?} and {:?})", off.0, off.1, off.2, off.3);
+        off.0
+    };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let along = |y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, y, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(60.0 + i as f32, y, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![sample(90.0, y, 240.0)]);
+    };
+    s.set_brush_size(0.2);
+    s.set_color(1.0, 0.0, 0.0);
+    for y in [40.0, 100.0, 160.0] {
+        dot(60.0, y);
+    }
+    assert_eq!(pixel(&s, 140, 100), [255, 0, 0, 255]);
+    // smudged right on the left, left on the right
+    s.set_tool(ToolKind::Smudge);
+    along(40.0);
+    let dragged = |p: [u8; 4]| p[1] < 250;
+    assert!(
+        dragged(pixel(&s, 80, 40)) && dragged(pixel(&s, 119, 40)),
+        "{:?} {:?}",
+        pixel(&s, 80, 40),
+        pixel(&s, 119, 40)
+    );
+    // erased on the left, on the right too
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_size(0.3);
+    along(100.0);
+    let erased = |p: [u8; 4]| p[1] > 50;
+    assert!(erased(pixel(&s, 60, 100)) && erased(pixel(&s, 139, 100)), "{:?}", pixel(&s, 139, 100));
+    assert!(apart(&s, 100) <= 3);
+    s.set_tool(ToolKind::Paint);
+    // pushed right on the left, so left on the right
+    let before = pixel(&s, 125, 160);
+    assert!(s.liquify_begin());
+    let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
+    s.liquify_stroke((0..=20).flat_map(|i| [60.0 + i as f32, 160.0, 1.0, 8.0]).collect(), true, false, brush);
+    assert_ne!(pixel(&s, 125, 160), before);
+    assert!(apart(&s, 160) <= 3);
+    s.adjust_end(true);
+    assert!(apart(&s, 160) <= 3);
+    // a layer without Drawing Assist: only where the brush is
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    dot(60.0, 130.0);
+    dot(140.0, 130.0);
+    assert!(apart(&s, 130) <= 3);
+    let right = (100..200).map(|x| pixel(&s, x, 130)).collect::<Vec<_>>();
+    assert!(s.liquify_begin());
+    s.liquify_stroke((0..=20).flat_map(|i| [60.0 + i as f32, 130.0, 1.0, 8.0]).collect(), true, false, brush);
+    assert_eq!((100..200).map(|x| pixel(&s, x, 130)).collect::<Vec<_>>(), right);
+    assert!(apart(&s, 130) > 3);
+    s.adjust_end(true);
+}
+
 #[test]
 fn liquify_pushes_a_layer_s_mask_along() {
     use crate::adjust::{LiquifyBrush, LiquifyKind};
