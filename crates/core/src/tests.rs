@@ -2434,6 +2434,111 @@ fn smudge_tool_moves_paint_and_is_one_undo_step() {
     assert_eq!(pixel(&s, 30, 50), [255, 0, 0, 255], "the paint itself stays");
 }
 
+/// How a smudge stroke is given in [`smudge_drag`]: by what pointer, at what pressure and tilt
+/// (radians from upright), how many samples a second, and whether the brush's Smudge Pull follows
+/// the pressure (its own pressure curve straight, as a brush without one has it) or not (flat).
+#[derive(Clone, Copy, Debug)]
+struct SmudgeInput {
+    kind: PointerKind,
+    pressure: f32,
+    tilt: f32,
+    rate: f64,
+    flat_pull: bool,
+}
+
+const SMUDGE_MOUSE: SmudgeInput =
+    SmudgeInput { kind: PointerKind::Mouse, pressure: 1.0, tilt: 0.0, rate: 125.0, flat_pull: false };
+
+/// How far (canvas pixels) the smudge brush drags red out of a red band across its edge on white,
+/// where the red first falls under half, the band's own edge taken away: the same stroke, at 300
+/// pixels a second, given as `input` says, a render each display frame.
+fn smudge_drag(input: SmudgeInput) -> Option<f32> {
+    let s = session(320, 320)?;
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.3);
+    // the band: upright strokes side by side
+    for x in (0..=100).step_by(3) {
+        let x = x as f32;
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, -20.0, 0.0)]);
+        s.stroke_add((1..36).map(|i| sample(x, -20.0 + i as f32 * 10.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![sample(x, 340.0, 300.0)]);
+    }
+    let redness = |s: &CanvasSession| {
+        let row = picture(s);
+        (0..320).map(|x| 255 - i32::from(row[(160 * 320 + x) * 4 + 1])).collect::<Vec<_>>()
+    };
+    let edge_of = |row: &[i32]| row.iter().rposition(|&r| r >= 128).unwrap_or(0) as f32;
+    let edge = edge_of(&redness(&s));
+    s.set_tool(ToolKind::Smudge);
+    s.set_brush_size(0.3);
+    if input.flat_pull {
+        s.studio_begin();
+        s.set_studio_slider_curve("smudge_pull".to_owned(), vec![0.0, 1.0, 1.0, 1.0]);
+        s.studio_end(true);
+    }
+    // from inside the band out across its edge, 180 pixels in 0.6 s
+    let (from, to, ms) = (edge - 30.0, edge + 150.0, 600.0);
+    let count = (input.rate * ms / 1000.0).round() as usize;
+    let at = |i: usize| {
+        let t = i as f64 / count as f64;
+        let mut p = sample(from + (to - from) * t as f32, 160.0, t * ms);
+        p.pressure = input.pressure;
+        p.tilt = input.tilt;
+        p
+    };
+    s.stroke_begin(input.kind, vec![at(0)]);
+    let (mut i, mut frame) = (1, 1.0);
+    while i < count {
+        let mut batch = Vec::new();
+        while i < count && at(i).time_ms < frame * 1000.0 / 60.0 {
+            batch.push(at(i));
+            i += 1;
+        }
+        if !batch.is_empty() {
+            s.stroke_add(batch);
+        }
+        picture(&s);
+        frame += 1.0;
+    }
+    s.stroke_end(vec![at(count)]);
+    Some(edge_of(&redness(&s)) - edge)
+}
+
+/// #313: a pen's smudge keeps what it carries as its pressure says, as a mouse's does at full
+/// pressure: each stamp keeps the brush's Smudge Pull to the power 1/8, times the pressure through
+/// Smudge Pull's own pressure curve (straight for a brush without one). Its tilt and how fast its
+/// samples come change nothing; a pen pressing fully drags as far as the mouse; and a brush whose
+/// Smudge Pull doesn't follow the pressure (its curve flat) drags far at half pressure.
+#[test]
+fn a_pen_s_smudge_drags_as_its_pressure_says_whatever_its_tilt_or_rate() {
+    let Some(mouse) = smudge_drag(SMUDGE_MOUSE) else { return };
+    let pen = SmudgeInput { kind: PointerKind::Stylus, ..SMUDGE_MOUSE };
+    let drag = |input: SmudgeInput| smudge_drag(input).unwrap_or(f32::NAN);
+    let half = SmudgeInput { pressure: 0.5, ..pen };
+    let (full, at_half) = (drag(pen), drag(half));
+    let (tilted, quick) = (drag(SmudgeInput { tilt: 0.8, ..half }), drag(SmudgeInput { rate: 240.0, ..half }));
+    let mouse_quick = drag(SmudgeInput { rate: 240.0, ..SMUDGE_MOUSE });
+    let pressures = [0.5, 0.8, 0.9, 0.95].map(|p| drag(SmudgeInput { pressure: p, ..pen }));
+    let flat = drag(SmudgeInput { flat_pull: true, ..half });
+    eprintln!(
+        "mouse {mouse} (240/s {mouse_quick}); pen full {full}, half {at_half}, tilted {tilted}, 240/s {quick}; \
+         by pressure {pressures:?}; half with a flat Smudge Pull {flat}"
+    );
+    // the mouse drags red well past the edge, as the pen pressing fully does
+    assert!(mouse > 40.0 && (full - mouse).abs() <= 1.0, "{mouse} {full}");
+    assert!((mouse_quick - mouse).abs() <= 2.0, "{mouse} {mouse_quick}");
+    // tilt and rate make no difference of their own
+    assert!((tilted - at_half).abs() <= 1.0 && (quick - at_half).abs() <= 1.0, "{at_half} {tilted} {quick}");
+    // the harder the pen presses, the farther (at half, the stamps keep under half of what they
+    // carry: the red barely moves)
+    assert!(pressures.windows(2).all(|w| w[0] < w[1]) && pressures[3] < full, "{pressures:?} {full}");
+    assert!(at_half <= 4.0, "{at_half}");
+    // Smudge Pull made not to follow the pressure (its curve flat, the studio's own control for
+    // it): half pressure drags many times farther, the rest of the way short only as the pen's
+    // lighter stamps lay less of what they carry
+    assert!(flat >= 15.0 && flat >= 8.0 * at_half.max(1.0) && flat < mouse, "{flat} {at_half} {mouse}");
+}
+
 /// The picture `s` shows, every pixel.
 fn picture(s: &CanvasSession) -> Vec<u8> {
     let mut guard = s.shared.lock();
