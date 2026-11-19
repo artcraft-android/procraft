@@ -1082,6 +1082,12 @@ pub struct StrokeBuilder {
     changed: usize,
     /// Once it has ended: the path's length and the end taper's span its stamps take.
     ended: Option<(f32, f32)>,
+    /// The input's pressure counts though its pointer reports none (see
+    /// [`StrokeBuilder::with_given_pressure`]).
+    given_pressure: bool,
+    /// How far the pressure grows from nothing at the start and falls to nothing at the end
+    /// (canvas pixels; see [`StrokeBuilder::with_pressure_tapers`]).
+    pressure_tapers: [f32; 2],
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -1239,6 +1245,32 @@ impl StrokeBuilder {
         self
     }
 
+    /// The samples' pressure counts as a pen's does, though the pointer reports none (a finger
+    /// given a pressure, by a plugin): the brush's pressure settings act on it, and nothing else
+    /// changes. Its tapers stay the pointer's (a finger's touch taper), and it neither leans nor
+    /// turns.
+    pub fn with_given_pressure(mut self) -> StrokeBuilder {
+        self.given_pressure = true;
+        self
+    }
+
+    /// Input whose pressure counts has it grow from nothing over the first `start` canvas pixels
+    /// of the path and fall to nothing over the last `end`, as a pen's does pressed down and lifted
+    /// off, on top of the brush's own tapers: the brush's pressure settings say what that does to
+    /// its stamps. A tap keeps its whole pressure.
+    pub fn with_pressure_tapers(mut self, start: f32, end: f32) -> StrokeBuilder {
+        let span = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        self.pressure_tapers = [span(start), span(end)];
+        self
+    }
+
+    /// Whether the samples' pressure was given (see [`StrokeBuilder::with_given_pressure`]), and
+    /// the pressure's tapers (see [`StrokeBuilder::with_pressure_tapers`]): for a stroke laid
+    /// again as this one was.
+    pub fn pressing(&self) -> (bool, [f32; 2]) {
+        (self.given_pressure, self.pressure_tapers)
+    }
+
     pub fn exact_path(mut self) -> StrokeBuilder {
         self.exact = true;
         self
@@ -1261,6 +1293,7 @@ impl StrokeBuilder {
     /// without one.
     fn add_outside(&mut self, samples: &[Sample]) -> Option<Vec<Stamp>> {
         let pen = self.pointer.has_pressure();
+        let given = self.given_pressure;
         let curve = &self.input.pressure_curve;
         let outside = self.outside.0.as_mut()?;
         if outside.ended {
@@ -1279,7 +1312,9 @@ impl StrokeBuilder {
                         }
                     }
                 } else {
-                    (s.pressure, s.tilt, s.azimuth, s.roll) = (1.0, 0.0, 0.0, 0.0);
+                    // a given pressure as it was given (no pen's curve), and no lean or turn
+                    let pressure = if given { s.pressure.clamp(0.0, 1.0) } else { 1.0 };
+                    (s.pressure, s.tilt, s.azimuth, s.roll) = (pressure, 0.0, 0.0, 0.0);
                 }
                 s
             })
@@ -1383,6 +1418,8 @@ impl StrokeBuilder {
             tipped: false,
             changed: usize::MAX,
             ended: None,
+            given_pressure: false,
+            pressure_tapers: [0.0; 2],
         }
         .reading_extras()
     }
@@ -1561,7 +1598,7 @@ impl StrokeBuilder {
         let reach = match self.start_settled {
             // the start's reach still moving: nothing is drawn for good yet
             None => f32::NEG_INFINITY,
-            Some(_) if self.end_shows() => self.length - self.end_span(0.0),
+            Some(_) if self.end_shows() => self.length - self.end_reach(0.0),
             Some(_) => f32::INFINITY,
         };
         // and only as far as the tapers, eased over the points around, no longer change
@@ -1747,7 +1784,9 @@ impl StrokeBuilder {
             false => self.taper().start <= 0.0,
         };
         let unchanged = laid <= self.placed.len() && self.changed >= laid && length > 0.0 && start_kept;
-        // nor does the end taper (eased over the points around) reach the last of them
+        // nor does the end taper, or the pressure's fall (eased over the points around), reach the
+        // last of them
+        let end = end.max(self.pressure_taper(1));
         let reach = self.eased_before(length - end);
         let last = laid.checked_sub(1).and_then(|i| self.placed.get(i));
         let untapered = end <= 0.0 || last.is_none_or(|p| p.distance < reach);
@@ -1814,7 +1853,13 @@ impl StrokeBuilder {
         let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
         let batched = self.last_sample.is_some() && since < BATCHED_MS;
         let steps = if batched || since <= 0.0 { 1.0 } else { (since / interval).min(MOST_STEPS) as f32 };
-        let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
+        // a pen's pressure through the app's curve; one given as it was given (the curve is the
+        // pen's); a finger's full
+        let raw = match (pen, self.given_pressure) {
+            (true, _) => self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+            (false, true) => s.pressure.clamp(0.0, 1.0),
+            (false, false) => 1.0,
+        };
         // the pressure is smoothed with the path by streamline; a stroke drawn for show or an
         // exact path, which no streamline holds back, smooths it as it comes
         let pressure = match self.pressure.filter(|_| self.steady || self.exact) {
@@ -1971,9 +2016,27 @@ impl StrokeBuilder {
         together(self.brush.pressure_smoothing, self.input.pressure_smoothing)
     }
 
-    /// Whether streamline smooths the pressure (a pen's, its smoothing on).
+    /// Whether streamline smooths the pressure (a pen's, or one given, its smoothing on).
     fn pressure_streams(&self) -> bool {
-        self.pointer.has_pressure() && self.pressure_smoothing() > 0.0
+        self.pressure_counts() && self.pressure_smoothing() > 0.0
+    }
+
+    /// Whether the samples' pressure counts: a pen's, or one given (see
+    /// [`StrokeBuilder::with_given_pressure`]). A finger's otherwise doesn't.
+    fn pressure_counts(&self) -> bool {
+        self.pointer.has_pressure() || self.given_pressure
+    }
+
+    /// How far the pressure grows from nothing at the start (`end` 0) or falls to nothing at the
+    /// end (1), canvas pixels: none where the pressure doesn't count.
+    fn pressure_taper(&self, end: usize) -> f32 {
+        if self.pressure_counts() { self.pressure_tapers.get(end).copied().unwrap_or(0.0) } else { 0.0 }
+    }
+
+    /// How far back from the end its tapers reach (see [`StrokeBuilder::end_span`]): the end
+    /// taper's, or the pressure's fall where that is longer.
+    fn end_reach(&self, run_on: f32) -> f32 {
+        self.end_span(run_on).max(self.pressure_taper(1))
     }
 
     /// `p`, a point motion filtering, streamline and stabilisation have all settled (`dt`
@@ -1983,7 +2046,7 @@ impl StrokeBuilder {
     /// the stroke is drawn for show or is an exact path; and the speed the path went there at.
     fn pressed_on(&mut self, p: PathPoint, dt: Option<f64>) -> PathPoint {
         let pen = self.pointer.has_pressure();
-        let curved = if pen { self.brush.pressures(p.pressure) } else { [1.0; 5] };
+        let curved = if self.pressure_counts() { self.brush.pressures(p.pressure) } else { [1.0; 5] };
         // frames of a 60 Hz display since the last point (a sample's worth at the input's rate,
         // if it came with it)
         let gone = self.pressed_from.zip(dt).map(|(from, dt)| {
@@ -2432,7 +2495,7 @@ impl StrokeBuilder {
     /// Whether the end taper shows while the stroke is drawn: with the tip animation on, a
     /// finger's as a pen's (a classic taper's only as it ends, where it runs on).
     fn end_shows(&self) -> bool {
-        !self.classic() && self.taper().end > 0.0 && self.extras.tip_animation
+        !self.classic() && (self.taper().end > 0.0 || self.pressure_taper(1) > 0.0) && self.extras.tip_animation
     }
 
     /// How far back from the end the end taper starts (0: none): the classic one over the run-on
@@ -2573,9 +2636,10 @@ impl StrokeBuilder {
     }
 
     /// The (size, opacity) multipliers the pressure gives a point: none for a finger, which has
-    /// no pressure (a brush that thins as it is pressed keeps its full size under a finger).
+    /// no pressure (a brush that thins as it is pressed keeps its full size under a finger), unless
+    /// it is given one.
     fn pressed(&self, p: PathPoint) -> (f32, f32) {
-        if self.pointer.has_pressure() { self.brush.factors(p.soft[0], p.soft[1]) } else { (1.0, 1.0) }
+        if self.pressure_counts() { self.brush.factors(p.soft[0], p.soft[1]) } else { (1.0, 1.0) }
     }
 
     /// The stamp's size with `by` of it left (0..1, what the pressure and the speed leave): they
@@ -2673,7 +2737,9 @@ impl StrokeBuilder {
     fn respaces(&self) -> bool {
         let t = self.taper();
         let fades = self.pointer.has_pressure() && self.extras.taper_pressure > 0.0;
-        self.outside.0.is_none() && (t.start > 0.0 || t.end > 0.0) && (t.size > 0.0 || fades)
+        let pressure_tapers = self.pressure_taper(0) > 0.0 || self.pressure_taper(1) > 0.0;
+        let tapers = (t.start > 0.0 || t.end > 0.0) && (t.size > 0.0 || fades);
+        self.outside.0.is_none() && (tapers || pressure_tapers)
     }
 
     /// Where the walk along the path stands.
@@ -2735,10 +2801,11 @@ impl StrokeBuilder {
         if !self.respaces() {
             return;
         }
-        let end = end.filter(|&(_, span)| span > 0.0);
+        let fall = self.pressure_taper(1);
+        let end = end.filter(|&(_, span)| span > 0.0 || fall > 0.0);
         let from = match end {
             _ if self.start_open() => f32::NEG_INFINITY,
-            Some((length, span)) => self.eased_before(length - span),
+            Some((length, span)) => self.eased_before(length - span.max(fall)),
             None => return,
         };
         self.spacing_end = end;
@@ -2763,7 +2830,7 @@ impl StrokeBuilder {
         let least = self.laid_for_good();
         let mut cut = self.walked.iter().position(|w| w.before.stamps >= least).unwrap_or(self.walked.len());
         if !self.start_open() {
-            let from = self.eased_before(self.length - 2.0 * self.end_span(0.0));
+            let from = self.eased_before(self.length - 2.0 * self.end_reach(0.0));
             if let Some(i) = self.walked.iter().rposition(|w| w.before.length <= from) {
                 cut = cut.max(i);
             }
@@ -2981,7 +3048,7 @@ impl StrokeBuilder {
             Some(theta) if self.lean_known() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let pressed = if self.pointer.has_pressure() { p.soft[1] } else { self.brush.touch_opacity };
+        let pressed = if self.pressure_counts() { p.soft[1] } else { self.brush.touch_opacity };
         let attack = (pressed.clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
@@ -3267,26 +3334,31 @@ impl StrokeBuilder {
     ) -> Tapered {
         let grown = |gone: f32, span: f32| if span > 0.0 { (gone / span).clamp(0.0, 1.0) } else { 1.0 };
         let tip = if self.pointer.has_pressure() { self.extras.pen_taper_tip } else { self.extras.touch_taper_tip };
-        // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
-        // bleed and roundness it gave scaled to what the faded pressure gives
-        let fade = self.extras.taper_pressure;
-        let fading = self.pointer.has_pressure() && fade > 0.0;
+        // a pen's pressure fades into the tapers as far as the brush says, and pressure that
+        // counts grows and falls over its own tapers: the size, opacity, bleed and roundness it
+        // gave scaled to what the faded pressure gives
+        let fade = if self.pointer.has_pressure() { self.extras.taper_pressure } else { 0.0 };
+        let (rise, fall) = (self.pressure_taper(0), self.pressure_taper(1));
+        let fading = self.pressure_counts() && (fade > 0.0 || rise > 0.0 || fall > 0.0);
         // what the tapers leave at a place along the path: of the size, the opacity and the
         // pressure faded into them
         let tapered = |at: f32| {
-            let (start, finish) = match end {
-                // a tap keeps its whole size
-                Some((length, _)) if length <= 0.0 => (1.0, 1.0),
-                Some((length, span)) => (grown(at, start_span), grown(length - at, span)),
-                None => (grown(at, start_span), 1.0),
+            let (start, finish, risen, fallen) = match end {
+                // a tap keeps its whole size, and its whole pressure
+                Some((length, _)) if length <= 0.0 => (1.0, 1.0, 1.0, 1.0),
+                Some((length, span)) => {
+                    (grown(at, start_span), grown(length - at, span), grown(at, rise), grown(length - at, fall))
+                }
+                None => (grown(at, start_span), 1.0, grown(at, rise), 1.0),
             };
             let (size, alpha) = self.taper().applied(start, finish, tip);
-            [size, alpha, (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip))]
+            let faded = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
+            [size, alpha, faded * risen * fallen]
         };
         let [mut size, mut alpha, kept] = self.eased(at, tapered);
         let mut grain_press = None;
         let [s, o, b, r, _] = pressed;
-        let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * speed_size;
+        let size_left = if self.pressure_counts() { self.brush.factors(s, o).0 } else { 1.0 } * speed_size;
         let (mut faded_left, mut faded_round) = (size_left, r);
         if fading {
             let (_, o0) = self.brush.factors(s, o);
@@ -3810,6 +3882,121 @@ mod tests {
         let touch = finger.add(&samples);
         assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
+    }
+
+    #[test]
+    fn a_finger_given_a_pressure_draws_with_it_as_a_pen_does() {
+        let radius = |mut b: StrokeBuilder, pressure: f32| b.add(&[Sample::at(Vec2::ZERO, pressure, 0.0)])[0].radius;
+        let finger = || StrokeBuilder::new(plain(), 10.0, Pointer::Finger);
+        let pen = || StrokeBuilder::new(plain(), 10.0, Pointer::Stylus);
+        // a finger's pressure doesn't count, unless it is given
+        assert_eq!(radius(finger(), 0.25), 5.0);
+        let given = radius(finger().with_given_pressure(), 0.25);
+        assert!(given < 4.0, "{given}");
+        assert!((given - radius(pen(), 0.25)).abs() < 1e-5, "{given} {}", radius(pen(), 0.25));
+        assert_eq!(radius(finger().with_given_pressure(), 1.0), 5.0);
+        // the app's pressure curve is the pen's: a pressure given goes on as it was given
+        let curve = Curve::new(&[Vec2::ZERO, Vec2::new(1.0, 0.5)]);
+        let input = InputSettings { pressure_curve: curve, ..InputSettings::default() };
+        assert!(radius(pen().with_input(input.clone()), 1.0) < 4.0);
+        assert_eq!(radius(finger().with_given_pressure().with_input(input), 1.0), 5.0);
+        // and its opacity, by a brush that lightens as it is pressed less
+        let lightens = Brush { pressure_opacity: 1.0, ..plain() };
+        let alpha = |pointer: Pointer, given: bool| {
+            let b = StrokeBuilder::new(lightens.clone(), 10.0, pointer);
+            let mut b = if given { b.with_given_pressure() } else { b };
+            b.add(&[Sample::at(Vec2::ZERO, 0.3, 0.0)])[0].alpha
+        };
+        assert!(alpha(Pointer::Finger, false) > alpha(Pointer::Stylus, false));
+        assert!(alpha(Pointer::Finger, true) < alpha(Pointer::Finger, false));
+        assert!((alpha(Pointer::Finger, true) - alpha(Pointer::Stylus, false)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_pressure_s_tapers_grow_it_from_nothing_and_let_it_fall_to_nothing() {
+        // pressed fully along 200 px, the pressure tapering in over 40 and out over 60
+        let stroke = |b: StrokeBuilder| {
+            let mut b = b;
+            b.add(&line(50, 200.0));
+            b.finish()
+        };
+        let tapered = |pointer: Pointer| StrokeBuilder::new(plain(), 10.0, pointer).with_pressure_tapers(40.0, 60.0);
+        let given = stroke(tapered(Pointer::Finger).with_given_pressure());
+        let length = given.last().unwrap().distance;
+        let at = |stamps: &[Stamp], d: f32| {
+            stamps.iter().min_by(|a, b| (a.distance - d).abs().total_cmp(&(b.distance - d).abs())).unwrap().radius
+        };
+        let shown: Vec<String> =
+            [0.0, 10.0, 20.0, 30.0, 40.0, 100.0].iter().map(|&d| format!("{d}: {:.2}", at(&given, d))).collect();
+        let fall: Vec<String> = [60.0, 45.0, 30.0, 15.0, 0.0]
+            .iter()
+            .map(|&left| format!("{left} before the end: {:.2}", at(&given, length - left)))
+            .collect();
+        println!("radius along a 10 px stroke tapered over 40 and 60: {shown:?}, {fall:?}");
+        // at each end the size the brush gives no pressure (15% of it), the full size between,
+        // growing and falling evenly: half way, half way between
+        let (least, half) = (5.0 * 0.15, 5.0 * (0.15 + 0.85 / 2.0));
+        assert!(
+            (at(&given, 0.0) - least).abs() < 0.05 && (at(&given, length) - least).abs() < 0.05,
+            "{shown:?} {fall:?}"
+        );
+        assert_eq!(at(&given, 100.0), 5.0);
+        assert!((at(&given, 20.0) - half).abs() < 0.1 && (at(&given, length - 30.0) - half).abs() < 0.1);
+        let rising = given.iter().filter(|s| s.distance <= 40.0).map(|s| s.radius);
+        assert!(rising.clone().zip(rising.skip(1)).all(|(a, b)| b >= a - 1e-4));
+        let falling = given.iter().filter(|s| s.distance >= length - 60.0).map(|s| s.radius);
+        assert!(falling.clone().zip(falling.skip(1)).all(|(a, b)| b <= a + 1e-4));
+        // tapered closer together, as the brush's own tapers lie
+        assert!(given.len() > stroke(StrokeBuilder::new(plain(), 10.0, Pointer::Finger)).len());
+        // a pen takes them too; a finger whose pressure doesn't count, none
+        let pen = stroke(tapered(Pointer::Stylus));
+        assert!((at(&pen, 0.0) - least).abs() < 0.05 && at(&pen, 100.0) == 5.0);
+        assert!(stroke(tapered(Pointer::Finger)).iter().all(|s| s.radius == 5.0));
+        // and with none, a pen's stroke is as it always was
+        let plain_pen = stroke(StrokeBuilder::new(plain(), 10.0, Pointer::Stylus));
+        assert_eq!(
+            stroke(StrokeBuilder::new(plain(), 10.0, Pointer::Stylus).with_pressure_tapers(0.0, 0.0)),
+            plain_pen
+        );
+        // a tap keeps its whole pressure
+        let mut tap = tapered(Pointer::Finger).with_given_pressure();
+        tap.add(&[Sample::at(Vec2::new(5.0, 5.0), 1.0, 0.0)]);
+        assert_eq!(tap.finish().iter().map(|s| s.radius).collect::<Vec<_>>(), [5.0]);
+    }
+
+    #[test]
+    fn a_pressure_s_fall_shows_as_the_stroke_is_drawn_and_its_end_lays_the_rest() {
+        let mut brush = plain();
+        brush.set_setting("pen_tip_animation", 1.0);
+        let make = |brush: &Brush| {
+            StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger)
+                .with_given_pressure()
+                .with_pressure_tapers(0.0, 50.0)
+        };
+        assert!(make(&brush).shows_tip());
+        let mut b = make(&brush);
+        let samples = line(50, 200.0);
+        let mut kept = Vec::new();
+        let mut tip = Vec::new();
+        for s in samples.chunks(5) {
+            let (k, t) = b.add_tipped(s);
+            kept.extend(k);
+            tip = t;
+        }
+        // drawn for good up to where the fall would begin, the rest the tip, falling to its end
+        assert!(kept.iter().all(|s| s.radius == 5.0) && !kept.is_empty());
+        let (Some(first), Some(last)) = (tip.first(), tip.last()) else { panic!("no tip") };
+        assert!(first.radius > 4.0 && last.radius < 1.0, "{} {}", first.radius, last.radius);
+        // its end lays only what wasn't drawn for good
+        let laid = kept.len();
+        let rest = b.finish_after(laid).expect("laid as it was drawn");
+        assert!(!rest.is_empty() && rest.last().unwrap().radius < 1.0);
+        // off, the fall is laid once it ends: what was laid at full size is laid again
+        brush.set_setting("pen_tip_animation", 0.0);
+        let mut b = make(&brush);
+        assert!(!b.shows_tip());
+        let laid = b.add(&samples).len();
+        assert!(b.finish_after(laid).is_none());
     }
 
     #[test]

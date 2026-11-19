@@ -73,6 +73,7 @@ mod plugin_run;
 mod plugins;
 mod pour;
 mod presets;
+mod pressure;
 mod project;
 mod projection;
 mod quick_menu;
@@ -655,6 +656,8 @@ pub(crate) struct State {
     pub(crate) ahead: bool,
     /// The platform sends predicted input after the stroke's samples.
     pub(crate) predicting: bool,
+    /// The open stroke's pressure as plugins give it.
+    pub(crate) pressing: pressure::Pressing,
     /// The open stroke's brush engine, as it is told the colours under the dabs it asks about.
     pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
@@ -1870,6 +1873,7 @@ impl CanvasSession {
             airbrush: None,
             ahead: false,
             predicting: false,
+            pressing: pressure::Pressing::default(),
             engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
@@ -2053,6 +2057,9 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // pressed as plugins say, before anything takes them
+        let mut samples = samples;
+        st.press(Some(pointer), &mut samples);
         // a plugin's own artwork takes its strokes itself
         if st.plugin_touch(plugin_artwork::Phase::Down, &samples) {
             self.shared.frame(st);
@@ -2122,11 +2129,12 @@ impl CanvasSession {
         let whole_pixels = st.whole_pixels(&samples).filter(|_| shown_ahead);
         let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
             let preview_tilt = brush.setting("preview_tilt") >= 0.5;
-            let mut builder = StrokeBuilder::with_seed(brush, diameter, pointer.into(), seed)
+            let builder = StrokeBuilder::with_seed(brush, diameter, pointer.into(), seed)
                 .scaled(st.brush_scale())
                 .with_input(st.input.clone())
                 .on_view_turned(st.view.map_or(0.0, |v| v.rotation()))
                 .seen_at(st.view.map_or(1.0, |v| v.zoom()) / st.display_scale);
+            let mut builder = st.pressing.applied(builder, st.canvas_per_point());
             if let Some(zoom) = whole_pixels {
                 builder = builder.read_in_whole_pixels(zoom);
             }
@@ -2216,6 +2224,8 @@ impl CanvasSession {
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        let mut samples = samples;
+        st.press(None, &mut samples);
         if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
             self.shared.frame(st);
             return;
@@ -2263,9 +2273,10 @@ impl CanvasSession {
     /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
     /// never kept.
     pub fn stroke_predict(&self, samples: Vec<PenSample>) {
-        let samples = self.pen_predicted(samples);
+        let mut samples = self.pen_predicted(samples);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.press_predicted(&mut samples);
         if st.scene_shown() {
             return;
         }
@@ -2292,6 +2303,8 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        let mut samples = samples;
+        st.press(None, &mut samples);
         st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
             self.shared.frame(st);

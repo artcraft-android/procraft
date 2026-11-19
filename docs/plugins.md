@@ -71,8 +71,8 @@ needs at least one hook, one action (see [Actions](#actions)), one kind of artwo
 [Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
 the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
 5, more than eight controls, or a picker's picture that reads its controls, 6, the `hide_notices`
-and `floating_panels` hooks 7, and the `gesture_lock`, `view_look`, `paper` and `reference_windows`
-hooks, the `view` permission and actions in the Canvas tab 8.
+and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
+hooks, the `view` permission and actions in the Canvas tab 8, and the `pressure` hook 9.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -543,6 +543,40 @@ picture with it. The artwork keeps them all as it keeps the first (each picture 
 `reference-2.png` and on); with fewer allowed later, those open stay open but no more open. An
 answer past 1 to 8 stops the plugin. With several plugins on this hook, the most any says is used.
 
+### `pressure`
+
+The pressure each sample of a stroke draws with, a finger's too, and how it tapers (interface 9):
+
+```
+procraft_pressure(pointer: i32, first: i32, x: f32, y: f32, ms: f32, pressure: f32) -> f32
+procraft_pressure_taper(pointer: i32, end: i32) -> f32
+```
+
+`procraft_pressure` is asked once for each sample, in the order they come, before anything else
+takes it: `pointer` is 0 for a finger, 1 a pen, 2 a pen's eraser end and 3 a mouse; `first` is 1 for
+the stroke's first sample (start afresh) and 0 after; `x` and `y` are where it is in window points
+(window pixels over the screen's density, so a speed reads the same on every screen); `ms` is how
+long after the stroke's first sample it came; `pressure` is its pressure as it came, 0 to 1 (a
+finger's says nothing). It answers the pressure the sample draws with, 0 to 1, or below 0 to leave it
+as it came. Predicted input isn't asked: it takes the last pressure given.
+
+A finger or a mouse reports no pressure, so a stroke of one draws at full pressure, whatever its
+brush says, unless its first sample is given one: then the whole stroke draws with the pressure given,
+and the brush's pressure settings act on it as on a pen's (its size and opacity by the pressure, its
+pressure curves and smoothing). Everything else about it stays its pointer's: a finger's taper, and
+no lean or turn. A pen's pressure given goes through the app's pressure curve as its own does.
+
+`procraft_pressure_taper` is asked as each stroke begins, after its first sample: how far (window
+points, 0 to 1,000) its pressure grows from nothing at its start (`end` 0) and falls to nothing at
+its end (1), on top of the brush's own tapers, for a stroke whose pressure counts (a pen's, or one
+given). The end's fall shows as the stroke is drawn, as the brush's end taper does with its tip
+animation on, and a tap keeps its whole pressure. Answer 0 for none.
+
+A pressure past 1 or that isn't a number, or a taper below 0, past 1,000 or that isn't a number, stops
+the plugin. Several plugins on this hook run one after another, in order of id, each told the
+pressure the last one gave; each taper is the longest any gives. A stroke on a plugin's layer keeps
+what was given (field 27), so it is laid again the same.
+
 ### `floating_panels`
 
 Whether a panel can be torn off into a window of its own (not 0) (interface 7):
@@ -866,8 +900,8 @@ own sound, or none. All of it is in the plugin, made sample by sample with a few
 | A layer's data | 64 MiB |
 | Steps for a call on a layer | 800,000,000, for at most 5 seconds |
 
-A pen sends a sample every 4 ms at 240 Hz, so a `position` call has to be far quicker than that. Use a
-few hundred steps, not thousands.
+A pen sends a sample every 4 ms at 240 Hz, so a `position` or `pressure` call has to be far quicker
+than that. Use a few hundred steps, not thousands.
 
 A fill too big for the limit stays as it was, and the app says so.
 
@@ -1235,6 +1269,7 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 | 24 | The selection it was drawn inside, if any: its box (x, y, width, height, u32), then its coverage in runs, each a u32 count and the byte |
 | 25 | A region it fills, in place of samples: u32 how many outlines, then each a u32 count of points and them, x and y as 32-bit floats (canvas pixels). The app fills them even-odd in the item's colour (field 3) at its opacity (field 6), smoothed, over what is under it, moved by its transform (field 22). Such an item needs no brush |
 | 26 | The shape it snapped to with QuickShape: u8 its kind (0 line, 1 polyline, 2 arc, 3 curve, 4 ellipse, 5 circle, 6 triangle, 7 equilateral triangle, 8 quadrilateral, 9 rectangle, 10 square), then its nodes, x and y as 32-bit floats (canvas pixels). Its samples are laid exactly as they are, nothing smoothing them, and a dual brush's first alone |
+| 27 | Its pressure as a plugin on the [`pressure`](#pressure) hook gave it: u8 1 if it was given though the pointer reports none (a finger's), then how far it grew from nothing at the start and fell to nothing at the end, two 32-bit floats (canvas pixels, moved by its transform). None: its pointer's own pressure, no tapers |
 
 The brush is kept as the brush library keeps one: the brush it came from among those the app comes
 with, and every setting changed from there. An item draws the same however the brush is changed
@@ -1640,9 +1675,9 @@ keeps. Interface 3 added kinds of layer, interface 4 brush engines, the `brush.d
 the utilities, interface 5 several filters in one plugin, interface 6 up to sixteen controls, a
 picker's picture given its controls, a picker that goes quiet or picks the hue on a ring of its own,
 a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks,
-interface 7 the `hide_notices` and `floating_panels` hooks, and interface 8 the `gesture_lock`,
+interface 7 the `hide_notices` and `floating_panels` hooks, interface 8 the `gesture_lock`,
 `view_look`, `paper` and `reference_windows` hooks, the `view` permission and actions in the Canvas
-tab. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+tab, and interface 9 the `pressure` hook. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

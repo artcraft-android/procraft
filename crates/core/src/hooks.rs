@@ -648,6 +648,33 @@ impl Hooks {
         self.through(Hook::ReferenceWindows, 1, |running, most| Ok(most.max(running.reference_windows()?)))
     }
 
+    /// The pressure hook: the pressure a stroke's sample draws with, as the plugins on it say in
+    /// turn (in order of id), each told what the last one said; none while none says, or for a
+    /// sample that isn't a number.
+    #[inline]
+    pub(crate) fn pressure(&self, asked: crate::plugin_run::PressureAsked) -> Option<f32> {
+        let numbers = [asked.x, asked.y, asked.ms, asked.pressure].iter().all(|v| v.is_finite());
+        if !self.has(Hook::Pressure) || !numbers {
+            return None;
+        }
+        self.through(Hook::Pressure, None, |running, said: Option<f32>| {
+            let told = crate::plugin_run::PressureAsked { pressure: said.unwrap_or(asked.pressure), ..asked };
+            Ok(running.pressure(told)?.or(said))
+        })
+    }
+
+    /// The pressure hook's tapers for a stroke by `pointer` (numbered as for [`Hooks::pressure`]):
+    /// how far (window points) its pressure grows from nothing at its start and falls to nothing at
+    /// its end, each the longest any plugin on it says.
+    pub(crate) fn pressure_tapers(&self, pointer: i32) -> [f32; 2] {
+        if !self.has(Hook::Pressure) {
+            return [0.0; 2];
+        }
+        self.through(Hook::Pressure, [0.0; 2], |running, [start, end]| {
+            Ok([start.max(running.pressure_taper(pointer, 0)?), end.max(running.pressure_taper(pointer, 1)?)])
+        })
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -1025,6 +1052,36 @@ pub(crate) mod tests {
         (func (export "procraft_control") (param i32 f32)
             (global.set $clear (f32.ne (local.get 1) (f32.const 0))))
         (func (export "procraft_keep_clear") (result i32) (global.get $clear)))"#;
+    /// Answers the pressure hook: a finger's sample (pointer 0) pressed at its x over 100, anything
+    /// else left as it came; a finger's stroke tapered over 10 points at its start and 20 at its end.
+    const PRESSES: &str = r#"(module
+        (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32)
+            (if (result f32) (i32.eqz (local.get 0))
+                (then (f32.div (local.get 2) (f32.const 100)))
+                (else (f32.const -1))))
+        (func (export "procraft_pressure_taper") (param i32 i32) (result f32)
+            (if (result f32) (i32.eqz (local.get 0))
+                (then (f32.convert_i32_s (i32.mul (i32.add (local.get 1) (i32.const 1)) (i32.const 10))))
+                (else (f32.const 0)))))"#;
+
+    /// Answers the pressure hook with half the pressure it is told, for every pointer, and a taper
+    /// of 5 points at the start and 30 at the end.
+    const PRESSES_HALF: &str = r#"(module
+        (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32)
+            (f32.mul (local.get 5) (f32.const 0.5)))
+        (func (export "procraft_pressure_taper") (param i32 i32) (result f32)
+            (select (f32.const 30) (f32.const 5) (local.get 1))))"#;
+
+    /// A plugin on the pressure hook that answers `pressure` and `taper` as given (WAT bodies).
+    fn pressure_module(pressure: &str, taper: &str) -> Vec<u8> {
+        let text = format!(
+            r#"(module
+                (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32) {pressure})
+                (func (export "procraft_pressure_taper") (param i32 i32) (result f32) {taper}))"#
+        );
+        wat::parse_str(text).unwrap()
+    }
+
     /// Answers the pick hook by its one switch.
     const PICKS: &str = r#"(module
         (global $layer (mut i32) (i32.const 0))
@@ -3090,6 +3147,73 @@ pub(crate) mod tests {
     fn rows_drawn(rgba: &[u8]) -> Vec<usize> {
         let rows = rgba.chunks(200 * 4).enumerate();
         rows.filter(|(_, row)| row.chunks(4).any(|p| p[3] > 0)).map(|(y, _)| y).collect()
+    }
+
+    fn finger_at(x: f32) -> crate::plugin_run::PressureAsked {
+        crate::plugin_run::PressureAsked { pointer: 0, first: true, x, y: 0.0, ms: 0.0, pressure: 0.9 }
+    }
+
+    #[test]
+    fn the_pressure_hook_presses_as_its_plugins_say_in_turn_and_with_none_on_nothing() {
+        use crate::plugin_run::PressureAsked;
+        // (the last a set of hooks has room for: another needs a wider set)
+        assert_eq!(Hook::Pressure.bit(), 1 << 31);
+        let hooks = Hooks::default();
+        assert_eq!(hooks.pressure(finger_at(50.0)), None);
+        assert_eq!(hooks.pressure_tapers(0), [0.0; 2]);
+        hooks.put_on(
+            "a".to_owned(),
+            Running::start(&wat::parse_str(PRESSES).unwrap(), &[]).unwrap(),
+            &[Hook::Pressure],
+        );
+        assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.5));
+        assert_eq!(hooks.pressure(PressureAsked { pointer: 1, ..finger_at(50.0) }), None, "a pen's left");
+        assert_eq!((hooks.pressure_tapers(0), hooks.pressure_tapers(1)), ([10.0, 20.0], [0.0; 2]));
+        // a sample that isn't a number goes on as it came, and no plugin answers for it
+        assert_eq!(hooks.pressure(PressureAsked { x: f32::NAN, ..finger_at(1.0) }), None);
+        assert_eq!(hooks.pressure(PressureAsked { pressure: f32::INFINITY, ..finger_at(1.0) }), None);
+        assert!(hooks.listens(Hook::Pressure));
+        // a second, after it by id: told what the first said (or the sample's own, where it left
+        // it); each taper the longest either says
+        hooks.put_on(
+            "b".to_owned(),
+            Running::start(&wat::parse_str(PRESSES_HALF).unwrap(), &[]).unwrap(),
+            &[Hook::Pressure],
+        );
+        assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.25));
+        assert_eq!(hooks.pressure(PressureAsked { pointer: 1, ..finger_at(50.0) }), Some(0.45));
+        assert_eq!(hooks.pressure_tapers(0), [10.0, 30.0]);
+        assert_eq!(hooks.take_stopped(), Vec::new());
+    }
+
+    #[test]
+    fn a_pressure_or_a_taper_that_makes_no_sense_stops_its_plugin() {
+        for (pressure, taper) in [
+            ("(f32.const 1.5)", "(f32.const 0)"),
+            ("(f32.const nan)", "(f32.const 0)"),
+            ("(f32.const 0.5)", "(f32.const -1)"),
+            ("(f32.const 0.5)", "(f32.const 1001)"),
+            ("(f32.const 0.5)", "(f32.const inf)"),
+            ("(loop (br 0)) (f32.const 0.5)", "(f32.const 0)"),
+        ] {
+            let hooks = Hooks::default();
+            let running = Running::start(&pressure_module(pressure, taper), &[]).unwrap();
+            hooks.put_on("odd".to_owned(), running, &[Hook::Pressure]);
+            let pressed = hooks.pressure(finger_at(10.0));
+            let tapers = hooks.pressure_tapers(0);
+            assert!(!hooks.listens(Hook::Pressure), "{pressure} {taper}: still on");
+            assert_eq!(hooks.take_stopped().len(), 1, "{pressure} {taper}");
+            assert_eq!(hooks.pressure(finger_at(10.0)), None);
+            assert!(pressed.is_none() || tapers == [0.0; 2], "{pressure} {taper}");
+        }
+        // below 0 leaves it, 0 and 1 are pressures, and tapers of 0 to 1000 points are taken
+        for (said, want) in [(-0.5, None), (-1e30, None), (0.0, Some(0.0)), (1.0, Some(1.0))] {
+            let hooks = Hooks::default();
+            let running = Running::start(&pressure_module(&format!("(f32.const {said})"), "(f32.const 1000)"), &[]);
+            hooks.put_on("fine".to_owned(), running.unwrap(), &[Hook::Pressure]);
+            assert_eq!((hooks.pressure(finger_at(10.0)), hooks.pressure_tapers(0)), (want, [1000.0; 2]));
+            assert!(hooks.take_stopped().is_empty());
+        }
     }
 
     #[test]

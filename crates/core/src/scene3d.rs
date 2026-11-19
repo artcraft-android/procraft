@@ -3165,10 +3165,10 @@ impl State {
         self.strokes = self.strokes.wrapping_add(1);
         self.info.strokes = self.info.strokes.saturating_add(1);
         let seed = self.strokes.wrapping_mul(0x9e37_79b9);
-        let mut builder = StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed)
-            .with_input(self.input.clone())
-            .scaled(zoom)
-            .seen_at(1.0);
+        let builder =
+            StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed).with_input(self.input.clone());
+        // (its samples in window pixels)
+        let mut builder = self.pressing.applied(builder.scaled(zoom).seen_at(1.0), self.display_scale);
         // a brush engine's, drawn by it (on the screen's canvas, where it gets its tips)
         let engine = self.hooks.clone().filter(|_| brush.engine.is_some()).map(|hooks| {
             let starting = crate::plugin_brushes::Starting {

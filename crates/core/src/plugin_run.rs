@@ -77,6 +77,16 @@
 //!   `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the artwork's.
 //! - `procraft_reference_windows() -> i32`: for the hook `reference_windows` (interface 8), how
 //!   many Reference windows may be open at once, 1 to 8.
+//! - For the hook `pressure` (interface 9): `procraft_pressure(pointer: i32, first: i32, x: f32,
+//!   y: f32, ms: f32, pressure: f32) -> f32` the pressure (0..1) a stroke's sample draws with, below
+//!   0 to leave it as it came: `pointer` 0 a finger, 1 a pen, 2 a pen's eraser end, 3 a mouse;
+//!   `first` 1 for the stroke's first sample, else 0; where it is in window points, `ms` after the
+//!   stroke's first, and `pressure` as it came (or as the plugin before said). Asked once a sample,
+//!   in order, never of predicted input. A finger's first sample given a pressure gives the whole
+//!   stroke one, which the brush's pressure settings act on as on a pen's. And
+//!   `procraft_pressure_taper(pointer: i32, end: i32) -> f32`, asked as each stroke begins: how far
+//!   (window points, 0 to [`MOST_PRESSURE_TAPER`]) its pressure grows from nothing at its start
+//!   (`end` 0) and falls to nothing at its end (1), for a stroke whose pressure counts.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -251,6 +261,10 @@ const MOST_PAPER_TIME: Duration = Duration::from_secs(3);
 pub(crate) const PAPER_SIDE: usize = procraft_engine::textures::TEXTURE_SIZE;
 /// How many Reference windows a plugin may let be open at once.
 pub(crate) const MOST_REFERENCE_WINDOWS: i32 = 8;
+const PRESSURE: &str = "procraft_pressure";
+const PRESSURE_TAPER: &str = "procraft_pressure_taper";
+/// The longest a pressure's taper may be, window points: past a long stroke's length.
+pub(crate) const MOST_PRESSURE_TAPER: f32 = 1000.0;
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -401,6 +415,9 @@ pub(crate) enum Hook {
     Paper,
     /// How many Reference windows may be open at once (interface 8).
     ReferenceWindows,
+    /// The pressure each sample of a stroke draws with, a finger's too, and how it tapers
+    /// (interface 9).
+    Pressure,
 }
 
 impl Hook {
@@ -435,6 +452,7 @@ impl Hook {
             "view_look" => Some(Hook::ViewLook),
             "paper" => Some(Hook::Paper),
             "reference_windows" => Some(Hook::ReferenceWindows),
+            "pressure" => Some(Hook::Pressure),
             _ => None,
         }
     }
@@ -473,6 +491,7 @@ impl Hook {
             Hook::ViewLook => "This plugin can change how the canvas looks on the screen, never the artwork.",
             Hook::Paper => "This plugin can give the canvas a paper that your strokes and its background show.",
             Hook::ReferenceWindows => "This plugin can let more than one Reference window be open.",
+            Hook::Pressure => "This plugin can change how hard your strokes press, a finger's too.",
         }
     }
 
@@ -505,6 +524,11 @@ impl Hook {
                     && has_memory(module)
             }
             Hook::ReferenceWindows => exports(module, REFERENCE_WINDOWS, &[], &[ValType::I32]),
+            Hook::Pressure => {
+                use ValType::{F32, I32};
+                exports(module, PRESSURE, &[I32, I32, F32, F32, F32, F32], &[F32])
+                    && exports(module, PRESSURE_TAPER, &[I32, I32], &[F32])
+            }
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -860,6 +884,24 @@ pub(crate) struct Paper {
     pub(crate) colour: Option<u32>,
 }
 
+/// What the pressure hook asks a stroke's sample (see [`PressureAsked`]).
+type PressureCall = TypedFunc<(i32, i32, f32, f32, f32, f32), f32>;
+
+/// A stroke's sample, as the pressure hook is told it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PressureAsked {
+    /// 0 a finger, 1 a pen, 2 a pen's eraser end, 3 a mouse.
+    pub(crate) pointer: i32,
+    /// The stroke's first sample.
+    pub(crate) first: bool,
+    /// Where it is, window points, and how long after the stroke's first it came (milliseconds).
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) ms: f32,
+    /// Its pressure as it came (0..1), or as the plugin before on the hook said.
+    pub(crate) pressure: f32,
+}
+
 pub(crate) struct Running {
     store: Store<Host>,
     position: Option<TypedFunc<(f32, f32), i64>>,
@@ -891,6 +933,8 @@ pub(crate) struct Running {
     view_look: Option<TypedFunc<i32, f32>>,
     paper: Option<PaperCalls>,
     reference_windows: Option<TypedFunc<(), i32>>,
+    pressure: Option<PressureCall>,
+    pressure_taper: Option<TypedFunc<(i32, i32), f32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1049,6 +1093,8 @@ impl Running {
                 })
             })();
             let reference_windows = instance.get_typed_func(&store, REFERENCE_WINDOWS).ok();
+            let pressure = instance.get_typed_func(&store, PRESSURE).ok();
+            let pressure_taper = instance.get_typed_func(&store, PRESSURE_TAPER).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1154,6 +1200,8 @@ impl Running {
                 view_look,
                 paper,
                 reference_windows,
+                pressure,
+                pressure_taper,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2159,6 +2207,36 @@ impl Running {
             reference_windows.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         if (1..=MOST_REFERENCE_WINDOWS).contains(&said) { Ok(said as u32) } else { Err(Stop::Nonsense) }
+    }
+
+    /// The pressure it says a stroke's sample draws with (0..1), as [`PressureAsked`] tells it; none
+    /// where it leaves it as it came. One past 1, or not a number, stops it.
+    pub(crate) fn pressure(&mut self, asked: PressureAsked) -> Result<Option<f32>, Stop> {
+        let Running { store, pressure, .. } = self;
+        let Some(pressure) = pressure else { return Ok(None) };
+        let PressureAsked { pointer, first, x, y, ms, pressure: came } = asked;
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            pressure.call(&mut *store, (pointer, i32::from(first), x, y, ms, came)).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            _ if said.is_nan() || said > 1.0 => Err(Stop::Nonsense),
+            _ if said < 0.0 => Ok(None),
+            _ => Ok(Some(said)),
+        }
+    }
+
+    /// How far (window points) it says the pressure of a stroke by `pointer` grows from nothing at
+    /// its start (`end` 0) or falls to nothing at its end (1). One below 0, past
+    /// [`MOST_PRESSURE_TAPER`] or not a number stops it.
+    pub(crate) fn pressure_taper(&mut self, pointer: i32, end: i32) -> Result<f32, Stop> {
+        let Running { store, pressure_taper, .. } = self;
+        let Some(pressure_taper) = pressure_taper else { return Ok(0.0) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            pressure_taper.call(&mut *store, (pointer, end)).map_err(|e| stop_of(&e))
+        })?;
+        if (0.0..=MOST_PRESSURE_TAPER).contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
     }
 
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).

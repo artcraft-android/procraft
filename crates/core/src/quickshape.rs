@@ -331,6 +331,7 @@ impl State {
         let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
             .scaled(self.brush_scale())
             .exact_path();
+        let builder = crate::pressure::pressed_like(builder, old);
         let samples = edit.samples();
         // a brush engine's stroke drawn by it along the shape
         let mut builder = self.engine_again(builder, self.doc.current(), SHAPE_SEED);
@@ -732,8 +733,9 @@ impl CanvasSession {
         let scale = st.brush_scale();
         let stroke = last.laid_again(last.samples.clone());
         let along = StrokeAlong::of(&last.samples, last.pace);
-        st.stroke =
-            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), SHAPE_SEED).scaled(scale));
+        let builder =
+            StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), SHAPE_SEED).scaled(scale);
+        st.stroke = Some(crate::pressure::pressed_like(builder, &last.line));
         st.second = None;
         st.shape = Some(ShapeEdit::new(first, choices, line, along, None, stroke));
         st.draw_shape();
