@@ -3696,6 +3696,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    const FINGER_PRESSURE: &str = "io.github.artcraftandroid.finger-pressure";
+
+    /// The pressure `hooks` give the last sample of a stroke by `pointer` (0 a finger) moving across
+    /// at `speed` window points a second, a sample every 1/120 s for 400 ms.
+    fn pressed_at(hooks: &crate::hooks::Hooks, pointer: i32, speed: f32) -> Option<f32> {
+        let mut said = None;
+        for i in 0..=48 {
+            let ms = i as f32 * 1000.0 / 120.0;
+            let asked = crate::plugin_run::PressureAsked {
+                pointer,
+                first: i == 0,
+                x: speed * ms / 1000.0,
+                y: 0.0,
+                ms,
+                pressure: 0.6,
+            };
+            said = hooks.pressure(asked);
+        }
+        said
+    }
+
+    #[test]
+    fn finger_pressure_presses_a_finger_by_its_speed_tapers_it_and_leaves_pens_alone() {
+        let dir = store("bundled-finger-pressure");
+        let plugins = app_at(&dir);
+        let hooks = plugins.hooks();
+        // as it comes, off: nothing pressed, nothing tapered
+        assert_eq!(pressed_at(&hooks, 0, 1000.0), None);
+        assert_eq!(hooks.pressure_tapers(0), [0.0; 2]);
+        assert!(plugins.set_on(FINGER_PRESSURE.to_owned(), true));
+        // the faster, the lighter: by the speed in window points a second
+        let speeds = [0.0, 200.0, 500.0, 1000.0, 2000.0, 3000.0];
+        let curve: Vec<f32> = speeds.iter().map(|&v| pressed_at(&hooks, 0, v).unwrap()).collect();
+        println!("finger pressure at {speeds:?} points a second: {curve:?}");
+        let want = [1.0, 0.976, 0.874, 0.685, 0.496, 0.433];
+        for ((got, want), speed) in curve.iter().zip(want).zip(speeds) {
+            assert!((got - want).abs() < 0.005, "at {speed}: {got}, not {want}");
+        }
+        // tapered in over 20 points and out over 40, a finger's stroke alone
+        assert_eq!(hooks.pressure_tapers(0), [20.0, 40.0]);
+        // asked for every sample: quick, even unoptimised (`finger_pressure_sample_cost` times it)
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            assert!(pressed_at(&hooks, 0, 1000.0).is_some());
+        }
+        let each = t.elapsed() / (20 * 49);
+        println!("a finger's sample pressed in {each:?}");
+        assert!(each < std::time::Duration::from_micros(200), "{each:?}");
+        // a pen, its eraser end and a mouse draw as they do
+        for pointer in [1, 2, 3] {
+            assert_eq!(pressed_at(&hooks, pointer, 1000.0), None, "{pointer}");
+            assert_eq!(hooks.pressure_tapers(pointer), [0.0; 2], "{pointer}");
+        }
+        // its sliders: how much speed counts, the least and most pressure, the tapers
+        let slider = |key: &str, value: f32| plugins.set_slider(format!("{FINGER_PRESSURE}.{key}"), value).unwrap();
+        slider("speed", 0.0);
+        assert_eq!(pressed_at(&hooks, 0, 3000.0), Some(1.0));
+        slider("speed", 1.0);
+        slider("least", 0.3);
+        slider("most", 0.8);
+        let still = pressed_at(&hooks, 0, 0.0).unwrap();
+        assert!((still - 0.8).abs() < 1e-5, "{still}");
+        let flying = pressed_at(&hooks, 0, 20_000.0).unwrap();
+        assert!((flying - 0.3).abs() < 0.01, "{flying}");
+        slider("start", 0.0);
+        slider("end", 120.0);
+        assert_eq!(hooks.pressure_tapers(0), [0.0, 120.0]);
+        // off again: as it came
+        assert!(plugins.set_on(FINGER_PRESSURE.to_owned(), false));
+        assert_eq!((pressed_at(&hooks, 0, 1000.0), hooks.pressure_tapers(0)), (None, [0.0; 2]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What Finger pressure costs a sample, on the hook, with it on and a finger moving; and with it
+    /// off, the list on the session: printed, and failing past 20 µs a sample (a 240 Hz pen sends one
+    /// every 4,000). Run alone, in release: `cargo test --release -p procraft-core
+    /// finger_pressure_sample_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn finger_pressure_sample_cost() {
+        let dir = store("bundled-finger-pressure-cost");
+        let plugins = app_at(&dir);
+        let hooks = plugins.hooks();
+        const SAMPLES: u32 = 200_000;
+        let cost = |pointer: i32| {
+            let t = std::time::Instant::now();
+            let mut sum = 0.0;
+            for i in 0..SAMPLES {
+                let ms = i as f32 * 4.0;
+                let asked = crate::plugin_run::PressureAsked {
+                    pointer,
+                    first: i % 500 == 0,
+                    x: std::hint::black_box(ms * 1.5 % 2000.0),
+                    y: 300.0,
+                    ms,
+                    pressure: 0.5,
+                };
+                sum += hooks.pressure(asked).unwrap_or(0.0);
+            }
+            std::hint::black_box(sum);
+            t.elapsed().as_secs_f64() * 1e6 / f64::from(SAMPLES)
+        };
+        let off = (0..3).map(|_| cost(0)).fold(f64::MAX, f64::min);
+        assert!(plugins.set_on(FINGER_PRESSURE.to_owned(), true));
+        let finger = (0..3).map(|_| cost(0)).fold(f64::MAX, f64::min);
+        let pen = (0..3).map(|_| cost(1)).fold(f64::MAX, f64::min);
+        println!("a sample through the pressure hook: {off:.3} µs off, {finger:.3} µs a finger's, {pen:.3} µs a pen's");
+        assert!(finger < 20.0 && pen < 20.0, "{finger} {pen}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();

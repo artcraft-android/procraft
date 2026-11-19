@@ -29,7 +29,8 @@ action beside a filter, `colour-triangle` is a picker, `vector-layers` adds laye
 `colour-triangle`'s picture draws its hue ring as its switch says and its [menu](#a-menu-of-its-own)
 switches its shape, and `floating-panels` lets panels float in windows of their own. `rotation-reset`
 has an action and a switch in the Canvas tab, `value-check` a switch there with a key of its own,
-`paper` controls kept with each artwork, and `reference-windows` a single slider.
+`paper` controls kept with each artwork, `reference-windows` a single slider, and `finger-pressure`
+gives a finger a pressure on the `pressure` hook.
 
 ## What you write
 
@@ -576,6 +577,15 @@ A pressure past 1 or that isn't a number, or a taper below 0, past 1,000 or that
 the plugin. Several plugins on this hook run one after another, in order of id, each told the
 pressure the last one gave; each taper is the longest any gives. A stroke on a plugin's layer keeps
 what was given (field 27), so it is laid again the same.
+
+The kit has no macro for this hook: a plugin exports both functions itself, as
+`plugins/finger-pressure` does with the kit's `Controls` beside them.
+
+The Finger pressure plugin the app comes with gives a finger a pressure by its speed (window points a
+second, followed over about 40 ms): the most when it goes slowly, falling towards the least as it
+speeds up, by a share of `s² / (1 + s²)` (`s` the speed over 1,000) times its Speed influence; and
+tapers each finger's stroke in and out over its Start taper and End taper. Pens and mice it leaves
+as they are.
 
 ### `floating_panels`
 

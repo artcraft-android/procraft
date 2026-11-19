@@ -3216,6 +3216,88 @@ pub(crate) mod tests {
         }
     }
 
+    /// A session as [`session`] gives, a window pixel a point, its brush's size by its pressure and
+    /// no taper of its own, sized `size`.
+    fn pressing_session(size: f32) -> Option<Arc<CanvasSession>> {
+        let s = session()?;
+        s.set_display_scale(1.0);
+        s.studio_begin();
+        s.set_studio_setting("pressure_size".to_owned(), 1.0);
+        for taper in ["pen_taper_start", "pen_taper_end", "touch_taper_start", "touch_taper_end"] {
+            s.set_studio_setting(taper.to_owned(), 0.0);
+        }
+        s.studio_end(true);
+        s.set_brush_size(size);
+        Some(s)
+    }
+
+    /// A stroke by `pointer` across the canvas at row 100, from x 20 to 180, `step` window pixels
+    /// every 4 ms (pressed 1, as a finger says nothing).
+    fn swipe(s: &CanvasSession, pointer: PointerKind, step: f32) {
+        s.stroke_begin(pointer, vec![sample(20.0, 100.0, 0.0)]);
+        let (mut x, mut ms, mut more) = (20.0, 0.0, Vec::new());
+        while x + step < 180.0 {
+            x += step;
+            ms += 4.0;
+            more.push(sample(x, 100.0, ms));
+        }
+        s.stroke_add(more);
+        s.stroke_end(vec![sample(180.0, 100.0, ms + 4.0)]);
+    }
+
+    /// How many rows of each column of `rgba` (200 wide) have anything drawn.
+    fn column_heights(rgba: &[u8]) -> Vec<usize> {
+        (0..200).map(|x| (0..200).filter(|y| rgba.get((y * 200 + x) * 4 + 3).is_some_and(|&a| a > 0)).count()).collect()
+    }
+
+    #[test]
+    fn finger_pressure_thins_a_fast_finger_and_tapers_it_and_leaves_pens_and_its_absence_as_they_were() {
+        const FINGER: &str = "io.github.artcraftandroid.finger-pressure";
+        let drawn = |plugins: Option<&Arc<Plugins>>, pointer: PointerKind, step: f32| {
+            let s = pressing_session(0.35)?;
+            if let Some(plugins) = plugins {
+                s.use_plugins(Arc::clone(plugins));
+            }
+            swipe(&s, pointer, step);
+            Some(picture(&s))
+        };
+        let Some(finger) = drawn(None, PointerKind::Finger, 12.0) else { return };
+        let pen = drawn(None, PointerKind::Stylus, 12.0).unwrap();
+        let dir = store("finger-pressure-strokes");
+        let plugins = Plugins::with_bundled(dir.clone());
+        // as it comes (off), nothing differs at all
+        assert!(drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap() == finger);
+        assert!(plugins.set_on(FINGER.to_owned(), true));
+        // on: a pen's stroke is as it was
+        assert!(drawn(Some(&plugins), PointerKind::Stylus, 12.0).unwrap() == pen);
+        // a finger going 3,000 points a second presses lighter, so it is thinner
+        let fast = drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap();
+        let (plain_heights, fast_heights) = (column_heights(&finger), column_heights(&fast));
+        println!(
+            "a finger's stroke 3,000 points a second, rows high at x 40, 100 and 160: {:?} without, {:?} with",
+            [plain_heights[40], plain_heights[100], plain_heights[160]],
+            [fast_heights[40], fast_heights[100], fast_heights[160]]
+        );
+        assert!(fast_heights[100] * 10 < plain_heights[100] * 9, "{} {}", fast_heights[100], plain_heights[100]);
+        // slowly, with speed counting for nothing: as thick as without in the middle, tapered to
+        // points at the ends (in over 20 points, out over 40)
+        assert!(plugins.set_slider(format!("{FINGER}.speed"), 0.0).is_some());
+        let slow_plain = column_heights(&drawn(None, PointerKind::Finger, 2.0).unwrap());
+        let slow = column_heights(&drawn(Some(&plugins), PointerKind::Finger, 2.0).unwrap());
+        println!(
+            "slowly, rows high at x 22, 30, 100, 150 and 175: {:?} without, {:?} with",
+            [22, 30, 100, 150, 175].map(|x| slow_plain[x]),
+            [22, 30, 100, 150, 175].map(|x| slow[x])
+        );
+        assert!(slow[100].abs_diff(slow_plain[100]) <= 1, "{} {}", slow[100], slow_plain[100]);
+        assert!(slow[22] * 2 < slow[100] && slow[175] * 2 < slow[100], "{slow:?}");
+        assert!(slow[22] < slow[30] && slow[150] > slow[175], "{slow:?}");
+        // off again: as if it had never been
+        assert!(plugins.set_on(FINGER.to_owned(), false));
+        assert!(drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap() == finger);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_stroke_lands_where_the_plugin_says_and_as_it_did_once_it_is_gone() {
         let Some(plain) = session() else { return };

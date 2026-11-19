@@ -2484,6 +2484,143 @@ mod tests {
     }
 
     #[test]
+    fn finger_pressure_s_card_shows_its_sliders_once_it_is_on() {
+        const ID: &str = "io.github.artcraftandroid.finger-pressure";
+        let dir = std::env::temp_dir().join(format!("procraft-actions-finger-pressure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut page = Page::new();
+        page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(page.list().iter().any(|p| p.id == ID && !p.on), "it comes with the app, off");
+        let shapes = page.run(Vec::new()).1;
+        assert!(drawn(&shapes, "Finger pressure").is_some());
+        assert!(drawn(&shapes, "Speed influence").is_none(), "off, its sliders don't show");
+        assert!(page.prefs.plugins.set_on(ID.to_owned(), true));
+        page.frame(Vec::new());
+        let shapes = page.run(Vec::new()).1;
+        let rows = [
+            ("Speed influence", "70%"),
+            ("Start taper", "20 pt"),
+            ("End taper", "40 pt"),
+            ("Least pressure", "10%"),
+            ("Most pressure", "100%"),
+        ];
+        let mut tops = Vec::new();
+        for (label, value) in rows {
+            let (Some(at), Some(shown)) = (drawn(&shapes, label), drawn(&shapes, value)) else {
+                panic!("{label} {value}")
+            };
+            tops.push(at.y);
+            assert!(shown.x > at.x, "{value} right of {label}");
+        }
+        assert!(tops.windows(2).all(|w| w[0] < w[1]), "in the manifest's order: {tops:?}");
+        // a taper at its least reads Off
+        assert!(page.prefs.plugins.set_slider(format!("{ID}.start"), 0.0).is_some());
+        page.frame(Vec::new());
+        assert!(drawn(&page.run(Vec::new()).1, "Off").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finger pressure's card, on, drawn on a headless GPU as the window draws the interface, at 2
+    /// pixels a point, into `PROCRAFT_DUMP/finger-pressure-card.png` (no window opens):
+    /// `PROCRAFT_DUMP=dir cargo test -p procraft-desktop dump_finger_pressure_card -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_finger_pressure_card() {
+        use procraft_gpu::wgpu;
+        const ID: &str = "io.github.artcraftandroid.finger-pressure";
+        let Ok(out) = std::env::var("PROCRAFT_DUMP") else { return };
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        let dir = std::env::temp_dir().join(format!("procraft-actions-finger-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut page = Page::new();
+        page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        // its card alone, on
+        for other in page.list().into_iter().filter(|p| p.id != ID) {
+            assert!(page.prefs.plugins.remove(other.id).is_some());
+        }
+        assert!(page.prefs.plugins.set_on(ID.to_owned(), true));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let (_, bottom) = page.cards()[0];
+        // drawn afresh at 2 pixels a point, keeping every texture the frames make (its fonts')
+        let scale = 2.0;
+        page.ctx = egui::Context::default();
+        crate::look::install_fonts(&page.ctx);
+        page.ctx.set_pixels_per_point(scale);
+        let mut textures = Vec::new();
+        let mut shapes = Vec::new();
+        for _ in 0..4 {
+            page.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1600.0))),
+                time: Some(page.time),
+                ..RawInput::default()
+            };
+            let Page { ctx, look, actions, prefs, .. } = &mut page;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let _ = actions.plugins_page(ui, look, body(), prefs);
+            });
+            textures.extend(std::mem::take(&mut output.textures_delta.set));
+            shapes = output.shapes;
+        }
+        let ctx = page.ctx.clone();
+        assert_eq!(ctx.pixels_per_point(), scale);
+        let size = [(1200.0 * scale) as u32, (1600.0 * scale) as u32];
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("card"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+        for (id, deltas) in &textures {
+            for delta in deltas {
+                renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
+            }
+        }
+        let jobs = ctx.tessellate(shapes, scale);
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: size, pixels_per_point: scale };
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("card") });
+        let uploads = renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("card"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        gpu.queue.submit(uploads.into_iter().chain([encoder.finish()]));
+        let pixels = procraft_gpu::read_texture(&gpu, &target, size[0], size[1]).unwrap();
+        let picture = image::RgbaImage::from_raw(size[0], size[1], pixels).unwrap();
+        // the page from its top to under the card
+        let (x, y) = (((body().left() - 8.0) * scale) as u32, ((body().top() - 8.0) * scale) as u32);
+        let (w, h) = (((ACTIONS_WIDTH + 16.0) * scale) as u32, ((bottom - body().top() + 24.0) * scale) as u32);
+        let card = image::imageops::crop_imm(&picture, x, y, w, h).to_image();
+        let path = std::path::Path::new(&out).join("finger-pressure-card.png");
+        card.save(&path).unwrap();
+        println!("{}", path.display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remove_asks_first_with_the_plugin_s_name_and_cancel_keeps_it() {
         let (mut page, dir) = with_store("remove-asks");
         assert_eq!(page.prefs.plugins.install(filter_file()), None);
