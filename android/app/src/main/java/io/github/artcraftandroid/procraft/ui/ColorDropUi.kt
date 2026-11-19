@@ -62,7 +62,7 @@ private enum class DropTouch { TAP, HOLD, DRAG, GONE }
  * is pulled out (of the colour button's centre, or where the swatch was pressed) and goes with the
  * finger, filling where it is let go below the top bar.
  */
-internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = null, onHold: (() -> Unit)? = null, onTap: () -> Unit): Modifier = composed {
+internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = null, holdMs: Long? = null, onHold: (() -> Unit)? = null, onTap: () -> Unit): Modifier = composed {
     val tap by rememberUpdatedState(onTap)
     val hold by rememberUpdatedState(onHold)
     val colour by rememberUpdatedState(swatch)
@@ -80,7 +80,7 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
             val down = awaitFirstDown()
             down.consume()
             // whichever comes first: lifted, moved past the slop, or (when holding does something) held
-            val wait = if (hold != null) viewConfiguration.longPressTimeoutMillis else Long.MAX_VALUE
+            val wait = if (hold != null) holdMs ?: viewConfiguration.longPressTimeoutMillis else Long.MAX_VALUE
             val touch = withTimeoutOrNull(wait) {
                 var seen: DropTouch? = null
                 while (seen == null) {

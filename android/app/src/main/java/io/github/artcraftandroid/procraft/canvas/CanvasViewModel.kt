@@ -1219,6 +1219,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The colour panel floating, dragged out by its grabber: its window's top-left (window pixels). */
     var floatingColorsAt by mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
 
+    init {
+        // the colour panel opened and closed: closed on another colour, the one it opened on is
+        // the one the colour button's hold goes back to
+        viewModelScope.launch {
+            androidx.compose.runtime.snapshotFlow { panel == Panel.COLOR || floatingColorsAt != null }
+                .collect { shown -> colourHistory.panelShown(shown, colorRgb().toUInt(), onMask) }
+        }
+    }
+
     /** The colour panel's grabber is being dragged out: the panel stays, unseen, until let go. */
     var colorsUndocking by mutableStateOf(false)
 
@@ -6404,7 +6413,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun endPick() {
         pendingPick = null
-        picking?.rgb?.let { setRgb(it) }
+        picking?.rgb?.let {
+            val before = colorRgb()
+            setRgb(it)
+            // the colour it replaced is the one the colour button's hold goes back to
+            colourHistory.chose(before.toUInt(), colorRgb().toUInt(), onMask)
+        }
         picking = null
     }
 
@@ -6413,10 +6427,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         picking = null
     }
 
-    /** The colour button held: back to the colour painted with before this one, if there was one. */
+    /**
+     * The colour button held (or the quick menu's Previous colour): the colour and the previous
+     * one trade places, so holding again comes back. As there, the paint tool is the tool then and
+     * the panels close.
+     */
     fun previousColor() {
-        val before = colourHistory.previous(colorRgb().toUInt())?.toInt() ?: return
+        val before = colourHistory.swapPrevious(colorRgb().toUInt(), onMask)?.toInt() ?: return
         setRgb(before)
+        closePanels()
+        if (tool != ToolKind.PAINT) select(ToolKind.PAINT)
         showDone("Previous colour")
     }
 

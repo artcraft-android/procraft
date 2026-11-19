@@ -20,8 +20,8 @@ use crate::overlays::ease;
 
 /// A press moved this far (points) drags the colour out.
 const SLOP: f32 = 8.0;
-/// A press held still this long is a hold.
-const HOLD: Duration = Duration::from_millis(400);
+/// A swatch's press held still this long is a hold.
+pub(crate) const HOLD: Duration = Duration::from_millis(400);
 /// How long the band offers to continue filling after a drop.
 const OFFERED: Duration = Duration::from_millis(2500);
 const SLIDE: f32 = 0.3;
@@ -111,7 +111,7 @@ impl Default for ColourDrop {
 
 impl ColourDrop {
     /// A colour that can be dragged out at `rect`: the colour button, or a swatch (`swatch`) of
-    /// colour `rgb`. Tapped, or held still when `holds`, it says so; dragged, its colour goes with
+    /// colour `rgb`. Tapped, or held still for `hold` when given, it says so; dragged, its colour goes with
     /// the pointer as a dot and fills where it is let go below the top bar (and off `avoid`).
     #[allow(clippy::too_many_arguments)]
     pub fn source(
@@ -122,7 +122,7 @@ impl ColourDrop {
         rect: Rect,
         rgb: u32,
         swatch: bool,
-        holds: bool,
+        hold: Option<Duration>,
         avoid: Option<Rect>,
     ) -> Option<Touch> {
         let response = ui.interact(rect, id, Sense::click_and_drag());
@@ -225,13 +225,13 @@ impl ColourDrop {
             self.band = Band::Dragging;
             return Some(Touch::Dragged);
         }
-        if holds {
+        if let Some(hold) = hold {
             let held_for = press.since.elapsed();
-            if held_for >= HOLD {
+            if held_for >= hold {
                 press.held = true;
                 return Some(Touch::Hold);
             }
-            ctx.request_repaint_after(HOLD - held_for);
+            ctx.request_repaint_after(hold - held_for);
         }
         None
     }

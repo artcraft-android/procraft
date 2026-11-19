@@ -610,7 +610,7 @@ impl Interface {
         if self.pen_picking && !eyedropper_held {
             self.pen_picking = false;
             if let Some(rgb) = self.overlays.finish_pick() {
-                self.colours.set_rgb(session, rgb);
+                self.colours.picked(session, rgb);
             }
         }
         self.commands(&ctx, session, input);
@@ -790,18 +790,19 @@ impl Interface {
             Some(BarButton::Adjustments) => self.adjustments_pressed(session),
             Some(BarButton::Colour) | None => {}
         }
+        // the colour panel opened or closed: closed on another colour, the one it opened on is
+        // the previous colour
+        self.colours.panel_shown(self.open == Some(Popover::Colour));
         // the colour button: tapped it opens the colours, held it goes back to the previous
-        // colour, and dragged out its colour fills where it is let go (ColorDrop)
+        // colour (held again, comes back), and dragged out its colour fills where it is let go
+        // (ColorDrop)
         if let Some(rect) = bar.rect(BarButton::Colour) {
             let id = ui.scope_id().with("colour button");
             let rgb = to_hex(self.colours.rgb());
-            match self.drop.source(ui, session, id, rect, rgb, false, true, None) {
+            let hold = std::time::Duration::from_millis(u64::from(procraft_core::COLOUR_HOLD_MS));
+            match self.drop.source(ui, session, id, rect, rgb, false, Some(hold), None) {
                 Some(Touch::Tap) => self.toggle(session, Popover::Colour),
-                Some(Touch::Hold) => {
-                    if self.colours.previous(session) {
-                        self.overlays.done("Previous colour", false);
-                    }
-                }
+                Some(Touch::Hold) => self.previous_colour(session),
                 Some(Touch::Dragged) => self.open = None,
                 None => {}
             }
@@ -960,7 +961,7 @@ impl Interface {
             }
             Some(crate::reference::Picked::Done) => {
                 if let Some(rgb) = self.overlays.finish_pick() {
-                    self.colours.set_rgb(session, rgb);
+                    self.colours.picked(session, rgb);
                 }
             }
             None => {}
@@ -1313,7 +1314,7 @@ impl Interface {
                 TouchCommand::Pick { x, y } => self.overlays.pick(ctx, session, x, y),
                 TouchCommand::PickDone => {
                     if let Some(rgb) = self.overlays.finish_pick() {
-                        self.colours.set_rgb(session, rgb);
+                        self.colours.picked(session, rgb);
                     }
                 }
                 TouchCommand::PickCancel => self.overlays.picking = None,
@@ -1673,11 +1674,7 @@ impl Interface {
                 self.library.tool_changed();
             }
             QuickAction::Eyedropper => session.set_pick_next(true),
-            QuickAction::SwapColors => {
-                if self.colours.previous(session) {
-                    self.overlays.done("Previous colour", false);
-                }
-            }
+            QuickAction::SwapColors => self.previous_colour(session),
             QuickAction::Selection => self.toggle_selection(session),
             QuickAction::Transform => self.toggle_transform(session),
             QuickAction::Colors => self.toggle(session, Popover::Colour),
@@ -2424,6 +2421,21 @@ impl Interface {
     }
 
     /// A panel's button: the panel opens (or closes), what works on the canvas ending first.
+    /// The colour and the previous one trade places (the colour button held, or the quick menu's
+    /// Previous colour): as there, the paint tool is the tool then and the panels close.
+    fn previous_colour(&mut self, session: &CanvasSession) {
+        if !self.colours.previous(session) {
+            return;
+        }
+        self.open = None;
+        if session.info().tool != ToolKind::Paint {
+            self.end_recolor(session);
+            session.set_tool(ToolKind::Paint);
+            self.library.tool_changed();
+        }
+        self.overlays.done("Previous colour", false);
+    }
+
     fn toggle(&mut self, session: &CanvasSession, popover: Popover) {
         self.feedback();
         self.switch_modes(session, ModeButton::Panel { colour: popover == Popover::Colour });

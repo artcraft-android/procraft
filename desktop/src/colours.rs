@@ -571,11 +571,25 @@ impl Colours {
         self.send(session);
     }
 
-    /// The last colour in the history other than the current one, back; false if there is none.
+    /// The colour and the previous one trade places (the colour button held, or the quick menu's
+    /// Previous colour), so another hold comes back; false if there is none to go to.
     pub fn previous(&mut self, session: &CanvasSession) -> bool {
-        let Some(before) = self.history.previous(to_hex(self.rgb())) else { return false };
+        let Some(before) = self.history.swap_previous(to_hex(self.rgb()), self.on_mask) else { return false };
         self.set_rgb(session, before);
         true
+    }
+
+    /// The eyedropper picked `rgb`: the colour it replaces is the previous colour.
+    pub fn picked(&mut self, session: &CanvasSession, rgb: u32) {
+        let before = to_hex(self.rgb());
+        self.set_rgb(session, rgb);
+        self.history.chose(before, to_hex(self.rgb()), self.on_mask);
+    }
+
+    /// Whether the colour panel shows (docked, `docked`, or floating), told each frame: closed on
+    /// another colour than it opened on, that one is the previous colour.
+    pub fn panel_shown(&self, docked: bool) {
+        self.history.panel_shown(docked || self.floating.is_some(), to_hex(self.rgb()), self.on_mask);
     }
 
     /// The current and second colours trade places.
@@ -903,11 +917,13 @@ impl Colours {
                 let slot = (row * 10 + i) as u32;
                 let id = ui.scope_id().with(("palette swatch", slot));
                 match rgb {
-                    Some(c) => match drop.source(ui, session, id, cell, c, true, true, Some(panel)) {
-                        Some(Touch::Tap) => self.set_rgb(session, c),
-                        Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
-                        Some(Touch::Dragged) | None => {}
-                    },
+                    Some(c) => {
+                        match drop.source(ui, session, id, cell, c, true, Some(crate::colour_drop::HOLD), Some(panel)) {
+                            Some(Touch::Tap) => self.set_rgb(session, c),
+                            Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
+                            Some(Touch::Dragged) | None => {}
+                        }
+                    }
                     // not the swatch's id: a hold that took a colour out doesn't tap the slot it
                     // leaves when let go
                     None => {
@@ -2294,6 +2310,30 @@ mod tests {
             let back = hue_at(HueControl::Slider, hue_position(HueControl::Slider, hue));
             assert!((back - hue).abs() < 1e-3, "{hue} came back {back}");
         }
+    }
+
+    #[test]
+    fn the_colour_button_s_hold_trades_the_colour_with_the_one_before_the_last_chosen() {
+        let session = CanvasSession::new(64, 64);
+        let mut colours = Colours::default();
+        colours.set_rgb(&session, 0xFF0000);
+        // nothing chosen or painted yet: nothing to go back to
+        assert!(!colours.previous(&session));
+        // the eyedropper picks green over red: held, red; held again, green
+        colours.picked(&session, 0x00FF00);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0xFF0000);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0x00FF00);
+        // the panel opened on green, closed on blue: held, green, not what it passed
+        colours.panel_shown(true);
+        colours.set_rgb(&session, 0x123456);
+        colours.set_rgb(&session, 0x0000FF);
+        colours.panel_shown(true);
+        colours.panel_shown(false);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0x00FF00);
+        assert_eq!(procraft_core::COLOUR_HOLD_MS, 300);
     }
 
     #[test]
