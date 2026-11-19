@@ -4318,6 +4318,64 @@ fn a_grain_raises_faint_paint_only_in_part() {
 }
 
 #[test]
+fn a_moving_grain_raises_a_soft_stamp_s_faint_rim_whole_and_lays_nothing_past_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a soft stamp laid over a flat grain of a half by Normal: its rim, faint as it is (well under
+    // a sixty-fourth), takes the grain whole, so shows about a half; past the stamp, nothing
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let mut style = StrokeStyle {
+        grain_mode: procraft_engine::brush::GrainMode::Moving,
+        grain_depth: 1.0,
+        grain_scale: 256.0,
+        grain_blend: 0,
+        hardness: 0.0,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+    };
+    canvas.use_full_grain(&gpu, &mut style, 9, 512, &vec![128u8; 512 * 512]);
+    canvas.begin_stroke(doc.current(), style);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // 19.5 px out (the soft falloff under a hundredth there), 30 px out (past the stamp)
+    let (rim, outside) = (pixel(&layer, 64, 51, 32)[3], pixel(&layer, 64, 62, 32)[3]);
+    assert!(rim.abs_diff(129) <= 8, "rim {rim}");
+    assert_eq!(outside, 0);
+}
+
+#[test]
+fn a_wet_edged_stroke_s_grain_rise_is_held_to_what_its_stamps_laid_not_to_its_pooled_rim() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a dot laid at 0.02 (over a sixty-fourth), its wet edges pooling it to near nothing, over a
+    // flat grain of a half fixed to the canvas, by Normal: the grain's rise is taken whole, as
+    // the dot laid more than a sixty-fourth, however little the pooling left
+    let cover = |wet_edges: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle {
+            grain_mode: procraft_engine::brush::GrainMode::Texturized,
+            grain_depth: 1.0,
+            grain_scale: 64.0,
+            grain_blend: 0,
+            wet_edges,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.use_full_grain(&gpu, &mut style, 10, 512, &vec![128u8; 512 * 512]);
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 0.02)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)[3]
+    };
+    let (dry, wet) = (cover(0.0), cover(1.0));
+    assert!(dry >= 120 && wet >= 120, "dry {dry}, wet {wet}");
+}
+
+#[test]
 fn a_tapered_round_tip_thins_its_rim_too() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

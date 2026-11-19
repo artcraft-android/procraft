@@ -13984,6 +13984,40 @@ mod tests {
     }
 
     #[test]
+    fn a_stamp_s_grain_raises_faint_coverage_whole_and_a_stroke_s_holds_the_rise_to_what_was_laid() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        if !gpu.computes() {
+            return eprintln!("skipped: the shader is probed in a compute pass");
+        }
+        // (coverage, grain, depth, mode) through grain_combine: Normal lays the coverage over a
+        // grain of a half however faint it is, none stays none, and a falling mode falls
+        let combined = probe_on_gpu(
+            &gpu,
+            "grain_combine(v.x, v.y, v.z, u32(v.w))",
+            &[[0.004, 0.5, 1.0, 0.0], [0.0, 0.5, 1.0, 0.0], [0.004, 0.9, 1.0, 8.0], [0.5, 0.5, 1.0, 1.0]],
+        );
+        let want = [0.004 + 0.5 - 0.002, 0.0, 0.04, 0.25];
+        for (g, w) in combined.iter().zip(want) {
+            assert!((g - w).abs() < 1e-4, "{combined:?}");
+        }
+        // (raised, laid) through rise_held: paint laid under a sixty-fourth takes that share of the
+        // rise, more takes all of it, none takes none, and a fall is kept
+        let full = 0.015_686_275f32;
+        let held = probe_on_gpu(
+            &gpu,
+            "rise_held(v.x, v.y)",
+            &[[0.5, 0.004, 0.0, 0.0], [0.5, 0.02, 0.0, 0.0], [0.5, 0.0, 0.0, 0.0], [0.001, 0.004, 0.0, 0.0]],
+        );
+        let want = [0.004 + 0.004 / full * 0.496, 0.5, 0.0, 0.001];
+        for (g, w) in held.iter().zip(want) {
+            assert!((g - w).abs() < 1e-4, "{held:?}");
+        }
+        // a second held the same, but for Normal, which shows it where the first laid nothing
+        let dual = probe_on_gpu(&gpu, "dual_rise(v.x, v.y, u32(v.z))", &[[0.5, 0.0, 0.0, 0.0], [0.5, 0.0, 1.0, 0.0]]);
+        assert!((dual[0] - 0.5).abs() < 1e-6 && dual[1] == 0.0, "{dual:?}");
+    }
+
+    #[test]
     fn wet_edges_where_strokes_cross_stay_the_paint_s_own_colour() {
         use procraft_engine::geom::Vec2;
         let Ok(gpu) = Gpu::headless() else { return };

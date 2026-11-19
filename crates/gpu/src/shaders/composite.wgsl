@@ -146,8 +146,12 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         }
         let g = grain_look(raw);
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and
-        // only where the stroke is
-        let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
+        // only where the stroke is; a rise held to what the stamps laid (with a second, once
+        // that is combined too)
+        var a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
+        if (lu.dual == 0u) {
+            a = rise_held(a, laid);
+        }
         s = s * (a / max(s.a, 1e-6));
     }
     // the paper, fixed to the canvas, whatever the brush: its hollows take a share of the paint
@@ -164,7 +168,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
         let mode = dual_mode(lu.dual);
-        let a = dual_rise(dual_combine(s.a, b, mode), built, mode);
+        let a = dual_rise(dual_combine(s.a, b, mode), laid, mode);
         // the first's colour; by Normal turned toward the second's (drawn in the stroke's colour)
         // as far as the second shows where the first laid little, so where the first fades out
         // the two meet smoothly, not at a seam of whatever colour the first's faintest paint

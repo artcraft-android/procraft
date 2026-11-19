@@ -801,6 +801,10 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(own_dab(), vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
+        // a rise held to what was laid (with a second, once that is combined too)
+        if (st.dual == 0u) {
+            a = rise_held(a, built);
+        }
     }
     // a Normal second's share of the colour: where the first laid little, the second shows in the
     // stroke's own colour (none for any other dual mode)
