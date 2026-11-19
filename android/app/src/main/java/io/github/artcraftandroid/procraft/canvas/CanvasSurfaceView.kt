@@ -188,23 +188,34 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     palms.clear()
                 }
                 landedAt = e.eventTime
+                tellPointer(e, i, "down")
                 if (palmSized(e, i)) {
                     palms += e.getPointerId(i)
                     emptyList()
                 } else {
                     val kind = kindOf(e, i)
                     // a pen's stroke goes by its lean only if its device says how it leans
-                    if (kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER) s.setPenTiltKnown(tiltKnown(e))
+                    if (kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER) {
+                        s.setPenTiltKnown(tiltKnown(e))
+                        penStrokes.began(e.deviceId)
+                        summedPointer = e.getPointerId(i)
+                        sumPressures(e, i)
+                    }
                     s.touchDown(e.getPointerId(i).toULong(), kind, samples(e, i))
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                val grown = (0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms && palmSized(e, i) }
+                if (penStrokes.summing) e.findPointerIndex(summedPointer).takeIf { it >= 0 }?.let { sumPressures(e, it) }
+                val grown =(0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms && palmSized(e, i) }
                 val back = grown.flatMap { i -> palms += e.getPointerId(i); s.touchCancelOne(e.getPointerId(i).toULong()) }
                 back + s.touchMoves((0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms }.map { i -> TouchMove(e.getPointerId(i).toULong(), samples(e, i)) })
             }
             MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
                 val i = e.actionIndex
+                if (penStrokes.summing && e.getPointerId(i) == summedPointer) {
+                    sumPressures(e, i)
+                    penStrokes.lifted()?.let { AppLog.i(TAG, it) }
+                }
                 when {
                     palms.remove(e.getPointerId(i)) -> emptyList()
                     // the system took the pointer back (a palm): what it did is undone, not ended
@@ -216,6 +227,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 // the tablet taking three fingers for its own gesture: said once, with what to do
                 val fingers = (0 until e.pointerCount).count { kindOf(e, it) == PointerKind.FINGER }
                 if (systemTookFingers(fingers, e.eventTime - landedAt, hasWindowFocus())) vm.systemTookFingers()
+                penStrokes.lifted()?.let { AppLog.i(TAG, "$it (called off by the system)") }
                 palms.clear()
                 s.touchCancel()
             }
@@ -256,7 +268,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 vm.showCursor(null)
                 vm.transformHeld = null
             }
-            // a pen touching at no pressure before it presses (some begin their touches above the glass): as it hovering there
+            // a pen touching at no pressure before it presses (some begin their touches above the glass; one
+            // not known to give a pressure waits a moment for one, then paints at full pressure): as it hovering there
             is TouchCommand.PenHovers -> hovered(Offset(c.x, c.y))
             TouchCommand.TextLayer -> vm.askRasterize = true
             TouchCommand.BrushChanged -> vm.brushTouched()
@@ -396,10 +409,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
      * erases while held).
      */
     private fun penButton(e: MotionEvent): Boolean {
-        if (isPen(e.getToolType(0))) penAt = Offset(e.x, e.y)
+        if (isPen(e.getToolType(0), e.source)) penAt = Offset(e.x, e.y)
         // by what the event says is held: some pens' drivers send no press of their own, only their
         // hover and touch events with the button in them
-        val penIn = (0 until e.pointerCount).any { isPen(e.getToolType(it)) }
+        val penIn = (0 until e.pointerCount).any { isPen(e.getToolType(it), e.source) }
         val (pressed, letGo) = penButtons.next(e.buttonState, penIn, penTouching(e.actionMasked), penLifting(e.actionMasked))
         val own = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || e.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
         // let go, whatever is open: one held to erase gives the eraser back (before this event's
@@ -487,9 +500,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     private fun hoverEvent(e: MotionEvent): Boolean {
+        tellPointer(e, 0, "hovering")
         if (penButton(e)) return true
         if (kindOf(e, 0) == PointerKind.MOUSE) return mouseHover(e)
-        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return super.onHoverEvent(e)
+        if (kindOf(e, 0) != PointerKind.STYLUS) return super.onHoverEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
@@ -552,6 +566,35 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     private fun kindOf(e: MotionEvent, index: Int): PointerKind = pointerKindOf(e, index)
+
+    /** The kinds of pointer told in the log so far. */
+    private val pointersTold = PointersTold()
+
+    /** Each device's first pen stroke, summed up in the log as it lifts, and its pointer. */
+    private val penStrokes = PenStrokesTold()
+    private var summedPointer = -1
+
+    /** The pressures of pointer [i]'s samples in [e], into the first pen stroke's sum. */
+    private fun sumPressures(e: MotionEvent, i: Int) {
+        for (h in 0 until e.historySize) penStrokes.sample(e.getHistoricalPressure(i, h))
+        penStrokes.sample(e.getPressure(i))
+    }
+
+    /**
+     * Pointer [i] of [e], [what] it does (down, or hovering): the first of its kind from its device
+     * is told in the log, with what a report of a pen that doesn't paint needs.
+     */
+    private fun tellPointer(e: MotionEvent, i: Int, what: String) {
+        val toolType = e.getToolType(i)
+        if (!pointersTold.isNew(e.deviceId, toolType, e.source)) return
+        val device = e.device
+        // (a pen paired over Bluetooth may carry a name its owner gave it: only a built-in one's)
+        val builtIn = device != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && !device.isExternal
+        val named = if (builtIn) " \"${device?.name}\"" else ""
+        val about = device?.let { "device %04x:%04x%s".format(java.util.Locale.ROOT, it.vendorId, it.productId, named) } ?: "no device"
+        val axis = device?.getMotionRange(MotionEvent.AXIS_PRESSURE, e.source)?.let { it.min..it.max }
+        AppLog.i(TAG, pointerFacts(what, about, toolType, e.source, kindOf(e, i), e.getPressure(i), axis, e.buttonState, e.getTouchMajor(i)))
+    }
 
     /** The pointer's samples in this event: the batched ones since the last event, then the latest. */
     private fun samples(e: MotionEvent, i: Int): List<PenSample> {

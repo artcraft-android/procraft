@@ -233,4 +233,96 @@ class PenKeysTest {
             assertEquals(modelPaint, tablet.modelFingerPaint)
         }
     }
+
+    @Test
+    fun a_pen_whose_driver_gives_no_tool_type_is_still_the_pen() {
+        val screen = InputDevice.SOURCE_TOUCHSCREEN
+        val unknown = MotionEvent.TOOL_TYPE_UNKNOWN
+        // a phone's built-in pen, its tool type left unknown, from the touchscreen and the stylus
+        assertEquals(PointerKind.STYLUS, pointerKind(unknown, screen or InputDevice.SOURCE_STYLUS))
+        assertEquals(PointerKind.STYLUS, pointerKind(unknown, InputDevice.SOURCE_STYLUS))
+        // one paired over Bluetooth, its events marked so, or fused into the touchscreen's
+        assertEquals(PointerKind.STYLUS, pointerKind(unknown, InputDevice.SOURCE_BLUETOOTH_STYLUS))
+        assertEquals(PointerKind.STYLUS, pointerKind(unknown, screen or InputDevice.SOURCE_BLUETOOTH_STYLUS))
+        // and one whose device is a mouse as well: the pen, not the mouse (which paints at no pressure)
+        assertEquals(PointerKind.STYLUS, pointerKind(unknown, InputDevice.SOURCE_MOUSE or InputDevice.SOURCE_STYLUS))
+        // a pen's tip and eraser end as ever, whatever else the source says
+        for (source in listOf(screen, screen or InputDevice.SOURCE_STYLUS, InputDevice.SOURCE_BLUETOOTH_STYLUS, InputDevice.SOURCE_MOUSE)) {
+            assertEquals(PointerKind.STYLUS, pointerKind(MotionEvent.TOOL_TYPE_STYLUS, source))
+            assertEquals(PointerKind.STYLUS_ERASER, pointerKind(MotionEvent.TOOL_TYPE_ERASER, source))
+        }
+        // an unknown tool from the touchscreen alone, or a finger in an event the pen is in, stays a finger
+        assertEquals(PointerKind.FINGER, pointerKind(unknown, screen))
+        assertEquals(PointerKind.FINGER, pointerKind(MotionEvent.TOOL_TYPE_FINGER, screen or InputDevice.SOURCE_STYLUS))
+        // (a palm's tool type is no pen's)
+        assertEquals(PointerKind.FINGER, pointerKind(5, screen or InputDevice.SOURCE_STYLUS))
+    }
+
+    @Test
+    fun a_pen_with_no_tool_type_hovers_and_has_its_buttons_heard() {
+        val pen = InputDevice.SOURCE_TOUCHSCREEN or InputDevice.SOURCE_STYLUS
+        assertEquals(true, isPen(MotionEvent.TOOL_TYPE_UNKNOWN, pen))
+        assertEquals(true, isPen(MotionEvent.TOOL_TYPE_ERASER, InputDevice.SOURCE_TOUCHSCREEN))
+        assertEquals(false, isPen(MotionEvent.TOOL_TYPE_UNKNOWN, InputDevice.SOURCE_TOUCHSCREEN))
+        assertEquals(false, isPen(MotionEvent.TOOL_TYPE_FINGER, pen))
+        assertEquals(false, isPen(MotionEvent.TOOL_TYPE_MOUSE, InputDevice.SOURCE_MOUSE))
+        // its first button held over the canvas and let go: one press, heard as the pen's
+        val buttons = PenButtons()
+        val penIn = isPen(MotionEvent.TOOL_TYPE_UNKNOWN, pen)
+        assertEquals(FIRST_BUTTON to 0, buttons.next(MotionEvent.BUTTON_STYLUS_PRIMARY, penIn))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn))
+    }
+
+    @Test
+    fun a_pen_touching_with_no_button_held_presses_none() {
+        // an S Pen's touch, its button state none (or only the touch's own primary bit): no button,
+        // so it never switches to the eraser
+        val buttons = PenButtons()
+        for (state in listOf(0, MotionEvent.BUTTON_PRIMARY)) {
+            assertEquals(0 to 0, buttons.next(state, penIn = true, touching = true))
+            assertEquals(0 to 0, buttons.next(state, penIn = true, lifting = true))
+            assertEquals(0 to 0, buttons.next(state, penIn = true))
+        }
+    }
+
+    @Test
+    fun the_log_tells_what_a_kind_of_pointer_is_and_gives() {
+        val pen = InputDevice.SOURCE_TOUCHSCREEN or InputDevice.SOURCE_STYLUS
+        assertEquals(
+            "a pointer down: device 0000:0000 \"sec_e-pen\", tool unknown, source 0x5002, taken for stylus; " +
+                "pressure 0.000 (its device gives 0.00 to 1.00); buttons 0x20; touch 3.5 px",
+            pointerFacts("down", "device 0000:0000 \"sec_e-pen\"", MotionEvent.TOOL_TYPE_UNKNOWN, pen, PointerKind.STYLUS, 0f, 0f..1f, MotionEvent.BUTTON_STYLUS_PRIMARY, 3.5f),
+        )
+        assertEquals(
+            "a pointer hovering: no device, tool 9, source 0x1002, taken for finger; pressure 1.000 (its device gives none); buttons 0x0; touch 0.0 px",
+            pointerFacts("hovering", "no device", 9, InputDevice.SOURCE_TOUCHSCREEN, PointerKind.FINGER, 1f, null, 0, 0f),
+        )
+        val told = PointersTold()
+        assertEquals(true, told.isNew(3, MotionEvent.TOOL_TYPE_STYLUS, pen))
+        assertEquals(false, told.isNew(3, MotionEvent.TOOL_TYPE_STYLUS, pen))
+        assertEquals(true, told.isNew(3, MotionEvent.TOOL_TYPE_FINGER, InputDevice.SOURCE_TOUCHSCREEN))
+        assertEquals(true, told.isNew(4, MotionEvent.TOOL_TYPE_STYLUS, pen))
+    }
+
+    @Test
+    fun each_device_s_first_pen_stroke_tells_the_pressures_it_gave() {
+        val strokes = PenStrokesTold()
+        // a pen that gives no pressure: its first stroke says so
+        strokes.began(7)
+        assertEquals(true, strokes.summing)
+        for (p in listOf(0f, 0f, 0f)) strokes.sample(p)
+        assertEquals("the first pen stroke from device 7: 3 samples, pressure 0.000 to 0.000", strokes.lifted())
+        // its next strokes aren't summed up, nor told
+        strokes.began(7)
+        assertEquals(false, strokes.summing)
+        strokes.sample(0.5f)
+        assertNull(strokes.lifted())
+        // another device's first is; one with no samples says so
+        strokes.began(9)
+        for (p in listOf(0.02f, 0.4f, 0.9f)) strokes.sample(p)
+        assertEquals("the first pen stroke from device 9: 3 samples, pressure 0.020 to 0.900", strokes.lifted())
+        assertNull(strokes.lifted())
+        strokes.began(11)
+        assertEquals("the first pen stroke from device 11: no samples", strokes.lifted())
+    }
 }

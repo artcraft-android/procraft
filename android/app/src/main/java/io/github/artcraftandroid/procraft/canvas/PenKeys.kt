@@ -36,8 +36,11 @@ internal const val SECOND_BUTTON = 2
 internal fun penButtonsIn(buttonState: Int): Int =
     (if (buttonState and PEN_FIRST != 0) FIRST_BUTTON else 0) or (if (buttonState and PEN_SECOND != 0) SECOND_BUTTON else 0)
 
-/** Whether a pointer of [toolType] is a pen's (its tip or its eraser end). */
-internal fun isPen(toolType: Int) = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
+/** Whether a pointer of [toolType] from [source] is a pen's (its tip or its eraser end): see [pointerKind]. */
+internal fun isPen(toolType: Int, source: Int) = pointerKind(toolType, source).let { it == PointerKind.STYLUS || it == PointerKind.STYLUS_ERASER }
+
+/** Whether an event's [source] says it came from a pen (a Bluetooth pen's says so too). */
+private fun fromStylus(source: Int) = source and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS
 
 /**
  * A touchpad's gestures, as an event's classification says (Android 14's
@@ -48,7 +51,8 @@ private val TOUCHPAD_GESTURES = setOf(3, 4, 5)
 
 /**
  * What a pointer is to the canvas, by its [toolType], the [source] its event came from and the
- * event's [classification] (0 where the system has none): a pen's tip or eraser end; a mouse, or a
+ * event's [classification] (0 where the system has none): a pen's tip or eraser end, or a pointer
+ * whose driver doesn't say what it is (an unknown tool type) in an event from a pen; a mouse, or a
  * touchpad moving the pointer (Android gives that one a finger's tool type), which does what a
  * touch is set to do, with no pressure, and is never taken for a hand resting by the pen; else a
  * finger. A touchpad's own swipes and pinches stay fingers'.
@@ -57,6 +61,7 @@ internal fun pointerKind(toolType: Int, source: Int, classification: Int = 0): P
     toolType == MotionEvent.TOOL_TYPE_STYLUS -> PointerKind.STYLUS
     toolType == MotionEvent.TOOL_TYPE_ERASER -> PointerKind.STYLUS_ERASER
     toolType == MotionEvent.TOOL_TYPE_MOUSE -> PointerKind.MOUSE
+    toolType == MotionEvent.TOOL_TYPE_UNKNOWN && fromStylus(source) -> PointerKind.STYLUS
     source and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE && classification !in TOUCHPAD_GESTURES -> PointerKind.MOUSE
     else -> PointerKind.FINGER
 }
@@ -150,4 +155,79 @@ internal fun penKeyButton(keyCode: Int, sources: Int, keyboardType: Int, name: S
     val stylus = sources and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS
     val pen = stylus || keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC || PEN_NAME.containsMatchIn(name)
     return second.takeIf { pen }
+}
+
+/** Each kind of pointer the canvas has seen from each device, told once in the log. */
+internal class PointersTold {
+    private val told = HashSet<Triple<Int, Int, Int>>()
+
+    /** Whether a pointer of [toolType] in an event from [source] of device [deviceId] is yet to be told (it counts as told now). */
+    fun isNew(deviceId: Int, toolType: Int, source: Int): Boolean = told.add(Triple(deviceId, toolType, source))
+}
+
+/** Android's tool types by number. */
+private val TOOL_NAMES = listOf("unknown", "finger", "stylus", "mouse", "eraser", "palm")
+
+/**
+ * What the log says of a kind of pointer the first time it comes ([what]: down, or hovering): its
+ * [device] (its vendor and product, and a built-in one's name), [toolType] and event [source],
+ * what the canvas takes it for ([kind]), its first [pressure] and the pressure its device says it
+ * gives ([pressureAxis], least to most; null, none), the [buttons] held and how big its touch is
+ * ([touchMajor] pixels): what a report of a pen that doesn't paint needs.
+ */
+internal fun pointerFacts(
+    what: String,
+    device: String,
+    toolType: Int,
+    source: Int,
+    kind: PointerKind,
+    pressure: Float,
+    pressureAxis: ClosedFloatingPointRange<Float>?,
+    buttons: Int,
+    touchMajor: Float,
+): String {
+    val tool = TOOL_NAMES.getOrNull(toolType) ?: "$toolType"
+    val axis = pressureAxis?.let { "%.2f to %.2f".format(java.util.Locale.ROOT, it.start, it.endInclusive) } ?: "none"
+    return "a pointer %s: %s, tool %s, source 0x%x, taken for %s; pressure %.3f (its device gives %s); buttons 0x%x; touch %.1f px".format(
+        java.util.Locale.ROOT, what, device, tool, source, kind.name.lowercase(java.util.Locale.ROOT), pressure, axis, buttons, touchMajor,
+    )
+}
+
+/** Each device's first pen stroke, its pressures summed up for the log: whether the pen gives a pressure, and how much. */
+internal class PenStrokesTold {
+    private val told = HashSet<Int>()
+
+    /** The device whose first stroke this is (none: not being summed up), its samples and its least and most pressure. */
+    private var device: Int? = null
+    private var count = 0
+    private var least = 0f
+    private var most = 0f
+
+    /** A pen's stroke began on device [deviceId]: summed up if it is that device's first. */
+    fun began(deviceId: Int) {
+        device = deviceId.takeIf { it !in told }
+        count = 0
+        least = Float.POSITIVE_INFINITY
+        most = Float.NEGATIVE_INFINITY
+    }
+
+    /** Whether the stroke's samples are being summed up. */
+    val summing get() = device != null
+
+    /** One of its samples' [pressure]. */
+    fun sample(pressure: Float) {
+        if (device == null) return
+        count++
+        least = minOf(least, pressure)
+        most = maxOf(most, pressure)
+    }
+
+    /** The stroke lifted (or was called off): the line for the log, if it was its device's first. */
+    fun lifted(): String? {
+        val d = device ?: return null
+        device = null
+        told += d
+        if (count == 0) return "the first pen stroke from device $d: no samples"
+        return "the first pen stroke from device %d: %d samples, pressure %.3f to %.3f".format(java.util.Locale.ROOT, d, count, least, most)
+    }
 }
