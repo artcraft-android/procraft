@@ -49,3 +49,13 @@ internal suspend fun ScrollScope.followBlend(rowPx: Int, density: Float, positio
         }
     }
 }
+
+/**
+ * Where the band crosses blend row [index] with the list scrolled [position] pixels: its top and
+ * bottom, pixels down from the row's top (outside 0 until [rowPx] it misses the row). The rows are
+ * [rowPx] apart, and the band is a row tall where the first row is unscrolled.
+ */
+internal fun blendBandInRow(position: Int, index: Int, rowPx: Int): Pair<Float, Float> {
+    val top = (position - index * rowPx).toFloat()
+    return top to top + rowPx
+}

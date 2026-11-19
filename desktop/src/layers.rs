@@ -2217,35 +2217,39 @@ fn swipe_reach(l: &LayerInfo) -> f32 {
     SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
 }
 
-/// The list moves behind a highlight fixed to its center.
+/// The modes in `list`, scrolled `scroll` from the first in the band: the band fixed in the
+/// middle and the rows sliding under it, each name and glyph white where the band covers it and
+/// grey elsewhere (a row half in it half and half).
 fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], scroll: f32) {
     let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
-    let painter = ui.painter_at(list);
-    let highlight = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
-    painter.rect_filled(highlight, 0, argb(pc::ACCENT));
-    let centered = blend_centred(scroll, BLEND_ROW, modes.len() as u32) as usize;
+    let band = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
+    ui.painter_at(list).rect_filled(band, 0, argb(pc::ACCENT));
+    let above = Rect::from_min_max(list.min, pos2(list.right(), band.top()));
+    let below = Rect::from_min_max(pos2(list.left(), band.bottom()), list.max);
     for (i, m) in modes.iter().enumerate() {
-        let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
+        let top = band.top() + i as f32 * BLEND_ROW - scroll;
         let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
-        if !row.intersects(list) {
-            continue;
-        }
-        let on = i == centered;
-        let ink = if on { Color32::WHITE } else { argb(PANEL_TITLE) };
-        text(
-            &painter,
-            pos2(row.left() + 12.0, row.center().y),
-            Align2::LEFT_CENTER,
-            &m.name,
-            17.0,
-            Weight::Regular,
-            ink,
-        );
-        if let Some((_, glyph)) = icons::BLEND_GLYPHS.iter().find(|(name, _)| *name == m.name) {
-            let tint = if on { Color32::WHITE } else { argb(BLEND_GLYPH_INK) };
-            let centre = pos2(row.right() - 31.5, row.center().y);
-            if list.contains(centre) {
-                look.icon(ui, glyph, centre, 26.0, tint);
+        let glyph = icons::BLEND_GLYPHS.iter().find(|(name, _)| *name == m.name).map(|(_, glyph)| glyph);
+        for (part, on) in [(above, false), (band, true), (below, false)] {
+            // (a sliver of a hundredth of a point, from rounding, is nothing to draw)
+            let shown = row.intersect(part);
+            if shown.width() <= 0.0 || shown.height() < 0.01 {
+                continue;
+            }
+            let painter = ui.painter_at(shown);
+            let (ink, tint) =
+                if on { (Color32::WHITE, Color32::WHITE) } else { (argb(PANEL_TITLE), argb(BLEND_GLYPH_INK)) };
+            text(
+                &painter,
+                pos2(row.left() + 12.0, row.center().y),
+                Align2::LEFT_CENTER,
+                &m.name,
+                17.0,
+                Weight::Regular,
+                ink,
+            );
+            if let Some(glyph) = glyph {
+                look.icon_on(ui, &painter, glyph, pos2(row.right() - 31.5, row.center().y), 26.0, tint);
             }
         }
     }
@@ -2439,6 +2443,64 @@ mod tests {
             assert!((highlight.center().y - list.center().y).abs() < 0.01);
             assert!((highlight.height() - BLEND_ROW).abs() < 0.01);
             assert!(highlights.next().is_none());
+        }
+    }
+
+    /// A mode's name is white where the band covers it and grey elsewhere: a row half in the band
+    /// is drawn half white, half grey, split at the band's edge.
+    #[test]
+    fn a_blend_name_half_in_the_band_is_white_only_where_the_band_covers_it() {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let modes = procraft_core::blend_modes();
+        let list = Rect::from_min_size(pos2(12.0, 12.0), vec2(360.0, BLEND_LIST_HEIGHT));
+        let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
+        let band = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
+        for scroll in [2.5 * BLEND_ROW, 2.25 * BLEND_ROW, 3.0 * BLEND_ROW, -20.0] {
+            let mut output = ctx.clone().run_ui(RawInput::default(), |ui| {
+                blend_rows(ui, &mut look, list, &modes, scroll);
+            });
+            output.textures_delta.clear();
+            let mut split = 0;
+            for (i, m) in modes.iter().enumerate() {
+                let row = Rect::from_min_size(
+                    pos2(list.left(), band.top() + i as f32 * BLEND_ROW - scroll),
+                    vec2(list.width(), BLEND_ROW),
+                );
+                // the name's pieces: where each is drawn, and in which colour
+                let pieces: Vec<(Rect, Color32)> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text() == m.name => Some((c.clip_rect, t.fallback_color)),
+                        _ => None,
+                    })
+                    .collect();
+                let white: Vec<Rect> = pieces.iter().filter(|(_, c)| *c == Color32::WHITE).map(|(r, _)| *r).collect();
+                let grey: Vec<Rect> = pieces.iter().filter(|(_, c)| *c == argb(PANEL_TITLE)).map(|(r, _)| *r).collect();
+                assert_eq!(white.len() + grey.len(), pieces.len(), "{}: {pieces:?}", m.name);
+                // white just where the band covers the row, grey over the rest of it shown
+                let covered = row.intersect(band);
+                if covered.height() >= 0.01 {
+                    assert_eq!(white, vec![covered], "{} at {scroll}", m.name);
+                } else {
+                    assert!(white.is_empty(), "{} at {scroll}: {white:?}", m.name);
+                }
+                assert!(grey.iter().all(|r| r.intersect(band).height() < 0.01), "{} at {scroll}: {grey:?}", m.name);
+                let shown = row.intersect(list).height().max(0.0);
+                let drawn = grey.iter().chain(&white).map(|r| r.height()).sum::<f32>();
+                assert!((drawn - shown).abs() < 0.02, "{} at {scroll}: {drawn} of {shown}", m.name);
+                if !white.is_empty() && !grey.is_empty() {
+                    split += 1;
+                }
+            }
+            // between two rows both are split, on a row none, stretched past the top the first
+            let expected = match scroll {
+                s if s < 0.0 => 1,
+                s if (s / BLEND_ROW - (s / BLEND_ROW).round()).abs() < 1e-4 => 0,
+                _ => 2,
+            };
+            assert_eq!(split, expected, "at {scroll}");
         }
     }
 

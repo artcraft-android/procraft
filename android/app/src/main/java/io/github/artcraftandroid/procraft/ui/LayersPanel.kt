@@ -62,6 +62,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.geometry.CornerRadius
@@ -81,6 +82,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -1232,9 +1234,7 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo, open: Boolean) {
                 userScrollEnabled = !tapping,
             ) {
                 itemsIndexed(modes) { i, m ->
-                    val focused = i == centered
-                    val ink = if (focused) Color.White else Pc.PanelTitle
-                    Row(
+                    Box(
                         Modifier.fillMaxWidth().height(BlendRow)
                             .clickable(enabled = !tapping) {
                                 val from = position / density
@@ -1251,18 +1251,37 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo, open: Boolean) {
                                         tapping = false
                                     }
                                 }
-                            }
-                            .padding(start = 12.dp, end = 18.5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            },
                     ) {
-                        Text(m.name, color = ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                        PcIcons.BlendGlyphs[m.name]?.let {
-                            Icon(it, contentDescription = null, tint = if (focused) Color.White else BlendGlyphInk, modifier = Modifier.size(26.dp))
-                        }
+                        // grey outside the band and white inside it: a name half under it is half and half
+                        BlendLabel(
+                            m.name, Pc.PanelTitle, BlendGlyphInk,
+                            Modifier.drawWithContent {
+                                val (top, bottom) = blendBandInRow(position, i, rowPx)
+                                clipRect(top = top, bottom = bottom, clipOp = ClipOp.Difference) { this@drawWithContent.drawContent() }
+                            },
+                        )
+                        BlendLabel(
+                            m.name, Color.White, Color.White,
+                            // (read out once, from the grey copy)
+                            Modifier.clearAndSetSemantics { }.drawWithContent {
+                                val (top, bottom) = blendBandInRow(position, i, rowPx)
+                                clipRect(top = top, bottom = bottom) { this@drawWithContent.drawContent() }
+                            },
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+/** A blend mode's name and glyph, in [ink] and [glyphInk]. */
+@Composable
+private fun BlendLabel(name: String, ink: Color, glyphInk: Color, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxSize().padding(start = 12.dp, end = 18.5.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(name, color = ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        PcIcons.BlendGlyphs[name]?.let { Icon(it, contentDescription = null, tint = glyphInk, modifier = Modifier.size(26.dp)) }
     }
 }
 
