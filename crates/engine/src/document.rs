@@ -1366,16 +1366,26 @@ impl Document {
         any
     }
 
-    /// Merging what is chosen: its bottom paint layer, and what is chosen above that (layers and
-    /// groups), bottom first, for the renderer to draw into it, each layer's mask (the bottom
-    /// one's too) applied to it first. None unless there is something to merge or if any of it
-    /// is locked.
+    /// Merging what is chosen: its bottom item that holds paint, and what is chosen above that
+    /// (layers and groups), bottom first, for the renderer to draw into it, each layer's mask (the
+    /// bottom one's too) applied to it first. A chosen group goes whole, everything in it merged
+    /// with the rest: one at the bottom is flattened into one layer first (see
+    /// [`Document::flatten`]), named after its bottom layer, which the rest then merge into. None
+    /// unless there is something to merge (a group alone: two layers in it), or if any of it, or
+    /// anything in a chosen group, is locked.
     pub fn merge_chosen_plan(&self) -> Option<(LayerId, Vec<LayerId>)> {
-        let items = self.chosen_items();
-        if items.iter().any(|id| self.is_locked(*id)) {
+        if self.chosen_locked() {
             return None;
         }
-        let at = items.iter().position(|id| self.layer(*id).is_some_and(|l| l.kind == LayerKind::Paint))?;
+        let items = self.chosen_items();
+        let painted = |id: LayerId| match self.layer(id).map(|l| l.kind) {
+            Some(LayerKind::Paint) => 1,
+            Some(LayerKind::Group) => {
+                self.contents(id).iter().filter(|c| self.layer(**c).is_some_and(|l| l.kind == LayerKind::Paint)).count()
+            }
+            _ => 0,
+        };
+        let at = items.iter().position(|id| painted(*id) > 0)?;
         let lower = *items.get(at)?;
         let uppers: Vec<LayerId> = items
             .get(at + 1..)?
@@ -1383,7 +1393,7 @@ impl Document {
             .copied()
             .filter(|id| self.layer(*id).is_some_and(|l| matches!(l.kind, LayerKind::Group | LayerKind::Paint)))
             .collect();
-        (!uppers.is_empty()).then_some((lower, uppers))
+        (!uppers.is_empty() || painted(lower) > 1).then_some((lower, uppers))
     }
 
     /// Removes `uppers` (each with everything in it) once they were drawn into `lower`, which
@@ -2975,5 +2985,37 @@ mod tests {
         assert!(d.finish_merge_chosen(one, &[three]));
         assert_eq!(ids(&d), vec![one, two]);
         assert!(d.layer(one_mask).is_none() && d.layer(three_mask).is_none());
+    }
+
+    #[test]
+    fn a_group_chosen_at_the_bottom_merges_whole() {
+        // 1 and 2 in a group, 3 above it: 3 and 2 chosen take the group whole, the group first
+        let (mut d, made) = stack(3);
+        let [one, two, three]: [LayerId; 3] = made.try_into().unwrap();
+        d.set_current(two);
+        d.toggle_pick(one);
+        let group = d.group_chosen().unwrap();
+        assert!(d.choose_between(three, one));
+        assert_eq!(d.merge_chosen_plan(), Some((group, vec![three])));
+        // the group alone flattens
+        d.set_current(group);
+        d.clear_picks();
+        assert_eq!(d.merge_chosen_plan(), Some((group, vec![])));
+        // a group of one layer, alone, has nothing to merge
+        let (mut d, made) = stack(2);
+        let [_, two]: [LayerId; 2] = made.try_into().unwrap();
+        d.set_current(two);
+        let group = d.group_chosen().unwrap();
+        d.set_current(group);
+        assert_eq!(d.merge_chosen_plan(), None);
+        // a locked layer in a chosen group stops it
+        let (mut d, made) = stack(3);
+        let [one, two, three]: [LayerId; 3] = made.try_into().unwrap();
+        d.set_current(two);
+        d.toggle_pick(one);
+        let group = d.group_chosen().unwrap();
+        d.set_locked(one, true);
+        assert!(d.choose_between(three, group));
+        assert_eq!(d.merge_chosen_plan(), None);
     }
 }

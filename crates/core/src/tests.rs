@@ -8247,6 +8247,73 @@ fn rows_pinched_together_merge_with_all_between() {
 }
 
 #[test]
+fn layers_pinched_or_picked_with_a_group_merge_it_whole() {
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32, rgb: [f32; 3]| {
+        s.set_color(rgb[0], rgb[1], rgb[2]);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_brush_size(0.6);
+    let bottom = s.layers()[0].id;
+    dot(30.0, 30.0, [1.0, 0.0, 0.0]);
+    let middle = s.add_layer();
+    dot(50.0, 50.0, [0.0, 1.0, 0.0]);
+    let top = s.add_layer();
+    dot(70.0, 70.0, [0.0, 0.0, 1.0]);
+    // red and green in a group at half opacity, blue above it
+    let group = s.combine_down(middle).unwrap();
+    assert!(s.set_layer_opacity(group, 0.5, true));
+    let ids = |s: &CanvasSession| s.layers().iter().map(|l| l.id).collect::<Vec<u64>>();
+    assert_eq!(ids(&s), [top, group, middle, bottom]);
+    let near = |p: [u8; 4], q: [u8; 3]| (0..3).all(|i| p[i].abs_diff(q[i]) <= 2);
+    let looks = |s: &CanvasSession| {
+        assert!(near(pixel(s, 30, 30), [255, 128, 128]), "{:?}", pixel(s, 30, 30));
+        assert!(near(pixel(s, 50, 50), [128, 255, 128]), "{:?}", pixel(s, 50, 50));
+        assert_eq!(pixel(s, 70, 70), [0, 0, 255, 255]);
+    };
+    looks(&s);
+    // a layer onto the group below has no Merge Down; the group's own takes its top layer
+    let info = |s: &CanvasSession, id: u64| s.layers().into_iter().find(|l| l.id == id).unwrap();
+    assert!(!info(&s, top).can_merge && info(&s, group).can_merge);
+    // blue's row pinched to red's, in the group: all of it one layer, named after the bottom one,
+    // looking the same, the group gone
+    let chosen = s.chosen_layers();
+    assert!(s.merge_between(top, bottom));
+    let merged = s.layers();
+    assert_eq!(merged.len(), 1);
+    assert_eq!((merged[0].name.as_str(), merged[0].parent, merged[0].current), ("Layer 1", None, true));
+    looks(&s);
+    // one step, undone the layers and the group back as they were chosen
+    assert_eq!(s.undo().as_deref(), Some("merge layers"));
+    assert_eq!(ids(&s), [top, group, middle, bottom]);
+    assert_eq!(s.chosen_layers(), chosen);
+    looks(&s);
+    assert!(s.redo().is_some());
+    assert_eq!(ids(&s).len(), 1);
+    looks(&s);
+    s.undo();
+    // every row picked (the group and what is in it too), Merge does the same
+    assert!(s.pick_all_layers());
+    assert!(s.merge_picked());
+    assert_eq!(s.layers().len(), 1);
+    assert_eq!(s.layers()[0].name, "Layer 1");
+    looks(&s);
+    s.undo();
+    // the group alone picked with its own rows: flattened into one layer
+    assert!(s.select_layer(group));
+    assert!(s.merge_between(group, bottom));
+    assert_eq!(s.layers().len(), 2);
+    assert_eq!(s.layers()[1].name, "Layer 1");
+    looks(&s);
+    s.undo();
+    // a locked layer in the group: nothing merges
+    assert!(s.set_layer_locked(middle, true));
+    assert!(!s.merge_between(top, bottom));
+    assert_eq!(ids(&s), [top, group, middle, bottom]);
+}
+
+#[test]
 fn picked_layers_transform_together() {
     use crate::transform::TransformHandle;
     let Some(s) = session(100, 100) else { return };

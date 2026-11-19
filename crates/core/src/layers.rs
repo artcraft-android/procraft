@@ -1275,12 +1275,40 @@ impl CanvasSession {
         {
             return false;
         }
-        let Some((lower, uppers)) = st.doc.merge_chosen_plan() else {
+        let Some((base, uppers)) = st.doc.merge_chosen_plan() else {
             st.doc = chosen_before;
             return false;
         };
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
+        // a group at the bottom goes whole: flattened into one layer first (named after its bottom
+        // layer), which the rest merge into, the two one step
+        let lower = if st.doc.layer(base).is_some_and(|l| l.kind == LayerKind::Group) {
+            let Some(flat) = st.doc.flatten(base) else {
+                st.doc = before;
+                return false;
+            };
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.mark_steps();
+                canvas.name_next_step("merge layers");
+                canvas.flatten_group(base, flat, before.clone());
+            }
+            if uppers.is_empty() {
+                st.doc.clear_picks();
+                if let Some(canvas) = st.canvas.as_mut() {
+                    canvas.collapse_steps();
+                }
+                st.revision += 1;
+                self.shared.frame(st);
+                return true;
+            }
+            flat
+        } else {
+            base
+        };
+        let flattened = lower != base;
+        // the merge draws into the flattened layer, as the document now has it
+        let before = if flattened { st.doc.clone() } else { before };
         // the layer below changes only where they (a group's layers within it) are painted: only
         // that much is kept for undo, where the GPU can tell
         st.flush();
@@ -1308,6 +1336,9 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("merge layers");
             canvas.merge_layers_with_masks(uppers.clone(), lower, masks, drop_lower, before, within);
+            if flattened {
+                canvas.collapse_steps();
+            }
         }
         st.doc.finish_merge_chosen(lower, &uppers);
         st.revision += 1;
