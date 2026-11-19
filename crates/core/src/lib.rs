@@ -17,6 +17,7 @@ mod adjust_menu;
 mod adjusting;
 mod animation;
 mod app_log;
+mod blend_wheel;
 mod brush_files;
 mod brush_libraries;
 mod brush_library;
@@ -130,6 +131,10 @@ pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{
     AnimationPlayback, AnimationSettings, FrameRate, PlayStep, animation_next_step, export_fps_at, export_fps_fraction,
     export_fps_label, frame_rate,
+};
+pub use blend_wheel::{
+    BLEND_TAP_SECONDS, BlendCoast, BlendStep, blend_centred, blend_coast, blend_coast_at, blend_pull_for, blend_pulled,
+    blend_stretch, blend_tap, blend_tap_at, blend_unstretch,
 };
 pub use brush_files::BrushEngines;
 pub use brush_files::{

@@ -2016,6 +2016,28 @@ fn blend_picker_updates_live_and_keeps_one_undo_step() {
     assert_eq!(mode(), BlendMode::Normal.id(), "a round trip adds no step");
 }
 
+/// A tap on a blend mode while a movement through them is still open: the movement's step ends
+/// there and the tap is a step of its own, both "blend mode".
+#[test]
+fn a_blend_tap_after_a_movement_is_a_step_of_its_own() {
+    use procraft_engine::document::BlendMode;
+
+    let Some(s) = session(32, 32) else { return };
+    let id = s.layers()[0].id;
+    let mode = || s.layers()[0].blend;
+    assert!(s.preview_layer_blend(id, BlendMode::Multiply.id()));
+    assert!(s.preview_layer_blend(id, BlendMode::Darken.id()));
+    assert!(s.set_layer_blend(id, BlendMode::Screen.id()));
+    assert!(!s.finish_layer_blend(), "the tap ended the movement");
+    assert_eq!(s.undo().as_deref(), Some("blend mode"));
+    assert_eq!(mode(), BlendMode::Darken.id());
+    assert_eq!(s.undo().as_deref(), Some("blend mode"));
+    assert_eq!(mode(), BlendMode::Normal.id());
+    // no third step
+    s.undo();
+    assert_eq!(mode(), BlendMode::Normal.id());
+}
+
 #[test]
 fn merge_duplicate_blend_and_locks() {
     let Some(s) = session(100, 100) else { return };
