@@ -2830,6 +2830,9 @@ pub struct Canvas {
     /// The most a smudge stroke's window may take, bytes (see `smudge.rs`): what a buffer and a
     /// binding may hold.
     smudge_most: u64,
+    /// The most a window laid in buffers may take, bytes: what a buffer and a binding may hold
+    /// (see `Canvas::smudge_room_for`); no limit in fragment passes, which lay none.
+    smudge_room: u64,
     /// The passes of wet paint a render lays (see [`WetPass`]), and how many it holds.
     wet_params: wgpu::Buffer,
     wet_capacity: u64,
@@ -3053,6 +3056,7 @@ impl Canvas {
         // the most a smudge's window takes: what a binding holds, or in fragment passes their own
         let smudge_most =
             if pipelines.compute.is_some() { Canvas::smudge_room_for(device) } else { fragments::WINDOW_MOST };
+        let smudge_room = if pipelines.compute.is_some() { Canvas::smudge_room_for(device) } else { u64::MAX };
         let fits = stroke.filter(|s| (s.texture.width(), s.texture.height()) == (width, height));
         let (stroke_texture, stroke_view) = match fits {
             Some(s) => (s.texture.clone(), s.view.clone()),
@@ -3208,6 +3212,7 @@ impl Canvas {
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
             smudge_capacity: 64,
             smudge_most,
+            smudge_room,
             wet_params: wet_params(device, 4),
             wet_capacity: 4,
             prediction: Vec::new(),
@@ -13754,6 +13759,87 @@ mod tests {
                 assert_ne!(roomy, undone, "style {k}");
                 assert!(drawn(style, Some(8 << 10), big_first) == (roomy, undone), "style {k} {big_first}");
             }
+        }
+        assert_eq!(gpu.errors(), 0);
+    }
+
+    /// Wet paint that keeps what it has laid tile by tile, its work cut into windows close to what a
+    /// binding holds, is laid whole, as in roomy ones, and alike where a copy from a texture can put
+    /// its rows in a buffer only at multiples of 512 bytes (see `crate::placed`). Cut by its pixels
+    /// alone, a window laid in buffers took up to twice what it was cut to, and work cut close to
+    /// what a binding holds wasn't laid; laid as it reaches (too big once laid out from a column
+    /// copies can start at), a tile's part copied in at once wrote over its neighbours' rows.
+    #[test]
+    fn wet_paint_cut_close_to_what_a_binding_holds_is_laid_whole_and_alike_where_copies_are_placed() {
+        use procraft_engine::geom::Vec2;
+        let Ok(gpu) = Gpu::headless() else { return };
+        if !gpu.computes() {
+            return;
+        }
+        let (width, height) = (700, 200);
+        // every pixel its own colour, opaque
+        let picture: Vec<u8> = (0..width * height)
+            .flat_map(|i| {
+                let (x, y) = (i % width, i / width);
+                [(x * 3 % 256) as u8, (y * 5 % 256) as u8, ((x / 7 + y / 3) * 11 % 256) as u8, 255]
+            })
+            .collect();
+        // to and fro across the tiles, stamps of a few sizes
+        let stamps: Vec<Stamp> = (0..90)
+            .map(|i| {
+                let t = i as f32 / 89.0;
+                let x = if i < 45 { -10.0 + 1440.0 * t } else { 1430.0 - 1440.0 * t };
+                Stamp {
+                    time_ms: 15.0 * f64::from(i),
+                    distance: 16.0 * i as f32,
+                    transfer: 0.5 + 0.004 * i as f32,
+                    ..Stamp::round(
+                        Vec2::new(x, 100.0 + 60.0 * (i as f32 * 0.37).sin()),
+                        [9.0, 13.0, 17.0][i as usize % 3],
+                        0.8,
+                    )
+                }
+            })
+            .collect();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.6),
+            load: 0.4,
+            dilution: 0.3,
+            rendering: Rendering::Gradual,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.2, 0.3, 0.8], 1.0)
+        };
+        // keeping how much each pixel has taken; and laid apart, the stroke as laid and how much of
+        // its paint shows besides
+        let styles = [wet, StrokeStyle { wet_pull: None, laid_in_place: true, burnt_edges: 0.5, ..wet }];
+        // the layer once a stroke has gone over it a few stamps a frame, its windows (and what a
+        // binding holds) `room` bytes if given
+        let drawn = |style: StrokeStyle, room: Option<u64>, placed: bool| {
+            gpu.emulate_placed_copies(placed);
+            let mut doc = procraft_engine::document::Document::new(width, height);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let id = doc.current();
+            canvas.upload_layer(&gpu, id, &picture).unwrap();
+            if let Some(room) = room {
+                (canvas.smudge_most, canvas.smudge_room) = (room, room);
+            }
+            canvas.begin_stroke(id, style);
+            for lot in stamps.chunks(3) {
+                canvas.add_stamps(lot);
+                canvas.render(&gpu, &mut doc, None);
+            }
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            assert!(!canvas.take_smudge_refused());
+            gpu.emulate_placed_copies(false);
+            canvas.read_layer(&gpu, id).unwrap()
+        };
+        // windows and bindings of at most 64 kB: several stamps together, each stamp's own fitting
+        const MOST: u64 = 64 << 10;
+        for (k, style) in styles.into_iter().enumerate() {
+            let roomy = drawn(style, None, false);
+            assert_ne!(roomy, picture, "style {k}");
+            assert!(drawn(style, Some(MOST), false) == roomy, "style {k}");
+            assert!(drawn(style, Some(MOST), true) == roomy, "style {k}, placed");
         }
         assert_eq!(gpu.errors(), 0);
     }
