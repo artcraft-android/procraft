@@ -3482,7 +3482,10 @@ mod tests {
         assert!(plugins.set_on(ROTATION.to_owned(), true));
         let reset = format!("{ROTATION}.reset");
         let keys = |controls: Vec<PluginControl>| controls.iter().map(|c| c.key().to_owned()).collect::<Vec<_>>();
-        assert_eq!(keys(plugins.controls_in(PluginPlace::Canvas)), [format!("{ROTATION}.lock")]);
+        assert_eq!(
+            keys(plugins.controls_in(PluginPlace::Canvas)),
+            [format!("{ROTATION}.lock"), format!("{ROTATION}.no_fit")]
+        );
         let actions: Vec<String> = plugins.actions_in(PluginPlace::Canvas).into_iter().map(|a| a.key).collect();
         assert_eq!(actions, [reset.as_str()]);
         assert!(plugins.controls_in(PluginPlace::Card).is_empty());
@@ -3533,6 +3536,13 @@ mod tests {
         }
         let pressed = t.elapsed() / 200;
         println!("the gesture lock asked in {asked:?}, a plugin's press found in {pressed:?}");
+        // its other switch keeps a quick pinch from fitting the canvas, the turn's lock aside
+        assert!(!hooks.gesture_lock(crate::hooks::GESTURE_FIT));
+        assert!(plugins.set_switch(format!("{ROTATION}.no_fit"), true));
+        assert!(hooks.gesture_lock(crate::hooks::GESTURE_FIT) && hooks.gesture_lock(crate::hooks::GESTURE_TURN));
+        assert!(plugins.set_switch(format!("{ROTATION}.lock"), false));
+        assert!(hooks.gesture_lock(crate::hooks::GESTURE_FIT) && !hooks.gesture_lock(crate::hooks::GESTURE_TURN));
+        assert!(!hooks.gesture_lock(2), "a part it doesn't know");
         assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
         assert!(pressed < std::time::Duration::from_millis(1), "{pressed:?}");
         let _ = std::fs::remove_dir_all(&dir);

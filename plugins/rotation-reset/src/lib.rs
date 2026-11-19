@@ -1,11 +1,12 @@
 //! Rotation reset: Reset rotation, a row of the Actions panel's Canvas tab (and Alt+R), turns the
 //! canvas back upright, or to the right angle nearest, about the middle of the window, its zoom
-//! and what is there kept; and a switch keeps two fingers from turning the canvas as they pinch,
-//! so a pinch near the canvas's edges doesn't turn it by accident. It's a plugin, not part of the
-//! app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
+//! and what is there kept; a switch keeps two fingers from turning the canvas as they pinch, so a
+//! pinch near the canvas's edges doesn't turn it by accident; and another keeps a quick pinch in
+//! from fitting the canvas to the screen, so it zooms out as any pinch does. It's a plugin, not
+//! part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
-//! The action reads how far the canvas is turned and turns it (the `view` permission); the switch
-//! answers the gesture lock's hook. The interface is written down at the top of
+//! The action reads how far the canvas is turned and turns it (the `view` permission); the switches
+//! answer the gesture lock's hook. The interface is written down at the top of
 //! `crates/core/src/plugin_run.rs`.
 
 #![cfg_attr(not(test), no_std)]
@@ -13,14 +14,18 @@
 use core::f32::consts::FRAC_PI_2;
 
 /// The controls by their place, as the manifest starts them: where Reset rotation turns to (0
-/// upright, 1 the nearest right angle), and whether pinching keeps the turn.
-static CONTROLS: kit::Controls<2> = kit::Controls::new([0.0, 0.0]);
+/// upright, 1 the nearest right angle), whether pinching keeps the turn, and whether a quick pinch
+/// keeps from fitting the canvas.
+static CONTROLS: kit::Controls<3> = kit::Controls::new([0.0, 0.0, 0.0]);
 kit::controls!(CONTROLS);
 const TO: usize = 0;
 const LOCK: usize = 1;
+const NO_FIT: usize = 2;
 
-/// The part of the view the gesture lock's hook asks about that is the turn.
+/// The parts of the view the gesture lock's hook asks about: the turn, and the fit a quick pinch
+/// in makes.
 const TURN: i32 = 0;
+const FIT: i32 = 1;
 
 /// Where a canvas turned `turn` radians goes: upright, or to the right angle `nearest` it (half
 /// way between two, the one further round).
@@ -55,10 +60,16 @@ pub extern "C" fn procraft_action(_index: i32) -> i32 {
     0
 }
 
-/// Whether two fingers leave part `part` of the view as it is: the turn, while the switch is on.
+/// Whether two fingers leave part `part` of the view as it is: the turn, or the fit, while its
+/// switch is on.
 #[unsafe(no_mangle)]
 pub extern "C" fn procraft_gesture_lock(part: i32) -> i32 {
-    i32::from(part == TURN && CONTROLS.on(LOCK))
+    let locked = match part {
+        TURN => CONTROLS.on(LOCK),
+        FIT => CONTROLS.on(NO_FIT),
+        _ => false,
+    };
+    i32::from(locked)
 }
 
 #[cfg(not(test))]
@@ -87,11 +98,16 @@ mod tests {
     }
 
     #[test]
-    fn pinching_keeps_the_turn_while_the_switch_is_on() {
-        assert_eq!(procraft_gesture_lock(TURN), 0);
+    fn pinching_keeps_the_turn_or_the_fit_while_its_switch_is_on() {
+        let parts = || (procraft_gesture_lock(TURN), procraft_gesture_lock(FIT), procraft_gesture_lock(-1));
+        assert_eq!(parts(), (0, 0, 0));
         procraft_control(LOCK as i32, 1.0);
-        assert_eq!((procraft_gesture_lock(TURN), procraft_gesture_lock(1), procraft_gesture_lock(-1)), (1, 0, 0));
+        assert_eq!((parts(), procraft_gesture_lock(2)), ((1, 0, 0), 0));
+        procraft_control(NO_FIT as i32, 1.0);
+        assert_eq!((parts(), procraft_gesture_lock(2)), ((1, 1, 0), 0));
         procraft_control(LOCK as i32, 0.0);
-        assert_eq!(procraft_gesture_lock(TURN), 0);
+        assert_eq!(parts(), (0, 1, 0));
+        procraft_control(NO_FIT as i32, 0.0);
+        assert_eq!(parts(), (0, 0, 0));
     }
 }

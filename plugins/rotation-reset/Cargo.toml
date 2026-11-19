@@ -1,10 +1,10 @@
 [package]
 name = "rotation-reset"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "A plugin for ProCraft: the canvas turned back upright, or to the nearest right angle, and two-finger gestures kept from turning it"
+description = "A plugin for ProCraft: the canvas turned back upright, or to the nearest right angle, two-finger gestures kept from turning it, and a quick pinch from fitting it"
 
 [lib]
 crate-type = ["cdylib"]

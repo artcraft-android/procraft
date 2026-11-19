@@ -11,8 +11,10 @@ use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
-/// The part of the view the gesture lock's hook is asked about: its turn.
+/// The parts of the view the gesture lock's hook is asked about: its turn, and the fit a quick
+/// pinch in makes (interface 10).
 pub(crate) const GESTURE_TURN: i32 = 0;
+pub(crate) const GESTURE_FIT: i32 = 1;
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 pub(crate) type Shared = Arc<Mutex<Running>>;
@@ -606,7 +608,7 @@ impl Hooks {
     }
 
     /// The gesture lock's hook: whether a two-finger gesture leaves part `part` of the view (by
-    /// [`GESTURE_TURN`]) as it is, as any plugin on it says.
+    /// [`GESTURE_TURN`] and [`GESTURE_FIT`]) as it is, as any plugin on it says.
     pub(crate) fn gesture_lock(&self, part: i32) -> bool {
         self.has(Hook::GestureLock)
             && self.through(Hook::GestureLock, false, |running, said| Ok(said || running.gesture_lock(part)?))

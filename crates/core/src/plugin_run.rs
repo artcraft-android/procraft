@@ -66,7 +66,8 @@
 //!   whether a panel can be torn off into a window of its own (not 0), `panel` by
 //!   [`crate::floating::FloatingPanel`].
 //! - `procraft_gesture_lock(part: i32) -> i32`: for the hook `gesture_lock` (interface 8), whether
-//!   a two-finger gesture leaves part of the view as it is (not 0), `part` 0 its turn.
+//!   a two-finger gesture leaves part of the view as it is (not 0), `part` 0 its turn and 1
+//!   (interface 10) the fit a quick pinch in makes.
 //! - `procraft_view_look(entry: i32) -> f32`: for the hook `view_look` (interface 8), entry 0 to 11
 //!   of a matrix the canvas's colours go through on the screen alone, in linear light: rows red,
 //!   green and blue, each three weights and what is added.

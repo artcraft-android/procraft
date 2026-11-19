@@ -492,6 +492,8 @@ pub(crate) struct Touches {
     /// A plugin keeps two-finger gestures from turning the canvas, as it said when the last finger
     /// landed (the gesture lock's hook).
     turn_locked: bool,
+    /// A plugin keeps a quick pinch in from fitting the canvas, as it said then too.
+    fit_locked: bool,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
     scrub_x: f32,
@@ -638,6 +640,7 @@ impl Default for Touches {
             more_to_come: false,
             pinch: Vec::new(),
             turn_locked: false,
+            fit_locked: false,
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
             scrub_x: 0.0,
@@ -1258,8 +1261,10 @@ impl CanvasSession {
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
-        // a plugin locking the turn: the fingers landing now don't turn the canvas
-        t.turn_locked = hooks.as_ref().is_some_and(|hooks| hooks.gesture_lock(crate::hooks::GESTURE_TURN));
+        // a plugin locking the turn or the fit: the fingers landing now don't turn the canvas, or
+        // fit it with a quick pinch in
+        let locked = |part| hooks.as_ref().is_some_and(|hooks| hooks.gesture_lock(part));
+        (t.turn_locked, t.fit_locked) = (locked(crate::hooks::GESTURE_TURN), locked(crate::hooks::GESTURE_FIT));
         // the guide editor: a touch takes a handle, more fingers move the view
         if t.guide_editing {
             if t.down.len() == 1 {
@@ -2331,9 +2336,11 @@ impl CanvasSession {
                 let pinched = parted && self.end_box_pinch(&mut t, cancelled, &mut out);
                 Self::follow_fingers(&mut t);
                 // two fingers parting as they close fast fit a canvas pinched smaller than it
-                // fits, settling into place (a tap's fingers aren't a pinch)
+                // fits, settling into place (a tap's fingers aren't a pinch), unless a plugin keeps
+                // the fit
                 let tap = Self::fingers_tapped(&t, now);
-                if parted && !pinched && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
+                let fits = !t.fit_locked && t.tap_pointers == 2 && t.gesture_pair.is_none();
+                if parted && !pinched && !cancelled && !tap && fits {
                     let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
                     if flicked && self.pinched_smaller_than_fit() {
                         out.push(TouchCommand::Fit);
@@ -3844,6 +3851,47 @@ mod tests {
         // closing a little faster than 2.5 a second fits, a little slower doesn't
         assert!(pinch(&shown(1.0), -2.8, 150.0, 0.0).contains(&TouchCommand::Fit));
         assert!(!pinch(&shown(1.0), -2.2, 150.0, 0.0).contains(&TouchCommand::Fit));
+    }
+
+    /// A list with a plugin on the gesture lock's hook that locks part `part` of the view.
+    fn locking(part: i32) -> std::sync::Arc<crate::hooks::Hooks> {
+        let code = format!(
+            r#"(module (func (export "procraft_gesture_lock") (param i32) (result i32)
+                (i32.eq (local.get 0) (i32.const {part}))))"#
+        );
+        let running = crate::plugin_run::Running::start(&wat::parse_str(code).unwrap(), &[]).unwrap();
+        let hooks = std::sync::Arc::new(crate::hooks::Hooks::default());
+        hooks.put_on("org.example.lock".to_owned(), running, &[crate::plugin_run::Hook::GestureLock]);
+        hooks
+    }
+
+    #[test]
+    fn a_quick_pinch_in_zooms_as_any_pinch_while_a_plugin_keeps_the_fit() {
+        let s = shown(1.0);
+        s.shared.lock().hooks = Some(locking(crate::hooks::GESTURE_FIT));
+        let fitted = zoom(&s);
+        let out = pinch(&s, -5.0, 120.0, 0.0);
+        assert!(!out.contains(&TouchCommand::Fit), "{out:?}");
+        assert!(zoom(&s) < fitted * 0.5, "zoomed out as the fingers went: {} from {fitted}", zoom(&s));
+        // from fitted, the small flick in that fits it leaves it as the fingers left it
+        let s = shown(1.0);
+        s.shared.lock().hooks = Some(locking(crate::hooks::GESTURE_FIT));
+        assert!(!pinch(&s, -6.9, 32.0, 0.0).contains(&TouchCommand::Fit));
+        // a plugin keeping the turn alone leaves the fit as it is, and one on no part neither
+        for part in [crate::hooks::GESTURE_TURN, 7] {
+            let s = shown(1.0);
+            s.shared.lock().hooks = Some(locking(part));
+            assert!(pinch(&s, -5.0, 120.0, 0.0).contains(&TouchCommand::Fit), "{part}");
+        }
+        // asked as the fingers land, so a gesture under way goes on as it started
+        let hooks = locking(crate::hooks::GESTURE_FIT);
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(hooks.gesture_lock(crate::hooks::GESTURE_FIT));
+        }
+        let asked = t.elapsed() / 1000;
+        println!("the fit's lock asked in {asked:?} as a finger lands");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
     }
 
     #[test]
