@@ -5390,6 +5390,40 @@ fn a_time_lapse_frame_is_read_at_the_size_it_is_kept() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The graphics device lost as a frame is read back (or before): no frame, and nothing panics,
+/// whether the read was started before the loss or after it.
+#[test]
+fn a_time_lapse_frame_on_a_lost_device_is_none_without_a_panic() {
+    let Some(s) = session(256, 256) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-lost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    s.stroke_begin(PointerKind::Finger, vec![sample(100.0, 100.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    // a read started, the device lost before it is waited for
+    let pending = {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        let pending = canvas.start_composite_thumbnail_without(gpu, &mut st.doc, 64, &[]);
+        gpu.device.destroy();
+        pending
+    };
+    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pending.pixels()));
+    assert!(read.is_ok_and(|r| r.is_err()), "a read on a lost device fails, not panics");
+    // and the next frames read after it
+    s.stroke_begin(PointerKind::Finger, vec![sample(150.0, 150.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (s.time_lapse_frame(64).is_none(), s.record_time_lapse(std::sync::Arc::clone(&lapse)))
+    }));
+    assert_eq!(recorded.ok(), Some((true, false)));
+    assert!(s.shared.lock().gpu.as_ref().is_some_and(Gpu::is_lost));
+    assert_eq!(lapse.count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_private_picture_stays_out_of_the_time_lapse() {
     let Some(s) = session(100, 100) else { return };

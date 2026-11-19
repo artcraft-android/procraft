@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 
 use procraft_engine::animation::{self, FrameLook};
@@ -2451,7 +2451,7 @@ fn pack_region(gpu: &Gpu, band: &mut Option<wgpu::Buffer>, texture: &wgpu::Textu
             buffer.slice(..used).map_async(wgpu::MapMode::Read, move |r| {
                 let _ = sent.send(r);
             });
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+            gpu.wait().ok()?;
             mapped.recv().ok()?.ok()?;
             {
                 let view = buffer.slice(..used).get_mapped_range().ok()?;
@@ -10211,6 +10211,7 @@ impl Canvas {
         // each layer's pixel the first 4 bytes of its row
         let read = Readback::Copying {
             device: gpu.device.clone(),
+            lost: gpu.lost.clone(),
             buffer,
             size,
             kept: gpu.readbacks.clone(),
@@ -12164,11 +12165,11 @@ impl Uploads {
         let fits = |kept: &[(wgpu::Buffer, Arc<AtomicU8>)]| {
             kept.iter().position(|(b, state)| b.size() >= size && state.load(Ordering::Acquire) == UPLOAD_READY)
         };
-        let _ = device.poll(wgpu::PollType::Poll);
+        let _ = crate::poll(device, wgpu::PollType::Poll);
         let mut found = fits(&kept);
         if found.is_none() && kept.iter().any(|(b, _)| b.size() >= size) {
             // one on its way back: waited for rather than another as big made
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = crate::poll(device, wgpu::PollType::wait_indefinitely());
             found = fits(&kept);
         }
         if let Some(i) = found {
@@ -12925,6 +12926,8 @@ pub enum Readback {
     Failed(String),
     Copying {
         device: wgpu::Device,
+        /// Whether the device has been lost (see [`Gpu::is_lost`]).
+        lost: Arc<AtomicBool>,
         /// The buffer and how much of it the pixels take; kept for the next readback after.
         buffer: wgpu::Buffer,
         size: u64,
@@ -12980,11 +12983,15 @@ impl Readback {
         let (device, buffer, size, kept, row, padded, mapped) = match self {
             Readback::Ready(p) => return Ok(p),
             Readback::Failed(why) => return Err(GpuError::Readback(why)),
-            Readback::Copying { device, buffer, size, kept, row, padded, mapped } => {
+            Readback::Copying { device, lost, buffer, size, kept, row, padded, mapped } => {
+                if lost.load(Ordering::Relaxed) {
+                    return Err(GpuError::Lost);
+                }
                 (device, buffer, size, kept, row, padded, mapped)
             }
         };
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
+        // a device lost or out of memory meanwhile is an error, not a panic as in wgpu's own wait
+        crate::poll(&device, wgpu::PollType::wait_indefinitely())?;
         mapped.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
         let view = buffer.slice(..size).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
         let mut out = Vec::with_capacity(row * (view.len() / padded.max(1)));
@@ -13046,7 +13053,8 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
         let _ = tx.send(r);
     });
     let kept = gpu.readbacks.clone();
-    Readback::Copying { device: gpu.device.clone(), buffer, size, kept, row, padded, mapped: rx }
+    let (device, lost) = (gpu.device.clone(), gpu.lost.clone());
+    Readback::Copying { device, lost, buffer, size, kept, row, padded, mapped: rx }
 }
 
 #[cfg(test)]

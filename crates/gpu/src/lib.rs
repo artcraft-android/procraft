@@ -57,6 +57,31 @@ pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("")
 }
 
+/// Whether a wait on the GPU that failed has been told in the log: only the first is.
+static WAIT_FAILED_TOLD: AtomicBool = AtomicBool::new(false);
+
+/// Polls `device` as `how` says (waiting for what was sent to it, or not), failing soft: wgpu's own
+/// poll panics where the device is lost or out of memory (errors it can't return), which here is
+/// [`GpuError::Lost`], and any other failure [`GpuError::Failed`], the first of them logged. A wait
+/// that runs out of time fails too, as nothing wrong: not logged.
+pub fn poll(device: &wgpu::Device, how: wgpu::PollType) -> Result<wgpu::PollStatus, GpuError> {
+    polled(|| device.poll(how))
+}
+
+/// [`poll`] with the poll given, as wgpu's might go.
+fn polled(poll: impl FnOnce() -> Result<wgpu::PollStatus, wgpu::PollError>) -> Result<wgpu::PollStatus, GpuError> {
+    let (error, why) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)) {
+        Ok(Ok(status)) => return Ok(status),
+        Ok(Err(wgpu::PollError::Timeout)) => return Err(GpuError::Failed("the GPU took too long".to_owned())),
+        Ok(Err(e)) => (GpuError::Failed(format!("waiting on the GPU: {e}")), e.to_string()),
+        Err(panic) => (GpuError::Lost, panic_message(panic.as_ref()).to_owned()),
+    };
+    if !WAIT_FAILED_TOLD.swap(true, Ordering::Relaxed) {
+        log::error!("waiting on the GPU failed ({why}); later failures aren't logged");
+    }
+    Err(error)
+}
+
 /// The graphics APIs in `backends` by name ("Vulkan", "Direct3D 12", "OpenGL", ...).
 fn backends_name(backends: wgpu::Backends) -> String {
     let named = [
@@ -269,9 +294,16 @@ impl Gpu {
     /// staged in are let go.
     pub fn flush(&self) {
         self.queue.submit(std::iter::empty());
-        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
-            log::error!("flushing uploads: {e}");
+        let _ = self.wait();
+    }
+
+    /// Waits for everything sent to the device; an error (logged once) if the device is lost or
+    /// the wait fails (see [`poll`]), never a panic.
+    pub fn wait(&self) -> Result<(), GpuError> {
+        if self.is_lost() {
+            return Err(GpuError::Lost);
         }
+        poll(&self.device, wgpu::PollType::wait_indefinitely()).map(|_| ())
     }
 
     /// A device for offscreen work (tests, exports), from the first instance that makes one. With
@@ -659,6 +691,24 @@ mod tests {
         if std::env::var_os("WGPU_BACKEND").is_none() {
             assert_eq!(super::Gpu::backends().last(), Some(&wgpu::Backends::GL));
         }
+    }
+
+    /// A poll panicking, as wgpu's does on a device lost or out of memory, is the device lost; one
+    /// that fails or runs out of time is an error; neither goes on as a panic.
+    #[test]
+    fn a_poll_that_panics_or_fails_is_an_error() {
+        use super::{GpuError, polled};
+        assert!(matches!(polled(|| Ok(wgpu::PollStatus::QueueEmpty)), Ok(wgpu::PollStatus::QueueEmpty)));
+        assert!(matches!(polled(|| panic!("Error in Device::poll: Parent device is lost")), Err(GpuError::Lost)));
+        assert!(matches!(polled(|| Err(wgpu::PollError::Timeout)), Err(GpuError::Failed(_))));
+        assert!(matches!(polled(|| Err(wgpu::PollError::WrongSubmissionIndex(2, 1))), Err(GpuError::Failed(_))));
+        // a device destroyed: waited on, it is lost, then refused at once
+        let Ok(gpu) = super::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        gpu.device.destroy();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu.wait()));
+        assert!(gpu.is_lost());
+        assert!(matches!(gpu.wait(), Err(GpuError::Lost)));
+        gpu.flush();
     }
 
     #[test]

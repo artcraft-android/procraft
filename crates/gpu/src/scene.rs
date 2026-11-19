@@ -2260,7 +2260,7 @@ impl MeshView {
         f.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        gpu.wait().ok()?;
         rx.recv().ok()?.ok()?;
         let words: Vec<u32> = {
             let mapped = f.read.slice(..).get_mapped_range().ok()?;
@@ -2737,7 +2737,7 @@ impl FootprintMarks {
         self.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        gpu.wait().ok()?;
         rx.recv().ok()?.ok()?;
         let mut words = vec![0u32; (FOOTPRINT_TILES * FOOTPRINT_TILES).div_ceil(32) as usize];
         {

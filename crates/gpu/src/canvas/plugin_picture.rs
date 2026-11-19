@@ -209,7 +209,8 @@ impl Gpu {
             }
             let sent = Instant::now();
             self.queue.submit([encoder.finish()]);
-            let waited = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(DRAW_LIMIT) });
+            let waited =
+                crate::poll(device, wgpu::PollType::Wait { submission_index: None, timeout: Some(DRAW_LIMIT) });
             if self.is_lost() {
                 return Err(PictureStop::Lost);
             }
