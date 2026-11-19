@@ -256,12 +256,20 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
                     Modifier.offset(x = x, y = 2.dp).size(frameWidth, FrameHeight).clip(RoundedCornerShape(6.dp)).background(if (held) HeldFrame else Color.White)
                         .border(1.dp, Color(0xFF9A9A9A), RoundedCornerShape(6.dp)).clickable { vm.tapFrame(i) },
                 ) {
-                    if (!held) vm.animationFrames.getOrNull(frame)?.let { vm.frameThumbnails[it] }?.let { Image(it, contentDescription = "Frame ${i + 1}", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp)) }
+                    if (!held) vm.animationFrames.getOrNull(frame)?.let { vm.frameThumbnails[it] }?.let { Image(it, contentDescription = frameLabel(vm, i, frame), contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp)) }
                 }
             }
         }
     }
     Box(Modifier.offset(x = 12.dp + width / 2 - 12.dp, y = 42.dp + 44.dp + 3.dp).size(24.dp, 3.dp).clip(RoundedCornerShape(1.5.dp)).background(Pc.Accent))
+}
+
+/** Timeline place [slot]'s name: "Frame N", counting only the frames that play, else "Background" or "Foreground". */
+private fun frameLabel(vm: CanvasViewModel, slot: Int, frame: Int): String {
+    val played = vm.playedSlots
+    if (slot !in played) return if (frame == 0) "Background" else "Foreground"
+    val first = played.firstOrNull()?.let { vm.frameSlots.getOrNull(it) } ?: 0
+    return "Frame ${frame - first + 1}"
 }
 
 /** A panel standing on the bar, its arrow pointing down at [arrowX] from its left edge. */

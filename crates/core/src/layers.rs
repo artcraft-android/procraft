@@ -1,7 +1,7 @@
 //! Layers: the list the layers panel shows and every change to it, each one undoable. A slider
 //! drag (opacity, background colour) is one undo step from where it began to `done`.
 
-use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
+use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Place, Unseen};
 
 use crate::CanvasSession;
 
@@ -137,6 +137,107 @@ pub struct LayerOptionRow {
     pub label: String,
     pub enabled: bool,
     pub switch_on: Option<bool>,
+}
+
+/// A row of the layers panel where it is laid out (its top and bottom, any unit, down the
+/// screen), to place a drop by.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct ShownRow {
+    pub id: u64,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// Where rows dragged in the layers panel land if let go now ([`CanvasSession::row_drop`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RowDrop {
+    /// Where they are: let go over their own rows.
+    Stays,
+    /// Just above row `target` (over its mask), in the group that row is in.
+    Above { target: u64 },
+    /// Just below row `target`, in the group it is in: the last row of a group keeps what is let
+    /// go on its lower half in that group.
+    Below { target: u64 },
+    /// At the bottom of the stack, in no group.
+    Bottom,
+    /// Onto row `target`, held over it a moment: into a group at its top; with a layer, both in a
+    /// new group.
+    Onto { target: u64 },
+}
+
+/// A row held over this long while a row is dragged takes what is let go onto it.
+pub const ROW_HOLD_SECONDS: f32 = 0.5;
+
+/// How long a dragged row must be held over another to let go onto it, seconds
+/// ([`ROW_HOLD_SECONDS`]).
+#[uniffi::export]
+pub fn row_hold_seconds() -> f32 {
+    ROW_HOLD_SECONDS
+}
+
+impl RowDrop {
+    /// The engine's place for it; none for [`RowDrop::Stays`].
+    pub(crate) fn engine(self) -> Option<Place> {
+        Some(match self {
+            RowDrop::Stays => return None,
+            RowDrop::Above { target } => Place::Above(LayerId(target)),
+            RowDrop::Below { target } => Place::Below(LayerId(target)),
+            RowDrop::Bottom => Place::Bottom,
+            RowDrop::Onto { target } => Place::Onto(LayerId(target)),
+        })
+    }
+}
+
+/// The shown row as [`place_drop`] weighs it: where it is laid out (if it is), whether it is the
+/// last shown of the group it is in, and whether a drag held over it lets go onto it.
+#[derive(Clone, Copy, Debug)]
+struct DropRow {
+    id: u64,
+    span: Option<(f32, f32)>,
+    last_in_group: bool,
+    holdable: bool,
+}
+
+/// Where a drag lets go at `y`, by `rows` (the panel's rows shown, top down, without the ones
+/// dragged; those laid out with their spans), `over_own` (`y` is over a row dragged) and `held`
+/// (the row the drag has been held over): on a row held over, onto it; on the lower
+/// half of the last row of a group, under it in that group; otherwise just above the first row
+/// whose middle is at or under `y` (out of a group by its row's upper half, into an open one by
+/// its row's lower half), or at the bottom.
+fn place_drop(rows: &[DropRow], y: f32, over_own: bool, held: Option<u64>) -> RowDrop {
+    let within = |r: &DropRow| r.span.is_some_and(|(top, bottom)| y >= top && y < bottom);
+    if let Some(r) = held.and_then(|h| rows.iter().find(|r| r.id == h)).filter(|r| r.holdable && within(r)) {
+        return RowDrop::Onto { target: r.id };
+    }
+    let over = rows.iter().position(within);
+    if over.is_none() && over_own {
+        return RowDrop::Stays;
+    }
+    if let Some(k) = over
+        && let Some(r) = rows.get(k)
+        && let Some((top, bottom)) = r.span
+        && bottom > top
+        && (y - top) / (bottom - top) > 0.5
+    {
+        if r.last_in_group {
+            return RowDrop::Below { target: r.id };
+        }
+        // under its middle: above the next row, laid out or not
+        return rows.get(k + 1).map_or(RowDrop::Bottom, |n| RowDrop::Above { target: n.id });
+    }
+    if let Some(r) = over.and_then(|k| rows.get(k)) {
+        return RowDrop::Above { target: r.id };
+    }
+    // between rows or past them: above the first laid out under `y`, or the one after the last
+    // laid out (scrolled away)
+    if let Some(r) = rows.iter().find(|r| r.span.is_some_and(|(top, _)| top >= y)) {
+        return RowDrop::Above { target: r.id };
+    }
+    let last = rows.iter().rposition(|r| r.span.is_some());
+    match last.and_then(|k| rows.get(k + 1)) {
+        Some(n) => RowDrop::Above { target: n.id },
+        None => RowDrop::Bottom,
+    }
 }
 
 /// What locking (`on`) or unlocking layer `id` is called (see [`CanvasSession::lock_said`]).
@@ -299,6 +400,25 @@ pub fn set_frame_cache_budget(bytes: u64) {
     procraft_gpu::set_frame_cache_budget(bytes);
 }
 
+/// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
+/// caches (four).
+pub(crate) const CANVAS_LAYERS: u64 = 7;
+
+/// What the layers' textures of a canvas `width` × `height` may take, bytes: the device's budget
+/// less what the canvas holds besides them, so that the canvas as a whole keeps to the budget (a
+/// layer's worth at least; 0, no budget, keeps every layer on the GPU).
+pub(crate) fn canvas_budget(width: u32, height: u32) -> u64 {
+    canvas_budget_of(width, height, 4)
+}
+
+/// [`canvas_budget`] for a canvas whose pixels take `pixel_bytes` each (an HDR canvas's half
+/// floats take 8).
+pub(crate) fn canvas_budget_of(width: u32, height: u32, pixel_bytes: u32) -> u64 {
+    let budget = resident_budget();
+    let per = u64::from(width) * u64::from(height) * u64::from(pixel_bytes);
+    if budget == 0 { 0 } else { budget.saturating_sub(CANVAS_LAYERS * per).max(per.max(1)) }
+}
+
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {
@@ -371,11 +491,17 @@ impl CanvasSession {
 
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
-        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, px, py) else { return Vec::new() };
+        // the copy started under the lock, waited for once it is let go: touches and frames go
+        // on while the GPU finishes what it was given before
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
+            canvas.start_alphas_at(gpu, &mut st.doc, px, py)
+        };
+        let Ok(alphas) = pending.alphas() else { return Vec::new() };
+        let st = self.shared.lock();
         let doc = &st.doc;
         alphas
             .into_iter()
@@ -490,14 +616,24 @@ impl CanvasSession {
         id
     }
 
-    /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
-    /// [`Self::add_layer`], named "Frame N" ("Page N") by the frames there are with it.
+    /// Add Frame (New Page with Page Assist): a new empty frame above the current one, named
+    /// "Frame N" ("Page N") by the frames there are with it. With a layer inside a group current,
+    /// it goes above that group's frame, at the top level, not into the group.
     pub fn add_frame(&self) -> u64 {
         self.change("new layer", |d| {
             if !d.has_room(1) {
                 return None;
             }
             let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            // the frame the current layer is drawn in: its outermost group, or itself
+            let mut frame = d.current();
+            for _ in 0..64 {
+                match d.group_of(frame) {
+                    Some(g) => frame = g,
+                    None => break,
+                }
+            }
+            d.set_current(frame);
             let id = d.add_layer();
             let n = procraft_engine::animation::frames(d).len();
             d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
@@ -681,21 +817,67 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// Moves layer `id` just above or below `target`'s row, as a row dragged in the panel drops:
-    /// with what goes with it (its mask, or a group with what is in it); the current layer with
-    /// others picked (or a picked one) takes them all along, in their order. False if nothing moved.
-    pub fn move_next_to(&self, id: u64, target: u64, above: bool) -> bool {
+    /// Where layer `id`, dragged in the panel with what goes with it (see
+    /// [`CanvasSession::moving_with`]), lands if let go with its middle at `y`: `rows` are the
+    /// panel's rows where they are laid out (any unit, down the screen; those scrolled away may be
+    /// left out), `held` the row the drag has been held over for [`ROW_HOLD_SECONDS`], if any.
+    /// With no `id`, for layers brought in from elsewhere.
+    pub fn row_drop(&self, id: Option<u64>, rows: Vec<ShownRow>, y: f32, held: Option<u64>) -> RowDrop {
         let layers = self.layers();
-        let Some((unit, together)) = moving(&layers, id) else { return false };
-        if unit.contains(&target) {
-            return false;
-        }
-        // the others, bottom first: it goes in among them
-        let Some(at) = layers.iter().filter(|o| !unit.contains(&o.id)).rev().position(|o| o.id == target) else {
-            return false;
+        let unit = id.and_then(|id| moving(&layers, id)).map(|(unit, _)| unit).unwrap_or_default();
+        let by_id: std::collections::HashMap<u64, &LayerInfo> = layers.iter().map(|l| (l.id, l)).collect();
+        let by_id = &by_id;
+        // the groups a row is in, innermost first (a mask's, its layer's)
+        let groups = |l: &LayerInfo| {
+            let mut at =
+                if l.kind == LayerType::Mask { l.parent.and_then(|p| by_id.get(&p)?.parent) } else { l.parent };
+            std::iter::from_fn(move || {
+                let g = at?;
+                at = by_id.get(&g).and_then(|o| o.parent);
+                Some(g)
+            })
+            .take(layers.len())
         };
-        let to = u32::try_from(if above { at + 1 } else { at }).unwrap_or(u32::MAX);
-        if together { self.move_chosen(to) } else { self.move_layer(id, to) }
+        let closed = |g: u64| by_id.get(&g).is_some_and(|o| o.collapsed);
+        let shown: Vec<&LayerInfo> =
+            layers.iter().filter(|l| !unit.contains(&l.id) && !groups(l).any(closed)).collect();
+        let span = |id: u64| rows.iter().find(|r| r.id == id).map(|r| (r.top, r.bottom));
+        let drop_rows: Vec<DropRow> = shown
+            .iter()
+            .enumerate()
+            .map(|(k, l)| {
+                let next = shown.get(k + 1);
+                DropRow {
+                    id: l.id,
+                    span: span(l.id),
+                    last_in_group: groups(l).next().is_some_and(|g| next.is_none_or(|n| !groups(n).any(|o| o == g))),
+                    holdable: l.kind != LayerType::Mask,
+                }
+            })
+            .collect();
+        let over_own = rows.iter().any(|r| unit.contains(&r.id) && y >= r.top && y < r.bottom);
+        place_drop(&drop_rows, y, over_own, held)
+    }
+
+    /// Moves layer `id` to `place` (as [`CanvasSession::row_drop`] gives it) with what goes with
+    /// it: its mask, or a group with what is in it; the current layer with others picked (or a
+    /// picked one) takes them all along, in their order. One undo step; false if nothing moved.
+    pub fn drop_row(&self, id: u64, place: RowDrop) -> bool {
+        let layers = self.layers();
+        let Some((_, together)) = moving(&layers, id) else { return false };
+        let Some(place) = place.engine() else { return false };
+        let combined =
+            matches!(place, Place::Onto(t) if layers.iter().any(|l| l.id == t.0 && l.kind == LayerType::Paint));
+        let name = match (combined, together) {
+            (true, _) => "combine down",
+            (false, true) => "move layers",
+            (false, false) => "move layer",
+        };
+        self.change(name, |d| {
+            let moved = if together { d.move_chosen_to(place) } else { d.move_to(LayerId(id), place) };
+            moved.then_some(())
+        })
+        .is_some()
     }
 
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
@@ -720,13 +902,44 @@ impl CanvasSession {
         }
     }
 
-    /// Why `adjustment` can't start on the current layer, if it can't: as [`Self::why_blocked`],
-    /// and Liquify turns away a layer whose alpha is locked.
+    /// Why `adjustment` can't start, if it can't: as [`Self::why_blocked`]. Liquify works on
+    /// every layer chosen (those in a chosen group too) and turns them away while the alpha of
+    /// one is locked; the others work on one layer, so a group current or several layers chosen
+    /// say so.
     pub fn why_not_adjusted(&self, adjustment: crate::adjust_menu::Adjustment) -> Option<Blocked> {
         self.why_blocked().or_else(|| {
-            let liquify = adjustment == crate::adjust_menu::Adjustment::Liquify;
-            (liquify && self.layers().iter().any(|l| l.current && l.alpha_lock)).then_some(Blocked::AlphaLocked)
+            if adjustment == crate::adjust_menu::Adjustment::Liquify {
+                self.alpha_locked_chosen().map(|_| Blocked::AlphaLocked)
+            } else {
+                self.why_not_one_layer()
+            }
         })
+    }
+
+    /// Why the current layer can't be copied, or cut (`cut`), if it can't: what is copied is one
+    /// layer's, so a group current or several layers chosen say so; a cut changes the layer, so
+    /// also as [`Self::why_blocked`].
+    pub fn why_not_copied(&self, cut: bool) -> Option<Blocked> {
+        let why = if cut { self.why_blocked() } else { None };
+        why.or_else(|| self.why_not_one_layer())
+    }
+
+    /// The first layer Liquify would work on whose alpha is locked (what it turns away), if any.
+    pub fn alpha_locked_chosen(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        let layers = st.edited_layers();
+        layers.into_iter().find(|id| st.doc.layer(*id).is_some_and(|l| l.alpha_lock)).map(|id| id.0)
+    }
+
+    /// Why what works on one layer at a time can't: several layers are chosen, or a group is
+    /// current.
+    fn why_not_one_layer(&self) -> Option<Blocked> {
+        let st = self.shared.lock();
+        if st.doc.chosen().len() > 1 {
+            Some(Blocked::Several)
+        } else {
+            st.doc.layer(st.doc.current()).is_some_and(|l| l.kind == LayerKind::Group).then_some(Blocked::Group)
+        }
     }
 
     /// Why a change to the current layer would go unseen, if it would (what a hidden alert
@@ -766,7 +979,7 @@ impl CanvasSession {
     }
 
     /// The rows a drag of layer `id` in the panel takes along (see
-    /// [`CanvasSession::move_next_to`]), it among them.
+    /// [`CanvasSession::drop_row`]), it among them.
     pub fn moving_with(&self, id: u64) -> Vec<u64> {
         let layers = self.layers();
         let Some((unit, _)) = moving(&layers, id) else { return Vec::new() };
@@ -1007,6 +1220,18 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
+    /// Records the canvas as `lapse`'s next frame, read back at the size frames are kept (not the
+    /// video's): the picture stays in the core, never crossing to the app and back, so a frame
+    /// after each stroke moves a few MB, not dozens. Whether one was kept (none before the canvas
+    /// exists, while it doesn't record, or when nothing changed since the last).
+    pub fn record_time_lapse(&self, lapse: std::sync::Arc<crate::timelapse::TimeLapse>) -> bool {
+        if !lapse.recording() {
+            return false;
+        }
+        let Some(t) = self.time_lapse_frame(crate::timelapse::FRAME_SIDE) else { return false };
+        lapse.record(t.rgba, t.width, t.height)
+    }
+
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
     /// need only be read again when its layer's is new.
     pub fn layer_versions(&self) -> Vec<LayerVersion> {
@@ -1128,20 +1353,49 @@ impl CanvasSession {
         {
             return false;
         }
-        let Some((lower, uppers)) = st.doc.merge_chosen_plan() else {
+        let Some((base, uppers)) = st.doc.merge_chosen_plan() else {
             st.doc = chosen_before;
             return false;
         };
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
-        if let Some(merged) = st.vector_merged(lower, &uppers) {
-            st.keep_vector_merge("merge layers", lower, merged, before, |d| {
-                d.finish_merge_chosen(lower, &uppers);
+        // (vector layers alone merge as vectors: none of them is a group)
+        if let Some(merged) = st.vector_merged(base, &uppers) {
+            st.keep_vector_merge("merge layers", base, merged, before, |d| {
+                d.finish_merge_chosen(base, &uppers);
             });
             st.revision += 1;
             self.shared.frame(st);
             return true;
         }
+        // a group at the bottom goes whole: flattened into one layer first (named after its bottom
+        // layer), which the rest merge into, the two one step
+        let lower = if st.doc.layer(base).is_some_and(|l| l.kind == LayerKind::Group) {
+            let Some(flat) = st.doc.flatten(base) else {
+                st.doc = before;
+                return false;
+            };
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.mark_steps();
+                canvas.name_next_step("merge layers");
+                canvas.flatten_group(base, flat, before.clone());
+            }
+            if uppers.is_empty() {
+                st.doc.clear_picks();
+                if let Some(canvas) = st.canvas.as_mut() {
+                    canvas.collapse_steps();
+                }
+                st.revision += 1;
+                self.shared.frame(st);
+                return true;
+            }
+            flat
+        } else {
+            base
+        };
+        let flattened = lower != base;
+        // the merge draws into the flattened layer, as the document now has it
+        let before = if flattened { st.doc.clone() } else { before };
         // the layer below changes only where they (a group's layers within it) are painted: only
         // that much is kept for undo, where the GPU can tell
         st.flush();
@@ -1171,6 +1425,9 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("merge layers");
             canvas.merge_layers_with_masks(uppers.clone(), lower, masks, drop_lower, before, within);
+            if flattened {
+                canvas.collapse_steps();
+            }
         }
         st.doc.finish_merge_chosen(lower, &uppers);
         st.revision += 1;
@@ -1220,6 +1477,37 @@ impl CanvasSession {
     }
 }
 
+impl crate::State {
+    /// The layers an edit of what is chosen works on (a transform, Liquify): with several chosen
+    /// or a group current, every paint layer chosen or in a chosen group; else the current layer.
+    /// Only those that can change: unlocked, shown, and not drawn from data (`also` lets one of
+    /// those in).
+    pub(crate) fn edited_layers_but(&self, also: impl Fn(LayerId) -> bool) -> Vec<LayerId> {
+        let doc = &self.doc;
+        let changes = |l: &procraft_engine::document::Layer| {
+            (!doc.is_locked(l.id) && l.visible && !l.drawn_from_data()) || also(l.id)
+        };
+        let chosen = doc.chosen();
+        let current = doc.current();
+        let group = doc.layer(current).is_some_and(|l| l.kind == LayerKind::Group);
+        if chosen.len() > 1 || group {
+            doc.layers()
+                .iter()
+                .filter(|l| l.kind == LayerKind::Paint && changes(l))
+                .filter(|l| chosen.iter().any(|c| *c == l.id || doc.is_inside(l.id, *c)))
+                .map(|l| l.id)
+                .collect()
+        } else {
+            doc.layer(current).filter(|l| changes(l)).map(|_| current).into_iter().collect()
+        }
+    }
+
+    /// [`State::edited_layers_but`] with none let in.
+    pub(crate) fn edited_layers(&self) -> Vec<LayerId> {
+        self.edited_layers_but(|_| false)
+    }
+}
+
 /// Why the current layer takes no change (see [`CanvasSession::why_blocked`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
@@ -1234,9 +1522,11 @@ pub enum Blocked {
     MeshLocked,
     /// A group that doesn't show (as [`Blocked::Hidden`] is a layer).
     GroupHidden,
-    /// A group is current where a stroke or a fill takes a layer
-    /// ([`CanvasSession::why_unpainted`]).
+    /// A group is current where a stroke, a fill, an adjustment or a copy takes a layer
+    /// ([`CanvasSession::why_unpainted`], [`CanvasSession::why_not_adjusted`]).
     Group,
+    /// Several layers are chosen where an adjustment or a copy takes one.
+    Several,
     /// Liquify on a layer whose alpha is locked ([`CanvasSession::why_not_adjusted`]).
     AlphaLocked,
 }
@@ -1312,6 +1602,8 @@ impl CanvasSession {
 
 #[cfg(test)]
 mod tests {
+    use super::RowDrop::{Above, Below, Bottom, Onto, Stays};
+    use super::{DropRow, LayerType, ShownRow, place_drop};
     use crate::CanvasSession;
 
     #[test]
@@ -1324,11 +1616,11 @@ mod tests {
             s.layers().iter().filter(|l| l.kind != super::LayerType::Mask).map(|l| l.id).collect::<Vec<_>>()
         };
         assert_eq!(order(&s), vec![top, middle, bottom]);
-        assert!(s.move_next_to(bottom, top, true));
+        assert!(s.drop_row(bottom, Above { target: top }));
         assert_eq!(order(&s), vec![bottom, top, middle]);
-        assert!(s.move_next_to(bottom, middle, false));
+        assert!(s.drop_row(bottom, Below { target: middle }));
         assert_eq!(order(&s), vec![top, middle, bottom]);
-        assert!(!s.move_next_to(top, top, true), "onto itself it stays");
+        assert!(!s.drop_row(top, Above { target: top }), "onto itself it stays");
         assert_eq!(s.why_blocked(), None);
         s.set_layer_locked(top, true);
         assert_eq!(s.why_blocked(), Some(super::Blocked::Locked));
@@ -1338,15 +1630,186 @@ mod tests {
         s.set_layer_visible(top, true);
         // a layer's mask goes with it
         let mask = s.add_mask(middle).unwrap_or_default();
-        assert!(s.move_next_to(middle, top, true));
+        assert!(s.drop_row(middle, Above { target: top }));
         let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
         let at = |id| ids.iter().position(|&i| i == id).unwrap_or(usize::MAX);
         assert!(at(mask) < at(middle) && at(middle) < at(top), "{ids:?}");
-        assert!(!s.move_next_to(middle, mask, true), "onto its own mask it stays");
+        assert!(!s.drop_row(middle, Above { target: mask }), "onto its own mask it stays");
         let mut with = s.moving_with(middle);
         with.sort_unstable();
         let mut expected = vec![middle, mask];
         expected.sort_unstable();
         assert_eq!(with, expected);
+    }
+
+    /// Top down: x, a, the group (c1, c2), b; x current. Returns the session and the ids.
+    fn grouped() -> (std::sync::Arc<CanvasSession>, [u64; 6]) {
+        let s = CanvasSession::new(64, 64);
+        let b = s.layers().first().map(|l| l.id).unwrap_or_default();
+        let c2 = s.add_layer();
+        let c1 = s.add_layer();
+        s.pick_layer(c2);
+        let g = s.group_picked();
+        s.select_layer(g);
+        let a = s.add_layer();
+        let x = s.add_layer();
+        let ids = [x, a, g, c1, c2, b];
+        let order: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+        assert_eq!(order, ids);
+        (s, ids)
+    }
+
+    /// The rows shown, laid out down from 0 as the panel does: a group 44 high, a layer 69, 1
+    /// apart; `skip`: rows scrolled away.
+    fn laid_out(s: &CanvasSession, skip: &[u64]) -> Vec<ShownRow> {
+        let layers = s.layers();
+        let closed: Vec<u64> = layers.iter().filter(|l| l.collapsed).map(|l| l.id).collect();
+        let mut y = 0.0;
+        let mut rows = Vec::new();
+        for l in &layers {
+            if closed.iter().any(|g| super::is_inside(&layers, l, *g)) {
+                continue;
+            }
+            let h = if l.kind == LayerType::Group { 44.0 } else { 69.0 };
+            if !skip.contains(&l.id) {
+                rows.push(ShownRow { id: l.id, top: y, bottom: y + h });
+            }
+            y += h + 1.0;
+        }
+        rows
+    }
+
+    fn parent(s: &CanvasSession, id: u64) -> Option<u64> {
+        s.layers().into_iter().find(|l| l.id == id).and_then(|l| l.parent)
+    }
+
+    fn order(s: &CanvasSession) -> Vec<u64> {
+        s.layers().iter().map(|l| l.id).collect()
+    }
+
+    #[test]
+    fn a_row_let_go_by_an_open_group_goes_in_only_among_its_layers() {
+        let (s, [x, a, g, c1, c2, b]) = grouped();
+        let rows = laid_out(&s, &[]);
+        // x 0..69, a 70..139, the group 140..184, c1 185..254, c2 255..324, b 325..394
+        let at = |y: f32| s.row_drop(Some(x), rows.clone(), y, None);
+        assert_eq!(at(30.0), Stays, "over its own row");
+        assert_eq!(at(80.0), Above { target: a });
+        assert_eq!(at(130.0), Above { target: g }, "the lower half of the row over the group: above it, out of it");
+        assert_eq!(at(150.0), Above { target: g }, "the group's upper half: above it");
+        assert_eq!(at(175.0), Above { target: c1 }, "the open group's lower half: in it at its top");
+        assert_eq!(at(240.0), Above { target: c2 });
+        assert_eq!(at(310.0), Below { target: c2 }, "its last layer's lower half: in it at its bottom");
+        assert_eq!(at(324.5), Above { target: b }, "between the group and the row under it: out of it");
+        assert_eq!(at(330.0), Above { target: b });
+        assert_eq!(at(390.0), Bottom);
+        assert_eq!(at(500.0), Bottom);
+        // let go there: in or out of the group as placed
+        assert!(s.drop_row(x, at(330.0)));
+        assert_eq!(parent(&s, x), None);
+        assert_eq!(order(&s), [a, g, c1, c2, x, b]);
+        let rows = laid_out(&s, &[]);
+        // a 0..69, the group 70..114, c1 115..184, c2 185..254, x 255..324: c2's lower half
+        assert!(s.drop_row(x, s.row_drop(Some(x), rows, 240.0, None)));
+        assert_eq!(parent(&s, x), Some(g), "on its last layer's lower half");
+        assert_eq!(order(&s), [a, g, c1, c2, x, b]);
+    }
+
+    #[test]
+    fn a_row_let_go_by_a_closed_group_goes_by_it_and_into_it_only_held_onto_its_row() {
+        let (s, [x, a, g, _, _, b]) = grouped();
+        s.set_group_collapsed(g, true);
+        let rows = laid_out(&s, &[]);
+        // x 0..69, a 70..139, the group 140..184, b 185..254
+        let at = |y: f32, held| s.row_drop(Some(x), rows.clone(), y, held);
+        assert_eq!(at(80.0, None), Above { target: a });
+        assert_eq!(at(150.0, None), Above { target: g });
+        assert_eq!(at(175.0, None), Above { target: b }, "the closed group's lower half: under it, out of it");
+        assert_eq!(at(190.0, None), Above { target: b });
+        // held over its row, anywhere on it: onto it
+        assert_eq!(at(150.0, Some(g)), Onto { target: g });
+        assert_eq!(at(175.0, Some(g)), Onto { target: g });
+        assert_eq!(at(190.0, Some(g)), Above { target: b }, "moved off the row held over");
+        assert!(s.drop_row(x, at(175.0, None)));
+        assert_eq!(parent(&s, x), None);
+        let rows = laid_out(&s, &[]);
+        // a 0..69, the group 70..114, x 115..184
+        let onto = s.row_drop(Some(x), rows, 100.0, Some(g));
+        assert_eq!(onto, Onto { target: g });
+        assert!(s.drop_row(x, onto));
+        assert_eq!(parent(&s, x), Some(g));
+        let ids = order(&s);
+        assert_eq!(ids.iter().position(|i| *i == x), Some(2), "at the group's top: {ids:?}");
+    }
+
+    #[test]
+    fn a_row_held_onto_a_layer_makes_a_group_with_it_but_never_onto_a_mask() {
+        let (s, [x, a, ..]) = grouped();
+        let mask = s.add_mask(a).unwrap_or_default();
+        s.select_layer(x);
+        let rows = laid_out(&s, &[]);
+        let row = |id| rows.iter().find(|r| r.id == id).copied().unwrap();
+        let on_mask = row(mask).top + 10.0;
+        assert_eq!(s.row_drop(Some(x), rows.clone(), on_mask, Some(mask)), Above { target: mask });
+        let on_a = row(a).top + 10.0;
+        let onto = s.row_drop(Some(x), rows, on_a, Some(a));
+        assert_eq!(onto, Onto { target: a });
+        assert!(s.drop_row(x, onto));
+        let group = parent(&s, a).unwrap();
+        assert_eq!(parent(&s, x), Some(group));
+        let layers = s.layers();
+        let new = layers.iter().find(|l| l.id == group).unwrap();
+        assert_eq!((new.kind, new.parent), (LayerType::Group, None));
+    }
+
+    #[test]
+    fn a_group_s_last_layer_dragged_keeps_the_one_over_it_last_and_its_own_place_stays() {
+        let (s, [_, _, g, c1, c2, b]) = grouped();
+        let rows = laid_out(&s, &[]);
+        let row = |id| rows.iter().find(|r| r.id == id).copied().unwrap();
+        let at = |y: f32| s.row_drop(Some(c2), rows.clone(), y, None);
+        assert_eq!(at(row(c2).top + 30.0), Stays);
+        assert_eq!(at(row(c1).bottom - 5.0), Below { target: c1 }, "c1 is the group's last without it");
+        assert_eq!(at(row(b).top + 5.0), Above { target: b });
+        assert!(!s.drop_row(c2, at(row(c1).bottom - 5.0)), "where it was: nothing moves");
+        // the group dragged: never into itself
+        let at = |y: f32| s.row_drop(Some(g), rows.clone(), y, None);
+        assert_eq!(at(row(c1).top + 5.0), Stays);
+        assert_eq!(at(row(b).top + 5.0), Above { target: b });
+    }
+
+    #[test]
+    fn rows_scrolled_away_still_place_a_drop_by_their_order() {
+        let (s, [x, _, _, c1, c2, b]) = grouped();
+        // only x, a, the group and c1 laid out
+        let rows = laid_out(&s, &[c2, b]);
+        let y = rows.iter().find(|r| r.id == c1).map_or(0.0, |r| r.bottom - 5.0);
+        assert_eq!(s.row_drop(Some(x), rows.clone(), y, None), Above { target: c2 });
+        assert_eq!(s.row_drop(Some(x), rows, 1000.0, None), Above { target: c2 });
+        // layers brought in from elsewhere: nothing of theirs to stay by
+        let rows = laid_out(&s, &[]);
+        assert_eq!(s.row_drop(None, rows, 30.0, None), Above { target: x });
+    }
+
+    #[test]
+    fn a_drop_is_placed_by_halves_of_rows_and_the_last_rows_of_groups() {
+        let row = |id, top: f32, bottom: f32, last_in_group| DropRow {
+            id,
+            span: Some((top, bottom)),
+            last_in_group,
+            holdable: true,
+        };
+        // 1 at the top level; 2 the last in a group; 3 under it
+        let rows = [row(1, 0.0, 10.0, false), row(2, 10.0, 20.0, true), row(3, 20.0, 30.0, false)];
+        let place = |y, held| place_drop(&rows, y, false, held);
+        assert_eq!(place(5.0, None), Above { target: 1 }, "a row's middle counts as its upper half");
+        assert_eq!(place(5.1, None), Above { target: 2 });
+        assert_eq!(place(15.1, None), Below { target: 2 });
+        assert_eq!(place(25.1, None), Bottom);
+        assert_eq!(place(-5.0, None), Above { target: 1 });
+        assert_eq!(place(25.1, Some(3)), Onto { target: 3 });
+        assert_eq!(place(25.1, Some(1)), Bottom, "held over a row it has left");
+        assert_eq!(place_drop(&rows, 40.0, true, None), Stays, "over its own rows, past the others");
+        assert_eq!(place_drop(&[], 40.0, false, None), Bottom);
     }
 }

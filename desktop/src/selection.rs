@@ -18,9 +18,8 @@ use crate::transform::{
     menu_slider, menu_title, popover_frame, switch,
 };
 
-/// The selection toolbar's buttons with room, and where the window is narrow.
+/// The selection toolbar's buttons with room (narrower where the window is).
 const BUTTON_ROOMY: f32 = 83.0;
-const BUTTON_NARROW: f32 = 70.0;
 const FEATHER_WIDTH: f32 = 250.0;
 const START_DOT: u32 = 0xFFC7C7C7;
 const MESSAGE_BAR: Themed = Themed(0xFF606060, 0xFFD0D0D0);
@@ -71,6 +70,11 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Color Fill is on: what is selected is filled as the tool closes.
+    pub fn color_fill(&self) -> bool {
+        self.color_fill
+    }
+
     /// The icon of how it selects now, for the pointer over the canvas.
     pub fn kind_icon(&self) -> &'static icons::Icon {
         match self.kind {
@@ -117,12 +121,14 @@ impl Selection {
         self.look(session);
     }
 
-    /// The tool closes; a freehand path drawn is closed into a selection.
+    /// The tool closes; a freehand path drawn is closed into a selection. With Color Fill, what is
+    /// selected is filled and the selection ends with it (one undo step, which brings it back).
     pub fn close(&mut self, session: &CanvasSession) {
         if !self.on {
             return;
         }
-        session.close_freehand();
+        session.close_selection_tool(self.color_fill);
+        self.has = session.has_selection();
         session.set_touch_selecting(None);
         self.on = false;
         self.set_popup(session, Popup::None);
@@ -151,10 +157,17 @@ impl Selection {
         self.color_fill && self.lasso_fill && self.lasso_fills
     }
 
-    /// The selection shows tinted while selecting by colour, else striped.
+    /// The selection shows covered by the colour with Color Fill on, else tinted while selecting
+    /// by colour, else striped.
     fn look(&self, session: &CanvasSession) {
-        let tint = self.on && self.kind == SelectKind::Automatic;
-        session.set_selection_display(if tint { SelectionDisplay::Tint } else { SelectionDisplay::Stripes });
+        let display = if self.on && self.color_fill {
+            SelectionDisplay::ColourFill
+        } else if self.on && self.kind == SelectKind::Automatic {
+            SelectionDisplay::Tint
+        } else {
+            SelectionDisplay::Stripes
+        };
+        session.set_selection_display(display);
     }
 
     /// Nothing selected any more (a freehand path being drawn closed first), as Deselect does.
@@ -195,13 +208,10 @@ impl Selection {
         self.drag = None;
     }
 
-    /// A selection was made: Color Fill fills it.
+    /// A selection was made.
     pub fn changed(&mut self, session: &CanvasSession) {
         self.drag = None;
         self.has = session.has_selection();
-        if self.color_fill && self.has {
-            session.fill_selection();
-        }
         self.look(session);
     }
 
@@ -259,8 +269,7 @@ impl Selection {
         }
         buttons.push(Button::new(&icons::CLEAR_SELECTION, "Clear", 44.0).enabled(has || drawing));
         self.buttons = buttons.len();
-        let tapped =
-            floating_toolbar(ctx, look, "selection toolbar", (BUTTON_ROOMY, BUTTON_NARROW), &segments, &buttons, 41.0);
+        let tapped = floating_toolbar(ctx, look, "selection toolbar", BUTTON_ROOMY, &segments, &buttons, 41.0);
         match tapped {
             Some(Tapped::Background) => self.set_popup(session, Popup::None),
             Some(Tapped::Segment(k)) => {
@@ -294,10 +303,8 @@ impl Selection {
             Some(Tapped::Button(5)) => self.open_popup(ctx, session, Popup::Saved),
             Some(Tapped::Button(6)) => {
                 self.color_fill = !self.color_fill;
-                if self.color_fill && self.has {
-                    session.fill_selection();
-                }
                 self.touches(session);
+                self.look(session);
             }
             // right-clicked: Color Fill's settings
             Some(Tapped::Held(6)) => self.open_popup(ctx, session, Popup::ColorFill),
@@ -353,7 +360,7 @@ impl Selection {
             Popup::ColorFill => 6,
             _ => 5,
         };
-        let (tip_x, tip_y) = button_tip(ctx, (BUTTON_ROOMY, BUTTON_NARROW), index, self.buttons);
+        let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, self.buttons);
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
         let height = match self.popup {
             Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0,

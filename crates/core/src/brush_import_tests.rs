@@ -92,7 +92,7 @@ fn the_brushes_are_read_ahead_on_a_thread_with_little_stack() {
         let _ = s.open_brushes(dir.clone());
         s.new_brush_set();
         s.keep_brushes(dir.clone());
-        let (library, _) = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
+        let library = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
         assert!(library.is_file(), "a library kept");
     }
     let at = dir.clone();

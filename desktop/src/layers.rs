@@ -3,7 +3,8 @@
 //! background under them. Tap a layer to make it current, the current one for its options (where
 //! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
 //! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it
-//! (with a mouse, just drag it up or down);
+//! (with a mouse, just drag it up or down), out past the panel's side to lift it out and drop it
+//! on the canvas or, through the gallery, into another artwork;
 //! slide it left for lock, duplicate and delete, or a little right to pick it. On a model: each
 //! texture set's name over its meshes (each its picture and box), the open mesh's layers under it,
 //! and under a layer its channels (colour, roughness, metalness), one of which a click paints on.
@@ -14,8 +15,8 @@ use std::time::Instant;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, ThumbnailImage,
-    VectorApply,
+    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind, RowDrop,
+    ShownRow, ThumbnailImage, VectorApply,
 };
 use resvg::tiny_skia;
 
@@ -27,7 +28,7 @@ use crate::menu::{self, Entry, Menu};
 use crate::overlays::ease;
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
 
-const LAYERS_WIDTH: f32 = 384.0;
+pub(crate) const LAYERS_WIDTH: f32 = 384.0;
 const HEADER_HEIGHT: f32 = 64.0;
 const ROW_HEIGHT: f32 = 69.0;
 /// A layer with a mask, and the mask, are a little shorter.
@@ -38,13 +39,22 @@ const LIST_CORNER: f32 = 8.0;
 const GROUP_HEIGHT: f32 = 44.0;
 const GROUP_INDENT: f32 = 21.0;
 const GROUP_LINE: u32 = 0xFF4E4E4E;
+/// A closed group's row is taller: its line (20 under the row's top and 20 over its bottom) opens
+/// into a window 4 in from them, on its layers' rows drawn small; opening or closing, over this
+/// long (seconds).
+const GROUP_CLOSED_HEIGHT: f32 = 82.0;
+const GROUP_LINE_INSET: f32 = 20.0;
+const GROUP_WINDOW_INSET: f32 = 4.0;
+const GROUP_TURN: f32 = 0.15;
+/// A row's thumbnail (a group's line) held over by a dragged row long enough to take it.
+const HELD_OUTLINE: Color32 = Color32::WHITE;
 const MASK_OWNER_ROW: u32 = 0xFF2C5281;
 const PICKED_ROW: u32 = 0xFF2C5281;
 const LOCKED_LETTER: u32 = 0xFF808080;
 const LAYER_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const BACKGROUND_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const CHECK_FILL: Themed = Themed(0xFFC7C7C7, 0xFF575757);
-const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
+pub(crate) const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
 /// A text layer's glyph on its thumbnail.
 const TEXT_GLYPH: Themed = Themed(0xFFB8B8B8, 0xFF000000);
 const THUMB: (f32, f32) = (93.0, 61.0);
@@ -95,6 +105,8 @@ const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 /// A dragged row this near an end of the list scrolls it, at most this far a second.
 const DRAG_EDGE: f32 = 56.0;
 const DRAG_SCROLL: f32 = 480.0;
+/// A dragged row this far out past the panel's side is lifted out of it, to drop elsewhere.
+const LIFT_REACH: f32 = 24.0;
 
 /// What a press on a row turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,6 +145,12 @@ struct Blend {
 
 #[derive(Default)]
 pub struct Layers {
+    /// Floating in a window of its own: what its strips had done to them this frame.
+    pub chrome: panel::FloatingChrome,
+    /// Hanging from its button, whether a plugin lets it float (its grabber then shows), and while
+    /// the grabber is dragged, where the press began and where the pointer is (the window's points).
+    pub floats: bool,
+    pub undock: Option<(egui::Pos2, egui::Pos2)>,
     /// Each layer's thumbnail and the pixels' version it shows.
     thumbnails: HashMap<u64, (u64, TextureHandle)>,
     /// The current layer's options: whose (kept while they fade), and their coming and going.
@@ -158,8 +176,22 @@ pub struct Layers {
     /// The rows that go with a dragged one (its mask, a group's layers), where the rows lay last
     /// frame, the list's box, and how far to scroll it.
     dragged_rows: Vec<u64>,
+    /// Where the dragged row lands if let go now, and the row under its middle and since when
+    /// (held over it a moment, it goes onto it).
+    drop_at: Option<RowDrop>,
+    over: Option<(u64, Instant)>,
+    /// Each closed group's layers, as the list would show them open, with how far in each sits
+    /// under it: drawn small in its window.
+    closed_contents: HashMap<u64, Vec<(LayerInfo, u32)>>,
     last_rows: HashMap<u64, Rect>,
     list: Option<Rect>,
+    /// The panel's box and its rows where the window has them, as last shown: where layers held out
+    /// of it drop.
+    box_on_window: Option<Rect>,
+    rows_on_window: HashMap<u64, Rect>,
+    /// A row dragged out past the panel's side: its layer, to be lifted out and held (the app takes
+    /// it).
+    pub lifted: Option<u64>,
     scroll_by: f32,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
@@ -169,7 +201,7 @@ pub struct Layers {
     twin: Option<Twin>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
     /// layers shared, a text layer's text edited.
-    pub notice: Option<(String, bool)>,
+    pub notice: Option<(String, bool, procraft_core::NoticeKind)>,
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
     pub edit_text: Option<u64>,
@@ -296,18 +328,22 @@ impl Layers {
             || self.locked.is_open()
     }
 
-    /// Shows the panel hanging from `button`; returns where it is (points).
+    /// Shows the panel hanging from its button, or floating in a window of its own, as `hang`
+    /// says; returns where it is (points).
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
         session: &CanvasSession,
         colours: &mut Colours,
-        button: Rect,
+        hang: panel::Hang,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
-        let screen = ctx.content_rect();
-        let (left, arrow_x) = panel::place(ctx, LAYERS_WIDTH, button.center().x);
+        let screen = panel::screen(ctx);
+        let (left, arrow_x) = match hang {
+            panel::Hang::Button(button) => panel::place(ctx, LAYERS_WIDTH, button.center().x),
+            panel::Hang::Floating(window) => (window.left(), 0.0),
+        };
         // on a model: its meshes pictured as it is seen when the panel opens
         let model = session.model_info();
         let chosen_tile = model.is_some() && session.channel_tile_chosen();
@@ -337,9 +373,15 @@ impl Layers {
             false
         };
         let shown: Vec<&LayerInfo> = layers.iter().filter(|l| !hidden(l)).collect();
+        self.closed_contents = closed_contents(&layers);
         let masked = |l: &LayerInfo| layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
+        // a closed group's row grows as it closes
         let height_of = |l: &LayerInfo| match l.kind {
-            LayerType::Group => GROUP_HEIGHT,
+            LayerType::Group => {
+                let closed =
+                    ctx.animate_bool_with_time(egui::Id::unique(("group closed", l.id)), l.collapsed, GROUP_TURN);
+                GROUP_HEIGHT + (GROUP_CLOSED_HEIGHT - GROUP_HEIGHT) * closed
+            }
             LayerType::Mask => MASKED_ROW_HEIGHT,
             LayerType::Paint if masked(l) => MASKED_ROW_HEIGHT,
             LayerType::Paint => ROW_HEIGHT,
@@ -372,7 +414,16 @@ impl Layers {
         // as tall as its rows, up to the window's bottom less a gap
         let most = screen.bottom() - panel::POPOVER_GAP - top;
         let height = (panel::ARROW_HEIGHT + HEADER_HEIGHT + rows).min(most);
-        let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+        let (rect, area) = match hang {
+            panel::Hang::Button(_) => {
+                let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+                (rect, panel::area(ctx, egui::Id::unique("layers panel"), rect))
+            }
+            // floating, as big as its window, whatever its rows
+            panel::Hang::Floating(window) => {
+                (panel::floating_rect(window), panel::floating_area(ctx, egui::Id::unique("floating layers"), window))
+            }
+        };
         let any_picked = layers.iter().any(|l| l.picked);
         let current_mask_parent = layers.iter().find(|l| l.current && l.kind == LayerType::Mask).and_then(|l| l.parent);
         let current = layers.iter().find(|l| l.current).map(|l| l.id);
@@ -385,190 +436,193 @@ impl Layers {
         // the only layer (masks aside) is cleared rather than deleted
         let alone = layers.iter().filter(|l| l.kind != LayerType::Mask).count() == 1;
 
-        egui::Area::new(egui::Id::unique("layers panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
-            ctx,
-            |ui| {
-                ui.allocate_rect(rect, Sense::click());
-                panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
-                let body = panel::body(rect);
-                // the chevron turns blue while layers are picked
-                let (title_tapped, row) = panel::header_title(ui, look, body, "Layers", 24.0, true, any_picked);
-                title = row;
-                if title_tapped {
-                    self.title_menu.open();
+        area.show(ctx, |ui| {
+            match hang {
+                panel::Hang::Button(_) => {
+                    ui.allocate_rect(rect, Sense::click());
+                    panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
+                    self.undock = if self.floats { panel::undock_grabber(ui, panel::body(rect)) } else { None };
                 }
-                plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
-                look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                // (held, or with the other button: a vector layer, which keeps what is drawn on it as
-                // strokes and fills)
-                let plus = ui.interact(plus, ui.scope_id().with("new layer"), Sense::click());
-                let added = if plus.long_touched() || plus.secondary_clicked() {
-                    Some(session.add_vector_layer())
-                } else if plus.clicked() {
-                    // with plugins' kinds of layer on, it asks which
-                    if self.layer_kinds.is_empty() {
-                        Some(session.add_layer())
-                    } else {
-                        self.add_menu.open();
-                        None
-                    }
+                panel::Hang::Floating(window) => {
+                    ui.allocate_rect(window, Sense::click());
+                    panel::floating_panel_frame(ui, look, "floating layers frame", window, backdrops);
+                    self.chrome = panel::floating_chrome(ui, window);
+                }
+            }
+            let body = panel::body(rect);
+            // the chevron turns blue while layers are picked
+            let (title_tapped, row) = panel::header_title(ui, look, body, "Layers", 24.0, true, any_picked);
+            title = row;
+            if title_tapped {
+                self.title_menu.open();
+            }
+            plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
+            look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
+            // (held, or with the other button: a vector layer, which keeps what is drawn on it as
+            // strokes and fills)
+            let plus_touch = ui.interact(plus, ui.scope_id().with("new layer"), Sense::click());
+            let added = if plus_touch.long_touched() || plus_touch.secondary_clicked() {
+                Some(session.add_vector_layer())
+            } else if plus_touch.clicked() {
+                // with plugins' kinds of layer on, it asks which
+                if self.layer_kinds.is_empty() {
+                    Some(session.add_layer())
                 } else {
+                    self.add_menu.open();
                     None
-                };
-                if added == Some(0) {
-                    crate::files::no_room(session);
                 }
-                let list = Rect::from_min_max(
-                    pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
-                    pos2(body.right() - 12.0, body.bottom()),
-                );
-                let mut read = 0;
-                self.list = Some(list);
-                ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
-                    ScrollArea::vertical()
-                        .id_salt("layers list")
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                            // at once: a finger's drag or a dragged row's at the edge, each frame
-                            ui.scroll_with_delta_animation(
-                                vec2(0.0, -std::mem::take(&mut self.scroll_by)),
-                                egui::style::ScrollAnimation::none(),
-                            );
-                            let mut dragged = Vec::new();
-                            let mut squeezed = Vec::new();
-                            for item in &items {
-                                let (l, (t, b), indent, shared) = match item {
-                                    Item::Set { name, first } => {
-                                        set_header(ui, name, *first);
-                                        continue;
-                                    }
-                                    Item::Mesh { index, name, open, corners } => {
-                                        self.submesh_row(ui, look, session, colours, *index, name, *open, *corners);
-                                        ui.add_space(ROW_GAP);
-                                        continue;
-                                    }
-                                    Item::Layer { l, corners, indent, shared } => (*l, *corners, *indent, *shared),
-                                };
-                                let height = height_of(l);
-                                let (row, _) =
-                                    ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-                                row_rects.insert(l.id, row);
-                                // the current mask's layer, or the current layer's mask
-                                let owner = current_mask_parent == Some(l.id)
-                                    || (l.kind == LayerType::Mask && l.parent.is_some() && l.parent == current);
-                                // on a model with a channel's tile chosen, the tile is blue, not the row
-                                let chosen = l.current && !chosen_tile;
-                                let fill = if chosen {
-                                    argb(pc::ACCENT)
-                                } else if l.picked {
-                                    argb(PICKED_ROW)
-                                } else if owner {
-                                    argb(MASK_OWNER_ROW)
-                                } else {
-                                    argb(LAYER_ROW)
-                                };
-                                let looks = RowLook {
-                                    corners: (t, b),
-                                    fill,
-                                    version: versions.get(&l.id).copied(),
-                                    masked: masked(l),
-                                    indent,
-                                    shared,
-                                    cube: (model.is_some() && l.kind != LayerType::Mask)
-                                        .then_some(l.current && chosen_tile),
-                                    chosen,
-                                };
-                                if self.dragged_rows.contains(&l.id) {
-                                    // held and dragged: drawn where it is dragged to, over the rest
-                                    dragged.push((l, row, looks));
-                                } else if let Some((dy, upper)) = self.pinch.as_ref().and_then(|p| p.moved(l.id)) {
-                                    // pinched: drawn after the rest, moved part of its finger's way
-                                    squeezed.push((l, row.translate(vec2(0.0, dy)), looks, upper));
-                                } else {
-                                    let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
-                                    let way = self.making_way(l.id);
-                                    let aside =
-                                        ui.ctx().animate_value_with_time(ui.scope_id().with(("aside", l.id)), way, 0.3);
-                                    let row = row.translate(vec2(0.0, aside));
-                                    let at = row.translate(vec2(slide, 0.0));
-                                    if slide < 0.0 {
-                                        self.swipe_buttons(ui, session, l, row, alone);
-                                    }
-                                    let id = ui.scope_id().with(("row", l.id));
-                                    let response = ui.interact(at.intersect(row), id, Sense::click_and_drag());
-                                    if response.is_pointer_button_down_on()
-                                        && self.press.is_none()
-                                        && let Some(origin) = ui.input(|i| i.pointer.interact_pos())
-                                    {
-                                        let since = Instant::now();
-                                        let way = Way::Undecided;
-                                        // a tablet's pen moving the mouse pointer goes as a finger
-                                        let mouse = !ui.input(|i| i.any_touches()) && crate::pen::mouse_pen().is_none();
-                                        self.press = Some(RowPress {
-                                            id: l.id,
-                                            origin,
-                                            since,
-                                            way,
-                                            start: slide,
-                                            dy: 0.0,
-                                            mouse,
-                                        });
-                                    }
-                                    let mut row_ui = ui.new_child(UiBuilder::new().max_rect(row));
-                                    row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
-                                    if self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read) {
-                                        blend_tapped = Some(l.id);
-                                    }
-                                    // a tap, not a slide or a hold
-                                    if response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided) {
-                                        tapped = Some(l);
-                                        self.swiped = None;
-                                    }
+            } else {
+                None
+            };
+            if added == Some(0) {
+                crate::files::no_room(session);
+            }
+            let list = Rect::from_min_max(
+                pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
+                pos2(body.right() - 12.0, body.bottom()),
+            );
+            let mut read = 0;
+            self.list = Some(list);
+            ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("layers list")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        // at once: a finger's drag or a dragged row's at the edge, each frame
+                        ui.scroll_with_delta_animation(
+                            vec2(0.0, -std::mem::take(&mut self.scroll_by)),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                        let mut dragged = Vec::new();
+                        let mut squeezed = Vec::new();
+                        for item in &items {
+                            let (l, (t, b), indent, shared) = match item {
+                                Item::Set { name, first } => {
+                                    set_header(ui, name, *first);
+                                    continue;
                                 }
-                                if tray_for == Some(l.id) {
-                                    let (tray, _) =
-                                        ui.allocate_exact_size(vec2(ui.available_width(), TRAY_HEIGHT), Sense::hover());
-                                    self.channel_tray(ui, session, colours, l, tray);
+                                Item::Mesh { index, name, open, corners } => {
+                                    self.submesh_row(ui, look, session, colours, *index, name, *open, *corners);
+                                    ui.add_space(ROW_GAP);
+                                    continue;
                                 }
-                                ui.add_space(ROW_GAP);
-                                // its blend modes and opacity open under it, the panel growing as
-                                // they come
-                                if let Some(&k) = blend_shown.get(&l.id) {
-                                    let (space, _) = ui.allocate_exact_size(
-                                        vec2(ui.available_width(), k * BLEND_EDITOR_HEIGHT),
-                                        Sense::hover(),
-                                    );
-                                    let editor =
-                                        Rect::from_min_size(space.min, vec2(space.width(), BLEND_EDITOR_HEIGHT));
-                                    let mut ui = ui.new_child(UiBuilder::new().max_rect(editor));
-                                    ui.set_clip_rect(space.intersect(ui.clip_rect()));
-                                    ui.multiply_opacity(k);
-                                    self.blend_editor(&mut ui, look, session, l, editor, &modes);
+                                Item::Layer { l, corners, indent, shared } => (*l, *corners, *indent, *shared),
+                            };
+                            let height = height_of(l);
+                            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+                            row_rects.insert(l.id, row);
+                            // the current mask's layer, or the current layer's mask
+                            let owner = current_mask_parent == Some(l.id)
+                                || (l.kind == LayerType::Mask && l.parent.is_some() && l.parent == current);
+                            // on a model with a channel's tile chosen, the tile is blue, not the row
+                            let chosen = l.current && !chosen_tile;
+                            let fill = if chosen {
+                                argb(pc::ACCENT)
+                            } else if l.picked {
+                                argb(PICKED_ROW)
+                            } else if owner {
+                                argb(MASK_OWNER_ROW)
+                            } else {
+                                argb(LAYER_ROW)
+                            };
+                            let looks = RowLook {
+                                corners: (t, b),
+                                fill,
+                                version: versions.get(&l.id).copied(),
+                                masked: masked(l),
+                                indent,
+                                shared,
+                                cube: (model.is_some() && l.kind != LayerType::Mask)
+                                    .then_some(l.current && chosen_tile),
+                                chosen,
+                                held: self.drop_at == Some(RowDrop::Onto { target: l.id }),
+                            };
+                            if self.dragged_rows.contains(&l.id) {
+                                // held and dragged: drawn where it is dragged to, over the rest
+                                dragged.push((l, row, looks));
+                            } else if let Some((dy, upper)) = self.pinch.as_ref().and_then(|p| p.moved(l.id)) {
+                                // pinched: drawn after the rest, moved part of its finger's way
+                                squeezed.push((l, row.translate(vec2(0.0, dy)), looks, upper));
+                            } else {
+                                let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
+                                let way = self.making_way(l.id);
+                                let aside =
+                                    ui.ctx().animate_value_with_time(ui.scope_id().with(("aside", l.id)), way, 0.3);
+                                let row = row.translate(vec2(0.0, aside));
+                                let at = row.translate(vec2(slide, 0.0));
+                                if slide < 0.0 {
+                                    self.swipe_buttons(ui, session, l, row, alone);
+                                }
+                                let id = ui.scope_id().with(("row", l.id));
+                                let response = ui.interact(at.intersect(row), id, Sense::click_and_drag());
+                                if response.is_pointer_button_down_on()
+                                    && self.press.is_none()
+                                    && let Some(origin) =
+                                        ui.input(|i| i.pointer.interact_pos()).map(|p| panel::in_panel(ctx, p))
+                                {
+                                    let since = Instant::now();
+                                    let way = Way::Undecided;
+                                    // a tablet's pen moving the mouse pointer goes as a finger
+                                    let mouse = !ui.input(|i| i.any_touches()) && crate::pen::mouse_pen().is_none();
+                                    self.press =
+                                        Some(RowPress { id: l.id, origin, since, way, start: slide, dy: 0.0, mouse });
+                                }
+                                let mut row_ui = ui.new_child(UiBuilder::new().max_rect(row));
+                                row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
+                                if self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read) {
+                                    blend_tapped = Some(l.id);
+                                }
+                                // a tap, not a slide or a hold
+                                if response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided) {
+                                    tapped = Some(l);
+                                    self.swiped = None;
                                 }
                             }
-                            if model.is_none() {
-                                ui.add_space(10.0);
-                                self.pick_background |= background_row(ui, look, session);
+                            if tray_for == Some(l.id) {
+                                let (tray, _) =
+                                    ui.allocate_exact_size(vec2(ui.available_width(), TRAY_HEIGHT), Sense::hover());
+                                self.channel_tray(ui, session, colours, l, tray);
                             }
-                            ui.add_space(12.0);
-                            // the pinched rows over the rest, the upper over the lower
-                            squeezed.sort_by_key(|s| s.3);
-                            for (l, at, looks, _) in squeezed {
-                                let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
-                                self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
+                            ui.add_space(ROW_GAP);
+                            // its blend modes and opacity open under it, the panel growing as
+                            // they come
+                            if let Some(&k) = blend_shown.get(&l.id) {
+                                let (space, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), k * BLEND_EDITOR_HEIGHT),
+                                    Sense::hover(),
+                                );
+                                let editor = Rect::from_min_size(space.min, vec2(space.width(), BLEND_EDITOR_HEIGHT));
+                                let mut ui = ui.new_child(UiBuilder::new().max_rect(editor));
+                                ui.set_clip_rect(space.intersect(ui.clip_rect()));
+                                ui.multiply_opacity(k);
+                                self.blend_editor(&mut ui, look, session, l, editor, &modes);
                             }
-                            for (l, row, looks) in dragged {
-                                let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
-                                let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
-                                self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
-                            }
-                        });
-                });
-            },
-        );
-        self.follow_press(ctx, session, &layers, &row_rects);
+                        }
+                        if model.is_none() {
+                            ui.add_space(10.0);
+                            self.pick_background |= background_row(ui, look, session);
+                        }
+                        ui.add_space(12.0);
+                        // the pinched rows over the rest, the upper over the lower
+                        squeezed.sort_by_key(|s| s.3);
+                        for (l, at, looks, _) in squeezed {
+                            let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
+                            self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
+                        }
+                        for (l, row, looks) in dragged {
+                            let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
+                            let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
+                            self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
+                        }
+                    });
+            });
+        });
+        self.follow_press(ctx, session, &layers, &row_rects, rect);
         self.last_rows.clone_from(&row_rects);
+        let to_window = panel::to_window(ctx);
+        self.box_on_window = Some(to_window.mul_rect(rect));
+        self.rows_on_window = row_rects.iter().map(|(id, r)| (*id, to_window.mul_rect(*r))).collect();
         self.follow_pinch(ctx, session, &row_rects);
         // a layer tapped: picked layers give way to it; the current one shows its options (or
         // hides them); any other becomes the current one
@@ -623,7 +677,10 @@ impl Layers {
             _ = session.delete_layer(id);
         }
         self.locked.show(ctx, look);
-        rect
+        match hang {
+            panel::Hang::Button(_) => rect,
+            panel::Hang::Floating(window) => window,
+        }
     }
 
     /// The title's menu, under it: Select All; Group and Merge (with layers picked); Share and
@@ -649,7 +706,7 @@ impl Layers {
         entries.push(menu::DIVIDER);
         entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let left = (title.center().x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
         let rect = Rect::from_min_size(pos2(left, title.bottom().max(screen.top() + OPTIONS_TOP)), size);
         let mut tapped = None;
@@ -695,7 +752,7 @@ impl Layers {
         }
         let entries = add_entries(&self.layer_kinds);
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let left = (plus.right() - size.x).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
         let rect = Rect::from_min_size(pos2(left, plus.bottom().max(screen.top() + OPTIONS_TOP)), size);
         let mut tapped = None;
@@ -744,7 +801,7 @@ impl Layers {
         let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
         let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
-            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill);
+            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill, looks.held);
             false
         } else {
             self.layer_row(ui, look, session, l, at, ink, box_fill, looks, modes, read)
@@ -773,13 +830,14 @@ impl Layers {
         let swiped = self.mesh_swiped == Some(index);
         let mut slide = self.mesh_slid.get(&index).copied().unwrap_or(if swiped { -reach } else { 0.0 });
         let pressed = ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.primary_down()));
+        let pressed = pressed.map(|p| panel::in_panel(ui.ctx(), p));
         if let Some(origin) = pressed.filter(|p| self.mesh_press.is_none() && place.contains(*p)) {
             self.mesh_press = Some((index, origin.x, slide));
         }
         let mut let_go = false;
         if let Some((_, origin, start)) = self.mesh_press.filter(|p| p.0 == index) {
             let (down, at) = ui.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
-            if let Some(at) = at.filter(|_| down) {
+            if let Some(at) = at.filter(|_| down).map(|p| panel::in_panel(ui.ctx(), p)) {
                 slide = (start + at.x - origin).clamp(-reach, if swiped { 0.0 } else { PICK_REACH });
             }
             let_go = !down;
@@ -788,7 +846,8 @@ impl Layers {
             self.mesh_press = None;
             if slide > PICK_REACH / 2.0 {
                 if !session.pick_more_submeshes(index as u32) {
-                    self.notice = Some(("Those meshes aren't in the same texture set".to_owned(), true));
+                    self.notice =
+                        Some(("Those meshes aren't in the same texture set".to_owned(), true, NoticeKind::Problem));
                 }
                 self.mesh_swiped = None;
             } else {
@@ -804,7 +863,8 @@ impl Layers {
             text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Medium, argb(SWIPE_INK));
             if ui.interact(rect, ui.scope_id().with(("mesh lock", index)), Sense::click()).clicked() {
                 session.set_submesh_locked(index as u32, !locked);
-                self.notice = Some((if locked { "Unlock mesh" } else { "Lock mesh" }.to_owned(), false));
+                self.notice =
+                    Some((if locked { "Unlock mesh" } else { "Lock mesh" }.to_owned(), false, NoticeKind::Done));
                 self.mesh_swiped = None;
                 self.mesh_slid.remove(&index);
             }
@@ -844,7 +904,8 @@ impl Layers {
         check_box(ui, look, visibility.center(), !hidden, argb(CHECK_FILL));
         if ui.interact(visibility, ui.scope_id().with(("mesh box", index)), Sense::click()).clicked() {
             session.set_submesh_hidden(index as u32, !hidden);
-            self.notice = Some((if hidden { "Show Submesh" } else { "Hide Submesh" }.to_owned(), false));
+            self.notice =
+                Some((if hidden { "Show Submesh" } else { "Hide Submesh" }.to_owned(), false, NoticeKind::Done));
         } else if response.clicked() {
             self.open_mesh(session, colours, index);
         }
@@ -853,15 +914,15 @@ impl Layers {
 
     /// Layer `id`'s content in `channel` replaced by a picture chosen now.
     fn replace_map(&mut self, session: &CanvasSession, colours: &mut Colours, id: u64, channel: u32) {
-        let Some(path) = rfd::FileDialog::new().set_title("Replace Material Map Content").pick_file() else { return };
+        let Some(path) = crate::files::dialog().set_title("Replace Material Map Content").pick_file() else { return };
         let Ok(picture) = image::open(&path) else {
-            self.notice = Some(("This picture can't be opened.".to_owned(), true));
+            self.notice = Some(("This picture can't be opened.".to_owned(), true, NoticeKind::Problem));
             return;
         };
         let rgba = picture.to_rgba8();
         let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
         if session.replace_material_map(id, channel, image) {
-            self.notice = Some(("Replace Material Map Content".to_owned(), false));
+            self.notice = Some(("Replace Material Map Content".to_owned(), false, NoticeKind::Done));
             self.channel_pictures.retain(|(_, l), _| *l != id);
             self.follow_channel(session, colours);
         }
@@ -999,7 +1060,7 @@ impl Layers {
                     "Lock" | "Unlock" => {
                         let said = session.lock_said(l.id, !l.locked);
                         if session.set_layer_locked(l.id, !l.locked) {
-                            self.notice = Some((said, false));
+                            self.notice = Some((said, false, NoticeKind::Done));
                         }
                     }
                     "Duplicate" => _ = session.duplicate_layer(l.id),
@@ -1160,23 +1221,71 @@ impl Layers {
         }
     }
 
-    /// How far row `id` stands aside for the rows being dragged: past its middle it takes the room
-    /// they left, so the gap shows where they will land.
+    /// How far row `id` stands aside for the rows being dragged: between where they were and where
+    /// they land it takes the room they left, so the gap shows where they will land.
     fn making_way(&self, id: u64) -> f32 {
-        let (Some(p), Some(row)) = (self.press, self.last_rows.get(&id)) else { return 0.0 };
+        let Some(row) = self.last_rows.get(&id) else { return 0.0 };
+        if self.press.is_none() || self.dragged_rows.contains(&id) {
+            return 0.0;
+        }
         let moved: Vec<&Rect> = self.dragged_rows.iter().filter_map(|r| self.last_rows.get(r)).collect();
-        let Some(dragged) = self.last_rows.get(&p.id).filter(|_| !moved.is_empty()) else { return 0.0 };
-        let y = dragged.center().y + p.dy;
+        if moved.is_empty() {
+            return 0.0;
+        }
         let top = moved.iter().fold(f32::INFINITY, |t, r| t.min(r.top()));
         let bottom = moved.iter().fold(f32::NEG_INFINITY, |b, r| b.max(r.bottom()));
         let room = bottom - top + ROW_GAP;
-        if row.bottom() <= top && y < row.center().y {
+        // the line between the rows they land between; held onto a row, or over their own place,
+        // none moves
+        let slot = match self.drop_at {
+            Some(RowDrop::Above { target }) => self.last_rows.get(&target).map(|r| r.top()),
+            Some(RowDrop::Below { target }) => self.last_rows.get(&target).map(|r| r.bottom()),
+            Some(RowDrop::Bottom) => Some(f32::INFINITY),
+            _ => None,
+        };
+        let Some(slot) = slot else { return 0.0 };
+        if row.bottom() <= top && row.top() >= slot {
             room
-        } else if row.top() >= bottom && y > row.center().y {
+        } else if row.top() >= bottom && row.bottom() <= slot {
             -room
         } else {
             0.0
         }
+    }
+
+    /// Where layers let go at window point `at` land by the panel's rows (`layer`: the one of
+    /// them held, back among its own rows): none off the panel, or with it closed.
+    pub fn drop_at(&self, session: &CanvasSession, layer: Option<u64>, at: Pos2) -> Option<RowDrop> {
+        if !self.box_on_window.is_some_and(|b| b.contains(at)) {
+            return None;
+        }
+        Some(session.row_drop(layer, shown_rows(&self.rows_on_window), at.y, None))
+    }
+
+    /// The row under the dragged row's middle at `y`, held over since when, and the row held
+    /// over long enough to go onto it, if any.
+    fn held_over(&mut self, rows: &HashMap<u64, Rect>, y: f32) -> Option<u64> {
+        let under = rows
+            .iter()
+            .find(|(id, r)| !self.dragged_rows.contains(id) && y >= r.top() && y < r.bottom())
+            .map(|(id, _)| *id);
+        if self.over.map(|(id, _)| id) != under {
+            self.over = under.map(|id| (id, Instant::now()));
+        }
+        self.over
+            .filter(|(_, since)| since.elapsed().as_secs_f32() >= procraft_core::ROW_HOLD_SECONDS)
+            .map(|(id, _)| id)
+    }
+
+    /// Layer `id`'s thumbnail as the panel shows it, if it has been read, and its row on the window.
+    pub fn row_look(&self, id: u64) -> (Option<TextureHandle>, Option<Rect>) {
+        (self.thumbnails.get(&id).map(|(_, t)| t.clone()), self.rows_on_window.get(&id).copied())
+    }
+
+    /// The panel closed: no rows to drop on.
+    pub fn closed(&mut self) {
+        self.box_on_window = None;
+        self.rows_on_window.clear();
     }
 
     /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
@@ -1189,10 +1298,11 @@ impl Layers {
         session: &CanvasSession,
         layers: &[LayerInfo],
         rows: &HashMap<u64, Rect>,
+        panel_box: Rect,
     ) {
         let Some(mut p) = self.press else { return };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
-        let d = at.unwrap_or(p.origin) - p.origin;
+        let d = at.map_or(p.origin, |at| panel::in_panel(ctx, at)) - p.origin;
         let l = layers.iter().find(|l| l.id == p.id);
         let reach = l.map_or(0.0, swipe_reach);
         let open = self.swiped == Some(p.id);
@@ -1230,6 +1340,16 @@ impl Layers {
                     ctx.request_repaint();
                 }
                 Way::Reorder => {
+                    // out past the panel's side, the row (with what goes with it) is lifted out,
+                    // held by the pointer from then on wherever it goes
+                    let x = at.map_or(p.origin.x, |at| panel::in_panel(ctx, at).x);
+                    if x < panel_box.left() - LIFT_REACH || x > panel_box.right() + LIFT_REACH {
+                        self.lifted = Some(p.id);
+                        self.press = None;
+                        self.dragged_rows.clear();
+                        (self.drop_at, self.over) = (None, None);
+                        return;
+                    }
                     // the row scrolled with the list stays under the pointer
                     let scrolled =
                         self.last_rows.get(&p.id).zip(rows.get(&p.id)).map_or(0.0, |(was, row)| was.top() - row.top());
@@ -1247,12 +1367,18 @@ impl Layers {
                         };
                         self.scroll_by = towards.clamp(-1.0, 1.0) * DRAG_SCROLL * ctx.input(|i| i.stable_dt);
                     }
+                    // where it lands if let go now: the gap opens there, or a row held over is outlined
+                    if let Some(row) = rows.get(&p.id) {
+                        let y = row.center().y + p.dy;
+                        let held = self.held_over(rows, y);
+                        self.drop_at = Some(session.row_drop(Some(p.id), shown_rows(rows), y, held));
+                    }
                     ctx.request_repaint();
                 }
                 // a finger's: the row has the drag (not the list's own drag to scroll), the list
                 // follows it
                 Way::Ignored if !p.mouse => {
-                    self.scroll_by -= ctx.input(|i| i.pointer.delta().y);
+                    self.scroll_by -= panel::in_panel_by(ctx, ctx.input(|i| i.pointer.delta())).y;
                     ctx.request_repaint();
                 }
                 Way::Ignored => {}
@@ -1262,6 +1388,7 @@ impl Layers {
         }
         self.press = None;
         self.dragged_rows.clear();
+        self.drop_at = None;
         match p.way {
             Way::Swipe => {
                 let slide = self.slid.get(&p.id).copied().unwrap_or(0.0);
@@ -1275,21 +1402,12 @@ impl Layers {
                 }
             }
             Way::Reorder => {
-                // dropped where its middle came to rest: just above or below the row it is over
+                // dropped where its middle came to rest, placed as the core places it
                 let Some(row) = rows.get(&p.id) else { return };
                 let y = row.center().y + p.dy;
-                let moving = session.moving_with(p.id);
-                let others: Vec<(u64, Rect)> = layers
-                    .iter()
-                    .filter(|o| !moving.contains(&o.id))
-                    .filter_map(|o| rows.get(&o.id).map(|r| (o.id, *r)))
-                    .collect();
-                let target = others.iter().find(|(_, r)| y >= r.top() && y < r.bottom()).or_else(|| {
-                    others.iter().min_by(|a, b| (a.1.center().y - y).abs().total_cmp(&(b.1.center().y - y).abs()))
-                });
-                if let Some((target, r)) = target {
-                    session.move_next_to(p.id, *target, y < r.center().y);
-                }
+                let held = self.held_over(rows, y);
+                self.over = None;
+                session.drop_row(p.id, session.row_drop(Some(p.id), shown_rows(rows), y, held));
             }
             Way::Undecided | Way::Ignored => {}
         }
@@ -1307,7 +1425,7 @@ impl Layers {
                 if held >= HOLD {
                     *done = true;
                     if let Some(said) = session.hold_visibility(l.id) {
-                        self.notice = Some((said, false));
+                        self.notice = Some((said, false, NoticeKind::Done));
                     }
                 } else {
                     ui.ctx().request_repaint_after(HOLD - held);
@@ -1320,7 +1438,7 @@ impl Layers {
             && !held
             && let Some(said) = session.tap_visibility(l.id)
         {
-            self.notice = Some((said, false));
+            self.notice = Some((said, false, NoticeKind::Done));
         }
         if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
             self.box_press = None;
@@ -1364,7 +1482,7 @@ impl Layers {
         let count = rows.len() + own.len() + actions.len();
         // as measured, an empty one (a locked group's or mask's) is a pill 64 tall
         let height = (7.0 * 2.0 + menu::OPTION_HEIGHT * count as f32).max(64.0);
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
         let top = (row_y - height / 2.0).clamp(screen.top() + OPTIONS_TOP, lowest);
         let rect = Rect::from_min_size(pos2(panel.left() + OPTIONS_LEFT, top), vec2(OPTIONS_WIDTH, height));
@@ -1438,7 +1556,8 @@ impl Layers {
             LayerOption::EditText => self.edit_text = Some(l.id),
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
-                self.notice = Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true));
+                self.notice =
+                    Some((if l.text { "Text rasterized" } else { "Layer rasterized" }.into(), true, NoticeKind::Done));
             }
             LayerOption::SeparateObjects => _ = session.separate_vector_objects(l.id),
             // a plugin's layer: its strokes recoloured, or given the paint brush, as strokes
@@ -1597,6 +1716,9 @@ impl Layers {
         let thumb =
             Rect::from_center_size(pos2(x + 4.0 + THUMB.0 / 2.0, row.center().y + shift), vec2(THUMB.0, THUMB.1));
         self.thumbnail(ui, look, session, l, thumb, version, read);
+        if looks.held {
+            ui.painter().rect_stroke(thumb, 4, egui::Stroke::new(2.0, HELD_OUTLINE), egui::StrokeKind::Inside);
+        }
         let name_left = thumb.right();
         let blend =
             Rect::from_min_size(pos2(row.right() - 8.0 - 44.0 - 44.0 + 8.0, row.center().y - 23.5), vec2(44.0, 47.0));
@@ -1702,7 +1824,9 @@ impl Layers {
         }
     }
 
-    /// A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box.
+    /// A group's row: where a thumbnail would be, a line while it is open or, closed (the row
+    /// taller), a window on its layers' rows drawn small; its name, its open or closed arrow and
+    /// its box. Held over by a dragged row long enough to take it, the line or window is outlined.
     #[allow(clippy::too_many_arguments)]
     fn group_row(
         &mut self,
@@ -1713,12 +1837,27 @@ impl Layers {
         row: Rect,
         ink: Color32,
         box_fill: Color32,
+        held: bool,
     ) {
         let x = row.left() + GROUP_INDENT * l.depth as f32;
-        let line = Rect::from_min_size(pos2(x + 4.0, row.center().y - 2.0), vec2(93.0, 4.0));
-        ui.painter().rect_filled(line, 2, argb(GROUP_LINE));
-        let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.top()), vec2(44.0, GROUP_HEIGHT));
-        let arrow = Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, row.top()), vec2(44.0, GROUP_HEIGHT));
+        // 0 open, 1 closed: the line's 20 above and below become 4, the line the window between
+        let closed = ((row.height() - GROUP_HEIGHT) / (GROUP_CLOSED_HEIGHT - GROUP_HEIGHT)).clamp(0.0, 1.0);
+        let inset = GROUP_LINE_INSET + (GROUP_WINDOW_INSET - GROUP_LINE_INSET) * closed;
+        let corner = 2.0 + 2.0 * closed;
+        let line = Rect::from_min_max(pos2(x + 4.0, row.top() + inset), pos2(x + 4.0 + THUMB.0, row.bottom() - inset));
+        ui.painter().rect_filled(line, corner, argb(GROUP_LINE));
+        if closed > 0.0 {
+            self.group_contents(ui, look, session, l.id, line);
+        }
+        if held {
+            ui.painter().rect_stroke(line, corner, egui::Stroke::new(2.0, HELD_OUTLINE), egui::StrokeKind::Inside);
+        }
+        let visibility = Rect::from_min_size(
+            pos2(row.right() - 8.0 - 44.0, row.center().y - GROUP_HEIGHT / 2.0),
+            vec2(44.0, GROUP_HEIGHT),
+        );
+        let arrow =
+            Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, visibility.top()), vec2(44.0, GROUP_HEIGHT));
         self.name(ui, look, session, l, pos2(line.right(), row.center().y), arrow.left() - 8.0, ink);
         let icon = if l.collapsed { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_DOWN };
         look.icon(ui, icon, arrow.center(), 16.0, ink);
@@ -1727,6 +1866,98 @@ impl Layers {
         }
         check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
+    }
+
+    /// A closed group's layers' rows in its `window`, drawn small to fit its width less 1 on each
+    /// side, from its top: their fills, thumbnails, names, blend letters and boxes, as their rows
+    /// look in the list.
+    fn group_contents(&mut self, ui: &mut Ui, look: &mut Look, session: &CanvasSession, group: u64, window: Rect) {
+        let Some(rows) = self.closed_contents.get(&group).cloned() else { return };
+        let mut mini = ui.new_child(UiBuilder::new().max_rect(window));
+        mini.set_clip_rect(window.intersect(ui.clip_rect()));
+        let width = self.list.map_or(LAYERS_WIDTH - 24.0, |l| l.width());
+        let scale = (window.width() - 2.0) / width;
+        let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();
+        let modes = procraft_core::blend_modes();
+        let masked = |l: &LayerInfo| rows.iter().any(|(m, _)| m.kind == LayerType::Mask && m.parent == Some(l.id));
+        let mut y = window.top() + 1.0;
+        let mut read = 0;
+        for (l, depth) in &rows {
+            let group = l.kind == LayerType::Group;
+            let mask = l.kind == LayerType::Mask;
+            let full = if group {
+                GROUP_HEIGHT
+            } else if mask || masked(l) {
+                MASKED_ROW_HEIGHT
+            } else {
+                ROW_HEIGHT
+            };
+            let row = Rect::from_min_size(pos2(window.left() + 1.0, y), vec2(width, full) * scale);
+            y += (full + ROW_GAP) * scale;
+            if row.top() > window.bottom() {
+                break;
+            }
+            let fill = if l.current {
+                argb(pc::ACCENT)
+            } else if l.picked {
+                argb(PICKED_ROW)
+            } else {
+                argb(LAYER_ROW)
+            };
+            mini.painter().rect_filled(row, 0, fill);
+            let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
+            let left = row.left() + (GROUP_INDENT * *depth as f32 + 4.0) * scale;
+            let name_left = left + THUMB.0 * scale;
+            if group {
+                let line = Rect::from_center_size(
+                    pos2(left + THUMB.0 * scale / 2.0, row.center().y),
+                    vec2(THUMB.0, 4.0) * scale,
+                );
+                mini.painter().rect_filled(line, 2.0 * scale, argb(GROUP_LINE));
+            } else {
+                let shift = if mask {
+                    2.0
+                } else if masked(l) {
+                    -2.0
+                } else {
+                    0.0
+                };
+                let thumb = Rect::from_center_size(
+                    pos2(left + THUMB.0 * scale / 2.0, row.center().y + shift * scale),
+                    vec2(THUMB.0, THUMB.1) * scale,
+                );
+                self.thumbnail(&mini, look, session, l, thumb, versions.get(&l.id).copied(), &mut read);
+            }
+            let name = galley(
+                &mini,
+                &l.name,
+                17.0 * scale,
+                Weight::Regular,
+                ink,
+                (row.right() - 96.0 * scale - name_left).max(1.0),
+            );
+            mini.painter().galley(pos2(name_left + 29.0 * scale, row.center().y - name.size().y / 2.0), name, ink);
+            let right = row.right() - 8.0 * scale;
+            if !group && !mask {
+                let code = blend_code(&modes, l.blend);
+                let letter = if l.locked && !l.current && !l.picked { argb(LOCKED_LETTER) } else { ink };
+                let at = pos2(right - 44.0 * scale - 22.0 * scale + 8.0 * scale, row.center().y);
+                text(mini.painter(), at, Align2::CENTER_CENTER, &code, 14.0 * scale, Weight::SemiBold, letter);
+            }
+            let box_at = pos2(right - 22.0 * scale, row.center().y);
+            let box_fill = if l.current || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
+            let check = Rect::from_center_size(box_at, vec2(18.0, 18.0) * scale);
+            if l.visible && !l.soloed_out {
+                mini.painter().rect_filled(check, 5.0 * scale, box_fill);
+            } else {
+                mini.painter().rect_stroke(
+                    check,
+                    5.0 * scale,
+                    egui::Stroke::new(1.5 * scale, box_fill),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
     }
 
     /// A layer's thumbnail, read again when its pixels' version is new: what is drawn, fitted on
@@ -1820,7 +2051,13 @@ fn plugin_badge(painter: &egui::Painter, rect: Rect, badge: &procraft_core::Plug
 
 /// A plugin's badge's lines and dots in `ink` over `area` (its box, 0 to 1 across and down): its
 /// lines `width` thick, its dots squares twice that across.
-pub fn badge_drawing(painter: &egui::Painter, area: Rect, badge: &procraft_core::PluginBadge, ink: Color32, width: f32) {
+pub fn badge_drawing(
+    painter: &egui::Painter,
+    area: Rect,
+    badge: &procraft_core::PluginBadge,
+    ink: Color32,
+    width: f32,
+) {
     let at = |x: f32, y: f32| pos2(area.left() + area.width() * x, area.top() + area.height() * y);
     let stroke = egui::Stroke::new(width, ink);
     for line in &badge.lines {
@@ -1898,6 +2135,47 @@ struct RowLook {
     shared: bool,
     cube: Option<bool>,
     chosen: bool,
+    /// Held over by a dragged row long enough to take it: its thumbnail (a group's line) outlined.
+    held: bool,
+}
+
+/// The panel's rows where they are laid out, as the core places a drop by them.
+fn shown_rows(rows: &HashMap<u64, Rect>) -> Vec<ShownRow> {
+    rows.iter().map(|(id, r)| ShownRow { id: *id, top: r.top(), bottom: r.bottom() }).collect()
+}
+
+/// Each closed group's layers as the list would show them open (a group closed inside it keeps
+/// its own out), top first, each with how many groups in it sits under the closed one.
+fn closed_contents(layers: &[LayerInfo]) -> HashMap<u64, Vec<(LayerInfo, u32)>> {
+    let parent = |id: u64| layers.iter().find(|l| l.id == id).and_then(|l| l.parent);
+    // the groups `l` is in, innermost first (a mask by its layer's)
+    let groups = |l: &LayerInfo| {
+        let mut out = Vec::new();
+        let mut at = if l.kind == LayerType::Mask { l.parent.and_then(parent) } else { l.parent };
+        while let Some(g) = at {
+            if out.contains(&g) || out.len() > layers.len() {
+                break;
+            }
+            out.push(g);
+            at = parent(g);
+        }
+        out
+    };
+    let closed = |id: u64| layers.iter().any(|g| g.id == id && g.kind == LayerType::Group && g.collapsed);
+    let mut contents: HashMap<u64, Vec<(LayerInfo, u32)>> = HashMap::new();
+    for l in layers {
+        let around = groups(l);
+        for (k, g) in around.iter().enumerate() {
+            if !closed(*g) {
+                continue;
+            }
+            // shown in the window only if no group between it and this one is closed
+            if around.iter().take(k).all(|inner| !closed(*inner)) {
+                contents.entry(*g).or_default().push((l.clone(), k as u32));
+            }
+        }
+    }
+    contents
 }
 
 /// How far a row slides left to show its buttons: 6 past them.
@@ -2169,7 +2447,14 @@ mod tests {
             };
             step += 1;
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                layers.show(ui.ctx(), &mut look, &session, &mut colours, button, &mut Vec::new());
+                layers.show(
+                    ui.ctx(),
+                    &mut look,
+                    &session,
+                    &mut colours,
+                    crate::panel::Hang::Button(button),
+                    &mut Vec::new(),
+                );
             });
             output.textures_delta.clear();
         };
@@ -2273,5 +2558,84 @@ mod tests {
     fn the_background_row_tapped_asks_for_its_colour_and_its_box_tapped_hides_it() {
         assert_eq!(tap_background_row(false), (true, true), "the row: its colour, still shown");
         assert_eq!(tap_background_row(true), (false, false), "the box: hidden, no colour asked");
+    }
+
+    /// Top down: x, a closed group (c, b), z. Then x's row dragged with a mouse until its middle is
+    /// `into` the way down the group's row (0 its top, 1 its bottom), held there `hold`, and let
+    /// go. Returns the group x ends up in, the ids top down, and the group's id.
+    fn drag_by_a_closed_group(into: f32, hold: std::time::Duration) -> (Option<u64>, Vec<u64>, u64) {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let session = CanvasSession::new(64, 64);
+        session.add_layer();
+        let c = session.add_layer();
+        let group = session.combine_down(c).unwrap();
+        session.select_layer(group);
+        let x = session.add_layer();
+        session.set_group_collapsed(group, true);
+        let (mut layers, mut colours) = (Layers::default(), Colours::default());
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        let button = Rect::from_min_size(pos2(1000.0, 10.0), vec2(40.0, 40.0));
+        let mut step = 0;
+        let mut frame = |layers: &mut Layers, events: Vec<Event>| {
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            step += 1;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                layers.show(
+                    ui.ctx(),
+                    &mut look,
+                    &session,
+                    &mut colours,
+                    crate::panel::Hang::Button(button),
+                    &mut Vec::new(),
+                );
+            });
+            output.textures_delta.clear();
+        };
+        for _ in 0..12 {
+            frame(&mut layers, Vec::new());
+        }
+        let (from, to) = (layers.last_rows[&x], layers.last_rows[&group]);
+        assert!(to.height() > GROUP_HEIGHT + 30.0, "a closed group's row is taller: {to:?}");
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let mut at = from.center();
+        frame(&mut layers, vec![Event::PointerMoved(at), press(at, true)]);
+        let goal = to.top() + to.height() * into;
+        for _ in 0..20 {
+            at.y += (goal - from.center().y) / 20.0;
+            frame(&mut layers, vec![Event::PointerMoved(at)]);
+        }
+        let until = Instant::now() + hold;
+        while Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            frame(&mut layers, vec![Event::PointerMoved(at)]);
+        }
+        frame(&mut layers, vec![Event::PointerMoved(at)]);
+        frame(&mut layers, vec![press(at, false)]);
+        for _ in 0..2 {
+            frame(&mut layers, Vec::new());
+        }
+        let after = session.layers();
+        let parent = after.iter().find(|l| l.id == x).and_then(|l| l.parent);
+        (parent, after.iter().map(|l| l.id).collect(), group)
+    }
+
+    #[test]
+    fn a_row_let_go_under_a_closed_group_stays_out_of_it_and_held_onto_it_goes_in() {
+        let (parent, order, group) = drag_by_a_closed_group(0.75, std::time::Duration::ZERO);
+        assert_eq!(parent, None, "under the group's middle: out of it, under it ({order:?})");
+        assert_eq!(order.iter().position(|id| *id == group), Some(0));
+        let (parent, order, group) = drag_by_a_closed_group(0.75, std::time::Duration::from_millis(700));
+        assert_eq!(parent, Some(group), "held over its row: in it ({order:?})");
     }
 }

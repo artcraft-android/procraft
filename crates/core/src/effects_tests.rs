@@ -236,7 +236,8 @@ fn the_texture_packer_finds_drawings_and_shares_each_as_a_png() {
     assert_eq!(info, Some((boxes[1].width, boxes[1].height)));
     let mut px = vec![0; reader.as_ref().map_or(0, |r| r.output_buffer_size().unwrap_or(0))];
     reader.as_mut().and_then(|r| r.next_frame(&mut px).ok());
-    assert!(px.chunks(4).any(|p| p[0] > 200 && p[1] < 40 && p[3] == 255), "red in it");
+    // (a blob this small is a pixel or two of all but full cover)
+    assert!(px.chunks(4).any(|p| p[0] > 200 && p[1] < 40 && p[3] >= 250), "red in it");
     s.texture_packer_close();
     assert!(s.texture_packer_boxes(6, 0).is_empty());
     let _ = std::fs::remove_dir_all(dir);

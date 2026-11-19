@@ -366,7 +366,8 @@ impl State {
         }
         self.use_full_shape(&mut style, &brush);
         let mode = stroke.setup.brush.setting("dual_blend").round().max(0.0) as u32;
-        Some(SecondStroke { style, mode, threshold: style.alpha_threshold })
+        let classic = stroke.setup.brush.setting("classic_combine") >= 0.5;
+        Some(SecondStroke { style, mode, threshold: style.alpha_threshold, classic })
     }
 
     /// Vector layer `layer`'s pixels made again from what it holds alone, in the order it was
@@ -611,7 +612,8 @@ impl State {
                 drawn.secondary = ink.secondary;
                 ready(&mut drawn, &second.setup.brush);
                 let mode = kept.setup.brush.setting("dual_blend").round().max(0.0) as u32;
-                SecondStroke { style: drawn, mode, threshold: drawn.alpha_threshold }
+                let classic = kept.setup.brush.setting("classic_combine") >= 0.5;
+                SecondStroke { style: drawn, mode, threshold: drawn.alpha_threshold, classic }
             });
             let shown_by = self.vector_shown_by;
             let copies = |stamps: Vec<Stamp>| {
@@ -2149,6 +2151,20 @@ mod tests {
 
     /// A session 300 × 300 shown as it is, a pixel a point, with a GPU to draw on; none where
     /// there is no GPU (the test is skipped).
+    /// Where brush `origin` of ours from before the stock library (its set and place as they
+    /// shipped) is in the library now.
+    fn ours(s: &CanvasSession, origin: (u32, u32)) -> (u32, u32) {
+        let (set, i) =
+            crate::brush_library::place_of(&s.shared.lock().library, (origin.0 as usize, origin.1 as usize));
+        (set as u32, i as u32)
+    }
+
+    /// Chooses brush `origin` of ours from before the stock library (see [`ours`]).
+    fn select_ours(s: &CanvasSession, origin: (u32, u32)) -> bool {
+        let (set, i) = ours(s, origin);
+        s.select_brush(set, i)
+    }
+
     fn session() -> Option<Arc<CanvasSession>> {
         let gpu = match Gpu::headless() {
             Ok(gpu) => gpu,
@@ -2247,16 +2263,18 @@ mod tests {
         let layer = s.add_vector_layer();
         // a grain fixed to the paper (Graphite), a wet wash, and a dual brush: the second of set 1
         // made the first's second
-        assert!(s.combine_brushes(1, 0, 2));
+        let (pen, joining) = (ours(&s, (1, 0)), ours(&s, (1, 2)));
+        assert_eq!(pen.0, joining.0);
+        assert!(s.combine_brushes(pen.0, pen.1, joining.1));
         let brushes = [(0, 0, 0.5), (4, 0, 0.35), (1, 0, 0.3)];
         for (i, (set, brush, size)) in brushes.into_iter().enumerate() {
-            assert!(s.select_brush(set, brush), "no brush {set}.{brush}");
+            assert!(select_ours(&s, (set, brush)), "no brush {set}.{brush}");
             s.set_color(0.8 - i as f32 * 0.3, 0.2 + i as f32 * 0.25, 0.4);
             s.set_brush_size(size);
             stroke(&s, 40.0 + i as f32 * 45.0, i as f32);
         }
         // and the textured brush again, mirrored
-        assert!(s.select_brush(0, 0));
+        assert!(select_ours(&s, (0, 0)));
         s.set_guide_kind(GuideType::Symmetry);
         s.set_guide_on(true);
         s.set_guide_assisted(true);
@@ -2294,7 +2312,7 @@ mod tests {
         // strokes of several brushes, one over another, and the eraser through them
         let brushes = [(1, 0), (0, 0), (1, 2), (2, 1), (1, 5)];
         for (i, (set, brush)) in brushes.into_iter().enumerate() {
-            assert!(s.select_brush(set, brush), "no brush {set}.{brush}");
+            assert!(select_ours(&s, (set, brush)), "no brush {set}.{brush}");
             s.set_color(0.9 - i as f32 * 0.2, 0.1 + i as f32 * 0.2, 0.5);
             s.set_brush_size(0.25 + i as f32 * 0.05);
             stroke(&s, 70.0 + i as f32 * 35.0, i as f32);
@@ -2986,7 +3004,7 @@ mod tests {
         let layer = s.add_vector_layer();
         // strokes of several brushes, one with symmetry's copies
         for (i, (set, brush)) in [(1, 0), (0, 0), (2, 1), (1, 5)].into_iter().enumerate() {
-            assert!(s.select_brush(set, brush));
+            assert!(select_ours(&s, (set, brush)));
             s.set_color(0.8 - i as f32 * 0.2, 0.1 + i as f32 * 0.2, 0.4);
             s.set_brush_size(0.2 + i as f32 * 0.05);
             if i == 3 {
@@ -2999,7 +3017,7 @@ mod tests {
         s.set_guide_on(false);
         s.set_guide_assisted(false);
         // a box to fill, the fill, a lasso's shape, the eraser through it, and its lasso
-        assert!(s.select_brush(1, 0));
+        assert!(select_ours(&s, (1, 0)));
         boxed(&s);
         assert!(s.pour_drop(150.0, 150.0, 0.2, 0.6, 1.0, 0.5));
         s.set_color(1.0, 0.8, 0.0);
@@ -3260,11 +3278,11 @@ mod tests {
         stroke(&s, 60.0, 0.3);
         let layer = s.add_vector_layer();
         for (i, (set, brush)) in [(1, 0), (0, 0), (2, 1)].into_iter().enumerate() {
-            assert!(s.select_brush(set, brush));
+            assert!(select_ours(&s, (set, brush)));
             s.set_color(0.7 - i as f32 * 0.2, 0.2 + i as f32 * 0.2, 0.5);
             stroke(&s, 90.0 + i as f32 * 50.0, i as f32);
         }
-        assert!(s.select_brush(1, 0));
+        assert!(select_ours(&s, (1, 0)));
         boxed(&s);
         assert!(s.pour_drop(150.0, 150.0, 0.2, 0.6, 1.0, 0.5));
         s.set_tool(ToolKind::Erase);

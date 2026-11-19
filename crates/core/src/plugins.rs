@@ -7,13 +7,13 @@
 //! All are plain data, a name, a line on what it does and its controls, so the page draws any of
 //! them without knowing what it holds.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::KeyCombo;
 use crate::hooks::Hooks;
-use crate::plugin_file::{self, Added, Manifest, Refusal};
+use crate::plugin_file::{self, Added, Manifest, Refusal, Replaced, Shape};
 use crate::plugin_run::{Hook, Running, Stop};
 
 /// A setting the app used to have and a plugin now brings: what it was kept under, as it started
@@ -57,6 +57,8 @@ fn moved_and_changed(key: &str, value: &str) -> bool {
 pub(crate) const STOPPED_DRIVER: &str = "Switched off: it stopped the graphics driver.";
 /// Why a filter whose files no longer hold up can't open.
 const FILTER_DAMAGED: &str = "This filter's files don't hold up.";
+/// What is told when the plugins' order couldn't be kept.
+const ORDER_UNKEPT: &str = "The plugins' order couldn't be saved.";
 
 /// Where one came from. The route decides this, never the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -155,6 +157,9 @@ pub enum PluginPlace {
     /// In Animation Assist's frame options, after the app's own; run with that frame's layer
     /// current.
     Frame,
+    /// In the Actions panel's Canvas tab, after the app's own rows (interface 8): an action, or a
+    /// switch or a slider shown as on the card.
+    Canvas,
 }
 
 impl PluginPlace {
@@ -165,6 +170,7 @@ impl PluginPlace {
             "adjustments" => Some(PluginPlace::Adjustments),
             "layer" => Some(PluginPlace::Layer),
             "frame" => Some(PluginPlace::Frame),
+            "canvas" => Some(PluginPlace::Canvas),
             _ => None,
         }
     }
@@ -270,6 +276,16 @@ impl PluginControl {
         }
     }
 
+    /// It as it is, and starting so: a filter's panel opening at the values on its card.
+    fn starting_as_it_is(mut self) -> PluginControl {
+        match &mut self {
+            PluginControl::Switch { control } => control.starts = control.on,
+            PluginControl::Slider { control } => control.starts = control.value,
+            PluginControl::File { .. } => {}
+        }
+        self
+    }
+
     /// Its value as a plugin or a filter is told it.
     pub(crate) fn number(&self) -> f32 {
         match self {
@@ -326,6 +342,31 @@ pub fn plugin_slider_along(slider: PluginSlider, value: f32) -> f32 {
     if range > 0.0 { ((value - slider.least) / range).clamp(0.0, 1.0) } else { 0.0 }
 }
 
+/// `slider`'s steps as choices, when every step has a name: shown as a menu of them, not as a
+/// slider, since nothing lies between them. Otherwise none.
+#[uniffi::export]
+pub fn plugin_slider_choices(slider: PluginSlider) -> Vec<String> {
+    let steps = if slider.step > 0.0 { ((slider.most - slider.least) / slider.step).round() } else { -1.0 };
+    let wanted = steps + 1.0;
+    if steps >= 1.0 && wanted <= slider.names.len() as f32 {
+        slider.names.iter().take(wanted as usize).cloned().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Which of `slider`'s choices `value` is.
+#[uniffi::export]
+pub fn plugin_slider_chosen(slider: PluginSlider, value: f32) -> u32 {
+    if slider.step > 0.0 { ((slider.stepped(value) - slider.least) / slider.step).round().max(0.0) as u32 } else { 0 }
+}
+
+/// The value of `slider`'s choice `index`.
+#[uniffi::export]
+pub fn plugin_slider_choice(slider: PluginSlider, index: u32) -> f32 {
+    slider.stepped(slider.least + index as f32 * slider.step)
+}
+
 /// `value` on `slider` as it reads, to as many places as its step needs.
 #[uniffi::export]
 pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
@@ -374,9 +415,11 @@ fn read_chosen(store: &std::path::Path, plugin: &mut PluginInfo) {
     }
 }
 
-fn from_file(manifest: Manifest) -> PluginInfo {
+fn from_file(manifest: Manifest) -> (PluginInfo, Shape) {
     let only_filter = manifest.holds == [PluginPart::Filter];
-    PluginInfo {
+    // one filter's controls are its panel's alone; filters it lists have theirs on its card
+    let on_panel = only_filter && manifest.shape.filters.is_empty();
+    let info = PluginInfo {
         on_key: format!("{}.on", manifest.id),
         id: manifest.id,
         name: manifest.name,
@@ -388,20 +431,138 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         experimental: manifest.experimental,
         on: only_filter,
         problem: None,
-        controls: if only_filter { Vec::new() } else { manifest.controls },
+        controls: if on_panel { Vec::new() } else { manifest.controls },
         brush_controls: manifest.brush_controls,
         actions: manifest.actions,
         kinds: manifest.kinds,
         layer_kinds: manifest.layer_kinds,
         permissions: manifest.permissions,
+    };
+    (info, manifest.shape)
+}
+
+/// The parts of the interface a plugin may show bigger or smaller than the rest
+/// ([`Plugins::interface_part_scale`]), each by its number on the `interface_part_scale` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum InterfacePart {
+    /// Windows that float over the canvas: the colour panel dragged out, and any other.
+    Floating = 0,
+    /// Popovers and menus: what drops down from a button or a row.
+    Menus = 1,
+    /// The side bar.
+    SideBar = 2,
+    /// The bar across the top.
+    TopBar = 3,
+    /// The panels that hang from the top bar's buttons.
+    Panels = 4,
+}
+
+/// The notices the interface shows, by what they say ([`Plugins::shows_notice`]); the first two by
+/// their number on the `hide_notices` hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum NoticeKind {
+    /// What undo or redo took back or brought back.
+    Step = 0,
+    /// Anything else done: copied, pasted, cleared, merged, applied, switched on or off.
+    Done = 1,
+    /// Something that went wrong, or couldn't be kept: it always shows.
+    Problem = 2,
+}
+
+/// Where in the interface a plugin's menu is, from a button of the app's
+/// ([`Plugins::menu_choices`]), by its name in a manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum PluginMenuPlace {
+    /// The colour panel's Classic picker, from a button in its lower left corner.
+    Classic,
+}
+
+impl PluginMenuPlace {
+    /// The place a manifest calls `name`, if this app has it.
+    pub(crate) fn named(name: &str) -> Option<PluginMenuPlace> {
+        match name {
+            "classic" => Some(PluginMenuPlace::Classic),
+            _ => None,
+        }
+    }
+}
+
+/// One of the choices a plugin's menu offers: what picks it ([`Plugins::choose`]), its words, its
+/// icon (SVG path data on a 24-unit grid, filled even-odd in the interface's ink), and whether it
+/// stands now (every control it sets is as it sets it).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginChoice {
+    pub key: String,
+    pub label: String,
+    pub icon: String,
+    pub chosen: bool,
+}
+
+/// What a press of a plugin's own did (its manifest's `press`, see [`Plugins::plugin_press`]).
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum PluginPressed {
+    /// A switch flipped: the plugins changed, as a switch set on its card changes them.
+    Switched { control: PluginControl },
+    /// An action to run as its row runs it ([`Plugins::run_action`]), by its key.
+    Action { key: String },
+}
+
+/// `plugin` as its card shows it: what comes under a switch that is off left out.
+fn shown(plugin: &PluginInfo, shape: Option<&Shape>) -> PluginInfo {
+    let Some(shape) = shape else { return plugin.clone() };
+    let shows = |under: &[Option<usize>], at: usize| shape.shows(under.get(at).copied().flatten(), &plugin.controls);
+    let controls = plugin.controls.iter().enumerate().filter(|(at, _)| shows(&shape.under, *at));
+    let actions = plugin.actions.iter().enumerate().filter(|(at, _)| shows(&shape.action_under, *at));
+    PluginInfo {
+        controls: controls.map(|(_, c)| c.clone()).collect(),
+        actions: actions.map(|(_, a)| a.clone()).collect(),
+        ..plugin.clone()
+    }
+}
+
+/// The plugin of `files` taking the place of one as `find` says, and how, by their `shapes`.
+fn replacing<'a>(
+    files: &'a mut [PluginInfo],
+    shapes: &HashMap<String, Shape>,
+    find: impl Fn(&Replaced) -> bool,
+) -> Option<(&'a mut PluginInfo, Replaced)> {
+    files.iter_mut().find_map(|plugin| {
+        let replaced = shapes.get(&plugin.id)?.replaces.iter().find(|r| find(r))?.clone();
+        Some((plugin, replaced))
+    })
+}
+
+/// What `from` had set, taken over by `to`, which takes its place as `replaced` says: on if it was,
+/// the switch that stands for it with it, and the values of its controls.
+fn carry(to: &mut PluginInfo, replaced: &Replaced, from: &PluginInfo) {
+    let was_on = from.on && from.problem.is_none();
+    if was_on {
+        to.on = to.problem.is_none();
+        if let Some(PluginControl::Switch { control }) = replaced.switch.and_then(|at| to.controls.get_mut(at)) {
+            control.on = true;
+        }
+    }
+    for (key, at) in &replaced.controls {
+        if let (Some(was), Some(control)) = (from.controls.iter().find(|c| c.key() == key), to.controls.get_mut(*at)) {
+            control.take_value(was);
+        }
+    }
+    // a setting the app used to have, kept under the same key by both
+    for control in &mut to.controls {
+        if let Some(was) = from.controls.iter().find(|c| c.key() == control.key()) {
+            control.take_value(was);
+        }
     }
 }
 
 /// What the offer says `manifest` can do.
 fn can_do(manifest: &Manifest) -> String {
     let filter = manifest.holds.contains(&PluginPart::Filter);
-    let adds =
-        filter.then_some("This plugin adds a filter to Adjustments, which changes only the layer you use it on.");
+    let adds = filter.then_some(if manifest.shape.filters.len() > 1 {
+        "This plugin adds filters to Adjustments, which change only the layer you use them on."
+    } else {
+        "This plugin adds a filter to Adjustments, which changes only the layer you use it on."
+    });
     let sentences: Vec<&str> = adds
         .into_iter()
         .chain(manifest.hooks.iter().map(|hook| hook.sentence()))
@@ -419,8 +580,9 @@ fn can_do(manifest: &Manifest) -> String {
     format!("{} It can't reach {reach}.", sentences.join(" "))
 }
 
-/// A filter whose files have held up again, for opening.
+/// A filter whose files have held up again, for opening: of plugin `plugin`.
 pub(crate) struct FilterToOpen {
+    pub plugin: String,
     pub name: String,
     pub controls: Vec<PluginControl>,
     pub code: procraft_gpu::FilterCode,
@@ -437,9 +599,33 @@ struct Listed {
     flagged: HashSet<String>,
     /// What the app came with and added, as written down in the store.
     added: Vec<Added>,
+    /// What each says beyond its card, by its id.
+    shapes: HashMap<String, Shape>,
+    /// The plugins on or off as those they took the place of were read back to be.
+    carried: HashSet<String>,
+    /// The keys of the controls whose own values were read back.
+    read: HashSet<String>,
+    /// The switches set as the on or off of a plugin they stand for was read back.
+    flag_switched: HashSet<String>,
+    /// The order someone put the plugins in on the Plugins page, by id, as written down in the
+    /// store; those not in it come after, as they are listed.
+    order: Vec<String>,
+    /// That the order couldn't be kept has been said, since it last could be.
+    order_unkept_said: bool,
 }
 
 impl Listed {
+    /// The plugins in the order the Plugins page shows them: those put in an order first, in it,
+    /// then the rest as they are listed. Only the page goes by it: the hooks go through what is on
+    /// in id order, whatever it is.
+    fn in_order(&self) -> Vec<&PluginInfo> {
+        let place = |p: &PluginInfo| self.order.iter().position(|id| *id == p.id).unwrap_or(usize::MAX);
+        let mut shown: Vec<&PluginInfo> = self.files.iter().collect();
+        // (stable: those in no order keep theirs)
+        shown.sort_by_key(|p| place(p));
+        shown
+    }
+
     /// Whether plugin `id` is one the app added that starts off until someone turns it on.
     fn added_off(&self, id: &str) -> bool {
         self.added.iter().any(|added| added.off && added.id == id)
@@ -451,6 +637,46 @@ impl Listed {
             let at = plugin.controls.iter().position(|c| c.key() == key)?;
             Some((plugin, at))
         })
+    }
+
+    /// `plugin` as its card shows it.
+    fn shown(&self, plugin: &PluginInfo) -> PluginInfo {
+        shown(plugin, self.shapes.get(&plugin.id))
+    }
+
+    /// The id of the plugin here taking the place of `id`, and how.
+    fn taking_place_of(&self, id: &str) -> Option<(String, Replaced)> {
+        self.files.iter().find_map(|p| {
+            let replaced = self.shapes.get(&p.id)?.replaces.iter().find(|r| r.id == id)?;
+            Some((p.id.clone(), replaced.clone()))
+        })
+    }
+
+    /// Each plugin that another here takes the place of goes, from the list and from `store`, what
+    /// it had set taken over by the one taking its place. The ids of those gone.
+    fn give_way(&mut self, store: &std::path::Path) -> Vec<String> {
+        let pairs: Vec<(String, Replaced)> = self
+            .files
+            .iter()
+            .filter_map(|p| Some((p.id.clone(), self.shapes.get(&p.id)?.replaces.clone())))
+            .flat_map(|(to, replaces)| replaces.into_iter().map(move |r| (to.clone(), r)))
+            .collect();
+        let mut gone = Vec::new();
+        for (to, replaced) in pairs {
+            // (one already gone itself takes no place)
+            let here = |id: &str| self.files.iter().position(|p| p.id == id);
+            let (Some(_), Some(at)) = (here(&to), here(&replaced.id)) else { continue };
+            if !plugin_file::forget(store, &replaced.id) {
+                continue;
+            }
+            let from = self.files.remove(at);
+            self.shapes.remove(&from.id);
+            if let Some(plugin) = self.files.iter_mut().find(|p| p.id == to) {
+                carry(plugin, &replaced, &from);
+            }
+            gone.push(from.id);
+        }
+        gone
     }
 }
 
@@ -466,6 +692,9 @@ pub struct Plugins {
     hooks: Arc<Hooks>,
     /// A plugin's panel showing, with the copy of its code that showed it.
     panel: Mutex<Option<OpenPanel>>,
+    /// The artwork open, the last to take the plugins up: the controls kept with an artwork are
+    /// its, and setting one keeps it with it.
+    artwork: Mutex<std::sync::Weak<crate::CanvasSession>>,
 }
 
 /// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
@@ -496,9 +725,15 @@ impl Plugins {
     }
 
     fn kept_in(store: Option<PathBuf>) -> Arc<Plugins> {
-        let files = store.as_deref().map(plugin_file::read_all).unwrap_or_default();
-        let mut files: Vec<PluginInfo> = files.into_iter().map(from_file).collect();
+        let manifests = store.as_deref().map(plugin_file::read_all).unwrap_or_default();
+        let (mut files, mut shapes) = (Vec::new(), HashMap::new());
+        for manifest in manifests {
+            let (plugin, shape) = from_file(manifest);
+            shapes.insert(plugin.id.clone(), shape);
+            files.push(plugin);
+        }
         let added = store.as_deref().map(plugin_file::read_added).unwrap_or_default();
+        let order = store.as_deref().map(plugin_file::read_order).unwrap_or_default();
         if let Some(store) = &store {
             plugin_file::settle_trying(store, STOPPED_DRIVER);
             for plugin in &mut files {
@@ -511,9 +746,31 @@ impl Plugins {
         for plugin in &mut files {
             plugin.on &= !added.iter().any(|added| added.off && added.id == plugin.id);
         }
-        let list = Listed { files, moved: Vec::new(), notice_asked: false, flagged: HashSet::new(), added };
+        let mut list = Listed {
+            files,
+            moved: Vec::new(),
+            notice_asked: false,
+            flagged: HashSet::new(),
+            added,
+            shapes,
+            carried: HashSet::new(),
+            read: HashSet::new(),
+            flag_switched: HashSet::new(),
+            order,
+            order_unkept_said: false,
+        };
+        // what one here takes the place of goes, once, if it is still here
+        if let Some(store) = &store {
+            list.give_way(store);
+        }
         let hooks = Arc::new(Hooks::kept_in(store.clone()));
-        Arc::new(Plugins { list: Mutex::new(list), hooks, store, panel: Mutex::new(None) })
+        Arc::new(Plugins {
+            list: Mutex::new(list),
+            hooks,
+            store,
+            panel: Mutex::new(None),
+            artwork: Mutex::new(std::sync::Weak::new()),
+        })
     }
 
     /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
@@ -611,12 +868,19 @@ impl Plugins {
                 self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
                 // the kinds of layer it adds, for the sessions' layers of them to go through it
                 self.hooks.layer_kinds(&plugin.id, plugin.layer_kinds.clone());
+                // its brush engines, for brush files and the brushes made of them
+                if hooks.contains(&Hook::Brushes)
+                    && let Some(store) = store
+                {
+                    let engines = plugin_file::read_brush_engines(store, &plugin.id, &plugin.version);
+                    self.hooks.brush_engines(&plugin.id, engines);
+                }
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)
-                    && let Some(text) =
+                    && let Some((text, keys)) =
                         store.and_then(|store| plugin_file::read_picture_code(store, &plugin.id, &plugin.version))
                 {
-                    self.hooks.give_picture(&plugin.id, text);
+                    self.hooks.give_picture(&plugin.id, text, keys, values.clone());
                 }
                 // the files picked for it, handed over
                 for (at, control) in plugin.controls.iter().enumerate() {
@@ -648,7 +912,9 @@ impl Plugins {
         let store = self.store.as_deref().ok_or(Stop::Damaged)?;
         let (hooks, bytes) = plugin_file::read_code(store, id, version).ok_or(Stop::Damaged)?;
         let kept = plugin_file::read_kept(store, id);
-        Ok((Running::start_told(&bytes, values, &hooks, permissions, kept.as_deref())?, hooks))
+        let mut running = Running::start_told(&bytes, values, &hooks, permissions, kept.as_deref())?;
+        running.own(id);
+        Ok((running, hooks))
     }
 
     /// What `running`, a copy of `id`'s code that has just acted, says to keep: kept with the
@@ -712,15 +978,74 @@ impl Plugins {
     /// told the new value.
     fn change<T>(&self, key: &str, change: impl FnOnce(&mut PluginControl) -> Option<T>) -> Option<T> {
         let mut list = self.listed();
-        let (plugin, at) = list.control_mut(key)?;
+        let Listed { files, shapes, .. } = &mut *list;
+        let (plugin, at) = files.iter_mut().find_map(|plugin| {
+            let at = plugin.controls.iter().position(|c| c.key() == key)?;
+            Some((plugin, at))
+        })?;
         let changed = plugin.controls.get_mut(at).and_then(change)?;
+        let mut kept = None;
         if let Some(control) = plugin.controls.get(at) {
             self.hooks.control(&plugin.id, at, control.number());
+            if shapes.get(&plugin.id).is_some_and(|shape| shape.artwork.get(at) == Some(&true)) {
+                kept = Some((key.to_owned(), control.number()));
+            }
+        }
+        drop(list);
+        if let Some((key, value)) = kept {
+            self.keep_with_artwork(key, value);
         }
         Some(changed)
     }
 
-    #[cfg(test)]
+    /// `value` kept with the artwork open under `key`, a control's kept with each artwork.
+    fn keep_with_artwork(&self, key: String, value: f32) {
+        let artwork = self.artwork.lock().unwrap_or_else(|e| e.into_inner()).upgrade();
+        if let Some(session) = artwork {
+            session.keep_plugin_value(key, value);
+        }
+    }
+
+    /// `session` is the artwork open: the controls kept with an artwork take the values it keeps
+    /// (those it keeps none for, their `starts`), the plugins told, the first time it comes here.
+    /// Each plugin's are set whether it is on or not, so it starts with them.
+    pub(crate) fn take_up_artwork(&self, session: &Arc<crate::CanvasSession>) {
+        {
+            let mut artwork = self.artwork.lock().unwrap_or_else(|e| e.into_inner());
+            if artwork.upgrade().is_some_and(|open| Arc::ptr_eq(&open, session)) {
+                return;
+            }
+            *artwork = Arc::downgrade(session);
+        }
+        let kept = session.plugin_values();
+        let mut list = self.listed();
+        let Listed { files, shapes, .. } = &mut *list;
+        for plugin in files.iter_mut() {
+            let Some(shape) = shapes.get(&plugin.id) else { continue };
+            for (at, control) in plugin.controls.iter_mut().enumerate() {
+                if shape.artwork.get(at) != Some(&true) {
+                    continue;
+                }
+                let value = kept.get(control.key()).copied();
+                let changed = match control {
+                    PluginControl::Switch { control } => {
+                        let on = value.map_or(control.starts, |v| v >= 0.5);
+                        std::mem::replace(&mut control.on, on) != on
+                    }
+                    PluginControl::Slider { control } => {
+                        let to = control.stepped(value.unwrap_or(control.starts));
+                        std::mem::replace(&mut control.value, to) != to
+                    }
+                    PluginControl::File { .. } => false,
+                };
+                if changed {
+                    self.hooks.control(&plugin.id, at, control.number());
+                }
+            }
+        }
+    }
+
+    /// The control kept under `key`, as it is now.
     fn control(&self, key: &str) -> Option<PluginControl> {
         let mut list = self.listed();
         let (plugin, at) = list.control_mut(key)?;
@@ -746,7 +1071,8 @@ impl Plugins {
         // as the next start will find it, or not at all
         let (id, version) = (&package.manifest.id, &package.manifest.version);
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
-        let mut fresh = from_file(manifest);
+        let (mut fresh, shape) = from_file(manifest);
+        let id = fresh.id.clone();
         read_chosen(store, &mut fresh);
         let mut list = self.listed();
         fresh.on &= !list.added_off(&fresh.id);
@@ -774,26 +1100,49 @@ impl Plugins {
             }
             None => list.files.push(fresh),
         }
+        list.shapes.insert(id.clone(), shape);
+        // what it takes the place of goes, what that had set taken over (on, if that was, from
+        // when the hooks are next asked for)
+        for gone in list.give_way(store) {
+            self.take_off(&gone);
+        }
         Ok(())
     }
 
-    /// The filter `id` as it can be opened; what to tell if it can't.
+    /// The filter `id` as it can be opened; what to tell if it can't. `id` is its plugin's, or for
+    /// one of several a plugin lists, its own (`<plugin>.<key>`): that one opens at the values its
+    /// card has.
     pub(crate) fn filter_to_open(&self, id: &str) -> Result<FilterToOpen, String> {
         let list = self.listed();
-        let plugin = list.files.iter().find(|p| p.id == id && p.holds(PluginPart::Filter));
-        let plugin = plugin.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
+        let found = list.files.iter().filter(|p| p.holds(PluginPart::Filter)).find_map(|p| {
+            let listed = list.shapes.get(&p.id).map(|shape| shape.filters.as_slice()).unwrap_or_default();
+            if listed.is_empty() {
+                (p.id == id).then_some((p, None))
+            } else {
+                listed.iter().find(|f| f.id == id).map(|f| (p, Some(f)))
+            }
+        });
+        let (plugin, listed) = found.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
         if let Some(problem) = &plugin.problem {
             return Err(problem.clone());
         }
         let store = self.store.as_deref().ok_or_else(|| FILTER_DAMAGED.to_owned())?;
-        let read = plugin_file::read_filter_code(store, id, &plugin.version);
+        let path = listed.map_or(plugin_file::FILTER_CODE, |f| f.code.as_str());
+        let read = plugin_file::read_filter_code(store, &plugin.id, &plugin.version, path);
         let (manifest, text) = read.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
-        let code = procraft_gpu::read_filter(&text, &plugin_file::value_names(&manifest.controls));
+        let (name, controls) = match listed {
+            None => (manifest.name, manifest.controls),
+            Some(f) => {
+                let controls = f.controls.iter().filter_map(|&at| plugin.controls.get(at).cloned());
+                (f.label.clone(), controls.map(PluginControl::starting_as_it_is).collect())
+            }
+        };
+        let code = procraft_gpu::read_filter(&text, &plugin_file::value_names(&controls));
         let code = code.map_err(|why| {
             log::warn!("a kept filter's code was refused: {why}");
             FILTER_DAMAGED.to_owned()
         })?;
-        Ok(FilterToOpen { name: manifest.name, controls: manifest.controls, code })
+        Ok(FilterToOpen { plugin: plugin.id.clone(), name, controls, code })
     }
 
     /// Filter `id` is on trial: if the app ends before it has drawn, it is put down to it.
@@ -824,10 +1173,15 @@ impl Plugins {
     }
 
     /// Whether what is here lets a plugin of `manifest` in: an older file doesn't replace a newer,
-    /// and a moved setting has one holder.
+    /// a moved setting has one holder (besides one it takes the place of), and one here taking its
+    /// place keeps it.
     fn can_take(&self, manifest: &Manifest) -> Result<(), Refusal> {
         let list = self.listed();
-        let others = || list.files.iter().filter(|p| p.id != manifest.id).flat_map(|p| &p.controls);
+        if list.taking_place_of(&manifest.id).is_some() {
+            return Err(Refusal::Replaced);
+        }
+        let replaced = |id: &str| manifest.shape.replaces.iter().any(|r| r.id == id);
+        let others = || list.files.iter().filter(|p| p.id != manifest.id && !replaced(&p.id)).flat_map(|p| &p.controls);
         if manifest.controls.iter().any(|control| others().any(|other| other.key() == control.key())) {
             return Err(Refusal::Clash);
         }
@@ -862,24 +1216,121 @@ impl Plugins {
         plugins
     }
 
-    /// What the Plugins page shows: every plugin imported.
+    /// What the Plugins page shows: every plugin imported, each as its card shows it (what comes
+    /// under a switch that is off left out).
     pub fn plugins(&self) -> Vec<PluginInfo> {
-        self.listed().files.clone()
+        let list = self.listed();
+        list.in_order().into_iter().map(|p| list.shown(p)).collect()
+    }
+
+    /// Moves plugin `id` to place `to` on the Plugins page (past the end: the last), the order
+    /// written down whole in the store for the next start. Only the page goes by it. What to tell
+    /// if it couldn't be kept, said once until it can be (the page shows the order meanwhile);
+    /// nothing for an id that isn't here.
+    pub fn move_plugin(&self, id: String, to: u32) -> Option<String> {
+        let mut list = self.listed();
+        let shown: Vec<String> = list.in_order().into_iter().map(|p| p.id.clone()).collect();
+        let mut order = shown.clone();
+        let from = order.iter().position(|o| *o == id)?;
+        let moved = order.remove(from);
+        order.insert((to as usize).min(order.len()), moved);
+        if order == shown {
+            return None;
+        }
+        let kept = self.store.as_deref().is_none_or(|store| plugin_file::note_order(store, &order));
+        list.order = order;
+        if kept {
+            list.order_unkept_said = false;
+            return None;
+        }
+        (!std::mem::replace(&mut list.order_unkept_said, true)).then(|| ORDER_UNKEPT.to_owned())
     }
 
     /// The actions listed in `place` now, of the plugins that are on.
     pub fn actions_in(&self, place: PluginPlace) -> Vec<PluginAction> {
         let list = self.listed();
-        let on = list.files.iter().filter(|p| p.on && p.problem.is_none());
-        on.flat_map(|p| p.actions.iter().filter(|a| a.place == place).cloned()).collect()
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none()).map(|p| list.shown(p));
+        on.flat_map(|p| p.actions.into_iter().filter(|a| a.place == place)).collect()
+    }
+
+    /// The controls shown in `place` now besides their cards (interface 8), of the plugins that are
+    /// on, in the order the Plugins page lists them: each as its card shows it, set as on its card.
+    pub fn controls_in(&self, place: PluginPlace) -> Vec<PluginControl> {
+        if place == PluginPlace::Card {
+            return Vec::new();
+        }
+        let list = self.listed();
+        let mut placed = Vec::new();
+        for plugin in list.in_order().into_iter().filter(|p| p.on && p.problem.is_none()) {
+            let Some(shape) = list.shapes.get(&plugin.id) else { continue };
+            for (at, control) in plugin.controls.iter().enumerate() {
+                let shows = shape.shows(shape.under.get(at).copied().flatten(), &plugin.controls);
+                if shows && shape.places.get(at) == Some(&place) {
+                    placed.push(control.clone());
+                }
+            }
+        }
+        placed
+    }
+
+    /// A hardware keyboard's `press` on the canvas, as a plugin rebinding keys took it
+    /// ([`Plugins::key_press`]), that none of the app's shortcuts take, as a plugin that is on gives
+    /// it to one of its switches or actions in its manifest (interface 8): the switch flipped (for
+    /// the app to keep as one set on its card), or the action for the app to run. None: no
+    /// plugin's.
+    pub fn plugin_press(&self, press: KeyCombo) -> Option<PluginPressed> {
+        let press = KeyCombo::of(&press.key, press.command, press.shift, press.alt);
+        let found = {
+            let list = self.listed();
+            list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|plugin| {
+                let shape = list.shapes.get(&plugin.id)?;
+                let shows = |under: &[Option<usize>], at: usize| {
+                    shape.shows(under.get(at).copied().flatten(), &plugin.controls)
+                };
+                let control = shape.presses.iter().position(|p| p.as_ref() == Some(&press));
+                if let Some(at) = control.filter(|&at| shows(&shape.under, at)) {
+                    return Some(Err(plugin.controls.get(at)?.key().to_owned()));
+                }
+                let action = shape.action_presses.iter().position(|p| p.as_ref() == Some(&press));
+                let at = action.filter(|&at| shows(&shape.action_under, at))?;
+                Some(Ok(plugin.actions.get(at)?.key.clone()))
+            })
+        };
+        match found? {
+            Ok(key) => Some(PluginPressed::Action { key }),
+            Err(key) => {
+                let on = matches!(self.control(&key), Some(PluginControl::Switch { control }) if control.on);
+                self.set_switch(key.clone(), !on);
+                Some(PluginPressed::Switched { control: self.control(&key)? })
+            }
+        }
     }
 
     /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
-    /// imported.
+    /// imported. Each is as its plugin, but for one of several a plugin lists, which is there while
+    /// the switch it comes under is on: its `id` is what opens it, its `name` its own, and its
+    /// `controls` those of its panel.
     pub fn filters(&self) -> Vec<PluginInfo> {
         let list = self.listed();
         let ready = |p: &&PluginInfo| p.holds(PluginPart::Filter) && p.on && p.problem.is_none();
-        list.files.iter().filter(ready).cloned().collect()
+        let mut filters = Vec::new();
+        for plugin in list.files.iter().filter(ready) {
+            let listed = list.shapes.get(&plugin.id).map(|shape| shape.filters.as_slice()).unwrap_or_default();
+            if listed.is_empty() {
+                filters.push(plugin.clone());
+            }
+            let shape = list.shapes.get(&plugin.id);
+            for filter in listed.iter().filter(|f| shape.is_none_or(|shape| shape.shows(f.under, &plugin.controls))) {
+                filters.push(PluginInfo {
+                    id: filter.id.clone(),
+                    name: filter.label.clone(),
+                    controls: filter.controls.iter().filter_map(|&at| plugin.controls.get(at).cloned()).collect(),
+                    actions: Vec::new(),
+                    ..plugin.clone()
+                });
+            }
+        }
+        filters
     }
 
     /// A value read back from where it was kept, as text. A key nothing has, or anything that
@@ -888,14 +1339,49 @@ impl Plugins {
     ///
     /// A setting the app used to have, that someone changed, starts the plugin the app added to
     /// hold it on, so the app goes on as they left it: unless that plugin's own on or off is read
-    /// back too, in whatever order, which says instead.
+    /// back too, in whatever order, which says instead; and the switch it comes under, unless its
+    /// own is read back.
+    ///
+    /// What was kept for a plugin another took the place of goes to that one: on while any of
+    /// those was, with the switch standing for each, and their values to the controls that took
+    /// them; unless its own on or off, or those controls' own values, are read back, in whatever
+    /// order, which say instead.
     pub fn read_kept(&self, key: String, value: String) {
         let mut list = self.listed();
-        let Listed { files, moved: unheld, flagged, added, .. } = &mut *list;
+        let Listed { files, moved: unheld, flagged, added, shapes, carried, read, flag_switched, .. } = &mut *list;
         if let Some(plugin) = files.iter_mut().find(|p| p.on_key == key) {
             if let Ok(on) = value.parse::<bool>() {
                 plugin.on = on && plugin.problem.is_none();
                 flagged.insert(plugin.id.clone());
+            }
+            return;
+        }
+        // what was kept for a plugin another took the place of goes to that one: its on or off to
+        // it (on while any of those was) and to the switch that stands for it, its values to the
+        // controls that took them; unless their own were read
+        if let Some(id) = key.strip_suffix(".on")
+            && let Some((plugin, replaced)) = replacing(files, shapes, |r| r.id == id)
+        {
+            let Ok(on) = value.parse::<bool>() else { return };
+            if !flagged.contains(&plugin.id) {
+                let first = carried.insert(plugin.id.clone());
+                let on = on && plugin.problem.is_none();
+                plugin.on = on || (plugin.on && !first);
+            }
+            if let Some(PluginControl::Switch { control }) = replaced.switch.and_then(|at| plugin.controls.get_mut(at))
+                && !read.contains(&control.key)
+            {
+                control.on = on;
+                flag_switched.insert(control.key.clone());
+            }
+            return;
+        }
+        if let Some((plugin, replaced)) = replacing(files, shapes, |r| r.controls.iter().any(|(old, _)| *old == key)) {
+            let at = replaced.controls.iter().find(|(old, _)| *old == key).map(|(_, at)| *at);
+            if let Some(control) = at.and_then(|at| plugin.controls.get_mut(at))
+                && !read.contains(control.key())
+            {
+                control.read(&value);
             }
             return;
         }
@@ -907,9 +1393,25 @@ impl Plugins {
             if let Some(control) = plugin.controls.get_mut(at) {
                 control.read(&value);
             }
+            read.insert(key.clone());
             let added_off = added.iter().any(|added| added.off && added.id == plugin.id);
-            if added_off && moved_and_changed(&key, &value) && !flagged.contains(&plugin.id) {
+            let by_flags = flagged.contains(&plugin.id) || carried.contains(&plugin.id);
+            if added_off && moved_and_changed(&key, &value) && !by_flags {
                 plugin.on = plugin.problem.is_none();
+                // with the switch it comes under, and the one that comes under
+                let shape = shapes.get(&plugin.id);
+                let mut under = shape.and_then(|shape| shape.under.get(at).copied().flatten());
+                while let Some(above) = under {
+                    if let Some(PluginControl::Switch { control }) = plugin.controls.get_mut(above)
+                        && !read.contains(&control.key)
+                        && !flag_switched.contains(&control.key)
+                    {
+                        control.on = true;
+                    }
+                    // (two deep at most, as read)
+                    under =
+                        shape.and_then(|shape| shape.under.get(above).copied().flatten()).filter(|&next| next != above);
+                }
             }
         } else if moved(&key) {
             unheld.retain(|(kept, _)| *kept != key);
@@ -1025,6 +1527,12 @@ impl Plugins {
             let list = self.listed();
             list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
                 let index = p.actions.iter().position(|a| a.key == key)?;
+                // (one under a switch that is off isn't there)
+                let shape = list.shapes.get(&p.id);
+                let under = shape.and_then(|shape| shape.action_under.get(index).copied().flatten());
+                if !shape.is_none_or(|shape| shape.shows(under, &p.controls)) {
+                    return None;
+                }
                 let values: Vec<f32> = p.controls.iter().map(PluginControl::number).collect();
                 Some((p.id.clone(), p.version.clone(), index, values, p.permissions.clone()))
             })
@@ -1207,7 +1715,17 @@ impl Plugins {
         match offered {
             Ok(manifest) => {
                 let publisher = if manifest.publisher.is_empty() { "none given" } else { &manifest.publisher };
-                let sentence = can_do(&manifest);
+                let mut sentence = can_do(&manifest);
+                // what it takes the place of, by name, if it is here
+                let names: Vec<String> = {
+                    let list = self.listed();
+                    let here = |id: &str| list.files.iter().find(|p| p.id == id).map(|p| p.name.clone());
+                    manifest.shape.replaces.iter().filter_map(|r| here(&r.id)).collect()
+                };
+                if let Some((last, rest)) = names.split_last() {
+                    let all = if rest.is_empty() { last.clone() } else { format!("{} and {last}", rest.join(", ")) };
+                    sentence.push_str(&format!(" It takes the place of {all}, keeping what was set."));
+                }
                 PluginOffer {
                     message: format!("Version {}\nPublisher: {publisher} (not checked)\n{sentence}", manifest.version),
                     name: manifest.name,
@@ -1245,6 +1763,13 @@ impl Plugins {
         self.take_off(&id);
         let gone = list.files.remove(at);
         list.flagged.remove(&id);
+        list.carried.remove(&id);
+        // what was kept for those it took the place of goes too
+        let replaced = list.shapes.remove(&id).map(|shape| shape.replaces).unwrap_or_default();
+        let theirs = replaced.into_iter().flat_map(|r| {
+            let on = format!("{}.on", r.id);
+            std::iter::once(on).chain(r.controls.into_iter().map(|(key, _)| key))
+        });
         // one the app added stays written down, so it isn't added again; imported again, it is as
         // any import
         if list.added_off(&id)
@@ -1257,13 +1782,20 @@ impl Plugins {
             }
         }
         let keys = gone.controls.iter().map(|c| c.key().to_owned());
-        Some(keys.chain([gone.on_key.clone()]).collect())
+        Some(keys.chain([gone.on_key.clone()]).chain(theirs).collect())
     }
 
     /// How big the interface shows in a window `width` × `height` points at 1: as a plugin says, or
     /// as measured.
     pub fn interface_scale(&self, width: f32, height: f32) -> f32 {
         self.hooks().interface_scale(width, height)
+    }
+
+    /// Whether a plugin keeps the interface clear of the status bar and the screen's cutouts, a
+    /// camera's: the app then lays it out inside them. Where there are none, as on a desktop, it
+    /// changes nothing.
+    pub fn keep_clear(&self) -> bool {
+        self.hooks().keep_clear()
     }
 
     /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
@@ -1294,6 +1826,123 @@ impl Plugins {
     /// (0..1, y down): `[x, y]`, or none with no picker plugin on.
     pub fn picker_point(&self, s: f32, v: f32) -> Option<Vec<f32>> {
         self.hooks().picker_point(s, v).map(|(x, y)| vec![x, y])
+    }
+
+    /// The hue (0..1) the picker plugin says a touch starting at point (`x`, `y`) of the Classic
+    /// square picks (0..1, y down); none where it picks saturation and brightness, or with no picker
+    /// plugin on that picks hues itself.
+    pub fn picker_hue(&self, x: f32, y: f32) -> Option<f32> {
+        self.hooks().picker_hue(x, y)
+    }
+
+    /// Where the picker plugin says hue `h`'s knob sits on the Classic square (0..1, y down): `[x,
+    /// y]`, or none while the app's hue slider has the hue (it shows only then).
+    pub fn picker_hue_point(&self, h: f32) -> Option<Vec<f32>> {
+        self.hooks().picker_hue_point(h).map(|(x, y)| vec![x, y])
+    }
+
+    /// A number that changes whenever a plugin comes on or off or its controls change: what a plugin
+    /// answered, or a picture drawn by one, before it changed may not be what it answers now.
+    pub fn generation(&self) -> u64 {
+        self.hooks().generation()
+    }
+
+    /// How big `part` of the interface shows next to the rest of it, on top of
+    /// [`Self::interface_scale`], as plugins say (1: as the rest).
+    pub fn interface_part_scale(&self, part: InterfacePart) -> f32 {
+        self.hooks().interface_part_scale(part as i32)
+    }
+
+    /// Whether a plugin has the floating colour window show Classic's picker alone: no title, mode
+    /// icons or the other pickers.
+    pub fn floating_picker_only(&self) -> bool {
+        self.hooks().floating_picker_only()
+    }
+
+    /// Whether the notice of `kind` shows: one of something gone wrong always does; one of
+    /// something done unless a plugin hides it (what undo and redo did, by the undo notice's hook
+    /// too).
+    pub fn shows_notice(&self, kind: NoticeKind) -> bool {
+        let hooks = self.hooks();
+        match kind {
+            NoticeKind::Problem => true,
+            NoticeKind::Step => !hooks.hide_undo_notice() && !hooks.hide_notice(kind as i32),
+            NoticeKind::Done => !hooks.hide_notice(kind as i32),
+        }
+    }
+
+    /// How many Reference windows may be open at once: the most a plugin on the reference
+    /// windows' hook says, 1 with none.
+    pub fn reference_windows(&self) -> u32 {
+        self.hooks().reference_windows()
+    }
+
+    /// Whether a plugin lets `panel` be torn off into a window of its own.
+    pub fn floats(&self, panel: crate::floating::FloatingPanel) -> bool {
+        self.hooks().floating_panel(panel as i32)
+    }
+
+    /// The choices the menus at `place` offer, of each plugin on that has one there (in order of
+    /// id), as their manifests list them. None: the app shows no button for them.
+    pub fn menu_choices(&self, place: PluginMenuPlace) -> Vec<PluginChoice> {
+        let list = self.listed();
+        let mut on: Vec<&PluginInfo> = list.files.iter().filter(|p| p.on && p.problem.is_none()).collect();
+        on.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut choices = Vec::new();
+        for plugin in on {
+            let Some(menu) = list.shapes.get(&plugin.id).and_then(|shape| shape.menu.as_ref()) else { continue };
+            if menu.place != place {
+                continue;
+            }
+            for choice in &menu.choices {
+                let chosen =
+                    choice.sets.iter().all(|&(at, value)| plugin.controls.get(at).is_some_and(|c| c.number() == value));
+                choices.push(PluginChoice {
+                    key: choice.key.clone(),
+                    label: choice.label.clone(),
+                    icon: choice.icon.clone(),
+                    chosen,
+                });
+            }
+        }
+        choices
+    }
+
+    /// The menu choice `key` ([`PluginChoice::key`]) picked: each control it sets set so, as if on
+    /// its card, its plugin told. The controls it changed, as they are now, for the app to keep
+    /// (as it keeps a switch or a slider set on the card); none for a choice no plugin on offers.
+    pub fn choose(&self, key: String) -> Vec<PluginControl> {
+        let mut list = self.listed();
+        let Listed { files, shapes, .. } = &mut *list;
+        let found = files.iter_mut().filter(|p| p.on && p.problem.is_none()).find_map(|plugin| {
+            let choice = shapes.get(&plugin.id)?.menu.as_ref()?.choices.iter().find(|c| c.key == key)?;
+            Some((plugin, choice.sets.clone()))
+        });
+        let Some((plugin, sets)) = found else { return Vec::new() };
+        let artwork: Vec<bool> = shapes.get(&plugin.id).map(|shape| shape.artwork.clone()).unwrap_or_default();
+        let mut changed = Vec::new();
+        let mut kept = Vec::new();
+        for (at, value) in sets {
+            let Some(control) = plugin.controls.get_mut(at) else { continue };
+            if control.number() == value {
+                continue;
+            }
+            match control {
+                PluginControl::Switch { control } => control.on = value != 0.0,
+                PluginControl::Slider { control } => control.value = control.stepped(value),
+                PluginControl::File { .. } => continue,
+            }
+            self.hooks.control(&plugin.id, at, control.number());
+            if artwork.get(at) == Some(&true) {
+                kept.push((control.key().to_owned(), control.number()));
+            }
+            changed.push(control.clone());
+        }
+        drop(list);
+        for (key, value) in kept {
+            self.keep_with_artwork(key, value);
+        }
+        changed
     }
 
     /// Whether a plugin has the colour panel's Classic show a triangle (saturation and brightness
@@ -1355,10 +2004,50 @@ impl Plugins {
     /// rebinding them says do each now.
     pub fn key_shortcut_list(&self, desktop: bool, mac: bool) -> Vec<crate::ShortcutGroup> {
         let hooks = self.hooks();
-        if !hooks.rebinds_keys() {
-            return crate::key_shortcut_list(desktop, mac);
+        let mut groups = if hooks.rebinds_keys() {
+            crate::keys::shortcut_list_now(desktop, mac, |press| hooks.key_shortcut_keys(press))
+        } else {
+            crate::key_shortcut_list(desktop, mac)
+        };
+        // the presses plugins give their switches and actions, under their names
+        let rows: Vec<crate::ShortcutRow> = self
+            .plugin_presses()
+            .into_iter()
+            .map(|(press, does)| crate::ShortcutRow { keys: press.label(mac), combos: vec![press], does })
+            .collect();
+        if !rows.is_empty() {
+            groups.push(crate::ShortcutGroup { heading: "Plugins".to_owned(), rows });
         }
-        crate::keys::shortcut_list_now(desktop, mac, |press| hooks.key_shortcut_keys(press))
+        groups
+    }
+}
+
+impl Plugins {
+    /// Each press a plugin that is on gives one of its switches or actions (each while it shows),
+    /// with what it does: the switch's or the action's words.
+    fn plugin_presses(&self) -> Vec<(KeyCombo, String)> {
+        let list = self.listed();
+        let mut presses = Vec::new();
+        for plugin in list.in_order().into_iter().filter(|p| p.on && p.problem.is_none()) {
+            let Some(shape) = list.shapes.get(&plugin.id) else { continue };
+            let shows =
+                |under: &[Option<usize>], at: usize| shape.shows(under.get(at).copied().flatten(), &plugin.controls);
+            for (at, press) in shape.presses.iter().enumerate() {
+                if let (Some(press), Some(PluginControl::Switch { control })) = (press, plugin.controls.get(at))
+                    && shows(&shape.under, at)
+                {
+                    presses.push((press.clone(), control.label.clone()));
+                }
+            }
+            for (at, press) in shape.action_presses.iter().enumerate() {
+                if let (Some(press), Some(action)) = (press, plugin.actions.get(at))
+                    && shows(&shape.action_under, at)
+                {
+                    presses.push((press.clone(), action.label.clone()));
+                }
+            }
+        }
+        presses
     }
 }
 
@@ -1574,6 +2263,26 @@ mod tests {
         assert_eq!(plugin_slider_shown(sound.clone(), 0.0), "By brush");
         assert_eq!(plugin_slider_shown(sound.clone(), 1.2), "Eraser");
         assert_eq!(plugin_slider_shown(sound, 2.0), "Pencil");
+    }
+
+    #[test]
+    fn a_slider_named_at_every_step_is_a_choice() {
+        let names = ["Eraser", "Pencil", "Pen"].map(str::to_owned).to_vec();
+        let sound = PluginSlider { least: 1.0, most: 3.0, step: 1.0, at_least: None, names, ..gap_slider() };
+        assert_eq!(plugin_slider_choices(sound.clone()), ["Eraser", "Pencil", "Pen"]);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 1.0), 0);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 3.0), 2);
+        assert_eq!(plugin_slider_chosen(sound.clone(), 9.0), 2);
+        assert_eq!(plugin_slider_choice(sound.clone(), 1), 2.0);
+        assert_eq!(plugin_slider_choice(sound.clone(), 7), 3.0);
+        // a step left unnamed, numbers, or a range of one: a slider still
+        let short = PluginSlider { most: 4.0, ..sound.clone() };
+        assert!(plugin_slider_choices(short).is_empty());
+        assert!(plugin_slider_choices(gap_slider()).is_empty());
+        let one = PluginSlider { most: 1.0, ..sound.clone() };
+        assert!(plugin_slider_choices(one).is_empty());
+        let flat = PluginSlider { step: 0.0, ..sound };
+        assert!(plugin_slider_choices(flat).is_empty());
     }
 
     #[test]
@@ -2047,13 +2756,13 @@ mod tests {
         assert_eq!(Plugins::new().install(file).as_deref(), Some("This plugin couldn't be saved."));
     }
 
-    const POSTERISE: &str = "io.github.artcraftandroid.posterise";
-    const GAP: &str = "io.github.artcraftandroid.gap-closing";
-    const SIZE: &str = "io.github.artcraftandroid.interface-size";
-    const EYEDROPPER: &str = "io.github.artcraftandroid.eyedropper-layer";
-    const PASTE: &str = "io.github.artcraftandroid.paste-into-masks";
+    const EFFECTS: &str = "io.github.artcraftandroid.effects";
+    const COLORDROP: &str = "io.github.artcraftandroid.colordrop-tools";
+    const INTERFACE: &str = "io.github.artcraftandroid.interface";
+    const LAYER_TOOLS: &str = "io.github.artcraftandroid.layer-tools";
+    const LAYER_FILLS: &str = "io.github.artcraftandroid.layer-fills";
+    const TRIANGLE: &str = "io.github.artcraftandroid.colour-triangle";
     const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
-    const COLOUR: &str = "io.github.artcraftandroid.interface-colour";
 
     /// The app's plugins kept in `dir`, what it comes with added.
     fn app_at(dir: &str) -> Arc<Plugins> {
@@ -2074,9 +2783,9 @@ mod tests {
         let package = plugin_file::read_package(bytes).unwrap();
         let mut manifest: Value = serde_json::from_slice(package.manifest_text()).unwrap();
         manifest["version"] = json!(version);
-        let inside = [plugin_file::FILTER_CODE, crate::plugin_run::MODULE];
-        let files: Vec<(&str, &[u8])> =
-            inside.into_iter().filter_map(|path| Some((path, package.file(path)?))).collect();
+        let listed = package.manifest.shape.filters.iter().map(|f| f.code.as_str());
+        let inside = [plugin_file::FILTER_CODE, crate::plugin_run::MODULE].into_iter().chain(listed);
+        let files: Vec<(&str, &[u8])> = inside.filter_map(|path| Some((path, package.file(path)?))).collect();
         pack(&manifest, &files)
     }
 
@@ -2208,42 +2917,102 @@ mod tests {
             assert!(plugins.set_on(card.id.clone(), true));
             let on = self::card(&plugins, &card.id);
             assert!(on.on && on.problem.is_none(), "{on:?}");
-            if card.holds.contains(&PluginPart::Filter) {
-                let opened = plugins.filter_to_open(&card.id).map(|open| open.name);
-                assert_eq!(opened.as_deref(), Ok(card.name.as_str()));
-            }
             if card.holds.contains(&PluginPart::Hooks) {
                 assert!(plugins.hooks().is_on(&card.id), "{}", card.name);
             }
         }
-        assert_eq!(plugins.filters().len(), 4);
-        // each does what it says, by its controls
+        // each filter there while its switch is on, and each opens
+        assert!(plugins.filters().is_empty(), "each waits for its switch");
+        for switch in ["extract_lines", "outline", "posterise"] {
+            assert!(plugins.set_switch(format!("{EFFECTS}.{switch}"), true));
+        }
+        assert!(plugins.set_switch(format!("{LAYER_FILLS}.paper"), true));
+        let filters = plugins.filters();
+        let names: Vec<&str> = filters.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Extract lines", "Outline", "Posterise", "Paper texture"]);
+        for filter in &filters {
+            let opened = plugins.filter_to_open(&filter.id).map(|open| (open.name, open.controls));
+            assert_eq!(opened, Ok((filter.name.clone(), filter.controls.clone())));
+        }
+        // each does what it says, by its controls, its sliders doing nothing with their switch off
         assert_eq!(plugins.set_slider(format!("{TOUCH}.x"), 10.0), Some(10.0));
         assert_eq!(landing(&plugins), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
         assert!(plugins.set_slider("interface_size".to_owned(), 0.9).is_some());
+        assert!(plugins.set_switch(format!("{INTERFACE}.clear"), true));
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert!(!plugins.keep_clear());
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
         assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6);
+        assert!(plugins.keep_clear());
+        assert!(plugins.set_switch(format!("{INTERFACE}.clear"), false));
+        assert!(!plugins.keep_clear());
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6, "the slider is its own");
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
         assert!(plugins.hooks().pick_layer());
         assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
         assert!(plugins.hooks().paste_mask());
+        assert!(!plugins.hooks().opacity_together());
+        assert!(plugins.set_switch(format!("{LAYER_TOOLS}.opacity"), true));
+        assert!(plugins.hooks().opacity_together());
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 4.0), Some(4.0));
-        assert!(plugins.hooks().fill_mask());
-        // the accent as it was at the slider's start, then red
+        assert!(!plugins.hooks().fill_mask());
+        assert!(plugins.set_switch(format!("{COLORDROP}.gap_closing"), true));
+        assert!(plugins.hooks().fill_mask() && !plugins.hooks().fill_all_layers());
+        assert!(plugins.set_switch(format!("{COLORDROP}.all_layers"), true));
+        assert!(plugins.hooks().fill_all_layers());
+        // the accent, at the sliders' start the blue it was, then red, then grey
+        assert_eq!(plugins.accent_colour(), None);
+        assert!(plugins.set_switch(format!("{INTERFACE}.colour"), true));
         assert_eq!(plugins.accent_colour(), Some(0x0076FD));
-        assert!(plugins.set_slider(format!("{COLOUR}.hue"), 0.0).is_some());
+        assert!(plugins.set_slider(format!("{INTERFACE}.hue"), 0.0).is_some());
         assert_eq!(plugins.accent_colour(), Some(0xFD0000));
-        assert!(plugins.set_slider(format!("{COLOUR}.saturation"), 0.0).is_some());
+        assert!(plugins.set_slider(format!("{INTERFACE}.saturation"), 0.0).is_some());
         assert_eq!(plugins.accent_colour(), Some(0xFDFDFD));
+        for (switch, hook) in
+            [("hide_undo", Hooks::hide_undo_notice as fn(&Hooks) -> bool), ("pin_panels", Hooks::pin_panels)]
+        {
+            assert!(!hook(&plugins.hooks()), "{switch}");
+            assert!(plugins.set_switch(format!("{INTERFACE}.{switch}"), true));
+            assert!(hook(&plugins.hooks()), "{switch}");
+        }
         // the triangle draws Classic, and says where a touch lands: its right corner is the pure hue
         assert!(plugins.picker_on());
         let corner = plugins.picker_pick(0.933, 0.5).unwrap();
         assert!(corner.iter().all(|share| (share - 1.0).abs() < 1e-3), "{corner:?}");
+        // the hue slider has the hue until the ring does, then a touch on the ring picks it
+        assert_eq!(plugins.picker_hue_point(0.0), None);
+        assert_eq!(plugins.picker_hue(0.97, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.ring"), true));
+        let knob = plugins.picker_hue_point(0.25).unwrap();
+        assert!((knob[0] - 0.5).abs() < 1e-3 && (knob[1] - 0.05).abs() < 1e-3, "{knob:?}");
+        assert!(plugins.picker_hue(0.97, 0.5).is_some_and(|h| !(1e-3..=0.999).contains(&h)));
+        assert_eq!(plugins.picker_hue(0.5, 0.5), None, "the triangle's middle");
+        // the floating window: smaller with Interface size's slider, and the picker alone with its switch
+        assert!(!plugins.floating_picker_only());
+        assert!(plugins.set_switch(format!("{TRIANGLE}.picker_only"), true));
+        assert!(plugins.floating_picker_only());
+        // the parts of the interface each on top of the whole, while they're sized separately
+        assert!(plugins.set_slider(format!("{INTERFACE}.floating"), 0.5).is_some());
+        assert!(plugins.set_slider(format!("{INTERFACE}.top_bar"), 1.5).is_some());
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 1.0);
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Floating), 0.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::TopBar), 1.5);
+        assert_eq!(plugins.interface_part_scale(InterfacePart::Panels), 1.0);
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6, "the whole as it was");
+        // the triangle's own switch off: Classic is the app's square again, and the window as it was
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), false));
+        assert!(!plugins.picker_on() && !plugins.floating_picker_only());
+        assert_eq!(plugins.picker_pick(0.933, 0.5), None);
+        assert!(plugins.set_switch(format!("{TRIANGLE}.triangle"), true));
+        assert!(plugins.picker_on());
         // kept, so through a restart
         let next = app_at(&dir);
         read_lines(&next, &plugins.kept_lines());
         assert_eq!(next.plugins(), plugins.plugins());
         assert_eq!(landing(&next), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
         assert_eq!(next.filters().len(), 4);
+        assert_eq!(next.accent_colour(), Some(0xFDFDFD));
         // and off again, none does
         for card in plugins.plugins() {
             assert!(plugins.set_on(card.id, false));
@@ -2258,30 +3027,250 @@ mod tests {
     }
 
     #[test]
+    fn a_card_shows_what_comes_under_a_switch_only_while_it_is_on() {
+        let dir = store("bundled-under");
+        let plugins = app_at(&dir);
+        let labels = |plugins: &Plugins, id: &str| {
+            let card = card(plugins, id);
+            let controls = card.controls.iter().map(|c| match c {
+                PluginControl::Switch { control } => control.label.clone(),
+                PluginControl::Slider { control } => control.label.clone(),
+                PluginControl::File { control } => control.label.clone(),
+            });
+            controls.chain(card.actions.iter().map(|a| a.label.clone())).collect::<Vec<_>>()
+        };
+        // a switch for each of the plugins it was made of, named as they were
+        let switches = ["ColorDrop fills by all layers", "ColorDrop gap closing"];
+        assert_eq!(labels(&plugins, COLORDROP), switches);
+        assert!(plugins.set_switch(format!("{COLORDROP}.gap_closing"), true));
+        assert_eq!(labels(&plugins, COLORDROP), ["ColorDrop fills by all layers", "ColorDrop gap closing", "Gap"]);
+        let interface =
+            ["Interface size", "Interface colour", "Hide undo notices", "Hide all action notices", "Panels stay open"];
+        assert_eq!(labels(&plugins, INTERFACE), interface);
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
+        assert!(plugins.set_switch(format!("{INTERFACE}.colour"), true));
+        let all = [
+            "Interface size",
+            "Size",
+            "Size parts separately",
+            "Clear of status bar and camera",
+            "Interface colour",
+            "Hue",
+            "Saturation",
+            "Hide undo notices",
+            "Hide all action notices",
+            "Panels stay open",
+        ];
+        assert_eq!(labels(&plugins, INTERFACE), all);
+        // a switch under a switch, and what comes under it while both are on
+        assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
+        let parts = ["Floating panels", "Popovers and menus", "Side bar", "Top bar", "Panels"];
+        let with_parts: Vec<&str> = all[..3].iter().chain(&parts).chain(&all[3..]).copied().collect();
+        assert_eq!(labels(&plugins, INTERFACE), with_parts);
+        assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), false));
+        assert_eq!(labels(&plugins, INTERFACE)[..2], ["Interface size", "Interface colour"]);
+        let tools = ["Opacity of picked layers", "Paste into masks", "Eyedropper picks from layer"];
+        assert_eq!(labels(&plugins, LAYER_TOOLS), tools);
+        assert_eq!(labels(&plugins, EFFECTS), ["Extract lines", "Outline", "Posterise"]);
+        assert!(plugins.set_switch(format!("{EFFECTS}.extract_lines"), true));
+        let lines = ["Extract lines", "Paper", "Softness", "Keep the colour", "Outline", "Posterise"];
+        assert_eq!(labels(&plugins, EFFECTS), lines);
+        // an action too, and it doesn't run with its switch off
+        assert_eq!(labels(&plugins, LAYER_FILLS), ["Grid layer", "Paper texture"]);
+        assert!(plugins.set_on(LAYER_FILLS.to_owned(), true));
+        assert!(plugins.actions_in(PluginPlace::Card).is_empty());
+        let session = crate::CanvasSession::new(64, 64);
+        assert!(!plugins.run_action(format!("{LAYER_FILLS}.add"), Arc::clone(&session)));
+        assert!(plugins.set_switch(format!("{LAYER_FILLS}.grid"), true));
+        let grid = ["Grid layer", "Spacing", "Line width", "Paper texture", "Add a grid layer"];
+        assert_eq!(labels(&plugins, LAYER_FILLS), grid);
+        assert_eq!(plugins.actions_in(PluginPlace::Card).len(), 1);
+        // what is hidden keeps its value, and is kept
+        assert_eq!(plugins.set_slider(format!("{LAYER_FILLS}.spacing"), 50.0), Some(50.0));
+        assert!(plugins.set_switch(format!("{LAYER_FILLS}.grid"), false));
+        assert!(plugins.kept_lines().contains(&format!("{LAYER_FILLS}.spacing 50")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_filter_of_several_opens_at_its_card_s_values_and_resets_to_them() {
+        let dir = store("listed-filters");
+        let plugins = at(&dir);
+        let (_, file) = crate::plugin_file::tests::two_filters("org.example.filters");
+        assert_eq!(plugins.install(file), None);
+        // it only adds, so it is on, but each filter waits for its switch
+        assert!(card(&plugins, "org.example.filters").on);
+        assert!(plugins.filters().is_empty());
+        assert!(plugins.set_switch("org.example.filters.fade_on".to_owned(), true));
+        let filters = plugins.filters();
+        assert_eq!(filters.len(), 1);
+        assert_eq!((filters[0].id.as_str(), filters[0].name.as_str()), ("org.example.filters.fade", "Fade"));
+        assert_eq!(plugins.set_slider("org.example.filters.fade".to_owned(), 0.3), Some(0.3));
+        let opened = plugins.filter_to_open("org.example.filters.fade").map_err(|why| why.to_string()).unwrap();
+        assert_eq!(opened.plugin, "org.example.filters");
+        assert_eq!(opened.controls.len(), 1);
+        match &opened.controls[0] {
+            PluginControl::Slider { control } => assert_eq!((control.value, control.starts), (0.3, 0.3)),
+            other => panic!("{other:?}"),
+        }
+        // its switch off, it isn't listed; the plugin's own id opens none of them
+        assert!(plugins.set_switch("org.example.filters.fade_on".to_owned(), false));
+        assert!(plugins.filters().is_empty());
+        assert!(plugins.filter_to_open("org.example.filters").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A plugin of code, `id`, with `controls` and `more` in its manifest.
+    fn coded_file(id: &str, controls: Value, more: &[(&str, Value)]) -> Vec<u8> {
+        let module = position_module(r#"(func (export "procraft_control") (param i32 f32))"#, "(i64.const 0)");
+        let mut manifest = coded(id, &module);
+        manifest["controls"] = controls;
+        for (field, value) in more {
+            manifest[*field] = value.clone();
+        }
+        pack(&manifest, &[(crate::plugin_run::MODULE, &module)])
+    }
+
+    const OLD_A: &str = "org.example.old-a";
+    const OLD_B: &str = "org.example.old-b";
+    const NEW: &str = "org.example.new";
+
+    /// Two plugins as an app came with them, A with a slider and B a filter, as files.
+    fn the_old_two() -> Vec<(&'static str, Vec<u8>)> {
+        let a = json!([{ "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 10, "starts": 2 }]);
+        vec![("old-a", coded_file(OLD_A, a, &[])), ("old-b", filter_file(&filter(OLD_B)))]
+    }
+
+    /// The one that takes their place: a switch for each, A's slider under A's.
+    fn the_new_one() -> (&'static str, Vec<u8>) {
+        let controls = json!([
+            { "key": "a", "type": "switch", "label": "Old A" },
+            { "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 10, "starts": 2, "under": "a" },
+            { "key": "b", "type": "switch", "label": "Old B" },
+        ]);
+        let replaces = json!([
+            { "id": OLD_A, "switch": "a", "controls": { "amount": "amount" } },
+            { "id": OLD_B, "switch": "b" },
+        ]);
+        ("new", coded_file(NEW, controls, &[("replaces", replaces)]))
+    }
+
+    fn switch_of(plugins: &Plugins, key: &str) -> bool {
+        matches!(plugins.control(key), Some(PluginControl::Switch { control }) if control.on)
+    }
+
+    #[test]
+    fn one_taking_the_place_of_others_takes_what_they_had_set_in_whatever_order_it_is_read() {
+        let dir = store("replaces");
+        // an earlier app: A on with its slider moved, B off
+        let earlier = app_with(&dir, &the_old_two());
+        let mut lines = vec![format!("{OLD_A}.on true"), format!("{OLD_A}.amount 7"), format!("{OLD_B}.on false")];
+        read_lines(&earlier, &lines);
+        // the next comes with the new one alone: the old ones go, from the disk too, once
+        for order in [false, true] {
+            let next = app_with(&dir, &[the_new_one()]);
+            assert!(!has(&next, OLD_A) && !has(&next, OLD_B));
+            assert!(!dir_holds(&dir, OLD_A) && !dir_holds(&dir, OLD_B));
+            if order {
+                lines.reverse();
+            }
+            read_lines(&next, &lines);
+            assert!(card(&next, NEW).on, "reversed: {order}");
+            assert!(switch_of(&next, &format!("{NEW}.a")) && !switch_of(&next, &format!("{NEW}.b")));
+            assert_eq!(slider_value(&next, &format!("{NEW}.amount")), 7.0);
+            assert!(next.hooks().is_on(NEW));
+        }
+        // its own values, kept since, say instead, read before or after
+        for own_first in [true, false] {
+            let next = app_at_with_new(&dir);
+            let own = [format!("{NEW}.a false"), format!("{NEW}.amount 4"), format!("{NEW}.on false")];
+            if own_first {
+                read_lines(&next, &own);
+            }
+            read_lines(&next, &lines);
+            if !own_first {
+                read_lines(&next, &own);
+            }
+            assert!(!card(&next, NEW).on && !switch_of(&next, &format!("{NEW}.a")), "own first: {own_first}");
+            assert_eq!(slider_value(&next, &format!("{NEW}.amount")), 4.0);
+        }
+        // with all the old ones off, it stays off
+        let off = app_at_with_new(&dir);
+        read_lines(&off, &[format!("{OLD_A}.on false"), format!("{OLD_B}.on false")]);
+        assert!(!card(&off, NEW).on);
+        // B on alone: on, with B's switch, A's not
+        let b = app_at_with_new(&dir);
+        read_lines(&b, &[format!("{OLD_A}.on false"), format!("{OLD_B}.on true")]);
+        assert!(card(&b, NEW).on && switch_of(&b, &format!("{NEW}.b")) && !switch_of(&b, &format!("{NEW}.a")));
+        // what is written down from then on is its own
+        let kept = b.kept_lines();
+        assert!(kept.contains(&format!("{NEW}.on true")) && kept.contains(&format!("{NEW}.b true")), "{kept:?}");
+        assert!(kept.iter().all(|line| !line.starts_with("org.example.old")), "{kept:?}");
+        // an old one can't come back beside it; removed, it takes what was kept for those too
+        let said = Some("A plugin already here takes this one's place.".to_owned());
+        assert_eq!(b.install(the_old_two().remove(0).1), said);
+        let keys = b.remove(NEW.to_owned()).unwrap();
+        for key in [format!("{NEW}.on"), format!("{OLD_A}.on"), format!("{OLD_A}.amount"), format!("{OLD_B}.on")] {
+            assert!(keys.contains(&key), "{key}: {keys:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app's plugins in `dir` as an app that comes with the new one alone adds them.
+    fn app_at_with_new(dir: &str) -> Arc<Plugins> {
+        app_with(dir, &[the_new_one()])
+    }
+
+    #[test]
+    fn imported_where_the_others_are_on_it_takes_their_place_as_they_were_at_once() {
+        let dir = store("replaces-import");
+        let plugins = at(&dir);
+        for (_, file) in the_old_two() {
+            assert_eq!(plugins.install(file), None);
+        }
+        assert!(plugins.set_on(OLD_A.to_owned(), true));
+        assert_eq!(plugins.set_slider(format!("{OLD_A}.amount"), 9.0), Some(9.0));
+        // B, a filter, started on
+        let offer = plugins.inspect(the_new_one().1);
+        assert!(
+            offer.message.contains("It takes the place of A plugin and A filter, keeping what was set."),
+            "{offer:?}"
+        );
+        assert_eq!(plugins.install(the_new_one().1), None);
+        assert!(!has(&plugins, OLD_A) && !has(&plugins, OLD_B) && !plugins.hooks().is_on(OLD_A));
+        assert!(card(&plugins, NEW).on && plugins.hooks().is_on(NEW));
+        assert!(switch_of(&plugins, &format!("{NEW}.a")) && switch_of(&plugins, &format!("{NEW}.b")));
+        assert_eq!(slider_value(&plugins, &format!("{NEW}.amount")), 9.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn one_the_app_added_and_someone_removed_stays_removed() {
         let dir = store("bundled-removed");
         let plugins = app_at(&dir);
-        assert!(plugins.set_on(GAP.to_owned(), true));
+        assert!(plugins.set_on(COLORDROP.to_owned(), true));
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 6.0), Some(6.0));
-        assert_eq!(plugins.remove(POSTERISE.to_owned()), Some(vec![format!("{POSTERISE}.on")]));
-        let keys = plugins.remove(GAP.to_owned()).unwrap();
-        assert!(keys.contains(&"fill_gap".to_owned()) && keys.contains(&format!("{GAP}.on")), "{keys:?}");
-        assert!(!has(&plugins, POSTERISE) && !has(&plugins, GAP) && !plugins.hooks().is_on(GAP));
-        assert!(!dir_holds(&dir, POSTERISE) && !dir_holds(&dir, GAP));
+        let keys = plugins.remove(EFFECTS.to_owned()).unwrap();
+        assert!(keys.contains(&format!("{EFFECTS}.on")) && keys.contains(&format!("{EFFECTS}.reach")), "{keys:?}");
+        assert!(keys.contains(&"io.github.artcraftandroid.outline.on".to_owned()), "{keys:?}");
+        let keys = plugins.remove(COLORDROP.to_owned()).unwrap();
+        assert!(keys.contains(&"fill_gap".to_owned()) && keys.contains(&format!("{COLORDROP}.on")), "{keys:?}");
+        assert!(!has(&plugins, EFFECTS) && !has(&plugins, COLORDROP) && !plugins.hooks().is_on(COLORDROP));
+        assert!(!dir_holds(&dir, EFFECTS) && !dir_holds(&dir, COLORDROP));
         // through a restart, and an app that comes with a newer one
         let lines = plugins.kept_lines();
         let next = app_at(&dir);
         read_lines(&next, &lines);
-        assert!(!has(&next, POSTERISE) && !has(&next, GAP));
+        assert!(!has(&next, EFFECTS) && !has(&next, COLORDROP));
         assert_eq!(next.plugins().len(), crate::bundled::BUNDLED.len() - 2);
         let mut newer = all_bundled();
-        newer.retain(|(name, _)| *name != "posterise");
-        newer.push(("posterise", bundled_file("posterise", "1.1.0")));
-        assert!(!has(&app_with(&dir, &newer), POSTERISE));
-        // imported again, it is as any import: a filter starts on, and stays so
-        assert_eq!(next.install(bundled_file("posterise", "1.0.0")), None);
-        assert!(card(&next, POSTERISE).on);
-        assert!(card(&app_at(&dir), POSTERISE).on);
+        newer.retain(|(name, _)| *name != "effects");
+        newer.push(("effects", bundled_file("effects", "1.1.0")));
+        assert!(!has(&app_with(&dir, &newer), EFFECTS));
+        // imported again, it is as any import: one that only holds filters starts on, and stays so
+        assert_eq!(next.install(bundled_file("effects", "1.0.0")), None);
+        assert!(card(&next, EFFECTS).on);
+        assert!(card(&app_at(&dir), EFFECTS).on);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2292,41 +3281,41 @@ mod tests {
         first.retain(|(name, _)| *name != "touch-offset");
         let plugins = app_with(&dir, &first);
         assert!(!has(&plugins, TOUCH));
-        assert!(plugins.set_on(POSTERISE.to_owned(), true));
-        assert!(plugins.set_on(GAP.to_owned(), true));
+        assert!(plugins.set_on(EFFECTS.to_owned(), true));
+        assert!(plugins.set_on(COLORDROP.to_owned(), true));
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 7.0), Some(7.0));
         let lines = plugins.kept_lines();
         // the next comes with touch offset, and newer ones of these two
         let mut next = all_bundled();
-        next.retain(|(name, _)| !["posterise", "gap-closing"].contains(name));
-        next.push(("posterise", bundled_file("posterise", "1.1.0")));
-        next.push(("gap-closing", bundled_file("gap-closing", "1.0.1")));
+        next.retain(|(name, _)| !["effects", "colordrop-tools"].contains(name));
+        next.push(("effects", bundled_file("effects", "1.1.0")));
+        next.push(("colordrop-tools", bundled_file("colordrop-tools", "1.0.1")));
         let updated = app_with(&dir, &next);
         read_lines(&updated, &lines);
         assert!(!card(&updated, TOUCH).on);
-        let (posterise, gap) = (card(&updated, POSTERISE), card(&updated, GAP));
-        assert_eq!((posterise.version.as_str(), posterise.on), ("1.1.0", true));
-        assert_eq!((gap.version.as_str(), gap.on), ("1.0.1", true));
+        let (effects, colordrop) = (card(&updated, EFFECTS), card(&updated, COLORDROP));
+        assert_eq!((effects.version.as_str(), effects.on), ("1.1.0", true));
+        assert_eq!((colordrop.version.as_str(), colordrop.on), ("1.0.1", true));
         assert_eq!(slider_value(&updated, "fill_gap"), 7.0);
         // one newer than the app's stays as it is
         let older = app_at(&dir);
-        assert_eq!(card(&older, POSTERISE).version, "1.1.0");
+        assert_eq!(card(&older, EFFECTS).version, "1.1.0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_plugin_imported_before_the_app_came_with_it_is_left_as_it_was() {
         let dir = store("bundled-imported");
-        // a filter, so it started on
-        assert_eq!(at(&dir).install(bundled_file("posterise", "1.0.0")), None);
+        // one that only holds filters, so it started on
+        assert_eq!(at(&dir).install(bundled_file("effects", "1.0.0")), None);
         assert_eq!(at(&dir).install(bundled_file("touch-offset", "0.5.0")), None);
         let plugins = app_at(&dir);
-        assert!(card(&plugins, POSTERISE).on);
-        assert!(card(&app_at(&dir), POSTERISE).on);
+        assert!(card(&plugins, EFFECTS).on);
+        assert!(card(&app_at(&dir), EFFECTS).on);
         // an older one is updated
         let touch = card(&plugins, TOUCH);
         assert_eq!((touch.version.as_str(), touch.on), ("1.0.0", false));
-        assert!(!card(&plugins, "io.github.artcraftandroid.outline").on);
+        assert!(!card(&plugins, LAYER_TOOLS).on);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2339,27 +3328,29 @@ mod tests {
         plugins.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
         plugins.read_kept("interface_size".to_owned(), "1.0".to_owned());
         plugins.read_kept("paste_into_mask".to_owned(), "false".to_owned());
-        assert!(card(&plugins, GAP).on && card(&plugins, EYEDROPPER).on);
+        assert!(card(&plugins, COLORDROP).on && card(&plugins, LAYER_TOOLS).on);
         assert_eq!(slider_value(&plugins, "fill_gap"), 5.0);
-        assert!(plugins.hooks().is_on(GAP) && plugins.hooks().pick_layer());
-        assert!(!card(&plugins, SIZE).on && !card(&plugins, PASTE).on);
+        // with the switch the gap comes under
+        assert!(switch_of(&plugins, &format!("{COLORDROP}.gap_closing")));
+        assert!(plugins.hooks().fill_mask() && plugins.hooks().pick_layer() && !plugins.hooks().paste_mask());
+        assert!(!card(&plugins, INTERFACE).on);
         // nothing to import: it's here, and on
         assert_eq!(plugins.take_moved_notice(), None);
         let lines = plugins.kept_lines();
-        assert!(lines.contains(&format!("{GAP}.on true")), "{lines:?}");
+        assert!(lines.contains(&format!("{COLORDROP}.on true")), "{lines:?}");
         assert_eq!(lines.iter().filter(|line| line.starts_with("fill_gap ")).count(), 1, "{lines:?}");
         // on the next start with only the setting kept, as one platform keeps them
         let next = app_at(&dir);
         next.read_kept("fill_gap".to_owned(), "5".to_owned());
-        assert!(card(&next, GAP).on);
+        assert!(card(&next, COLORDROP).on);
         // the size too, from where it was kept as a number
         next.read_kept("interface_size".to_owned(), "0.85".to_owned());
-        assert!(card(&next, SIZE).on);
+        assert!(card(&next, INTERFACE).on);
         assert!((next.interface_scale(1600.0, 1000.0) - 0.85).abs() < 1e-6);
         // its own on or off says instead, read before or after
         for flag_first in [true, false] {
             let next = app_at(&dir);
-            let flag = || next.read_kept(format!("{GAP}.on"), "false".to_owned());
+            let flag = || next.read_kept(format!("{COLORDROP}.on"), "false".to_owned());
             if flag_first {
                 flag();
             }
@@ -2367,14 +3358,354 @@ mod tests {
             if !flag_first {
                 flag();
             }
-            assert!(!card(&next, GAP).on, "flag first: {flag_first}");
+            assert!(!card(&next, COLORDROP).on, "flag first: {flag_first}");
             assert_eq!(slider_value(&next, "fill_gap"), 5.0);
         }
+        // and the switch its own, kept off
+        let next = app_at(&dir);
+        next.read_kept(format!("{COLORDROP}.gap_closing"), "false".to_owned());
+        next.read_kept("fill_gap".to_owned(), "5".to_owned());
+        assert!(card(&next, COLORDROP).on && !switch_of(&next, &format!("{COLORDROP}.gap_closing")));
         // nor does one that stopped come back on for it
-        app_at(&dir).stop_filter(GAP, STOPPED_DRIVER);
+        app_at(&dir).stop_filter(COLORDROP, STOPPED_DRIVER);
         let again = app_at(&dir);
         again.read_kept("fill_gap".to_owned(), "5".to_owned());
-        assert!(!card(&again, GAP).on);
+        assert!(!card(&again, COLORDROP).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_triangle_s_menu_switches_its_shape_and_what_it_sets_is_kept() {
+        let dir = store("bundled-menu");
+        let plugins = app_at(&dir);
+        // nothing at Classic while it's off
+        assert!(plugins.menu_choices(PluginMenuPlace::Classic).is_empty());
+        assert!(plugins.choose(format!("{TRIANGLE}.ring")).is_empty(), "none offers it");
+        assert!(plugins.set_on(TRIANGLE.to_owned(), true));
+        let chosen = |plugins: &Plugins| {
+            let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+            choices.iter().filter(|c| c.chosen).map(|c| c.label.clone()).collect::<Vec<_>>()
+        };
+        let choices = plugins.menu_choices(PluginMenuPlace::Classic);
+        let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Square", "Triangle", "Hue ring"]);
+        assert!(choices.iter().all(|c| c.icon.starts_with('M') && c.icon.ends_with('Z')), "each its icon");
+        // the triangle starts on, its ring off
+        assert_eq!(chosen(&plugins), ["Triangle"]);
+        assert_eq!(plugins.picker_hue_point(0.25), None);
+        // the ring: its switch set, and told back to be kept
+        let changed = plugins.choose(format!("{TRIANGLE}.ring"));
+        let keys: Vec<&str> = changed.iter().map(PluginControl::key).collect();
+        assert_eq!(keys, [format!("{TRIANGLE}.ring")]);
+        assert_eq!(chosen(&plugins), ["Hue ring"]);
+        assert!(plugins.picker_hue_point(0.25).is_some(), "the ring has the hue");
+        // the square: Classic is the app's own again
+        let changed = plugins.choose(format!("{TRIANGLE}.square"));
+        assert!(matches!(changed.as_slice(), [PluginControl::Switch { control }] if !control.on));
+        assert_eq!(chosen(&plugins), ["Square"]);
+        assert!(!plugins.picker_on());
+        // picked again, nothing changes
+        assert!(plugins.choose(format!("{TRIANGLE}.square")).is_empty());
+        // kept, so through a restart, as if set on its card
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(chosen(&next), ["Square"]);
+        assert!(!next.picker_on());
+        assert!(!next.choose(format!("{TRIANGLE}.ring")).is_empty());
+        assert_eq!(chosen(&next), ["Hue ring"]);
+        // off, it offers nothing
+        assert!(next.set_on(TRIANGLE.to_owned(), false));
+        assert!(next.menu_choices(PluginMenuPlace::Classic).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_interface_hides_every_notice_of_something_done_but_what_went_wrong() {
+        let dir = store("bundled-notices");
+        let plugins = app_at(&dir);
+        let shown = |plugins: &Plugins| {
+            [NoticeKind::Step, NoticeKind::Done, NoticeKind::Problem].map(|k| plugins.shows_notice(k))
+        };
+        // with it off, every notice shows
+        assert_eq!(shown(&plugins), [true; 3]);
+        assert!(plugins.set_on(INTERFACE.to_owned(), true));
+        assert_eq!(shown(&plugins), [true; 3], "each waits for its switch");
+        // undo's alone, then every action's; what went wrong always shows
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), true));
+        assert_eq!(shown(&plugins), [false, true, true]);
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_undo"), false));
+        assert!(plugins.set_switch(format!("{INTERFACE}.hide_notices"), true));
+        assert_eq!(shown(&plugins), [false, false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(shown(&next), [false, false, true]);
+        assert!(next.set_on(INTERFACE.to_owned(), false));
+        assert_eq!(shown(&next), [true; 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panels_float_while_the_floating_panels_switches_say() {
+        use crate::floating::FloatingPanel;
+        const FLOATING: &str = "io.github.artcraftandroid.floating-panels";
+        let dir = store("bundled-floating");
+        let plugins = app_at(&dir);
+        let floats = |plugins: &Plugins| [FloatingPanel::Layers, FloatingPanel::Brushes].map(|p| plugins.floats(p));
+        // with it off nothing floats; on, both do at once, each while its switch is
+        assert_eq!(floats(&plugins), [false; 2]);
+        assert!(plugins.set_on(FLOATING.to_owned(), true));
+        assert_eq!(floats(&plugins), [true, true]);
+        assert!(plugins.set_switch(format!("{FLOATING}.layers"), false));
+        assert_eq!(floats(&plugins), [false, true]);
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(floats(&next), [false, true]);
+        assert!(next.set_on(FLOATING.to_owned(), false));
+        assert_eq!(floats(&next), [false; 2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session on a window, its canvas fitted in it.
+    fn viewed() -> Arc<crate::CanvasSession> {
+        let s = crate::CanvasSession::new(100, 100);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (400, 400);
+            st.view = Some(procraft_engine::view::View::fit((100, 100), (400, 400)));
+        }
+        s
+    }
+
+    fn press(plugins: &Plugins, text: &str) -> Option<PluginPressed> {
+        plugins.plugin_press(KeyCombo::read(text).unwrap())
+    }
+
+    #[test]
+    fn rotation_reset_turns_the_canvas_from_the_canvas_tab_or_its_press_and_locks_pinching() {
+        const ROTATION: &str = "io.github.artcraftandroid.rotation-reset";
+        let dir = store("bundled-rotation");
+        let plugins = app_at(&dir);
+        // off, the Canvas tab has nothing of it and its press is no one's
+        assert!(
+            plugins.controls_in(PluginPlace::Canvas).is_empty() && plugins.actions_in(PluginPlace::Canvas).is_empty()
+        );
+        assert_eq!(press(&plugins, "alt+r"), None);
+        assert!(plugins.set_on(ROTATION.to_owned(), true));
+        let reset = format!("{ROTATION}.reset");
+        let keys = |controls: Vec<PluginControl>| controls.iter().map(|c| c.key().to_owned()).collect::<Vec<_>>();
+        assert_eq!(keys(plugins.controls_in(PluginPlace::Canvas)), [format!("{ROTATION}.lock")]);
+        let actions: Vec<String> = plugins.actions_in(PluginPlace::Canvas).into_iter().map(|a| a.key).collect();
+        assert_eq!(actions, [reset.as_str()]);
+        assert!(plugins.controls_in(PluginPlace::Card).is_empty());
+        // Alt+R runs it, and the keyboard's list says so
+        assert_eq!(press(&plugins, "alt+r"), Some(PluginPressed::Action { key: reset.clone() }));
+        assert_eq!(press(&plugins, "r"), None);
+        let list = plugins.key_shortcut_list(false, false);
+        let ours = list.iter().find(|g| g.heading == "Plugins").unwrap();
+        assert_eq!(ours.rows.iter().map(|r| r.does.as_str()).collect::<Vec<_>>(), ["Reset rotation"]);
+        // run on a turned canvas: upright, or the nearest right angle, the middle staying put
+        let s = viewed();
+        s.view_gesture(200.0, 200.0, 0.0, 0.0, 2.0, 1.2);
+        let middle = s.shared.lock().view.unwrap().screen_to_canvas(procraft_engine::geom::Vec2::new(200.0, 200.0));
+        let settled = |s: &crate::CanvasSession| {
+            let mut st = s.shared.lock();
+            st.view = st.view_motion.take().map(|m| m.to).or(st.view);
+            st.view.unwrap()
+        };
+        assert!(plugins.run_action(reset.clone(), Arc::clone(&s)));
+        let v = settled(&s);
+        assert!(
+            v.rotation().abs() < 1e-5
+                && (v.zoom() / 2.0 - procraft_engine::view::View::fit((100, 100), (400, 400)).zoom()).abs() < 1e-3
+        );
+        assert_eq!(
+            v.screen_to_canvas(procraft_engine::geom::Vec2::new(200.0, 200.0)).map(|p| (p.x.round(), p.y.round())),
+            middle.map(|p| (p.x.round(), p.y.round()))
+        );
+        assert!(plugins.set_slider(format!("{ROTATION}.to"), 1.0).is_some());
+        s.view_gesture(200.0, 200.0, 0.0, 0.0, 1.0, 1.2);
+        assert!(plugins.run_action(reset, Arc::clone(&s)));
+        assert!((settled(&s).rotation() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        // the switch keeps two fingers from turning the canvas
+        assert!(!plugins.hooks().gesture_lock(crate::hooks::GESTURE_TURN) && !s.gesture_turn_locked());
+        assert!(plugins.set_switch(format!("{ROTATION}.lock"), true));
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.hooks().gesture_lock(crate::hooks::GESTURE_TURN) && s.gesture_turn_locked());
+        // asked as each finger lands, and each key that isn't the app's: quick
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(hooks.gesture_lock(crate::hooks::GESTURE_TURN));
+        }
+        let asked = t.elapsed() / 1000;
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            assert!(press(&plugins, "alt+r").is_some());
+        }
+        let pressed = t.elapsed() / 200;
+        println!("the gesture lock asked in {asked:?}, a plugin's press found in {pressed:?}");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
+        assert!(pressed < std::time::Duration::from_millis(1), "{pressed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn value_check_shows_the_canvas_in_greys_from_its_switch_or_its_press() {
+        const VALUES: &str = "io.github.artcraftandroid.value-check";
+        let dir = store("bundled-values");
+        let plugins = app_at(&dir);
+        let s = viewed();
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.set_on(VALUES.to_owned(), true));
+        // on, but its switch off: the colours as they are
+        assert_eq!(plugins.hooks().view_look(), None);
+        // Alt+G flips it: each colour the grey of its luminance, on the screen alone
+        let flipped = press(&plugins, "alt+g");
+        assert!(
+            matches!(flipped, Some(PluginPressed::Switched { control: PluginControl::Switch { ref control } }) if control.on)
+        );
+        let grey = plugins.hooks().view_look().unwrap();
+        assert_eq!(grey, procraft_gpu::GREY_LOOK);
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.shared.lock().shown_look(), Some(procraft_gpu::GREY_LOOK));
+        // asked as the plugins change (twelve entries): quick
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        for _ in 0..200 {
+            assert!(hooks.view_look().is_some());
+        }
+        let asked = t.elapsed() / 200;
+        println!("the view look asked in {asked:?}");
+        assert!(asked < std::time::Duration::from_millis(1), "{asked:?}");
+        // stronger contrast spreads the greys from a middle grey; the grey view goes on top
+        assert!(plugins.set_slider(format!("{VALUES}.contrast"), 2.0).is_some());
+        let strong = plugins.hooks().view_look().unwrap();
+        let mid = crate::view_look::through(&strong, [0.18; 3]);
+        assert!(mid.iter().all(|v| (v - 0.18).abs() < 1e-5), "{mid:?}");
+        // and off again: nothing shown through
+        assert!(matches!(press(&plugins, "alt+g"), Some(PluginPressed::Switched { .. })));
+        assert_eq!(plugins.hooks().view_look(), None);
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.shared.lock().shown_look(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_paper_is_kept_with_each_artwork_and_given_to_its_canvas() {
+        const PAPER: &str = "io.github.artcraftandroid.paper";
+        let dir = store("bundled-paper");
+        let plugins = app_at(&dir);
+        assert!(plugins.set_on(PAPER.to_owned(), true));
+        let paper_of = |s: &crate::CanvasSession| s.shared.lock().plugin_paper.clone();
+        // an artwork starts with none
+        let one = crate::CanvasSession::new(64, 48);
+        one.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&one), None);
+        // chosen for it: given to its canvas, and kept with it
+        let edits = one.edits();
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 3.0).is_some());
+        assert!(plugins.set_slider(format!("{PAPER}.colour"), 2.0).is_some());
+        assert_ne!(one.edits(), edits);
+        // its tile drawn once a change, and given as drawn after: what the app asks each time the
+        // plugins change costs little (`paper_tile_cost` bounds the drawing)
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        let drawn = hooks.paper();
+        let first = t.elapsed();
+        // (the quickest of five asks: other work on the machine may hold up one alone)
+        let kept = (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let again = hooks.paper();
+                let kept = t.elapsed();
+                assert!(drawn.is_some() && drawn == again);
+                kept
+            })
+            .min()
+            .unwrap_or_default();
+        println!("the paper asked in {first:?} drawing its tile, in {kept:?} drawn");
+        assert!(kept * 10 < first, "{kept:?} drawn, {first:?} drawing its tile");
+        one.use_plugins(Arc::clone(&plugins));
+        let given = paper_of(&one).unwrap();
+        assert_eq!(given.tile.len(), procraft_engine::textures::TEXTURE_SIZE.pow(2));
+        assert!(given.tile.iter().any(|&h| h < 128) && given.tile.iter().any(|&h| h > 128));
+        assert_eq!((given.strength, given.scale, given.depth), (0.6, 1.0, 0.3));
+        let cream = [0xF4, 0xEC, 0xD8].map(|c| c as f32 / 255.0);
+        assert_eq!(given.colour, Some(cream));
+        let saved = std::env::temp_dir().join(format!("procraft-paper-artwork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&saved);
+        one.save(saved.to_string_lossy().into_owned()).unwrap();
+        // another artwork has its own: none until chosen
+        let two = crate::CanvasSession::new(64, 48);
+        two.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&two), None);
+        assert!(
+            matches!(plugins.control(&format!("{PAPER}.paper")), Some(PluginControl::Slider { control }) if control.value == 0.0)
+        );
+        // the first opened again has its paper back
+        let opened = crate::CanvasSession::open(saved.to_string_lossy().into_owned()).unwrap();
+        opened.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&opened), Some(given));
+        // None takes it away
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 0.0).is_some());
+        opened.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&opened), None);
+        let _ = std::fs::remove_dir_all(&saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What drawing Paper's tile costs (paper 3, the first ask after it is chosen), the best of
+    /// five, printed; fails past 150 ms (drawn point by point it took 200 ms here, four times as
+    /// long on a tablet). Run alone (other work on the machine slows it):
+    /// `cargo test -p procraft-core paper_tile_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn paper_tile_cost() {
+        const PAPER: &str = "io.github.artcraftandroid.paper";
+        let dir = store("bundled-paper-cost");
+        let plugins = app_at(&dir);
+        assert!(plugins.set_on(PAPER.to_owned(), true));
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            // another paper drawn between, so each time this one is drawn again
+            for (paper, timed) in [(1.0, false), (3.0, true)] {
+                assert!(plugins.set_slider(format!("{PAPER}.paper"), paper).is_some());
+                let hooks = plugins.hooks();
+                let t = std::time::Instant::now();
+                assert!(hooks.paper().is_some());
+                if timed {
+                    times.push(t.elapsed());
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let best = times.iter().copied().min().unwrap_or_default();
+        println!("paper 3's tile drawn in {best:?} at best: {times:?}");
+        assert!(best < std::time::Duration::from_millis(150), "{best:?}");
+    }
+
+    #[test]
+    fn reference_windows_lets_as_many_be_open_as_it_says() {
+        const WINDOWS: &str = "io.github.artcraftandroid.reference-windows";
+        let dir = store("bundled-references");
+        let plugins = app_at(&dir);
+        assert_eq!(plugins.reference_windows(), 1);
+        assert!(plugins.set_on(WINDOWS.to_owned(), true));
+        assert_eq!(plugins.reference_windows(), 3);
+        assert!(plugins.set_slider(format!("{WINDOWS}.most"), 6.0).is_some());
+        assert_eq!(plugins.reference_windows(), 6);
+        // asked each frame on a desktop: quick
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(plugins.reference_windows(), 6);
+        }
+        let asked = t.elapsed() / 1000;
+        println!("how many reference windows asked in {asked:?}");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
+        assert!(plugins.set_on(WINDOWS.to_owned(), false));
+        assert_eq!(plugins.reference_windows(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2397,6 +3728,102 @@ mod tests {
         // a value kept for it finds nothing to go to
         next.read_kept("org.example.filter.cut".to_owned(), "0.1".to_owned());
         assert!(filters(&next).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const A: &str = "org.example.a";
+    const B: &str = "org.example.b";
+    const C: &str = "org.example.c";
+
+    /// The ids on the Plugins page, the top first.
+    fn page(plugins: &Plugins) -> Vec<String> {
+        plugins.plugins().into_iter().map(|p| p.id).collect()
+    }
+
+    /// A store holding filters `ids`, imported in that order.
+    fn store_of(name: &str, ids: &[&str]) -> String {
+        let dir = store(name);
+        let plugins = at(&dir);
+        for id in ids {
+            assert_eq!(plugins.install(filter_file(&filter(id))), None);
+        }
+        dir
+    }
+
+    /// What is left half written in `dir`.
+    fn left_beside(dir: &str) -> Vec<String> {
+        let names = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        names.filter(|n| n.starts_with('.')).collect()
+    }
+
+    #[test]
+    fn plugins_moved_on_the_page_stay_in_that_order_through_a_restart() {
+        let dir = store_of("order", &[A, B, C]);
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        // the last to the top, then the first of the others past the end: the last
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None);
+        assert_eq!(page(&plugins), [C, A, B]);
+        assert_eq!(plugins.move_plugin(A.to_owned(), 99), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // nothing for one that isn't here, nor for one put where it is
+        assert_eq!(plugins.move_plugin("org.example.gone".to_owned(), 0), None);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 1), None);
+        assert_eq!(page(&plugins), [C, B, A]);
+        // kept whole, nothing left beside it
+        let next = at(&dir);
+        assert_eq!(page(&next), [C, B, A]);
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // only the page goes by it: the Adjustments menu lists them as ever
+        let menu: Vec<String> = next.filters().into_iter().map(|p| p.id).collect();
+        assert_eq!(menu, [A, B, C]);
+        // one imported since comes after them; one removed leaves the rest as they were
+        assert_eq!(next.install(filter_file(&filter("org.example.d"))), None);
+        assert!(next.remove(B.to_owned()).is_some());
+        assert_eq!(page(&next), [C, A, "org.example.d"]);
+        assert_eq!(page(&at(&dir)), [C, A, "org.example.d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_kept_before_the_order_was_reads_as_it_did() {
+        // imported in no order: listed by id, as before
+        let dir = store_of("no-order", &[C, A, B]);
+        assert!(!dir_holds(&dir, "order"));
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_order_damaged_anyhow_keeps_what_it_can_and_the_rest_come_after() {
+        let dir = store_of("order-damaged", &[A, B, C]);
+        let note = std::path::Path::new(&dir).join("order");
+        // junk, an id twice, one gone, blank lines and spaces: C, then the rest as listed
+        std::fs::write(
+            &note,
+            "not an id\n\n  org.example.c  \nORG.EXAMPLE.A\norg.example.gone\norg.example.c\n\u{fffd}",
+        )
+        .unwrap();
+        assert_eq!(page(&at(&dir)), [C, A, B]);
+        // too big to be one: none
+        std::fs::write(&note, format!("{B}\n").repeat(10_000)).unwrap();
+        assert_eq!(page(&at(&dir)), [A, B, C]);
+        // not a file: none, and moving one says once that it isn't kept
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        let plugins = at(&dir);
+        assert_eq!(page(&plugins), [A, B, C]);
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
+        assert_eq!(plugins.move_plugin(C.to_owned(), 0), None, "said once");
+        assert_eq!(page(&plugins), [C, B, A], "shown meanwhile");
+        assert!(left_beside(&dir).is_empty(), "{:?}", left_beside(&dir));
+        // kept again once it can be, and said again if it can't afterwards
+        std::fs::remove_dir_all(&note).unwrap();
+        assert_eq!(plugins.move_plugin(A.to_owned(), 0), None);
+        assert_eq!(page(&at(&dir)), [A, C, B]);
+        std::fs::remove_file(&note).unwrap();
+        std::fs::create_dir_all(note.join("in the way")).unwrap();
+        assert_eq!(plugins.move_plugin(B.to_owned(), 0).as_deref(), Some(ORDER_UNKEPT));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

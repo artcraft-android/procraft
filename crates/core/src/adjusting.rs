@@ -347,6 +347,22 @@ impl Adjusting {
         Adjusting { open: Some(adjustment), ..Adjusting::default() }
     }
 
+    /// Liquify's Adjust amount as an undo or redo left it, and whether it holds anything liquified.
+    pub(crate) fn liquify_follows(&mut self, amount: f32, liquified: bool) {
+        self.liquify_amount = amount;
+        self.liquified = liquified;
+    }
+
+    /// Liquify opened again by an undo or a redo, as it was: its brush as it is set.
+    pub(crate) fn liquify_open_again(&mut self) {
+        self.open = Some(Adjustment::Liquify);
+        self.pencil = false;
+        self.preview = false;
+        self.touched = true;
+        self.puck = None;
+        self.puck_offset = None;
+    }
+
     /// The liquify brush as it is set.
     pub(crate) fn liquify_brush(&self) -> LiquifyBrush {
         let [size, pressure, distortion, _] = self.liquify;
@@ -981,8 +997,9 @@ impl CanvasSession {
             }
             return true;
         }
-        // Liquify leaves an alpha locked layer alone
-        if self.why_not_adjusted(adjustment) == Some(crate::layers::Blocked::AlphaLocked) {
+        // Liquify leaves an alpha locked layer alone; the others take one layer
+        use crate::layers::Blocked;
+        if matches!(self.why_not_adjusted(adjustment), Some(Blocked::AlphaLocked | Blocked::Group | Blocked::Several)) {
             return false;
         }
         self.adjustment_close(true);
@@ -1330,9 +1347,12 @@ impl CanvasSession {
         }
     }
 
-    /// Takes back the adjustment's changes (perspective blur's puck a drag at a time), or with
-    /// none, the last one kept.
+    /// Takes back the adjustment's changes (perspective blur's puck a drag at a time; Liquify's a
+    /// step at a time), or with none, the last one kept.
     pub fn adjustment_undo(&self) {
+        if self.step_liquify(true).is_some() {
+            return;
+        }
         let Some((open, changed)) = self.adjusting(|a, _| a.open.map(|o| (o, a.changed()))) else { return };
         if self.perspective_step(true) {
             return;
@@ -1428,6 +1448,11 @@ impl CanvasSession {
         let amount = amount.clamp(0.0, 1.0);
         self.adjusting(|a, _| a.liquify_amount = amount);
         self.liquify_amount(amount);
+    }
+
+    /// The finger let go of Adjust's slider: that drag is an undo step of its own.
+    pub fn adjustment_liquify_amount_end(&self) {
+        self.shared.lock().liquify_adjust_ends();
     }
 
     /// Everything liquify did undone.

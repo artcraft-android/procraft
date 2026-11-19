@@ -67,6 +67,7 @@ pub mod timeline;
 pub mod tone;
 pub mod transform;
 pub mod usd;
+pub mod variant;
 pub mod vector;
 pub mod vector_export;
 pub mod vector_fill;

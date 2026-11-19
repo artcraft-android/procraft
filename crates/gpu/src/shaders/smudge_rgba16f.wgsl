@@ -1,27 +1,20 @@
-// An HDR canvas's smudged layer in `work` and `grained`: a premultiplied pixel two u32s, red and
-// green then blue and alpha as half floats. Colour keeps its light above white; half floats don't
-// band, so nothing is dithered.
+// An HDR canvas's pixels in a smudge's window (see smudge_compute.wgsl): a premultiplied pixel two
+// u32s, red and green then blue and alpha as half floats. Colour keeps its light above white.
 
-fn work_at(k: u32) -> vec4<f32> {
-    return vec4<f32>(unpack2x16float(work[2u * k]), unpack2x16float(work[2u * k + 1u]));
+// u32 words a pixel
+const PX_WORDS: u32 = 2u;
+// half floats don't band: nothing is dithered
+const DITHER: f32 = 0.0;
+
+// the pixel its words hold
+fn px_of(a: u32, b: u32) -> vec4<f32> {
+    return vec4<f32>(unpack2x16float(a), unpack2x16float(b));
 }
 
-fn grained_at(k: u32) -> vec4<f32> {
-    return vec4<f32>(unpack2x16float(grained[2u * k]), unpack2x16float(grained[2u * k + 1u]));
+fn word0(v: vec4<f32>) -> u32 {
+    return pack2x16float(v.xy);
 }
 
-fn kept(v: vec4<f32>) -> vec4<f32> {
-    return clamp(v, vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
-}
-
-fn put_work(k: u32, v: vec4<f32>, h: f32) {
-    let c = kept(v);
-    work[2u * k] = pack2x16float(c.xy);
-    work[2u * k + 1u] = pack2x16float(c.zw);
-}
-
-fn put_grained(k: u32, v: vec4<f32>, h: f32) {
-    let c = kept(v);
-    grained[2u * k] = pack2x16float(c.xy);
-    grained[2u * k + 1u] = pack2x16float(c.zw);
+fn word1(v: vec4<f32>) -> u32 {
+    return pack2x16float(v.zw);
 }

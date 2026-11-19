@@ -31,10 +31,6 @@ private let keyGroups: CGFloat = 30
 /// The sheet: the keys from 51 below its top to 38 above the screen's foot.
 private let sheetHeight = 51 + keyHeight * 4 + keyGap * 3 + 38
 
-/// Where the canvas fits while the guide is edited: a fifth of the screen's height above and below,
-/// 40 in from the sides.
-private let fitBand: CGFloat = 0.2
-private let fitSide: CGFloat = 40
 /// How near a touch takes a handle, points.
 private let handleReach: CGFloat = 30
 
@@ -124,12 +120,8 @@ final class GuideTool {
         if !info.on {
             _ = session.setGuideOn(on: true)
         }
-        let size = CGSize(width: model.screenCentre.x * 2, height: model.screenCentre.y * 2)
-        let band = size.height * fitBand
-        let side = fitSide * model.pixels
-        info = session.guideEditBegin(
-            left: Float(side), top: Float(band), right: Float(size.width - side), bottom: Float(size.height - band)
-        )
+        // (the core fits the editor's canvas in the window itself, and takes its pinches and pans)
+        info = session.guideEditBegin()
         editing = true
         model.refreshView()
     }

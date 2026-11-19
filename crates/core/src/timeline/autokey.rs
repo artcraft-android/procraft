@@ -132,6 +132,8 @@ impl State {
             return None;
         }
         let Ok(target) = self.autokey_target() else { return Some(None) };
+        // (a stroke just ended is on its layer before what it paints is measured)
+        self.flush();
         let Some([x, y, w, h]) = self.target_box(&target) else { return Some(None) };
         let Some(posing) = self.posing_of(&target, [x + w / 2.0, y + h / 2.0], Vec::new(), 0) else {
             return Some(None);
@@ -150,6 +152,8 @@ impl State {
         if !self.autokey.on || self.doc.timeline.is_none() || self.selection.is_some() {
             return None;
         }
+        // (a stroke just ended is on its layer before what it paints is measured)
+        self.flush();
         let why = match self.autokey_target() {
             Err(Refused::Playing) => "Stop playing to key",
             Err(Refused::NoDrawing) => "No drawing at the playhead to key",
@@ -284,6 +288,7 @@ impl State {
         let Ok(target) = self.autokey_target() else { return };
         if target.clip != clip {
             // another clip: the box laid around what it shows
+            self.flush();
             let Some([x, y, w, h]) = self.target_box(&target) else { return };
             let Some(posing) = self.posing_of(&target, [x + w / 2.0, y + h / 2.0], began, steps) else { return };
             self.transform = Some(Transform::new(x, y, w, h, box_hull([x, y, w, h])));

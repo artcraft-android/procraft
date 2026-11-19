@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.rotation-reset",
+  "name": "Rotation reset",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Reset rotation, in Actions > Canvas or on Alt+R, turns the canvas upright or to the nearest right angle, keeping its zoom and place. A switch keeps pinching from turning it.",
+  "compat": { "procraft": { "interface": 8 } },
+  "permissions": ["view"],
+  "hooks": ["gesture_lock"],
+  "controls": [
+    {
+      "key": "to", "type": "slider", "label": "Reset to", "least": 0, "most": 1, "step": 1, "starts": 0,
+      "names": ["Upright", "Nearest 90°"]
+    },
+    { "key": "lock", "type": "switch", "label": "Lock rotation while pinching", "starts": false, "place": "canvas" }
+  ],
+  "actions": [
+    { "key": "reset", "label": "Reset rotation", "place": "canvas", "press": "alt+r" }
+  ]
+}

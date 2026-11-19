@@ -17,8 +17,9 @@ const STACK: &str = "Stack";
 /// The stack the gallery's recovery puts what it finds in.
 const RECOVERED: &str = "Recovered Artworks";
 
-/// A saved artwork: its folder, its name and size, and when it was last changed (milliseconds
-/// since 1970).
+/// A saved artwork: its folder, its name and size, when it was last changed (milliseconds since
+/// 1970), and how many quarter turns clockwise it shows turned by (its thumbnail is kept so), as
+/// its canvas was left.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GalleryArtwork {
     pub dir: String,
@@ -26,6 +27,7 @@ pub struct GalleryArtwork {
     pub width: u32,
     pub height: u32,
     pub modified_ms: i64,
+    pub turns: u32,
 }
 
 /// Something the gallery shows: an artwork, or a stack of them (in their own order).
@@ -41,6 +43,259 @@ impl GalleryEntry {
             GalleryEntry::Artwork { artwork } => &artwork.dir,
             GalleryEntry::Stack { dir, .. } => dir,
         }
+    }
+}
+
+/// Under this wide a window the gallery's columns go by its width, not by which way it is turned.
+const GALLERY_NARROW: f32 = 600.0;
+/// The width a column takes in a narrow window, one column more than fit.
+const GALLERY_COLUMN: f32 = 256.0;
+
+/// How many columns the gallery's grid has in a window `width` wide (`landscape`: wider than
+/// tall): three upright and four on its side; a narrower window (beside another, or a phone) one
+/// more than fit 256 wide, so its artworks stay a size to see: two on a phone upright.
+#[uniffi::export]
+pub fn gallery_columns(width: f32, landscape: bool) -> u32 {
+    if width < GALLERY_NARROW {
+        (width / GALLERY_COLUMN).floor().max(0.0) as u32 + 1
+    } else if landscape {
+        4
+    } else {
+        3
+    }
+}
+
+/// One of the buttons in the gallery's title row (in its capsule, or More's list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GalleryAction {
+    Select,
+    Import,
+    Photo,
+    Stack,
+    Preview,
+    Share,
+    Duplicate,
+    Delete,
+    /// The rest, in a list under it.
+    More,
+}
+
+/// A button in the capsule: what it does, its name, how wide it is.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryButton {
+    pub action: GalleryAction,
+    pub label: String,
+    pub width: f32,
+}
+
+/// The gallery's title row laid out for the window: the capsule's buttons (`more` holds those
+/// that don't fit, in More's list), where the capsule's left edge is and how wide it is, and the
+/// title's size as a share of its own (it shrinks to fit beside the capsule, never under 0.3) and
+/// the most it may be wide (past that, at 0.3, it is cut short).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryHeaderFit {
+    pub buttons: Vec<GalleryButton>,
+    pub more: Vec<GalleryAction>,
+    pub capsule_left: f32,
+    pub capsule_width: f32,
+    pub title_scale: f32,
+    pub title_room: f32,
+}
+
+/// Under this wide a window, More alone holds every button.
+const HEADER_NARROW: f32 = 440.0;
+/// The room right of the title, + left out, that all the buttons need; and selecting.
+const HEADER_ROOM_ALL: f32 = 300.0;
+const HEADER_ROOM_ALL_SELECTING: f32 = 560.0;
+/// The window's edge to + (or Select's round button that ends it), how wide that is, and the gap
+/// before it (13 selecting); the title's gap before the capsule; how small the title may shrink.
+const HEADER_END: f32 = 20.0;
+const HEADER_ROUND: f32 = 44.0;
+const HEADER_TITLE_GAP: f32 = 12.0;
+const HEADER_TITLE_LEAST: f32 = 0.3;
+/// More alone in the capsule (its glyph, no name).
+pub const GALLERY_MORE_ALONE: f32 = 56.0;
+
+fn button(action: GalleryAction) -> GalleryButton {
+    let (label, width) = match action {
+        GalleryAction::Select => ("Select", 69.0),
+        GalleryAction::Import => ("Import", 71.0),
+        GalleryAction::Photo => ("Photo", 66.0),
+        GalleryAction::Stack => ("Stack", 65.0),
+        GalleryAction::Preview => ("Preview", 80.0),
+        GalleryAction::Share => ("Share", 65.0),
+        GalleryAction::Duplicate => ("Duplicate", 91.0),
+        GalleryAction::Delete => ("Delete", 70.0),
+        GalleryAction::More => ("More", 61.0),
+    };
+    GalleryButton { action, label: label.to_owned(), width }
+}
+
+/// The gallery's title row in a window `width` wide (`landscape`: wider than tall): the title
+/// starts `title_x` in and is `title_width` wide at its own size (36), `selecting` or not, in a
+/// stack or not. With room, every button shows (selecting, all five only on a window on its side);
+/// with less, some and More; under 440 wide, More alone. The title then shrinks to fit.
+#[uniffi::export]
+pub fn gallery_header_fit(
+    width: f32,
+    title_x: f32,
+    title_width: f32,
+    selecting: bool,
+    landscape: bool,
+    in_stack: bool,
+) -> GalleryHeaderFit {
+    use GalleryAction::*;
+    let room = width - (title_x + title_width) - HEADER_ROUND;
+    let all: Vec<GalleryAction> = if !selecting {
+        vec![Select, Import, Photo]
+    } else if in_stack {
+        vec![Preview, Share, Duplicate, Delete]
+    } else {
+        vec![Stack, Preview, Share, Duplicate, Delete]
+    };
+    let (shown, more): (Vec<GalleryAction>, Vec<GalleryAction>) = if width < HEADER_NARROW {
+        (vec![More], all)
+    } else if (selecting && landscape && room >= HEADER_ROOM_ALL_SELECTING) || (!selecting && room >= HEADER_ROOM_ALL) {
+        (all, Vec::new())
+    } else if selecting {
+        // More's list in its own order: Preview, Stack (none in a stack), Duplicate
+        let more = if in_stack { vec![Preview, Duplicate] } else { vec![Preview, Stack, Duplicate] };
+        (vec![Share, Delete, More], more)
+    } else {
+        (vec![Select, More], vec![Import, Photo])
+    };
+    let mut buttons: Vec<GalleryButton> = shown.into_iter().map(button).collect();
+    if let [alone] = buttons.as_mut_slice()
+        && alone.action == More
+    {
+        alone.width = GALLERY_MORE_ALONE;
+    }
+    let capsule_width: f32 = buttons.iter().map(|b| b.width).sum();
+    let gap = if selecting { 13.0 } else { 12.0 };
+    let capsule_left = width - HEADER_END - HEADER_ROUND - gap - capsule_width;
+    let title_room = (capsule_left - HEADER_TITLE_GAP - title_x).max(0.0);
+    let title_scale = if title_width > 0.0 { (title_room / title_width).clamp(HEADER_TITLE_LEAST, 1.0) } else { 1.0 };
+    GalleryHeaderFit { buttons, more, capsule_left, capsule_width, title_scale, title_room }
+}
+
+/// How long a dragged artwork rests on a stack, or on the way back out of the stack open (its
+/// title), before that opens with the drag going on, milliseconds.
+pub const GALLERY_SPRING_MS: i64 = 600;
+
+#[uniffi::export]
+pub fn gallery_spring_ms() -> i64 {
+    GALLERY_SPRING_MS
+}
+
+/// What a drag in the gallery rests on, for what opens when rested on long enough: a stack (by
+/// folder), or "" the way back out of the stack open.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DragRest {
+    /// What it rests on, since when (milliseconds), and whether that has opened already.
+    on: Option<(String, i64, bool)>,
+}
+
+impl DragRest {
+    /// The drag is over `on` (none: over nothing that opens) at `now_ms`: true the moment it has
+    /// rested there `GALLERY_SPRING_MS`, once; moved off and back, it waits again.
+    pub fn over(&mut self, on: Option<&str>, now_ms: i64) -> bool {
+        let Some(on) = on else {
+            self.on = None;
+            return false;
+        };
+        match &mut self.on {
+            Some((was, since, opened)) if was == on => {
+                if !*opened && now_ms - *since >= GALLERY_SPRING_MS {
+                    *opened = true;
+                    return true;
+                }
+                false
+            }
+            _ => {
+                self.on = Some((on.to_owned(), now_ms, false));
+                false
+            }
+        }
+    }
+
+    /// What it rests on and has not opened yet.
+    pub fn resting_on(&self) -> Option<&str> {
+        self.on.as_ref().filter(|(_, _, opened)| !opened).map(|(on, _, _)| on.as_str())
+    }
+
+    /// How long until what it rests on opens (none: nothing to wait for).
+    pub fn waiting(&self, now_ms: i64) -> Option<i64> {
+        self.on
+            .as_ref()
+            .filter(|(_, _, opened)| !opened)
+            .map(|(_, since, _)| (since + GALLERY_SPRING_MS - now_ms).max(0))
+    }
+}
+
+/// What Select's actions act on, the same in every app.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct GalleryPick {
+    /// The entries picked (folders), in the order shown: what Duplicate and Delete act on, a stack
+    /// whole.
+    pub dirs: Vec<String>,
+    /// What Preview shows and Share shares: the artworks picked in the order shown, a picked
+    /// stack's all of them in its own order.
+    pub artworks: Vec<GalleryArtwork>,
+    /// How many of those picked are stacks.
+    pub stacks: u32,
+    /// Stack puts two or more together (artworks or stacks); a stack has no Stack of its own.
+    pub can_stack: bool,
+    /// Delete asks first: its question and what it says.
+    pub delete_title: String,
+    pub delete_message: String,
+}
+
+fn artworks_told(n: usize) -> String {
+    if n == 1 { "1 artwork".to_owned() } else { format!("{n} artworks") }
+}
+
+/// Of the `entries` shown (the gallery's, or `in_stack` a stack's), those `picked` (by folder) as
+/// Select's actions take them; folders no longer shown are left out.
+#[uniffi::export]
+pub fn gallery_pick(entries: Vec<GalleryEntry>, picked: Vec<String>, in_stack: bool) -> GalleryPick {
+    let chosen: Vec<&GalleryEntry> = entries.iter().filter(|e| picked.iter().any(|p| p == e.dir())).collect();
+    let artworks: Vec<GalleryArtwork> = chosen
+        .iter()
+        .flat_map(|e| match e {
+            GalleryEntry::Artwork { artwork } => vec![artwork.clone()],
+            GalleryEntry::Stack { artworks, .. } => artworks.clone(),
+        })
+        .collect();
+    let stacks: Vec<(&str, usize)> = chosen
+        .iter()
+        .filter_map(|e| match e {
+            GalleryEntry::Stack { name, artworks, .. } => Some((name.as_str(), artworks.len())),
+            GalleryEntry::Artwork { .. } => None,
+        })
+        .collect();
+    let n = chosen.len();
+    let undone = "This can't be undone.";
+    let (delete_title, delete_message) = match stacks.as_slice() {
+        [] => (format!("Delete {}?", artworks_told(n)), undone.to_owned()),
+        [(name, count)] if n == 1 => {
+            let go = if *count == 1 { "goes" } else { "go" };
+            (format!("Delete \u{201c}{name}\u{201d}?"), format!("Its {} {go} with it. {undone}", artworks_told(*count)))
+        }
+        _ if stacks.len() == n => {
+            (format!("Delete {n} stacks?"), format!("Their {} go with them. {undone}", artworks_told(artworks.len())))
+        }
+        _ => (
+            format!("Delete {n} items?"),
+            format!("The stacks' artworks go with them, {} in all. {undone}", artworks_told(artworks.len())),
+        ),
+    };
+    GalleryPick {
+        dirs: chosen.iter().map(|e| e.dir().to_owned()).collect(),
+        artworks,
+        stacks: stacks.len() as u32,
+        can_stack: !in_stack && n >= 2,
+        delete_title,
+        delete_message,
     }
 }
 
@@ -128,6 +383,17 @@ fn copy_dir(from: &Path, to: &Path, last: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The artwork in `from` copied to `to`, its own file last (a copy half made isn't an artwork in
+/// the gallery yet) and as recent as the original's (not worked on yet).
+fn copy_artwork(from: &Path, to: &Path) -> std::io::Result<()> {
+    copy_dir(from, to, Some(ARTWORK_FILE))?;
+    let when = fs::metadata(from.join(ARTWORK_FILE)).and_then(|m| m.modified());
+    if let (Ok(when), Ok(file)) = (when, fs::File::options().write(true).open(to.join(ARTWORK_FILE))) {
+        let _ = file.set_modified(when);
+    }
+    Ok(())
+}
+
 fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
     let file = dir.join(ARTWORK_FILE);
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&file).ok()?).ok()?;
@@ -139,6 +405,7 @@ fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
         width: side("width"),
         height: side("height"),
         modified_ms: modified(&file),
+        turns: json.get("turns").and_then(serde_json::Value::as_u64).map_or(0, |t| (t % 4) as u32),
     })
 }
 
@@ -353,18 +620,30 @@ impl ArtworkStore {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A copy of the artwork in `dir`, under the same name, right after it; returns its folder.
+    /// A copy of the artwork in `dir`, under the same name, right after it; a stack's copy holds
+    /// a copy of each of its artworks, in its order. Returns its folder.
     pub fn duplicate(&self, dir: String) -> String {
         let dir = PathBuf::from(dir);
         let at = self.parent_of(&dir);
         let before = self.order(&at);
         let copy = at.join(fresh_name());
-        // the artwork's own file last: a copy half made isn't an artwork in the gallery yet
-        let _ = copy_dir(&dir, &copy, Some(ARTWORK_FILE));
-        // not worked on yet: as recent as the original
-        let when = fs::metadata(dir.join(ARTWORK_FILE)).and_then(|m| m.modified());
-        if let (Ok(when), Ok(file)) = (when, fs::File::options().write(true).open(copy.join(ARTWORK_FILE))) {
-            let _ = file.set_modified(when);
+        if dir.join(STACK_FILE).is_file() {
+            // each artwork in a folder of its own name, so no two in the gallery share one; the
+            // stack's own file last: a copy half made isn't a stack in the gallery yet
+            let _ = fs::create_dir_all(&copy);
+            let inside: Vec<String> = self
+                .order(&dir)
+                .iter()
+                .filter(|name| read_artwork(&dir.join(name)).is_some())
+                .filter_map(|name| {
+                    let fresh = fresh_name();
+                    copy_artwork(&dir.join(name), &copy.join(&fresh)).ok().map(|()| fresh)
+                })
+                .collect();
+            write_order(&copy, &inside);
+            let _ = fs::copy(dir.join(STACK_FILE), copy.join(STACK_FILE));
+        } else {
+            let _ = copy_artwork(&dir, &copy);
         }
         let place = before.iter().position(|n| *n == name_of(&dir)).map_or(0, |i| i + 1);
         let mut order = before;
@@ -424,6 +703,49 @@ impl ArtworkStore {
     pub fn stack(&self, dirs: Vec<String>) -> String {
         let artworks: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
         self.make_stack(&artworks, None).to_string_lossy().into_owned()
+    }
+
+    /// The entries in `dirs` (artworks and stacks of the gallery, as Select picks them) put
+    /// together in one stack where the first of them was, holding all their artworks in the
+    /// gallery's order (a stack's in its own). Stacks never nest, so the first stack picked takes
+    /// in the rest and keeps its name; the others go once emptied. With no stack picked it is a
+    /// new stack, as `stack` makes. Returns its folder.
+    pub fn stack_picked(&self, dirs: Vec<String>) -> String {
+        let order = self.order(&self.root);
+        let wanted: Vec<String> =
+            dirs.iter().map(PathBuf::from).filter(|d| self.parent_of(d) == self.root).map(|d| name_of(&d)).collect();
+        let picked: Vec<PathBuf> = order.iter().filter(|n| wanted.contains(n)).map(|n| self.root.join(n)).collect();
+        let Some(into) = picked.iter().find(|p| p.join(STACK_FILE).is_file()).cloned() else {
+            return self.make_stack(&picked, None).to_string_lossy().into_owned();
+        };
+        // each moved whole or left where it is (a folder of that name there already, or a move
+        // that failed): nothing is lost either way
+        let take_in = |from: &Path| {
+            let to = into.join(name_of(from));
+            !to.exists() && fs::rename(from, &to).is_ok()
+        };
+        let mut inside: Vec<String> = Vec::new();
+        for p in &picked {
+            if *p == into {
+                inside.extend(self.order(p));
+            } else if p.join(STACK_FILE).is_file() {
+                inside.extend(self.order(p).into_iter().filter(|name| take_in(&p.join(name))));
+                // emptied: no artwork's folder left in it
+                if folders(p).is_empty() {
+                    let _ = fs::remove_dir_all(p);
+                }
+            } else if take_in(p) {
+                inside.push(name_of(p));
+            }
+        }
+        write_order(&into, &inside);
+        // where the first picked was, the others out of the gallery's order
+        let gone = |n: &String| picked.iter().any(|p| name_of(p) == *n && *p != into && !p.exists());
+        let at = picked.first().and_then(|f| order.iter().position(|n| *n == name_of(f))).unwrap_or(0);
+        let to = order.iter().take(at).filter(|n| !picked.iter().any(|p| name_of(p) == **n)).count();
+        let rest: Vec<String> = order.iter().filter(|n| !gone(n)).cloned().collect();
+        write_order(&self.root, &moved(&rest, &name_of(&into), to as i64));
+        into.to_string_lossy().into_owned()
     }
 
     /// The stack in `dir` named `name` ("Stack" if it is empty).
@@ -803,6 +1125,282 @@ mod tests {
         }
     }
 
+    /// A gallery holding, in this order: A, "One"[B, C], D, "Two"[E]; and their folders by name.
+    fn mixed_gallery() -> (PathBuf, Arc<ArtworkStore>, HashMap<&'static str, String>) {
+        let root = std::env::temp_dir().join(format!("procraft-pick-{}-{}", std::process::id(), fresh_name()));
+        let store = ArtworkStore::open(root.to_string_lossy().into_owned());
+        let mut dirs = HashMap::new();
+        for name in ["A", "B", "C", "D", "E"] {
+            dirs.insert(name, artwork(&store, name, None));
+        }
+        let one = store.stack(vec![dirs["B"].clone(), dirs["C"].clone()]);
+        store.rename_stack(one.clone(), "One".into());
+        let two = store.stack(vec![dirs["E"].clone()]);
+        store.rename_stack(two.clone(), "Two".into());
+        for (i, d) in [&dirs["A"], &one, &dirs["D"], &two].into_iter().enumerate() {
+            store.move_entry(d.clone(), i as i64, None);
+        }
+        // B and C in that order in their stack
+        let inside: Vec<String> = store.list(Some(one.clone())).iter().map(|e| e.dir().to_owned()).collect();
+        let b = inside.iter().find(|d| name_in(d) == "B").unwrap().clone();
+        store.move_entry(b, 0, None);
+        dirs.insert("One", one);
+        dirs.insert("Two", two);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C]", "D", "Two[E]"]));
+        (root, store, dirs)
+    }
+
+    use std::collections::HashMap;
+
+    #[test]
+    fn select_takes_stacks_and_artworks_together() {
+        let (root, store, dirs) = mixed_gallery();
+        let entries = store.list(None);
+        let pick = |p: &[&str], in_stack: bool| {
+            gallery_pick(entries.clone(), p.iter().map(|n| dirs[n].clone()).collect(), in_stack)
+        };
+        let artwork_names = |p: &GalleryPick| p.artworks.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        // picked in any order, they act in the order shown, a stack's artworks all of them
+        let both = pick(&["Two", "A", "One"], false);
+        assert_eq!(both.dirs, [dirs["A"].clone(), dirs["One"].clone(), dirs["Two"].clone()]);
+        assert_eq!(artwork_names(&both), names(&["A", "B", "C", "E"]));
+        assert_eq!(both.stacks, 2);
+        assert!(both.can_stack);
+        assert_eq!(both.delete_title, "Delete 3 items?");
+        assert_eq!(both.delete_message, "The stacks' artworks go with them, 4 artworks in all. This can't be undone.");
+        // a stack and an artwork can be stacked; one alone can't, nor anything inside a stack
+        assert!(pick(&["One", "D"], false).can_stack);
+        assert!(!pick(&["One"], false).can_stack);
+        assert!(!pick(&["A", "D"], true).can_stack);
+        // what Delete asks
+        let one = pick(&["One"], false);
+        assert_eq!(
+            (one.delete_title.as_str(), one.delete_message.as_str()),
+            ("Delete \u{201c}One\u{201d}?", "Its 2 artworks go with it. This can't be undone.")
+        );
+        let two = pick(&["Two"], false);
+        assert_eq!(two.delete_message, "Its 1 artwork goes with it. This can't be undone.");
+        let stacks = pick(&["One", "Two"], false);
+        assert_eq!(
+            (stacks.delete_title.as_str(), stacks.delete_message.as_str()),
+            ("Delete 2 stacks?", "Their 3 artworks go with them. This can't be undone.")
+        );
+        assert_eq!(pick(&["D"], false).delete_title, "Delete 1 artwork?");
+        assert_eq!(pick(&["A", "D"], false).delete_title, "Delete 2 artworks?");
+        // a folder no longer shown is left out
+        let mut gone = vec![dirs["A"].clone(), root.join("not-there").to_string_lossy().into_owned()];
+        gone.push(dirs["D"].clone());
+        assert_eq!(gallery_pick(entries.clone(), gone, false).dirs.len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_with_stacks_picked_merges_into_the_first_stack_where_the_first_was() {
+        let (root, store, dirs) = mixed_gallery();
+        let picked = vec![dirs["Two"].clone(), dirs["D"].clone(), dirs["One"].clone(), dirs["A"].clone()];
+        let into = store.stack_picked(picked);
+        // the first stack picked takes in the rest in the order shown, keeping its name, where A
+        // (the first picked) was; the emptied stack is gone
+        assert_eq!(Path::new(&into), Path::new(&dirs["One"]));
+        assert_eq!(shown(&store, None), names(&["One[A,B,C,D,E]"]));
+        assert!(!Path::new(&dirs["Two"]).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_with_picks_around_others_keeps_the_others_in_their_places() {
+        let (root, store, dirs) = mixed_gallery();
+        // D and Two: Two takes D in, where D was
+        store.stack_picked(vec![dirs["D"].clone(), dirs["Two"].clone()]);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C]", "Two[D,E]"]));
+        // two stacks: the first takes the other's artworks after its own
+        store.stack_picked(vec![dirs["Two"].clone(), dirs["One"].clone()]);
+        assert_eq!(shown(&store, None), names(&["A", "One[B,C,D,E]"]));
+        // only artworks: a new stack, as before
+        let e = store.list(None);
+        let lone = artwork(&store, "F", None);
+        store.move_entry(lone.clone(), 2, None);
+        let made = store.stack_picked(vec![lone, e[0].dir().to_owned()]);
+        assert_ne!(Path::new(&made), Path::new(&dirs["One"]));
+        assert_eq!(shown(&store, None), names(&["Stack[A,F]", "One[B,C,D,E]"]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stack_never_overwrites_an_artwork_already_in_the_stack() {
+        let (root, store, dirs) = mixed_gallery();
+        // a folder in "One" of the same name as A's (no two should share one, but if they did)
+        let clash = Path::new(&dirs["One"]).join(name_of(Path::new(&dirs["A"])));
+        fs::create_dir_all(&clash).unwrap();
+        let json = serde_json::json!({ "name": "Clash", "document": { "width": 8, "height": 8 } });
+        fs::write(clash.join(ARTWORK_FILE), json.to_string()).unwrap();
+        store.stack_picked(vec![dirs["A"].clone(), dirs["One"].clone()]);
+        // A stays where it was, whole; the one in the stack is untouched
+        assert_eq!(name_in(&dirs["A"]), "A");
+        assert_eq!(name_in(&clash.to_string_lossy()), "Clash");
+        let mut all: Vec<String> = shown(&store, None);
+        all.sort();
+        assert_eq!(all, names(&["A", "D", "One[Clash,B,C]", "Two[E]"]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_drag_resting_on_the_way_back_or_a_stack_opens_it_once() {
+        let mut rest = DragRest::default();
+        // on the way back: nothing until it has rested there long enough, then once
+        assert!(!rest.over(Some(""), 1000));
+        assert_eq!(rest.resting_on(), Some(""));
+        assert_eq!(rest.waiting(1100), Some(GALLERY_SPRING_MS - 100));
+        assert!(!rest.over(Some(""), 1000 + GALLERY_SPRING_MS - 1));
+        assert!(rest.over(Some(""), 1000 + GALLERY_SPRING_MS));
+        assert!(!rest.over(Some(""), 1000 + GALLERY_SPRING_MS * 3));
+        assert_eq!(rest.resting_on(), None);
+        // moved onto a stack it waits again; off everything, it forgets
+        assert!(!rest.over(Some("stack"), 5000));
+        assert!(!rest.over(None, 5300));
+        assert!(!rest.over(Some("stack"), 5400));
+        assert!(!rest.over(Some("stack"), 5400 + GALLERY_SPRING_MS - 1));
+        assert!(rest.over(Some("stack"), 5400 + GALLERY_SPRING_MS));
+        // from one to another, the time starts again
+        assert!(!rest.over(Some("a"), 0));
+        assert!(!rest.over(Some("b"), GALLERY_SPRING_MS));
+        assert!(rest.over(Some("b"), GALLERY_SPRING_MS * 2));
+    }
+
+    #[test]
+    fn an_artwork_taken_out_of_its_stack_goes_where_it_is_let_go() {
+        let (root, store, dirs) = mixed_gallery();
+        let in_stack = |name: &str| -> String {
+            store
+                .list(Some(dirs["One"].clone()))
+                .iter()
+                .map(|e| e.dir().to_owned())
+                .find(|d| name_in(d) == name)
+                .unwrap()
+        };
+        // let go between D and Two in the gallery: out of its stack, there, whole
+        let b = in_stack("B");
+        store.move_entry(b.clone(), 3, Some(store.root()));
+        assert_eq!(shown(&store, None), names(&["A", "One[C]", "D", "B", "Two[E]"]));
+        let now = root.join(name_of(Path::new(&b)));
+        assert_eq!(name_in(&now.to_string_lossy()), "B");
+        assert!(!Path::new(&b).exists());
+        // let go on the way back: to the gallery's front; the emptied stack goes
+        store.move_entry(in_stack("C"), 0, Some(store.root()));
+        assert_eq!(shown(&store, None), names(&["C", "A", "D", "B", "Two[E]"]));
+        assert!(!Path::new(&dirs["One"]).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn actions(fit: &GalleryHeaderFit) -> Vec<GalleryAction> {
+        fit.buttons.iter().map(|b| b.action).collect()
+    }
+
+    /// "ProCraft" at its own size, about as wide as it is drawn.
+    const TITLE: f32 = 150.0;
+
+    #[test]
+    fn a_tablet_title_row_is_laid_out_as_it_always_was() {
+        use GalleryAction::*;
+        // tablets upright and on their side: Select, Import and Photo, the title at its size; the
+        // capsule 12 left of + (44, 20 in)
+        for (width, landscape) in [(640.0, false), (744.0, false), (800.0, false), (1024.0, true), (1280.0, true)] {
+            let fit = gallery_header_fit(width, 32.0, TITLE, false, landscape, false);
+            assert_eq!(actions(&fit), [Select, Import, Photo], "{width}");
+            assert!(fit.more.is_empty());
+            assert_eq!(fit.capsule_width, 69.0 + 71.0 + 66.0);
+            assert_eq!(fit.capsule_left, width - 20.0 - 44.0 - 12.0 - fit.capsule_width);
+            assert_eq!(fit.title_scale, 1.0, "{width}");
+            // selecting: on its side Stack, Preview, Share, Duplicate and Delete; upright Share,
+            // Delete and More (Preview, Stack, Duplicate); the round button 13 right of them
+            let picking = gallery_header_fit(width, 32.0, TITLE, true, landscape, false);
+            if landscape {
+                assert_eq!(actions(&picking), [Stack, Preview, Share, Duplicate, Delete], "{width}");
+                assert!(picking.more.is_empty());
+            } else {
+                assert_eq!(actions(&picking), [Share, Delete, More], "{width}");
+                assert_eq!(picking.more, [Preview, Stack, Duplicate]);
+            }
+            assert_eq!(picking.capsule_left, width - 20.0 - 44.0 - 13.0 - picking.capsule_width);
+            assert_eq!(picking.title_scale, 1.0, "{width}");
+        }
+        // in a stack, selecting: no Stack, in the row or under More
+        let fit = gallery_header_fit(1024.0, 60.0, TITLE, true, true, true);
+        assert_eq!(actions(&fit), [Preview, Share, Duplicate, Delete]);
+        let fit = gallery_header_fit(744.0, 60.0, TITLE, true, false, true);
+        assert_eq!(fit.more, [Preview, Duplicate]);
+    }
+
+    #[test]
+    fn a_narrow_window_keeps_the_title_on_one_line_beside_fewer_buttons() {
+        use GalleryAction::*;
+        // a phone upright (411 wide): More alone holds them all; the title fits at its size
+        let fit = gallery_header_fit(411.0, 32.0, TITLE, false, false, false);
+        assert_eq!(actions(&fit), [More]);
+        assert_eq!(fit.more, [Select, Import, Photo]);
+        assert_eq!(fit.capsule_width, GALLERY_MORE_ALONE);
+        assert_eq!(fit.title_scale, 1.0);
+        assert!(32.0 + TITLE + 12.0 <= fit.capsule_left);
+        let picking = gallery_header_fit(411.0, 32.0, TITLE, true, false, false);
+        assert_eq!(actions(&picking), [More]);
+        assert_eq!(picking.more, [Stack, Preview, Share, Duplicate, Delete]);
+        // a window too narrow to give the room 300: Select and More (Import, Photo)
+        let fit = gallery_header_fit(500.0, 32.0, TITLE, false, false, false);
+        assert_eq!(actions(&fit), [Select, More]);
+        assert_eq!(fit.more, [Import, Photo]);
+        assert!(fit.title_room >= TITLE);
+        // on its side but not 560 of room: Share, Delete and More
+        let picking = gallery_header_fit(700.0, 32.0, TITLE, true, true, false);
+        assert_eq!(actions(&picking), [Share, Delete, More]);
+        // a long stack name shrinks to fit beside the buttons, no smaller than 0.3, and the room
+        // it gets never runs under the capsule
+        for width in [300.0, 360.0, 411.0, 500.0, 640.0, 900.0] {
+            for selecting in [false, true] {
+                let fit = gallery_header_fit(width, 60.0, 900.0, selecting, width > 600.0, true);
+                assert!(fit.title_scale >= 0.3 && fit.title_scale <= 1.0);
+                assert!(60.0 + fit.title_room + 12.0 <= fit.capsule_left + 0.01 || fit.title_room == 0.0);
+                if fit.title_scale > 0.3 && fit.title_scale < 1.0 {
+                    assert!((900.0 * fit.title_scale - fit.title_room).abs() < 0.01, "{width} {fit:?}");
+                }
+                assert!(fit.capsule_left + fit.capsule_width + 44.0 + 20.0 <= width + 13.01);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tablet_gallery_keeps_its_columns_and_a_narrow_window_gets_bigger_cells() {
+        // tablets as always: three across upright, four on their side
+        for (width, landscape, columns) in [
+            (640.0, false, 3),
+            (744.0, false, 3),
+            (800.0, false, 3),
+            (1024.0, true, 4),
+            (1133.0, true, 4),
+            (1280.0, true, 4),
+        ] {
+            assert_eq!(gallery_columns(width, landscape), columns, "{width}");
+        }
+        // a phone upright (and a window as narrow): two across, each cell's picture box (the
+        // pitch less 40 across, less 82 down) a usable size, where three left it tiny
+        for width in [320.0, 360.0, 393.0, 411.0, 480.0] {
+            let columns = gallery_columns(width, false);
+            assert_eq!(columns, 2, "{width}");
+            let pitch = width / columns as f32;
+            assert!(pitch - 40.0 >= 120.0 && pitch - 82.0 >= 78.0, "{width}");
+        }
+        // half a tablet: three; very narrow: one; a phone on its side: four
+        assert_eq!(gallery_columns(560.0, false), 3);
+        assert_eq!(gallery_columns(240.0, false), 1);
+        assert_eq!(gallery_columns(851.0, true), 4);
+        // never fewer columns for a wider window, upright
+        let mut last = 0;
+        for w in (200..1400).step_by(10) {
+            let n = gallery_columns(w as f32, false);
+            assert!(n >= last, "{w}");
+            last = n;
+        }
+    }
+
     /// The name kept in the artwork's file in `dir`.
     fn name_in(dir: &str) -> String {
         let text = fs::read_to_string(Path::new(dir).join(ARTWORK_FILE)).unwrap();
@@ -858,6 +1456,21 @@ mod tests {
         store.stack(vec![dir(3), dir(1)]);
         assert_eq!(shown(&store, None), names(&["C", "Stack[First,B]", "A"]));
         assert!(store.most_recent().is_some());
+        // a stack duplicated: right after it, a copy of each of its artworks in its order, each
+        // in a folder of its own
+        let stack = store.list(None)[1].dir().to_owned();
+        store.rename_stack(stack.clone(), "Pair".into());
+        let copy = store.duplicate(stack.clone());
+        assert_eq!(shown(&store, None), names(&["C", "Pair[First,B]", "Pair[First,B]", "A"]));
+        let inside = |dir: &str| -> Vec<String> {
+            store.list(Some(dir.to_owned())).iter().map(|e| name_of(Path::new(e.dir()))).collect()
+        };
+        let (was, now) = (inside(&stack), inside(&copy));
+        assert_eq!(now.len(), 2);
+        assert!(now.iter().all(|n| !was.contains(n)), "{was:?} {now:?}");
+        // deleted, its artworks go with it
+        store.delete(copy.clone());
+        assert_eq!(shown(&store, None), names(&["C", "Pair[First,B]", "A"]));
         let _ = fs::remove_dir_all(&root);
     }
 }

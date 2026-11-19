@@ -21,7 +21,7 @@ extension CanvasModel {
     /// Moves `l` (with what goes with it) just above or below `target`'s row; a chosen layer with
     /// others picked takes them along, in their order (the shared core decides).
     func moveNextTo(_ l: LayerInfo, _ target: LayerInfo, above: Bool) {
-        _ = session.moveNextTo(id: l.id, target: target.id, above: above)
+        _ = session.dropRow(id: l.id, place: above ? .above(target: target.id) : .below(target: target.id))
         refresh()
     }
 

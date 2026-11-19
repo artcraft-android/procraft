@@ -9,7 +9,8 @@ const KNEE: f32 = 0.8;
 struct DisplayUniform {
     // the map from the canvas's 0..1 coordinates to clip space: (a, b, c, d) ...
     m0: vec4<f32>,
-    // ... (e, f), then 1 when the target encodes sRGB itself, then unused
+    // ... (e, f), then 1 when the target encodes sRGB itself, then 1 to show the colours through
+    // the look below
     m1: vec4<f32>,
     // the canvas's colours to the target's, in linear light: three rows, c0.w 1 to apply them
     c0: vec4<f32>,
@@ -19,6 +20,11 @@ struct DisplayUniform {
     // smooth the edge over that; all 0 for a quad drawn exactly. Then (an HDR canvas's) the
     // brightest the target shows, sRGB-encoded (0 for white)
     edge: vec4<f32>,
+    // a look the colours go through, in linear light (the display only): rows red, green and
+    // blue, each three weights and what is added
+    l0: vec4<f32>,
+    l1: vec4<f32>,
+    l2: vec4<f32>,
 }
 
 @group(0) @binding(0) var composite: texture_2d<f32>;
@@ -83,12 +89,16 @@ fn shown(c: vec4<f32>) -> vec4<f32> {
     if (CEILING > 1.0) {
         rgb = toned(rgb, max(du.edge.w, 1.0));
     }
-    // in perceptual greys, as a soft proof to a grey profile (sRGB's tone curve) shows it: each
-    // colour as the grey of its luminance (Rec. 709 on linear light, as the colour panel's HSY′
-    // luma is, so colours of one Y′ show as one grey), keeping its CIE lightness
+    // through the look (perceptual greys, say: each colour as the grey of its luminance, as a
+    // soft proof to a grey profile shows it), on linear light, clipped
     if (du.m1.w > 0.5) {
-        let y = dot(vec3<f32>(0.2126, 0.7152, 0.0722), srgb_to_linear(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))));
-        rgb = linear_to_srgb(vec3<f32>(clamp(y, 0.0, 1.0)));
+        let lin = srgb_to_linear(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+        let looked = vec3<f32>(
+            dot(du.l0.xyz, lin) + du.l0.w,
+            dot(du.l1.xyz, lin) + du.l1.w,
+            dot(du.l2.xyz, lin) + du.l2.w,
+        );
+        rgb = linear_to_srgb(clamp(looked, vec3<f32>(0.0), vec3<f32>(1.0)));
     }
     // into the target's colour space (another profile's primaries), clipped to it
     if (du.c0.w > 0.5) {

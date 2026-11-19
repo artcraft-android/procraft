@@ -20,7 +20,7 @@
   <img alt="Rust engine" src="https://img.shields.io/badge/engine-Rust-lightblue?style=flat&logo=rust&logoColor=white">
   <img alt="GPU renderer: wgpu" src="https://img.shields.io/badge/renderer-wgpu-lightblue?style=flat">
   <img alt="Kotlin and Jetpack Compose" src="https://img.shields.io/badge/UI-Kotlin%20%C2%B7%20Jetpack%20Compose-blue?style=flat">
-  <img alt="Minimum: Android 10 (API 29)" src="https://img.shields.io/badge/min-Android%2010%20%28API%2029%29-blue?style=flat">
+  <img alt="Minimum: Android 8 (API 26)" src="https://img.shields.io/badge/min-Android%208%20%28API%2026%29-blue?style=flat">
   <img alt="Target: Android 16 (API 36)" src="https://img.shields.io/badge/target-Android%2016%20%28API%2036%29-blue?style=flat">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat">
   <img alt="Desktop: Windows and Linux" src="https://img.shields.io/badge/desktop-Windows%20%C2%B7%20Linux-blue?style=flat">
@@ -28,7 +28,7 @@
 </p>
 
 <p align="center">
-  <sub>From <a href="https://github.com/artcraft-android/procraft/releases">Releases</a>: Android tablets take the <code>arm64.apk</code> (the <code>legacy-arm32.apk</code> is only for older 32-bit tablets), or Obtainium, for updates; Windows the <code>.msi</code> installer or the portable <code>.zip</code>; Linux the <code>.AppImage</code>, the <code>.deb</code> or the <code>.tar.gz</code> (videos and PDFs there use the system's <code>ffmpeg</code> and <code>poppler-utils</code>).</sub>
+  <sub>From <a href="https://github.com/artcraft-android/procraft/releases">Releases</a>: Android tablets take the <code>arm64.apk</code> (the <code>legacy-armeabi-v7a.apk</code> is only for older 32-bit tablets), or Obtainium, for updates; Windows the <code>.msi</code> installer or the portable <code>.zip</code>; Linux the <code>.AppImage</code>, the <code>.deb</code> or the <code>.tar.gz</code> (videos and PDFs there use the system's <code>ffmpeg</code> and <code>poppler-utils</code>).</sub>
 </p>
 
 <p align="center">
@@ -120,6 +120,7 @@ ProCraft is in beta, on Android tablets and on the desktop (Windows and Linux).
 | Desktop: Windows and Linux, the same interface with a mouse, a pen tablet and keyboard shortcuts; an installer, an AppImage and a .deb | 🚧 beta |
 | Plugins: `.procraft-plugin` files you import in Prefs › Plugins, each off until you turn it on and gone without a trace when you turn it off. Filters (a few lines of WGSL, under Adjustments) and sandboxed WebAssembly that changes how the app behaves, such as Interface size, Touch offset and ColorDrop gap closing. How to write one: [docs/plugins.md](docs/plugins.md) | ✅ |
 | More for plugins: buttons that change the artwork (asking permission first), panels of their own, the colour picker drawn their way, kinds of artwork and of layer of their own | ✅ |
+| Brush engines in plugins: brush files another app's engine draws, drawn by a plugin as that app draws them, with a brush studio of its own, such as Krita brushes (Krita's pixel brush) | 🚧 |
 | Phones: their own app, ProCraft Pocket (this one is for tablets) | ⬜ |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started · 🚫 not planned</sub>

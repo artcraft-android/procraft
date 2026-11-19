@@ -838,7 +838,10 @@ impl CanvasSession {
         done: bool,
     ) -> bool {
         let (local, middle) = {
-            let st = self.shared.lock();
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            // (a stroke just ended is on its layer before what it paints is measured)
+            st.flush();
             let frame = st.canvas.as_ref().map_or(0, |c| c.timeline_frame());
             let tl = st.doc.timeline.as_ref();
             let root = tl.and_then(|t| t.clip(ClipId(id))).and_then(|c| match &c.content {

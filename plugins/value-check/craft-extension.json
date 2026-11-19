@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.value-check",
+  "name": "Value check",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Values only, in Actions > Canvas or on Alt+G, shows the canvas in greys to check its values, on the screen alone: what you save, export and pick stays in colour.",
+  "compat": { "procraft": { "interface": 8 } },
+  "permissions": [],
+  "hooks": ["view_look"],
+  "controls": [
+    { "key": "values", "type": "switch", "label": "Values only", "starts": false, "place": "canvas", "press": "alt+g" },
+    {
+      "key": "contrast", "type": "slider", "label": "Contrast", "least": 1, "most": 2, "step": 0.05, "starts": 1,
+      "shown_times": 100, "unit": "%", "live": true, "under": "values"
+    }
+  ]
+}

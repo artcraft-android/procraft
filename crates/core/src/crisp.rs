@@ -439,7 +439,9 @@ impl State {
         self.crisp_echo();
         self.crisp_stroke = None;
         let plain = matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) && !style.preview;
-        if !plain || self.crisp_busy() || self.view_motion.is_some() {
+        // (no sharp picture showing: nothing to bring up to date, and the artwork's waiting work,
+        // a stroke laid again over frames as it ended say, is left to go on as it was)
+        if !plain || self.crisp.is_none() || self.crisp_busy() || self.view_motion.is_some() {
             return false;
         }
         let (Some(view), Some(picture), Some(gpu)) = (self.view, self.crisp_picture(), self.gpu.clone()) else {

@@ -156,6 +156,13 @@ extension CanvasModel {
             } else if session.nudgePluginItems(dx: dx, dy: dy) {
                 refresh()
             }
+        // the view's own moves, which a plugin gives keys to
+        case .zoomView, .turnView, .panView:
+            _ = session.keyView(shortcut: shortcut)
+            refreshView()
+        case .fitView:
+            _ = session.keyView(shortcut: shortcut)
+            followView()
         }
         return true
     }

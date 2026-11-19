@@ -13,6 +13,15 @@ use crate::{
 };
 
 impl State {
+    /// Whether the window's surface asks for wide colour (see [`configure`]): only for a canvas
+    /// whose colours go past sRGB (Display P3, CMYK shown through Display P3, an imported profile),
+    /// and only while the app allows it. An sRGB canvas shows the same in either, so its window
+    /// stays plain sRGB: the layer screens' compositors handle best (a wide one has blurred the
+    /// interface over the canvas, or dulled the canvas while nothing moved, on some tablets).
+    pub(crate) fn wide_colour(&self) -> bool {
+        self.wide_colour_allowed && (self.doc.profile.is_p3() || self.doc.icc.is_some())
+    }
+
     /// Draws the whole canvas fitted and centred on black into `view` (`format`, `size` pixels,
     /// its colours shown in `screen`): Project canvas, on a second display.
     pub(crate) fn draw_fitted(
@@ -48,7 +57,7 @@ impl State {
                 lut,
                 // the second display's own density isn't known: crisp once a pixel covers more
                 crisp_from: 1.0,
-                grey: false,
+                look: None,
             }),
         );
     }
@@ -64,6 +73,8 @@ impl State {
             }
             SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
             SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
+            // the paint colour is in the canvas's colours
+            SelectionDisplay::ColourFill => SelectionLook::Fill(self.doc.profile.convert(self.color, screen)),
         }
     }
 
@@ -100,6 +111,11 @@ impl State {
         if self.vector_warp_draw(false) {
             self.needs_frame = true;
         }
+        // a shape moved since the last frame is drawn again where it is now, once however many
+        // moves came meanwhile
+        self.draw_moved_shape();
+        // what runs ahead of the open stroke, once however many samples came since the last frame
+        self.draw_ahead();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
@@ -115,8 +131,8 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
-        // while a transform is open, what is selected is what is being moved: no bands over the rest
-        let selection_hidden = self.transform.is_some();
+        // while a transform is open the selection shows no bands: its box shows what moves
+        let banded = self.transform.is_none();
         // vector layers drawn again as fine as the screen, once the view has rested zoomed in
         let crisp = if self.scene_shown() || self.sphere.is_some() {
             crate::crisp::CrispShown::No
@@ -126,7 +142,7 @@ impl State {
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
-            let selected = self.selection.is_some() && !selection_hidden;
+            let selected = self.selection.is_some() && banded;
             let look = selected.then_some(selection_shown);
             // the bands drift, so they keep drawing, a frame each time they have moved a pixel
             if matches!(look, Some(SelectionLook::Stripes(_))) {
@@ -139,12 +155,15 @@ impl State {
             let convert = colours_to(self.doc.profile, screen);
             self.render_sphere(view, format, size, convert);
             self.frames += 1;
-        } else if let (Some(canvas), Some(gpu), Some(to_screen)) = (self.canvas.as_mut(), self.gpu.as_ref(), to_screen)
+        } else if let (shown_look, Some(canvas), Some(gpu), Some(to_screen)) =
+            (self.shown_look(), self.canvas.as_mut(), self.gpu.as_ref(), to_screen)
         {
+            // the paper the plugins give, which a canvas made since hasn't taken yet
+            canvas.set_paper(gpu, self.plugin_paper.as_ref());
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
             let shown = selection_shown;
-            let look = (canvas.has_selection() && !selection_hidden).then_some(shown);
+            let look = (canvas.has_selection() && banded).then_some(shown);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
@@ -184,7 +203,7 @@ impl State {
                 Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
                 None => (canvas, &mut self.doc, to_screen),
             };
-            let look = (canvas.has_selection() && !selection_hidden).then_some(shown);
+            let look = (canvas.has_selection() && banded).then_some(shown);
             canvas.render(
                 gpu,
                 doc,
@@ -200,7 +219,7 @@ impl State {
                     convert,
                     lut,
                     crisp_from: self.display_scale,
-                    grey: self.grey_view,
+                    look: shown_look,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
@@ -233,7 +252,7 @@ impl State {
                         lut: None,
                         // (it is no longer a pixel to a pixel: smoothed, never squares)
                         crisp_from: f32::INFINITY,
-                        grey: self.grey_view,
+                        look: shown_look,
                     }),
                 );
                 sharp.set_over(false);
@@ -245,6 +264,13 @@ impl State {
         }
         self.heed_filter_run();
     }
+}
+
+/// The least time between the beginnings of two frames for a screen showing at most `hertz` frames
+/// a second: a tenth under its period, so a frame is ready for every refresh as frames drift
+/// against it. None for a rate that can't be.
+pub(crate) fn frame_spacing(hertz: f32) -> Option<Duration> {
+    (hertz.is_finite() && hertz >= 1.0).then(|| Duration::from_secs_f32(0.9 / hertz.min(1000.0)))
 }
 
 /// The profile a configured surface shows colours in.

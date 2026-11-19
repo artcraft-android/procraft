@@ -469,9 +469,6 @@ final class CanvasModel {
         applyPlugins()
         PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
         refreshCanvasSpace()
-        if !SystemSettings.orientationMemory {
-            session.forgetSavedView()
-        }
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setVectorCrisp(on: settings.vectorCrisp)
@@ -2512,7 +2509,7 @@ final class CanvasModel {
     /// Turns the canvas back by `turn` (radians) about (`x`, `y`), easing there: two fingers'
     /// accidental turn.
     func settleTurn(x: Float, y: Float, turn: Float) {
-        session.settleTurn(x: x, y: y, turn: turn)
+        session.unturn(x: x, y: y, turn: turn)
         followView()
     }
 
@@ -2620,7 +2617,7 @@ final class CanvasModel {
                     showNotice(said)
                 }
                 refresh()
-            case .emptyGroup, .group:
+            case .emptyGroup, .group, .several:
                 break
             case .meshHidden, .meshLocked:
                 session.freeMeantMeshes()

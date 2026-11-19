@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use procraft_engine::document::{Document, Layer, LayerId};
-use procraft_engine::formats::{self, PsdKind};
+use procraft_engine::document::{Document, LayerId};
+use procraft_engine::formats;
 
 use crate::project::straight_alpha;
 use crate::{CanvasSession, MobileError};
@@ -13,14 +13,14 @@ use crate::{CanvasSession, MobileError};
 /// The pixels (straight RGBA8) each adjustment layer a PSD can't keep as one is flattened into.
 pub(crate) type Flattened = HashMap<LayerId, Vec<u8>>;
 
-/// How layer `l` goes into a PSD if it is an adjustment layer (with its `mask`): its PSD kind, or
-/// its pixels from `flattened`. None for any other layer.
-pub(crate) fn psd_kind<'a>(l: &Layer, mask: Option<&'a [u8]>, flattened: &'a Flattened) -> Option<PsdKind<'a>> {
-    let a = l.adjustment.as_ref()?;
-    match formats::psd_adjustment(&a.filter, &a.table) {
-        Some((key, data)) => Some(PsdKind::Adjustment { key, data, mask }),
-        None => flattened.get(&l.id).map(|rgba| PsdKind::Pixels { rgba, mask }),
-    }
+/// The shown masks of the adjustment layers of `doc` a PSD keeps as its own kind: read ahead of
+/// the file being written, where their records want them.
+pub(crate) fn kept_masks(doc: &Document) -> Vec<LayerId> {
+    doc.layers()
+        .iter()
+        .filter(|l| l.adjustment.as_ref().is_some_and(|a| formats::psd_adjustment(&a.filter, &a.table).is_some()))
+        .filter_map(|l| doc.mask_of(l.id).filter(|m| doc.layer(*m).is_some_and(|m| m.visible)))
+        .collect()
 }
 
 impl CanvasSession {

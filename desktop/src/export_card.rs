@@ -68,6 +68,9 @@ pub enum Ended {
 }
 
 struct Run {
+    /// What it says it is doing, after its glyph.
+    title: &'static str,
+    glyph: &'static crate::icons::Icon,
     progress: Box<dyn Fn() -> f32>,
     exporting: Exporting,
     since: Instant,
@@ -84,8 +87,25 @@ impl ExportCard {
     /// Shows the card for an export whose progress (0..1) `progress` tells; its thread is handed
     /// the [`Exporting`] to read Cancel from and to end it by.
     pub fn start(&mut self, progress: impl Fn() -> f32 + 'static) -> Exporting {
+        self.start_as("Exporting", &crate::icons::TAB_SHARE, progress)
+    }
+
+    /// Shows the card for files being brought in ("Importing", as the Android app's import card),
+    /// as [`Self::start`] does.
+    pub fn start_importing(&mut self, progress: impl Fn() -> f32 + 'static) -> Exporting {
+        self.start_as("Importing", &crate::icons::TAB_IMPORT, progress)
+    }
+
+    fn start_as(
+        &mut self,
+        title: &'static str,
+        glyph: &'static crate::icons::Icon,
+        progress: impl Fn() -> f32 + 'static,
+    ) -> Exporting {
         let exporting = Exporting { cancel: Arc::new(AtomicBool::new(false)), made: Arc::new(AtomicU8::new(RUNNING)) };
         self.run = Some(Run {
+            title,
+            glyph,
             progress: Box::new(progress),
             exporting: exporting.clone(),
             since: Instant::now(),
@@ -148,10 +168,10 @@ impl ExportCard {
             // the title after the share glyph (22 tall: 18.6 of its 50 frame), 13 between
             let title_y = card.top() + 21.0 + 31.0 / 2.0;
             let ink = argb(INK);
-            let words = painter.layout_no_wrap("Exporting".into(), Weight::Bold.font(26.0), ink).size().x;
+            let words = painter.layout_no_wrap(run.title.into(), Weight::Bold.font(26.0), ink).size().x;
             let left = card.center().x - (22.0 + 13.0 + words) / 2.0;
-            look.icon(ui, &crate::icons::TAB_SHARE, pos2(left + 11.0, title_y), 59.0, argb(pc::ACCENT));
-            text(ui.painter(), pos2(left + 35.0, title_y), Align2::LEFT_CENTER, "Exporting", 26.0, Weight::Bold, ink);
+            look.icon(ui, run.glyph, pos2(left + 11.0, title_y), 59.0, argb(pc::ACCENT));
+            text(ui.painter(), pos2(left + 35.0, title_y), Align2::LEFT_CENTER, run.title, 26.0, Weight::Bold, ink);
             let centre = pos2(card.center().x, card.top() + 21.0 + 31.0 + 40.0 + PIE / 2.0);
             let accent = argb(pc::ACCENT);
             let painter = ui.painter();

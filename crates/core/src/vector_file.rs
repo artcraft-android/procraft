@@ -443,6 +443,8 @@ impl State {
                     pressure_curve: if curve.len() >= 2 { Curve::new(&curve) } else { Curve::linear() },
                     speed_distance: input.speed_distance,
                     tip_attached: input.tip_attached,
+                    // (a kept stroke's samples hold the lean it was drawn with)
+                    tilt_known: true,
                 },
                 view_turn: saved.view_turn,
                 points_per_pixel: saved.points_per_pixel,

@@ -313,6 +313,7 @@ impl CanvasSession {
                         match near {
                             // the colour under the pen is taken
                             Some(h) if !cancelled => {
+                                t.pick_pen = true;
                                 out.push(TouchCommand::Pick { x: h.x, y: h.y });
                                 out.push(TouchCommand::PickDone);
                             }
@@ -408,6 +409,7 @@ impl CanvasSession {
         match (s.action, near) {
             (Some(GestureAction::Eyedropper), Some(h)) => {
                 s.picking = true;
+                t.pick_pen = true;
                 out.push(TouchCommand::Pick { x: h.x, y: h.y });
             }
             (Some(GestureAction::Eyedropper), None) if s.picking => {
@@ -476,6 +478,34 @@ mod tests {
         // borrowed, the eraser was never a tool chosen: the one before the smudge tool is the brush
         s.touch_pen_double_tap(PenPreferred::SwitchPrevious, 0.0, 0.0);
         assert_eq!(s.info().tool, ToolKind::Paint);
+    }
+
+    #[test]
+    fn a_pen_s_second_button_does_what_the_first_can() {
+        let s = session();
+        s.set_tool(ToolKind::Smudge);
+        // held to erase: the eraser while it is held, the first's let go leaving it
+        squeeze_set(&s, Some(GestureAction::Erase));
+        assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        assert!(!s.touch_pen_button_up(false));
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        assert!(s.touch_pen_button_up(true));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // the pages a squeeze has none of
+        for (action, does) in [
+            (GestureAction::ClearLayer, TouchCommand::ClearLayer),
+            (GestureAction::FullScreen, TouchCommand::ToggleBars),
+            (GestureAction::CopyPaste, TouchCommand::CopyPaste),
+        ] {
+            squeeze_set(&s, Some(action));
+            assert_eq!(s.touch_pen_button(true, 10.0, 10.0), vec![does]);
+        }
+        squeeze_set(&s, Some(GestureAction::Assisted));
+        let was = s.guide().assisted;
+        s.touch_pen_button(true, 10.0, 10.0);
+        assert_eq!(s.guide().assisted, !was);
+        assert_eq!(s.info().tool, ToolKind::Smudge);
     }
 
     #[test]
@@ -655,6 +685,8 @@ mod tests {
             squeeze(SqueezePhase::Began, over(10.0, 10.0, 0.4, 0.0), 0.0),
             vec![TouchCommand::Pick { x: 10.0, y: 10.0 }]
         );
+        // its loupe on the pen's tip
+        assert_eq!(s.pick_loupe_lift(), 0.0);
         // the loupe stands in for the brush's outline
         s.touch_pen_hover(over(10.0, 10.0, 0.4, 5.0));
         assert_eq!(s.pen_hover_cursor(), None);

@@ -5,6 +5,9 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
@@ -43,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -51,6 +55,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -66,6 +74,9 @@ import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.PluginSource
 import io.github.artcraftandroid.procraft.core.pluginSliderAlong
 import io.github.artcraftandroid.procraft.core.pluginSliderAt
+import io.github.artcraftandroid.procraft.core.pluginSliderChoice
+import io.github.artcraftandroid.procraft.core.pluginSliderChoices
+import io.github.artcraftandroid.procraft.core.pluginSliderChosen
 import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -334,6 +345,16 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     // the app's own settings page, apart from the canvas
                     runCatching { context.startActivity(Intent(context, io.github.artcraftandroid.procraft.SettingsActivity::class.java)) }
                 },
+                Act("Share log") {
+                    // made outside the panel, which may be closed meanwhile
+                    vm.viewModelScope.launch {
+                        val log = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            io.github.artcraftandroid.procraft.AppLog.toShare(context)
+                        }
+                        if (log == null) dialog = "Share log" to "The log couldn't be made ready to share."
+                        else runCatching { shareFile(context, log, "text/plain") }
+                    }
+                },
             ),
         )
     }
@@ -418,6 +439,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             }
                         }
                     }
+                    // what plugins put in the Canvas tab
+                    if (shownTab == 1 && !model) PluginCanvasRows(vm)
                 }
             }
         }
@@ -575,7 +598,11 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** The plugins, a page of the panel: a card each, drawn from what the list says of them. */
+/**
+ * The plugins, a page of the panel: a card each, drawn from what the list says of them, in the
+ * order they were put in. A card held by its name lifts and follows the finger or pen, faint where
+ * it was; let go over another card, it takes that one's place. Remove asks first.
+ */
 @Composable
 private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
@@ -593,34 +620,131 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
         }
     }
     val shown = vm.pluginList
-    Column(
-        Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
-    ) {
-        if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
-        for (plugin in shown) PluginCard(plugin, vm)
+    // the plugin whose Remove was tapped, while it is asked about
+    var removing by remember { mutableStateOf<PluginInfo?>(null) }
+    // a card held and dragged: whose, where the finger is and where on the card it took hold
+    var dragged by remember { mutableStateOf<String?>(null) }
+    var dragAt by remember { mutableStateOf(Offset.Zero) }
+    var grab by remember { mutableStateOf(Offset.Zero) }
+    // where the cards are (window pixels), for a dragged one to land, and how tall their heads are
+    val cardBounds = remember { androidx.compose.runtime.mutableStateMapOf<String, androidx.compose.ui.geometry.Rect>() }
+    val headHeights = remember { androidx.compose.runtime.mutableStateMapOf<String, Int>() }
+    var listBounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    // let go over another card: to its place
+    fun drop() {
+        val id = dragged ?: return
+        dragged = null
+        val to = shown.indexOfFirst { cardBounds[it.id]?.contains(dragAt) == true }
+        if (to >= 0 && shown.getOrNull(to)?.id != id) vm.movePlugin(id, to)
+    }
+    // (for a hold that began before the list last changed)
+    val dropNow by rememberUpdatedState(::drop)
+    Box(Modifier.onGloballyPositioned { listBounds = it.boundsInWindow() }) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
+        ) {
+            if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
+            for (plugin in shown) androidx.compose.runtime.key(plugin.id) {
+                val id = plugin.id
+                // gone from the list, it is nowhere: where it last was may be under another card
+                androidx.compose.runtime.DisposableEffect(id) {
+                    onDispose {
+                        cardBounds.remove(id)
+                        headHeights.remove(id)
+                    }
+                }
+                PluginCard(
+                    plugin,
+                    vm,
+                    Modifier.onGloballyPositioned { cardBounds[id] = it.boundsInWindow() }.alpha(if (dragged == id) 0.3f else 1f),
+                    head = Modifier.onSizeChanged { headHeights[id] = it.height }.pointerInput(id) {
+                        // held still, the card lifts; the rest of the press is its drag's, taken before
+                        // the list under it sees it (moved first, the list scrolls instead)
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val long = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            grab = long.position
+                            dragAt = (cardBounds[id]?.topLeft ?: Offset.Zero) + long.position
+                            dragged = id
+                            try {
+                                while (true) {
+                                    val change = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
+                                    if (change == null || change.isConsumed) {
+                                        dragged = null
+                                        break
+                                    }
+                                    val by = change.positionChangeIgnoreConsumed()
+                                    change.consume()
+                                    if (!change.pressed) {
+                                        dropNow()
+                                        break
+                                    }
+                                    dragAt += by
+                                }
+                            } catch (gone: kotlinx.coroutines.CancellationException) {
+                                dragged = null
+                                throw gone
+                            }
+                        }
+                    },
+                    onRemove = { removing = plugin },
+                )
+            }
+        }
+        // the dragged card follows the finger: its name and what it does
+        dragged?.let { id ->
+            val plugin = shown.firstOrNull { it.id == id } ?: return@let
+            val width = cardBounds[id]?.width ?: 0f
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val at = dragAt - grab - listBounds.topLeft
+            Box(
+                Modifier.offset { androidx.compose.ui.unit.IntOffset(at.x.roundToInt(), at.y.roundToInt()) }
+                    .size(with(density) { width.toDp() }, with(density) { (headHeights[id] ?: 0).toDp() })
+                    .clip(RoundedCornerShape(22.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
+            ) {
+                PluginHead(plugin, lifted = true)
+            }
+        }
+    }
+    Alert(
+        removing,
+        title = { "Remove this plugin?" },
+        message = { "“${it.name}” goes, and its settings with it." },
+        action = "Remove",
+        icon = PcIcons.Trash,
+        onCancel = { removing = null },
+        onAction = {
+            removing = null
+            vm.removePlugin(it)
+        },
+    )
+}
+
+/** A plugin card's head: its name, what it does and what is the matter with it; all in white while it is [lifted] and dragged. */
+@Composable
+private fun PluginHead(plugin: PluginInfo, modifier: Modifier = Modifier, lifted: Boolean = false) {
+    Column(modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(plugin.name, color = if (lifted) Color.White else Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+        Text(plugin.description, color = if (lifted) Color.White else Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+        plugin.problem?.let { Text(it, color = if (lifted) Color.White else Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
     }
 }
 
-/** A plugin: its name, what it does, what is the matter with it, its controls whatever they are, what it does when tapped, and the rows that turn it on or off and remove it. */
+/**
+ * A plugin: its head ([head] where it is held to drag it), its controls whatever they are, what it
+ * does when tapped, and the rows that turn it on or off and remove it ([onRemove], which asks).
+ */
 @Composable
-private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            }
-            Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
-            plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
-        }
+private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifier, head: Modifier, onRemove: () -> Unit) {
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
+        PluginHead(plugin, modifier = head)
         if (plugin.on && plugin.problem == null) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-                when (control) {
-                    is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
-                    is PluginControl.Slider -> PluginSliderRow(control.control, vm::setPluginSlider)
-                    is PluginControl.File -> PluginFileRow(control.control, vm)
-                }
+                PluginControlRow(control, vm)
             }
             for (action in plugin.actions) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
@@ -631,7 +755,44 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
         ActionRowView(Act(if (plugin.on) "Turn off" else "Turn on") { vm.setPluginOn(plugin, !plugin.on) })
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-            ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
+            ActionRowView(Act("Remove", onClick = onRemove))
+        }
+    }
+}
+
+/** A plugin's control as its card shows it, whatever it is: a switch, a slider, a setting named at every step, a file. */
+@Composable
+private fun PluginControlRow(control: PluginControl, vm: CanvasViewModel) {
+    when (control) {
+        is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
+        is PluginControl.Slider -> {
+            val choices = pluginSliderChoices(control.control)
+            if (choices.isEmpty()) PluginSliderRow(control.control, vm::setPluginSlider)
+            else PluginChoiceRow(control.control, choices, vm::setPluginSlider)
+        }
+        is PluginControl.File -> PluginFileRow(control.control, vm)
+    }
+}
+
+/**
+ * The controls and actions the plugins that are on put in the Canvas tab, after its own rows: a
+ * group of their own, each row as on its plugin's card.
+ */
+@Composable
+private fun PluginCanvasRows(vm: CanvasViewModel) {
+    val list = vm.pluginList
+    val controls = remember(list) { vm.plugins.controlsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
+    val actions = remember(list) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
+    if (controls.isEmpty() && actions.isEmpty()) return
+    Spacer(Modifier.height(20.dp))
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
+        controls.forEachIndexed { i, control ->
+            if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            PluginControlRow(control, vm)
+        }
+        actions.forEachIndexed { i, action ->
+            if (i > 0 || controls.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            PluginActionRow(action.label) { vm.runPluginAction(action.key) }
         }
     }
 }
@@ -745,6 +906,33 @@ private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
             Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(file.key) }.padding(start = 12.dp))
         } else {
             Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+    }
+}
+
+/** A setting on a card named at every step: its label, the one chosen in blue; a tap opens a menu of them. */
+@Composable
+private fun PluginChoiceRow(slider: PluginSlider, choices: List<String>, onSet: (PluginSlider, Float) -> Unit) {
+    var open by remember(slider.key) { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).clickable { open = true }.padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(slider.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+            Box(Modifier.weight(1f))
+            Text(pluginSliderShown(slider, slider.value), color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+        MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(0f, 0f)) { look ->
+            ChoiceMenu(
+                look,
+                choices, pluginSliderChosen(slider, slider.value).toInt(), offsetY = (-7).dp,
+                onPick = {
+                    onSet(slider, pluginSliderChoice(slider, it.toUInt()))
+                    open = false
+                },
+                onDismiss = { open = false },
+            )
         }
     }
 }
@@ -1084,13 +1272,16 @@ internal fun shareFile(context: Context, file: File, mime: String) {
     context.startActivity(shareSheet(context, send, listOf(file), mime))
 }
 
-/** The share sheet for [send], with saving [files] to the device always among its choices. */
+/**
+ * The share sheet for [send], with saving [files] to the device always among its choices, and to
+ * the gallery too for pictures and videos.
+ */
 private fun shareSheet(context: Context, send: Intent, files: List<File>, mime: String): Intent {
-    val save = android.content.pm.LabeledIntent(
-        io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime),
-        context.packageName,
-        "Save to device",
-        io.github.artcraftandroid.procraft.R.mipmap.ic_launcher,
-    )
-    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf<android.os.Parcelable>(save))
+    fun ours(intent: Intent, label: String) =
+        android.content.pm.LabeledIntent(intent, context.packageName, label, io.github.artcraftandroid.procraft.R.mipmap.ic_launcher)
+    val gallery = ours(io.github.artcraftandroid.procraft.SaveToGalleryActivity.intent(context, files, mime), "Save to Gallery")
+        .takeIf { io.github.artcraftandroid.procraft.savesToGallery(mime) }
+    val save = ours(io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime), "Save to device")
+    val choices = listOfNotNull(gallery, save).toTypedArray<android.os.Parcelable>()
+    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, choices)
 }

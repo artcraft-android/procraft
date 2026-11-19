@@ -143,8 +143,15 @@ mod tests {
         s.shared.lock().layer_pixels(LayerId(layer)).unwrap()
     }
 
+    /// The canvas as composited (premultiplied RGBA8), everything queued drawn first.
     fn composite(s: &CanvasSession) -> Vec<u8> {
-        s.shared.lock().composite_pixels().unwrap()
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        st.flush();
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.read_composite_without(gpu, &mut st.doc, &[]).unwrap()
     }
 
     fn pixel(rgba: &[u8], x: usize, y: usize) -> [u8; 4] {
