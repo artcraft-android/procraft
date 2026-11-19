@@ -257,7 +257,14 @@ object Pc {
         BarFit(8.dp, 0.dp, 0.dp, BarButtonWidth),
         BarFit(8.dp, 0.dp, 0.dp, 36.dp),
         BarFit(4.dp, 0.dp, 0.dp, 32.dp),
+        // a phone a little narrower than 360 (its display size made larger): the buttons' glyphs
+        // drawn smaller with them, so the tools never cover Selection and Transform
+        BarFit(4.dp, 0.dp, 0.dp, 28.dp),
+        BarFit(2.dp, 0.dp, 0.dp, 26.dp),
     )
+
+    /** How much smaller than drawn a top bar button [width] wide draws its glyph: none down to 32. */
+    fun barGlyphScale(width: Dp): Float = (width / 32.dp).coerceAtMost(1f)
 
     /**
      * The spacing of a top bar [width] wide: the measured step for that width, or where its two

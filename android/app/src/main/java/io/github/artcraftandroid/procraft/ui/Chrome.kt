@@ -132,10 +132,11 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun ActionButton(icon: ImageVector, label: String, width: Dp, selected: Boolean = false, glyph: Dp = 36.dp, onClick: () -> Unit = {}) {
     val lit = animateHighlight(selected)
+    val k = Pc.barGlyphScale(width)
     Box(Modifier.size(width, Pc.BarButtonHeight).tap(onClick = onClick), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(Pc.ActionDiscSize).clip(CircleShape).background(lerp(Pc.ActionDisc, Pc.BarGlyphSelected, lit)))
+        Box(Modifier.size(Pc.ActionDiscSize * k).clip(CircleShape).background(lerp(Pc.ActionDisc, Pc.BarGlyphSelected, lit)))
         // the glyphs are drawn in a 44 frame, shown [glyph] across (most 36)
-        Icon(icon, contentDescription = label, tint = lerp(Pc.ActionGlyph, Color.White, lit), modifier = Modifier.requiredSize(glyph))
+        Icon(icon, contentDescription = label, tint = lerp(Pc.ActionGlyph, Color.White, lit), modifier = Modifier.requiredSize(glyph * k))
     }
 }
 
@@ -152,7 +153,7 @@ private fun ToolButton(icon: ImageVector, label: String, width: Dp, selected: Bo
     val touch = if (onHold != null) Modifier.tapOrHold(onClick, onHold) else Modifier.tap(onClick = onClick)
     Box(Modifier.size(width, Pc.BarButtonHeight).then(touch), contentAlignment = Alignment.Center) {
         // a 44 frame shown as it is, over the 38 tall button
-        Icon(icon, contentDescription = label, tint = lerp(Pc.BarGlyph, Pc.BarGlyphSelected, animateHighlight(selected)), modifier = Modifier.requiredSize(44.dp))
+        Icon(icon, contentDescription = label, tint = lerp(Pc.BarGlyph, Pc.BarGlyphSelected, animateHighlight(selected)), modifier = Modifier.requiredSize(44.dp * Pc.barGlyphScale(width)))
     }
 }
 
@@ -166,7 +167,7 @@ private fun ColorButton(vm: CanvasViewModel, width: Dp) {
     // dragged out onto the canvas, it fills there (ColorDrop)
     val hold = io.github.artcraftandroid.procraft.core.colourHoldMs().toLong()
     Box(Modifier.size(width, Pc.BarButtonHeight).dropSource(vm, holdMs = hold, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
-        val dot = Modifier.size(Pc.ColorDot).clip(CircleShape).background(CanvasSpace.color(rgb))
+        val dot = Modifier.size(Pc.ColorDot * Pc.barGlyphScale(width)).clip(CircleShape).background(CanvasSpace.color(rgb))
         Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
     }
 }

@@ -123,6 +123,20 @@ private val StudioDone get() = Pc.tinted(Color(0xFF0190FF))
 private val PadHeight = 510.dp
 private val TabsWidth = 81.dp
 
+/** The landscape studio's pages card (with its margin), its settings and the line after them. */
+private val PagesAndSettings = 330.dp + SettingsWidth + 1.dp
+
+/** The least the pad beside them needs: its Drawing Pad button and Cancel and Done, apart. */
+internal val PadLeast = 360.dp
+
+/**
+ * Whether the studio in a window [width] wide lays its pages, settings and pad side by side: in
+ * landscape where the pad still has room for its buttons (on a phone held sideways it had about 80
+ * across, and Done was squeezed to nothing), else the pages as a rail beside the pad over the
+ * settings, as upright.
+ */
+internal fun studioSideBySide(landscape: Boolean, width: Dp) = landscape && width >= PagesAndSettings + PadLeast
+
 /**
  * How a slider reads; [SIZE] reads the size the control sets (the brush's most size × place^2.2) as a
  * percent (Max at the control's end), [BOTH] goes both ways from 0% in its middle, -100% to Max (and
@@ -655,7 +669,7 @@ private fun Studio(vm: CanvasViewModel) {
     BoxWithConstraints(
         Modifier.fillMaxSize().background(StudioBack).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
     ) {
-        if (landscape) {
+        if (studioSideBySide(landscape, maxWidth)) {
             // the pages listed by name on a card, the settings beside them, the pad on the right
             Row(Modifier.fillMaxSize()) {
                 StudioPagesCard(vm)
@@ -683,7 +697,8 @@ private fun Studio(vm: CanvasViewModel) {
 /** Portrait: the pages as icons down the left. */
 @Composable
 private fun StudioRail(vm: CanvasViewModel) {
-    Column(Modifier.width(TabsWidth).fillMaxHeight().background(StudioTabs).padding(top = 46.dp)) {
+    // scrolling where the window is too short for all of them (a phone held sideways)
+    Column(Modifier.width(TabsWidth).fillMaxHeight().background(StudioTabs).verticalScroll(rememberScrollState()).padding(top = 46.dp)) {
         STUDIO_TABS.forEachIndexed { i, tab ->
             val on = vm.studioTab == i
             Box(
