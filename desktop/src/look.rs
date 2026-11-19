@@ -560,6 +560,11 @@ impl Look {
 
     /// `icon` shown `width` points across (its frame scaled to it), centred at `centre`, in `colour`.
     pub fn icon(&mut self, ui: &Ui, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
+        self.icon_on(ui, ui.painter(), icon, centre, width, colour);
+    }
+
+    /// [`Look::icon`] drawn with `painter`, within what it clips to.
+    pub fn icon_on(&mut self, ui: &Ui, painter: &Painter, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
         let ppp = self.pixels_per_point(ui);
         let px = (width * ppp).round().max(1.0) as u32;
         let texture = self
@@ -567,7 +572,7 @@ impl Look {
             .entry((icon.name, px))
             .or_insert_with(|| ui.ctx().load_texture(icon.name, raster_icon(icon, px), TextureOptions::LINEAR));
         let height = width * icon.height / icon.width;
-        ui.painter().image(texture.id(), Rect::from_center_size(centre, vec2(width, height)), ALL, colour);
+        painter.image(texture.id(), Rect::from_center_size(centre, vec2(width, height)), ALL, colour);
     }
 
     /// A plugin's icon, SVG path data on the interface icons' 24-unit grid (as the core checked and
