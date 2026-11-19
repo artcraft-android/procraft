@@ -89,8 +89,11 @@ const SLIDER_REST: Themed = Themed(0xFF5A5A5A, 0xFFBEBEBE);
 /// Opening, the blend editor grows over this long; closing, it goes faster.
 const BLEND_OPEN: f32 = 0.25;
 const BLEND_CLOSE: f32 = 0.1;
-/// A scroll of the modes left alone this long settles on the nearest.
-const BLEND_SETTLE: f32 = 0.12;
+/// Let wheel and trackpad scrolling finish before snapping to a row.
+const BLEND_WHEEL_PAUSE: f32 = 0.12;
+const BLEND_SNAP: f32 = 0.18;
+const BLEND_FLING_DECAY: f32 = 4.5;
+const BLEND_FLING_STOP: f32 = 20.0;
 /// A row slid left shows its buttons, each this wide, this far apart; slid right this far, it is
 /// picked.
 const SWIPE_BUTTON: f32 = 82.0;
@@ -139,8 +142,57 @@ struct RowPress {
 struct Blend {
     id: u64,
     scroll: f32,
-    to: Option<f32>,
-    moved: Option<Instant>,
+    motion: BlendMotion,
+}
+
+#[derive(Clone, Copy)]
+enum BlendMotion {
+    Resting,
+    Dragging,
+    Wheel(Instant),
+    Coasting(f32),
+    Centering { from: f32, to: f32, since: Instant, duration: f32 },
+}
+
+impl Blend {
+    fn nearest(&self) -> f32 {
+        (self.scroll / BLEND_ROW).round() * BLEND_ROW
+    }
+
+    fn center_on(&mut self, to: f32, now: Instant, duration: f32) {
+        self.motion = BlendMotion::Centering { from: self.scroll, to, since: now, duration };
+    }
+
+    /// Move the list, returning the row to apply only when centering finishes.
+    fn advance(&mut self, now: Instant, dt: f32, most: f32) -> Option<usize> {
+        match self.motion {
+            BlendMotion::Wheel(last) if now.duration_since(last).as_secs_f32() >= BLEND_WHEEL_PAUSE => {
+                self.center_on(self.nearest(), now, BLEND_SNAP);
+            }
+            BlendMotion::Coasting(velocity) => {
+                let decay = (-BLEND_FLING_DECAY * dt).exp();
+                let distance = velocity * (1.0 - decay) / BLEND_FLING_DECAY;
+                self.scroll = (self.scroll + distance).clamp(0.0, most);
+                let velocity = velocity * decay;
+                if velocity.abs() < BLEND_FLING_STOP || self.scroll == 0.0 || self.scroll == most {
+                    self.center_on(self.nearest(), now, BLEND_SNAP);
+                } else {
+                    self.motion = BlendMotion::Coasting(velocity);
+                }
+            }
+            BlendMotion::Centering { from, to, since, duration } => {
+                let t = (now.duration_since(since).as_secs_f32() / duration).min(1.0);
+                if t == 1.0 || from == to {
+                    self.scroll = to;
+                    self.motion = BlendMotion::Resting;
+                    return Some((to / BLEND_ROW).round() as usize);
+                }
+                self.scroll = egui::lerp(from..=to, ease(t));
+            }
+            _ => {}
+        }
+        None
+    }
 }
 
 #[derive(Default)]
@@ -642,7 +694,7 @@ impl Layers {
                     .iter()
                     .find(|l| l.id == id)
                     .map_or(0, |l| modes.iter().position(|m| m.id == l.blend).unwrap_or(0));
-                Blend { id, scroll: at as f32 * BLEND_ROW, to: None, moved: None }
+                Blend { id, scroll: at as f32 * BLEND_ROW, motion: BlendMotion::Resting }
             });
         }
         if let Some(l) = self.options.and_then(|id| layers.iter().find(|l| l.id == id)) {
@@ -1582,59 +1634,58 @@ impl Layers {
         let Some(b) = self.blend.as_mut().filter(|b| b.id == l.id) else {
             // closing: as it was
             let at = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
-            blend_rows(ui, look, list, modes, l.blend, at);
+            blend_rows(ui, look, list, modes, at);
             return;
         };
         let most = modes.len().saturating_sub(1) as f32 * BLEND_ROW;
         let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
         let response = ui.interact(list, ui.scope_id().with(("modes", l.id)), Sense::click_and_drag());
         let now = Instant::now();
-        if response.dragged() {
+        let wheel = if response.hovered() {
+            // The picker owns the wheel here, inside the scrollable Layers panel.
+            ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+        } else {
+            0.0
+        };
+
+        if response.is_pointer_button_down_on() {
             b.scroll = (b.scroll - response.drag_delta().y).clamp(0.0, most);
-            b.to = None;
-            b.moved = Some(now);
-        }
-        if response.hovered() {
-            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-            if wheel != 0.0 {
-                // the list scrolls, not the panel round it
-                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
-                b.scroll = (b.scroll - wheel).clamp(0.0, most);
-                b.to = None;
-                b.moved = Some(now);
-            }
-        }
-        if response.clicked()
+            b.motion = BlendMotion::Dragging;
+        } else if wheel != 0.0 {
+            b.scroll = (b.scroll - wheel).clamp(0.0, most);
+            b.motion = BlendMotion::Wheel(now);
+        } else if response.clicked()
             && let Some(p) = response.interact_pointer_pos()
         {
             let i = ((p.y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
             if i >= 0.0 && (i as usize) < modes.len() {
-                b.to = Some(i * BLEND_ROW);
+                let to = i * BLEND_ROW;
+                let rows = (to - b.scroll).abs() / BLEND_ROW;
+                b.center_on(to, now, (0.30 + 0.04 * rows).min(0.60));
+            } else if matches!(b.motion, BlendMotion::Dragging) {
+                b.center_on(b.nearest(), now, BLEND_SNAP);
             }
+        } else if response.drag_stopped() {
+            let scale = ui.ctx().layer_transform_from_global(ui.layer_id()).map_or(1.0, |t| t.scaling);
+            let velocity = ui.input(|i| -i.pointer.velocity().y) * scale;
+            b.motion = BlendMotion::Coasting(velocity);
+        } else if matches!(b.motion, BlendMotion::Dragging) {
+            b.center_on(b.nearest(), now, BLEND_SNAP);
+        } else if matches!(b.motion, BlendMotion::Resting) {
+            // Undo or redo can change the applied mode while the picker is open.
+            b.scroll = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
         }
-        // left alone, it settles on the nearest mode
-        let settled = b.moved.is_some_and(|t| t.elapsed().as_secs_f32() >= BLEND_SETTLE);
-        if b.to.is_none() && settled && !response.dragged() {
-            b.to = Some((b.scroll / BLEND_ROW).round() * BLEND_ROW);
-        }
-        if let Some(to) = b.to {
-            let dt = ui.input(|i| i.stable_dt).min(0.05);
-            b.scroll += (to - b.scroll) * (dt * 14.0).min(1.0);
-            if (to - b.scroll).abs() < 0.5 {
-                b.scroll = to;
-                b.to = None;
-                b.moved = None;
-                let i = (to / BLEND_ROW).round() as usize;
-                if let Some(m) = modes.get(i).filter(|m| m.id != l.blend) {
-                    session.set_layer_blend(l.id, m.id);
-                }
+
+        let dt = ui.input(|i| i.stable_dt).min(0.05);
+        if let Some(i) = b.advance(now, dt, most) {
+            if let Some(m) = modes.get(i).filter(|m| m.id != l.blend) {
+                session.set_layer_blend(l.id, m.id);
             }
             ui.ctx().request_repaint();
-        } else if b.moved.is_some() {
+        } else if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Dragging) {
             ui.ctx().request_repaint();
         }
-        let scroll = b.scroll;
-        blend_rows(ui, look, list, modes, l.blend, scroll);
+        blend_rows(ui, look, list, modes, b.scroll);
     }
 
     /// A layer's row: its thumbnail, its name (a padlock before it when locked, what it is under it),
@@ -2127,21 +2178,20 @@ fn swipe_reach(l: &LayerInfo) -> f32 {
     SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
 }
 
-/// The blend modes in `list`, scrolled `scroll` from the first in the middle: each its name and
-/// glyph, the layer's (`chosen`) blue.
-fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], chosen: u32, scroll: f32) {
+/// The list moves behind a highlight fixed to its center.
+fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], scroll: f32) {
     let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
     let painter = ui.painter_at(list);
+    let highlight = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
+    painter.rect_filled(highlight, 0, argb(pc::ACCENT));
+    let centered = (scroll / BLEND_ROW).round() as usize;
     for (i, m) in modes.iter().enumerate() {
         let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
         let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
         if !row.intersects(list) {
             continue;
         }
-        let on = m.id == chosen;
-        if on {
-            painter.rect_filled(row, 0, argb(pc::ACCENT));
-        }
+        let on = i == centered;
         let ink = if on { Color32::WHITE } else { argb(PANEL_TITLE) };
         text(
             &painter,
@@ -2330,6 +2380,44 @@ impl Pinch {
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, PointerButton, RawInput};
+
+    #[test]
+    fn blend_highlight_stays_centered_while_rows_move() {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let modes = procraft_core::blend_modes();
+        let list = Rect::from_min_size(pos2(12.0, 12.0), vec2(360.0, BLEND_LIST_HEIGHT));
+        for scroll in [0.0, 2.4 * BLEND_ROW, 5.0 * BLEND_ROW] {
+            let output = ctx.clone().run_ui(RawInput::default(), |ui| {
+                blend_rows(ui, &mut look, list, &modes, scroll);
+            });
+            let mut highlights = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == argb(pc::ACCENT) => Some(rect.rect),
+                _ => None,
+            });
+            let highlight = highlights.next().expect("the center highlight is drawn");
+            assert!((highlight.center().y - list.center().y).abs() < 0.01);
+            assert!((highlight.height() - BLEND_ROW).abs() < 0.01);
+            assert!(highlights.next().is_none());
+        }
+    }
+
+    #[test]
+    fn blend_drag_coasts_then_applies_one_centered_mode() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut blend = Blend { id: 1, scroll: BLEND_ROW, motion: BlendMotion::Coasting(900.0) };
+        let most = 20.0 * BLEND_ROW;
+        assert_eq!(blend.advance(start + Duration::from_millis(16), 0.016, most), None);
+        assert!(blend.scroll > BLEND_ROW);
+        assert!(matches!(blend.motion, BlendMotion::Coasting(v) if v < 900.0));
+        let selected = (2..90).find_map(|step| blend.advance(start + Duration::from_millis(step * 16), 0.016, most));
+        let selected = selected.expect("coasting and snapping finish");
+        assert!(selected > 1);
+        assert_eq!(blend.scroll, selected as f32 * BLEND_ROW);
+        assert_eq!(blend.advance(start + Duration::from_secs(2), 0.016, most), None);
+    }
 
     /// A tap on the background's row, on its box or left of it: whether the row asked for its
     /// colour, and whether the background shows after.
