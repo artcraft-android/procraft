@@ -161,6 +161,7 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             // the pen input that came while the canvas was held goes in this frame
             shared.take_queued_input(st);
             st.draw_frame(&view, format, size, profile, started);
+            shared.lands_on.note(st);
             let now = Instant::now();
             if let Some(prev) = last_present {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;

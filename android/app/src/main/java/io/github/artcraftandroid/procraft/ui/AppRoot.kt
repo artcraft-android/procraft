@@ -334,8 +334,9 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             ModelWarningsAlert(vm)
             SharedLayerAlert(vm)
             PluginOfferAlert(vm)
-            // a fill a plugin is finishing: nothing is touched until it is done
-            if (vm.fillFinishing) {
+            // a fill a plugin is finishing, or a dropped colour's being made: nothing is touched until
+            // it is done (the screen goes on drawing)
+            if (vm.fillFinishing || vm.dropFilling) {
                 Box(
                     Modifier.fillMaxSize().pointerInput(Unit) {
                         awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }

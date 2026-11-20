@@ -186,6 +186,8 @@ private fun isPicture(kinds: android.content.ClipDescription) = (0 until kinds.m
 
 /** The gallery, the open artwork and the state of the controls around it; outlives configuration changes. */
 class CanvasViewModel(app: Application) : AndroidViewModel(app) {
+    // (read on the fill's thread too)
+    @Volatile
     var session: CanvasSession? = null
         private set
 
@@ -7154,6 +7156,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun undo() {
+        // a dropped colour's fill still being made is undone once it is (the main thread not held)
+        if (drops.pending > 0) return drops.afterFills { undo() }
         feedback()
         // a finished text's step goes back to editing that text first, as a step of its own
         if (textInfo == null && !transforming) session?.textUndoLayer()?.let { if (resumeText(it)) return }
@@ -7232,6 +7236,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun redo() {
+        if (drops.pending > 0) return drops.afterFills { redo() }
         feedback()
         if (transforming) return
         if (textInfo != null && stepTextBox(undo = false)) return
@@ -7845,9 +7850,37 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The colour being dragged: where it is and whether it has come to rest (the core's rules). */
     private var colourDrag: io.github.artcraftandroid.procraft.core.ColourDrag? = null
 
-    /** The dragged colour came to rest and its slid threshold has begun filling (or tried to, and couldn't). */
-    private var dropPoured = false
-    private var dropPourRefused = false
+    /** The dragged colour's fills, made on the fill's thread: the main thread never waits for one. */
+    private val drops: ColorDropFlow by lazy {
+        ColorDropFlow(
+            object : DropPours {
+                override fun drop(at: Offset, colour: Int, threshold: Float): DropPours.Dropped {
+                    val s = session ?: return DropPours.Dropped.NOTHING
+                    // (the current layer asked here too: a fill still being made held it)
+                    if (s.whyUnpainted() != null) return DropPours.Dropped.BLOCKED
+                    val (r, g, b) = Triple(((colour shr 16) and 0xFF) / 255f, ((colour shr 8) and 0xFF) / 255f, (colour and 0xFF) / 255f)
+                    // made at once, and shown spreading in from where it landed
+                    return if (s.pourDrop(at.x, at.y, r, g, b, threshold)) DropPours.Dropped.POURED else DropPours.Dropped.NOTHING
+                }
+
+                override fun threshold(threshold: Float) {
+                    session?.pourThreshold(threshold)
+                }
+
+                override fun end(keep: Boolean) {
+                    session?.pourEnd(keep, null)
+                }
+            },
+            run = { block -> pourThread.execute(block) },
+            post = { block -> mainHandler.post(block) },
+        ).also { it.onBusy = { busy -> dropFilling = busy } }
+    }
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** A dropped colour's fill is being made or kept: the screen takes no touch until it is (it goes on drawing). */
+    var dropFilling by mutableStateOf(false)
+        private set
 
     /**
      * A colour starts being dragged from the colour button, or [swatch] from the palette, at
@@ -7863,8 +7896,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropSwatch = swatch
         dropDot = at to (swatch ?: colorRgb())
         dropBand = DropBand.DRAGGING
-        dropPoured = false
-        dropPourRefused = false
+        drops.start()
         colourDrag = io.github.artcraftandroid.procraft.core.ColourDrag(at.x / density, at.y / density, ms.toDouble(), pen, dropThreshold)
         // with the system's animations off it neither stretches nor wobbles
         val still = !android.animation.ValueAnimator.areAnimatorsEnabled()
@@ -7887,14 +7919,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropDot = dropDot?.let { dot to it.second }
         blobTo(dot)
         if (!step.slid) return
-        if (dropPoured) {
-            pourThreshold(step.threshold)
-        } else if (!dropPourRefused) {
-            dropThreshold = step.threshold
-            dropSliding = true
-            dropPoured = pourBegin(dot)
-            dropPourRefused = !dropPoured
-            if (dropPoured) dropDot = null
+        when (drops.fill) {
+            ColorDropFlow.Fill.PENDING, ColorDropFlow.Fill.POURED -> {
+                dropThreshold = step.threshold.coerceIn(0f, 1f)
+                dropSliding = true
+                drops.slide(dropThreshold)
+            }
+            ColorDropFlow.Fill.NONE -> {
+                dropThreshold = step.threshold
+                dropSliding = true
+                pourBegin(dot)
+            }
+            ColorDropFlow.Fill.REFUSED -> Unit
         }
     }
 
@@ -7919,10 +7955,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 dropAvoid?.contains(dot) != true &&
                 session?.pourLands(dot.x, dot.y) == true,
         )
-        if (!rests || dropPoured || dropPourRefused) return
-        dropPoured = pourBegin(dot)
-        dropPourRefused = !dropPoured
-        if (dropPoured) dropDot = null
+        if (!rests || drops.fill != ColorDropFlow.Fill.NONE) return
+        pourBegin(dot)
     }
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
@@ -7933,29 +7967,33 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropBlob = null
         // come to rest, it fills where it rests (already, if its threshold was slid)
         val rested = step?.takeIf { it.resting }?.let { Offset(it.dotX * density, it.dotY * density) }
-        if (dropPoured) {
-            dropPoured = false
-            dropDot = null
-            pourEnd(keep = true)
-            dropBand = DropBand.DROPPED
-            dropBandTimer = viewModelScope.launch {
-                kotlinx.coroutines.delay(DROP_BAND_MS)
-                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
-            }
-            return
-        }
-        val at = if (at != null) rested ?: at else null
+        val made = drops.fill
         dropDot = null
-        if (at != null && dropAvoid?.contains(at) != true && pourBegin(at)) {
-            pourEnd(keep = true)
-            // the band offers to go on filling for a moment
-            dropBand = DropBand.DROPPED
-            dropBandTimer = viewModelScope.launch {
-                kotlinx.coroutines.delay(DROP_BAND_MS)
-                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
+        // filled already: kept; else it fills where it is let go and that is kept (being filled, the
+        // fill's thread knows which)
+        val there = if (at != null) rested ?: at else null
+        val tried = there?.takeIf { made != ColorDropFlow.Fill.POURED && dropAvoid?.contains(it) != true && dropAllowed() }
+        // the band offers to go on filling for a moment
+        if (made == ColorDropFlow.Fill.POURED) droppedBand()
+        drops.release(tried, dropSwatch ?: colorRgb(), dropThreshold, blocked = { currentTakesChanges(paint = true) }) { kept ->
+            if (kept) {
+                if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
+                dropSliding = false
+                if (made != ColorDropFlow.Fill.POURED) droppedBand()
+                drops.afterFills { refresh() }
+            } else if (dropBand == DropBand.DRAGGING) {
+                dropBand = DropBand.NONE
             }
-        } else {
-            dropBand = DropBand.NONE
+        }
+    }
+
+    /** The band says the colour was dropped, and offers to go on filling, for a moment. */
+    private fun droppedBand() {
+        dropBand = DropBand.DROPPED
+        dropBandTimer?.cancel()
+        dropBandTimer = viewModelScope.launch {
+            kotlinx.coroutines.delay(DROP_BAND_MS)
+            if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
         }
     }
 
@@ -7978,19 +8016,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropSliding = false
     }
 
-    /** Fills from window point [p] with the dropped colour; false if nothing was filled. */
-    fun pourBegin(p: Offset): Boolean {
-        val s = session ?: return false
-        if (!currentTakesChanges(paint = true)) return false
-        // text takes no colour until it is rasterized
+    /**
+     * Fills from window point [p] with the dropped colour, on the fill's thread: the dot goes once it
+     * has filled; nothing is tried again until the colour is let go if it can't.
+     */
+    private fun pourBegin(p: Offset) {
+        if (session == null) return
+        if (!dropAllowed()) {
+            drops.refuse()
+            return
+        }
+        drops.begin(p, dropSwatch ?: colorRgb(), dropThreshold, poured = { dropDot = null }, blocked = { currentTakesChanges(paint = true) })
+    }
+
+    /**
+     * Whether a dropped colour may fill: the current layer takes it (else a dialog says why; asked
+     * here while no fill is being made, else on the fill's thread, which a fill holds) and isn't
+     * text (which takes no colour until it is rasterized).
+     */
+    private fun dropAllowed(): Boolean {
+        if (drops.pending == 0 && !currentTakesChanges(paint = true)) return false
         if (currentIsText()) {
             askRasterize = true
             return false
         }
-        val c = dropSwatch ?: colorRgb()
-        val t = dropThreshold
-        // made at once, and shown spreading in from where it landed
-        return pourNow { s.pourDrop(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
+        return true
     }
 
     /** Continue filling: the colour and threshold the canvas's (shared) touches fill with; none when not filling. */
@@ -8037,15 +8087,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             fillFinishing = false
             refresh()
         }
-    }
-
-    /** The fill under way ends: [keep] makes it an undo step, else it is taken back. */
-    fun pourEnd(keep: Boolean) {
-        val s = session ?: return
-        pourNow { s.pourEnd(keep, null) }
-        if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
-        dropSliding = false
-        refresh()
     }
 
     /** A fill's work (and feathering's), in order, off the main thread (a slid threshold redoes the whole fill). */

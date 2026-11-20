@@ -1557,6 +1557,8 @@ pub(crate) struct Shared {
     input_queued: std::sync::atomic::AtomicBool,
     /// How the brush cursor's outline turns, read without waiting on the canvas.
     pub(crate) cursor: cursor_turn::CursorTurns,
+    /// Where the artwork is on the screen as last seen, for a dragged colour's rest.
+    pub(crate) lands_on: pour::LandsOn,
 }
 
 /// Pen input waiting for the canvas (see [`Shared::queued`]): the stroke's samples in order (those
@@ -2151,6 +2153,7 @@ impl CanvasSession {
                 queued: parking_lot::Mutex::new(QueuedInput::default()),
                 input_queued: std::sync::atomic::AtomicBool::new(false),
                 cursor: cursor_turn::CursorTurns::default(),
+                lands_on: pour::LandsOn::default(),
             }),
         })
     }

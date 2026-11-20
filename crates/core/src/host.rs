@@ -43,6 +43,7 @@ impl CanvasSession {
         // the pen input that came while the canvas was held goes in this frame
         self.shared.take_queued_input(&mut st);
         st.draw_frame(view, format, size, screen, started);
+        self.shared.lands_on.note(&st);
         crate::activity::Counts::add(&self.shared.counts.frames);
         // what the frame laid (a stroke committed) may be new to save
         self.shared.nudge.nudge();

@@ -537,11 +537,41 @@ fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
     st.window_texel(x, y)
 }
 
+/// Where the artwork is on the screen as last seen (its view and its size; none while a model is
+/// shown, whose surface goes by more than that): whether a dragged colour lands on it is told from
+/// this while a pour holds the canvas, which a whole layer's does for a while.
+#[derive(Default)]
+pub(crate) struct LandsOn(parking_lot::Mutex<Option<(procraft_engine::view::View, (u32, u32))>>);
+
+impl LandsOn {
+    /// Notes where the artwork is as `st` has it.
+    pub(crate) fn note(&self, st: &State) {
+        let seen = st.view.filter(|_| !st.scene_shown()).map(|v| (v, (st.doc.width(), st.doc.height())));
+        *self.0.lock() = seen;
+    }
+
+    /// Whether window point (`x`, `y`) is on the artwork as last noted; none if that isn't known.
+    fn lands(&self, x: f32, y: f32) -> Option<bool> {
+        let (view, (w, h)) = (*self.0.lock())?;
+        let p = view.screen_to_canvas(Vec2::new(x, y))?;
+        Some(p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32)
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Whether window point (`x`, `y`) is on the artwork, where a dragged colour can come to rest.
+    /// Asked while the colour is dragged, it never waits on a pour holding the canvas (an earlier
+    /// drop's still being made): it goes by where the artwork was last seen.
     pub fn pour_lands(&self, x: f32, y: f32) -> bool {
-        seed_at(&self.shared.lock(), x, y).is_some()
+        if let Some(st) = self.shared.try_lock() {
+            self.shared.lands_on.note(&st);
+            return seed_at(&st, x, y).is_some();
+        }
+        match self.shared.lands_on.lands(x, y) {
+            Some(lands) => lands,
+            None => seed_at(&self.shared.lock(), x, y).is_some(),
+        }
     }
 
     /// Pours colour (`r`, `g`, `b`, 0..1) at window point (`x`, `y`) with `threshold` (0..1) on

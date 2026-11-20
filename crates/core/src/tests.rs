@@ -1690,6 +1690,71 @@ fn strokes_draw_alike_through_vulkan_and_direct3d() {
     println!("{} of {tried} brushes draw unlike", unlike.len());
 }
 
+/// A colour dropped into the whole of a large canvas (2048 square), its threshold slid and let go,
+/// is poured on a thread of its own, as the Android app does: meanwhile the main thread asks only
+/// whether the dragged colour lands (as it does while the colour is dragged), and never waits on
+/// the pour holding the canvas. Printed: the longest the main thread waited pouring itself (as the
+/// app did), and now. Bound: under 8 ms.
+#[test]
+fn the_main_thread_never_waits_on_a_dropped_colour_s_fill() {
+    let Some(s) = session(2048, 2048) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let poured = |s: &CanvasSession| {
+        let [r, g, b, _] = pixel(s, 1000, 1000);
+        r > 200 && (40..64).contains(&g) && b < 40
+    };
+    let white = |s: &CanvasSession| pixel(s, 1000, 1000).iter().all(|&c| c > 250);
+    // as the app did: the main thread pours, slides and lets go itself, waiting for each
+    let mut poured_here = 0.0f64;
+    let steps: [&dyn Fn(); 7] = [
+        &|| assert!(s.pour_drop(40.0, 40.0, 0.9, 0.2, 0.1, 0.3)),
+        &|| s.pour_threshold(0.35),
+        &|| s.pour_threshold(0.4),
+        &|| s.pour_threshold(0.45),
+        &|| s.pour_threshold(0.5),
+        &|| s.pour_threshold(0.55),
+        &|| s.pour_end(true, None),
+    ];
+    for step in steps {
+        let t = std::time::Instant::now();
+        step();
+        poured_here = poured_here.max(ms(t));
+    }
+    assert!(poured(&s), "poured over the whole layer");
+    s.undo();
+    assert!(white(&s));
+    // now: the fill's thread pours; the main thread asks where the colour lands meanwhile
+    assert!(s.pour_lands(40.0, 40.0));
+    let fill = std::thread::spawn({
+        let s = std::sync::Arc::clone(&s);
+        move || {
+            s.pour_drop(40.0, 40.0, 0.9, 0.2, 0.1, 0.3);
+            for k in 0..5 {
+                s.pour_threshold(0.35 + k as f32 * 0.05);
+            }
+            s.pour_end(true, None);
+        }
+    });
+    let (mut waited, mut asked) = (0.0f64, 0);
+    while !fill.is_finished() {
+        let t = std::time::Instant::now();
+        assert!(s.pour_lands(40.0, 40.0) && !s.pour_lands(-5.0, 40.0));
+        waited = waited.max(ms(t));
+        asked += 1;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(fill.join().is_ok());
+    println!(
+        "a whole 2048 square layer's drop, five slides and its release: the main thread waited up to {poured_here:.1} ms pouring itself, {waited:.2} ms now ({asked} asks)"
+    );
+    assert!(waited < 8.0, "the main thread waited {waited:.2} ms");
+    assert!(asked >= 5, "asked {asked} times while it poured");
+    // and it was poured and kept as one step
+    assert!(poured(&s));
+    s.undo();
+    assert!(white(&s));
+}
+
 /// What ColorDrop costs on a large canvas (`POUR_COST_SIDE`, 4096 square): a colour dropped into a
 /// small ring, its threshold slid, and let go, each timed as the app waits for it; then the same
 /// into the whole empty layer. Run on a device with `--ignored --nocapture`.
