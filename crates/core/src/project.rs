@@ -562,9 +562,11 @@ impl CanvasSession {
                     }
                 }
                 // changes come in runs (a stroke after another): saved a little after one, once
-                // (a look again after a wait for nothing is made at once)
+                // (a look again after a wait for nothing is made at once); the changes made
+                // meanwhile are this look's, not a reason for another after it
                 if woken {
                     std::thread::sleep(wait);
+                    seen = nudge.seen();
                 }
                 wait = every;
                 let Some(session) = session.upgrade() else { return };
