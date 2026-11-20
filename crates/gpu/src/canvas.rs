@@ -3117,6 +3117,8 @@ pub struct Canvas {
     rewinds: bool,
     rewind_most: Option<u64>,
     marks_made: u64,
+    /// How many windows strokes painting in place have been laid in (see `smudge.rs`): for tests.
+    windows_laid: u64,
     rewound: u64,
     /// Whether the open stroke's end may lay again what it has laid (see [`Canvas::may_lay_again`]).
     may_lay_again: bool,
@@ -3126,6 +3128,13 @@ pub struct Canvas {
     /// together with yet), or reached before it was laid from scratch: put together there as the
     /// stroke ends.
     second_unsynthesized: IRect,
+    /// Where a dual brush's paint laid apart is still to be put together with its second's newest
+    /// stamps: put together with the paint's next stamps, in their window (each window copies the
+    /// layer and what the stroke keeps in and out, which OpenGL makes dear), or before any other
+    /// work. And whether it waits so (else it is put together as the second's stamps come): for
+    /// tests.
+    synthesis_due: IRect,
+    joins_synthesis: bool,
     /// How long a render that shows the canvas lays a stroke laid again as it ends (see
     /// [`RELAY_AT_ONCE`]), and whether one is being laid over several (the picture held meanwhile).
     relay_at_once: std::time::Duration,
@@ -3543,10 +3552,13 @@ impl Canvas {
             rewinds: true,
             rewind_most: None,
             marks_made: 0,
+            windows_laid: 0,
             rewound: 0,
             may_lay_again: true,
             stamps_queued: 0,
             second_unsynthesized: IRect::EMPTY,
+            synthesis_due: IRect::EMPTY,
+            joins_synthesis: true,
             relay_at_once: RELAY_AT_ONCE,
             relaying: false,
             catching_up: false,
@@ -4657,6 +4669,13 @@ impl Canvas {
     #[doc(hidden)]
     pub fn lay_stamp_by_stamp(&mut self, on: bool) {
         self.stamp_by_stamp = on;
+    }
+
+    /// How many windows smudges and paint laid in place have been laid in (see `smudge.rs`): for
+    /// tests.
+    #[doc(hidden)]
+    pub fn smudge_windows(&self) -> u64 {
+        self.windows_laid
     }
 
     /// How many pieces of work were sent early, there being too much for one: for tests.
@@ -6271,6 +6290,12 @@ impl Canvas {
         let full = self.full();
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
+            // (what the paint's next stamps don't take with them is put together before other work)
+            let joins = matches!(&op, Op::Stamps { second: false, pencil: false, clear: false, style, .. }
+                if style.in_place());
+            if !joins {
+                self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
+            }
             if let (Some(until), Op::Stamps { .. }) = (relay_until, &op)
                 && relaid
                 && std::time::Instant::now() >= until
@@ -6477,14 +6502,17 @@ impl Canvas {
                         }
                         drop(pass);
                     }
-                    // a dual brush's paint laid in place: put together again where the second went,
-                    // or where it went before the paint began as the stroke ends
+                    // a dual brush's paint laid in place: put together again where the second went
+                    // (with the paint's next stamps, or before other work: put together again over
+                    // both, it comes out the same, nothing reading what it puts together), or where
+                    // it went before the paint began as the stroke ends
                     if second {
                         let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
                             let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
                             r.union(IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2))
                         });
                         match self.smudge.as_ref().filter(|s| s.apart.is_some()) {
+                            Some(_) if self.joins_synthesis => self.synthesis_due = self.synthesis_due.union(rect),
                             Some(_) => self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect),
                             None => self.second_unsynthesized = self.second_unsynthesized.union(rect),
                         }
@@ -7309,6 +7337,8 @@ impl Canvas {
                 self.stroke_step = Some((number, self.steps_made));
             }
         }
+        // (and what the work left to put together, before its uniforms are written)
+        self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
         if history_changed {
             self.collect_layers(doc);
         }
@@ -7798,6 +7828,32 @@ impl Canvas {
         self.lay_pieces(gpu, encoder, params, &pieces, (&brush, second.as_ref()));
     }
 
+    /// Puts together what is due (see `synthesis_due`).
+    fn synthesize_due(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, params: &mut UniformData) {
+        let due = std::mem::replace(&mut self.synthesis_due, IRect::EMPTY);
+        if !due.is_empty() {
+            self.synthesize(gpu, encoder, params, due);
+        }
+    }
+
+    /// The pieces putting together what is due (see `synthesis_due`), to lay before the
+    /// paint's next stamps in their window.
+    fn due_synthesis(&mut self) -> Vec<smudge::Piece> {
+        let due = std::mem::replace(&mut self.synthesis_due, IRect::EMPTY);
+        if due.is_empty() {
+            return Vec::new();
+        }
+        self.note_synthesized(due);
+        self.synthesis(due)
+    }
+
+    /// Whether a dual brush's second's stamps are put together with its paint's next stamps (see
+    /// `synthesis_due`), else as they come: for tests comparing the two.
+    #[doc(hidden)]
+    pub fn join_synthesis(&mut self, on: bool) {
+        self.joins_synthesis = on;
+    }
+
     /// The pieces of [`Canvas::synthesize`] over `rect`: none without paint laid apart.
     fn synthesis(&self, rect: IRect) -> Vec<smudge::Piece> {
         let rect = rect.intersect(IRect::from_size(self.width, self.height));
@@ -7853,7 +7909,8 @@ impl Canvas {
             if s.radius <= 0.0 { IRect::EMPTY } else { bbox }
         };
         let mut changed = IRect::EMPTY;
-        let mut pieces = Vec::new();
+        // (the second's newest stamps put together first, in the same window)
+        let mut pieces = self.due_synthesis();
         let groups = |r: IRect| [r.width().div_ceil(8), r.height().div_ceil(8)];
         if style.wet_pull.is_none() {
             // dry paint laid in place: each stamp lays the paint itself, no pass of plots; listed a

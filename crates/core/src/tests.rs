@@ -20101,6 +20101,69 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
 /// Stock brushes of paint laid in place with a start taper that lasts a time.
 const TIMED_START_WET: [&str; 5] = ["Lundy", "Kingsley", "Dunlin", "Copperwing", "Olympus"];
 
+/// A dual brush's paint laid in place puts its second's newest stamps together with the paint in the
+/// window of the paint's next stamps, not in a window of their own: each window copies the layer and
+/// what the stroke keeps in and out, a copy at a time, which on OpenGL costs the CPU a good deal (a
+/// big wet brush's frames took longer than a display frame). The picture is the same at every frame
+/// and as the stroke ends, in fewer windows.
+#[test]
+fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_its_own() {
+    let side = 512;
+    let point = |k: usize| PenSample {
+        pressure: 0.3 + 0.6 * (k as f32 * 0.05).sin().abs(),
+        tilt: 0.4,
+        orientation: 0.8,
+        ..sample(40.0 + k as f32 * 2.2, 256.0 + (k as f32 * 0.04).sin() * 140.0, k as f64 * 4.17)
+    };
+    let brushes =
+        [("Shorewalker", 1.0), ("Shorewalker", 0.4), ("Copperwing", 0.4), ("Kingsley", 0.3), ("Lestrade", 0.4)];
+    let (mut joined, mut apart) = (0, 0);
+    for (name, size) in brushes {
+        // the picture every tenth event, the layer as it ends, and the windows laid while drawn
+        let drawn = |joined: bool| -> Option<(Vec<Vec<u8>>, Vec<u8>, u64)> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())?;
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(size);
+            s.set_color(0.2, 0.5, 0.3);
+            s.shared.lock().canvas.as_mut()?.join_synthesis(joined);
+            let windows = || s.shared.lock().canvas.as_ref().map_or(0, procraft_gpu::Canvas::smudge_windows);
+            let before = windows();
+            let mut frames = Vec::new();
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=90 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    let shown = picture(&s);
+                    if e % 10 == 0 {
+                        frames.push(shown);
+                    }
+                }
+            }
+            let laid = windows() - before;
+            s.stroke_end(vec![point(181)]);
+            picture(&s);
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some((frames, layer_rgba(&s, current), laid))
+        };
+        let (Some((shown, ended, windows)), Some((shown_apart, ended_apart, windows_apart))) =
+            (drawn(true), drawn(false))
+        else {
+            panic!("{name}: no stock dual brush of that name");
+        };
+        println!(
+            "{name}@{size}: {windows} windows while drawn, against {windows_apart} with its second put together apart"
+        );
+        for (k, (a, b)) in shown.iter().zip(&shown_apart).enumerate() {
+            assert_eq!(differ(a, b), (0, 0), "{name}@{size}: the picture at its {}th event", 10 * (k + 1));
+        }
+        assert_eq!(differ(&ended, &ended_apart), (0, 0), "{name}@{size}: as it ends");
+        assert!(windows < windows_apart, "{name}@{size}: {windows} windows, against {windows_apart}");
+        (joined, apart) = (joined + windows, apart + windows_apart);
+    }
+    assert!(joined * 5 <= apart * 4, "{joined} windows in all, against {apart}");
+}
+
 /// A stroke painting in place whose marks can't all be kept (past the most bytes they may take) is
 /// laid again from its start as it ends, or from a mark it still has: either way as laid whole.
 #[test]

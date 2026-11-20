@@ -532,6 +532,7 @@ impl Canvas {
             return self.lay_window_in_fragments(gpu, encoder, params, pieces, reach, (brush, second));
         }
         let reach = if reach.is_empty() { IRect::new(0, 0, 1, 1) } else { reach }.intersect(self.full());
+        self.windows_laid += 1;
         // laid out so that copies into it start where any API places them, where a binding holds
         // that (else as it is, its tiles' parts copied in a row at a time: only a window close to
         // the most a binding holds is that big)
