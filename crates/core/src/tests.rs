@@ -777,6 +777,164 @@ fn stroke_cost() {
     assert_eq!(errors, 0, "GPU validation errors");
 }
 
+/// What a second of pen stroke costs a frame, for the heavy kinds of brush (dual, wet, wet and
+/// dual, smudge, big textured) on a canvas painted on (`FRAME_BOUND_SIDE`, 2048 square): a 240 Hz
+/// pen at 120 frames a second, each frame its two events, its render and the GPU done with it (as
+/// waited for: what the frame takes end to end), and how an event's cost late in a long stroke
+/// (`FRAME_BOUND_EVENTS`, 1600 events) compares with its first. Bounds: a frame's 95th percentile
+/// within `FRAME_BOUND_MS` (16.7: 60 frames a second; a fast GPU's), and the last 200 events of the
+/// long stroke within twice the first 200's (a cost that grows with the stroke, as a copy of all of
+/// it at every event would, fails). `FRAME_BOUND_BRUSHES` lists them as [`stroke_cost`] does; with
+/// `WGPU_BACKEND=gl` the same on OpenGL. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn a_second_of_stroke_keeps_to_its_frames() {
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let side: u32 = env("FRAME_BOUND_SIDE", "2048").parse().unwrap_or(2048);
+    let events: usize = env("FRAME_BOUND_EVENTS", "1600").parse().unwrap_or(1600);
+    let bound: f64 = env("FRAME_BOUND_MS", "16.7").parse().unwrap_or(16.7);
+    let Some(s) = session(side, 1600) else { return };
+    if let Some(g) = s.shared.lock().gpu.as_ref() {
+        let info = g.adapter.get_info();
+        println!("{} ({:?}), canvas {side} square", info.name, info.backend);
+    }
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let at = |v: &[f64], q: f64| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
+    };
+    let point = |k: usize, of: usize| {
+        let t = k as f32 / (2 * of) as f32;
+        PenSample {
+            x: 100.0 + t * 1400.0,
+            y: 800.0 + (t * 25.0).sin() * 500.0,
+            pressure: 0.3 + 0.6 * (t * 40.0).sin().abs(),
+            tilt: 0.4,
+            orientation: 0.8,
+            time_ms: k as f64 * 4.17,
+            roll: 0.0,
+        }
+    };
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+        }
+    };
+    let flush = |s: &CanvasSession| {
+        if let Some(g) = s.shared.lock().gpu.as_ref() {
+            g.flush();
+        }
+    };
+    let library = s.brush_library();
+    let pick = |wanted: &str| {
+        library
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))
+    };
+    // paint to smudge and mix into: strokes across, kept
+    if let Some((set, index)) = pick("Soft Airbrush") {
+        s.select_brush(set, index);
+        s.set_brush_size(1.0);
+        for (k, y) in [300.0_f32, 700.0, 1100.0, 1400.0].into_iter().enumerate() {
+            s.set_color(k as f32 / 3.0, 0.4, 1.0 - k as f32 / 3.0);
+            s.stroke_begin(PointerKind::Stylus, vec![sample(80.0, y, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(80.0 + i as f32 * 50.0, y, i as f64 * 8.0)).collect());
+            s.stroke_end(vec![]);
+            frame(&s);
+        }
+        flush(&s);
+    }
+    s.set_color(0.8, 0.2, 0.1);
+    let brushes = env(
+        "FRAME_BOUND_BRUSHES",
+        "Dunlin,Lestrade,Aberdeen,Gouache,Oil Paint,smudge:Oil Paint,Merlin,Soft Airbrush@1,Studio Pen@1",
+    );
+    let mut failures = Vec::new();
+    for entry in brushes.split(',') {
+        let (tool, rest) = match entry.strip_prefix("smudge:") {
+            Some(rest) => (ToolKind::Smudge, rest),
+            None => (ToolKind::Paint, entry),
+        };
+        let (wanted, size) = match rest.split_once('@') {
+            Some((name, size)) => (name, size.parse().unwrap_or(0.4)),
+            None => (rest, 0.4),
+        };
+        let Some((set, index)) = pick(wanted) else {
+            failures.push(format!("no brush {wanted}"));
+            continue;
+        };
+        s.set_tool(tool);
+        s.select_brush(set, index);
+        s.set_brush_size(size);
+        flush(&s);
+        // a second's stroke, each frame waited for to the end
+        let second = 240;
+        s.stroke_begin(PointerKind::Stylus, vec![point(0, second)]);
+        let mut frames = Vec::new();
+        for f in 1..=second / 2 {
+            let t = std::time::Instant::now();
+            for e in [2 * f - 1, 2 * f] {
+                s.stroke_add(vec![point(2 * e - 1, second), point(2 * e, second)]);
+            }
+            frame(&s);
+            flush(&s);
+            frames.push(ms(t));
+        }
+        let t = std::time::Instant::now();
+        s.stroke_end(vec![]);
+        let lift_call = ms(t);
+        frame(&s);
+        flush(&s);
+        let lift = ms(t);
+        s.undo();
+        frame(&s);
+        flush(&s);
+        // a long stroke, frames recorded but not waited for, as the render thread sends them
+        s.stroke_begin(PointerKind::Stylus, vec![point(0, events)]);
+        let mut adds = Vec::with_capacity(events);
+        for e in 1..=events {
+            let t = std::time::Instant::now();
+            s.stroke_add(vec![point(2 * e - 1, events), point(2 * e, events)]);
+            adds.push(ms(t));
+            if e % 2 == 0 {
+                frame(&s);
+            }
+        }
+        s.stroke_end(vec![]);
+        frame(&s);
+        flush(&s);
+        s.undo();
+        frame(&s);
+        flush(&s);
+        let (early, late) = (at(&adds[..200], 0.5), at(&adds[events - 200..], 0.5));
+        let p95 = at(&frames, 0.95);
+        println!(
+            "{entry:<20} frame {:6.2} ms (95th {:6.2}, most {:6.2}) | lift {:6.2} ms ({:6.2} the call) | event {:.3} ms early, {:.3} ms late",
+            at(&frames, 0.5),
+            p95,
+            at(&frames, 1.0),
+            lift,
+            lift_call,
+            early,
+            late
+        );
+        if p95 > bound {
+            failures.push(format!("{entry}: a frame's 95th percentile {p95:.2} ms, past {bound} ms"));
+        }
+        if late > 2.0 * early + 0.05 {
+            failures.push(format!("{entry}: an event {early:.3} ms early in the stroke, {late:.3} ms late"));
+        }
+    }
+    s.set_tool(ToolKind::Paint);
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// How long a save holds the artwork from the app on a very large canvas: a thread asking for
 /// the state every 2 ms records its longest wait while the save goes on. Saved once with every
 /// layer changed (`SAVE_COST_LAYERS`, 10, on a `SAVE_COST_SIDE`, 6000, square canvas), then with

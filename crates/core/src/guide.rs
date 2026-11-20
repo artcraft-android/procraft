@@ -125,8 +125,12 @@ fn length_label(px: f32, unit: LengthUnit, dpi: f32) -> String {
 /// randomness and all, moved as the canvas is by the copy's mirror or turn, its shape and its
 /// moving grain with it (the grain each copy's own reflection or turn of the stamp's, not read
 /// afresh where the copy lands), and told which copy it is on (a smudge's copies each carry the
-/// paint along their own paths).
-pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
+/// paint along their own paths). Without symmetry, the stamps themselves, not a copy (a long
+/// stroke's end copied all of it, megabytes, as the pen lifted).
+pub(crate) fn mirrored<'s>(guide: &Guide, stamps: &'s [Stamp]) -> std::borrow::Cow<'s, [Stamp]> {
+    if guide.copies(procraft_engine::geom::Vec2::ZERO).is_empty() {
+        return std::borrow::Cow::Borrowed(stamps);
+    }
     let mut out = stamps.to_vec();
     for s in stamps {
         for (k, (at, turn, mirror)) in guide.copies(s.center).into_iter().enumerate() {
@@ -149,7 +153,7 @@ pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
             out.push(copy);
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Liquify `stamps` and the copies the guide's symmetry makes of them, as a stroke's are (with

@@ -254,7 +254,7 @@ pub use timelapse::{
 };
 pub use touch::{
     COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, LOUPE_LIFT, PenHover, PenPreferred,
-    SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
+    SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchMove, TouchSettings, TransformTouch,
 };
 pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
@@ -1363,7 +1363,8 @@ fn draw_samples(
         canvas.set_tip(&guide::mirrored(guide, &tip));
         return !kept.is_empty() || !tip.is_empty();
     }
-    let stamps = guide::mirrored(guide, &builder.add(samples));
+    let added = builder.add(samples);
+    let stamps = guide::mirrored(guide, &added);
     if builder.take_turned() {
         // its first stamps turned to the way it goes: the few laid so far laid again as they are
         canvas.replace_stamps(&guide::mirrored(guide, &builder.placed_stamps()));
@@ -1474,8 +1475,9 @@ fn lay_stroke(
         canvas.add_stamps(&guide::mirrored(guide, &builder.finish_from(drawn)));
     } else {
         // (a stroke shown with its tip keeps what it drew for good, as it stood before it ended,
-        // for when that can't be told without it; a brush engine's stamps stay as they came)
-        let before = (canvas.shows_tip() && !builder.is_outside()).then(|| builder.clone());
+        // for when that can't be told without it: the canvas no longer keeps what it laid, the
+        // stroke being very long; a brush engine's stamps stay as they came)
+        let before = (canvas.shows_tip() && !builder.is_outside() && !canvas.keeps_laid()).then(|| builder.clone());
         match canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n)) {
             Some(rest) => canvas.end_with(&rest),
             None => {

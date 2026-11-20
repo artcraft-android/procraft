@@ -4042,6 +4042,12 @@ impl Canvas {
         self.laid_count += stamps.len();
     }
 
+    /// Whether the open stroke keeps the stamps it has laid (all but a very long one's), so that
+    /// [`Canvas::replace_stamps`] lays only what follows those still at its start.
+    pub fn keeps_laid(&self) -> bool {
+        self.laid.is_some()
+    }
+
     /// How many stamps the open stroke has laid for good (added since it began or was last redrawn
     /// from scratch; none when a stroke is laid whole as it ends, see [`Canvas::lay_ends_whole`]).
     pub fn laid_count(&self) -> Option<usize> {
