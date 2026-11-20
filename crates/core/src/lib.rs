@@ -1408,7 +1408,8 @@ fn draw_samples(
         return true;
     }
     show_ahead(canvas, builder, &[], guide);
-    !stamps.is_empty()
+    // (holding its start, what it holds back shows in the tip)
+    !stamps.is_empty() || builder.holds_start()
 }
 
 /// Draws `samples`, the last of the open stroke's, as the pen lifts: their stamps, unless the stroke
@@ -1442,7 +1443,10 @@ fn show_ahead(
     guide: &procraft_engine::guide::Guide,
 ) {
     if canvas.shows_tip() {
-        canvas.set_tip(&guide::mirrored(guide, &builder.preview_to_input(samples)));
+        // (with the stamps it holds back until they no longer change, see `hold_start`)
+        let mut tip = builder.held_back();
+        tip.extend(builder.preview_to_input(samples));
+        canvas.set_tip(&guide::mirrored(guide, &tip));
     } else {
         canvas.set_prediction(&guide::mirrored(guide, &builder.preview(samples)));
     }
@@ -2447,6 +2451,12 @@ impl CanvasSession {
             if let Some(second) = second_builder.as_mut() {
                 second.hold_start();
             }
+        }
+        // and so does a stroke shown with a tip whose start taper doesn't show in one (a classic
+        // one, eased over the points around), those held back shown in its tip meanwhile: its end
+        // laid all of it again, for a big brush a tenth of a second or more
+        if canvas.shows_tip() && !builder.shows_tip() {
+            builder.hold_start();
         }
         // (paint laid in place keeps marks to go back to only if its end may lay it again)
         canvas.may_lay_again(builder.end_may_change_laid());

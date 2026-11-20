@@ -3418,6 +3418,70 @@ fn a_dual_brushs_stroke_ends_laying_only_the_rest_as_laid_whole() {
     }
 }
 
+/// A stroke shown with a tip whose start taper is a classic one (its first stamps eased over the
+/// points around them, so they change as the next points come) holds those back until they no
+/// longer change, showing them in its tip meanwhile: the stroke shows as far as the pen has come,
+/// its end lays only the rest (it laid all of it again, a tenth of a second for Fresco at its full
+/// size), and it comes out as laid whole.
+#[test]
+fn a_classic_start_tapers_stroke_ends_laying_only_the_rest_as_laid_whole() {
+    let side = 256;
+    for name in ["Fresco", "Flowing Hair", "Fine Hair", "Short Hair", "Marker"] {
+        let ended = |whole: bool| -> Option<(Vec<u8>, u64, usize, bool, bool)> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name)?;
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(0.3);
+            s.set_color(0.7, 0.2, 0.1);
+            s.shared.lock().canvas.as_mut()?.lay_ends_whole(whole);
+            let blank = picture(&s);
+            let point = |k: usize| PenSample {
+                pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
+                ..sample(20.0 + k as f32 * 1.6, 128.0 + (k as f32 * 0.05).sin() * 60.0, k as f64 * 4.17)
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            // its first events: stamps held back, and shown
+            let mut shown_early = false;
+            for e in 1..=65 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    let shown = picture(&s);
+                    if e <= 6 {
+                        let st = s.shared.lock();
+                        let (b, c) = (st.stroke.as_ref()?, st.canvas.as_ref()?);
+                        let held = c.laid_count().is_some_and(|n| n < b.stamp_count());
+                        shown_early |= held && differ(&blank, &shown).1 > 0;
+                    }
+                }
+            }
+            picture(&s);
+            let (holds, stamps, queued) = {
+                let st = s.shared.lock();
+                (
+                    st.stroke.as_ref()?.holds_start(),
+                    st.stroke.as_ref()?.stamp_count(),
+                    st.canvas.as_ref()?.stamps_queued(),
+                )
+            };
+            s.stroke_end(vec![point(131)]);
+            picture(&s);
+            let laid = s.shared.lock().canvas.as_ref()?.stamps_queued() - queued;
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some((layer_rgba(&s, current), laid, stamps, holds, shown_early))
+        };
+        let (Some((whole, laid_whole, ..)), Some((rest, laid_rest, stamps, holds, shown_early))) =
+            (ended(true), ended(false))
+        else {
+            continue;
+        };
+        println!("{name}: {stamps} stamps; its end laid {laid_rest} of them (laid whole, {laid_whole})");
+        assert!(holds, "{name} holds its start");
+        assert!(shown_early, "{name}: what it holds back shows in its tip");
+        assert_eq!(differ(&whole, &rest), (0, 0), "{name}: ended unlike laid whole");
+        assert!(laid_rest * 4 < stamps as u64, "{name}: its end laid {laid_rest} of {stamps} stamps");
+    }
+}
+
 /// A stroke laid again whole as it ends (its end taper reaching back over wet paint) is laid a share
 /// at each frame shown, the picture held as it was until it is all laid, and comes out as laid in
 /// one; meanwhile the next stroke begins and goes on without waiting for it.

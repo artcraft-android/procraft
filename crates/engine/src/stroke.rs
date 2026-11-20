@@ -1563,7 +1563,10 @@ impl StrokeBuilder {
     /// whose reach is known only once the stroke is under way, are handed out once they no longer
     /// change. Until it is known they are handed out as they stand, and once it is known, while the
     /// stroke is a few frames long, laid again (see [`StrokeBuilder::take_turned`]): the stroke's end
-    /// then finds its start as laid, and lays again only what its end changes.
+    /// then finds its start as laid, and lays again only what its end changes. (A stroke built up
+    /// in its own texture holds a classic start taper so too, those held back shown in its tip
+    /// meanwhile, see [`StrokeBuilder::held_back`]: eased over the points around them, its first
+    /// stamps change as the next points come, and its end laid all of it again.)
     pub fn hold_start(&mut self) {
         if !self.is_outside() && self.taper().start > 0.0 {
             self.held = Some(0);
@@ -1829,6 +1832,19 @@ impl StrokeBuilder {
             Some(outside) => outside.stamps.last().copied(),
             None => self.placed.last().map(|p| self.finish_stamp(p, self.start_span(), None)),
         }
+    }
+
+    /// Holding its start (see [`StrokeBuilder::hold_start`]), the stamps placed and not yet handed
+    /// out, as they would be drawn now: shown in the stroke's tip until they are handed out, so the
+    /// stroke shows as far as it has come (none otherwise, nor while its start's reach still moves,
+    /// as all are handed out then).
+    pub fn held_back(&self) -> Vec<Stamp> {
+        if self.held.is_none() || self.tipped || self.is_outside() {
+            return Vec::new();
+        }
+        let start = self.start_span();
+        let handed = self.handed();
+        self.placed.get(handed..).unwrap_or_default().iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
 
     /// How many of its stamps it has handed out (see [`StrokeBuilder::touched`]).
