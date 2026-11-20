@@ -7536,7 +7536,7 @@ impl Canvas {
             let store =
                 (style.store != 0).then(|| self.store_for_stroke(device, encoder, target, style.store)).flatten();
             // its tiles sized to its brush
-            let tile = self.smudge_tiles.unwrap_or_else(|| smudge::tile_for(self.brush_across));
+            let tile = self.smudge_tiles.unwrap_or_else(|| smudge::tile_for(self.brush_across, gpu.is_gl()));
             let rewind = (wet_paint && self.rewinds && self.may_lay_again && !in_fragments && store.is_none())
                 .then(|| rewind::Rewind::new(self.low_memory(), self.rewind_most, tile));
             self.smudge = Some(Smudge {

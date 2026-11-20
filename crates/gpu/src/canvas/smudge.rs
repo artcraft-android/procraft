@@ -23,12 +23,13 @@ use crate::Gpu;
 /// with tiles half as wide, a big wet brush's frame took three times the copies (and a third more
 /// time).
 pub(super) const TILE: u32 = 512;
-/// The side of a thin brush's tiles (see [`tile_for`]): its windows cover few tiles either way, and
-/// in a big brush's tiles a thin stroke held two to three times the memory (its tiles, and its
-/// marks' copies of them, see `rewind.rs`).
+/// The side of a thin brush's tiles (see [`tile_for`]): in a big brush's tiles a thin stroke held
+/// two to three times the memory (its tiles, and its marks' copies of them, see `rewind.rs`).
 pub(super) const THIN_TILE: u32 = 256;
-/// The widest brush (canvas pixels across) whose strokes keep thin tiles.
-const THIN_MOST: f32 = 128.0;
+/// The widest brush (canvas pixels across) whose strokes keep thin tiles: a wider one's stroke, in
+/// tiles half as wide, took longer to lay again as it ended (its tiles gone back over and put
+/// together a copy at a time), a medium brush's half as long again on OpenGL.
+const THIN_MOST: f32 = 32.0;
 
 /// Where a copy from a texture may put its rows in a window's buffer: at a multiple of this many
 /// bytes. Direct3D 12 without unrestricted copy pitches (on Windows 10, and with older drivers, as
@@ -41,10 +42,10 @@ const _: () = assert!(TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a colu
 const _: () = assert!(THIN_TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a column copies can start at");
 
 /// The side of the tiles a stroke keeps, of a brush `diameter` canvas pixels across (none told: a
-/// big brush's).
-pub(super) fn tile_for(diameter: Option<f32>) -> u32 {
+/// big brush's), on OpenGL (`gl`) a big brush's whatever the brush: each copy costs the CPU there.
+pub(super) fn tile_for(diameter: Option<f32>, gl: bool) -> u32 {
     match diameter {
-        Some(d) if d <= THIN_MOST => THIN_TILE,
+        Some(d) if d <= THIN_MOST && !gl => THIN_TILE,
         _ => TILE,
     }
 }
@@ -1213,7 +1214,8 @@ mod tests {
         let thin: Vec<_> = tiles_of(IRect::new(t - 6, 10, t + 4, 300), THIN_TILE).collect();
         assert_eq!(thin, [(1, 0), (2, 0), (1, 1), (2, 1)]);
         assert_eq!(tile_rect((2, 1), THIN_TILE), IRect::new(512, 256, 768, 512));
-        assert_eq!((tile_for(Some(40.0)), tile_for(Some(600.0)), tile_for(None)), (THIN_TILE, TILE, TILE));
+        assert_eq!((tile_for(Some(20.0), false), tile_for(Some(600.0), false)), (THIN_TILE, TILE));
+        assert_eq!((tile_for(None, false), tile_for(Some(20.0), true)), (TILE, TILE));
         assert_eq!(part(0, 0, 255, 255), WHOLE);
     }
 

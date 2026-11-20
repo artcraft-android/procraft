@@ -20166,9 +20166,9 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
 
 /// A thin brush's stroke painting in place keeps its layer in tiles a thin brush's side across, a
 /// big brush's in tiles twice as wide (each window copies each tile it covers in and out, a copy at
-/// a time, which OpenGL makes dear): in a big brush's tiles a thin stroke held two to three times
-/// the memory, its tiles and its marks' copies of them. Either way it comes out the same, pixel for
-/// pixel. Prints what each holds.
+/// a time, and on OpenGL a big brush's whatever the brush: copies are dear there): in a big brush's
+/// tiles a thin stroke held two to three times the memory, its tiles and its marks' copies of them.
+/// Either way it comes out the same, pixel for pixel. Prints what each holds.
 #[test]
 fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
     let side = 1024;
@@ -20176,15 +20176,17 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
         pressure: 0.5 + 0.3 * (k as f32 * 0.05).sin(),
         ..sample(40.0 + k as f32 * 2.0, 512.0 + (k as f32 * 0.02).sin() * 400.0, k as f64 * 4.17)
     };
-    for (name, size, thin) in [("Kingsley", 0.05, true), ("Lundy", 0.15, true), ("Shorewalker", 1.0, false)] {
-        // the layer, the most the canvas held past what it held before, and the side of its tiles
-        let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32)> {
+    for (name, size, thin) in [("Kingsley", 0.05, true), ("Lundy", 0.15, true), ("Shorewalker", 0.4, false)] {
+        // the layer, the most the canvas held past what it held before, the side of its tiles, and
+        // whether it is on OpenGL
+        let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32, bool)> {
             let s = session(side, side)?;
             let (set, index) = library_brush(&s, |b| b.name == name)?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
             s.set_color(0.3, 0.2, 0.6);
             s.shared.lock().canvas.as_mut()?.set_smudge_tiles(tiles);
+            let gl = s.shared.lock().gpu.as_ref()?.is_gl();
             picture(&s);
             let held =
                 |s: &CanvasSession| s.shared.lock().canvas.as_ref().map_or(0, procraft_gpu::Canvas::texture_bytes);
@@ -20202,9 +20204,9 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
             s.stroke_end(vec![point(481)]);
             picture(&s);
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
-            Some((layer_rgba(&s, current), most, tile))
+            Some((layer_rgba(&s, current), most, tile, gl))
         };
-        let (Some((own, held_own, tile)), Some((thin_tiles, held_thin, _)), Some((big_tiles, held_big, _))) =
+        let (Some((own, held_own, tile, gl)), Some((thin_tiles, held_thin, ..)), Some((big_tiles, held_big, ..))) =
             (drawn(None), drawn(Some(256)), drawn(Some(512)))
         else {
             panic!("{name}: no stock brush of that name");
@@ -20216,7 +20218,7 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
             mb(held_thin),
             mb(held_big)
         );
-        assert_eq!(tile, if thin { 256 } else { 512 }, "{name}@{size}: its tiles");
+        assert_eq!(tile, if thin && !gl { 256 } else { 512 }, "{name}@{size}: its tiles");
         assert_eq!(differ(&thin_tiles, &big_tiles), (0, 0), "{name}@{size}: unlike in tiles of the other side");
         assert_eq!(differ(&own, &big_tiles), (0, 0), "{name}@{size}: unlike in tiles 512 across");
         if thin {
