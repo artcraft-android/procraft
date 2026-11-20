@@ -18,10 +18,17 @@ use super::{
 };
 use crate::Gpu;
 
-/// The side of the tiles a smudge stroke keeps (pixels). Each window copies each tile it covers in
-/// and out, a copy at a time, and on OpenGL each copy costs the CPU a good deal: with tiles half as
-/// wide, a big wet brush's frame took three times the copies (and a third more time).
+/// The side of the tiles a smudge stroke of a big brush keeps (pixels). Each window copies each
+/// tile it covers in and out, a copy at a time, and on OpenGL each copy costs the CPU a good deal:
+/// with tiles half as wide, a big wet brush's frame took three times the copies (and a third more
+/// time).
 pub(super) const TILE: u32 = 512;
+/// The side of a thin brush's tiles (see [`tile_for`]): its windows cover few tiles either way, and
+/// in a big brush's tiles a thin stroke held two to three times the memory (its tiles, and its
+/// marks' copies of them, see `rewind.rs`).
+pub(super) const THIN_TILE: u32 = 256;
+/// The widest brush (canvas pixels across) whose strokes keep thin tiles.
+const THIN_MOST: f32 = 128.0;
 
 /// Where a copy from a texture may put its rows in a window's buffer: at a multiple of this many
 /// bytes. Direct3D 12 without unrestricted copy pitches (on Windows 10, and with older drivers, as
@@ -31,6 +38,16 @@ pub(super) const TILE: u32 = 512;
 /// on).
 const PLACEMENT: u32 = crate::placed::PLACEMENT as u32;
 const _: () = assert!(TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a column copies can start at");
+const _: () = assert!(THIN_TILE.is_multiple_of(PLACEMENT / 4), "tiles start on a column copies can start at");
+
+/// The side of the tiles a stroke keeps, of a brush `diameter` canvas pixels across (none told: a
+/// big brush's).
+pub(super) fn tile_for(diameter: Option<f32>) -> u32 {
+    match diameter {
+        Some(d) if d <= THIN_MOST => THIN_TILE,
+        _ => TILE,
+    }
+}
 
 /// The most bytes a window takes for work laid together in it: past it, the work goes in windows of
 /// its own (only a piece that reaches further than this by itself takes one bigger).
@@ -267,16 +284,18 @@ fn runs(lo: u32, hi: u32, fits: impl Fn(u32, u32) -> bool) -> Vec<(u32, u32)> {
     out
 }
 
-/// The tiles `rect` (canvas pixels, none negative) touches.
-pub(super) fn tiles_of(rect: IRect) -> impl Iterator<Item = (u32, u32)> {
-    let (x0, y0) = (rect.x0.max(0).unsigned_abs() / TILE, rect.y0.max(0).unsigned_abs() / TILE);
-    let (x1, y1) = (rect.x1.max(1).unsigned_abs().div_ceil(TILE), rect.y1.max(1).unsigned_abs().div_ceil(TILE));
+/// The tiles `side` pixels across that `rect` (canvas pixels, none negative) touches.
+pub(super) fn tiles_of(rect: IRect, side: u32) -> impl Iterator<Item = (u32, u32)> {
+    let side = side.max(1);
+    let (x0, y0) = (rect.x0.max(0).unsigned_abs() / side, rect.y0.max(0).unsigned_abs() / side);
+    let (x1, y1) = (rect.x1.max(1).unsigned_abs().div_ceil(side), rect.y1.max(1).unsigned_abs().div_ceil(side));
     let rows = if rect.is_empty() { 0..0 } else { y0..y1 };
     rows.flat_map(move |y| (x0..x1).map(move |x| (x, y)))
 }
 
-pub(super) fn tile_rect((x, y): (u32, u32)) -> IRect {
-    let at = |n: u32| i32::try_from(n * TILE).unwrap_or(i32::MAX);
+/// Where the tile at `(x, y)` of tiles `side` pixels across lies (canvas pixels).
+pub(super) fn tile_rect((x, y): (u32, u32), side: u32) -> IRect {
+    let at = |n: u32| i32::try_from(n.saturating_mul(side)).unwrap_or(i32::MAX);
     IRect::new(at(x), at(y), at(x + 1), at(y + 1))
 }
 
@@ -750,7 +769,7 @@ impl Canvas {
         if smudge.stalled {
             return false;
         }
-        let keeps = smudge.keeps;
+        let (keeps, side) = (smudge.keeps, smudge.tile);
         let (width, height) = (reach.width(), reach.height());
         let row = row_bytes(width);
         let bytes = u64::from(row) * u64::from(height);
@@ -759,7 +778,7 @@ impl Canvas {
             .as_ref()
             .is_none_or(|w| w.bytes < bytes || w.before.width() < width || w.before.height() < height);
         let mut missing: Vec<(u32, u32)> =
-            writes.iter().flat_map(|w| tiles_of(*w)).filter(|t| !smudge.tiles.contains_key(t)).collect();
+            writes.iter().flat_map(|w| tiles_of(*w, side)).filter(|t| !smudge.tiles.contains_key(t)).collect();
         missing.sort_unstable();
         missing.dedup();
         if small || !missing.is_empty() {
@@ -782,7 +801,7 @@ impl Canvas {
                     bytes,
                 }
             });
-            let tile = |label| texture(device, label, TILE, TILE, LAYER_FORMAT);
+            let tile = |label| texture(device, label, side, side, LAYER_FORMAT);
             let made: Vec<((u32, u32), Tile)> = missing
                 .iter()
                 .map(|&at| {
@@ -813,7 +832,7 @@ impl Canvas {
             }
             for (at, tile) in made {
                 // the layer there as it was: the stroke hasn't written to it yet
-                let r = tile_rect(at).intersect(full);
+                let r = tile_rect(at, side).intersect(full);
                 for into in std::iter::once(&tile.before).chain(&tile.grained) {
                     encoder.copy_texture_to_texture(
                         copy_at(&layer.texture, r.x0, r.y0),
@@ -847,13 +866,13 @@ impl Canvas {
             encoder.clear_buffer(amount, 0, Some(bytes * keeps.halves()));
         }
         // what the stroke keeps where it has been
-        for at in tiles_of(reach) {
+        for at in tiles_of(reach, side) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = tile_rect(at).intersect(reach);
+            let r = tile_rect(at, side).intersect(reach);
             if r.is_empty() {
                 continue;
             }
-            let t = tile_rect(at);
+            let t = tile_rect(at, side);
             let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
             let offset = in_window(reach, r);
             if before {
@@ -909,9 +928,9 @@ impl Canvas {
         if !kept {
             return;
         }
-        for at in tiles_of(changed) {
+        for at in tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let t = tile_rect(at);
+            let t = tile_rect(at, smudge.tile);
             let r = t.intersect(changed);
             if r.is_empty() {
                 continue;
@@ -944,7 +963,7 @@ impl Canvas {
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let also: Vec<Option<&wgpu::Texture>> = also.iter().map(|id| self.layers.get(id).map(|l| &l.texture)).collect();
         for (&at, tile) in &smudge.tiles {
-            let r = tile_rect(at).intersect(full);
+            let r = tile_rect(at, smudge.tile).intersect(full);
             let back =
                 std::iter::once((&tile.before, Some(&layer.texture))).chain(tile.more.iter().zip(also.iter().copied()));
             for (kept, to) in back {
@@ -984,14 +1003,14 @@ impl Canvas {
             copy_at(into, 0, 0),
             extent(rect.width(), rect.height()),
         );
-        for at in tiles_of(rect) {
+        for at in tiles_of(rect, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
             let kept = match also {
                 Some(k) => tile.more.get(k),
                 None => Some(&tile.before),
             };
             let Some(kept) = kept else { continue };
-            let t = tile_rect(at);
+            let t = tile_rect(at, smudge.tile);
             let r = t.intersect(rect);
             if r.is_empty() {
                 continue;
@@ -1029,9 +1048,12 @@ impl Canvas {
         }
         let Some(layer) = self.layers.get(&smudge.into) else { return false };
         let also: Vec<&wgpu::Texture> = also.iter().filter_map(|id| self.layers.get(id)).map(|l| &l.texture).collect();
-        let keeps = smudge.keeps;
-        let mut missing: Vec<(u32, u32)> =
-            rects.iter().flat_map(|w| tiles_of(w.intersect(full))).filter(|t| !smudge.tiles.contains_key(t)).collect();
+        let (keeps, side) = (smudge.keeps, smudge.tile);
+        let mut missing: Vec<(u32, u32)> = rects
+            .iter()
+            .flat_map(|w| tiles_of(w.intersect(full), side))
+            .filter(|t| !smudge.tiles.contains_key(t))
+            .collect();
         missing.sort_unstable();
         missing.dedup();
         if missing.is_empty() {
@@ -1039,10 +1061,10 @@ impl Canvas {
         }
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let tile = |label| texture(device, label, TILE, TILE, LAYER_FORMAT);
+        let tile = |label| texture(device, label, side, side, LAYER_FORMAT);
         // (the amounts' bits as words in fragment passes, as their bytes elsewhere)
         let amounts = if in_fragments { super::fragments::AMOUNT_FORMAT } else { LAYER_FORMAT };
-        let amount_tile = |label| texture(device, label, TILE, TILE, amounts);
+        let amount_tile = |label| texture(device, label, side, side, amounts);
         let made: Vec<((u32, u32), Tile)> = missing
             .iter()
             .map(|&at| {
@@ -1064,7 +1086,7 @@ impl Canvas {
         }
         smudge.laid = true;
         for (at, tile) in made {
-            let r = tile_rect(at).intersect(full);
+            let r = tile_rect(at, side).intersect(full);
             let from = std::iter::once((&layer.texture, &tile.before))
                 .chain(tile.grained.iter().map(|g| (&layer.texture, g)))
                 .chain(also.iter().copied().zip(&tile.more));
@@ -1184,9 +1206,14 @@ mod tests {
         assert_eq!(read_reach(Vec2::new(f32::NAN, 0.0), Vec2::new(1.0, 1.0), full), full);
         // the tiles a rect touches
         let t = TILE as i32;
-        let tiles: Vec<_> = tiles_of(IRect::new(t - 6, 10, t + 4, 2 * t + 88)).collect();
+        let tiles: Vec<_> = tiles_of(IRect::new(t - 6, 10, t + 4, 2 * t + 88), TILE).collect();
         assert_eq!(tiles, [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]);
-        assert_eq!(tiles_of(IRect::EMPTY).count(), 0);
+        assert_eq!(tiles_of(IRect::EMPTY, TILE).count(), 0);
+        // a thin brush's, half as wide
+        let thin: Vec<_> = tiles_of(IRect::new(t - 6, 10, t + 4, 300), THIN_TILE).collect();
+        assert_eq!(thin, [(1, 0), (2, 0), (1, 1), (2, 1)]);
+        assert_eq!(tile_rect((2, 1), THIN_TILE), IRect::new(512, 256, 768, 512));
+        assert_eq!((tile_for(Some(40.0)), tile_for(Some(600.0)), tile_for(None)), (THIN_TILE, TILE, TILE));
         assert_eq!(part(0, 0, 255, 255), WHOLE);
     }
 
@@ -1212,7 +1239,7 @@ mod tests {
         let row = row_bytes(reach.width());
         let bytes = u64::from(row) * u64::from(reach.height());
         let window = window_buffer(device, "window", bytes);
-        let r = tile_rect((1, 0)).intersect(reach);
+        let r = tile_rect((1, 0), TILE).intersect(reach);
         let offset = in_window(reach, r);
         assert_ne!(offset % u64::from(PLACEMENT), 0);
         let read = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1252,8 +1279,8 @@ mod tests {
             assert!(reach.x0 <= x0 && x0 - reach.x0 < 128, "{reach:?}");
             assert_eq!((reach.x1, reach.y0, reach.y1), (x0 + w, y0, y0 + h));
             let bytes = u64::from(row_bytes(reach.width())) * u64::from(reach.height());
-            for at in tiles_of(reach) {
-                let r = tile_rect(at).intersect(reach);
+            for at in tiles_of(reach, TILE) {
+                let r = tile_rect(at, TILE).intersect(reach);
                 // the amount's second half too
                 for start in [0, bytes] {
                     assert_eq!((start + in_window(reach, r)) % u64::from(PLACEMENT), 0, "{reach:?} {at:?}");

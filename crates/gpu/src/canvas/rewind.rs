@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use procraft_engine::geom::IRect;
 
-use super::smudge::{TILE, tile_rect, tiles_of};
+use super::smudge::{tile_rect, tiles_of};
 use super::{Canvas, Carry, Kept, LAYER_FORMAT, Op, PacedStamp, copy_at, extent, texture, wet_pass};
 
 /// Marks are at least this far apart in the stroke's input time (ms): two display frames.
@@ -29,8 +29,6 @@ const MARKS_MOST_LOW: u64 = 48 << 20;
 const CARRIED_BYTES: u64 = 2 * (super::WET_PLOT_MOST as u64 * super::WET_PLOT_MOST as u64) * 16;
 /// The most stamps a stroke keeps as they were given to go back over (past it, it can't).
 const GIVEN_MOST: usize = 1 << 17;
-/// The bytes of a tile's picture (each texture a mark keeps of a tile).
-const TILE_BYTES: u64 = TILE as u64 * TILE as u64 * 4;
 
 /// What a stroke painting in place keeps to go back to (see the module).
 pub(super) struct Rewind {
@@ -45,6 +43,8 @@ pub(super) struct Rewind {
     free_carries: Vec<wgpu::Buffer>,
     bytes: u64,
     most: u64,
+    /// The side of the stroke's tiles (pixels), and so of the marks' pictures of them.
+    side: u32,
     /// Whether it keeps what going back takes (not past the most stamps it keeps, nor with a
     /// symmetry's copies of the stroke, which take turns in what they carry).
     on: bool,
@@ -94,9 +94,9 @@ fn same((a, aw, ap): &PacedStamp, (b, bw, bp): &PacedStamp) -> bool {
 }
 
 impl Rewind {
-    /// Kept for a stroke beginning, its marks' pictures within `most` bytes (none: as much as a
-    /// device of little memory, or not, gives them).
-    pub(super) fn new(low_memory: bool, most: Option<u64>) -> Rewind {
+    /// Kept for a stroke beginning whose tiles are `side` pixels across, its marks' pictures within
+    /// `most` bytes (none: as much as a device of little memory, or not, gives them).
+    pub(super) fn new(low_memory: bool, most: Option<u64>, side: u32) -> Rewind {
         Rewind {
             given: Vec::new(),
             laid: 0,
@@ -105,6 +105,7 @@ impl Rewind {
             free_carries: Vec::new(),
             bytes: 0,
             most: most.unwrap_or(if low_memory { MARKS_MOST_LOW } else { MARKS_MOST }),
+            side,
             on: true,
         }
     }
@@ -165,9 +166,11 @@ impl Rewind {
             if let Some(t) = self.free.pop() {
                 return Some(t);
             }
-            if self.bytes + TILE_BYTES <= self.most {
-                self.bytes += TILE_BYTES;
-                return Some(texture(device, "stroke mark", TILE, TILE, LAYER_FORMAT));
+            // (each texture a mark keeps of a tile, its bytes)
+            let tile_bytes = u64::from(self.side) * u64::from(self.side) * 4;
+            if self.bytes + tile_bytes <= self.most {
+                self.bytes += tile_bytes;
+                return Some(texture(device, "stroke mark", self.side, self.side, LAYER_FORMAT));
             }
             if self.marks.len() < 2 {
                 return None;
@@ -269,7 +272,8 @@ impl Canvas {
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let Some(rewind) = smudge.rewind.as_mut().filter(|r| r.on) else { return };
         let Some(mark) = rewind.marks.back_mut() else { return };
-        let mut touched: Vec<(u32, u32)> = writes.iter().flat_map(|w| tiles_of(*w)).collect();
+        let side = smudge.tile;
+        let mut touched: Vec<(u32, u32)> = writes.iter().flat_map(|w| tiles_of(*w, side)).collect();
         touched.sort_unstable();
         touched.dedup();
         touched.retain(|t| !mark.made.contains(t) && !mark.saved.contains_key(t));
@@ -291,7 +295,7 @@ impl Canvas {
                 rewind.drop_newest();
                 return;
             }
-            let r = tile_rect(at).intersect(full);
+            let r = tile_rect(at, side).intersect(full);
             let mut taken = taken.into_iter();
             let Some(picture) = taken.next() else { return };
             encoder.copy_texture_to_texture(
@@ -303,7 +307,7 @@ impl Canvas {
             for (from, into) in kept.into_iter().zip(saved.kept.iter_mut()) {
                 if let Some(from) = from {
                     let Some(t) = taken.next() else { break };
-                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(&t, 0, 0), extent(TILE, TILE));
+                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(&t, 0, 0), extent(side, side));
                     *into = Some(t);
                 }
             }
@@ -386,6 +390,7 @@ impl Canvas {
         let full = self.full();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
+        let side = smudge.tile;
         let Some(rewind) = smudge.rewind.as_mut() else { return };
         let Some(k) = rewind.marks.iter().position(|m| m.at == at) else {
             log::error!("a stroke's mark at {at} went before it was gone back to");
@@ -405,7 +410,7 @@ impl Canvas {
         let mut changed = IRect::EMPTY;
         for at in &made {
             let Some(tile) = smudge.tiles.remove(at) else { continue };
-            let r = tile_rect(*at).intersect(full);
+            let r = tile_rect(*at, side).intersect(full);
             encoder.copy_texture_to_texture(
                 copy_at(&tile.before, 0, 0),
                 copy_at(&layer.texture, r.x0, r.y0),
@@ -415,7 +420,7 @@ impl Canvas {
         }
         for (at, saved) in first {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = tile_rect(at).intersect(full);
+            let r = tile_rect(at, side).intersect(full);
             encoder.copy_texture_to_texture(
                 copy_at(&saved.layer, 0, 0),
                 copy_at(&layer.texture, r.x0, r.y0),
@@ -423,7 +428,7 @@ impl Canvas {
             );
             for (from, into) in saved.kept.iter().zip([&tile.grained, &tile.amount, &tile.shown]) {
                 if let (Some(from), Some(into)) = (from, into) {
-                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(into, 0, 0), extent(TILE, TILE));
+                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(into, 0, 0), extent(side, side));
                 }
             }
             changed = changed.union(r);
@@ -461,7 +466,7 @@ mod tests {
     }
 
     fn rewind_with(marks: &[usize], given: &[PacedStamp]) -> Rewind {
-        let mut r = Rewind::new(false, None);
+        let mut r = Rewind::new(false, None, super::super::smudge::TILE);
         r.give(given.iter().copied());
         r.laid(given.len());
         for &at in marks {

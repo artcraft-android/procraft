@@ -1095,11 +1095,14 @@ impl Canvas {
         if smudge.stalled {
             return false;
         }
-        let keeps = smudge.keeps;
+        let (keeps, tile_side) = (smudge.keeps, smudge.tile);
         let (width, height) = (reach.width(), reach.height());
         let small = smudge.frag_window.as_ref().is_none_or(|w| !w.fits(width, height));
-        let mut missing: Vec<(u32, u32)> =
-            writes.iter().flat_map(|w| smudge::tiles_of(*w)).filter(|t| !smudge.tiles.contains_key(t)).collect();
+        let mut missing: Vec<(u32, u32)> = writes
+            .iter()
+            .flat_map(|w| smudge::tiles_of(*w, tile_side))
+            .filter(|t| !smudge.tiles.contains_key(t))
+            .collect();
         missing.sort_unstable();
         missing.dedup();
         if small || !missing.is_empty() {
@@ -1108,7 +1111,7 @@ impl Canvas {
             // grown in steps, so a stroke that reaches further doesn't make them every frame
             let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
             let window = small.then(|| FragWindow::new(device, (side(width, canvas_w), side(height, canvas_h)), keeps));
-            let tile = |label, format| texture(device, label, smudge::TILE, smudge::TILE, format);
+            let tile = |label, format| texture(device, label, tile_side, tile_side, format);
             let made: Vec<((u32, u32), smudge::Tile)> = missing
                 .iter()
                 .map(|&at| {
@@ -1139,7 +1142,7 @@ impl Canvas {
             }
             for (at, tile) in made {
                 // the layer there as it was: the stroke hasn't written to it yet
-                let r = smudge::tile_rect(at).intersect(full);
+                let r = smudge::tile_rect(at, tile_side).intersect(full);
                 let kept = std::iter::once((&layer.texture, &tile.before))
                     .chain(tile.grained.iter().map(|g| (&layer.texture, g)))
                     .chain(also.iter().copied().zip(&tile.more));
@@ -1176,13 +1179,13 @@ impl Canvas {
             ));
         }
         // what the stroke keeps where it has been
-        for at in smudge::tiles_of(reach) {
+        for at in smudge::tiles_of(reach, tile_side) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = smudge::tile_rect(at).intersect(reach);
+            let r = smudge::tile_rect(at, tile_side).intersect(reach);
             if r.is_empty() {
                 continue;
             }
-            let t = smudge::tile_rect(at);
+            let t = smudge::tile_rect(at, tile_side);
             let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
             let (wx, wy) = (r.x0 - reach.x0, r.y0 - reach.y0);
             if before {
@@ -1231,9 +1234,9 @@ impl Canvas {
         if !kept {
             return;
         }
-        for at in smudge::tiles_of(changed) {
+        for at in smudge::tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let t = smudge::tile_rect(at);
+            let t = smudge::tile_rect(at, smudge.tile);
             let r = t.intersect(changed);
             if r.is_empty() {
                 continue;

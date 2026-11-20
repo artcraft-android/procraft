@@ -2374,6 +2374,7 @@ impl CanvasSession {
             Some(second) => canvas.begin_dual_stroke(current, style, second),
             None => canvas.begin_stroke(current, style),
         }
+        canvas.brush_across(diameter);
         // paint laid in place lays its stamps for good as they come: those its start taper changes
         // are laid once they no longer change, so that its end lays again only what that changes
         if style.paints_in_place() && !canvas.shows_tip() && !canvas.is_pencil() {

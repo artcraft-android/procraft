@@ -2044,9 +2044,10 @@ struct Smudge {
     /// [`Canvas::lay_smudge`]), from that part's corner on.
     pass: Option<(i64, IRect)>,
     passed: Option<(wgpu::Texture, wgpu::TextureView)>,
-    /// The tiles of the layer it has written to, and the buffers its passes work in (or the
-    /// textures, in fragment passes).
+    /// The tiles of the layer it has written to, and their side (pixels: see `smudge::tile_for`);
+    /// and the buffers its passes work in (or the textures, in fragment passes).
     tiles: smudge::Tiles,
+    tile: u32,
     window: Option<smudge::Window>,
     frag_window: Option<fragments::FragWindow>,
     /// Whether it has laid anything yet, and whether what it takes couldn't be made since (it lays
@@ -3122,6 +3123,10 @@ pub struct Canvas {
     rewound: u64,
     /// Whether the open stroke's end may lay again what it has laid (see [`Canvas::may_lay_again`]).
     may_lay_again: bool,
+    /// How wide the open stroke's brush is (canvas pixels, see [`Canvas::brush_across`]), if told;
+    /// and the side of the tiles a stroke painting in place keeps, where a test sets it.
+    brush_across: Option<f32>,
+    smudge_tiles: Option<u32>,
     /// Stamps queued to be laid so far, for tests.
     stamps_queued: u64,
     /// Where a dual brush's second was laid before its paint laid in place began (nothing to put
@@ -3555,6 +3560,8 @@ impl Canvas {
             windows_laid: 0,
             rewound: 0,
             may_lay_again: true,
+            brush_across: None,
+            smudge_tiles: None,
             stamps_queued: 0,
             second_unsynthesized: IRect::EMPTY,
             synthesis_due: IRect::EMPTY,
@@ -3984,6 +3991,7 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.may_lay_again = true;
+        self.brush_across = None;
         self.prediction.clear();
         self.laid = Some(Vec::new());
         (self.laid_count, self.laid_second_count) = (0, 0);
@@ -4576,6 +4584,25 @@ impl Canvas {
     #[doc(hidden)]
     pub fn stamps_queued(&self) -> u64 {
         self.stamps_queued
+    }
+
+    /// The open stroke's brush is `diameter` canvas pixels across at its widest: painting in place, the
+    /// tiles it keeps of its layer are sized to it (see `smudge::tile_for`). Told after it begins.
+    pub fn brush_across(&mut self, diameter: f32) {
+        self.brush_across = diameter.is_finite().then_some(diameter);
+    }
+
+    /// The side of the tiles strokes painting in place keep (none: sized to their brush): for tests
+    /// comparing the two.
+    #[doc(hidden)]
+    pub fn set_smudge_tiles(&mut self, side: Option<u32>) {
+        self.smudge_tiles = side.filter(|&s| s == smudge::TILE || s == smudge::THIN_TILE);
+    }
+
+    /// The side of the tiles the open stroke painting in place keeps, once it keeps some: for tests.
+    #[doc(hidden)]
+    pub fn smudge_tile_side(&self) -> Option<u32> {
+        self.smudge.as_ref().map(|s| s.tile)
     }
 
     /// Whether the open stroke's end may lay again stamps it has laid (its tapers): painting in
@@ -7508,8 +7535,10 @@ impl Canvas {
             // painting into the layer's store: what it works in is the store's paint
             let store =
                 (style.store != 0).then(|| self.store_for_stroke(device, encoder, target, style.store)).flatten();
+            // its tiles sized to its brush
+            let tile = self.smudge_tiles.unwrap_or_else(|| smudge::tile_for(self.brush_across));
             let rewind = (wet_paint && self.rewinds && self.may_lay_again && !in_fragments && store.is_none())
-                .then(|| rewind::Rewind::new(self.low_memory(), self.rewind_most));
+                .then(|| rewind::Rewind::new(self.low_memory(), self.rewind_most, tile));
             self.smudge = Some(Smudge {
                 layer: target,
                 into: store.as_ref().map_or(target, |s| s.planes[0]),
@@ -7525,6 +7554,7 @@ impl Canvas {
                 pass: None,
                 passed: None,
                 tiles: smudge::Tiles::new(),
+                tile,
                 window: None,
                 frag_window: None,
                 laid: false,
