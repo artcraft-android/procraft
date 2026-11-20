@@ -31,7 +31,8 @@ switches its shape, and `floating-panels` lets panels float in windows of their 
 has an action and two switches in the Canvas tab, `value-check` a switch there with a key of its own,
 `paper` controls kept with each artwork, `reference-windows` a single slider, and `finger-pressure`
 gives a finger a pressure on the `pressure` hook, and `coloured-previews` tints the brush library's
-strokes on the `brush_preview_colour` hook.
+strokes on the `brush_preview_colour` hook. `colour-labels` keeps a mark with each layer from an
+action in its options, shows it with the `layer_label` hook, and asks for it with a row of colours.
 
 ## What you write
 
@@ -75,7 +76,8 @@ the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4
 5, more than eight controls, or a picker's picture that reads its controls, 6, the `hide_notices`
 and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
-`gesture_lock` hook's fit and the `brush_preview_colour` hook 10.
+`gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label` hooks, layers' marks and
+panels' rows of colours 10.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -615,6 +617,23 @@ The Coloured brush previews plugin the app comes with shows them in the colour b
 or in one of its own from its Hue, Saturation and Brightness, and the brush in use so too while
 its switch says.
 
+### `layer_label`
+
+The colour the row of a layer the plugin has marked shows in the Layers panel (interface 10):
+
+```
+procraft_layer_label(mark: i64) -> i32
+```
+
+It's asked about each layer, a group's too, that keeps a mark of the plugin's own (not 0, see
+[Actions](#actions)), told that mark, as the Layers panel lists them. Answer the colour, 0xRRGGBB,
+which shows down the row's left edge, or -1 for none. An answer past 0xFFFFFF, or below -1, stops
+the plugin. With several plugins on this hook, the first by id that answers for a layer's marks is
+used. With the plugin off, its marks stay and show nothing.
+
+The Colour labels plugin the app comes with gives a layer one of eight colours from Colour label in
+its options, a panel of the eight and No label, and keeps the colour's place as the layer's mark.
+
 ### `floating_panels`
 
 Whether a panel can be torn off into a window of its own (not 0) (interface 7):
@@ -981,8 +1000,8 @@ says what each permission lets the plugin do.
 
 | Permission | The functions it gives |
 |---|---|
-| `artwork.read` | `canvas_size`, `layer_count`, `layer_at`, `current_layer`, `read_pixels` |
-| `artwork.write` | `add_layer`, `write_pixels`, `set_layer_name`, `set_layer_opacity`, `set_layer_visible` |
+| `artwork.read` | `canvas_size`, `layer_count`, `layer_at`, `current_layer`, `read_pixels`, `layer_mark` (interface 10) |
+| `artwork.write` | `add_layer`, `write_pixels`, `set_layer_name`, `set_layer_opacity`, `set_layer_visible`, `set_layer_mark` (interface 10) |
 | `brush` | `brush_colour`, `set_brush_colour`, `brush_size`, `set_brush_size`, `brush_opacity`, `set_brush_opacity` |
 | `notice` | `notice` |
 | `panel` | `show_panel`, `close_panel` (see [Panels](#panels)) |
@@ -1007,6 +1026,12 @@ kit::actions!(|_| {
 ```
 
 - Layers go by the id the app gives each one, never 0. 0 means none.
+- A plugin can keep a number with each layer, a group's too (interface 10): `layer_mark(layer:
+  i64) -> i64` reads it (0 for none) and `set_layer_mark(layer: i64, mark: i64) -> i32` keeps it, 0
+  taking it off (1 if that changed it). Each plugin has its own, by its id, which no other reads.
+  The artwork saves it with the layer, undo takes it back as any change, a duplicate keeps it, and
+  it stays as it is while the plugin is off or gone. The [`layer_label`](#layer_label) hook shows it
+  as a colour. A layer keeps sixteen plugins' marks at most.
 - Pixels are premultiplied RGBA8, rows from the top. A rectangle has to be wholly on the canvas, at
   most 4,096 × 4,096 pixels. A write goes over what was there.
 - Code can paint only on a pixel layer that isn't locked.
@@ -1037,6 +1062,9 @@ some words, or a button. The plugin describes the panel as JSON text and hands i
 ```
 
 - A panel has 1 to 16 rows, and a choice has 1 to 8 options.
+- A `colours` row (interface 10) shows 1 to 8 colours to tap, each 0xRRGGBB, the one at `chosen`
+  ringed (leave it out for none): `{ "type": "colours", "label": "Colour", "colours": [15026509,
+  4130810], "chosen": 1 }`. A tap is told as the colour's place.
 - Labels and the title are at most 40 characters, an option at most 24, and words at most 400.
 - A field the app doesn't know, or a kind of row it doesn't have, makes the panel not hold up.
 - A `keys` row shows presses (written as for the [`key_shortcut`](#key_shortcut) hook) the way the
@@ -1045,7 +1073,8 @@ some words, or a button. The plugin describes the panel as JSON text and hands i
 - The panel shows once the action ends, and stays open in the same copy of the code.
 - Each touch calls the module's `procraft_panel_event(row: i32, value: f32) -> i32`, so a module
   with the `panel` permission has to export it. `row` is the row's place, from 0. The value is the
-  slider's (on its steps), 1 or 0 for a switch, the option's place for a choice, or 1 for a button.
+  slider's (on its steps), 1 or 0 for a switch, the option's place for a choice or the colour's for
+  a row of colours, or 1 for a button.
   A slider is told when it's let go.
 - A touch can do what an action can, and what it changes is one step to undo. It can show the panel
   again, changed, or close it with `close_panel()`.
@@ -1715,7 +1744,8 @@ picker's picture given its controls, a picker that goes quiet or picks the hue o
 a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks,
 interface 7 the `hide_notices` and `floating_panels` hooks, interface 8 the `gesture_lock`,
 `view_look`, `paper` and `reference_windows` hooks, the `view` permission and actions in the Canvas
-tab, interface 9 the `pressure` hook, and interface 10 the `gesture_lock` hook's fit and the `brush_preview_colour` hook. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+tab, interface 9 the `pressure` hook, and interface 10 the `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label`
+hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

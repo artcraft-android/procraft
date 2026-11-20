@@ -818,6 +818,7 @@ fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         is PanelRow.Switch -> ActionRowView(Toggle(row.label, row.on) { vm.touchPluginPanel(i, if (it) 1f else 0f) })
                         is PanelRow.Choice -> PanelChoiceRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Colours -> PanelColoursRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Keys -> PanelKeysRow(row) { vm.touchPluginPanel(i, 1f) }
                     }
                 }
@@ -862,6 +863,26 @@ private fun PanelChoiceRow(row: PanelRow.Choice, onPick: (Int) -> Unit) {
         Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
         Box(Modifier.weight(1f))
         Text(row.options.getOrElse(row.chosen.toInt()) { "" }, color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/** A row of colours on a plugin's panel: its label, then each colour a disc, the one chosen ringed; a tap picks one. */
+@Composable
+private fun PanelColoursRow(row: PanelRow.Colours, onPick: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 16.dp, end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, modifier = Modifier.padding(end = 8.dp))
+        Box(Modifier.weight(1f))
+        row.colours.forEachIndexed { at, colour ->
+            val chosen = row.chosen?.toInt() == at
+            Box(Modifier.size(30.dp).clip(CircleShape).clickable { onPick(at) }, contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(24.dp).clip(CircleShape)
+                        .then(if (chosen) Modifier.border(2.dp, Pc.ActionsRow, CircleShape) else Modifier)
+                        .padding(if (chosen) 4.dp else 0.dp).clip(CircleShape)
+                        .background(Color(0xFF000000L or colour.toLong())),
+                )
+            }
+        }
     }
 }
 

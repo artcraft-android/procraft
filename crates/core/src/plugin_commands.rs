@@ -55,7 +55,7 @@ impl PluginPermission {
         match self {
             PluginPermission::ArtworkRead => "It can read your artwork: its size, its layers and their pixels.",
             PluginPermission::ArtworkWrite => {
-                "It can change your artwork when you tap one of its actions: add layers, name them, set how they show and paint on them, one step undo takes back."
+                "It can change your artwork when you tap one of its actions: add layers, name and mark them, set how they show and paint on them, one step undo takes back."
             }
             PluginPermission::Brush => "It can read and set the brush's colour, size and opacity.",
             PluginPermission::Notice => "It can show a short message.",
@@ -110,6 +110,8 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
     ("set_layer_name", PluginPermission::ArtworkWrite, &[I64, I32, I32], &[I32]),
     ("set_layer_opacity", PluginPermission::ArtworkWrite, &[I64, F32], &[I32]),
     ("set_layer_visible", PluginPermission::ArtworkWrite, &[I64, I32], &[I32]),
+    ("layer_mark", PluginPermission::ArtworkRead, &[I64], &[I64]),
+    ("set_layer_mark", PluginPermission::ArtworkWrite, &[I64, I64], &[I32]),
     ("brush_colour", PluginPermission::Brush, &[], &[I32]),
     ("set_brush_colour", PluginPermission::Brush, &[I32], &[]),
     ("brush_size", PluginPermission::Brush, &[], &[F32]),
@@ -347,6 +349,10 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
             let found = session(&caller).and_then(|s| s.layers().get(usize::try_from(index).ok()?).map(|l| l.id));
             found.map_or(0, |id| id as i64)
         })?;
+        // the number the plugin keeps with a layer, 0 for none (interface 10)
+        linker.func_wrap(FROM, "layer_mark", |caller: Caller<'_, Host>, layer: i64| -> i64 {
+            session(&caller).map_or(0, |s| s.layer_mark(&caller.data().owner, layer as u64))
+        })?;
         linker.func_wrap(FROM, "current_layer", |caller: Caller<'_, Host>| -> i64 {
             let found = session(&caller).and_then(|s| s.layers().iter().find(|l| l.current).map(|l| l.id));
             found.map_or(0, |id| id as i64)
@@ -389,6 +395,10 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
         })?;
         linker.func_wrap(FROM, "set_layer_visible", |caller: Caller<'_, Host>, layer: i64, on: i32| -> i32 {
             session(&caller).map_or(0, |s| i32::from(s.set_layer_visible(layer as u64, on != 0)))
+        })?;
+        // a number kept with a layer for the plugin, saved with the artwork, 0 taking it off
+        linker.func_wrap(FROM, "set_layer_mark", |caller: Caller<'_, Host>, layer: i64, mark: i64| -> i32 {
+            session(&caller).map_or(0, |s| i32::from(s.set_layer_mark(&caller.data().owner, layer as u64, mark)))
         })?;
     }
     if granted.contains(&PluginPermission::Brush) {

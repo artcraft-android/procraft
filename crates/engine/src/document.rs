@@ -1,6 +1,8 @@
 //! The artwork: canvas size, background and layers. Pixels live with the renderer, keyed by
 //! [`LayerId`]; this is the structure around them, cheap to clone (undo keeps copies).
 
+use std::collections::BTreeMap;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct LayerId(pub u64);
@@ -430,7 +432,15 @@ pub struct Layer {
     /// its pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginLayer>,
+    /// Numbers plugins keep with the layer, each by the plugin's id (a colour label's, say): saved
+    /// and undone with it, gone with it, and kept as they are while their plugin is off or gone.
+    #[serde(default, deserialize_with = "or_default", skip_serializing_if = "BTreeMap::is_empty")]
+    pub marks: BTreeMap<String, i64>,
 }
+
+/// The most plugins' marks a layer keeps, and the longest id one goes by.
+pub const MOST_MARKS: usize = 16;
+const MOST_MARK_OWNER: usize = 256;
 
 /// What makes a layer one of a kind a plugin adds: the kind, and the plugin's data for it. The app
 /// paints, shows and saves the layer's pixels as any layer's; the data is the plugin's (the items it
@@ -466,7 +476,13 @@ impl Layer {
             private: false,
             assisted: false,
             plugin: None,
+            marks: BTreeMap::new(),
         }
+    }
+
+    /// The number plugin `owner` keeps with it: 0 for none.
+    pub fn mark(&self, owner: &str) -> i64 {
+        self.marks.get(owner).copied().unwrap_or(0)
     }
 
     /// Whether its pixels are drawn from what it holds besides them (its text, or a plugin's items):
@@ -932,6 +948,23 @@ impl Document {
 
     fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
+    }
+
+    /// `mark` kept with layer `id` for plugin `owner` (0 takes it off): false, changing nothing, if
+    /// there is no such layer, it holds that already, or it holds [`MOST_MARKS`] of others'.
+    pub fn set_mark(&mut self, id: LayerId, owner: &str, mark: i64) -> bool {
+        let Some(layer) = self.layer_mut(id) else { return false };
+        if layer.mark(owner) == mark || owner.is_empty() || owner.len() > MOST_MARK_OWNER {
+            return false;
+        }
+        if mark == 0 {
+            layer.marks.remove(owner);
+        } else if layer.marks.len() < MOST_MARKS || layer.marks.contains_key(owner) {
+            layer.marks.insert(owner.to_owned(), mark);
+        } else {
+            return false;
+        }
+        true
     }
 
     pub fn index_of(&self, id: LayerId) -> Option<usize> {
@@ -2125,6 +2158,37 @@ mod tests {
         assert_eq!(mask_grey([255, 0, 0, 255]), 76);
         assert_eq!(mask_grey([0, 255, 0, 255]), 150);
         assert_eq!(mask_grey([0, 0, 255, 255]), 29);
+    }
+
+    #[test]
+    fn a_layer_keeps_plugins_marks_through_its_file_and_reads_odd_ones_as_none() {
+        const A: &str = "org.example.a";
+        let mut d = Document::new(10, 10);
+        let id = d.current();
+        assert_eq!(d.layer(id).unwrap().mark(A), 0);
+        assert!(d.set_mark(id, A, 3));
+        assert!(!d.set_mark(id, A, 3), "as it was: nothing changed");
+        assert!(!d.set_mark(LayerId(999), A, 1), "no such layer");
+        assert!(!d.set_mark(id, "", 1), "no one's");
+        // through the file, as it was
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.layer(id).unwrap().mark(A), 3);
+        // taken off, the file holds none
+        assert!(d.set_mark(id, A, 0));
+        assert!(d.layer(id).unwrap().marks.is_empty());
+        assert!(!serde_json::to_string(&d).unwrap().contains("marks"));
+        // a layer keeps at most so many plugins' marks; one it keeps already still changes
+        for i in 0..MOST_MARKS {
+            assert!(d.set_mark(id, &format!("org.example.p{i}"), 1));
+        }
+        assert!(!d.set_mark(id, A, 1));
+        assert!(d.set_mark(id, "org.example.p0", 7));
+        // marks that aren't numbers by ids are none, the rest of the layer read as it was
+        let mut json: serde_json::Value = serde_json::to_value(&d).unwrap();
+        json["layers"][0]["marks"] = serde_json::json!("odd");
+        let read: Document = serde_json::from_value(json).unwrap();
+        assert!(read.layer(id).unwrap().marks.is_empty());
+        assert_eq!(read.layer(id).unwrap().name, d.layer(id).unwrap().name);
     }
 
     #[test]

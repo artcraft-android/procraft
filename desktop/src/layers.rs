@@ -851,6 +851,12 @@ impl Layers {
             egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 },
             looks.fill,
         );
+        // the colour a plugin labels it with, down its left edge
+        if let Some(label) = l.label {
+            let edge = Rect::from_min_size(at.min, vec2(LABEL_WIDTH, at.height()));
+            let corners = egui::CornerRadius { nw: t as u8, sw: b as u8, ..Default::default() };
+            ui.painter().rect_filled(edge, corners, labelled(label));
+        }
         let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
         let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
@@ -1951,6 +1957,10 @@ impl Layers {
                 argb(LAYER_ROW)
             };
             mini.painter().rect_filled(row, 0, fill);
+            if let Some(label) = l.label {
+                let edge = Rect::from_min_size(row.min, vec2(LABEL_WIDTH * scale, row.height()));
+                mini.painter().rect_filled(edge, 0, labelled(label));
+            }
             let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
             let left = row.left() + (GROUP_INDENT * *depth as f32 + 4.0) * scale;
             let name_left = left + THUMB.0 * scale;
@@ -2079,6 +2089,15 @@ fn add_entries(kinds: &[procraft_core::PluginKind]) -> Vec<Entry<'_>> {
     let badged = |k: &procraft_core::PluginKind| procraft_core::plugin_kind_badge(k.clone());
     entries.extend(kinds.iter().map(|k| Entry::Badge(badged(k), k.label.as_str(), menu::INK)));
     entries
+}
+
+/// How wide the colour a plugin labels a layer with shows, down the left edge of its row.
+const LABEL_WIDTH: f32 = 5.0;
+
+/// A label's colour (0xRRGGBB) to draw.
+fn labelled(label: u32) -> Color32 {
+    let [_, r, g, b] = label.to_be_bytes();
+    Color32::from_rgb(r, g, b)
 }
 
 /// A plugin's layer's badge (its drawing in white over a dark rounded box) in the bottom right

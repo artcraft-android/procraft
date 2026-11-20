@@ -88,6 +88,9 @@
 //!   `procraft_pressure_taper(pointer: i32, end: i32) -> f32`, asked as each stroke begins: how far
 //!   (window points, 0 to [`MOST_PRESSURE_TAPER`]) its pressure grows from nothing at its start
 //!   (`end` 0) and falls to nothing at its end (1), for a stroke whose pressure counts.
+//! - `procraft_layer_label(mark: i64) -> i32`: for the hook `layer_label` (interface 10), the
+//!   colour (0xRRGGBB) the row of a layer the plugin keeps `mark` with (not 0) shows in the Layers
+//!   panel, -1 for none.
 //! - `procraft_brush_preview_colour(current: i32, chosen: i32) -> i32`: for the hook
 //!   `brush_preview_colour` (interface 10), the colour (0xRRGGBB) the brush library draws a brush's
 //!   sample stroke in, told the current colour (0xRRGGBB) and whether the brush is the one in use
@@ -271,6 +274,7 @@ const PRESSURE_TAPER: &str = "procraft_pressure_taper";
 /// The longest a pressure's taper may be, window points: past a long stroke's length.
 pub(crate) const MOST_PRESSURE_TAPER: f32 = 1000.0;
 const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
+const LAYER_LABEL: &str = "procraft_layer_label";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -427,6 +431,8 @@ pub(crate) enum Hook {
     /// The colour the brush library draws its sample strokes in (interface 10): the first hook
     /// past the 32 a set of hooks had room for once.
     BrushPreviewColour,
+    /// The colour a layer's row shows, by the mark the plugin keeps with it (interface 10).
+    LayerLabel,
 }
 
 impl Hook {
@@ -463,6 +469,7 @@ impl Hook {
             "reference_windows" => Some(Hook::ReferenceWindows),
             "pressure" => Some(Hook::Pressure),
             "brush_preview_colour" => Some(Hook::BrushPreviewColour),
+            "layer_label" => Some(Hook::LayerLabel),
             _ => None,
         }
     }
@@ -503,6 +510,7 @@ impl Hook {
             Hook::ReferenceWindows => "This plugin can let more than one Reference window be open.",
             Hook::Pressure => "This plugin can change how hard your strokes press, a finger's too.",
             Hook::BrushPreviewColour => "This plugin can draw the brush library's sample strokes in another colour.",
+            Hook::LayerLabel => "This plugin can show a colour on the rows of layers it has marked.",
         }
     }
 
@@ -542,6 +550,7 @@ impl Hook {
                     && exports(module, PRESSURE_TAPER, &[I32, I32], &[F32])
             }
             Hook::BrushPreviewColour => exports(module, BRUSH_PREVIEW_COLOUR, &[ValType::I32; 2], &[ValType::I32]),
+            Hook::LayerLabel => exports(module, LAYER_LABEL, &[ValType::I64], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -949,6 +958,7 @@ pub(crate) struct Running {
     pressure: Option<PressureCall>,
     pressure_taper: Option<TypedFunc<(i32, i32), f32>>,
     brush_preview_colour: Option<TypedFunc<(i32, i32), i32>>,
+    layer_label: Option<TypedFunc<i64, i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1110,6 +1120,7 @@ impl Running {
             let pressure = instance.get_typed_func(&store, PRESSURE).ok();
             let pressure_taper = instance.get_typed_func(&store, PRESSURE_TAPER).ok();
             let brush_preview_colour = instance.get_typed_func(&store, BRUSH_PREVIEW_COLOUR).ok();
+            let layer_label = instance.get_typed_func(&store, LAYER_LABEL).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1218,6 +1229,7 @@ impl Running {
                 pressure,
                 pressure_taper,
                 brush_preview_colour,
+                layer_label,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2265,6 +2277,22 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             brush_preview_colour.call(&mut *store, (current, i32::from(chosen))).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            -1 => Ok(None),
+            0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
+            _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// The colour (0xRRGGBB) it says the row of a layer it keeps `mark` with shows; none for none.
+    /// One past 0xFFFFFF, or below -1, stops it.
+    pub(crate) fn layer_label(&mut self, mark: i64) -> Result<Option<u32>, Stop> {
+        let Running { store, layer_label, .. } = self;
+        let Some(layer_label) = layer_label else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            layer_label.call(&mut *store, mark).map_err(|e| stop_of(&e))
         })?;
         match said {
             -1 => Ok(None),

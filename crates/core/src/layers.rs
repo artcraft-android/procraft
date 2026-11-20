@@ -41,6 +41,9 @@ pub struct LayerInfo {
     /// draws none or its plugin is off or gone.
     #[uniffi(default = None)]
     pub plugin_badge: Option<crate::PluginBadge>,
+    /// The colour (0xRRGGBB) its row shows, as a plugin labels it by the mark it keeps with it.
+    #[uniffi(default = None)]
+    pub label: Option<u32>,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -529,6 +532,7 @@ impl CanvasSession {
                     let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));
                     badge.unwrap_or_else(crate::PluginBadge::plug)
                 }),
+                label: st.hooks.as_ref().and_then(|hooks| hooks.layer_label(&l.marks)),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then
@@ -1106,6 +1110,17 @@ impl CanvasSession {
             (differs && d.set_locked(id, on)).then_some(())
         })
         .is_some()
+    }
+
+    /// The number plugin `owner` keeps with layer `id`: 0 for none, or no such layer.
+    pub(crate) fn layer_mark(&self, owner: &str, id: u64) -> i64 {
+        self.shared.lock().doc.layer(LayerId(id)).map_or(0, |l| l.mark(owner))
+    }
+
+    /// `mark` kept with layer `id` for plugin `owner` (0 takes it off), one step undo takes back;
+    /// false if that changed nothing.
+    pub(crate) fn set_layer_mark(&self, owner: &str, id: u64, mark: i64) -> bool {
+        self.change("label layer", |d| d.set_mark(LayerId(id), owner, mark).then_some(())).is_some()
     }
 
     pub fn rename_layer(&self, id: u64, name: String) -> bool {

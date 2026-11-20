@@ -1524,6 +1524,9 @@ fn panel_value(value: f32, step: f32, unit: &str) -> String {
 }
 
 /// The height of `row` in a plugin's panel, `inside` wide.
+/// How far apart a plugin panel's colours are, centre to centre.
+const SWATCH_STEP: f32 = 30.0;
+
 fn panel_row_height(painter: &Painter, row: &PanelRow, inside: f32) -> f32 {
     match row {
         PanelRow::Text { text } => {
@@ -1675,6 +1678,38 @@ pub fn plugin_panel(
                                 );
                                 if tapped(ui) {
                                     asked = Some(PanelTouch::Touch(row_at, 1.0));
+                                }
+                            }
+                            // its label, then each colour a disc from the row's right end, the
+                            // one chosen ringed
+                            PanelRow::Colours { label, colours, chosen } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                let count = colours.len();
+                                for (at, &colour) in colours.iter().enumerate() {
+                                    let x =
+                                        cell.right() - 10.0 - SWATCH_STEP / 2.0 - (count - 1 - at) as f32 * SWATCH_STEP;
+                                    let centre = pos2(x, cell.center().y);
+                                    let [_, r, g, b] = colour.to_be_bytes();
+                                    let fill = Color32::from_rgb(r, g, b);
+                                    if *chosen == Some(at as u32) {
+                                        painter.circle_stroke(centre, 11.0, egui::Stroke::new(2.0, argb(ACTIONS_ROW)));
+                                        painter.circle_filled(centre, 8.0, fill);
+                                    } else {
+                                        painter.circle_filled(centre, 12.0, fill);
+                                    }
+                                    let spot = Rect::from_center_size(centre, vec2(SWATCH_STEP, cell.height()));
+                                    let id = ui.scope_id().with(("plugin colour", i, at));
+                                    if ui.interact(spot, id, Sense::click()).clicked() {
+                                        asked = Some(PanelTouch::Touch(row_at, at as f32));
+                                    }
                                 }
                             }
                             // its label, and the keys at its end as a file control's name is
@@ -2020,6 +2055,11 @@ mod tests {
                     chosen: 1,
                 },
                 PanelRow::Keys { label: "Undo".to_owned(), keys: "Ctrl+Z".to_owned() },
+                PanelRow::Colours {
+                    label: "Colour".to_owned(),
+                    colours: vec![0xFF0000, 0x00FF00, 0x0000FF],
+                    chosen: None,
+                },
             ],
             key_press: false,
         };
@@ -2065,6 +2105,12 @@ mod tests {
         assert_eq!(panel_tapped(row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
         assert_eq!(panel_tapped(row(2.0)), Some(PanelTouch::Touch(2, 0.0)), "the choice to the next, round");
         assert_eq!(panel_tapped(row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "the keys");
+        // the colours from the row's right end, each its place; the label between them none
+        let colour =
+            |from_right: f32| move |r: Rect| pos2(r.right() - 25.0 - from_right * 30.0, r.top() + 82.0 + 4.0 * 45.0);
+        assert_eq!(panel_tapped(colour(0.0)), Some(PanelTouch::Touch(4, 2.0)), "the last colour");
+        assert_eq!(panel_tapped(colour(2.0)), Some(PanelTouch::Touch(4, 0.0)), "the first colour");
+        assert_eq!(panel_tapped(row(4.0)), None, "the colours' label");
         assert_eq!(panel_tapped(|r| pos2(r.right() - 40.0, r.top() + 33.0)), Some(PanelTouch::Close));
         assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
     }

@@ -806,6 +806,7 @@ private fun GroupRow(
     Row(
         Modifier.fillMaxWidth().height(height).clip(shape)
             .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else Pc.LayerRow)
+            .labelled(l)
             .clickable(onClick = onTap)
             .padding(start = indent + GroupIndent * l.depth.toInt()),
         verticalAlignment = Alignment.CenterVertically,
@@ -866,6 +867,7 @@ private fun MiniRow(vm: CanvasViewModel, l: LayerInfo, depth: Int) {
     Row(
         Modifier.fillMaxWidth().height(if (group) GroupHeight else if (mask || masked) MaskedRowHeight else RowHeight)
             .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else Pc.LayerRow)
+            .labelled(l)
             .padding(start = GroupIndent * depth),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -921,6 +923,7 @@ private fun LayerRow(
         Modifier.fillMaxWidth().height(if (mask || masked) MaskedRowHeight else RowHeight).clip(shape)
             // the layer a selected mask belongs to shows a darker blue
             .background(if (selected) Pc.RowSelected else if (l.picked) PickedRow else if (owner) MaskOwnerRow else Pc.LayerRow)
+            .labelled(l)
             .clickable(onClick = onTap)
             .padding(start = indent + (if (l.clipped) 18.dp else 0.dp) + GroupIndent * l.depth.toInt()),
         verticalAlignment = Alignment.CenterVertically,
@@ -1080,6 +1083,16 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape, held: Boolean
             }
         }
     }
+}
+
+/** How wide the colour a plugin labels a layer with shows, down the left edge of its row. */
+private val LabelWidth = 5.dp
+
+/** The colour a plugin labels [l] with, if one does, down the left edge of its row. */
+private fun Modifier.labelled(l: LayerInfo): Modifier {
+    val label = l.label ?: return this
+    val colour = Color(0xFF000000L or label.toLong())
+    return drawBehind { drawRect(colour, size = Size(LabelWidth.toPx(), size.height)) }
 }
 
 /** The badge behind a plugin's layer's glyph on its thumbnail. */

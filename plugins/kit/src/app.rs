@@ -31,6 +31,8 @@ mod raw {
         pub fn set_layer_name(layer: i64, at: i32, len: i32) -> i32;
         pub fn set_layer_opacity(layer: i64, opacity: f32) -> i32;
         pub fn set_layer_visible(layer: i64, on: i32) -> i32;
+        pub fn layer_mark(layer: i64) -> i64;
+        pub fn set_layer_mark(layer: i64, mark: i64) -> i32;
         pub fn brush_colour() -> i32;
         pub fn set_brush_colour(rgb: i32);
         pub fn brush_size() -> f32;
@@ -76,6 +78,12 @@ mod raw {
         0
     }
     pub unsafe fn set_layer_visible(_: i64, _: i32) -> i32 {
+        0
+    }
+    pub unsafe fn layer_mark(_: i64) -> i64 {
+        0
+    }
+    pub unsafe fn set_layer_mark(_: i64, _: i64) -> i32 {
         0
     }
     pub unsafe fn brush_colour() -> i32 {
@@ -153,6 +161,17 @@ pub fn set_layer_opacity(layer: Layer, opacity: f32) -> bool {
 /// `layer` shown or hidden.
 pub fn show_layer(layer: Layer, on: bool) -> bool {
     unsafe { raw::set_layer_visible(layer.0, i32::from(on)) != 0 }
+}
+
+/// The number the plugin keeps with `layer` (`artwork.read`, interface 10): 0 for none.
+pub fn layer_mark(layer: Layer) -> i64 {
+    unsafe { raw::layer_mark(layer.0) }
+}
+
+/// `mark` kept with `layer` for the plugin, saved with the artwork (`artwork.write`, interface 10):
+/// 0 takes it off. The `layer_label` hook is told it.
+pub fn set_layer_mark(layer: Layer, mark: i64) -> bool {
+    unsafe { raw::set_layer_mark(layer.0, mark) != 0 }
 }
 
 /// The brush's colour, 0xRRGGBB.
@@ -254,6 +273,19 @@ impl Panel {
             r#"{{"type":"choice","label":{},"options":[{}],"chosen":{chosen}}}"#,
             quoted(label),
             options.join(",")
+        ));
+        self
+    }
+
+    /// A row of `colours` (0xRRGGBB, one to eight) to tap, the one at `chosen` ringed (interface
+    /// 10): a tap is told as the colour's place.
+    pub fn colours(mut self, label: &str, colours: &[u32], chosen: Option<usize>) -> Panel {
+        let colours: Vec<String> = colours.iter().map(|c| (c & 0xFF_FFFF).to_string()).collect();
+        let chosen = chosen.map(|at| format!(r#","chosen":{at}"#)).unwrap_or_default();
+        self.rows.push(format!(
+            r#"{{"type":"colours","label":{},"colours":[{}]{chosen}}}"#,
+            quoted(label),
+            colours.join(",")
         ));
         self
     }

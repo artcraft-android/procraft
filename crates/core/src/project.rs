@@ -2270,6 +2270,7 @@ pub fn import_pages(
             private: false,
             assisted: false,
             plugin: None,
+            marks: Default::default(),
         });
     }
     let mut doc = Document::from_layers(w, h, layers, LayerId(1));

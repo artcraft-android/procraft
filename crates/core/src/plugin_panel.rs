@@ -18,12 +18,15 @@
 //! place, or 1 for a button tapped. A `keys` row shows presses as the platform writes them
 //! (`{ "type": "keys", "label": "Undo", "keys": ["command+z"] }`, see [`crate::KeyCombo`]) and is
 //! tapped as a button is; a panel with `"key_press": true` asks for the next key press, which goes
-//! to the plugin as `procraft_panel_key` rather than to the canvas.
+//! to the plugin as `procraft_panel_key` rather than to the canvas. A `colours` row (interface 10)
+//! shows one to eight colours to tap, the one at `chosen` (if any) ringed:
+//! `{ "type": "colours", "label": "Colour", "colours": [15026509, 4130810], "chosen": 1 }`, each
+//! 0xRRGGBB; a tap is told as the colour's place.
 
 use serde::Deserialize;
 
-/// The most rows a panel may have, the most choices one row may give, and the most presses a row of
-/// keys shows.
+/// The most rows a panel may have, the most choices one row may give (colours too), and the most
+/// presses a row of keys shows.
 const MOST_ROWS: usize = 16;
 const MOST_OPTIONS: usize = 8;
 const MOST_KEYS: usize = 8;
@@ -66,6 +69,12 @@ pub enum PanelRow {
     /// A row tapped, its words in the accent colour.
     Button {
         label: String,
+    },
+    /// `colours` (0xRRGGBB) to tap, the one at `chosen` ringed if any is (interface 10).
+    Colours {
+        label: String,
+        colours: Vec<u32>,
+        chosen: Option<u32>,
     },
     /// A row tapped, `keys` (presses, written for the platform: "Ctrl+Z  Ctrl+Y", or "None") at
     /// its end.
@@ -113,6 +122,12 @@ enum RawRow {
     },
     Button {
         label: String,
+    },
+    Colours {
+        label: String,
+        colours: Vec<u32>,
+        #[serde(default)]
+        chosen: Option<u32>,
     },
     Keys {
         label: String,
@@ -163,6 +178,13 @@ fn read_row(raw: RawRow) -> Option<PanelRow> {
             fits.then_some(PanelRow::Choice { label, options, chosen })?
         }
         RawRow::Button { label } => plain(&label, 40).then_some(PanelRow::Button { label })?,
+        RawRow::Colours { label, colours, chosen } => {
+            let fits = plain(&label, 40)
+                && (1..=MOST_OPTIONS).contains(&colours.len())
+                && colours.iter().all(|&c| c <= 0xFF_FFFF)
+                && chosen.is_none_or(|at| (at as usize) < colours.len());
+            fits.then_some(PanelRow::Colours { label, colours, chosen })?
+        }
         RawRow::Keys { label, keys } => {
             if !plain(&label, 40) || keys.len() > MOST_KEYS {
                 return None;
@@ -193,6 +215,10 @@ pub(crate) fn touched(panel: &PluginPanel, row: usize, value: f32) -> Option<f32
             let at = value.round();
             (at >= 0.0 && (at as usize) < options.len()).then_some(at)
         }
+        PanelRow::Colours { colours, .. } => {
+            let at = value.round();
+            (at >= 0.0 && (at as usize) < colours.len()).then_some(at)
+        }
         PanelRow::Button { .. } | PanelRow::Keys { .. } => Some(1.0),
     }
 }
@@ -204,6 +230,7 @@ pub(crate) fn with_value(mut panel: PluginPanel, row: usize, value: f32) -> Plug
         Some(PanelRow::Slider { value: shown, .. }) => *shown = value,
         Some(PanelRow::Switch { on, .. }) => *on = value >= 0.5,
         Some(PanelRow::Choice { chosen, .. }) => *chosen = value as u32,
+        Some(PanelRow::Colours { chosen, .. }) => *chosen = Some(value as u32),
         _ => {}
     }
     panel
@@ -254,6 +281,30 @@ mod tests {
         assert!(one(r#"{ "type": "choice", "label": "C", "options": ["A"], "chosen": 1 }"#).is_none());
         assert!(read_panel(r#"{ "title": "", "rows": [{ "type": "button", "label": "Go" }] }"#).is_none());
         assert!(read_panel("not json").is_none());
+    }
+
+    #[test]
+    fn a_row_of_colours_is_read_and_a_tap_on_one_is_told_as_its_place() {
+        let one = |row: &str| read_panel(&format!(r#"{{ "title": "T", "rows": [{row}] }}"#));
+        let panel =
+            one(r#"{ "type": "colours", "label": "Colour", "colours": [16711680, 255], "chosen": 1 }"#).unwrap();
+        let row = PanelRow::Colours { label: "Colour".into(), colours: vec![0xFF0000, 0x0000FF], chosen: Some(1) };
+        assert_eq!(panel.rows, [row]);
+        // none chosen
+        let none = one(r#"{ "type": "colours", "label": "Colour", "colours": [0] }"#).unwrap();
+        assert!(matches!(none.rows[0], PanelRow::Colours { chosen: None, .. }));
+        // none, more than eight, one that isn't a colour, a choice past them: it doesn't hold up
+        assert!(one(r#"{ "type": "colours", "label": "C", "colours": [] }"#).is_none());
+        let nine = ["1"; 9].join(",");
+        assert!(one(&format!(r#"{{ "type": "colours", "label": "C", "colours": [{nine}] }}"#)).is_none());
+        assert!(one(r#"{ "type": "colours", "label": "C", "colours": [16777216] }"#).is_none());
+        assert!(one(r#"{ "type": "colours", "label": "C", "colours": [-1] }"#).is_none());
+        assert!(one(r#"{ "type": "colours", "label": "C", "colours": [1, 2], "chosen": 2 }"#).is_none());
+        // a tap is its place, and shows chosen at once
+        assert_eq!(touched(&none, 0, 0.0), Some(0.0));
+        assert_eq!(touched(&panel, 0, 1.2), Some(1.0));
+        assert_eq!((touched(&panel, 0, 2.0), touched(&panel, 0, -1.0)), (None, None));
+        assert!(matches!(with_value(none, 0, 0.0).rows[0], PanelRow::Colours { chosen: Some(0), .. }));
     }
 
     #[test]

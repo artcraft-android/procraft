@@ -3747,6 +3747,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn colour_labels_label_a_layer_or_a_group_from_its_options_shown_on_its_row() {
+        const LABELS: &str = "io.github.artcraftandroid.colour-labels";
+        let dir = store("bundled-colour-labels");
+        let plugins = app_at(&dir);
+        let s = crate::CanvasSession::new(10, 10);
+        s.use_plugins(Arc::clone(&plugins));
+        let layer = s.add_layer();
+        let current = || s.layers().into_iter().find(|l| l.current).unwrap();
+        // it comes off: nothing in a layer's options
+        assert!(plugins.actions_in(PluginPlace::Layer).is_empty());
+        assert!(plugins.set_on(LABELS.to_owned(), true));
+        let actions: Vec<String> = plugins.actions_in(PluginPlace::Layer).into_iter().map(|a| a.key).collect();
+        assert_eq!(actions, [format!("{LABELS}.label")]);
+        // Colour label: a panel of its eight colours, none chosen, and No label
+        assert!(plugins.run_action(format!("{LABELS}.label"), Arc::clone(&s)));
+        let panel = plugins.panel().expect("shown");
+        assert_eq!(panel.title, "Colour label");
+        let crate::PanelRow::Colours { colours, chosen, .. } = &panel.rows[0] else { panic!("{:?}", panel.rows) };
+        assert_eq!((colours.len(), *chosen), (8, None));
+        let blue = colours[5];
+        assert_eq!(panel.rows[1], crate::PanelRow::Button { label: "No label".into() });
+        // the sixth labels the layer blue, its row shows it, and the panel closes
+        assert!(!plugins.panel_touched(0, 5.0, Arc::clone(&s)));
+        assert_eq!(plugins.panel(), None);
+        assert_eq!((current().id, current().label), (layer, Some(blue)));
+        // shown again, it shows the layer's label chosen; No label takes it off
+        assert!(plugins.run_action(format!("{LABELS}.label"), Arc::clone(&s)));
+        let panel = plugins.panel().unwrap();
+        assert!(matches!(panel.rows[0], crate::PanelRow::Colours { chosen: Some(5), .. }));
+        assert!(!plugins.panel_touched(1, 1.0, Arc::clone(&s)));
+        assert_eq!(current().label, None);
+        // the other layers have none, and a label stays with the layer while the plugin is off
+        assert!(plugins.run_action(format!("{LABELS}.label"), Arc::clone(&s)));
+        assert!(!plugins.panel_touched(0, 0.0, Arc::clone(&s)));
+        assert!(s.layers().iter().filter(|l| l.id != layer).all(|l| l.label.is_none()));
+        assert!(plugins.set_on(LABELS.to_owned(), false));
+        assert_eq!(current().label, None);
+        assert!(plugins.set_on(LABELS.to_owned(), true));
+        assert_eq!(current().label, Some(colours[0]));
+        // a group too, its row shown so
+        let group = s.group_picked();
+        assert!(group != 0 && s.select_layer(group));
+        assert!(plugins.run_action(format!("{LABELS}.label"), Arc::clone(&s)));
+        assert!(!plugins.panel_touched(0, 3.0, Arc::clone(&s)));
+        let row = s.layers().into_iter().find(|l| l.id == group).unwrap();
+        assert_eq!((row.kind, row.label), (crate::LayerType::Group, Some(colours[3])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     const FINGER_PRESSURE: &str = "io.github.artcraftandroid.finger-pressure";
 
     /// The pressure `hooks` give the last sample of a stroke by `pointer` (0 a finger) moving across

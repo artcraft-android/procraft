@@ -9,6 +9,7 @@
 pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("brush-sounds", include_bytes!("../bundled-plugins/brush-sounds.procraft-plugin")),
     ("colordrop-tools", include_bytes!("../bundled-plugins/colordrop-tools.procraft-plugin")),
+    ("colour-labels", include_bytes!("../bundled-plugins/colour-labels.procraft-plugin")),
     ("colour-triangle", include_bytes!("../bundled-plugins/colour-triangle.procraft-plugin")),
     ("coloured-previews", include_bytes!("../bundled-plugins/coloured-previews.procraft-plugin")),
     ("effects", include_bytes!("../bundled-plugins/effects.procraft-plugin")),

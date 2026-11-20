@@ -126,6 +126,16 @@ impl Hooks {
     /// `start` through each plugin on `hook`, in turn. One that stops is off the hooks there and then,
     /// and what it was handed goes on as it came to it.
     fn through<T: Copy>(&self, hook: Hook, start: T, mut step: impl FnMut(&mut Running, T) -> Result<T, Stop>) -> T {
+        self.through_by_id(hook, start, |_, running, at| step(running, at))
+    }
+
+    /// The same, each step told whose code it is (by its id).
+    fn through_by_id<T: Copy>(
+        &self,
+        hook: Hook,
+        start: T,
+        mut step: impl FnMut(&str, &mut Running, T) -> Result<T, Stop>,
+    ) -> T {
         let mut working = self.working();
         let mut at = start;
         let mut i = 0;
@@ -134,7 +144,7 @@ impl Hooks {
                 i += 1;
                 continue;
             }
-            let answer = step(&mut at_work(&plugin.running), at);
+            let answer = step(&plugin.id, &mut at_work(&plugin.running), at);
             match answer {
                 Ok(to) => {
                     at = to;
@@ -687,6 +697,20 @@ impl Hooks {
         self.through(Hook::BrushPreviewColour, None, |running, said| match said {
             Some(colour) => Ok(Some(colour)),
             None => running.brush_preview_colour(current, chosen),
+        })
+    }
+
+    /// The layer label's hook: the colour (0xRRGGBB) the row of a layer keeping `marks` (by
+    /// plugin id) shows, as the first plugin by id on it that keeps a mark there says; none for none.
+    /// Each is told only its own mark.
+    pub(crate) fn layer_label(&self, marks: &std::collections::BTreeMap<String, i64>) -> Option<u32> {
+        if marks.is_empty() || !self.has(Hook::LayerLabel) {
+            return None;
+        }
+        self.through_by_id(Hook::LayerLabel, None, |id, running, said| match (said, marks.get(id)) {
+            (Some(colour), _) => Ok(Some(colour)),
+            (None, Some(&mark)) if mark != 0 => running.layer_label(mark),
+            _ => Ok(None),
         })
     }
 
@@ -1292,6 +1316,151 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), false));
         assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
         assert_eq!(s.layers().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Its action marks the current layer one more than it was; it labels a row marked 1 red, and
+    /// marked 3 as no colour at all (past 0xFFFFFF).
+    const MARKS: &str = r#"(module
+        (import "procraft" "current_layer" (func $current (result i64)))
+        (import "procraft" "layer_mark" (func $mark (param i64) (result i64)))
+        (import "procraft" "set_layer_mark" (func $set (param i64 i64) (result i32)))
+        (func (export "procraft_action") (param i32) (result i32)
+            (drop (call $set (call $current) (i64.add (call $mark (call $current)) (i64.const 1))))
+            (i32.const 0))
+        (func (export "procraft_layer_label") (param i64) (result i32)
+            (if (result i32) (i64.eq (local.get 0) (i64.const 1))
+                (then (i32.const 0xFF0000))
+                (else (if (result i32) (i64.eq (local.get 0) (i64.const 3))
+                    (then (i32.const 0x1000000))
+                    (else (i32.const -1)))))))"#;
+
+    /// A plugin `id` whose code is [`MARKS`], on.
+    fn layer_marking(dir: &str, id: &str) -> Arc<Plugins> {
+        let module = wat::parse_str(MARKS).unwrap();
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(10);
+        manifest["hooks"] = json!(["layer_label"]);
+        manifest["permissions"] = json!(["artwork.read", "artwork.write"]);
+        manifest["actions"] = json!([{ "key": "mark", "label": "Mark it", "place": "layer" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(id.to_owned(), true));
+        plugins
+    }
+
+    #[test]
+    fn a_plugin_marks_a_layer_its_row_shows_the_label_and_undo_takes_it_back() {
+        let Some(s) = session() else { return };
+        let dir = store("marks");
+        let plugins = layer_marking(&dir, ID);
+        s.use_plugins(Arc::clone(&plugins));
+        let other = s.add_layer();
+        let current = || s.layers().into_iter().find(|l| l.current).unwrap();
+        let (layer, mark) = (current().id, || s.layer_mark(ID, current().id));
+        assert_eq!((current().label, mark()), (None, 0));
+        // marked 1: its row red, the others' none
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (Some(0xFF0000), 1));
+        assert!(s.layers().iter().filter(|l| l.id != layer).all(|l| l.label.is_none()));
+        assert_eq!(layer, other, "the current layer");
+        // marked 2, which it labels with nothing
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (None, 2));
+        // each mark one step undo takes back
+        s.undo();
+        assert_eq!((current().label, mark()), (Some(0xFF0000), 1));
+        s.undo();
+        assert_eq!((current().label, mark()), (None, 0));
+        s.redo();
+        // only its own: another plugin's mark there is none
+        assert_eq!(s.layer_mark("org.example.other", layer), 0);
+        // off, no label, the mark kept as it was; on again, the label back
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!((current().label, mark()), (None, 1));
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(current().label, Some(0xFF0000));
+        // a label that is no colour stops it
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (None, 3));
+        assert!(!card(&plugins).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_plugin_is_told_its_own_mark_the_first_by_id_with_a_label_showing() {
+        let hooks = Hooks::default();
+        let labels = |hooks: &Hooks, marks: &[(&str, i64)]| {
+            hooks.layer_label(&marks.iter().map(|(id, mark)| ((*id).to_owned(), *mark)).collect())
+        };
+        // none on: no label, whatever is marked
+        assert_eq!(labels(&hooks, &[("a", 1)]), None);
+        // [`MARKS`]'s label alone: a hook's copy of its code reaches none of the app's functions
+        let labels_only = r#"(module
+            (func (export "procraft_layer_label") (param i64) (result i32)
+                (if (result i32) (i64.eq (local.get 0) (i64.const 1))
+                    (then (i32.const 0xFF0000))
+                    (else (i32.const -1)))))"#;
+        for id in ["a", "b"] {
+            let running = Running::start(&wat::parse_str(labels_only).unwrap(), &[]).unwrap();
+            hooks.put_on(id.to_owned(), running, &[Hook::LayerLabel]);
+        }
+        // a's mark alone, b's alone, b's past a's that shows nothing, a mark of a plugin not on
+        assert_eq!(labels(&hooks, &[("a", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("b", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("a", 2), ("b", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("c", 1)]), None);
+        assert_eq!(labels(&hooks, &[]), None);
+        // a mark of 0 is none, and its plugin isn't asked (one asked with it would answer garbage)
+        assert_eq!(labels(&hooks, &[("a", 0)]), None);
+        assert!(hooks.take_stopped().is_empty());
+        // asked for each marked layer as the Layers panel is drawn: quick
+        let marks: std::collections::BTreeMap<String, i64> = [("b".to_owned(), 1)].into();
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            assert_eq!(hooks.layer_label(std::hint::black_box(&marks)), Some(0xFF0000));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("a layer's label asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+    }
+
+    /// What the Layers panel's list costs with every layer labelled, and with none on the hook:
+    /// printed, and failing past 2 ms for 200 layers (the desktop lists them each frame it shows).
+    #[test]
+    fn the_layers_list_with_every_layer_labelled_stays_quick() {
+        let s = CanvasSession::new(64, 64);
+        let dir = store("marks-cost");
+        let plugins = layer_marking(&dir, ID);
+        {
+            let mut st = s.shared.lock();
+            for _ in 1..200 {
+                st.doc.add_layer();
+            }
+            let ids: Vec<_> = st.doc.layers().iter().map(|l| l.id).collect();
+            for id in ids {
+                assert!(st.doc.set_mark(id, ID, 1));
+            }
+        }
+        let listed = |s: &CanvasSession| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..10 {
+                        std::hint::black_box(s.layers());
+                    }
+                    t.elapsed() / 10
+                })
+                .min()
+                .unwrap_or_default()
+        };
+        let bare = listed(&s);
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(s.layers().iter().all(|l| l.label == Some(0xFF0000)));
+        let labelled = listed(&s);
+        println!("200 layers listed in {bare:?} with no labels, {labelled:?} each labelled");
+        assert!(labelled < std::time::Duration::from_millis(2), "{labelled:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3198,6 +3367,7 @@ pub(crate) mod tests {
         "reference_windows",
         "pressure",
         "brush_preview_colour",
+        "layer_label",
     ];
 
     /// Every hook, `Layers` and `Brushes` too.
@@ -3217,17 +3387,17 @@ pub(crate) mod tests {
         }
         assert_eq!(all.count_ones() as usize, every.len());
         // the set as the app holds it: each hook found by its bit, past the 32nd as before it
-        assert_eq!(every.len(), 33, "a new hook goes in the list");
-        assert_eq!(all, (1 << 33) - 1, "the first 33 bits: the 32 the set held before it grew, and one past");
+        assert_eq!(every.len(), 34, "a new hook goes in the list");
+        assert_eq!(all, (1 << 34) - 1, "the first 34 bits: the 32 the set held before it grew, and two past");
         let hooks = Hooks::default();
         let module = wat::parse_str(PRESSES).unwrap();
         hooks.put_on("a".to_owned(), Running::start(&module, &[]).unwrap(), &every);
         assert_eq!(hooks.hooked.load(Ordering::Relaxed), all);
         assert!(every.iter().all(|&hook| hooks.has(hook)));
-        // the bit a 34th hook to 64th would take sits in the set the same
-        hooks.hooked.store(all | 1 << 33 | 1 << 63, Ordering::Relaxed);
+        // the bit a 35th hook to 64th would take sits in the set the same
+        hooks.hooked.store(all | 1 << 34 | 1 << 63, Ordering::Relaxed);
         assert!(every.iter().all(|&hook| hooks.has(hook)));
-        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 35);
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 36);
         hooks.take_off("a");
         assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
         assert!(!every.iter().any(|&hook| hooks.has(hook)));
