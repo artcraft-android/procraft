@@ -349,6 +349,7 @@ impl CanvasSession {
         }
         st.note_choice((set, index));
         warm_pictures([st.brush(st.tool)]);
+        st.warm_sharper();
         true
     }
 
