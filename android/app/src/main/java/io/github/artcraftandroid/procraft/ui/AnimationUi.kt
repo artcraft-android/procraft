@@ -344,9 +344,10 @@ private fun ColumnScope.OnionColorsPage(vm: CanvasViewModel, onBack: () -> Unit)
     var mode by remember { mutableStateOf(io.github.artcraftandroid.procraft.canvas.ColorMode.DISC) }
     val rgbOf = { v: List<Float> -> v.take(3).fold(0) { acc, x -> (acc shl 8) or (x.coerceIn(0f, 1f) * 255f).roundToInt() } }
     val unit = { rgb: Int -> listOf((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF).map { it / 255f } }
-    val c = remember(after) {
-        HeldColor(rgbOf(if (after) a.after else a.before), greyHue = 0f) { rgb -> vm.changeAnimation { if (after) it.copy(after = unit(rgb)) else it.copy(before = unit(rgb)) } }
-    }
+    // where the picker's changes go: the frames before the current one, or (second) after it
+    val into = { second: Boolean -> { rgb: Int -> vm.changeAnimation { if (second) it.copy(after = unit(rgb)) else it.copy(before = unit(rgb)) } } }
+    // one picker for both, editing the swatch tapped
+    val c = remember { HeldColor(rgbOf(a.before), greyHue = 0f, into(false)) }
     // the back button at the panel's very edge
     Row(Modifier.offset(x = (-8).dp).fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(44.dp, 34.dp).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
@@ -365,7 +366,10 @@ private fun ColumnScope.OnionColorsPage(vm: CanvasViewModel, onBack: () -> Unit)
         for ((i, v) in listOf(a.before, a.after).withIndex()) {
             Box(
                 Modifier.size(44.dp, 26.dp).clip(RoundedCornerShape(7.dp)).background(SwatchRim).padding(1.dp)
-                    .clip(RoundedCornerShape(6.dp)).background(Color(0xFF000000.toInt() or rgbOf(v))).clickable { after = i == 1 },
+                    .clip(RoundedCornerShape(6.dp)).background(Color(0xFF000000.toInt() or rgbOf(v))).clickable {
+                        after = i == 1
+                        c.edit(rgbOf(v), into(after))
+                    },
             )
         }
     }

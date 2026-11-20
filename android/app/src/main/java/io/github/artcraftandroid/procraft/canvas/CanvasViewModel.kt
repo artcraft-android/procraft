@@ -654,7 +654,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         @Suppress("SENSELESS_COMPARISON")
         if (strokeSound == null) return
         strokeSoundOn = plugins.makesStrokeSound()
-        strokeSound.follow(session?.takeIf { inFront && screen == Screen.CANVAS }, strokeSoundOn)
+        strokeSound.follow(strokeSoundHeard(session, inFront, screen == Screen.CANVAS), strokeSoundOn)
     }
 
     /** The app came to the front ([front]) or went behind: everything that runs by itself follows. */
@@ -3280,7 +3280,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyFitInsets()
         attachProjection()
         activeSince = android.os.SystemClock.elapsedRealtime()
-        followStrokeSound()
         thumbnails.clear()
         thumbnailVersions.clear()
         previews.clear()
@@ -3302,6 +3301,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readLibraries()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
+        // with the canvas shown (before, the sound had no canvas to follow and stayed off until
+        // the plugins next changed)
+        followStrokeSound()
         // a new artwork exists in the gallery from the start (an opened one is there already)
         if (!File(dir, "artwork.json").exists()) viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
         // kept saved by the core, a few seconds after it changes, once nothing is under way that

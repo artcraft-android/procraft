@@ -182,9 +182,10 @@ internal class BrushColor(private val vm: CanvasViewModel) : ColorPick {
 
 /**
  * A colour of its own, starting at [rgb]; [onChange] hears every change. Greys keep their hue, and
- * a grey opens at [greyHue] (180 degrees, as measured; some pickers open at 0).
+ * a grey opens at [greyHue] (180 degrees, as measured; some pickers open at 0). One picker can edit
+ * several colours in turn ([edit]).
  */
-class HeldColor(rgb: Int, greyHue: Float = 0.5f, private val onChange: (Int) -> Unit) : ColorPick {
+class HeldColor(rgb: Int, greyHue: Float = 0.5f, private var onChange: (Int) -> Unit) : ColorPick {
     override var hue by mutableFloatStateOf(greyHue)
         private set
     override var saturation by mutableFloatStateOf(0f)
@@ -197,14 +198,22 @@ class HeldColor(rgb: Int, greyHue: Float = 0.5f, private val onChange: (Int) -> 
     }
 
     private fun take(rgb: Int) {
-        val hsv = FloatArray(3)
-        android.graphics.Color.RGBToHSV((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF, hsv)
-        if (hsv[1] > 0f) hue = hsv[0] / 360f
+        val hsv = rgbToHsv(rgb)
+        if (hsv[1] > 0f) hue = hsv[0]
         saturation = hsv[1]
         brightness = hsv[2]
     }
 
-    override fun rgb() = CanvasViewModel.hsvToRgb(hue, saturation, brightness)
+    /**
+     * From now on the picker edits [rgb], and [onChange] hears its changes: the same picker for
+     * another colour (a grey keeps the hue shown).
+     */
+    fun edit(rgb: Int, onChange: (Int) -> Unit) {
+        this.onChange = onChange
+        take(rgb)
+    }
+
+    override fun rgb() = hsvToRgb(hue, saturation, brightness)
 
     override fun setHsv(h: Float, s: Float, v: Float) {
         hue = h.coerceIn(0f, 1f)
@@ -864,6 +873,9 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false,
     val hue by rememberUpdatedState(c.hue)
     val sat by rememberUpdatedState(c.saturation)
     val bri by rememberUpdatedState(c.brightness)
+    // the colour a touch sets: the one passed now (another may come in mid-way, as the onion
+    // skins' second colour does)
+    val pick by rememberUpdatedState(c)
     val density = LocalDensity.current
     // compact, the whole picker is 240 across instead of 364
     val k = if (compact) 240f / 364f else 1f
@@ -896,14 +908,14 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false,
                         val d = p - centre
                         if (onRing) {
                             val turn = (atan2(-d.y, d.x) / (2f * PI.toFloat()) + 1f) % 1f
-                            c.setHsv(hueAt(HueControl.RING, turn), sat, bri)
+                            pick.setHsv(hueAt(HueControl.RING, turn), sat, bri)
                         } else {
                             val r = discRadius.toPx()
                             var uv = Offset(d.x / r, d.y / r)
                             val len = uv.getDistance()
                             if (len > 1f) uv = Offset(uv.x / len, uv.y / len)
                             val sq = discToSquare(uv.x, uv.y)
-                            c.setHsv(hue, (sq.x + 1f) / 2f, (1f - sq.y) / 2f)
+                            pick.setHsv(hue, (sq.x + 1f) / 2f, (1f - sq.y) / 2f)
                         }
                     }
                     send(down.position)
@@ -1063,6 +1075,7 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
         return
     }
     val hue by rememberUpdatedState(c.hue)
+    val pick by rememberUpdatedState(c)
     val pure = hsvColor(c.hue, 1f, 1f)
     val current = rgbColor(c.rgb())
     Box(
@@ -1074,7 +1087,7 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
     ) {
         Box(
             Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
-                .pointerInput(Unit) { track { x, y -> c.setHsv(hue, x, 1f - y) } }
+                .pointerInput(Unit) { track { x, y -> pick.setHsv(hue, x, 1f - y) } }
                 .drawBehind {
                     drawRect(Brush.horizontalGradient(oneSpace(listOf(Color.White, pure))))
                     drawRect(Brush.verticalGradient(listOf(Color.Transparent, Color.Black)))
@@ -1094,6 +1107,7 @@ private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
     val hue by rememberUpdatedState(c.hue)
     val saturation by rememberUpdatedState(c.saturation)
     val brightness by rememberUpdatedState(c.brightness)
+    val pick by rememberUpdatedState(c)
     val picker by rememberUpdatedState(Pc.picker)
     val current = rgbColor(c.rgb())
     val box = if (compact) 248.dp else 344.dp
@@ -1117,12 +1131,12 @@ private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
                         fun send(p: Offset) {
                             val at = share(p)
                             if (onRing) {
-                                picker?.hue?.invoke(at.x, at.y)?.let { c.setHsv(it, saturation, brightness) }
+                                picker?.hue?.invoke(at.x, at.y)?.let { pick.setHsv(it, saturation, brightness) }
                                 return
                             }
                             val (x, y) = at.x.coerceIn(0f, 1f) to at.y.coerceIn(0f, 1f)
                             val sv = picker?.pick?.invoke(x, y) ?: io.github.artcraftandroid.procraft.core.triangleSv(x, y)
-                            c.setHsv(hue, sv[0], sv[1])
+                            pick.setHsv(hue, sv[0], sv[1])
                         }
                         send(down.position)
                         while (true) {
@@ -1270,9 +1284,10 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
     val worked = remember(rgb) { rgbToP3Hsv(rgb) }
     val hsv = held?.takeIf { it.first == rgb }?.second ?: worked
     val state by rememberUpdatedState(hsv)
+    val pick by rememberUpdatedState(c)
     fun set(h: Float, s: Float, v: Float) {
-        c.setRgb(p3HsvToRgb(h, s, v))
-        held = c.rgb() to floatArrayOf(h, s, v)
+        pick.setRgb(p3HsvToRgb(h, s, v))
+        held = pick.rgb() to floatArrayOf(h, s, v)
     }
     val density = LocalDensity.current
     // compact, the wheel is 200 across instead of 298; short, 296

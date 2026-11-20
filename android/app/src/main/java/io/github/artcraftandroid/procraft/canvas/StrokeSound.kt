@@ -6,6 +6,9 @@ import android.media.AudioTrack
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import kotlin.concurrent.withLock
 
+/** The artwork whose strokes are heard: [session], while the app is [inFront] and [onCanvas] shows it; else none. */
+internal fun <S : Any> strokeSoundHeard(session: S?, inFront: Boolean, onCanvas: Boolean): S? = session?.takeIf { inFront && onCanvas }
+
 /**
  * Brush sounds (a plugin's): plays the sound the core makes of the stroke being drawn, a little at a
  * time on a thread of its own, while [follow] says so. Silent for half a second (no stroke), the
