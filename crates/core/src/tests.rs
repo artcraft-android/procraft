@@ -778,7 +778,7 @@ fn stroke_cost() {
 }
 
 /// What a second of pen stroke costs a frame, for the heavy kinds of brush (dual, wet, wet and
-/// dual, smudge, big textured) on a canvas painted on (`FRAME_BOUND_SIDE`, 2048 square): a 240 Hz
+/// dual, smudge, big textured, a big wet dual brush at its full size) on a canvas painted on (`FRAME_BOUND_SIDE`, 2048 square): a 240 Hz
 /// pen at 120 frames a second, each frame its two events, its render and the GPU done with it (as
 /// waited for: what the frame takes end to end), and how an event's cost late in a long stroke
 /// (`FRAME_BOUND_EVENTS`, 1600 events) compares with its first. Bounds: a frame's 95th percentile
@@ -851,7 +851,7 @@ fn a_second_of_stroke_keeps_to_its_frames() {
     s.set_color(0.8, 0.2, 0.1);
     let brushes = env(
         "FRAME_BOUND_BRUSHES",
-        "Dunlin,Lestrade,Aberdeen,Gouache,Oil Paint,smudge:Oil Paint,Merlin,Soft Airbrush@1,Studio Pen@1",
+        "Dunlin,Lestrade,Aberdeen,Gouache,Oil Paint,smudge:Oil Paint,Merlin,Soft Airbrush@1,Studio Pen@1,Shorewalker@1,Shorewalker",
     );
     let mut failures = Vec::new();
     for entry in brushes.split(',') {
@@ -19900,4 +19900,389 @@ fn the_autosave_does_nothing_while_nothing_changes() {
     assert!(unsaved && saved_after, "saved once shown again");
     assert!(held.autosave_looks <= 12, "a few looks with a stroke held, not one every 5 ms: {held:?}");
     assert!(saved_ended, "saved once the stroke ended");
+}
+
+/// A stroke painting in place whose end taper reaches back over what it has laid goes back to a mark
+/// before what changed and lays only from there (laid again from its start, a long stroke's end held
+/// a slow GPU for a second or more): it ends as laid again from its start, pixel for pixel (wet paint
+/// with a second and without, dry paint laid in place, each given an end taper), laying a small part
+/// of what that lays.
+#[test]
+fn paint_laid_in_place_laid_again_as_it_ends_goes_back_to_a_mark_and_ends_as_laid_from_its_start() {
+    let side = 512;
+    let point = |k: usize| PenSample {
+        pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
+        tilt: 0.4,
+        orientation: 0.8,
+        ..sample(30.0 + k as f32 * 1.8, 256.0 + (k as f32 * 0.03).sin() * 150.0, k as f64 * 4.17)
+    };
+    for (name, size) in [("Lundy", 0.3), ("Kingsley", 0.3), ("Petrel", 0.3)] {
+        // the layer, and the dispatches at the end, the marks made, those gone back to and their bytes
+        let ended = |rewinds: bool| -> Option<(Vec<u8>, [u64; 4])> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name)?;
+            assert!(s.select_brush(set, index));
+            // an end taper and none at the start (whose reach, known only once the stroke is under
+            // way, changes the stamps of its start as it ends: those strokes are laid again whole)
+            s.studio_begin();
+            s.set_studio_setting("pen_taper_start".to_owned(), 0.0);
+            s.set_studio_setting("pen_taper_end".to_owned(), 0.6);
+            s.studio_end(true);
+            s.set_brush_size(size);
+            s.set_color(0.1, 0.3, 0.7);
+            s.shared.lock().canvas.as_mut()?.set_rewinds(rewinds, None);
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=120 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    picture(&s);
+                }
+            }
+            picture(&s);
+            let (before, bytes) = {
+                let st = s.shared.lock();
+                let canvas = st.canvas.as_ref()?;
+                (canvas.compute_dispatches(), canvas.rewinds_made().2)
+            };
+            s.stroke_end(vec![point(241)]);
+            picture(&s);
+            let canvas_end = {
+                let st = s.shared.lock();
+                let canvas = st.canvas.as_ref()?;
+                (canvas.compute_dispatches() - before, canvas.rewinds_made())
+            };
+            let (made, rewound, _) = canvas_end.1;
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some((layer_rgba(&s, current), [canvas_end.0, made, rewound, bytes]))
+        };
+        let (Some((whole, [sent_whole, ..])), Some((back, [sent_back, made, rewound, bytes]))) =
+            (ended(false), ended(true))
+        else {
+            continue;
+        };
+        println!(
+            "{name}: {sent_back} dispatches at the end going back ({rewound} of {made} marks), {sent_whole} laid again whole; marks {:.1} MB",
+            bytes as f64 / 1048576.0
+        );
+        assert_eq!(differ(&whole, &back), (0, 0), "{name}: going back ends unlike laying it all again");
+        assert!(rewound == 1, "{name}: went back {rewound} times");
+        assert!(
+            sent_back * 3 < sent_whole,
+            "{name}: {sent_back} dispatches at its end, against {sent_whole} laid again whole"
+        );
+    }
+}
+
+/// A stroke painting in place whose marks can't all be kept (past the most bytes they may take) is
+/// laid again from its start as it ends, or from a mark it still has: either way as laid whole.
+#[test]
+fn paint_laid_in_place_with_little_room_for_marks_ends_as_laid_from_its_start() {
+    let side = 512;
+    let point = |k: usize| PenSample {
+        pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
+        ..sample(30.0 + k as f32 * 1.8, 256.0 + (k as f32 * 0.03).sin() * 150.0, k as f64 * 4.17)
+    };
+    for most in [Some(0), Some(3 << 20)] {
+        let ended = |rewinds: bool| -> Option<Vec<u8>> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == "Kingsley")?;
+            assert!(s.select_brush(set, index));
+            s.studio_begin();
+            s.set_studio_setting("pen_taper_start".to_owned(), 0.0);
+            s.set_studio_setting("pen_taper_end".to_owned(), 0.6);
+            s.studio_end(true);
+            s.set_brush_size(0.3);
+            s.shared.lock().canvas.as_mut()?.set_rewinds(rewinds, most);
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=80 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    picture(&s);
+                }
+            }
+            s.stroke_end(vec![point(161)]);
+            picture(&s);
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some(layer_rgba(&s, current))
+        };
+        let (Some(whole), Some(back)) = (ended(false), ended(true)) else { return };
+        assert_eq!(differ(&whole, &back), (0, 0), "with room for {most:?} bytes of marks");
+    }
+}
+
+/// A fast scribble of a big wet brush (Shorewalker at its full size: wet paint with a second) for
+/// `STRESS_SECONDS` seconds (3), pen events every 4.17 ms, the canvas drawn on its own thread as the
+/// apps draw it (each frame's GPU work waited for before the next, as a window's images are): the
+/// pen never waits for a frame, no frame's GPU work grows past a bound that keeps a tablet's GPU out
+/// of a timeout (however far its stroke falls behind the pen), what the canvas holds on the GPU
+/// stays bounded, and the stroke is all laid soon after the lift. `STRESS_SPEED` (canvas pixels a
+/// second, 4000) makes it faster. Prints the numbers; `WGPU_BACKEND=gl` runs it on OpenGL. Run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn a_fast_scribble_of_a_big_wet_brush_keeps_its_frames_and_memory_bounded() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let env = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (seconds, speed) = (env("STRESS_SECONDS", 3.0), env("STRESS_SPEED", 4000.0) as f32);
+    let (side, height) = (2048u32, 1600u32);
+    let Some(s) = session(side, height) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Shorewalker") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(1.0);
+    s.set_color(0.2, 0.4, 0.8);
+    // (`STRESS_UNPACED`: paint laid in place all laid in each frame, as it was)
+    if std::env::var("STRESS_UNPACED").is_ok() {
+        s.shared.lock().canvas.as_mut().unwrap().set_in_place_paced(false);
+    }
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    // frames: how long each held the canvas, and each end to end with its GPU work; and the most the
+    // canvas held on the GPU
+    let frames = {
+        let (s, stop) = (s.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let gpu = s.shared.lock().gpu.clone().unwrap();
+            let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+            let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+                label: Some("window"),
+                size: procraft_gpu::wgpu::Extent3d { width: side, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: procraft_gpu::wgpu::TextureDimension::D2,
+                format,
+                usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let (mut held, mut whole, mut most_bytes) = (Vec::new(), Vec::new(), 0u64);
+            while !stop.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                s.draw(&view, format, (side, height), procraft_engine::profile::Profile::Srgb, started);
+                held.push(started.elapsed());
+                gpu.flush();
+                whole.push(started.elapsed());
+                let bytes = s.shared.lock().canvas.as_ref().map_or(0, procraft_gpu::Canvas::texture_bytes);
+                most_bytes = most_bytes.max(bytes);
+                std::thread::sleep(Duration::from_millis(8).saturating_sub(started.elapsed()));
+            }
+            (held, whole, most_bytes)
+        })
+    };
+    // a zigzag across the canvas and back, `speed` pixels a second, pressed unevenly
+    let events = (seconds * 240.0) as usize;
+    let at = |k: usize| {
+        let t = k as f32 * 4.17 / 1000.0 / 2.0;
+        let along = (t * speed) % (2.0 * 1700.0);
+        let x = 150.0 + if along < 1700.0 { along } else { 3400.0 - along };
+        PenSample {
+            pressure: 0.4 + 0.5 * (t * 9.0).sin().abs(),
+            tilt: 0.4,
+            orientation: 0.8,
+            ..sample(x, 800.0 + (t * 11.0).sin() * 600.0, k as f64 * 4.17 / 2.0)
+        }
+    };
+    let begun = Instant::now();
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    let mut adds = Vec::with_capacity(events);
+    for e in 1..=events {
+        let t = Instant::now();
+        s.stroke_add(vec![at(2 * e - 1), at(2 * e)]);
+        adds.push(t.elapsed());
+        let due = begun + Duration::from_secs_f64(e as f64 * 4.17 / 1000.0);
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    let lifted = Instant::now();
+    s.stroke_end(vec![]);
+    let lift = lifted.elapsed();
+    // laid to its end: a frame drawn since the lift with nothing left to lay
+    let drawn = s.shared.lock().frames;
+    loop {
+        {
+            let st = s.shared.lock();
+            let busy = st.canvas.as_ref().is_some_and(|c| c.wants_render() || c.changes_queued());
+            if st.frames > drawn + 1 && !busy {
+                break;
+            }
+        }
+        assert!(lifted.elapsed() < Duration::from_secs(60), "laid in time");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let laid = lifted.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    let (mut held, mut whole, most_bytes) = frames.join().unwrap();
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let top = |v: &mut Vec<Duration>| {
+        v.sort();
+        (
+            v.get(v.len() / 2).copied().unwrap_or_default(),
+            v.get(v.len() * 99 / 100).copied().unwrap_or_default(),
+            v.last().copied().unwrap_or_default(),
+        )
+    };
+    let (add_mid, add_99, add_most) = top(&mut adds);
+    let (held_mid, held_99, held_most) = top(&mut held);
+    let (whole_mid, whole_99, whole_most) = top(&mut whole);
+    let backend =
+        s.shared.lock().gpu.as_ref().map(|g| format!("{:?}", g.adapter.get_info().backend)).unwrap_or_default();
+    println!(
+        "{backend}: {seconds} s at {speed} px/s: pen event {:.2}/{:.2}/{:.2} ms (middle/99th/most); frame held the canvas {:.1}/{:.1}/{:.1} ms, \
+         end to end {:.1}/{:.1}/{:.1} ms over {} frames; lift {:.1} ms, all laid {:.0} ms after; most on the GPU {:.0} MB",
+        ms(add_mid),
+        ms(add_99),
+        ms(add_most),
+        ms(held_mid),
+        ms(held_99),
+        ms(held_most),
+        ms(whole_mid),
+        ms(whole_99),
+        ms(whole_most),
+        whole.len(),
+        ms(lift),
+        ms(laid),
+        most_bytes as f64 / 1048576.0
+    );
+    assert_eq!(errors, 0, "GPU errors");
+    // bounds a tablet keeps to: the pen waits on nothing (its events within a 240 Hz pen's interval,
+    // at the 99th), no frame's GPU work near a GPU's timeout (a quarter of a second, against two
+    // seconds), the stroke all laid within two seconds of the lift, and the canvas within 640 MB
+    let failures: Vec<String> = [
+        (add_99 > Duration::from_micros(4170)).then(|| format!("pen events {:.2} ms at the 99th", ms(add_99))),
+        (whole_most > Duration::from_millis(250)).then(|| format!("a frame {:.0} ms end to end", ms(whole_most))),
+        (laid > Duration::from_secs(2)).then(|| format!("laid {:.0} ms after the lift", ms(laid))),
+        (most_bytes > 640 << 20).then(|| format!("{} MB on the GPU", most_bytes >> 20)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// A dual brush's second laid by its rule (building up gradually) with paint laid in place ends
+/// laying only what follows the stamps it has laid, not all of it again (laid whole again, it was
+/// put together with the paint over the whole stroke: a slow GPU held the canvas for a second or
+/// more after a big wet brush's lift). Its lots' rounding leaves the stroke within a level of laid
+/// whole, in few pixels; and its end lays a small part of what laying it whole did.
+#[test]
+fn a_wet_brushs_second_ends_laying_only_its_rest_within_a_level_of_laid_whole() {
+    let side = 512;
+    let point = |k: usize| PenSample {
+        pressure: 0.3 + 0.6 * (k as f32 * 0.05).sin().abs(),
+        tilt: 0.4,
+        orientation: 0.8,
+        ..sample(40.0 + k as f32 * 1.7, 256.0 + (k as f32 * 0.04).sin() * 140.0, k as f64 * 4.17)
+    };
+    for (name, size) in [("Shorewalker", 1.0), ("Shorewalker", 0.4), ("Lestrade", 0.4)] {
+        let ended = |whole: bool| -> Option<(Vec<u8>, u64)> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name)?;
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(size);
+            s.set_color(0.7, 0.3, 0.1);
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=120 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    picture(&s);
+                }
+            }
+            picture(&s);
+            let before = s.shared.lock().canvas.as_ref()?.stamps_queued();
+            if whole {
+                // as before: the second laid whole again, the rest of the stroke as it ends now
+                let mut guard = s.shared.lock();
+                let st = &mut *guard;
+                let (mut builder, canvas) = (st.stroke.take()?, st.canvas.as_mut()?);
+                if let Some(mut second) = st.second.take() {
+                    canvas.lay_ends_whole(true);
+                    canvas.replace_second_stamps(&second.finish());
+                    canvas.lay_ends_whole(false);
+                }
+                match canvas.laid_count().and_then(|n| builder.finish_after(n)) {
+                    Some(rest) => canvas.end_with(&rest),
+                    None => canvas.replace_stamps(&builder.finish()),
+                }
+                canvas.end_stroke();
+            } else {
+                s.stroke_end(vec![]);
+            }
+            picture(&s);
+            let sent = s.shared.lock().canvas.as_ref()?.stamps_queued() - before;
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some((layer_rgba(&s, current), sent))
+        };
+        let (Some((whole, sent_whole)), Some((rest, sent_rest))) = (ended(true), ended(false)) else { continue };
+        let (most, count) = differ(&whole, &rest);
+        println!(
+            "{name}@{size}: {count} of {} channels differ, by {most} at most; {sent_rest} stamps laid at the end, against {sent_whole}",
+            whole.len()
+        );
+        assert!(most <= 1 && count * 50 <= whole.len(), "{name}@{size}: {count} channels differ, by {most} at most");
+        assert!(
+            sent_rest * 4 < sent_whole,
+            "{name}@{size}: {sent_rest} stamps laid at its end, against {sent_whole} laid whole"
+        );
+    }
+}
+
+/// Pen input that comes while something holds the canvas (a frame laying a big wet stroke, which on
+/// a slow GPU takes a while) doesn't wait for it: it waits in a queue of its own, taken all together
+/// by the next input or the next frame (a prediction meanwhile keeping only the newest), and the
+/// stroke comes out as drawn with the canvas free.
+#[test]
+fn pen_input_never_waits_for_a_frame_holding_the_canvas() {
+    use std::time::{Duration, Instant};
+    let side = 256;
+    let point = |k: usize| PenSample {
+        pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
+        ..sample(20.0 + k as f32 * 1.6, 128.0 + (k as f32 * 0.05).sin() * 60.0, k as f64 * 4.17)
+    };
+    let drawn = |held: bool| -> Option<(Vec<u8>, Duration)> {
+        let s = session(side, side)?;
+        let (texture, gpu) = frame_target(&s, side);
+        let (set, index) = library_brush(&s, |b| b.name == "Lundy")?;
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(0.3);
+        s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+        let mut longest = Duration::ZERO;
+        for e in 1..=60 {
+            // now and then a frame holds the canvas for a tenth of a second: two events come meanwhile
+            let holder = (held && e % 10 == 0).then(|| {
+                let (s, (tx, rx)) = (s.clone(), std::sync::mpsc::channel());
+                let holding = std::thread::spawn(move || {
+                    let _canvas = s.shared.lock();
+                    let _ = tx.send(());
+                    std::thread::sleep(Duration::from_millis(100));
+                });
+                let _ = rx.recv();
+                holding
+            });
+            let t = Instant::now();
+            s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+            if holder.is_some() {
+                s.stroke_predict(vec![point(2 * e + 1)]);
+                s.stroke_predict(vec![point(2 * e + 2)]);
+            }
+            longest = longest.max(t.elapsed());
+            if let Some(holding) = holder {
+                assert!(s.shared.input_waiting(), "the samples wait for the canvas");
+                holding.join().ok()?;
+                // taken by the next frame (every other time) or the next input
+                if e % 20 == 0 {
+                    framed(&s, &texture, &gpu, side);
+                    assert!(!s.shared.input_waiting(), "the frame took the samples waiting");
+                }
+            }
+            if e % 2 == 0 {
+                picture(&s);
+            }
+        }
+        s.stroke_end(vec![point(121)]);
+        picture(&s);
+        let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        Some((layer_rgba(&s, current), longest))
+    };
+    let (Some((free, _)), Some((held, longest))) = (drawn(false), drawn(true)) else { return };
+    assert!(longest < Duration::from_millis(30), "an event waited {longest:?} for the canvas");
+    assert_eq!(differ(&free, &held), (0, 0), "drawn as with the canvas free");
 }

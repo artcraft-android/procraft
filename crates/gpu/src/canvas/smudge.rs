@@ -18,8 +18,10 @@ use super::{
 };
 use crate::Gpu;
 
-/// The side of the tiles a smudge stroke keeps (pixels).
-pub(super) const TILE: u32 = 256;
+/// The side of the tiles a smudge stroke keeps (pixels). Each window copies each tile it covers in
+/// and out, a copy at a time, and on OpenGL each copy costs the CPU a good deal: with tiles half as
+/// wide, a big wet brush's frame took three times the copies (and a third more time).
+pub(super) const TILE: u32 = 512;
 
 /// Where a copy from a texture may put its rows in a window's buffer: at a multiple of this many
 /// bytes. Direct3D 12 without unrestricted copy pitches (on Windows 10, and with older drivers, as
@@ -489,13 +491,18 @@ impl Canvas {
     ) {
         self.ready_asides(&gpu.device, pieces);
         let together = self.smudge_most.min(TOGETHER_MOST);
+        let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
         let mut from = 0;
         while let Some(first) = pieces.get(from) {
             let mut reach = first.reach;
             let mut to = from + 1;
             while let Some(next) = pieces.get(to) {
                 let both = reach.union(next.reach);
-                if !self.window_fits(both, together) {
+                // together while small, or (a big brush's pass, and its paint put together after)
+                // where one window over both copies no more than one over each would: each window
+                // copies the layer and every tile it keeps in and out, a copy at a time
+                let overlapping = area(both) <= area(reach) + area(next.reach) && self.fits_window(both);
+                if !self.window_fits(both, together) && !overlapping {
                     break;
                 }
                 reach = both;
@@ -731,6 +738,8 @@ impl Canvas {
         writes: &[IRect],
     ) -> bool {
         let device = &gpu.device;
+        // what the passes write, as it is before them, for the stroke's mark to go back to
+        self.keep_for_mark(device, encoder, writes);
         let full = self.full();
         let also = self.smudge_also();
         let room = self.smudge_room;
@@ -1147,6 +1156,7 @@ impl super::Smudge {
             .chain(self.window.as_ref().map(|w| &w.before))
             .chain(self.passed.as_ref().map(|p| &p.0))
             .chain(fragments)
+            .chain(self.rewind.iter().flat_map(super::rewind::Rewind::textures))
             .collect()
     }
 }
@@ -1172,7 +1182,8 @@ mod tests {
         assert_eq!(read_reach(Vec2::new(-40.0, 70.0), Vec2::new(-30.0, 80.0), full), IRect::new(0, 49, 1, 50));
         assert_eq!(read_reach(Vec2::new(f32::NAN, 0.0), Vec2::new(1.0, 1.0), full), full);
         // the tiles a rect touches
-        let tiles: Vec<_> = tiles_of(IRect::new(250, 10, 260, 600)).collect();
+        let t = TILE as i32;
+        let tiles: Vec<_> = tiles_of(IRect::new(t - 6, 10, t + 4, 2 * t + 88)).collect();
         assert_eq!(tiles, [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]);
         assert_eq!(tiles_of(IRect::EMPTY).count(), 0);
         assert_eq!(part(0, 0, 255, 255), WHOLE);
@@ -1195,7 +1206,8 @@ mod tests {
             extent(TILE, TILE),
         );
         // a window from a column copies can't start at, over the second tile's first rows
-        let reach = IRect::new(100, 0, 400, 20);
+        let t = TILE as i32;
+        let reach = IRect::new(t - 156, 0, t + 144, 20);
         let row = row_bytes(reach.width());
         let bytes = u64::from(row) * u64::from(reach.height());
         let window = window_buffer(device, "window", bytes);

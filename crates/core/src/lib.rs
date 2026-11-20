@@ -1526,6 +1526,19 @@ pub(crate) struct Shared {
     /// Changes told to the autosave, which waits for one (shared with its thread, which mustn't
     /// keep the rest alive).
     pub(crate) nudge: Arc<activity::Nudge>,
+    /// Pen input that came while something held the canvas (a frame laying a stroke's paint), and
+    /// whether there is any: taken by the next frame or the next input, never waited for (see
+    /// [`CanvasSession::stroke_add`]).
+    queued: parking_lot::Mutex<QueuedInput>,
+    input_queued: std::sync::atomic::AtomicBool,
+}
+
+/// Pen input waiting for the canvas (see [`Shared::queued`]): the stroke's samples in order (those
+/// of several events together, taken as one), and the newest prediction (older ones dropped).
+#[derive(Default)]
+struct QueuedInput {
+    samples: Vec<PenSample>,
+    predicted: Option<Vec<PenSample>>,
 }
 
 impl Shared {
@@ -1535,6 +1548,62 @@ impl Shared {
         let guard = self.state.try_lock().unwrap_or_else(|| self.wait_for(at));
         self.holder.took(at);
         guard
+    }
+
+    /// The lock, if it is free now.
+    #[track_caller]
+    fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, State>> {
+        let at = std::panic::Location::caller();
+        let guard = self.state.try_lock()?;
+        self.holder.took(at);
+        Some(guard)
+    }
+
+    /// Pen input for later (the canvas held): samples after those waiting, or (`predicted`) where the
+    /// input is predicted to go, in place of any prediction waiting. A frame is asked for, to take it.
+    fn queue_input(&self, samples: Vec<PenSample>, predicted: bool) {
+        let mut queued = self.queued.lock();
+        if predicted {
+            queued.predicted = Some(samples);
+        } else {
+            queued.samples.extend(samples);
+            // (a prediction made before these samples no longer runs ahead of them)
+            queued.predicted = None;
+        }
+        self.input_queued.store(true, std::sync::atomic::Ordering::Release);
+        drop(queued);
+        self.wake.notify_all();
+    }
+
+    /// Whether pen input is waiting for the canvas.
+    pub(crate) fn input_waiting(&self) -> bool {
+        self.input_queued.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Takes the pen input waiting for the canvas (held as `st`): its samples, then its prediction.
+    pub(crate) fn take_queued_input(&self, st: &mut State) {
+        if !self.input_waiting() {
+            return;
+        }
+        let QueuedInput { samples, predicted } = {
+            let mut queued = self.queued.lock();
+            self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+            std::mem::take(&mut *queued)
+        };
+        if !samples.is_empty() {
+            self.add_samples(st, samples);
+        }
+        if let Some(predicted) = predicted {
+            self.predict_samples(st, predicted);
+        }
+    }
+
+    /// Drops the pen input waiting for the canvas (the stroke it was for has gone).
+    fn drop_queued_input(&self) {
+        if self.input_waiting() {
+            *self.queued.lock() = QueuedInput::default();
+            self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// The lock, for a call at `at` that found it held: a wait past [`held::LONG_WAIT`] goes in
@@ -2052,6 +2121,8 @@ impl CanvasSession {
                 holder: held::Holder::default(),
                 counts: activity::Counts::default(),
                 nudge: Arc::new(activity::Nudge::default()),
+                queued: parking_lot::Mutex::new(QueuedInput::default()),
+                input_queued: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -2131,6 +2202,8 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // (input left waiting by a stroke that has gone is for no stroke now)
+        self.shared.drop_queued_input();
         // pressed as plugins say, before anything takes them
         let mut samples = samples;
         st.press(Some(pointer), &mut samples);
@@ -2287,6 +2360,8 @@ impl CanvasSession {
             Some(second) => canvas.begin_dual_stroke(current, style, second),
             None => canvas.begin_stroke(current, style),
         }
+        // (paint laid in place keeps marks to go back to only if its end may lay it again)
+        canvas.may_lay_again(builder.end_may_change_laid());
         draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
         st.stroke = Some(builder);
         st.second = second_builder;
@@ -2294,14 +2369,56 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// More input for the stroke (including the samples batched in between).
+    /// More input for the stroke (including the samples batched in between). While something holds
+    /// the canvas (a frame laying a stroke's paint, which on a slow GPU takes a while) the samples
+    /// wait in a queue of their own, taken all together by the next frame or the next input: the
+    /// pen is never held up by the GPU's work, nor does each event's work pile up behind it.
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
-        let mut guard = self.shared.lock();
+        let Some(mut guard) = self.shared.try_lock() else {
+            self.shared.queue_input(samples, false);
+            return;
+        };
         let st = &mut *guard;
+        let samples = self.shared.with_queued(samples);
+        self.shared.add_samples(st, samples);
+    }
+
+    /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
+    /// never kept. Waiting for the canvas, only the newest is kept (see
+    /// [`CanvasSession::stroke_add`]).
+    pub fn stroke_predict(&self, samples: Vec<PenSample>) {
+        let samples = self.pen_predicted(samples);
+        let Some(mut guard) = self.shared.try_lock() else {
+            self.shared.queue_input(samples, true);
+            return;
+        };
+        let st = &mut *guard;
+        self.shared.take_queued_input(st);
+        self.shared.predict_samples(st, samples);
+    }
+}
+
+impl Shared {
+    /// `samples` after the samples waiting for the canvas (taken with them, their prediction
+    /// dropped).
+    fn with_queued(&self, samples: Vec<PenSample>) -> Vec<PenSample> {
+        if !self.input_waiting() {
+            return samples;
+        }
+        let mut queued = self.queued.lock();
+        self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+        let mut all = std::mem::take(&mut queued.samples);
+        queued.predicted = None;
+        all.extend(samples);
+        all
+    }
+
+    /// More input for the stroke, the canvas held (see [`CanvasSession::stroke_add`]).
+    fn add_samples(&self, st: &mut State, samples: Vec<PenSample>) {
         let mut samples = samples;
         st.press(None, &mut samples);
         if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
-            self.shared.frame(st);
+            self.frame(st);
             return;
         }
         if st.plugin_stepping > 0 {
@@ -2309,7 +2426,7 @@ impl CanvasSession {
         }
         if st.scene_shown() {
             st.scene_stroke_add(&samples, false);
-            self.shared.frame(st);
+            self.frame(st);
             return;
         }
         st.keep_pad_input(&samples);
@@ -2322,7 +2439,7 @@ impl CanvasSession {
             if let Some(to) = canvas_samples.iter().rev().find(|s| s.is_finite()).map(|s| s.pos)
                 && st.follow_shape(to)
             {
-                self.shared.frame(st);
+                self.frame(st);
             }
             return;
         }
@@ -2340,16 +2457,14 @@ impl CanvasSession {
         if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
             st.ahead = later;
             st.redraw_painted_on();
-            self.shared.frame(st);
+            self.frame(st);
         }
     }
 
-    /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
-    /// never kept.
-    pub fn stroke_predict(&self, samples: Vec<PenSample>) {
-        let mut samples = self.pen_predicted(samples);
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
+    /// Where the input is predicted to go next, the canvas held (see
+    /// [`CanvasSession::stroke_predict`]).
+    fn predict_samples(&self, st: &mut State, samples: Vec<PenSample>) {
+        let mut samples = samples;
         st.press_predicted(&mut samples);
         if st.scene_shown() {
             return;
@@ -2370,13 +2485,18 @@ impl CanvasSession {
         } else {
             show_ahead(canvas, builder, &canvas_samples, &guide);
         }
-        self.shared.frame(st);
+        self.frame(st);
     }
+}
 
+#[uniffi::export]
+impl CanvasSession {
     /// The stroke ends (the pen or finger lifted) after `samples`.
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // (the input waiting for the canvas came before)
+        self.shared.take_queued_input(st);
         let mut samples = samples;
         st.press(None, &mut samples);
         st.airbrush = None;
@@ -2444,6 +2564,7 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.drop_queued_input();
         st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {
             self.shared.frame(st);

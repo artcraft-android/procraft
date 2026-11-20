@@ -23,6 +23,7 @@ use crate::{Gpu, GpuError};
 mod fragments;
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
+mod rewind;
 mod smudge;
 mod store;
 
@@ -122,6 +123,16 @@ const STAMPS_AT_ONCE: u64 = 1 << 20;
 /// picture shown as it was until it is all laid: laid in one render, a long stroke of wet paint
 /// held the canvas, and every touch waiting on it, for a tenth of a second or more.
 const RELAY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(6);
+/// How much GPU time a render that shows the canvas gives paint laid in place (smudging, wet paint),
+/// ms, by how fast the GPU got through such work before: the rest waits for the renders after. Laid
+/// all at once, a stroke whose GPU fell behind the pen laid more in each frame, so each frame took
+/// longer and laid more again, until one held the GPU past its timeout (the device lost, the app
+/// gone) or the canvas for seconds: now it falls behind the pen evenly instead, and catches up.
+const IN_PLACE_FRAME_MS: f64 = 33.0;
+/// The least work of paint laid in place a render lays however slow the GPU seems (see
+/// [`WORK_AT_ONCE`]): a frame of a big wet brush drawn quickly, on a fast GPU (a GPU's speed seen
+/// late, or with other work, can seem slower than it is).
+const IN_PLACE_LEAST: u64 = 4 * WORK_AT_ONCE;
 /// What a stamp counts for besides the pixels it covers; and a stamp painted in place, a compute
 /// pass for each, for each pixel and for itself.
 const STAMP_WORK: u64 = 1 << 10;
@@ -2045,6 +2056,14 @@ struct Smudge {
     /// Where paint laid apart has been put together so far: all of it is put together once more
     /// as the stroke ends, from what the stroke and its second laid in the end.
     synthesized: IRect,
+    /// Paint laid in place (not in fragment passes, nor into a store): what it keeps to go back to
+    /// as it is laid again (see `rewind.rs`).
+    rewind: Option<rewind::Rewind>,
+    /// Paint laid apart: where what is put together may no longer be as its paint and its second
+    /// now have it (put together there once more as the stroke ends), or (`stale_whole`) anywhere.
+    /// Each lot of its stamps and its second's is put together where it went as it is laid.
+    stale: IRect,
+    stale_whole: bool,
 }
 
 /// One copy of a smudge stroke (the stroke itself, or one a symmetry draws of it): each picks up and
@@ -2071,6 +2090,12 @@ struct Carry {
 impl Carry {
     fn new() -> Carry {
         Carry { scale: 1.0, kept: -1, ..Carry::default() }
+    }
+
+    /// As it stands, without what it carries put aside.
+    fn plain(&self) -> Carry {
+        let Carry { started, scale, kept, stamps, last_anchor, passes, plot, aside: _, unkept } = *self;
+        Carry { started, scale, kept, stamps, last_anchor, passes, plot, aside: None, unkept }
     }
 }
 
@@ -2224,6 +2249,12 @@ enum Op {
     ClearSecond(SecondStroke),
     /// The open stroke goes on without its second.
     DropSecond,
+    /// The open stroke painting in place goes back to its mark before its stamp of this place (see
+    /// [`Canvas::rewound`]).
+    RewindInPlace(usize),
+    /// The open stroke's second is laid from scratch next: where it reached before, what was put
+    /// together of it there is put together again as the stroke ends.
+    SecondReached(IRect),
     /// Stamps added to the stroke (`clear`: the stroke is redrawn from scratch).
     Stamps {
         /// Into the stroke's second (a dual brush's).
@@ -3080,10 +3111,32 @@ pub struct Canvas {
     /// Wet paint and paint laid in place go down a stamp a dispatch, as they did before runs of
     /// stamps were laid at once (see [`Canvas::lay_stamp_by_stamp`]).
     stamp_by_stamp: bool,
+    /// Strokes painting in place keep marks to go back to as they are laid again (see `rewind.rs`),
+    /// within this many bytes (none: as the device's memory gives them); and the marks made and
+    /// gone back to so far.
+    rewinds: bool,
+    rewind_most: Option<u64>,
+    marks_made: u64,
+    rewound: u64,
+    /// Whether the open stroke's end may lay again what it has laid (see [`Canvas::may_lay_again`]).
+    may_lay_again: bool,
+    /// Stamps queued to be laid so far, for tests.
+    stamps_queued: u64,
+    /// Where a dual brush's second was laid before its paint laid in place began (nothing to put
+    /// together with yet), or reached before it was laid from scratch: put together there as the
+    /// stroke ends.
+    second_unsynthesized: IRect,
     /// How long a render that shows the canvas lays a stroke laid again as it ends (see
     /// [`RELAY_AT_ONCE`]), and whether one is being laid over several (the picture held meanwhile).
     relay_at_once: std::time::Duration,
     relaying: bool,
+    /// Paint laid in place left for the next render (see [`IN_PLACE_FRAME_MS`]); the last render
+    /// that laid such work, as sent (its submission, when, and how much), until it is seen done; and
+    /// how fast the GPU gets through such work, as seen (work a millisecond, at least).
+    catching_up: bool,
+    in_place_sent: Option<(wgpu::SubmissionIndex, std::time::Instant, u64)>,
+    in_place_rate: Option<f64>,
+    in_place_paced: bool,
     /// How the last plugin filter's draw went, not yet asked for.
     filter_run: Option<plugin_filter::FilterRun>,
     /// How many times the composite has been redrawn.
@@ -3487,8 +3540,19 @@ impl Canvas {
             paced_longest: std::time::Duration::ZERO,
             dispatched: AtomicU64::new(0),
             stamp_by_stamp: false,
+            rewinds: true,
+            rewind_most: None,
+            marks_made: 0,
+            rewound: 0,
+            may_lay_again: true,
+            stamps_queued: 0,
+            second_unsynthesized: IRect::EMPTY,
             relay_at_once: RELAY_AT_ONCE,
             relaying: false,
+            catching_up: false,
+            in_place_sent: None,
+            in_place_rate: None,
+            in_place_paced: true,
             filter_run: None,
             composites: 0,
             active: None,
@@ -3907,6 +3971,7 @@ impl Canvas {
     /// Starts a stroke on `layer` (finishing one still open).
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
+        self.may_lay_again = true;
         self.prediction.clear();
         self.laid = Some(Vec::new());
         (self.laid_count, self.laid_second_count) = (0, 0);
@@ -3979,14 +4044,17 @@ impl Canvas {
     /// it has laid and come out as laid whole. Not a dual brush's part laid in the stroke's
     /// textures by a rule that builds up gradually or towards its transfer: that rounds its sums
     /// to half floats once a lot (see `stamp_rule.wgsl`), so lots cut otherwise come out a little
-    /// otherwise, and a dual brush's stroke has always been laid whole again at its end. Nor when
-    /// that is asked for (see [`Canvas::lay_ends_whole`]).
+    /// otherwise, and a dual brush's stroke has always been laid whole again at its end. But the
+    /// second of paint laid in place does: laid whole again, it is put together with that paint
+    /// over the whole stroke, which on a slow GPU held the next stroke for a second or more after a
+    /// big brush's lift; what its lots' rounding changes is within a level here and there (see the
+    /// tests). Nor when laying whole is asked for (see [`Canvas::lay_ends_whole`]).
     fn ends_with_rest(&self, second: bool) -> bool {
         let Some(active) = self.active.filter(|_| !self.ends_whole) else { return false };
         let Some(dual) = active.second else { return !second };
         let style = if second { dual.style } else { active.style };
         let by_rule_here = self.pipelines.compute.is_some() || self.pipelines.fragments.is_some();
-        style.in_place() || by_rule(style.rendering).is_none() || !by_rule_here
+        style.in_place() || (second && active.style.in_place()) || by_rule(style.rendering).is_none() || !by_rule_here
     }
 
     /// The open stroke goes on without its second (it was made into a shape).
@@ -4166,7 +4234,13 @@ impl Canvas {
         match (second, clear) {
             (false, true) => active.first = bounds,
             (false, false) => active.first = active.first.union(bounds),
-            (true, true) => active.second_reach = bounds,
+            (true, true) => {
+                // (what was put together where it reached is put together again as the stroke ends)
+                if !self.measuring && !active.second_reach.is_empty() {
+                    self.ops.push(Op::SecondReached(active.second_reach));
+                }
+                active.second_reach = bounds;
+            }
             (true, false) => active.second_reach = active.second_reach.union(bounds),
         }
         if self.measuring {
@@ -4217,6 +4291,7 @@ impl Canvas {
             })
             .collect();
         self.dirty = self.dirty.union(bounds);
+        self.stamps_queued += instances.len() as u64;
         if !instances.is_empty() || clear {
             let pencil = active.pencil;
             // drawn from scratch: what is still queued of it would be laid only to be cleared (a
@@ -4464,6 +4539,36 @@ impl Canvas {
         self.stamps_at_once = stamps.max(1);
     }
 
+    /// How many stamps have been queued to be laid so far (each lot of a stroke's, and its
+    /// second's): for tests counting what an end lays.
+    #[doc(hidden)]
+    pub fn stamps_queued(&self) -> u64 {
+        self.stamps_queued
+    }
+
+    /// Whether the open stroke's end may lay again stamps it has laid (its tapers): painting in
+    /// place, it keeps marks to go back to then (see `rewind.rs`), which take copies of what it
+    /// writes as it goes. Told after it begins (it may, until told otherwise).
+    pub fn may_lay_again(&mut self, may: bool) {
+        self.may_lay_again = may;
+    }
+
+    /// Whether strokes painting in place keep marks to go back to as they are laid again (see
+    /// `rewind.rs`), and within how many bytes (none: as the device's memory gives them): for tests
+    /// comparing them with strokes laid again from scratch.
+    #[doc(hidden)]
+    pub fn set_rewinds(&mut self, on: bool, most: Option<u64>) {
+        self.rewinds = on;
+        self.rewind_most = most;
+    }
+
+    /// The marks strokes painting in place have made to go back to so far, and how many times they
+    /// went back to one; and the bytes the open stroke's marks take on the GPU.
+    pub fn rewinds_made(&self) -> (u64, u64, u64) {
+        let bytes = self.smudge.as_ref().and_then(|s| s.rewind.as_ref()).map_or(0, rewind::Rewind::bytes);
+        (self.marks_made, self.rewound, bytes)
+    }
+
     /// Lays a stroke laid again as it ends for at most this long in a render that shows the canvas,
     /// in place of [`RELAY_AT_ONCE`]: for tests (none, a piece of its work a render).
     #[doc(hidden)]
@@ -4475,6 +4580,44 @@ impl Canvas {
     /// the canvas (the picture held as it was until it is all laid).
     pub fn relaying(&self) -> bool {
         self.relaying
+    }
+
+    /// Whether paint laid in place is waiting for the GPU to get through what came before (see
+    /// [`IN_PLACE_FRAME_MS`]): the stroke shown so far as laid, and more laid at each render.
+    pub fn catching_up(&self) -> bool {
+        self.catching_up
+    }
+
+    /// The most work of paint laid in place a render lays (see [`IN_PLACE_FRAME_MS`]): as much as
+    /// the GPU gets through in that while, by the fastest it was seen to (each sighting counting a
+    /// little less as more come, so that a GPU slowing down is followed), and [`IN_PLACE_LEAST`] at
+    /// least; all of it before that is known, or in a render that doesn't show the canvas. The last
+    /// render that laid such work is seen here if it is done (its time from being sent to being seen
+    /// done is at least what the GPU took: the GPU is at least that fast).
+    fn in_place_most(&mut self, gpu: &Gpu, shown: bool) -> u64 {
+        if let Some((index, sent, work)) = self.in_place_sent.take() {
+            let now = wgpu::PollType::Wait {
+                submission_index: Some(index.clone()),
+                timeout: Some(std::time::Duration::ZERO),
+            };
+            if gpu.device.poll(now).is_ok() {
+                let rate = work as f64 / (sent.elapsed().as_secs_f64() * 1000.0).max(0.5);
+                self.in_place_rate = Some(self.in_place_rate.map_or(rate, |r| (r * 0.9).max(rate)));
+            } else {
+                self.in_place_sent = Some((index, sent, work));
+            }
+        }
+        match self.in_place_rate {
+            Some(rate) if shown && self.in_place_paced => ((rate * IN_PLACE_FRAME_MS) as u64).max(IN_PLACE_LEAST),
+            _ => u64::MAX,
+        }
+    }
+
+    /// Whether paint laid in place is laid only as fast as the GPU gets through it (see
+    /// [`IN_PLACE_FRAME_MS`]): for tests comparing it with all of it laid in each render.
+    #[doc(hidden)]
+    pub fn set_in_place_paced(&mut self, on: bool) {
+        self.in_place_paced = on;
     }
 
     /// The most stamps one buffer of this device holds.
@@ -5112,7 +5255,7 @@ impl Canvas {
     /// Whether the canvas has work that more renders do (caches being remade, layers being
     /// parked, the history's pixels being packed): it wants another render soon.
     pub fn wants_render(&self) -> bool {
-        self.busy() || self.parking_left || self.packing.is_some() || self.relaying
+        self.busy() || self.parking_left || self.packing.is_some() || self.relaying || self.catching_up
     }
 
     /// How the last remake of the caches went (none made yet).
@@ -5991,8 +6134,10 @@ impl Canvas {
         // no more stamps than one upload takes (room left for the predicted tail): the rest wait for
         // a render after this one's
         let most_stamps = self.stamps_at_once.min(Self::stamps_in_a_buffer(device) / 2).max(1);
-        let ops =
-            in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), self.work_at_once, most_stamps);
+        // (a stroke painting in place laid again from scratch goes back to a mark instead, where it can)
+        let ops = without_passing_tips(std::mem::take(&mut self.ops));
+        let ops = self.rewound(ops);
+        let ops = in_pieces(ops, self.full(), self.work_at_once, most_stamps);
         let (ops, held_back) = {
             let (mut taken, mut count) = (Vec::with_capacity(ops.len()), 0u64);
             let mut ops = ops.into_iter();
@@ -6088,14 +6233,22 @@ impl Canvas {
         let mut deferred = held_back;
         // stamps' work recorded and not sent yet
         let mut recorded = 0u64;
-        // a stroke laid again whole as it ends, in a render that shows the canvas: laid for so long
-        // (see `RELAY_AT_ONCE`), the rest left to the renders after, until its end is reached
+        // a stroke laid again whole as it ends (or from a mark it went back to), in a render that
+        // shows the canvas: laid for so long (see `RELAY_AT_ONCE`), the rest left to the renders
+        // after, until its end is reached
+        let rewinds = ops.iter().any(|op| matches!(op, Op::RewindInPlace(_)));
         let mut relay_until = target
             .as_ref()
-            .filter(|_| self.relaying || lays_ended_stroke_again(&ops))
+            .filter(|_| self.relaying || rewinds || lays_ended_stroke_again(&ops))
             .map(|_| started + self.relay_at_once);
         let mut relaid = false;
         self.relaying = false;
+        // paint laid in place, in a render that shows the canvas: as much as the GPU gets through in
+        // a little while (see `IN_PLACE_FRAME_MS`), the rest left to the renders after
+        let in_place_most = self.in_place_most(gpu, target.is_some());
+        let mut in_place_laid = 0u64;
+        self.catching_up = false;
+        let full = self.full();
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
             if let (Some(until), Op::Stamps { .. }) = (relay_until, &op)
@@ -6106,6 +6259,22 @@ impl Canvas {
                 self.ops.splice(0..0, rest);
                 self.relaying = true;
                 break;
+            }
+            if let Op::Stamps { instances, style, second: false, pencil: false, .. } = &op
+                && style.in_place()
+            {
+                let work = stamps_work(instances, full, true);
+                if in_place_laid > 0 && in_place_laid.saturating_add(work) > in_place_most {
+                    let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
+                    self.ops.splice(0..0, rest);
+                    // (a stroke being laid again holds the picture as it was meanwhile)
+                    match relay_until {
+                        Some(_) => self.relaying = true,
+                        None => self.catching_up = true,
+                    }
+                    break;
+                }
+                in_place_laid = in_place_laid.saturating_add(work);
             }
             match &op {
                 Op::Stamps { .. } => relaid = true,
@@ -6166,15 +6335,24 @@ impl Canvas {
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
                     self.smudge_stamps(gpu, &mut encoder, uniforms, stamps, &style, layer, clear);
                 }
+                Op::RewindInPlace(at) => self.rewind_in_place(&mut encoder, at),
+                Op::SecondReached(rect) => match self.smudge.as_mut().filter(|s| s.apart.is_some()) {
+                    Some(smudge) => smudge.stale = smudge.stale.union(rect),
+                    None => self.second_unsynthesized = self.second_unsynthesized.union(rect),
+                },
                 Op::DropSecond => {
                     self.queued_second = None;
-                    // paint laid apart is laid alone from here
-                    if let Some(apart) = self.smudge.as_mut().and_then(|s| s.apart.as_mut()) {
+                    // paint laid apart is laid alone from here (and put together so all over again)
+                    if let Some(smudge) = self.smudge.as_mut()
+                        && let Some(apart) = smudge.apart.as_mut()
+                    {
                         apart.1 = 0;
+                        smudge.stale_whole = true;
                     }
                 }
                 Op::ClearSecond(second) => {
                     self.queued_second = Some(second);
+                    self.second_unsynthesized = IRect::EMPTY;
                     let (texture, view) = self.second_stroke.get(device);
                     drop(render_pass(
                         &mut encoder,
@@ -6279,13 +6457,17 @@ impl Canvas {
                         }
                         drop(pass);
                     }
-                    // a dual brush's paint laid in place: put together again where the second went
-                    if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
+                    // a dual brush's paint laid in place: put together again where the second went,
+                    // or where it went before the paint began as the stroke ends
+                    if second {
                         let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
                             let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
                             r.union(IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2))
                         });
-                        self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect);
+                        match self.smudge.as_ref().filter(|s| s.apart.is_some()) {
+                            Some(_) => self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect),
+                            None => self.second_unsynthesized = self.second_unsynthesized.union(rect),
+                        }
                     }
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
@@ -6298,12 +6480,19 @@ impl Canvas {
                     let held = self.smudge.as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
                     self.lay_wet(gpu, &mut encoder, uniforms, &held, &stroke.style);
-                    // a dual brush's paint laid apart, put together over the whole stroke once more
-                    // (its second's first stamps may have come before the paint laid apart began)
-                    // (and wherever it was put together before: past the stroke's stamps where its
-                    // second's reached)
+                    // a dual brush's paint laid apart, put together once more where it may not be as
+                    // its paint and second now have it: where its second's first stamps came before
+                    // the paint laid apart began, and what the stroke went back over (or over the
+                    // whole stroke, wherever it was put together before, past its stamps where its
+                    // second's reached, if its second went or was laid from scratch); each lot of
+                    // either was put together where it went as it was laid
                     let rect = stroke.bounds.union(self.smudge.as_ref().map_or(IRect::EMPTY, |s| s.synthesized));
-                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect);
+                    let stale = match self.smudge.as_ref() {
+                        Some(s) if !s.stale_whole => s.stale.union(self.second_unsynthesized),
+                        _ => rect,
+                    };
+                    self.second_unsynthesized = IRect::EMPTY;
+                    self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, stale);
                     self.finish_smudge(device, &mut encoder, rect, false);
                     history_changed = true;
                 }
@@ -7167,13 +7356,17 @@ impl Canvas {
         for buffer in uploaded {
             self.uploads.give_back(buffer);
         }
+        // (how fast the GPU gets through paint laid in place is seen once this is done)
+        if in_place_laid > 0 && self.in_place_sent.is_none() {
+            self.in_place_sent = Some((sent.clone(), at, in_place_laid));
+        }
         self.wait_if_paced(gpu, sent, at);
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
         self.pack_history(gpu);
         // the work held back, in a submission after this one's (a stroke being laid again goes on in
         // the next render that shows the canvas)
-        if deferred && !self.relaying {
+        if deferred && !self.relaying && !self.catching_up {
             self.render(gpu, doc, None);
         }
     }
@@ -7197,6 +7390,11 @@ impl Canvas {
         if restart && self.smudge.as_ref().is_some_and(|s| s.layer == target) {
             self.smudge_put_back(encoder);
             if let Some(smudge) = self.smudge.as_mut() {
+                if let Some(rewind) = smudge.rewind.as_mut() {
+                    rewind.restart();
+                }
+                // (what was put together where its second reaches past the paint is gone too)
+                smudge.stale_whole = true;
                 smudge.tiles.clear();
                 smudge.stalled = false;
                 for carry in &mut smudge.carries {
@@ -7259,6 +7457,8 @@ impl Canvas {
             // painting into the layer's store: what it works in is the store's paint
             let store =
                 (style.store != 0).then(|| self.store_for_stroke(device, encoder, target, style.store)).flatten();
+            let rewind = (wet_paint && self.rewinds && self.may_lay_again && !in_fragments && store.is_none())
+                .then(|| rewind::Rewind::new(self.low_memory(), self.rewind_most));
             self.smudge = Some(Smudge {
                 layer: target,
                 into: store.as_ref().map_or(target, |s| s.planes[0]),
@@ -7279,16 +7479,30 @@ impl Canvas {
                 laid: false,
                 stalled: false,
                 synthesized: IRect::EMPTY,
+                rewind,
+                stale: IRect::EMPTY,
+                stale_whole: false,
             });
         }
         if style.paints_in_place() {
             let Some(smudge) = self.smudge.as_mut() else { return };
-            smudge.pending.extend(instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)));
+            let given = instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t));
+            if let Some(rewind) = smudge.rewind.as_mut() {
+                rewind.give(given.clone());
+            }
+            smudge.pending.extend(given);
             let key = |s: &(StampInstance, [f32; 8], Paced)| wet_pass(s.2.time_ms, style.preview);
             let newest = smudge.pending.last().map(key);
             let ready = smudge.pending.iter().take_while(|s| Some(key(s)) != newest).count();
             let ready: Vec<_> = smudge.pending.drain(..ready).collect();
+            // a mark to go back to before them (see `rewind.rs`)
+            if let Some(first) = ready.first() {
+                self.mark_in_place(encoder, device, first.2.time_ms);
+            }
             self.lay_wet(gpu, encoder, (params, passes), &ready, style);
+            if let Some(rewind) = self.smudge.as_mut().and_then(|s| s.rewind.as_mut()) {
+                rewind.laid(ready.len());
+            }
             return;
         }
         // a smudge of its own is laid a pass a display frame, as wet paint is; one picking up
@@ -9635,6 +9849,8 @@ impl Canvas {
             Op::Cancel
             | Op::SaveTip(_)
             | Op::Untip(_)
+            | Op::RewindInPlace(_)
+            | Op::SecondReached(_)
             | Op::Mark
             | Op::Name(_)
             | Op::OutsideChange(_)
@@ -14550,7 +14766,8 @@ mod tests {
     fn a_smudge_that_runs_out_of_memory_part_way_stops_and_undoes_whole() {
         use procraft_engine::geom::Vec2;
         let Ok(gpu) = Gpu::headless() else { return };
-        let (mut doc, mut canvas) = patched(&gpu, 600, 120);
+        // (two tiles across: the second where it smudges next)
+        let (mut doc, mut canvas) = patched(&gpu, smudge::TILE + 100, 120);
         let id = doc.current();
         let before = canvas.read_layer(&gpu, id).unwrap();
         let steps = canvas.steps_made();
@@ -14562,7 +14779,8 @@ mod tests {
         assert_ne!(begun, before);
         // the next tiles it reaches can't be made: it lays no more, and says so once
         FAILING.with(|f| f.set(Some("smudge before")));
-        canvas.add_stamps(&(0..8).map(|i| dot(400.0 + 4.0 * i as f32)).collect::<Vec<_>>());
+        let next = smudge::TILE as f32 + 20.0;
+        canvas.add_stamps(&(0..8).map(|i| dot(next + 4.0 * i as f32)).collect::<Vec<_>>());
         canvas.render(&gpu, &mut doc, None);
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);

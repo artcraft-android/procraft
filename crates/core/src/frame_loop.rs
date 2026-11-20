@@ -79,7 +79,9 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             loop {
                 // nothing is drawn while the app is away, and a device lost draws nothing again:
                 // there is only its stopping to wait for
-                while !st.stop && (st.hidden || !st.needs_frame || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
+                // (pen input waiting for the canvas asks for one)
+                let wanted = |st: &crate::State| st.needs_frame || shared.input_waiting();
+                while !st.stop && (st.hidden || !wanted(&st) || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
                     // a frame due later (the selection's bands drifting) comes then, unless asked
                     // sooner
                     let due = st.frame_due.filter(|_| !st.hidden && !st.gpu.as_ref().is_some_and(Gpu::is_lost));
@@ -156,6 +158,8 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             if st.window_size != size {
                 continue;
             }
+            // the pen input that came while the canvas was held goes in this frame
+            shared.take_queued_input(st);
             st.draw_frame(&view, format, size, profile, started);
             let now = Instant::now();
             if let Some(prev) = last_present {
