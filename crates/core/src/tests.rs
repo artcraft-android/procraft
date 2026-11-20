@@ -3818,6 +3818,62 @@ fn an_open_artwork_is_kept_saved_until_that_stops() {
 
 /// Fast painting leaves only short gaps between strokes: an autosave that finds one under way
 /// saves in the next gap, not at its next turn.
+/// The autosave, saving in the gap after a stroke as painting goes on, waits for the frames to lay
+/// a stroke's end that they lay a share at a time, rather than laying it at once as it reads the
+/// layers (the app's thread and the frames waited behind that after each heavy stroke); then it
+/// saves.
+#[test]
+fn an_autosave_after_a_stroke_waits_for_the_frames_to_lay_its_end() {
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Easterly") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(1.0);
+    // the end laid a piece at each frame
+    s.shared.lock().canvas.as_mut().unwrap().set_relay_at_once(Duration::ZERO);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let view = window_view(&s, 512);
+    let frame = || {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (512, 512), procraft_engine::profile::Profile::Srgb, Instant::now());
+        gpu.flush();
+    };
+    let lays = || s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames);
+    let dir = std::env::temp_dir().join(format!("procraft-autosave-end-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::sync::Arc::clone(&s).keep_saved(
+        dir.to_string_lossy().into_owned(),
+        Duration::from_millis(20),
+        Duration::from_millis(5),
+    );
+    s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 200.0, 0.0)]);
+    for i in 1..60 {
+        let x = 40.0 + i as f32 * 7.0;
+        s.stroke_add(vec![PenSample { pressure: 0.5, ..sample(x, 200.0 + (x / 40.0).sin() * 60.0, i as f64 * 8.0) }]);
+        if i % 2 == 0 {
+            frame();
+        }
+    }
+    s.stroke_end(vec![]);
+    frame();
+    assert!(lays(), "the stroke's end is laid over frames");
+    // its turn comes 20 ms after the change
+    std::thread::sleep(Duration::from_millis(120));
+    assert!(lays(), "the autosave left the stroke's end to the frames");
+    while lays() {
+        frame();
+    }
+    let edits = s.edits();
+    let saved = (0..10_000).any(|_| {
+        std::thread::sleep(Duration::from_millis(1));
+        s.edits_saved() == Some(edits)
+    });
+    s.stop_autosave();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(saved, "saved once the end was laid");
+    assert_eq!(gpu.errors(), 0);
+}
+
 #[test]
 fn an_autosave_that_finds_a_stroke_saves_as_it_ends() {
     let Some(s) = session(64, 64) else { return };
@@ -6591,6 +6647,210 @@ fn a_time_lapse_frame_is_read_at_the_size_it_is_kept() {
 
 /// The graphics device lost as a frame is read back (or before): no frame, and nothing panics,
 /// whether the read was started before the loss or after it.
+/// A window `side` pixels square to draw frames into, as the apps draw them.
+fn window_view(s: &CanvasSession, side: u32) -> procraft_gpu::wgpu::TextureView {
+    use procraft_gpu::wgpu;
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+}
+
+/// A time-lapse frame read right after a stroke whose end the frames lay a share at a time waits
+/// for them, the state let go meanwhile, rather than laying the rest at once in its hold of it (a
+/// time-lapse is kept by default, a frame after each stroke: the app's thread and the frames were
+/// held behind it for a third of a second after a heavy brush's stroke on a large canvas). The
+/// frame it keeps is the stroke with its end. With no frames drawn meanwhile, it reads at once.
+#[test]
+fn a_time_lapse_frame_waits_for_the_frames_to_lay_a_strokes_end() {
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Easterly") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(1.0);
+    // the end laid a piece at each frame
+    s.shared.lock().canvas.as_mut().unwrap().set_relay_at_once(Duration::ZERO);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let view = window_view(&s, 512);
+    let frame = || {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (512, 512), procraft_engine::profile::Profile::Srgb, Instant::now());
+        gpu.flush();
+    };
+    let lays = || s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames);
+    let stroke = |y: f32| {
+        s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, y, 0.0)]);
+        for i in 1..60 {
+            let x = 40.0 + i as f32 * 7.0;
+            s.stroke_add(vec![PenSample { pressure: 0.5, ..sample(x, y + (x / 40.0).sin() * 60.0, i as f64 * 8.0) }]);
+            if i % 2 == 0 {
+                frame();
+            }
+        }
+        s.stroke_end(vec![]);
+        frame();
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-end-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    stroke(200.0);
+    assert!(lays(), "the stroke's end is laid over frames");
+    let reader = {
+        let (s, lapse) = (std::sync::Arc::clone(&s), std::sync::Arc::clone(&lapse));
+        std::thread::spawn(move || s.record_time_lapse(lapse))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(lays(), "the read left the stroke's end to the frames");
+    let mut frames = 0;
+    while lays() && frames < 1000 {
+        frame();
+        frames += 1;
+    }
+    assert!(reader.join().unwrap(), "a frame kept");
+    assert!(frames > 1, "laid over {frames} frames");
+    // the frame kept is the picture with the end: read again, it is the same, so not kept again
+    assert!(!s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    assert_eq!(lapse.count(), 1);
+    // no frames drawn: read at once, the end laid by the read
+    stroke(350.0);
+    assert!(lays());
+    std::thread::sleep(crate::FRAMES_GONE + Duration::from_millis(50));
+    let t = Instant::now();
+    assert!(s.record_time_lapse(std::sync::Arc::clone(&lapse)));
+    assert!(t.elapsed() < crate::FRAMES_LAY_MOST, "{:?}", t.elapsed());
+    assert!(!lays());
+    assert_eq!(gpu.errors(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What reading a time-lapse frame right after each stroke (as the apps do, the time-lapse kept
+/// by default) costs the frames and the app's thread, for a few heavy brushes (wet, dual, big; at
+/// their full size) on a large canvas (`LAPSE_COST_SIDE`, 2944x1840, ten layers), the frames drawn
+/// on a thread of their own every 8 ms as the apps draw them: the longest frame over the two
+/// seconds after the lift, and the app thread's longest wait for the state (asked every 2 ms),
+/// each with the frame read and without. Bound: at the middle brush, the read adds no more than a
+/// 60 Hz frame (16.7 ms) to the longest frame (a read that laid the stroke's end at once, in its
+/// hold of the state, held the frames up to seconds behind that work). Run with `--ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn time_lapse_frame_cost() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+    let side = std::env::var("LAPSE_COST_SIDE").unwrap_or_else(|_| "2944x1840".to_owned());
+    let (w, h) =
+        side.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((2944u32, 1840u32));
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let s = CanvasSession::new(w, h);
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (1600, 1600);
+        st.view = Some(View::fit((w, h), (1600, 1600)));
+        st.gpu = Some(gpu.clone());
+        st.ensure_canvas();
+    }
+    for _ in 1..10 {
+        s.add_layer();
+    }
+    // the longest frame since last reset, in microseconds
+    let longest_frame = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let frames = {
+        let (s, stop, gpu, longest) = (Arc::clone(&s), Arc::clone(&stop), gpu.clone(), Arc::clone(&longest_frame));
+        std::thread::spawn(move || {
+            let view = window_view(&s, 1600);
+            while !stop.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+                s.draw(&view, format, (1600, 1600), procraft_engine::profile::Profile::Srgb, started);
+                gpu.flush();
+                longest.fetch_max(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(8).saturating_sub(started.elapsed()));
+            }
+        })
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-cost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let mut added = Vec::new();
+    println!(
+        "brush\tlongest frame without the read, ms\twith it\tthe app thread's longest wait without, ms\twith\tthe read, ms"
+    );
+    for name in ["Quagga", "Easterly", "Kingsley", "Dunlin", "Pin Oak", "Copperwing"] {
+        let Some((set, index)) = library_brush(&s, |b| b.name == name) else { continue };
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(1.0);
+        // a first stroke warms the brush up; then one without the read and one with it
+        let mut seen = Vec::new();
+        for round in 0..3 {
+            let y0 = 300.0 + 300.0 * round as f32;
+            s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, y0, 0.0)]);
+            for i in 1..=150 {
+                let x = 100.0 + i as f32 * 9.0;
+                let y = y0 + (x / 90.0).sin() * 150.0;
+                s.stroke_add(vec![PenSample { pressure: 0.6, ..sample(x, y, i as f64 * 8.3) }]);
+                std::thread::sleep(Duration::from_micros(8300));
+            }
+            longest_frame.store(0, Ordering::Relaxed);
+            s.stroke_end(vec![]);
+            // the app's thread asks for the state every 2 ms (touches, gestures) meanwhile
+            let probing = Arc::new(AtomicBool::new(true));
+            let prober = {
+                let (s, probing) = (Arc::clone(&s), Arc::clone(&probing));
+                std::thread::spawn(move || {
+                    let mut longest = Duration::ZERO;
+                    while probing.load(Ordering::Relaxed) {
+                        let t = Instant::now();
+                        drop(s.shared.lock());
+                        longest = longest.max(t.elapsed());
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    longest
+                })
+            };
+            let t = Instant::now();
+            if round == 2 {
+                s.record_time_lapse(Arc::clone(&lapse));
+            }
+            let read = t.elapsed();
+            std::thread::sleep(Duration::from_secs(2).saturating_sub(t.elapsed()));
+            probing.store(false, Ordering::Relaxed);
+            let waited = prober.join().unwrap();
+            let frame = Duration::from_micros(longest_frame.load(Ordering::Relaxed));
+            seen.push((frame, waited, read));
+            s.undo();
+        }
+        let ((without, waited_without, _), (with, waited_with, read)) = (seen[1], seen[2]);
+        println!(
+            "{name}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+            ms(without),
+            ms(with),
+            ms(waited_without),
+            ms(waited_with),
+            ms(read)
+        );
+        added.push(with.saturating_sub(without));
+    }
+    stop.store(true, Ordering::Relaxed);
+    frames.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    added.sort();
+    let middle = added.get(added.len() / 2).copied().unwrap_or_default();
+    println!("the read adds to the longest frame: middle {middle:?}, most {:?}", added.last());
+    assert!(middle < Duration::from_micros(16_700), "{middle:?}");
+}
+
 #[test]
 fn a_time_lapse_frame_on_a_lost_device_is_none_without_a_panic() {
     let Some(s) = session(256, 256) else { return };

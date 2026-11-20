@@ -102,6 +102,7 @@ impl State {
     ) {
         self.needs_frame = false;
         self.frame_due = None;
+        self.frame_drawn_at = Some(Instant::now());
         // a shape moved since the last frame is drawn again where it is now, once however many
         // moves came meanwhile
         self.draw_moved_shape();

@@ -4647,6 +4647,14 @@ impl Canvas {
         self.catching_up
     }
 
+    /// Whether renders that show the canvas have work to lay a share at a time, or work queued
+    /// for the next one to take: a stroke's end laid again, paint laid in place catching up, any
+    /// queued op. A render that shows nothing (a thumbnail's, a read of the layers) lays all of it
+    /// at once, holding whatever waits on the canvas meanwhile.
+    pub fn lays_over_frames(&self) -> bool {
+        self.relaying || self.catching_up || !self.ops.is_empty()
+    }
+
     /// The most work of paint laid in place a render lays (see [`IN_PLACE_FRAME_MS`]): as much as
     /// the GPU gets through in that while, by the fastest it was seen to (each sighting counting a
     /// little less as more come, so that a GPU slowing down is followed), and [`IN_PLACE_LEAST`] at

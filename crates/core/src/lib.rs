@@ -282,6 +282,12 @@ pub(crate) const GRID_LINE: [f32; 3] = [46.0 / 255.0, 46.0 / 255.0, 46.0 / 255.0
 pub(crate) const GRID_LINE_LIGHT: [f32; 3] = [202.0 / 255.0, 205.0 / 255.0, 206.0 / 255.0];
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_SPACING_PT: f32 = 16.0;
+/// The longest a read beside the frames waits for them to lay what they lay a share at a time
+/// (see [`Shared::await_frames_laid`]): past it, it lays the rest itself.
+pub(crate) const FRAMES_LAY_MOST: std::time::Duration = std::time::Duration::from_secs(3);
+/// With no frame drawn for this long, frames are taken not to be drawn (the app away, a test
+/// drawing none): nothing waits for them.
+pub(crate) const FRAMES_GONE: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_WIDTH_PT: f32 = 4.0 / 3.0;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -657,6 +663,9 @@ pub(crate) struct State {
     pub(crate) projection_size: (u32, u32),
     pub(crate) projection_stop: bool,
     pub(crate) frames: u64,
+    /// When a frame was last drawn: a read beside the frames waits for them to lay what they lay a
+    /// share at a time only while they are being drawn (see [`Shared::await_frames_laid`]).
+    pub(crate) frame_drawn_at: Option<std::time::Instant>,
     /// The drawing pad's strokes as drawn (pointer and input), drawn again when the brush changes;
     /// `None` on a canvas that keeps none.
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
@@ -1687,6 +1696,27 @@ impl Shared {
         }
     }
 
+    /// Waits, the state let go meanwhile, while the frames being drawn lay work a share at a time
+    /// (see [`procraft_gpu::Canvas::lays_over_frames`]), for at most [`FRAMES_LAY_MOST`]: a read
+    /// made beside them from a thread of its own (a time-lapse frame after each stroke) started
+    /// then lays all of that at once, and the app's thread and the frames wait behind it (a third
+    /// of a second after a heavy brush's stroke on a large canvas). With no frame drawn in the last
+    /// [`FRAMES_GONE`] it doesn't wait: no frame would lay it. Never from the thread that draws.
+    pub(crate) fn await_frames_laid(&self) {
+        let until = std::time::Instant::now() + FRAMES_LAY_MOST;
+        loop {
+            let waiting = {
+                let st = self.lock();
+                st.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_GONE)
+                    && st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
+            };
+            if !waiting || std::time::Instant::now() >= until {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+    }
+
     /// The lock, taken once the canvas has finished remaking its caches (made a render at a
     /// time, the lock let go between): what is read under it is the picture as it is, and
     /// nothing waits on a whole remake.
@@ -2039,6 +2069,7 @@ impl CanvasSession {
             projection_size: (1, 1),
             projection_stop: false,
             frames: 0,
+            frame_drawn_at: None,
             pad_strokes: None,
             airbrush: None,
             ahead: false,

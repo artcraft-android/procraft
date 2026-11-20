@@ -1168,6 +1168,9 @@ impl CanvasSession {
     /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
     /// never shows in the replay or its video. None before the canvas exists.
     pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
+        // read once the frames have laid what they lay a share at a time (a stroke's end), which
+        // the read would otherwise lay at once, touches and frames waiting on it
+        self.shared.await_frames_laid();
         // the copy started under the lock, waited for once it is let go: touches and frames go
         // on while the GPU copies it
         let pending = {
