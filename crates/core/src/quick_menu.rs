@@ -333,6 +333,21 @@ pub fn quick_menu_added(menus: Vec<QuickMenuSet>) -> Vec<QuickMenuSet> {
     menus
 }
 
+/// The menus with menu `index` named `name` (its spaces at the ends dropped, tabs and line breaks
+/// as spaces); a name left empty, or an index not there, leaves them as they are.
+#[uniffi::export]
+pub fn quick_menu_renamed(menus: Vec<QuickMenuSet>, index: u32, name: String) -> Vec<QuickMenuSet> {
+    let name = name.replace(['\t', '\n', '\r'], " ");
+    let name = name.trim();
+    let mut menus = menus;
+    if let Some(menu) = menus.get_mut(index as usize)
+        && !name.is_empty()
+    {
+        menu.name = name.to_owned();
+    }
+    menus
+}
+
 /// Which menu is active once menu `removed` has gone, `active` having been: the same one, or the
 /// one before the active one when that went (the first when the first went).
 #[uniffi::export]
@@ -419,6 +434,21 @@ mod tests {
         assert!(choices.contains(&Some(QuickAction::Bloom)));
         assert!(!choices.contains(&Some(QuickAction::Brushes)));
         assert_eq!(choices.len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn a_menu_is_renamed_and_kept_by_its_new_name() {
+        let menus = quick_menu_added(quick_menus(None, None));
+        let renamed = quick_menu_renamed(menus.clone(), 1, "  Inking\ttools \n".into());
+        assert_eq!(renamed[1].name, "Inking tools");
+        assert_eq!((renamed[0].clone(), renamed[1].slots.clone()), (menus[0].clone(), menus[1].slots.clone()));
+        assert_eq!(quick_menus(Some(quick_menus_saved(renamed.clone())), None), renamed);
+        // left empty, or a menu not there: as they were
+        assert_eq!(quick_menu_renamed(menus.clone(), 1, "   ".into()), menus);
+        assert_eq!(quick_menu_renamed(menus.clone(), 5, "Gone".into()), menus);
+        // a name taken by a renamed menu is skipped by the next one added
+        let taken = quick_menu_renamed(menus, 0, "QuickMenu 3".into());
+        assert_eq!(quick_menu_added(taken)[2].name, "QuickMenu 4");
     }
 
     #[test]

@@ -222,7 +222,7 @@ pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
     QuickAction, QuickMenuSet, pen_button_actions, pen_button_actions_saved, pen_button_choices, quick_action_adjusts,
     quick_action_label, quick_actions_listed, quick_adjustments_listed, quick_menu_active_after, quick_menu_added,
-    quick_menu_saved, quick_menu_slots, quick_menus, quick_menus_saved,
+    quick_menu_renamed, quick_menu_saved, quick_menu_slots, quick_menus, quick_menus_saved,
 };
 pub use quickshape::{QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{

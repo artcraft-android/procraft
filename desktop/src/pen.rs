@@ -295,6 +295,23 @@ pub(crate) fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
             None => leans.remove(&MOUSE),
         };
     }
+    // no pen moving it: no roll either
+    if pen.is_none() {
+        set_mouse_pen_roll(None);
+    }
+}
+
+/// The barrel roll (radians clockwise) of the tablet pen moving the mouse pointer, if its tablet
+/// gives one (WinTab's twist, as an Art Pen's): the mouse's samples carry it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn set_mouse_pen_roll(roll: Option<f32>) {
+    if let Ok(mut rolls) = ROLLS.lock() {
+        let rolls = rolls.get_or_insert_with(Default::default);
+        match roll.filter(|_| mouse_pen().is_some()) {
+            Some(r) => rolls.insert(MOUSE, r),
+            None => rolls.remove(&MOUSE),
+        };
+    }
 }
 
 /// Where a tablet pen's pressure and tilts are among its device's axes (XInput valuators): each

@@ -3652,6 +3652,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         keepQuickMenus()
     }
 
+    /** Names menu [i] [name] (left empty, it keeps its name). */
+    fun renameQuickMenu(i: Int, name: String) {
+        if (i !in quickMenus.indices) return
+        quickMenus = io.github.artcraftandroid.procraft.core.quickMenuRenamed(quickMenus, i.toUInt(), name)
+        keepQuickMenus()
+    }
+
     /** Deletes menu [i] (never the last one left); the ring shows the one before it if it showed it. */
     fun deleteQuickMenu(i: Int) {
         if (quickMenus.size < 2 || i !in quickMenus.indices) return

@@ -599,6 +599,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         val about = device?.let { "device %04x:%04x%s".format(java.util.Locale.ROOT, it.vendorId, it.productId, named) } ?: "no device"
         val axis = device?.getMotionRange(MotionEvent.AXIS_PRESSURE, e.source)?.let { it.min..it.max }
         AppLog.i(TAG, pointerFacts(what, about, toolType, e.source, kindOf(e, i), e.getPressure(i), axis, e.buttonState, e.getTouchMajor(i)))
+        // every axis a pen's device says it gives (a barrel's turn has no axis of Android's own)
+        if (isPen(toolType, e.source)) {
+            val axes = device?.motionRanges.orEmpty().filter { it.source and e.source != 0 }.map { MotionEvent.axisToString(it.axis) }.distinct()
+            AppLog.i(TAG, "its axes: ${axes.joinToString().ifEmpty { "none said" }}")
+        }
     }
 
     /** The pointer's samples in this event: the batched ones since the last event, then the latest. */
