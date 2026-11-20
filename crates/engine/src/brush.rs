@@ -110,9 +110,11 @@ impl std::ops::Deref for Pixels {
     }
 }
 
+// (the same whether drawn yet or not: what a brush looks like is told by its source's id, and the
+// app keeps sample strokes by that, see core's `drawn_previews`)
 impl std::fmt::Debug for Pixels {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Pixels({})", if self.is_drawn() { "drawn" } else { "to draw" })
+        f.write_str("Pixels")
     }
 }
 

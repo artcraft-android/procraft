@@ -33,6 +33,7 @@ mod colour_models;
 mod crop;
 mod crop_edit;
 mod device;
+mod drawn_previews;
 mod floating;
 mod frame;
 mod frame_loop;
@@ -618,6 +619,8 @@ pub(crate) struct State {
     strokes: u32,
     /// The small canvas brush previews are drawn on.
     preview: Option<(Canvas, Document)>,
+    /// Sample strokes drawn already, kept by what they were drawn from.
+    drawn_previews: drawn_previews::DrawnPreviews,
     color: [f32; 3],
     /// The secondary colour, for secondary colour dynamics.
     secondary: [f32; 3],
@@ -1916,6 +1919,7 @@ impl CanvasSession {
             sliders: HashMap::new(),
             strokes: 0,
             preview: None,
+            drawn_previews: Default::default(),
             color: [0.0, 0.0, 0.0],
             secondary: [1.0, 1.0, 1.0],
             colour_history: None,

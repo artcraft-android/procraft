@@ -91,7 +91,7 @@ impl CanvasSession {
     fn brush_pictures(&self, brush: &Brush, set: u32, index: u32) -> Made {
         // the preview it came with, else one drawn
         let thumbnail = brush.thumbnail.as_deref().map(<[u8]>::to_vec).unwrap_or_else(|| {
-            self.brush_preview(set, index, THUMBNAIL.0, THUMBNAIL.1)
+            self.brush_preview_for_file(set, index, THUMBNAIL.0, THUMBNAIL.1)
                 .map(|t| crate::project::rgba_png(t.width, t.height, &t.rgba))
                 .unwrap_or_else(|| crate::project::rgba_png(1, 1, &[0, 0, 0, 0]))
         });
@@ -4388,5 +4388,71 @@ mod tests {
             bytes >> 10
         );
         assert!(written <= pictures * 3 / 2, "written in {written:?}, its pictures made in {pictures:?}");
+    }
+
+    /// Sharing the library as it ships after the library has shown every brush (each row's sample
+    /// stroke drawn at the size the Android library draws it): the file takes the strokes the
+    /// library drew and keeps (all but the oldest, past what may be kept), drawing only the rest,
+    /// so it is written quicker than with none shown (its other pictures take the rest of the
+    /// time). Prints both times and what the kept strokes hold. Bounds: nine in ten of the kept
+    /// strokes taken, and quicker than with none shown.
+    /// `cargo test -p procraft-core --lib brush_library_export_after_its_previews_were_shown -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn brush_library_export_after_its_previews_were_shown() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let s = crate::CanvasSession::new(200, 200);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(procraft_engine::view::View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let dir = std::env::temp_dir().join(format!("procraft-library-shown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Library.brushlibrary").to_string_lossy().into_owned();
+        let write = || {
+            let t = std::time::Instant::now();
+            s.write_brush_library_file(path.clone(), None).unwrap();
+            (t.elapsed(), std::fs::read(&path).unwrap())
+        };
+        // none shown: every stroke drawn for the file (none kept), and nothing left kept
+        let (cold, cold_file) = write();
+        let drawn = s.shared.lock().drawn_previews.missed;
+        s.shared.lock().drawn_previews = Default::default();
+        // the library shows every brush, as its rows ask
+        let brushes: Vec<(u32, u32)> = s
+            .brush_library()
+            .iter()
+            .enumerate()
+            .flat_map(|(set, entry)| (0..entry.brushes.len()).map(move |i| (set as u32, i as u32)))
+            .collect();
+        let t = std::time::Instant::now();
+        for &(set, i) in &brushes {
+            std::hint::black_box(s.brush_preview(set, i, 530, 162));
+        }
+        let shown = t.elapsed();
+        let (kept, bytes) = s.shared.lock().drawn_previews.held();
+        let (warm, warm_file) = write();
+        let found = s.shared.lock().drawn_previews.found;
+        let _ = std::fs::remove_dir_all(&dir);
+        println!(
+            "{} brushes, {drawn} strokes drawn for the file: written in {} ms with none shown; the library shown in {} ms              ({kept} strokes kept, {} KB); then written in {} ms ({found} strokes taken from those kept)",
+            brushes.len(),
+            cold.as_millis(),
+            shown.as_millis(),
+            bytes >> 10,
+            warm.as_millis()
+        );
+        // the same file either way, but for the folders' names (made from the clock)
+        assert!(
+            cold_file.len().abs_diff(warm_file.len()) < cold_file.len() / 100,
+            "{} against {}",
+            cold_file.len(),
+            warm_file.len()
+        );
+        assert!(found >= kept as u64 * 9 / 10, "{found} strokes taken of {kept} kept");
+        assert!(warm < cold, "written in {warm:?} after the library was shown, {cold:?} before");
     }
 }

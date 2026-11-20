@@ -384,6 +384,20 @@ impl CanvasSession {
         self.drawn_preview(brush, width, height)
     }
 
+    /// Brush `index` of `set`'s sample stroke for a file being written: the one the library drew,
+    /// if it is kept, else drawn but not kept (a file of a whole library would push out every
+    /// stroke the library keeps, as it has none of them yet, one by one).
+    pub(crate) fn brush_preview_for_file(
+        &self,
+        set: u32,
+        index: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ThumbnailImage> {
+        let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        self.sample_stroke(brush, width, height, false)
+    }
+
     /// The sample stroke of the brush open in the studio (a dual brush's whole), as
     /// [`CanvasSession::brush_preview`] draws one, for the studio to show as its controls change.
     /// A slider being dragged asks again at every step: only the newest ask is drawn, and one still
@@ -401,13 +415,13 @@ impl CanvasSession {
             let (set, index) = st.studio.as_ref()?.0;
             st.library.get(set)?.brushes.get(index)?.clone()
         };
-        self.drawn_preview(brush, width, height)
+        self.sample_stroke(brush, width, height, false)
     }
 
     /// The same of the first or `second` part alone of the dual brush open in the studio.
     pub fn studio_part_preview(&self, second: bool, width: u32, height: u32) -> Option<ThumbnailImage> {
         let brush = self.shared.lock().studio_part(second)?;
-        self.drawn_preview(brush, width, height)
+        self.sample_stroke(brush, width, height, false)
     }
 }
 
@@ -477,6 +491,19 @@ impl CanvasSession {
         width: u32,
         height: u32,
     ) -> Option<ThumbnailImage> {
+        self.sample_stroke(brush, width, height, true)
+    }
+
+    /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]): the one drawn already from
+    /// a brush looking as it does, if it is kept, else drawn now, and kept if `keep` says (the
+    /// library's are; the studio's, a new one at every step of a slider, aren't).
+    fn sample_stroke(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        width: u32,
+        height: u32,
+        keep: bool,
+    ) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
         // a brush a plugin's brush engine draws, while that is on, is drawn by it
@@ -496,10 +523,28 @@ impl CanvasSession {
                 return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
             }
         }
+        // drawn already from a brush looking as this one does: that stroke (one a plugin's brush
+        // engine draws is drawn again, as the plugin may have changed)
+        let key = hooks.is_none().then(|| crate::drawn_previews::look_key(&brush));
+        let kept_stroke = |key: Option<u64>| {
+            let png = self.shared.lock().drawn_previews.find(key?)?;
+            let rgba = crate::drawn_previews::unpacked(cw, ch, &png)?;
+            Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) })
+        };
+        if let Some(kept) = kept_stroke(key) {
+            return Some(kept);
+        }
         // one at a time, on the canvas kept for them: drawn side by side, each took a canvas of its
         // own, its shape and grain arrays made again with it (a library's card asks for a dozen
         // strokes at once)
         let _drawing = PREVIEWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // (drawn meanwhile, by an ask for it made before this one)
+        if let Some(kept) = kept_stroke(key) {
+            return Some(kept);
+        }
+        if key.is_some() {
+            self.shared.lock().drawn_previews.missed += 1;
+        }
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
             let mut st = self.shared.lock();
@@ -545,7 +590,15 @@ impl CanvasSession {
         if !whole {
             return failed("part of it was left out");
         }
-        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+        let mut rgba = rgba?;
+        // kept, it shows as it will when taken again (a white stroke as its coverage)
+        if let Some(key) = key.filter(|_| keep)
+            && let Some(png) = crate::drawn_previews::packed(cw, ch, &rgba)
+        {
+            rgba = crate::drawn_previews::unpacked(cw, ch, &png).unwrap_or(rgba);
+            self.shared.lock().drawn_previews.keep(key, png);
+        }
+        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) })
     }
 
     /// `brush`'s sample stroke drawn on `canvas` (its layer wiped first), white: the canvas's pixels

@@ -16511,11 +16511,75 @@ fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
     let gpu = s.shared.lock().gpu.clone().unwrap();
     // lost as the next is drawn: not yet seen as lost (that comes as the device is polled)
     gpu.device.destroy();
-    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_none());
     assert!(s.brush_preview(wet.0, wet.1, 106, 32).is_none());
     let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
     assert!(gpu.is_lost());
-    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_none());
+    assert!(s.brush_preview(wet.0, wet.1, 106, 32).is_none());
+    // one drawn before is kept: shown still, with nothing drawn
+    assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_some());
+}
+
+/// A brush's sample stroke drawn once is kept by what the brush looks like: asked for again (a
+/// library redrawing its rows after any change, a set or library shared) it is the same stroke,
+/// not drawn again, wherever the brush has moved; a brush changed in any way that shows draws
+/// anew, and a brush changed back finds its stroke again. The studio's strokes aren't kept.
+#[test]
+fn a_sample_stroke_is_kept_by_how_the_brush_looks_and_drawn_anew_once_it_changes() {
+    let Some(s) = session(64, 64) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(i, l)| {
+            l.brushes.iter().position(|b| b.thumbnail.is_none() && b.secondary.is_some()).map(|j| (i, j))
+        });
+        found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+    };
+    let counts = || {
+        let st = s.shared.lock();
+        (st.drawn_previews.found, st.drawn_previews.missed)
+    };
+    let first = s.brush_preview(set, index, 530, 162).unwrap().rgba;
+    assert_eq!(counts(), (0, 1));
+    // again, and at the file's size: the stroke kept, the same as drawn
+    assert_eq!(s.brush_preview(set, index, 530, 162).unwrap().rgba, first);
+    let file_size = s.brush_preview(set, index, 1060, 324).unwrap().rgba;
+    assert_eq!(counts(), (2, 1));
+    // drawn anew on a fresh session's canvas: the same pixels as the kept stroke gives
+    let fresh = session(64, 64).unwrap();
+    assert_eq!(fresh.brush_preview(set, index, 1060, 324).unwrap().rgba, file_size);
+    // renamed and given notches: it looks the same, so its stroke is kept
+    {
+        let mut st = s.shared.lock();
+        let b = st.library.get_mut(set as usize).and_then(|l| l.brushes.get_mut(index as usize)).unwrap();
+        b.name = "Another name".to_owned();
+        b.sliders = [Some([0.5, 0.5]); 3];
+    }
+    assert_eq!(s.brush_preview(set, index, 530, 162).unwrap().rgba, first);
+    assert_eq!(counts(), (3, 1));
+    // its second's spacing changed: drawn anew, unlike before
+    let change = |value: f32| {
+        let mut st = s.shared.lock();
+        let b = st.library.get_mut(set as usize).and_then(|l| l.brushes.get_mut(index as usize)).unwrap();
+        b.secondary.as_mut().unwrap().set_setting("spacing", value);
+    };
+    let spacing =
+        s.shared.lock().library[set as usize].brushes[index as usize].secondary.as_ref().unwrap().setting("spacing");
+    change((spacing * 3.0).clamp(0.05, 1.0));
+    let changed = s.brush_preview(set, index, 530, 162).unwrap().rgba;
+    assert_eq!(counts(), (3, 2));
+    assert_ne!(changed, first);
+    // changed back: the first stroke again
+    change(spacing);
+    assert_eq!(s.brush_preview(set, index, 530, 162).unwrap().rgba, first);
+    assert_eq!(counts(), (4, 2));
+    // the studio's own aren't kept: a stroke at each step of a slider would push the library's out
+    assert!(s.select_brush(set, index));
+    s.studio_begin();
+    s.set_studio_setting("spacing".to_owned(), (spacing * 2.0).clamp(0.05, 1.0));
+    let held = s.shared.lock().drawn_previews.held().0;
+    assert!(s.studio_preview(530, 162).is_some());
+    assert_eq!(s.shared.lock().drawn_previews.held().0, held);
+    s.studio_end(false);
+    assert_eq!(s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors), 0);
 }
 
 /// Brush previews on a device like an old 32-bit phone's: an old GPU's fragment passes, the system
