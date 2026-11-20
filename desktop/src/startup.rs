@@ -210,29 +210,11 @@ pub fn backend_order() -> &'static [usize] {
         if keeps_backend(&saved, backends.len(), ENDS_TOLD) {
             return listed;
         }
-        let asking = files::app_dir().join(GPU_ASKING);
-        if recorded() {
-            if asking.exists() {
-                log::warn!("the last start stopped as Direct3D 12 listed the GPUs: the backends in their order");
-                return listed;
-            }
-            if let Err(e) = files::write_whole(&asking, b"asking") {
-                log::warn!("keeping that the GPUs are being listed: {e}");
-            }
-        }
-        // as Direct3D 12 sees them: Vulkan's driver is what may crash, so it isn't asked
-        let started = Instant::now();
-        let seen = std::panic::catch_unwind(|| Gpu::adapters(wgpu::Backends::DX12)).unwrap_or_else(|panic| {
-            log::warn!("the GPUs couldn't be listed: {}", procraft_gpu::panic_message(panic.as_ref()));
-            Vec::new()
-        });
-        if recorded() {
-            let _ = std::fs::remove_file(&asking);
-        }
-        let gpus: Vec<(u32, wgpu::DeviceType)> = seen.iter().map(|a| (a.vendor, a.device_type)).collect();
-        let picked = drawn_with(&gpus).and_then(|i| seen.get(i));
-        let order = order_for(&backends, picked.map(|a| (a.vendor, a.device_type)));
-        let took = started.elapsed().as_millis();
+        let Some((picked, took)) = d3d12_choice() else {
+            log::warn!("the last start stopped as Direct3D 12 listed the GPUs: the backends in their order");
+            return listed;
+        };
+        let order = order_for(&backends, picked.as_ref().map(|a| (a.vendor, a.device_type)));
         match picked {
             Some(gpu) if order != listed => log::info!(
                 "the GPU to draw with is {} ({:?}, vendor {:#06x}; listed by Direct3D 12 in {took} ms): {} first",
@@ -251,6 +233,72 @@ pub fn backend_order() -> &'static [usize] {
         }
         order
     })
+}
+
+/// The GPU Direct3D 12 would draw with (see [`drawn_with`]), as it lists them, once a run, and how
+/// long that took (ms); none where they can't be listed: the last start stopped as they were (a
+/// driver that crashes as it is asked mustn't do so at every start).
+fn d3d12_choice() -> Option<&'static (Option<wgpu::AdapterInfo>, u128)> {
+    static CHOICE: OnceLock<Option<(Option<wgpu::AdapterInfo>, u128)>> = OnceLock::new();
+    CHOICE
+        .get_or_init(|| {
+            let asking = files::app_dir().join(GPU_ASKING);
+            if recorded() {
+                if asking.exists() {
+                    return None;
+                }
+                if let Err(e) = files::write_whole(&asking, b"asking") {
+                    log::warn!("keeping that the GPUs are being listed: {e}");
+                }
+            }
+            // as Direct3D 12 sees them: Vulkan's driver is what may crash, so it isn't asked
+            let started = Instant::now();
+            let seen = std::panic::catch_unwind(|| Gpu::adapters(wgpu::Backends::DX12)).unwrap_or_else(|panic| {
+                log::warn!("the GPUs couldn't be listed: {}", procraft_gpu::panic_message(panic.as_ref()));
+                Vec::new()
+            });
+            if recorded() {
+                let _ = std::fs::remove_file(&asking);
+            }
+            let gpus: Vec<(u32, wgpu::DeviceType)> = seen.iter().map(|a| (a.vendor, a.device_type)).collect();
+            let picked = drawn_with(&gpus).and_then(|i| seen.get(i)).cloned();
+            Some((picked, started.elapsed().as_millis()))
+        })
+        .as_ref()
+}
+
+/// The window's device is made on `gpu`: on OpenGL under Windows, which GPU that is is logged
+/// beside the one Direct3D 12 would draw with, and a mismatch warned of. OpenGL draws on the GPU
+/// the drivers give the app, not the one wgpu picks: on a laptop of two GPUs it was the integrated
+/// one, its frames slow, before the app asked the drivers for the faster (see `main.rs`).
+pub fn gpu_drawing(gpu: &wgpu::AdapterInfo) {
+    if !cfg!(windows) || gpu.backend != wgpu::Backend::Gl {
+        return;
+    }
+    match d3d12_choice() {
+        None => log::info!("OpenGL draws on {} (Direct3D 12 isn't asked which GPU it would draw with)", gpu.name),
+        Some((None, _)) => log::info!("OpenGL draws on {} (Direct3D 12 lists no GPU)", gpu.name),
+        Some((Some(d3d12), _)) if same_gpu(gpu, d3d12) => {
+            log::info!("OpenGL draws on {}, the GPU Direct3D 12 would draw with", gpu.name);
+        }
+        Some((Some(d3d12), _)) => log::warn!(
+            "OpenGL draws on {} (vendor {:#06x}), not on {} (vendor {:#06x}) as Direct3D 12 would: the GPU the              drivers give the app",
+            gpu.name,
+            gpu.vendor,
+            d3d12.name,
+            d3d12.vendor
+        ),
+    }
+}
+
+/// Whether OpenGL's `gl` is the GPU `other` (another backend's): by vendor where OpenGL's says
+/// which (it goes by the driver's name), else by name (OpenGL's may add to it, as "/PCIe/SSE2").
+fn same_gpu(gl: &wgpu::AdapterInfo, other: &wgpu::AdapterInfo) -> bool {
+    if gl.vendor != 0 && other.vendor != 0 {
+        return gl.vendor == other.vendor;
+    }
+    let (gl, other) = (gl.name.to_lowercase(), other.name.to_lowercase());
+    !other.is_empty() && (gl.starts_with(&other) || other.starts_with(&gl))
 }
 
 /// Whether the record `saved` keeps its backend for the next start, of `count`.
@@ -1088,6 +1136,25 @@ mod tests {
     /// The order for a machine whose GPUs (vendor, type) are `gpus`, as Direct3D 12 lists them.
     fn order_with(backends: &[Backends], gpus: &[(u32, procraft_gpu::wgpu::DeviceType)]) -> Vec<usize> {
         order_for(backends, drawn_with(gpus).and_then(|i| gpus.get(i).copied()))
+    }
+
+    #[test]
+    fn opengl_s_gpu_is_told_apart_from_direct3d_12_s_by_vendor_or_name() {
+        use super::same_gpu;
+        use procraft_gpu::wgpu;
+        let gpu = |name: &str, vendor: u32, backend| wgpu::AdapterInfo {
+            name: name.to_owned(),
+            vendor,
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::Other, backend)
+        };
+        let rtx = gpu("NVIDIA GeForce RTX 2050", 0x10de, wgpu::Backend::Dx12);
+        // a laptop's OpenGL on the integrated GPU, Direct3D 12 on the discrete one
+        assert!(!same_gpu(&gpu("Intel(R) Iris(R) Xe Graphics", 0x8086, wgpu::Backend::Gl), &rtx));
+        assert!(same_gpu(&gpu("NVIDIA GeForce RTX 2050/PCIe/SSE2", 0x10de, wgpu::Backend::Gl), &rtx));
+        // a driver OpenGL can't name the vendor of: by name
+        let radeon = gpu("AMD Radeon RX 6600", 0x1002, wgpu::Backend::Dx12);
+        assert!(same_gpu(&gpu("AMD Radeon RX 6600", 0, wgpu::Backend::Gl), &radeon));
+        assert!(!same_gpu(&gpu("Radeon Graphics", 0, wgpu::Backend::Gl), &radeon));
     }
 
     #[test]

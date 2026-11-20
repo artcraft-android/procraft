@@ -133,6 +133,19 @@ impl Importing {
     }
 }
 
+/// On a laptop of two GPUs, the drivers give OpenGL the discrete one when the app says so with these
+/// (NVIDIA's Optimus, AMD's PowerXpress), as Direct3D 12 and Vulkan are given the faster by wgpu
+/// itself: OpenGL drew on the integrated one, its frames taking 100 to 480 ms. The linker exports
+/// them from the .exe (build.rs).
+#[cfg(windows)]
+#[allow(unsafe_code, non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static NvOptimusEnablement: u32 = 1;
+#[cfg(windows)]
+#[allow(unsafe_code, non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 /// What the layers' textures may take on the GPU, bytes: past it, the layers not worked on are kept
 /// compressed in memory until needed. A graphics card's (see [`layers_on_gpu`]).
 const LAYERS_ON_GPU: u64 = 2 << 30;
@@ -477,6 +490,8 @@ impl ApplicationHandler for App {
         let screen = match Screen::new(window, &display, order, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
+                // on OpenGL, whether the drivers gave it the GPU Direct3D 12 would draw with
+                startup::gpu_drawing(&s.gpu.adapter.get_info());
                 // the layers' room on the GPU, by whether its memory is the computer's (before any
                 // canvas is made)
                 let layers = layers_on_gpu(s.gpu.shares_memory(), memory_total());
@@ -1576,6 +1591,26 @@ mod tests {
     fn the_computers_memory_is_read() {
         let total = super::memory_total().expect("the system says how much memory there is");
         assert!(total >= 1 << 30, "{total} bytes");
+    }
+
+    /// The .exe asks the drivers for the discrete GPU for OpenGL: the two values are exported, set
+    /// (the test's .exe is linked as the app's is).
+    #[cfg(windows)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_exe_asks_the_drivers_for_the_discrete_gpu() {
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        // SAFETY: the module of this process, which stays loaded
+        let me = unsafe { GetModuleHandleW(None) }.unwrap();
+        for name in
+            [windows::core::s!("NvOptimusEnablement"), windows::core::s!("AmdPowerXpressRequestHighPerformance")]
+        {
+            // SAFETY: a name ending in a nul, looked up in this module's exports
+            let at = unsafe { GetProcAddress(me, name) };
+            let at = at.map(|f| f as usize).unwrap_or_else(|| panic!("{name:?} isn't exported"));
+            // SAFETY: the export is one of the u32 statics above, there for the process's life
+            assert_eq!(unsafe { std::ptr::read(at as *const u32) }, 1);
+        }
     }
 
     #[test]
