@@ -213,6 +213,40 @@ pub fn quick_menu_saved(slots: Vec<QuickAction>) -> String {
     slots.iter().map(|&a| entry(a).1).collect::<Vec<_>>().join(",")
 }
 
+/// The pen's side buttons, as Pen buttons sets them.
+const PEN_BUTTONS: usize = 2;
+
+/// What the pen's two side buttons (the first, the second) are set to do, as kept in `saved` (see
+/// [`pen_button_actions_saved`]): a QuickMenu action each, or `None` to do what Gesture controls
+/// say, as they start. A name not known any more is `None`.
+#[uniffi::export]
+pub fn pen_button_actions(saved: Option<String>) -> Vec<Option<QuickAction>> {
+    let mut actions: Vec<Option<QuickAction>> = saved
+        .unwrap_or_default()
+        .split(',')
+        .take(PEN_BUTTONS)
+        .map(|n| ACTIONS.iter().find(|e| e.1 == n).map(|e| e.0))
+        .collect();
+    actions.resize(PEN_BUTTONS, None);
+    actions
+}
+
+/// The pen's buttons as kept: their actions' names (empty for Gesture controls'), joined with
+/// commas.
+#[uniffi::export]
+pub fn pen_button_actions_saved(actions: Vec<Option<QuickAction>>) -> String {
+    actions.iter().take(PEN_BUTTONS).map(|a| a.map_or("", |a| entry(a).1)).collect::<Vec<_>>().join(",")
+}
+
+/// What a pen button can be set to, in order: `None` (what Gesture controls say) first, then the
+/// actions by name, then the adjustments by name. Select brush is left out, as a button here keeps
+/// no brush.
+#[uniffi::export]
+pub fn pen_button_choices() -> Vec<Option<QuickAction>> {
+    let actions = quick_actions_listed().into_iter().flatten().filter(|&a| a != QuickAction::Brushes);
+    std::iter::once(None).chain(actions.map(Some)).chain(quick_adjustments_listed().into_iter().map(Some)).collect()
+}
+
 /// One of the QuickMenu's menus: its name (shown in the middle) and its six buttons, each with
 /// the key of the brush it is set to (see `CanvasSession::quick_brush`) when it is Select brush,
 /// else 0 (a Select brush button with none opens the brush library).
@@ -369,6 +403,22 @@ mod tests {
         let kept = quick_menus_saved(menus.clone());
         assert!(kept.contains(",BRUSH:7,BRUSHES,"), "{kept}");
         assert_eq!(quick_menus(Some(kept), None), menus);
+    }
+
+    #[test]
+    fn the_pen_buttons_start_as_gesture_controls_say_and_are_kept_by_name() {
+        assert_eq!(pen_button_actions(None), vec![None, None]);
+        assert_eq!(pen_button_actions(Some(String::new())), vec![None, None]);
+        let kept = pen_button_actions_saved(vec![None, Some(QuickAction::Undo)]);
+        assert_eq!(kept, ",UNDO");
+        assert_eq!(pen_button_actions(Some(kept)), vec![None, Some(QuickAction::Undo)]);
+        assert_eq!(pen_button_actions(Some("REDO,GONE,UNDO".into())), vec![Some(QuickAction::Redo), None]);
+        let choices = pen_button_choices();
+        assert_eq!(choices.first(), Some(&None));
+        assert!(choices.contains(&Some(QuickAction::Undo)) && choices.contains(&Some(QuickAction::Redo)));
+        assert!(choices.contains(&Some(QuickAction::Bloom)));
+        assert!(!choices.contains(&Some(QuickAction::Brushes)));
+        assert_eq!(choices.len(), ACTIONS.len());
     }
 
     #[test]

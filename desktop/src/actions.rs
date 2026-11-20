@@ -137,6 +137,8 @@ pub enum Page {
     Pressure,
     Cursor,
     Plugins,
+    /// What the pen's side buttons do.
+    PenButtons,
 }
 
 /// The settings a slider row sets.
@@ -443,6 +445,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
+                    Button("Pen buttons", None, Some(Act::Page(Page::PenButtons))),
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
                     Button("Plugins", None, Some(Act::Page(Page::Plugins))),
@@ -549,6 +552,8 @@ pub struct Actions {
     plugin_moved: Option<(String, f32)>,
     /// The key of a plugin's action tapped, for the app to run.
     plugin_action: Option<String>,
+    /// Pen buttons: the button whose choices are listed (true: the second), or none.
+    pen_picking: Option<bool>,
     /// A plugin's choice menu, and the setting it picks for.
     plugin_menu: Menu,
     plugin_choice: Option<PluginChoice>,
@@ -698,6 +703,16 @@ impl Actions {
                             + 13.0;
                         header + rows.min(MOST_ROWS)
                     }
+                    Page::PenButtons => {
+                        let rows = match self.pen_picking {
+                            Some(_) => {
+                                let n = procraft_core::pen_button_choices().len();
+                                8.0 + choices_height(n, 0) + 13.0
+                            }
+                            None => 8.0 + 2.0 * (6.0 + 21.0 + 8.0 + CHOICE_HEIGHT) + 13.0,
+                        };
+                        header + rows.min(MOST_ROWS)
+                    }
                     Page::Plugins => {
                         let painter = ctx.layer_painter(egui::LayerId::background());
                         let list = prefs.plugins.plugins();
@@ -754,6 +769,7 @@ impl Actions {
         let mut act = match tapped {
             Some(Tapped::Act(Act::Page(page))) => {
                 self.page = page;
+                self.pen_picking = None;
                 None
             }
             Some(Tapped::Act(Act::ScalingMenu)) => {
@@ -859,6 +875,7 @@ impl Actions {
             Page::Cursor => self.cursor_page(ui, look, body, prefs),
             Page::Pressure => self.pressure_page(ui, look, body, prefs),
             Page::Plugins => self.plugins_page(ui, look, body, prefs),
+            Page::PenButtons => self.pen_buttons_page(ui, look, body, prefs),
         }
     }
 
@@ -1216,6 +1233,81 @@ impl Actions {
             return Some(Tapped::Act(Act::PluginAction));
         }
         changed.then_some(Tapped::Act(Act::Prefs))
+    }
+
+    /// Pen buttons: what the pen's first and second side buttons do, a QuickMenu action each or, as
+    /// they start, what Gesture controls say. A button's row tapped lists the choices, the one set
+    /// blue; a choice tapped sets it and comes back.
+    fn pen_buttons_page(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, prefs: &mut Prefs) -> Option<Tapped> {
+        let label = |a: Option<procraft_core::QuickAction>| {
+            a.map_or("Gesture controls".to_owned(), procraft_core::quick_action_label)
+        };
+        let title = match self.pen_picking {
+            None => "Pen buttons",
+            Some(false) => "Pen button",
+            Some(true) => "Pen second button",
+        };
+        if self.page_header(ui, look, body, title) {
+            // back from the choices to the buttons
+            if self.pen_picking.take().is_some() {
+                self.page = Page::PenButtons;
+            }
+            return None;
+        }
+        let (left, right) = (body.left() + 12.0, body.right() - 12.0);
+        let top = body.top() + 12.0 + 44.0 + 8.0;
+        let Some(second) = self.pen_picking else {
+            let mut y = top;
+            for (k, heading) in ["Pen button", "Pen second button"].into_iter().enumerate() {
+                y += 6.0;
+                text(
+                    ui.painter(),
+                    pos2(left + 14.0, y),
+                    Align2::LEFT_TOP,
+                    heading,
+                    17.0,
+                    Weight::Bold,
+                    argb(CURSOR_HEADING),
+                );
+                y += 21.0 + 8.0;
+                let row = Rect::from_min_size(pos2(left, y), vec2(right - left, CHOICE_HEIGHT));
+                let set = label(prefs.pen_buttons.get(k).copied().flatten());
+                // one row saying what it is set to, none of it blue
+                if choice_group(ui, row, &[set.as_str()], 1, 10 + k).is_some() {
+                    self.pen_picking = Some(k == 1);
+                }
+                y = row.bottom();
+            }
+            return None;
+        };
+        let choices = procraft_core::pen_button_choices();
+        let labels: Vec<String> = choices.iter().map(|&a| label(a)).collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let at = usize::from(second);
+        let set = prefs.pen_buttons.get(at).copied().flatten();
+        let chosen = choices.iter().position(|&c| c == set).unwrap_or(0);
+        let list = Rect::from_min_max(pos2(left, top), pos2(right, body.bottom()));
+        let mut picked = None;
+        ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ScrollArea::vertical()
+                .id_salt("pen button choices")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    let (group, _) = ui
+                        .allocate_exact_size(vec2(right - left, choices_height(labels.len(), chosen)), Sense::hover());
+                    picked = choice_group(ui, group, &labels, chosen, 20);
+                    ui.add_space(13.0);
+                });
+        });
+        let i = picked?;
+        if prefs.pen_buttons.len() < 2 {
+            prefs.pen_buttons.resize(2, None);
+        }
+        if let Some(slot) = prefs.pen_buttons.get_mut(at) {
+            *slot = choices.get(i).copied().flatten();
+        }
+        self.pen_picking = None;
+        Some(Tapped::Act(Act::Prefs))
     }
 
     /// Advanced cursor settings: when the brush cursor shows, and how it is drawn.

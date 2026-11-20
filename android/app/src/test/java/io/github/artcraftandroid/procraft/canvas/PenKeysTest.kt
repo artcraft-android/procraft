@@ -5,6 +5,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.artcraftandroid.procraft.core.GestureAction
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.TouchSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -264,6 +265,36 @@ class PenKeysTest {
             assertEquals(true, tablet.pointerFollowsTouch)
             assertEquals(shipped(paint, pan, modelFingerPaint = false), tablet.copy(pointerFollowsTouch = false))
         }
+    }
+
+    @Test
+    fun the_pen_buttons_set_in_pen_buttons_go_to_the_touches_and_nothing_else_changes() {
+        val gestures = shipped(fingerPaint = true, oneFingerPan = false, modelFingerPaint = false)
+        // as they start: what Gesture controls say
+        val plain = tabletTouchSettings(gestures, listOf(null, null))
+        assertNull(plain.penButtonDoes)
+        assertNull(plain.penSecondButtonDoes)
+        assertEquals(plain, tabletTouchSettings(gestures))
+        // one button left to swap the eraser, the other set to undo
+        val undo = tabletTouchSettings(gestures, listOf(null, QuickAction.UNDO))
+        assertNull(undo.penButtonDoes)
+        assertEquals(QuickAction.UNDO, undo.penSecondButtonDoes)
+        assertEquals(plain, undo.copy(penSecondButtonDoes = null))
+        val both = tabletTouchSettings(gestures, listOf(QuickAction.REDO, QuickAction.UNDO))
+        assertEquals(QuickAction.REDO to QuickAction.UNDO, both.penButtonDoes to both.penSecondButtonDoes)
+    }
+
+    @Test
+    fun a_key_a_pen_sends_that_isnt_taken_is_told_once() {
+        assertEquals(true, maybePenKeys(keyboard or InputDevice.SOURCE_STYLUS, "Touch"))
+        assertEquals(true, maybePenKeys(keyboard, "Xiaomi Smart Pen"))
+        assertEquals(false, maybePenKeys(keyboard, "Virtual"))
+        assertEquals(false, maybePenKeys(keyboard, "Open Keyboard"))
+        val told = KeysTold()
+        assertEquals(true, told.isNew(7, KeyEvent.KEYCODE_F21))
+        assertEquals(false, told.isNew(7, KeyEvent.KEYCODE_F21))
+        assertEquals(true, told.isNew(7, KeyEvent.KEYCODE_Z))
+        assertEquals(true, told.isNew(8, KeyEvent.KEYCODE_F21))
     }
 
     @Test

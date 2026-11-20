@@ -67,6 +67,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.PluginControl
 import io.github.artcraftandroid.procraft.core.PluginFile
 import io.github.artcraftandroid.procraft.core.PluginInfo
@@ -106,7 +108,7 @@ private class Heading(val label: String) : ActionRow
 private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onDone: () -> Unit = {}, val onChange: (Float) -> Unit) : ActionRow
 
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
-private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS }
+private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS, PEN_BUTTONS }
 
 private val CurveFill get() = if (Pc.light) Color(0xFFE7E7E9) else Color(0xFF262626)
 
@@ -313,6 +315,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Advanced cursor settings") { page = ActionsPage.CURSOR },
             ),
             listOf(
+                Act("Pen buttons") { page = ActionsPage.PEN_BUTTONS },
                 Act("Pressure and Smoothing") { page = ActionsPage.PRESSURE },
                 Act("Gesture controls") { vm.gestureControlsOpen = true },
                 Act("Plugins") { page = ActionsPage.PLUGINS },
@@ -373,6 +376,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 }
                 if (shown == ActionsPage.PLUGINS) {
                     PluginsPage(vm) { page = ActionsPage.TABS }
+                    return@Column
+                }
+                if (shown == ActionsPage.PEN_BUTTONS) {
+                    PenButtonsPage(vm) { page = ActionsPage.TABS }
                     return@Column
                 }
                 Text(
@@ -592,6 +599,52 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
         Text("Brush outline style", color = CursorHeading, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 28.dp, bottom = 8.dp))
         ChoiceGroup(listOf("High contrast", "Active color", "Per brush"), vm.cursorStyle.ordinal) {
             vm.changeCursorStyle(CanvasViewModel.CursorStyle.entries[it])
+        }
+    }
+}
+
+/** What a pen button set to [a] says it does: its QuickMenu action, or (null) what Gesture controls say. */
+private fun penButtonLabel(a: QuickAction?): String = a?.label ?: "Gesture controls"
+
+/**
+ * Pen buttons, a page of the panel: what the pen's first and second side buttons do, a QuickMenu
+ * action each (Undo, Redo, ...) or, as they start, what Gesture controls say. A row tapped lists
+ * the choices, the one set blue; a choice tapped sets it and comes back.
+ */
+@Composable
+private fun PenButtonsPage(vm: CanvasViewModel, onBack: () -> Unit) {
+    // the button whose choices are listed (true: the second), or none
+    var picking by remember { mutableStateOf<Boolean?>(null) }
+    val second = picking
+    BackHandler { if (second != null) picking = null else onBack() }
+    val title = when (second) {
+        null -> "Pen buttons"
+        false -> "Pen button"
+        true -> "Pen second button"
+    }
+    Row(Modifier.padding(start = 8.dp, top = 12.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(44.dp, 34.dp).clickable { if (second != null) picking = null else onBack() }, contentAlignment = Alignment.Center) {
+            Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.PanelTitle, modifier = Modifier.size(22.dp))
+        }
+        Text(title, color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+    if (second == null) {
+        Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
+            Group(
+                listOf(
+                    Act("Pen button", value = penButtonLabel(vm.penButtonActions.getOrNull(0))) { picking = false },
+                    Act("Pen second button", value = penButtonLabel(vm.penButtonActions.getOrNull(1))) { picking = true },
+                ),
+            )
+        }
+        return
+    }
+    val choices = remember { io.github.artcraftandroid.procraft.core.penButtonChoices() }
+    val set = vm.penButtonActions.getOrNull(if (second) 1 else 0)
+    Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
+        ChoiceGroup(choices.map(::penButtonLabel), choices.indexOf(set).coerceAtLeast(0)) {
+            vm.setPenButtonAction(second, choices.getOrNull(it))
+            picking = null
         }
     }
 }

@@ -5,6 +5,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.TouchSettings
 
 /** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
@@ -74,9 +75,14 @@ internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
  * [settings] as the tablet takes them: a mouse, or a touchpad moving the pointer, does what a finger
  * is set to do. With painting with a finger off it paints nothing (a drag does what a finger's
  * does), and on a model it turns the model; it still has no pressure and is never taken for a hand
- * resting by the pen.
+ * resting by the pen. The pen's buttons do what Pen buttons set them to ([penButtons], the first
+ * and the second; null, what Gesture controls say).
  */
-internal fun tabletTouchSettings(settings: TouchSettings): TouchSettings = settings.copy(pointerFollowsTouch = true)
+internal fun tabletTouchSettings(settings: TouchSettings, penButtons: List<QuickAction?> = emptyList()): TouchSettings = settings.copy(
+    pointerFollowsTouch = true,
+    penButtonDoes = penButtons.getOrNull(0),
+    penSecondButtonDoes = penButtons.getOrNull(1),
+)
 
 /**
  * Whether a mouse's press with [buttonState] held paints: its primary button's does (and a press
@@ -162,6 +168,21 @@ internal fun penKeyButton(keyCode: Int, sources: Int, keyboardType: Int, name: S
     val stylus = sources and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS
     val pen = stylus || keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC || PEN_NAME.containsMatchIn(name)
     return second.takeIf { pen }
+}
+
+/**
+ * Whether a key from a device with [sources] called [name] may be a pen's: a stylus, or one named
+ * as a pen. What a pen's button sends that the canvas doesn't take goes in the log, once a key.
+ */
+internal fun maybePenKeys(sources: Int, name: String): Boolean =
+    sources and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS || PEN_NAME.containsMatchIn(name)
+
+/** Each key from each device told once in the log. */
+internal class KeysTold {
+    private val told = HashSet<Pair<Int, Int>>()
+
+    /** Whether [keyCode] from device [deviceId] is yet to be told (it counts as told now). */
+    fun isNew(deviceId: Int, keyCode: Int): Boolean = told.add(deviceId to keyCode)
 }
 
 /** Each kind of pointer the canvas has seen from each device, told once in the log. */

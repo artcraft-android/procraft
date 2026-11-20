@@ -212,6 +212,12 @@ pub struct TouchSettings {
     /// hand resting by the pen.
     #[uniffi(default = false)]
     pub pointer_follows_touch: bool,
+    /// What the pen's first and second buttons are set to do in Pen buttons, a QuickMenu action
+    /// each, in place of what Gesture controls say; `None`, what Gesture controls say.
+    #[uniffi(default = None)]
+    pub pen_button_does: Option<crate::QuickAction>,
+    #[uniffi(default = None)]
+    pub pen_second_button_does: Option<crate::QuickAction>,
 }
 
 impl Default for TouchSettings {
@@ -239,6 +245,8 @@ impl Default for TouchSettings {
             quickshape_ms: 650.0,
             rapid_undo_ms: 650.0,
             pointer_follows_touch: false,
+            pen_button_does: None,
+            pen_second_button_does: None,
         }
     }
 }
@@ -248,6 +256,14 @@ impl Default for TouchSettings {
 pub enum TouchCommand {
     Undo,
     Redo,
+    /// A pen button set to a QuickMenu action in Pen buttons (other than Undo and Redo, which come
+    /// as themselves) was pressed with the pen at (x, y): the app does it, as the QuickMenu's
+    /// button would.
+    Run {
+        action: crate::QuickAction,
+        x: f32,
+        y: f32,
+    },
     ClearLayer,
     ToggleBars,
     /// The canvas settles to fit the window.
@@ -3747,6 +3763,55 @@ mod tests {
         });
         s.touch_pen_button(true, 0.0, 0.0);
         assert!(s.pick_next());
+    }
+
+    #[test]
+    fn a_pen_button_set_to_undo_in_pen_buttons_undoes_and_the_other_still_swaps_the_eraser() {
+        // one button swapping brush and eraser, the other undoing, as a pen with two buttons is
+        // often set up: press, let go, press, hovering and touching
+        let s = session();
+        s.set_tool(ToolKind::Paint);
+        s.set_touch_settings(TouchSettings {
+            pen_second_button_does: Some(crate::QuickAction::Undo),
+            ..TouchSettings::default()
+        });
+        for _ in 0..3 {
+            assert_eq!(s.touch_pen_button(true, 10.0, 10.0), vec![TouchCommand::Undo]);
+            assert!(!s.touch_pen_button_up(true));
+        }
+        assert_eq!(s.info().tool, ToolKind::Paint);
+        assert!(s.touch_pen_button(false, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        assert_eq!(s.touch_pen_button(true, 10.0, 10.0), vec![TouchCommand::Undo]);
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        // set in Pen buttons, the button does that whatever Gesture controls say: redo, no action,
+        // or another of the QuickMenu's actions for the app, where the pen is
+        s.set_touch_settings(TouchSettings {
+            pen_button: Some(GestureAction::Erase),
+            pen_button_does: Some(crate::QuickAction::Redo),
+            pen_second_button: Some(GestureAction::QuickMenu),
+            pen_second_button_does: Some(crate::QuickAction::None),
+            ..TouchSettings::default()
+        });
+        assert_eq!(s.touch_pen_button(false, 10.0, 10.0), vec![TouchCommand::Redo]);
+        assert!(!s.touch_pen_button_up(false), "not held to erase");
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());
+        s.set_touch_settings(TouchSettings {
+            pen_button_does: Some(crate::QuickAction::NewLayer),
+            ..TouchSettings::default()
+        });
+        assert_eq!(
+            s.touch_pen_button(false, 30.0, 40.0),
+            vec![TouchCommand::Run { action: crate::QuickAction::NewLayer, x: 30.0, y: 40.0 }]
+        );
+        // a pen that double-taps in place of a button: as the first
+        s.set_touch_settings(TouchSettings {
+            pen_button_does: Some(crate::QuickAction::Undo),
+            ..TouchSettings::default()
+        });
+        assert_eq!(s.touch_pen_double_tap(PenPreferred::SwitchEraser, 5.0, 5.0), vec![TouchCommand::Undo]);
+        assert_eq!(s.info().tool, ToolKind::Erase);
     }
 
     #[test]

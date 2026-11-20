@@ -425,7 +425,7 @@ impl Interface {
         self.selection.on = false;
         self.drop.end_filling();
         session.use_colour_history(self.colours.history.clone());
-        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+        session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
         session.use_gradients(self.gradients.clone());
         self.prefs.apply(session);
         self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
@@ -992,7 +992,7 @@ impl Interface {
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
-            session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+            session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
             crate::files::keep_gestures(&self.gestures.kept());
         }
         if let Some(info) = self.canvas_info.as_mut() {
@@ -1386,6 +1386,10 @@ impl Interface {
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
+                // a pen button set to a QuickMenu action in Pen buttons
+                TouchCommand::Run { action, x, y } => {
+                    self.run_quick(ctx, session, action, egui::pos2(x, y) / ctx.pixels_per_point());
+                }
                 // what a pen's own settings ask its button to show
                 TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
                 TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
@@ -1691,7 +1695,7 @@ impl Interface {
             QuickAction::QuickshapeOn => {
                 let on = self.gestures.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".into());
                 self.gestures.set(GesturePurpose::Quickshape, "DRAW_HOLD".into(), !on);
-                session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
                 crate::files::keep_gestures(&self.gestures.kept());
             }
             QuickAction::AddText => self.add_text(ctx, session),
@@ -2690,7 +2694,7 @@ impl Interface {
                     }
                     Some(Act::Prefs) => {
                         self.prefs.apply(session);
-                        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+                        session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
                         self.prefs.keep();
                     }
                     Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,

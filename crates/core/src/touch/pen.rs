@@ -100,6 +100,18 @@ pub struct HoverCursor {
     pub alpha: f32,
 }
 
+/// A pen button set to a QuickMenu action in Pen buttons, pressed at `at`: undo and redo as
+/// themselves, No Action nothing, the rest for the app to do.
+fn pen_runs(quick: crate::QuickAction, at: (f32, f32), out: &mut Vec<TouchCommand>) {
+    use crate::QuickAction as Q;
+    match quick {
+        Q::None => {}
+        Q::Undo => out.push(TouchCommand::Undo),
+        Q::Redo => out.push(TouchCommand::Redo),
+        action => out.push(TouchCommand::Run { action, x: at.0, y: at.1 }),
+    }
+}
+
 /// The pen's hover and squeeze, kept with the touches.
 #[derive(Default)]
 pub(super) struct PenState {
@@ -191,17 +203,25 @@ impl CanvasSession {
         Some(HoverCursor { x: h.x, y: h.y, alpha: shown * low })
     }
 
-    /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): what Gesture
-    /// controls set it to do. Set to nothing, the first switches between the current tool and the
-    /// eraser, and back, as a pen's double-tap does by default; the second does nothing. Set to
-    /// erase, the eraser is borrowed until the button is let go
-    /// ([`CanvasSession::touch_pen_button_up`]).
+    /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): the QuickMenu
+    /// action Pen buttons set it to, else what Gesture controls set it to do. Set to nothing in
+    /// either, the first switches between the current tool and the eraser, and back, as a pen's
+    /// double-tap does by default; the second does nothing. Set to erase in Gesture controls, the
+    /// eraser is borrowed until the button is let go ([`CanvasSession::touch_pen_button_up`]).
     pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
-        let action = {
+        let (action, does) = {
             let t = self.touches();
-            if second { t.settings.pen_second_button } else { t.settings.pen_button }
+            if second {
+                (t.settings.pen_second_button, t.settings.pen_second_button_does)
+            } else {
+                (t.settings.pen_button, t.settings.pen_button_does)
+            }
         };
         let mut out = Vec::new();
+        if let Some(quick) = does {
+            pen_runs(quick, (x, y), &mut out);
+            return out;
+        }
         if action == Some(GestureAction::Erase) {
             self.hold_eraser(second);
             return out;
@@ -236,8 +256,17 @@ impl CanvasSession {
         if preferred == PenPreferred::Ignore || !(x.is_finite() && y.is_finite()) {
             return out;
         }
+        // as the first button: set in Pen buttons, it does that
+        let (action, does) = {
+            let t = self.touches();
+            (t.settings.pen_button, t.settings.pen_button_does)
+        };
+        if let Some(quick) = does {
+            pen_runs(quick, (x, y), &mut out);
+            return out;
+        }
         // a double-tap can't be held: set to erase while held, it does what the platform asks
-        let action = self.touches().settings.pen_button.filter(|&a| a != GestureAction::Erase);
+        let action = action.filter(|&a| a != GestureAction::Erase);
         self.pen_does(action, preferred, (x, y), &mut out);
         out
     }

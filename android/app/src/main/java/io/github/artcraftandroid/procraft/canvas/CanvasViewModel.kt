@@ -3118,7 +3118,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
-    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings = tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0))
+    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings =
+        tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0), penButtonActions)
 
     /** The middle of the screen (window pixels), for menus a button opens. */
     var screenCentre = Offset(800f, 1280f)
@@ -3665,6 +3666,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             .putString(QUICK_MENUS, io.github.artcraftandroid.procraft.core.quickMenusSaved(quickMenus))
             .putInt(QUICK_MENU_ACTIVE, quickMenuActive)
             .apply()
+    }
+
+    /**
+     * Pen buttons: what the pen's first and second side buttons are set to do, a QuickMenu action
+     * each, or null to do what Gesture controls say (as they start).
+     */
+    var penButtonActions by mutableStateOf(io.github.artcraftandroid.procraft.core.penButtonActions(interfacePrefs.getString(PEN_BUTTONS, null)))
+        private set
+
+    /** Sets the pen's [second] button (else its first) to do [a] (null: what Gesture controls say). */
+    fun setPenButtonAction(second: Boolean, a: QuickAction?) {
+        val i = if (second) 1 else 0
+        penButtonActions = penButtonActions.toMutableList().also { if (i in it.indices) it[i] = a }
+        interfacePrefs.edit().putString(PEN_BUTTONS, io.github.artcraftandroid.procraft.core.penButtonActionsSaved(penButtonActions)).apply()
     }
 
     /**
@@ -9175,6 +9190,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** The QuickMenu's buttons as kept before there were several menus (read once, into the first). */
         const val QUICK_MENU = "quick_menu"
         const val QUICK_MENUS = "quick_menus"
+        const val PEN_BUTTONS = "pen_buttons"
         const val QUICK_MENU_ACTIVE = "quick_menu_active"
         /** A press of □ this short, used by nothing, is a tap. */
         const val MODIFY_TAP_MS = 500L

@@ -97,6 +97,9 @@ pub struct Prefs {
     pub drag_image_format: usize,
     /// Recolor's Flood, kept from one time to the next.
     pub recolor_threshold: f32,
+    /// Pen buttons: what the pen's first and second side buttons do, a QuickMenu action each, or
+    /// (`None`, as they start) what Gesture controls say.
+    pub pen_buttons: Vec<Option<procraft_core::QuickAction>>,
 }
 
 impl Default for Prefs {
@@ -136,6 +139,7 @@ impl Default for Prefs {
             drag_format: 0,
             drag_image_format: 0,
             recolor_threshold: 0.0,
+            pen_buttons: procraft_core::pen_button_actions(None),
         }
     }
 }
@@ -198,6 +202,7 @@ impl Prefs {
                     p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
+                "pen_buttons" => p.pen_buttons = procraft_core::pen_button_actions(Some(value.to_owned())),
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 name if floating_at(name).is_some() => {
                     if let Some(slot) = floating_at(name).and_then(|at| p.floating.get_mut(at)) {
@@ -254,6 +259,7 @@ impl Prefs {
             format!("drag_format {}", self.drag_format),
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
+            format!("pen_buttons {}", procraft_core::pen_button_actions_saved(self.pen_buttons.clone())),
         ];
         let floating = crate::floating_panels::PANELS.into_iter().zip(self.floating).filter_map(|(panel, window)| {
             Some(format!("{} {}", procraft_core::floating_key(panel), procraft_core::floating_kept(window?)))
@@ -282,6 +288,16 @@ impl Prefs {
             self.tip_attached,
             self.curve.iter().flatten().copied().collect(),
         );
+    }
+
+    /// The gesture settings as the canvas's touches take them, with the pen's buttons as Pen
+    /// buttons set them.
+    pub fn touch_settings(&self, gestures: &procraft_core::GestureSettings) -> procraft_core::TouchSettings {
+        procraft_core::TouchSettings {
+            pen_button_does: self.pen_buttons.first().copied().flatten(),
+            pen_second_button_does: self.pen_buttons.get(1).copied().flatten(),
+            ..gestures.touch_settings(self.rapid_undo_ms())
+        }
     }
 
     pub fn rapid_undo_ms(&self) -> f64 {
