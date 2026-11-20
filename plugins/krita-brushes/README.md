@@ -122,7 +122,9 @@ comes with the sensor it follows and its curve.
 The app keeps how each brush looks (its tips drawn, its texture's mask) with the plugin, so only a
 brush's first stroke ever waits for them; after that the plugin only reads the brush's settings.
 In the app, the app's utilities unpack bundles and decode pictures, much faster than the plugin's own
-readers (which its tests use) run in it.
+readers (which its tests use) run in it. A preset's settings are read without the pictures it carries
+(nearly all of a big one's text), each picture it wants read off the text where it lies and copied
+once into the brush, so a bundle of a few hundred megabytes fits the memory an import has.
 
 ## Not yet
 
