@@ -35,7 +35,7 @@
 //!   by without their notice (not 0).
 //! - `procraft_interface_colour(role: i32) -> i32`: for the hook `interface_colour`, the colour
 //!   (0xRRGGBB) the interface draws `role` in (0: the accent, the blue of what is chosen and
-//!   switched on), or -1 to leave it as it is.
+//!   switched on; 1, interface 11: the area round the canvas), or -1 to leave it as it is.
 //! - `procraft_pin_panels() -> i32`: for the hook `pin_panels`, whether a touch on the canvas with
 //!   a panel open paints at once and leaves the panel up (not 0).
 //! - `procraft_opacity_together() -> i32`: for the hook `opacity_together`, whether a layer's
@@ -88,6 +88,9 @@
 //!   `procraft_pressure_taper(pointer: i32, end: i32) -> f32`, asked as each stroke begins: how far
 //!   (window points, 0 to [`MOST_PRESSURE_TAPER`]) its pressure grows from nothing at its start
 //!   (`end` 0) and falls to nothing at its end (1), for a stroke whose pressure counts.
+//! - `procraft_surround_picture() -> i32`: for the hook `surround_picture` (interface 11), the place
+//!   in its `controls` of a `file` control of pictures whose picture shows round the canvas, -1 for
+//!   none.
 //! - `procraft_layer_label(mark: i64) -> i32`: for the hook `layer_label` (interface 10), the
 //!   colour (0xRRGGBB) the row of a layer the plugin keeps `mark` with (not 0) shows in the Layers
 //!   panel, -1 for none.
@@ -275,6 +278,7 @@ const PRESSURE_TAPER: &str = "procraft_pressure_taper";
 pub(crate) const MOST_PRESSURE_TAPER: f32 = 1000.0;
 const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const LAYER_LABEL: &str = "procraft_layer_label";
+const SURROUND_PICTURE: &str = "procraft_surround_picture";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -435,6 +439,8 @@ pub(crate) enum Hook {
     BrushPreviewColour,
     /// The colour a layer's row shows, by the mark the plugin keeps with it (interface 10).
     LayerLabel,
+    /// The picture shown round the canvas, of one of the plugin's file controls (interface 11).
+    SurroundPicture,
 }
 
 impl Hook {
@@ -472,6 +478,7 @@ impl Hook {
             "pressure" => Some(Hook::Pressure),
             "brush_preview_colour" => Some(Hook::BrushPreviewColour),
             "layer_label" => Some(Hook::LayerLabel),
+            "surround_picture" => Some(Hook::SurroundPicture),
             _ => None,
         }
     }
@@ -513,6 +520,7 @@ impl Hook {
             Hook::Pressure => "This plugin can change how hard your strokes press, a finger's too.",
             Hook::BrushPreviewColour => "This plugin can draw the brush library's sample strokes in another colour.",
             Hook::LayerLabel => "This plugin can show a colour on the rows of layers it has marked.",
+            Hook::SurroundPicture => "This plugin can show a picture you pick round the canvas.",
         }
     }
 
@@ -553,6 +561,7 @@ impl Hook {
             }
             Hook::BrushPreviewColour => exports(module, BRUSH_PREVIEW_COLOUR, &[ValType::I32; 2], &[ValType::I32]),
             Hook::LayerLabel => exports(module, LAYER_LABEL, &[ValType::I64], &[ValType::I32]),
+            Hook::SurroundPicture => exports(module, SURROUND_PICTURE, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -1043,6 +1052,7 @@ pub(crate) struct Running {
     pressure_taper: Option<TypedFunc<(i32, i32), f32>>,
     brush_preview_colour: Option<TypedFunc<(i32, i32), i32>>,
     layer_label: Option<TypedFunc<i64, i32>>,
+    surround_picture: Option<TypedFunc<(), i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1199,6 +1209,7 @@ impl Running {
             let pressure_taper = instance.get_typed_func(&store, PRESSURE_TAPER).ok();
             let brush_preview_colour = instance.get_typed_func(&store, BRUSH_PREVIEW_COLOUR).ok();
             let layer_label = instance.get_typed_func(&store, LAYER_LABEL).ok();
+            let surround_picture = instance.get_typed_func(&store, SURROUND_PICTURE).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1308,6 +1319,7 @@ impl Running {
                 pressure_taper,
                 brush_preview_colour,
                 layer_label,
+                surround_picture,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2429,6 +2441,22 @@ impl Running {
         match said {
             -1 => Ok(None),
             0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
+            _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// The place in its controls of the file control whose picture it says shows round the canvas;
+    /// none for none. One below -1 or past 255 stops it.
+    pub(crate) fn surround_picture(&mut self) -> Result<Option<u32>, Stop> {
+        let Running { store, surround_picture, .. } = self;
+        let Some(surround_picture) = surround_picture else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            surround_picture.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            -1 => Ok(None),
+            0..=255 => Ok(u32::try_from(said).ok()),
             _ => Err(Stop::Nonsense),
         }
     }

@@ -11,6 +11,9 @@ use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
+/// The role of the colour hook's that is the area round the canvas (interface 11).
+pub(crate) const SURROUND_ROLE: i32 = 1;
+
 /// The parts of the view the gesture lock's hook is asked about: its turn, and the fit a quick
 /// pinch in makes (interface 10).
 pub(crate) const GESTURE_TURN: i32 = 0;
@@ -717,6 +720,27 @@ impl Hooks {
         })
     }
 
+    /// The surround picture's hook: the plugin (by id) and the place in its controls of the file
+    /// control whose picture shows round the canvas, as the first plugin by id on it that answers
+    /// says; none for none.
+    pub(crate) fn surround_picture(&self) -> Option<(String, u32)> {
+        if !self.has(Hook::SurroundPicture) {
+            return None;
+        }
+        let mut whose = None;
+        self.through_by_id(Hook::SurroundPicture, false, |id, running, found| {
+            if found {
+                return Ok(true);
+            }
+            let said = running.surround_picture()?;
+            if let Some(at) = said {
+                whose = Some((id.to_owned(), at));
+            }
+            Ok(said.is_some())
+        });
+        whose
+    }
+
     /// The layer label's hook: the colour (0xRRGGBB) the row of a layer keeping `marks` (by
     /// plugin id) shows, as the first plugin by id on it that keeps a mark there says; none for none.
     /// Each is told only its own mark.
@@ -1037,6 +1061,11 @@ impl CanvasSession {
         // how the plugins have the window show the canvas, and the paper they give, asked now
         // rather than as it is drawn
         let look = hooks.view_look();
+        // the colour round the canvas and the picture there, read again only as it changes
+        let surround =
+            hooks.interface_colour(SURROUND_ROLE).map(|rgb| [16, 8, 0].map(|s| ((rgb >> s) & 0xFF) as f32 / 255.0));
+        let kept = self.shared.lock().surround_picture.clone();
+        let picture = crate::surround::picture_now(plugins.surround_picture_file(), kept);
         let paper = hooks.paper().map(|p| procraft_gpu::CanvasPaper {
             tile: p.tile,
             strength: p.strength,
@@ -1049,6 +1078,15 @@ impl CanvasSession {
         let mut changed = false;
         if st.plugin_look != look {
             st.plugin_look = look;
+            changed = true;
+        }
+        if st.plugin_surround != surround {
+            st.plugin_surround = surround;
+            changed = true;
+        }
+        let id = |p: &Option<Arc<crate::surround::SurroundPicture>>| p.as_ref().map(|p| p.id);
+        if id(&st.surround_picture) != id(&picture) {
+            st.surround_picture = picture;
             changed = true;
         }
         if st.plugin_paper != paper {
@@ -1544,6 +1582,30 @@ pub(crate) mod tests {
         assert_eq!((s.current_brush().set, s.current_brush().index), (0, 2));
         assert!(card(&plugins).on);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_surround_picture_is_the_first_plugin_s_that_answers_and_a_nonsense_place_stops_it() {
+        let picturing = |body: &str| {
+            let text = format!(r#"(module (func (export "procraft_surround_picture") (result i32) {body}))"#);
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+        };
+        let hooks = Hooks::default();
+        assert_eq!(hooks.surround_picture(), None);
+        hooks.put_on("b".to_owned(), picturing("(i32.const 2)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("b".to_owned(), 2)));
+        // one before it by id with none leaves it to the next
+        hooks.put_on("a".to_owned(), picturing("(i32.const -1)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("b".to_owned(), 2)));
+        hooks.put_on("a".to_owned(), picturing("(i32.const 0)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("a".to_owned(), 0)));
+        assert!(hooks.take_stopped().is_empty());
+        for odd in ["(i32.const -2)", "(i32.const 256)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), picturing(odd), &[Hook::SurroundPicture]);
+            assert_eq!(hooks.surround_picture(), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+        }
     }
 
     #[test]

@@ -34,7 +34,9 @@ gives a finger a pressure on the `pressure` hook, and `coloured-previews` tints 
 strokes on the `brush_preview_colour` hook. `colour-labels` keeps a mark with each layer from an
 action in its options, shows it with the `layer_label` hook, and asks for it with a row of colours.
 `pop-up-palette` has an action a pen's button runs, which shows a ring of the recent colours and
-brushes where the pen is.
+brushes where the pen is. `canvas-surround` colours the area round the canvas on the
+`interface_colour` hook's surround, or shows a picture picked for its `file` control there on the
+`surround_picture` hook.
 
 ## What you write
 
@@ -80,7 +82,8 @@ and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `ref
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
 `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label` hooks, layers' marks and
 panels' rows of colours 10, and the recent colours and brushes, actions at the pen, panels' rows of
-brushes and rings 11.
+brushes and rings, the `interface_colour` hook's surround, the `surround_picture` hook and `file`
+controls of pictures 11.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -104,7 +107,7 @@ interface 6 and no filter; a plugin with code can have up to eight `file` contro
 | `at_least` | Shown in place of the number at the slider's lowest, such as `"Off"` |
 | `names` | A name for each of a slider's steps from its lowest, shown in place of the number |
 | `live` | The value goes in as the slider moves, rather than as it lets go |
-| `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin) |
+| `accepts` | What a `file` control takes: `"sound"`, a recording (the app reads it, keeps a minute of it at most with the plugin, and drops it with the plugin); or `"picture"` (interface 11), a PNG or a JPEG of 32 MiB at most, kept as it came |
 | `under` | The `key` of a switch it comes under: on the card it shows after that switch, while the switch is on (its value stays as it was while it's hidden). That switch is at the top of the list, or comes under one there (interface 6): two deep at most |
 | `place` | Where else a switch or a slider shows besides the card: `"canvas"`, see [below](#in-the-canvas-tab-on-a-key-and-with-each-artwork) |
 | `press` | A key that flips a switch, see [below](#in-the-canvas-tab-on-a-key-and-with-each-artwork) |
@@ -664,9 +667,32 @@ procraft_interface_colour(role: i32) -> i32
 ```
 
 `role` 0 is the accent: the blue of what is chosen or switched on (a selected tab, a switch, a
-slider's filled part, a picked layer). Other roles may come later; answer -1 for any you don't know.
+slider's filled part, a picked layer). `role` 1 is the surround (interface 11): what shows round the
+canvas, under its grid, in place of the interface's own grey (light or dark), and what the eyedropper
+reads there. It's asked as the plugins change, not as the canvas is drawn. Other roles may come
+later; answer -1 for any you don't know.
 An answer past 0xFFFFFF stops the plugin. With several plugins on this hook, the first by id that
 answers is used.
+
+### `surround_picture`
+
+A picture shown round the canvas in place of the surround's grid (interface 11): one someone picked
+for one of the plugin's `file` controls that takes pictures.
+
+```
+procraft_surround_picture() -> i32
+```
+
+It answers the control's place in `controls`, or -1 for none. The app reads the picture (its longest
+side made 4,096 pixels at most) and shows it covering the window, its middle on the window's, fixed
+to the window as the canvas moves under it; where it is see-through, the surround's colour shows. The
+eyedropper reads it there, as the canvas's other surroundings. A place that isn't a `file` control of
+pictures with one picked shows none; an answer below -1 or past 255 stops the plugin. It's asked as
+the plugins change, and the picture is read again only when the file changes. With several plugins on
+this hook, the first by id that answers is used.
+
+The Canvas surround plugin the app comes with gives the surround a colour from its Hue, Saturation
+and Brightness (black at none), or, with A picture of your own on, the picture picked for it.
 
 ### `pin_panels`
 
@@ -1800,7 +1826,8 @@ interface 7 the `hide_notices` and `floating_panels` hooks, interface 8 the `ges
 tab, interface 9 the `pressure` hook, interface 10 the `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label`
 hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours, and interface 11
 the recent colours and brushes (`recent_colour`, `recent_brush`, `current_brush`, `choose_brush`),
-actions at the pen, and panels' rows of brushes and rings. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+actions at the pen, panels' rows of brushes and rings, the `interface_colour` hook's surround, the
+`surround_picture` hook and `file` controls of pictures. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

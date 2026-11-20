@@ -310,6 +310,19 @@ pub fn pick_sound(title: &str) -> Option<(Vec<u8>, String)> {
     }
 }
 
+/// A picture the user picks (titled `title`), a PNG or a JPEG, read whole, with its name.
+pub fn pick_control_picture(title: &str) -> Option<(Vec<u8>, String)> {
+    let path = dialog().set_title(title).add_filter("Pictures", &["png", "jpg", "jpeg"]).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some((bytes, name)),
+        Err(_) => {
+            say("This file could not be read.");
+            None
+        }
+    }
+}
+
 /// A file the user picks (titled `title`), read whole, with its name.
 /// A file the user picks, and its name; none if they pick none.
 pub fn pick_path(title: &str) -> Option<(PathBuf, String)> {

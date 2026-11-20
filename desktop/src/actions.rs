@@ -1582,6 +1582,14 @@ fn plugin_card(
                         clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
                     if on_clear {
                         changed |= plugins.clear_file(control.key.clone());
+                    } else if control.accepts == procraft_core::PluginFileKind::Picture {
+                        if let Some((bytes, name)) = crate::files::pick_control_picture(&control.label) {
+                            if plugins.set_picture_file(control.key.clone(), name, bytes) {
+                                changed = true;
+                            } else {
+                                crate::files::say("This picture couldn't be used. Pick a PNG or a JPEG.");
+                            }
+                        }
                     } else if let Some((bytes, name)) = crate::files::pick_sound(&control.label) {
                         if plugins.set_sound_file(control.key.clone(), name, bytes) {
                             changed = true;

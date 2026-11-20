@@ -937,6 +937,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** A picture picked at [uri] for a plugin's file control [key]: read in the background, then kept with the plugin; told if it can't be used. */
+    fun pickPluginPicture(key: String, uri: android.net.Uri) {
+        viewModelScope.launch {
+            val kept = withContext(Dispatchers.IO) {
+                val bytes = runCatching {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull() ?: return@withContext false
+                plugins.setPictureFile(key, fileName(uri) ?: "Picture", bytes)
+            }
+            if (kept) pluginsChanged() else message = "This picture couldn't be used. Pick a PNG or a JPEG."
+        }
+    }
+
     /** A plugin's file control [key] lets its file go. */
     fun clearPluginFile(key: String) {
         if (plugins.clearFile(key)) pluginsChanged()

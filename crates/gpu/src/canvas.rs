@@ -732,14 +732,17 @@ pub struct FillPreview {
 
 /// Grid lines around the canvas, fixed to the target: `width` pixels wide (their edges smoothed),
 /// every `spacing` pixels across and down from one whose middle is at `origin`, none above `top`,
-/// in `color` (sRGB 0..1).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// in `color` (sRGB 0..1). Or, where `picture` says (left, top, right and bottom, target pixels),
+/// the canvas's surround picture in their place (see [`Canvas::set_surround_picture`]), while it
+/// has one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SurroundGrid {
     pub spacing: f32,
     pub origin: [f32; 2],
     pub top: f32,
     pub width: f32,
     pub color: [f32; 3],
+    pub picture: Option<[f32; 4]>,
 }
 
 /// A small premultiplied RGBA8 image (rows top to bottom).
@@ -1533,6 +1536,15 @@ struct SurroundUniform {
     v0: [f32; 4],
     v1: [f32; 4],
     v2: [f32; 4],
+}
+
+/// Where the surround picture lies (target pixels), the surround's colour (sRGB) and whether the
+/// target encodes sRGB itself.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PictureUniform {
+    v0: [f32; 4],
+    v1: [f32; 4],
 }
 
 const STROKE_NONE: u32 = 0;
@@ -2955,6 +2967,8 @@ pub(crate) struct Pipelines {
     display_pipeline_layout: wgpu::PipelineLayout,
     surround_module: wgpu::ShaderModule,
     surround_pipeline_layout: wgpu::PipelineLayout,
+    /// A picture round the canvas in place of the grid (drawn with the display's layout).
+    surround_picture_module: wgpu::ShaderModule,
     stamp_layout: wgpu::PipelineLayout,
     overlay_module: wgpu::ShaderModule,
     /// Frosted panels: the blur passes and the regions drawn.
@@ -2975,6 +2989,7 @@ pub(crate) struct Pipelines {
 struct ScreenPipelines {
     display: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     surround: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    surround_picture: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     overlay: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     /// The selection's look, per target format and whether it multiplies.
     selection: HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
@@ -3190,6 +3205,8 @@ pub struct Canvas {
     scaled: Option<([f32; 2], f32)>,
     /// Part of the canvas drawn again sharper, shown over it in its place.
     sharp: Option<Sharp>,
+    /// The picture round the canvas, by the id it was given, bound to be drawn.
+    surround_picture: Option<(u64, wgpu::BindGroup)>,
     smudge_params: wgpu::Buffer,
     /// The slots it holds (a smudge stamp's uniform takes two).
     smudge_capacity: u64,
@@ -3591,6 +3608,7 @@ impl Canvas {
             last_ended: None,
             scaled: None,
             sharp: None,
+            surround_picture: None,
             smudge_params: smudge_params(device, 64),
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
             smudge_capacity: 64,
@@ -10352,6 +10370,7 @@ impl Canvas {
             display_lut_layout,
             surround_module,
             surround_pipeline_layout,
+            surround_picture_module,
             overlay_module,
             stamp_layout,
             selection_module,
@@ -10365,6 +10384,7 @@ impl Canvas {
         let ScreenPipelines {
             display,
             surround: surround_pipelines,
+            surround_picture: picture_pipelines,
             overlay,
             selection: selection_pipelines,
             frost,
@@ -10401,7 +10421,25 @@ impl Canvas {
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
             wgpu::Color { r: f64::from(surround[0]), g: f64::from(surround[1]), b: f64::from(surround[2]), a: 1.0 };
-        let grid = target.grid.map(|g| {
+        // the surround's picture, where the target has one and says where it lies, in place of its grid
+        let picture = target.grid.and_then(|g| g.picture).zip(self.surround_picture.as_ref()).map(|(at, (_, bind))| {
+            let pipeline = picture_pipelines.entry(target.format).or_insert_with(|| {
+                sampled_pipeline(
+                    device,
+                    kept,
+                    display_pipeline_layout,
+                    surround_picture_module,
+                    "surround picture",
+                    "vs_picture",
+                    "fs_picture",
+                    target.format,
+                )
+            });
+            let [r, g, b] = target.surround;
+            let offset = uniforms.push(&PictureUniform { v0: at, v1: [r, g, b, if srgb { 1.0 } else { 0.0 }] });
+            (&*pipeline, bind, offset)
+        });
+        let grid = target.grid.filter(|_| picture.is_none()).map(|g| {
             let pipeline = surround_pipelines.entry(target.format).or_insert_with(|| {
                 sampled_pipeline(
                     device,
@@ -10422,6 +10460,12 @@ impl Canvas {
             (&*pipeline, offset)
         });
         let mut pass = render_pass(encoder, "display", target.view, wgpu::LoadOp::Clear(clear));
+        if let Some((picture_pipeline, bind, offset)) = picture {
+            pass.set_pipeline(picture_pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.draw(0..3, 0..1);
+        }
         if let Some((grid_pipeline, offset)) = grid {
             pass.set_pipeline(grid_pipeline);
             pass.set_bind_group(0, &self.uniform_bind, &[offset]);
@@ -10610,6 +10654,56 @@ impl Canvas {
         {
             draw_glass(&mut pass, frost, small, &self.uniform_bind, uniforms, backdrop, target.size, k);
         }
+    }
+
+    /// The picture shown round the canvas where a target's grid says (see [`SurroundGrid::picture`]):
+    /// `width` × `height` straight sRGB RGBA8 rows from the top, known by `id` (none takes it away).
+    /// One bigger than the GPU takes is left out.
+    pub fn set_surround_picture(&mut self, gpu: &Gpu, id: u64, picture: Option<(u32, u32, &[u8])>) {
+        self.surround_picture = None;
+        let Some((width, height, rgba)) = picture else { return };
+        let most = gpu.device.limits().max_texture_dimension_2d;
+        let fits = width > 0 && height > 0 && width <= most && height <= most;
+        if !fits || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+            return;
+        }
+        let device = &gpu.device;
+        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("surround picture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("surround picture"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind = sampled_bind(device, &self.pipelines.sampled_layout, &view, &sampler);
+        self.surround_picture = Some((id, bind));
+    }
+
+    /// The id of the picture shown round the canvas, if it has one.
+    pub fn surround_picture_id(&self) -> Option<u64> {
+        self.surround_picture.as_ref().map(|(id, _)| *id)
     }
 
     /// Frosted panels over a picture something else drew on `target` (a model): `scene` draws it
@@ -11734,6 +11828,7 @@ impl Pipelines {
             module("composite", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/composite.wgsl")));
         let display_module = module("display", include_str!("shaders/display.wgsl"));
         let surround_module = module("surround", include_str!("shaders/surround.wgsl"));
+        let surround_picture_module = module("surround picture", include_str!("shaders/surround_picture.wgsl"));
         let backdrop_module = module("backdrop", include_str!("shaders/backdrop.wgsl"));
         let transform_module = module("transform", include_str!("shaders/transform.wgsl"));
         let selection_module = module("selection", include_str!("shaders/selection.wgsl"));
@@ -12224,6 +12319,7 @@ impl Pipelines {
 
             surround_module,
             surround_pipeline_layout,
+            surround_picture_module,
 
             stamp_layout,
             overlay_module,

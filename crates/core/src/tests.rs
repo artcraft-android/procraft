@@ -4298,6 +4298,73 @@ fn the_eyedropper_sees_the_window_and_the_colour_under_the_point() {
     assert_eq!(s.pick(100.0, 100.0, 21).unwrap().rgb, Some(0x000000));
 }
 
+/// The plugins, in `dir`, with one on that gives the surround (the colour hook's role 1) pure green
+/// and, while its file control (its control 0) has one picked, that control's picture.
+fn surrounding(dir: &std::path::Path) -> std::sync::Arc<crate::plugins::Plugins> {
+    let module = wat::parse_str(
+        r#"(module
+            (func (export "procraft_control") (param i32 f32))
+            (func (export "procraft_interface_colour") (param i32) (result i32)
+                (select (i32.const 0x00FF00) (i32.const -1) (i32.eq (local.get 0) (i32.const 1))))
+            (func (export "procraft_surround_picture") (result i32) (i32.const 0)))"#,
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    let plugins = crate::plugins::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let mut manifest = crate::plugin_file::tests::coded("org.example.surround", &module);
+    manifest["compat"]["procraft"]["interface"] = serde_json::json!(11);
+    manifest["hooks"] = serde_json::json!(["interface_colour", "surround_picture"]);
+    manifest["controls"] =
+        serde_json::json!([{ "key": "picture", "type": "file", "label": "Picture", "accepts": "picture" }]);
+    let file = crate::plugin_file::tests::pack(&manifest, &[(crate::plugin_run::MODULE, &module)]);
+    assert_eq!(plugins.install(file), None);
+    assert!(plugins.set_on("org.example.surround".to_owned(), true));
+    plugins
+}
+
+#[test]
+fn the_surround_shows_in_the_colour_or_the_picture_a_plugin_gives_and_the_eyedropper_sees_it() {
+    let Some(s) = session(100, 200) else { return };
+    // the canvas zoomed out to half the window: the surround round it
+    s.view_gesture(100.0, 100.0, 0.0, 0.0, 0.5, 0.0);
+    let seen = |s: &CanvasSession, rgb: [u8; 3]| {
+        let shown = s.pick(20.0, 20.0, 21).unwrap();
+        assert_eq!(shown.rgb, None, "off the canvas");
+        shown.pixels.chunks(4).filter(|p| p[..3] == rgb).count()
+    };
+    assert_eq!(seen(&s, [0, 255, 0]), 0, "the interface's grey");
+    let dir = std::env::temp_dir().join(format!("procraft-tests-surround-{}", std::process::id()));
+    let plugins = surrounding(&dir);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    // all but the grid's lines across it
+    let green = seen(&s, [0, 255, 0]);
+    assert!(green > 21 * 21 * 3 / 4, "{green} of {}", 21 * 21);
+    // a red picture picked: it covers the window, no lines, and the canvas stays as it is
+    let red = crate::project::png_of(8, 4, &[255, 0, 0, 255].repeat(32)).unwrap();
+    assert!(plugins.set_picture_file("org.example.surround.picture".to_owned(), "red.png".to_owned(), red));
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert_eq!(seen(&s, [255, 0, 0]), 21 * 21);
+    assert_eq!(s.pick(100.0, 100.0, 21).unwrap().rgb, Some(0xFFFFFF));
+    // taken up again with the picture as it was: kept, not read again (quick)
+    let id = s.shared.lock().surround_picture.as_ref().map(|p| p.id);
+    let t = std::time::Instant::now();
+    for _ in 0..200 {
+        s.use_plugins(std::sync::Arc::clone(&plugins));
+    }
+    let each = t.elapsed() / 200;
+    println!("the plugins taken up again in {each:?}, the surround's picture kept");
+    assert!(each < std::time::Duration::from_millis(2), "{each:?}");
+    assert_eq!(s.shared.lock().surround_picture.as_ref().map(|p| p.id), id);
+    // let go: the colour again
+    assert!(plugins.clear_file("org.example.surround.picture".to_owned()));
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(s.shared.lock().surround_picture.is_none());
+    assert!(seen(&s, [0, 255, 0]) > 21 * 21 * 3 / 4);
+    // a file that is no picture isn't taken
+    assert!(!plugins.set_picture_file("org.example.surround.picture".to_owned(), "x".to_owned(), vec![1, 2, 3]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn content_shape_holds_every_painted_pixel() {
     use crate::transform::content_shape;

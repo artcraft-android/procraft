@@ -98,6 +98,7 @@ mod stock_brushes;
 mod stock_library;
 mod stroke_sound;
 mod studio;
+mod surround;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -208,10 +209,10 @@ pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelBrush, PanelPoint, PanelRow, PluginPanel};
 pub use plugin_run::set_memory_available;
 pub use plugins::{
-    InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginInfo, PluginMenuPlace, PluginOffer,
-    PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes,
-    plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen,
-    plugin_slider_shown, plugin_slider_whole,
+    InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginFileKind, PluginInfo, PluginMenuPlace,
+    PluginOffer, PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices,
+    plugin_slider_chosen, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
@@ -716,6 +717,10 @@ pub(crate) struct State {
     pub(crate) plugin_look: Option<ViewLook>,
     /// The paper a plugin on the paper's hook gives, as it said then.
     pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
+    /// The colour round the canvas a plugin gives (sRGB 0..1), and the picture shown there in place
+    /// of the grid (interface 11), as they said then.
+    pub(crate) plugin_surround: Option<[f32; 3]>,
+    pub(crate) surround_picture: Option<std::sync::Arc<surround::SurroundPicture>>,
     /// The values of plugins' controls kept with the artwork, by their keys, saved with it.
     pub(crate) plugin_values: std::collections::BTreeMap<String, f32>,
     /// The Reference windows opened besides the artwork's own, kept with it as its own is.
@@ -879,13 +884,16 @@ impl State {
             top: GRID_TOP_PT * self.interface_scale() + by.y,
             width: GRID_WIDTH_PT * s,
             color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
+            // a plugin's picture covering the window in place of the lines
+            picture: self.surround_picture.as_ref().map(|p| surround::cover(self.window_size, (p.width, p.height), by)),
         }
     }
 
-    /// The colour around the canvas.
+    /// The colour around the canvas: a plugin's (the colour hook's surround), else the
+    /// interface's own.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn surround(&self) -> [f32; 3] {
-        if self.light { SURROUND_LIGHT } else { SURROUND }
+        self.plugin_surround.unwrap_or(if self.light { SURROUND_LIGHT } else { SURROUND })
     }
 
     /// Places the canvas in the window the first time: fitted, turned as the gallery shows it (its
@@ -2092,6 +2100,8 @@ impl CanvasSession {
             grey_view: false,
             plugin_look: None,
             plugin_paper: None,
+            plugin_surround: None,
+            surround_picture: None,
             plugin_values: std::collections::BTreeMap::new(),
             more_references: Vec::new(),
             reference_canvas: None,

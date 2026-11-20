@@ -159,6 +159,8 @@ impl State {
         {
             // the paper the plugins give, which a canvas made since hasn't taken yet
             canvas.set_paper(gpu, self.plugin_paper.as_ref());
+            // and the picture round it, likewise
+            crate::surround::put_on(canvas, gpu, self.surround_picture.as_deref());
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
             let look = canvas_selection.filter(|_| canvas.has_selection() && banded);

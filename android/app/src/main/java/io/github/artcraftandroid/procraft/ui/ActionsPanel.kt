@@ -982,14 +982,15 @@ private fun PluginActionRow(label: String, onClick: () -> Unit) {
     }
 }
 
-/** A file control on a card (a sound): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
+/** A file control on a card (a sound or a picture): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
 @Composable
 private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
+    val picture = file.accepts == io.github.artcraftandroid.procraft.core.PluginFileKind.PICTURE
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.pickPluginSound(file.key, it) }
+        uri?.let { if (picture) vm.pickPluginPicture(file.key, it) else vm.pickPluginSound(file.key, it) }
     }
     Row(
-        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf("audio/*")) }.padding(start = 16.dp, end = 16.dp),
+        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf(if (picture) "image/*" else "audio/*")) }.padding(start = 16.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(file.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)

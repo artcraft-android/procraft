@@ -725,6 +725,7 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
             let accepts = match raw.accepts.as_deref() {
                 _ if raw.keeps.is_some() => return Err(Refusal::Described),
                 Some("sound") => PluginFileKind::Sound,
+                Some("picture") => PluginFileKind::Picture,
                 // a kind of file this app doesn't take
                 Some(_) => return Err(Refusal::Newer),
                 None => return Err(Refusal::Described),
@@ -2204,7 +2205,7 @@ pub(crate) mod tests {
             .push(json!({ "key": "f9", "type": "file", "label": "A", "accepts": "sound" }));
         assert_eq!(refusal(&pack(&more, &[(MODULE, module.as_slice())])), Refusal::Described);
         // a kind it doesn't take is a newer app's; none said, or taking an old setting, is wrong
-        for (accepts, why) in [(json!("picture"), Refusal::Newer), (Value::Null, Refusal::Described)] {
+        for (accepts, why) in [(json!("video"), Refusal::Newer), (Value::Null, Refusal::Described)] {
             let mut odd = manifest.clone();
             odd["controls"] = json!([{ "key": "f", "type": "file", "label": "A", "accepts": accepts }]);
             assert_eq!(refusal(&pack(&odd, &[(MODULE, module.as_slice())])), why);

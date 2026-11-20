@@ -125,6 +125,8 @@ pub struct PluginSlider {
 pub enum PluginFileKind {
     /// A sound: a recording, kept as a WAV file.
     Sound,
+    /// A picture, a PNG or a JPEG, kept as it came (interface 11).
+    Picture,
 }
 
 /// A file someone picks, kept with the plugin; `chosen` is the name it was picked by, if one is.
@@ -392,6 +394,29 @@ pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
     };
     format!("{:.*}{}", places, value * slider.shown_times, slider.unit)
 }
+
+impl Plugins {
+    /// The file the picture round the canvas is read from, as a plugin on the surround picture's
+    /// hook says (interface 11): one of its file controls of pictures with one picked. None for
+    /// none.
+    pub(crate) fn surround_picture_file(&self) -> Option<std::path::PathBuf> {
+        let (id, at) = self.hooks.surround_picture()?;
+        let store = self.store.as_deref()?;
+        let list = self.listed();
+        let plugin = list.files.iter().find(|p| p.id == id && p.on)?;
+        match plugin.controls.get(at as usize)? {
+            PluginControl::File { control }
+                if control.accepts == PluginFileKind::Picture && control.chosen.is_some() =>
+            {
+                Some(plugin_file::chosen_paths(store, &id, &control.key).0)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The most bytes of a picture a file control keeps (interface 11).
+pub(crate) const MOST_PICTURE: usize = 32 << 20;
 
 /// Whether `slider` holds whole numbers: kept as one where what it is kept as matters.
 #[uniffi::export]
@@ -1523,6 +1548,39 @@ impl Plugins {
         control.chosen = Some(name);
         self.hooks.control(&id, at, 1.0);
         self.hooks.give_file(&id, at, Some(&kept_wav));
+        true
+    }
+
+    /// The file control kept under `key` takes the picture `bytes` (a PNG or a JPEG) picked by
+    /// `name`: kept with its plugin as it came (interface 11). False if there is no such control or
+    /// it takes no pictures, the plugins can't be kept, or `bytes` is no picture this reads or is
+    /// past [`MOST_PICTURE`].
+    pub fn set_picture_file(&self, key: String, name: String, bytes: Vec<u8>) -> bool {
+        let Some(store) = self.store.as_deref() else { return false };
+        if bytes.len() > MOST_PICTURE || crate::plugin_commands::decoded_image(&bytes).is_none() {
+            return false;
+        }
+        let name: String = name.chars().filter(|c| !c.is_control()).take(80).collect();
+        let name = if name.trim().is_empty() { "Picture".to_owned() } else { name.trim().to_owned() };
+        let mut list = self.listed();
+        let Some((plugin, at)) = list.control_mut(&key) else { return false };
+        let id = plugin.id.clone();
+        let Some(PluginControl::File { control }) = plugin.controls.get_mut(at) else { return false };
+        if control.accepts != PluginFileKind::Picture {
+            return false;
+        }
+        let (file, named) = plugin_file::chosen_paths(store, &id, &key);
+        let written =
+            |tmp: &std::path::Path| std::fs::write(tmp, &bytes).map_err(|e| crate::project::file_error("saving", e));
+        let kept = file.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+            && crate::project::write_atomically(&file, written).is_ok()
+            && std::fs::write(&named, &name).is_ok();
+        if !kept {
+            log::warn!("a picture for {key} couldn't be kept");
+            return false;
+        }
+        control.chosen = Some(name);
+        self.hooks.control(&id, at, 1.0);
         true
     }
 
@@ -3904,6 +3962,51 @@ mod tests {
         assert!(plugins.set_on(PALETTE.to_owned(), false));
         assert!(plugins.actions_in(PluginPlace::Pen).is_empty());
         assert!(!plugins.run_action_at(open, Arc::clone(&s), 1.0, 2.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn canvas_surround_gives_the_surround_its_colour_or_the_picture_picked_for_it() {
+        const SURROUND: &str = "io.github.artcraftandroid.canvas-surround";
+        let dir = store("bundled-canvas-surround");
+        let plugins = app_at(&dir);
+        let s = crate::CanvasSession::new(10, 10);
+        s.use_plugins(Arc::clone(&plugins));
+        let surround = || s.shared.lock().surround();
+        // it comes off: the interface's own grey, dark or light
+        assert_eq!(surround(), crate::SURROUND);
+        // on: its colour, the accent left as it is
+        assert!(plugins.set_on(SURROUND.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let near = |c: [f32; 3], rgb: u32| {
+            let want = [rgb >> 16, (rgb >> 8) & 0xFF, rgb & 0xFF].map(|v| v as f32 / 255.0);
+            c.iter().zip(want).all(|(c, w)| (c - w).abs() <= 1.0 / 255.0 + 1e-6)
+        };
+        assert!(near(surround(), 0x4D4945), "{:?}", surround());
+        assert_eq!(plugins.accent_colour(), None);
+        // black, from its sliders
+        plugins.set_slider(format!("{SURROUND}.brightness"), 0.0).unwrap();
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(near(surround(), 0x000000), "{:?}", surround());
+        // a picture: only with its switch on and one picked
+        let picture = format!("{SURROUND}.picture");
+        let png = crate::project::png_of(2, 2, &[0, 0, 255, 255].repeat(4)).unwrap();
+        assert!(plugins.set_picture_file(picture.clone(), "blue.png".to_owned(), png));
+        assert_eq!(plugins.surround_picture_file(), None, "its switch off");
+        assert!(plugins.set_switch(format!("{SURROUND}.own"), true));
+        let file = plugins.surround_picture_file().unwrap();
+        assert!(file.is_file());
+        s.use_plugins(Arc::clone(&plugins));
+        let shown = s.shared.lock().surround_picture.as_ref().map(|p| (p.width, p.height));
+        assert_eq!(shown, Some((2, 2)));
+        // a sound control takes no picture; the picture let go, none
+        assert!(plugins.clear_file(picture));
+        assert_eq!(plugins.surround_picture_file(), None);
+        // off again: the interface's own
+        assert!(plugins.set_on(SURROUND.to_owned(), false));
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(surround(), crate::SURROUND);
+        assert!(s.shared.lock().surround_picture.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
