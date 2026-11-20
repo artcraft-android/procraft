@@ -677,6 +677,19 @@ impl Hooks {
         })
     }
 
+    /// The brush preview's hook: the colour (0xRRGGBB) the brush library draws a brush's sample
+    /// stroke in, the current colour `current` (0xRRGGBB) and the brush the one in use if `chosen`,
+    /// as the first plugin by id that answers says; none for the app's own.
+    pub(crate) fn brush_preview_colour(&self, current: u32, chosen: bool) -> Option<u32> {
+        if !self.has(Hook::BrushPreviewColour) {
+            return None;
+        }
+        self.through(Hook::BrushPreviewColour, None, |running, said| match said {
+            Some(colour) => Ok(Some(colour)),
+            None => running.brush_preview_colour(current, chosen),
+        })
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -3184,6 +3197,7 @@ pub(crate) mod tests {
         "paper",
         "reference_windows",
         "pressure",
+        "brush_preview_colour",
     ];
 
     /// Every hook, `Layers` and `Brushes` too.
@@ -3203,17 +3217,17 @@ pub(crate) mod tests {
         }
         assert_eq!(all.count_ones() as usize, every.len());
         // the set as the app holds it: each hook found by its bit, past the 32nd as before it
-        assert_eq!(every.len(), 32, "a new hook goes in the list");
-        assert_eq!(all, u64::from(u32::MAX), "the first 32 bits, as the set held them before it grew");
+        assert_eq!(every.len(), 33, "a new hook goes in the list");
+        assert_eq!(all, (1 << 33) - 1, "the first 33 bits: the 32 the set held before it grew, and one past");
         let hooks = Hooks::default();
         let module = wat::parse_str(PRESSES).unwrap();
         hooks.put_on("a".to_owned(), Running::start(&module, &[]).unwrap(), &every);
         assert_eq!(hooks.hooked.load(Ordering::Relaxed), all);
         assert!(every.iter().all(|&hook| hooks.has(hook)));
-        // the bit a 33rd hook to 64th would take sits in the set the same
-        hooks.hooked.store(all | 1 << 32 | 1 << 63, Ordering::Relaxed);
+        // the bit a 34th hook to 64th would take sits in the set the same
+        hooks.hooked.store(all | 1 << 33 | 1 << 63, Ordering::Relaxed);
         assert!(every.iter().all(|&hook| hooks.has(hook)));
-        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 34);
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 35);
         hooks.take_off("a");
         assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
         assert!(!every.iter().any(|&hook| hooks.has(hook)));
@@ -3268,6 +3282,50 @@ pub(crate) mod tests {
             .fold(f64::MAX, f64::min);
         println!("a hook with none on looked at in {looked:.2} ns");
         assert!(looked < 50.0, "{looked} ns");
+    }
+
+    /// A plugin on the brush preview's hook answering `body` (WAT, given the current colour and
+    /// whether the brush is the one in use).
+    fn previewing(body: &str) -> Running {
+        let text =
+            format!(r#"(module (func (export "procraft_brush_preview_colour") (param i32 i32) (result i32) {body}))"#);
+        Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_brush_previews_go_in_the_colour_the_first_plugin_says_and_with_none_on_the_app_s() {
+        let hooks = Hooks::default();
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), None);
+        // the first hook past bit 31: on it, it is found as any other
+        assert_eq!(Hook::BrushPreviewColour.bit(), 1 << 32);
+        // the current colour, but the brush in use left as the app draws it
+        let current = "(select (i32.const -1) (local.get 0) (local.get 1))";
+        hooks.put_on("b".to_owned(), previewing(current), &[Hook::BrushPreviewColour]);
+        assert!(hooks.listens(Hook::BrushPreviewColour) && !hooks.listens(Hook::Pressure));
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0x123456));
+        assert_eq!(hooks.brush_preview_colour(0x123456, true), None);
+        // one before it by id that answers comes first; one that leaves it doesn't
+        hooks.put_on("a".to_owned(), previewing("(i32.const 0xFF0000)"), &[Hook::BrushPreviewColour]);
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0xFF0000));
+        hooks.put_on("a".to_owned(), previewing("(i32.const -1)"), &[Hook::BrushPreviewColour]);
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0x123456));
+        assert_eq!(hooks.take_stopped(), Vec::new());
+        // asked as the library draws: quick
+        let t = Instant::now();
+        for i in 0..10_000u32 {
+            assert_eq!(hooks.brush_preview_colour(i, false), Some(i));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the brush previews' colour asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+        // an answer that is no colour stops its plugin, and the previews go as the app draws them
+        for odd in ["(i32.const 0x1000000)", "(i32.const -2)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), previewing(odd), &[Hook::BrushPreviewColour]);
+            assert_eq!(hooks.brush_preview_colour(0x123456, false), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+            assert!(!hooks.listens(Hook::BrushPreviewColour), "{odd}");
+        }
     }
 
     fn finger_at(x: f32) -> crate::plugin_run::PressureAsked {

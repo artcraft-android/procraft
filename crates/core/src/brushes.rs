@@ -362,6 +362,20 @@ impl CanvasSession {
         Some(BrushInfo { set, index: index as u32, name: brush.name.clone() })
     }
 
+    /// The colour (0xRRGGBB) the brush library shows its sample strokes in, if a plugin gives one by
+    /// the current colour: for the brush in use (`chosen`, its row on the accent) or any other. None:
+    /// as the app shows them (white, or black on the light interface's rows). The strokes stay
+    /// white, so the library tints them with it as it draws them, and draws none again.
+    pub fn brush_preview_colour(&self, chosen: bool) -> Option<u32> {
+        let (hooks, colour) = {
+            let st = self.shared.lock();
+            (st.hooks.clone()?, st.color)
+        };
+        let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let [r, g, b] = colour.map(byte);
+        hooks.brush_preview_colour((r << 16) | (g << 8) | b, chosen)
+    }
+
     /// A sample stroke drawn with the brush, white on transparent, fitted into `width` × `height`
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {

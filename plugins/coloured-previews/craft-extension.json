@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.coloured-previews",
+  "name": "Coloured brush previews",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Draws the brush library's sample strokes in the colour you paint with, or a colour you pick, rather than white.",
+  "compat": { "procraft": { "interface": 10 } },
+  "permissions": [],
+  "hooks": ["brush_preview_colour"],
+  "controls": [
+    { "key": "own", "type": "switch", "label": "A colour of its own", "starts": false },
+    {
+      "key": "hue", "type": "slider", "label": "Hue", "least": 0, "most": 360, "step": 1, "starts": 200,
+      "unit": "°", "under": "own", "live": true
+    },
+    {
+      "key": "saturation", "type": "slider", "label": "Saturation", "least": 0, "most": 1, "step": 0.01,
+      "starts": 0.6, "shown_times": 100, "unit": "%", "under": "own", "live": true
+    },
+    {
+      "key": "brightness", "type": "slider", "label": "Brightness", "least": 0, "most": 1, "step": 0.01,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "own", "live": true
+    },
+    { "key": "chosen", "type": "switch", "label": "The brush in use too", "starts": false }
+  ]
+}

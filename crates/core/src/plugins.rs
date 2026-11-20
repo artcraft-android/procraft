@@ -3706,6 +3706,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn coloured_previews_tint_the_library_s_strokes_in_the_colour_or_its_own() {
+        const PREVIEWS: &str = "io.github.artcraftandroid.coloured-previews";
+        let dir = store("bundled-coloured-previews");
+        let plugins = app_at(&dir);
+        let s = crate::CanvasSession::new(10, 10);
+        s.use_plugins(Arc::clone(&plugins));
+        s.set_color(0.2, 0.4, 0.6);
+        let tints = || (s.brush_preview_colour(false), s.brush_preview_colour(true));
+        // it comes off: as the app draws them
+        assert_eq!(tints(), (None, None));
+        // on: in the colour painted with, the brush in use as the app draws it
+        assert!(plugins.set_on(PREVIEWS.to_owned(), true));
+        assert_eq!(tints(), (Some(0x336699), None));
+        s.set_color(1.0, 0.0, 0.0);
+        assert_eq!(tints(), (Some(0xFF0000), None));
+        // the brush in use too, while its switch says
+        assert!(plugins.set_switch(format!("{PREVIEWS}.chosen"), true));
+        assert_eq!(tints(), (Some(0xFF0000), Some(0xFF0000)));
+        // a colour of its own: it starts at 200°, 60% and 100%, then as its sliders say
+        assert!(plugins.set_switch(format!("{PREVIEWS}.own"), true));
+        assert_eq!(tints(), (Some(0x66CCFF), Some(0x66CCFF)));
+        let slider = |key: &str, value: f32| plugins.set_slider(format!("{PREVIEWS}.{key}"), value).unwrap();
+        slider("hue", 120.0);
+        slider("saturation", 1.0);
+        slider("brightness", 0.5);
+        assert_eq!(tints().0, Some(0x008000));
+        // asked as the library draws, each frame it shows: quick
+        let t = std::time::Instant::now();
+        for _ in 0..2000 {
+            assert!(s.brush_preview_colour(false).is_some());
+        }
+        let each = t.elapsed() / 2000;
+        println!("the library's tint asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(200), "{each:?}");
+        // off again: as the app draws them
+        assert!(plugins.set_on(PREVIEWS.to_owned(), false));
+        assert_eq!(tints(), (None, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     const FINGER_PRESSURE: &str = "io.github.artcraftandroid.finger-pressure";
 
     /// The pressure `hooks` give the last sample of a stroke by `pointer` (0 a finger) moving across

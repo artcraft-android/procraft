@@ -321,9 +321,30 @@ pub struct Library {
     searching: bool,
     search_down: bool,
     lists_top: (bool, bool),
+    /// What the sample strokes are tinted with as a plugin colours them (each brush's, then the
+    /// brush in use's), as this frame began; none, as the interface draws them.
+    tints: [Option<Color32>; 2],
+}
+
+/// A colour (0xRRGGBB) to draw.
+pub(crate) fn opaque(rgb: u32) -> Color32 {
+    let [_, r, g, b] = rgb.to_be_bytes();
+    Color32::from_rgb(r, g, b)
 }
 
 impl Library {
+    /// The tint of a sample stroke on a row (`selected`: the brush in use's, on the accent), as a
+    /// plugin colours it, or as the interface draws it: white, black on the light interface's
+    /// rows.
+    pub(crate) fn tint(&self, selected: bool) -> Color32 {
+        let [each, in_use] = self.tints;
+        match if selected { in_use } else { each } {
+            Some(tint) => tint,
+            None if crate::look::light() && !selected => Color32::BLACK,
+            None => Color32::WHITE,
+        }
+    }
+
     /// The tool changed: the library shows its brush's set again.
     pub fn tool_changed(&mut self) {
         self.shown_set = None;
@@ -501,6 +522,8 @@ impl Library {
         };
         // the cards' strokes forgotten last frame are drawn no more
         self.card_retired.clear();
+        // tinted as the plugins say by the colour now, the strokes themselves drawn once
+        self.tints = [false, true].map(|chosen| session.brush_preview_colour(chosen).map(opaque));
         if std::mem::take(&mut self.stale) {
             self.previews.clear();
             self.drawing = None;
@@ -1832,8 +1855,7 @@ impl Library {
         let k = (at.width() / pw).max(at.height() / ph);
         let shown = Rect::from_center_size(at.center(), vec2(pw * k, ph * k));
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        let tint = if crate::look::light() && !selected { Color32::BLACK } else { Color32::WHITE };
-        painter.image(p.texture.id(), shown, uv, tint);
+        painter.image(p.texture.id(), shown, uv, self.tint(selected));
         p.shaded
     }
 }
@@ -2087,6 +2109,31 @@ mod tests {
             f.frame(Vec::new());
         }
         assert!(f.top() < lifted - 10.0, "stopped dead: {} to {}", lifted, f.top());
+    }
+
+    #[test]
+    fn the_sample_strokes_show_in_the_colour_a_plugin_gives_by_the_colour_painted_with() {
+        const ID: &str = "io.github.artcraftandroid.coloured-previews";
+        let dir = std::env::temp_dir().join(format!("procraft-library-tints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        let mut f = Finger::new();
+        f.session.use_plugins(Arc::clone(&plugins));
+        f.session.set_color(1.0, 0.0, 0.0);
+        f.frame(Vec::new());
+        let red = Color32::from_rgb(255, 0, 0);
+        // as the interface draws them with the plugin off (it comes so)
+        assert_ne!(f.library.tint(false), red);
+        assert_eq!(f.library.tint(true), Color32::WHITE);
+        // on: each brush's in the colour painted with, the one in use's white on the accent
+        assert!(plugins.set_on(ID.to_owned(), true));
+        f.frame(Vec::new());
+        assert_eq!((f.library.tint(false), f.library.tint(true)), (red, Color32::WHITE));
+        // the colour changed, the next frame shows it, the strokes themselves not drawn again
+        f.session.set_color(0.0, 0.0, 1.0);
+        f.frame(Vec::new());
+        assert_eq!(f.library.tint(false), Color32::from_rgb(0, 0, 255));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

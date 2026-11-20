@@ -124,6 +124,17 @@ private val SwipeDelete = Color(0xFFFF3A46)
 private val PickedBrush = Color(0xFF2C5281)
 private val PickReach = 72.dp
 
+/** A sample stroke tinted with [tint], the colour a plugin gives it; as drawn (white) without one. */
+private fun pluginFilter(tint: Color?): androidx.compose.ui.graphics.ColorFilter? =
+    tint?.let { androidx.compose.ui.graphics.ColorFilter.tint(it, androidx.compose.ui.graphics.BlendMode.Modulate) }
+
+/**
+ * A sample stroke on a cell, the brush in use's if [selected]: in the colour a plugin gives in [tints] (each brush's, then
+ * the brush in use's), else dark on the light interface's cells.
+ */
+private fun previewFilter(tints: Pair<Color?, Color?>, selected: Boolean): androidx.compose.ui.graphics.ColorFilter? =
+    pluginFilter((if (selected) tints.second else tints.first) ?: Color.Black.takeIf { Pc.light && !selected })
+
 /** A brush's name on its cell: on a dark pill where its sample stroke runs under it. */
 @Composable
 private fun BrushName(name: String, selected: Boolean, shaded: Boolean, modifier: Modifier) {
@@ -207,6 +218,7 @@ private fun LibrarySearch(query: String, onQuery: (String) -> Unit, onFocus: (Bo
 @Composable
 private fun SearchResults(vm: CanvasViewModel, query: String) {
     val found = if (query.isBlank()) emptyList() else vm.brushSets.flatMap { it.brushes }.filter { it.name.contains(query.trim(), ignoreCase = true) }
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     if (found.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(top = 24.dp), contentAlignment = Alignment.TopCenter) {
             Text("No results", color = Pc.PanelTitle, fontSize = 15.sp, fontWeight = FontWeight.Medium)
@@ -230,7 +242,10 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
                     .background(if (selected) Pc.RowSelected else ResultFill)
                     .clickable { vm.chooseBrush(b) },
             ) {
-                preview?.let { Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                preview?.let {
+                    val tint = pluginFilter(if (selected) tints.second else tints.first)
+                    Image(it, contentDescription = null, contentScale = ContentScale.Crop, colorFilter = tint, modifier = Modifier.fillMaxSize())
+                }
                 BrushName(b.name, selected, vm.shadedNames[key] == true, Modifier.padding(start = 14.dp, top = 11.dp, end = 10.dp))
             }
         }
@@ -247,6 +262,7 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 @Composable
 fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, floating: FloatingFrame? = null) {
     val sets = vm.brushSets
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     // the Recent set, or one of the library's
     val recent = vm.shownSet == RECENT_SET
     val shown = sets.getOrNull(vm.shownSet)
@@ -762,10 +778,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                     // the sample stroke filling the cell's height (its ends past the cell's sides),
                                     // under the name
                                     preview?.let {
-                                        // the samples are drawn white: dark on the light interface's cells
+                                        // the samples are drawn white: dark on the light interface's cells, or in
+                                        // the colour a plugin gives
                                         Image(
                                             it, contentDescription = null, contentScale = ContentScale.Crop,
-                                            colorFilter = if (Pc.light && !selected) androidx.compose.ui.graphics.ColorFilter.tint(Color.Black, androidx.compose.ui.graphics.BlendMode.SrcIn) else null,
+                                            colorFilter = previewFilter(tints, selected),
                                             modifier = Modifier.fillMaxSize(),
                                         )
                                     }
@@ -831,7 +848,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                         .clip(RoundedCornerShape(12.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
                 ) {
                     vm.previews["${d.set}-${d.index}"]?.let {
-                        Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        Image(it, contentDescription = null, contentScale = ContentScale.Crop, colorFilter = pluginFilter(tints.second), modifier = Modifier.fillMaxSize())
                     }
                     Text(d.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 18.dp, top = 11.dp))
                     // several going together: how many
@@ -1253,6 +1270,7 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier, 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraftandroid.procraft.core.BrushLibraryInfo, onOpen: () -> Unit, onMenu: () -> Unit) {
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     val shape = RoundedCornerShape(CardCorner)
     Column(
         Modifier.fillMaxWidth().height(CardHeight).clip(shape).background(Pc.SetCell)
@@ -1288,7 +1306,7 @@ private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraft
                     val stroke = vm.cardPreviews[key]
                     LaunchedEffect(key, stroke == null) { if (stroke == null) vm.loadCardPreview(i, b.set.toInt(), b.index.toInt()) }
                     Box(Modifier.fillMaxWidth().height(CardBrushHeight)) {
-                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, colorFilter = pluginFilter(tints.first), modifier = Modifier.fillMaxSize()) }
                         Text(b.name, color = Pc.PanelTitle, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, top = 1.dp))
                     }
                 }

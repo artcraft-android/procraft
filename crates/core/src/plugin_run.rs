@@ -88,6 +88,10 @@
 //!   `procraft_pressure_taper(pointer: i32, end: i32) -> f32`, asked as each stroke begins: how far
 //!   (window points, 0 to [`MOST_PRESSURE_TAPER`]) its pressure grows from nothing at its start
 //!   (`end` 0) and falls to nothing at its end (1), for a stroke whose pressure counts.
+//! - `procraft_brush_preview_colour(current: i32, chosen: i32) -> i32`: for the hook
+//!   `brush_preview_colour` (interface 10), the colour (0xRRGGBB) the brush library draws a brush's
+//!   sample stroke in, told the current colour (0xRRGGBB) and whether the brush is the one in use
+//!   (1, its row on the accent); -1 to leave it as the app draws it.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -266,6 +270,7 @@ const PRESSURE: &str = "procraft_pressure";
 const PRESSURE_TAPER: &str = "procraft_pressure_taper";
 /// The longest a pressure's taper may be, window points: past a long stroke's length.
 pub(crate) const MOST_PRESSURE_TAPER: f32 = 1000.0;
+const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -419,6 +424,9 @@ pub(crate) enum Hook {
     /// The pressure each sample of a stroke draws with, a finger's too, and how it tapers
     /// (interface 9).
     Pressure,
+    /// The colour the brush library draws its sample strokes in (interface 10): the first hook
+    /// past the 32 a set of hooks had room for once.
+    BrushPreviewColour,
 }
 
 impl Hook {
@@ -454,6 +462,7 @@ impl Hook {
             "paper" => Some(Hook::Paper),
             "reference_windows" => Some(Hook::ReferenceWindows),
             "pressure" => Some(Hook::Pressure),
+            "brush_preview_colour" => Some(Hook::BrushPreviewColour),
             _ => None,
         }
     }
@@ -493,6 +502,7 @@ impl Hook {
             Hook::Paper => "This plugin can give the canvas a paper that your strokes and its background show.",
             Hook::ReferenceWindows => "This plugin can let more than one Reference window be open.",
             Hook::Pressure => "This plugin can change how hard your strokes press, a finger's too.",
+            Hook::BrushPreviewColour => "This plugin can draw the brush library's sample strokes in another colour.",
         }
     }
 
@@ -531,6 +541,7 @@ impl Hook {
                 exports(module, PRESSURE, &[I32, I32, F32, F32, F32, F32], &[F32])
                     && exports(module, PRESSURE_TAPER, &[I32, I32], &[F32])
             }
+            Hook::BrushPreviewColour => exports(module, BRUSH_PREVIEW_COLOUR, &[ValType::I32; 2], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -937,6 +948,7 @@ pub(crate) struct Running {
     reference_windows: Option<TypedFunc<(), i32>>,
     pressure: Option<PressureCall>,
     pressure_taper: Option<TypedFunc<(i32, i32), f32>>,
+    brush_preview_colour: Option<TypedFunc<(i32, i32), i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1097,6 +1109,7 @@ impl Running {
             let reference_windows = instance.get_typed_func(&store, REFERENCE_WINDOWS).ok();
             let pressure = instance.get_typed_func(&store, PRESSURE).ok();
             let pressure_taper = instance.get_typed_func(&store, PRESSURE_TAPER).ok();
+            let brush_preview_colour = instance.get_typed_func(&store, BRUSH_PREVIEW_COLOUR).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1204,6 +1217,7 @@ impl Running {
                 reference_windows,
                 pressure,
                 pressure_taper,
+                brush_preview_colour,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2239,6 +2253,24 @@ impl Running {
             pressure_taper.call(&mut *store, (pointer, end)).map_err(|e| stop_of(&e))
         })?;
         if (0.0..=MOST_PRESSURE_TAPER).contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
+    }
+
+    /// The colour (0xRRGGBB) it says the brush library draws a brush's sample stroke in, the current
+    /// colour `current` (0xRRGGBB) and the brush the one in use if `chosen`; none where it leaves it
+    /// as the app draws it. One past 0xFFFFFF, or below -1, stops it.
+    pub(crate) fn brush_preview_colour(&mut self, current: u32, chosen: bool) -> Result<Option<u32>, Stop> {
+        let Running { store, brush_preview_colour, .. } = self;
+        let Some(brush_preview_colour) = brush_preview_colour else { return Ok(None) };
+        let current = i32::try_from(current & 0xFF_FFFF).unwrap_or(0);
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            brush_preview_colour.call(&mut *store, (current, i32::from(chosen))).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            -1 => Ok(None),
+            0..=0xFF_FFFF => Ok(u32::try_from(said).ok()),
+            _ => Err(Stop::Nonsense),
+        }
     }
 
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).

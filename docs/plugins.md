@@ -30,7 +30,8 @@ action beside a filter, `colour-triangle` is a picker, `vector-layers` adds laye
 switches its shape, and `floating-panels` lets panels float in windows of their own. `rotation-reset`
 has an action and two switches in the Canvas tab, `value-check` a switch there with a key of its own,
 `paper` controls kept with each artwork, `reference-windows` a single slider, and `finger-pressure`
-gives a finger a pressure on the `pressure` hook.
+gives a finger a pressure on the `pressure` hook, and `coloured-previews` tints the brush library's
+strokes on the `brush_preview_colour` hook.
 
 ## What you write
 
@@ -74,7 +75,7 @@ the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4
 5, more than eight controls, or a picker's picture that reads its controls, 6, the `hide_notices`
 and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
-`gesture_lock` hook's fit 10.
+`gesture_lock` hook's fit and the `brush_preview_colour` hook 10.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -592,6 +593,27 @@ second, followed over about 40 ms): the most when it goes slowly, falling toward
 speeds up, by a share of `s² / (1 + s²)` (`s` the speed over 1,000) times its Speed influence; and
 tapers each finger's stroke in and out over its Start taper and End taper. Pens and mice it leaves
 as they are.
+
+### `brush_preview_colour`
+
+The colour the brush library shows its sample strokes in, in place of white (interface 10):
+
+```
+procraft_brush_preview_colour(current: i32, chosen: i32) -> i32
+```
+
+`current` is the colour being painted with, 0xRRGGBB, and `chosen` is 1 for the brush in use (its
+row on the accent) and 0 for any other. Answer the colour, 0xRRGGBB, or -1 to leave it as the app
+shows it: white, or black on the light interface's rows. The strokes are drawn once, white, and
+shown tinted with the colour, as a multiply: so the app asks as the library draws, never draws a
+stroke again for it, and a stroke's greys show darker shades of the colour. It goes for every
+library's strokes, the cards of the other libraries' too, but not the brush studio's. An answer past
+0xFFFFFF, or below -1, stops the plugin. With several plugins on this hook, the first by id that
+answers is used.
+
+The Coloured brush previews plugin the app comes with shows them in the colour being painted with,
+or in one of its own from its Hue, Saturation and Brightness, and the brush in use so too while
+its switch says.
 
 ### `floating_panels`
 
@@ -1693,7 +1715,7 @@ picker's picture given its controls, a picker that goes quiet or picks the hue o
 a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks,
 interface 7 the `hide_notices` and `floating_panels` hooks, interface 8 the `gesture_lock`,
 `view_look`, `paper` and `reference_windows` hooks, the `view` permission and actions in the Canvas
-tab, interface 9 the `pressure` hook, and interface 10 the `gesture_lock` hook's fit. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+tab, interface 9 the `pressure` hook, and interface 10 the `gesture_lock` hook's fit and the `brush_preview_colour` hook. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

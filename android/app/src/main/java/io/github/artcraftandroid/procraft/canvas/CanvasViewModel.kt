@@ -574,6 +574,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var referenceWindowsAllowed by mutableStateOf(1)
         private set
 
+    /** Counts the plugins' changes to how the interface looks, so what is worked out from them is worked out again. */
+    var pluginLooks by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+
     /**
      * Whether a plugin makes the strokes' sound, as last asked: only then does a hovering pen tell
      * the canvas where it is (each hover event would otherwise wait on the canvas for nothing).
@@ -606,8 +610,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.floatingPanels = io.github.artcraftandroid.procraft.core.FloatingPanel.entries.filter { plugins.floats(it) }.toSet()
         io.github.artcraftandroid.procraft.ui.Pc.noticesShown = io.github.artcraftandroid.procraft.core.NoticeKind.entries.filter { plugins.showsNotice(it) }.toSet()
         tweensOn = plugins.tweens()
+        pluginLooks++
         referenceWindowsAllowed = plugins.referenceWindows().toInt().coerceAtLeast(1)
         followStrokeSound()
+    }
+
+    /**
+     * What the library's sample strokes are tinted with as a plugin colours them by the colour now:
+     * each brush's, then the brush in use's (on the accent); none, as the interface draws them.
+     */
+    fun previewTints(): Pair<androidx.compose.ui.graphics.Color?, androidx.compose.ui.graphics.Color?> {
+        val s = session ?: return null to null
+        val tint = { chosen: Boolean -> s.brushPreviewColour(chosen)?.let { androidx.compose.ui.graphics.Color(0xFF000000L or it.toLong()) } }
+        return tint(false) to tint(true)
     }
 
     /** The strokes' sound (a plugin's), played while an artwork is open and the app in front. */
