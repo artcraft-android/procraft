@@ -881,7 +881,13 @@ fn writing(
     let exporting = card.start(move || following.export_progress());
     let session = Arc::clone(session);
     write_meanwhile(true, move || {
-        let written = write(&session);
+        // a panic on the way (the GPU's driver, or wgpu on a device lost) is said as any failure,
+        // the card let go, not left turning
+        let written =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&session))).unwrap_or_else(|panic| {
+                let reason = format!("it stopped: {}", procraft_gpu::panic_message(panic.as_ref()));
+                Err(procraft_core::MobileError::File { reason })
+            });
         let placed = written.map_err(|e| e.to_string()).and_then(|files| place_written(&files, exporting.cancelled()));
         match placed {
             Ok(made) => exporting.ended(made),

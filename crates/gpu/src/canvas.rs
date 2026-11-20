@@ -13651,9 +13651,54 @@ fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-/// Reads a texture of 4-byte pixels back from the GPU, rows top to bottom without padding.
+/// Reads a texture of 4-byte pixels back from the GPU, rows top to bottom without padding: a big
+/// one in strips of rows (see [`READ_STRIP_BYTES`]), two on their way at a time. What can't be
+/// had, on the GPU or here, is an error, not a crash.
 pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32) -> Result<Vec<u8>, GpuError> {
-    start_reading(gpu, texture, width, height).pixels()
+    let rows = strip_rows(width, READ_STRIP_BYTES.min(gpu.device.limits().max_buffer_size));
+    if rows >= height {
+        return start_reading(gpu, texture, width, height).pixels();
+    }
+    let total = width as usize * height as usize * 4;
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).map_err(|e| GpuError::Readback(format!("no memory for {total} bytes: {e}")))?;
+    let mut coming = std::collections::VecDeque::new();
+    let mut y = 0;
+    while y < height {
+        let to = height.min(y.saturating_add(rows));
+        let strip = IRect::new(0, y as i32, width as i32, to as i32);
+        coming.push_back(start_reading_part(gpu, texture, strip));
+        if coming.len() > 1
+            && let Some(read) = coming.pop_front()
+        {
+            out.extend_from_slice(&read.pixels()?);
+        }
+        y = to;
+    }
+    for read in coming {
+        out.extend_from_slice(&read.pixels()?);
+    }
+    Ok(out)
+}
+
+/// The most bytes a strip of a whole texture read back takes (see [`read_texture`]), or the device's
+/// most for a buffer if that is less: the canvas exported whole took a buffer the CPU can see as
+/// big as the picture (256 MB for 8192 square), which a GPU short of memory couldn't make room for
+/// (and one over the device's most for a buffer can't be made at all).
+const READ_STRIP_BYTES: u64 = 16 << 20;
+
+/// How many rows of a texture `width` pixels wide a strip of at most `most` bytes read back takes,
+/// its rows padded as copies to buffers have them (one row at least).
+fn strip_rows(width: u32, most: u64) -> u32 {
+    let padded = padded_row(width);
+    u32::try_from(most / padded.max(1)).unwrap_or(u32::MAX).max(1)
+}
+
+/// A row of `width` 4-byte pixels as a copy to a buffer lays it: padded to
+/// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`].
+fn padded_row(width: u32) -> u64 {
+    let align = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    (u64::from(width) * 4).div_ceil(align) * align
 }
 
 /// Pixels on their way back from the GPU: their copy is queued (under whatever lock guards what
@@ -13764,8 +13809,8 @@ pub fn start_reading(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32
 fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readback {
     let (width, height) = (rect.width(), rect.height());
     let row = width as usize * 4;
-    let padded = row.div_ceil(256) * 256;
-    let size = (padded * height as usize) as u64;
+    let padded = usize::try_from(padded_row(width)).unwrap_or(usize::MAX);
+    let size = padded_row(width).saturating_mul(u64::from(height));
     let buffer = gpu.readback_buffer(size);
     // a texture there was no memory for (or one its device let go) copies nothing, and the buffer
     // would give back what it held before, another layer's pixels perhaps: the read fails instead
@@ -13895,6 +13940,69 @@ mod tests {
     /// Whether a texture labelled `label` is to fail on this thread.
     pub(super) fn fails(label: &str) -> bool {
         FAILING.with(|f| f.get() == Some(label))
+    }
+
+    /// A big texture (a canvas's composite, as an export reads it) comes back in strips: what the
+    /// GPU holds for it at its fullest stays within two strips and the allocator's own blocks, not
+    /// the whole picture (128 MB here; 256 MB for 8192 square), and the pixels are the same as
+    /// read whole.
+    #[test]
+    fn a_big_texture_comes_back_in_strips_holding_two_at_most() {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        let Ok(gpu) = Gpu::headless() else { return };
+        let reserved = |gpu: &Gpu| gpu.device.generate_allocator_report().map(|r| r.total_reserved_bytes);
+        // (where the device can't tell what it holds, OpenGL's, the pixels are checked alone)
+        let told = reserved(&gpu).is_some();
+        let (w, h) = (8192u32, 4096u32);
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("big"),
+            size: extent(w, h),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let at = |x: u32, y: u32| [x as u8, y as u8, ((x >> 8) ^ (y >> 4)) as u8, 255 - (x as u8 ^ y as u8)];
+        // written a band at a time
+        for y0 in (0..h).step_by(256) {
+            let band: Vec<u8> = (y0..y0 + 256).flat_map(|y| (0..w).flat_map(move |x| at(x, y))).collect();
+            gpu.queue.write_texture(
+                copy_at(&texture, 0, y0 as i32),
+                &band,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(256) },
+                extent(w, 256),
+            );
+            gpu.flush();
+        }
+        gpu.let_go_of_kept_buffers();
+        gpu.flush();
+        let before = reserved(&gpu).unwrap_or(0);
+        let (peak, stop) = (Arc::new(AtomicU64::new(before)), Arc::new(AtomicBool::new(false)));
+        let sampler = {
+            let (gpu, peak, stop) = (gpu.clone(), Arc::clone(&peak), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak.fetch_max(reserved(&gpu).unwrap_or(0), Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        let pixels = read_texture(&gpu, &texture, w, h).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+        let held = peak.load(Ordering::Relaxed).max(reserved(&gpu).unwrap_or(0)) - before;
+        println!("read back {} MB: {} MB held on the GPU at the fullest", (w * h * 4) >> 20, held >> 20);
+        assert_eq!(pixels.len(), (w * h * 4) as usize);
+        for (x, y) in [(0, 0), (8191, 0), (17, 511), (4000, 512), (1, 2047), (8000, 2048), (8191, 4095)] {
+            let i = ((y * w + x) * 4) as usize;
+            assert_eq!(pixels[i..i + 4], at(x, y), "({x}, {y})");
+        }
+        assert!(pixels.chunks(4 * w as usize).enumerate().all(|(y, row)| row[..4] == at(0, y as u32)));
+        // two strips on their way, and up to as much again of the allocator's blocks around them
+        assert!(!told || held <= 4 * READ_STRIP_BYTES, "{held} bytes held reading {} back", w * h * 4);
+        assert_eq!(gpu.errors(), 0);
     }
 
     #[test]

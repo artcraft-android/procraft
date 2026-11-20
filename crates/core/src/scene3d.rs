@@ -1958,7 +1958,7 @@ impl CanvasSession {
     /// The model as the window shows it, on the canvas's surround, as a JPEG at `path`.
     pub fn export_model_jpeg(&self, path: String) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(false)?;
-        let rgb = crate::project::onto_white(&crate::project::straight_alpha(&rgba));
+        let rgb = crate::project::onto_white(&crate::project::straight_alpha(&rgba))?;
         let bytes = procraft_engine::jpeg::encode(&rgb, w, h, crate::project::JPEG_QUALITY);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
     }

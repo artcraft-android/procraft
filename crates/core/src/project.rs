@@ -1214,7 +1214,9 @@ impl CanvasSession {
     pub fn export_jpeg(&self, path: String) -> Result<(), MobileError> {
         let (w, h, straight, icc) = self.finished_picture()?;
         self.exported(0.7);
-        let bytes = procraft_engine::jpeg::encode_tagged(&onto_white(&straight), w, h, JPEG_QUALITY, &icc);
+        let rgb = onto_white(&straight)?;
+        drop(straight);
+        let bytes = procraft_engine::jpeg::encode_tagged(&rgb, w, h, JPEG_QUALITY, &icc);
         self.exported(0.95);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))?;
         self.exported(1.0);
@@ -2167,16 +2169,18 @@ pub fn export_file_name(name: String, package: bool) -> String {
 /// How finely JPEGs are written (1..100): fine enough to keep a painting's edges and grain.
 pub(crate) const JPEG_QUALITY: u8 = 92;
 
-/// Straight RGBA8 pixels laid onto white, as RGB8 (for a JPEG, which has nothing see-through).
-pub(crate) fn onto_white(rgba: &[u8]) -> Vec<u8> {
+/// Straight RGBA8 pixels laid onto white, as RGB8 (for a JPEG, which has nothing see-through); an
+/// error if there is no memory for them (a big canvas's, on a computer short of it), not a crash.
+pub(crate) fn onto_white(rgba: &[u8]) -> Result<Vec<u8>, MobileError> {
     let (pixels, _) = rgba.as_chunks::<4>();
-    let mut out = Vec::with_capacity(pixels.len() * 3);
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels.len() * 3).map_err(|e| file_error("making the picture", e))?;
     for &[r, g, b, a] in pixels {
         let a = u16::from(a);
         let over = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
         out.extend_from_slice(&[over(r), over(g), over(b)]);
     }
-    out
+    Ok(out)
 }
 
 /// [`straight_alpha`] in place, in pieces made side by side.

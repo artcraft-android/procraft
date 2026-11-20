@@ -8980,6 +8980,93 @@ fn only_a_canvas_past_srgb_puts_the_window_in_wide_colour() {
     assert!(!s.shows_wide_colour());
 }
 
+/// A big canvas (8192 by 4096) exports as PNG and JPEG while what the GPU holds at its fullest for
+/// it stays within a few strips of the picture read back (16 MB each; reading it whole took 128
+/// MB more, which a GPU short of memory couldn't make room for), and the PNG holds the canvas's
+/// pixels. On a device lost meanwhile, an export is an error to say, never a panic.
+#[test]
+fn a_big_canvas_exports_holding_a_few_strips_on_the_gpu_and_a_lost_device_is_an_error() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let (w, h) = (8192u32, 4096u32);
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let reserved = |gpu: &Gpu| gpu.device.generate_allocator_report().map(|r| r.total_reserved_bytes);
+    if gpu.max_texture_size() < w {
+        return eprintln!("skipped: the canvas is too big for this GPU");
+    }
+    // (where the device can't tell what it holds, OpenGL's, the files are checked alone)
+    let told = reserved(&gpu).is_some();
+    let s = CanvasSession::new(w, h);
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (1600, 1600);
+        st.view = Some(View::fit((w, h), (1600, 1600)));
+        st.gpu = Some(gpu.clone());
+        st.ensure_canvas();
+    }
+    // a stroke across, in red
+    s.set_brush_size(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(100.0, 800.0, 0.0)]);
+    s.stroke_add((1..40).map(|i| sample(100.0 + i as f32 * 35.0, 800.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let dir = std::env::temp_dir().join(format!("procraft-big-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    // drawn and settled first, so what is measured is the export's own
+    s.export_png(path("first.png")).unwrap();
+    gpu.let_go_of_kept_buffers();
+    gpu.flush();
+    for (name, export) in [
+        ("big.png", CanvasSession::export_png as fn(&CanvasSession, String) -> Result<(), crate::MobileError>),
+        ("big.jpg", CanvasSession::export_jpeg),
+    ] {
+        gpu.flush();
+        let before = reserved(&gpu).unwrap_or(0);
+        let (peak, stop) = (Arc::new(AtomicU64::new(before)), Arc::new(AtomicBool::new(false)));
+        let sampler = {
+            let (gpu, peak, stop) = (gpu.clone(), Arc::clone(&peak), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    peak.fetch_max(reserved(&gpu).unwrap_or(0), Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        export(&s, path(name)).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+        let held = peak.load(Ordering::Relaxed).max(reserved(&gpu).unwrap_or(0)) - before;
+        println!("{name}: {} MB held on the GPU at the fullest, for a picture of {} MB", held >> 20, (w * h * 4) >> 20);
+        assert!(!told || held <= 64 << 20, "{name}: {held} bytes held on the GPU");
+    }
+    // the PNG is the canvas, red where the stroke went
+    let mut reader =
+        png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path("big.png")).unwrap())).read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    assert_eq!((info.width, info.height), (w, h));
+    let composite = {
+        let st = s.shared.lock();
+        st.canvas.as_ref().unwrap().read_composite(&gpu).unwrap()
+    };
+    let mut straight = composite;
+    crate::project::straighten(&mut straight);
+    assert!(buf[..straight.len()] == straight[..], "the PNG isn't the canvas");
+    let red = straight.chunks(4).filter(|p| p[0] > 200 && p[1] < 50 && p[3] > 200).count();
+    assert!(red > 10_000, "{red} red pixels");
+    // the device lost: each export says so
+    gpu.device.destroy();
+    for export in [
+        CanvasSession::export_png as fn(&CanvasSession, String) -> Result<(), crate::MobileError>,
+        CanvasSession::export_jpeg,
+    ] {
+        let tried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export(&s, path("lost"))));
+        assert!(matches!(tried, Ok(Err(_))), "an error, not a panic or a file");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_artwork_never_shown_exports_offscreen() {
     let Some(s) = session(40, 40) else { return };

@@ -64,14 +64,37 @@ static WAIT_FAILED_TOLD: AtomicBool = AtomicBool::new(false);
 /// Polls `device` as `how` says (waiting for what was sent to it, or not), failing soft: wgpu's own
 /// poll panics where the device is lost or out of memory (errors it can't return), which here is
 /// [`GpuError::Lost`], and any other failure [`GpuError::Failed`], the first of them logged. A wait
-/// that runs out of time fails too, as nothing wrong: not logged.
+/// that runs out of time fails too, as nothing wrong: not logged. A wait without end goes in slices
+/// (see [`WAIT_SLICE`]).
 pub fn poll(device: &wgpu::Device, how: wgpu::PollType) -> Result<wgpu::PollStatus, GpuError> {
-    polled(|| device.poll(how))
+    let submission_index = match how {
+        wgpu::PollType::Wait { submission_index, timeout: None } => submission_index,
+        how => return polled(|| device.poll(how)),
+    };
+    loop {
+        let slice = wgpu::PollType::Wait { submission_index: submission_index.clone(), timeout: Some(WAIT_SLICE) };
+        let polled_now = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device.poll(slice)));
+        if !matches!(polled_now, Ok(Err(wgpu::PollError::Timeout))) {
+            return told(polled_now);
+        }
+        // the context let go a moment, for a thread waiting on it to take it
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
+
+/// The longest a wait on the GPU holds it at once: on OpenGL a wait holds the one context the whole
+/// time, and wgpu panics in any other thread kept from it for a second (the window's frame, as an
+/// export waited for a big canvas to be read back). Between slices the context is let go.
+const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// [`poll`] with the poll given, as wgpu's might go.
 fn polled(poll: impl FnOnce() -> Result<wgpu::PollStatus, wgpu::PollError>) -> Result<wgpu::PollStatus, GpuError> {
-    let (error, why) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)) {
+    told(std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)))
+}
+
+/// What a poll came to, as [`poll`] gives it, the first failure logged.
+fn told(polled: std::thread::Result<Result<wgpu::PollStatus, wgpu::PollError>>) -> Result<wgpu::PollStatus, GpuError> {
+    let (error, why) = match polled {
         Ok(Ok(status)) => return Ok(status),
         Ok(Err(wgpu::PollError::Timeout)) => return Err(GpuError::Failed("the GPU took too long".to_owned())),
         Ok(Err(e)) => (GpuError::Failed(format!("waiting on the GPU: {e}")), e.to_string()),
@@ -784,6 +807,73 @@ mod tests {
     }
 
     use super::*;
+
+    /// A wait goes in slices (see [`WAIT_SLICE`]), each letting OpenGL's one context go, and one
+    /// longer than a slice still waits for everything sent: a picture copied back and forth over
+    /// and over is done, and the device has nothing left to do. Another thread's call into the
+    /// GPU meanwhile is timed (on OpenGL one kept from the context a second panics in wgpu).
+    /// `LONG_WAIT_COPIES` (600) says how much work the GPU is given.
+    #[test]
+    fn a_wait_longer_than_its_slices_still_waits_for_everything_sent() {
+        use std::time::{Duration, Instant};
+        let Ok(gpu) = Gpu::headless() else { return };
+        let copies: usize = std::env::var("LONG_WAIT_COPIES").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let size = wgpu::Extent3d { width: 4096, height: 4096, depth_or_array_layers: 1 };
+        let texture = |label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let (a, b) = (texture("a"), texture("b"));
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for _ in 0..copies {
+            encoder.copy_texture_to_texture(a.as_image_copy(), b.as_image_copy(), size);
+            encoder.copy_texture_to_texture(b.as_image_copy(), a.as_image_copy(), size);
+        }
+        let sent = Instant::now();
+        gpu.queue.submit([encoder.finish()]);
+        let submitted = sent.elapsed();
+        let waiting = {
+            let gpu = gpu.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let done = gpu.wait();
+                (started.elapsed(), done.is_ok())
+            })
+        };
+        let mut longest = Duration::ZERO;
+        while !waiting.is_finished() {
+            let started = Instant::now();
+            let _ = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("meanwhile"),
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            longest = longest.max(started.elapsed());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (waited, done) = waiting.join().unwrap();
+        println!(
+            "{}: sent in {} ms, waited {} ms; a call meanwhile took {} ms at most",
+            gpu.adapter.get_info().name,
+            submitted.as_millis(),
+            waited.as_millis(),
+            longest.as_millis()
+        );
+        assert!(done);
+        // nothing left: the wait didn't end with a slice
+        let left = gpu.device.poll(wgpu::PollType::Poll).unwrap();
+        assert!(left.is_queue_empty(), "{left:?} after the wait");
+        assert_eq!(gpu.errors(), 0);
+    }
 
     #[test]
     fn work_that_fails_on_the_gpu_is_told() {

@@ -248,11 +248,15 @@ impl Screen {
         self.canvases_later.is_some()
     }
 
-    /// Whether nothing may be drawn now: on OpenGL while the canvases' pipelines are made. Its one
-    /// context is held by one thread at a time, and one that waits for it more than a second
-    /// panics (wgpu's lock), while a pipeline can take longer than that to compile.
+    /// Whether nothing may be drawn now: on OpenGL while the canvases' pipelines are made, or the
+    /// artwork open is exported or saved on a thread of its own. Its one context is held by one
+    /// thread at a time, and one that waits for it more than a second panics (wgpu's lock), while
+    /// a pipeline can take longer than that to compile, and an export's work on a big canvas (its
+    /// picture made and read back) longer than that to send and wait for.
     pub fn gl_busy(&self) -> bool {
-        self.gpu.is_gl() && self.canvases.as_ref().is_some_and(|made| !made.is_finished())
+        self.gpu.is_gl()
+            && (self.canvases.as_ref().is_some_and(|made| !made.is_finished())
+                || crate::files::exporting_since().is_some())
     }
 
     /// Whether nothing can show: its next size brings it back.
