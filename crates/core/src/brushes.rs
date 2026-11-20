@@ -587,13 +587,13 @@ impl CanvasSession {
             second_style.sample = true;
             canvas.use_sources(gpu, &mut second_style, &second);
             self.use_full_sources(gpu, canvas, &mut second_style, &second);
-            let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             let classic = brush.setting("classic_combine") >= 0.5;
             (!second_style.in_place()).then(|| {
                 let threshold = second_style.alpha_threshold;
                 let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
-                (second, dual, preview::diameter(brush) * ratio)
+                let diameter = preview::second_diameter(brush, &second);
+                (second, dual, diameter)
             })
         });
         match &second {

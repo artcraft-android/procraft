@@ -36,8 +36,8 @@ const SWING_TURN: f32 = 3.7591707;
 const LEAN_HEADING: f32 = 0.053382;
 
 /// The pressure the pen's swell is turned into: the brush's preview minimum plus this many times
-/// the swell (times its preview pressure scale).
-const PRESSURE_GAIN: f32 = 1.0;
+/// the swell (times its preview pressure scale), a little past double it.
+const PRESSURE_GAIN: f32 = 2.04;
 
 /// Where along the wave `t` (0..1) is, in canvas pixels.
 fn along(t: f32) -> Vec2 {
@@ -65,10 +65,10 @@ fn swell(t: f32) -> f32 {
 }
 
 /// The pressure the sample stroke presses `brush` with at `t` (0..1 along): the brush's preview
-/// minimum plus its swell, the control's full travel doubling it.
+/// minimum plus its swell, the control's full travel a little past doubling it.
 pub fn pressure_at(brush: &Brush, t: f32) -> f32 {
     let least = brush.setting("preview_pressure_min");
-    let gain = PRESSURE_GAIN * 2.0 * brush.setting("preview_pressure_scale");
+    let gain = PRESSURE_GAIN * brush.setting("preview_pressure_scale");
     (least + gain * swell(t)).clamp(0.0, 1.0)
 }
 
@@ -115,9 +115,21 @@ fn share(brush: &Brush, units: f32, small: f32) -> f32 {
 
 /// The diameter the sample stroke is drawn at (canvas pixels).
 pub fn diameter(brush: &Brush) -> f32 {
+    at_share(brush, size_share(brush))
+}
+
+/// The diameter a dual brush's `second` is drawn at along `brush`'s sample stroke: as far along
+/// its own range, from its least size to its most, as the first's preview size takes the first
+/// along its (the stroke's samples carry that share, and each part draws it from its own range).
+pub fn second_diameter(brush: &Brush, second: &Brush) -> f32 {
+    at_share(second, size_share(brush))
+}
+
+/// `brush`'s size `share` of the way from its least to its most (canvas pixels).
+fn at_share(brush: &Brush, share: f32) -> f32 {
     let most = brush.biggest();
     let least = brush.min_size.min(most);
-    (least + (most - least) * size_share(brush)).max(0.5)
+    (least + (most - least) * share).max(0.5)
 }
 
 /// The canvas (premultiplied RGBA8, [`CANVAS`] in size) fitted into a `width` × `height` preview:
@@ -185,7 +197,7 @@ mod tests {
         assert!(s.iter().all(|p| p.pos.y > 0.4 * CANVAS.1 && p.pos.y < 0.7 * CANVAS.1));
         // light at the ends, swelling to full in the middle
         assert!(first.pressure < 0.15 && last.pressure < 0.15);
-        assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.6);
+        assert!(s.get(SAMPLES / 4).unwrap().pressure < 0.62);
         assert_eq!(s.get(SAMPLES / 2).unwrap().pressure, 1.0);
         assert!((last.time_ms - 35.0 * STEP_MS).abs() < 1e-9);
     }
@@ -221,9 +233,11 @@ mod tests {
         let mut b = Brush::round_pen();
         b.set_setting("preview_pressure_scale", 0.25);
         b.set_setting("preview_pressure_min", 0.2);
-        // half travel leaves the swell as it is; a quarter halves it
-        assert!((pressure_at(&b, 0.0) - (0.2 + 0.5 * 0.1059249)).abs() < 1e-5);
-        assert!((pressure_at(&b, 0.5) - (0.2 + 0.5 * 1.0031434)).abs() < 1e-5);
+        // half travel leaves the swell a little stronger than it is; a quarter about halves it
+        assert!((pressure_at(&b, 0.0) - (0.2 + 0.51 * 0.1059249)).abs() < 1e-5);
+        assert!((pressure_at(&b, 0.5) - (0.2 + 0.51 * 1.0031434)).abs() < 1e-5);
+        b.set_setting("preview_pressure_scale", 0.5);
+        assert!((pressure_at(&b, 0.0) - (0.2 + 1.02 * 0.1059249)).abs() < 1e-5);
         b.set_setting("preview_pressure_scale", 1.0);
         assert_eq!(pressure_at(&b, 0.5), 1.0);
         let s = samples(&b);
