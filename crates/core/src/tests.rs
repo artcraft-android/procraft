@@ -782,10 +782,12 @@ fn stroke_cost() {
 /// pen at 120 frames a second, each frame its two events, its render and the GPU done with it (as
 /// waited for: what the frame takes end to end), and how an event's cost late in a long stroke
 /// (`FRAME_BOUND_EVENTS`, 1600 events) compares with its first. Bounds: a frame's 95th percentile
-/// within `FRAME_BOUND_MS` (16.7: 60 frames a second; a fast GPU's), and the last 200 events of the
-/// long stroke within twice the first 200's (a cost that grows with the stroke, as a copy of all of
-/// it at every event would, fails). `FRAME_BOUND_BRUSHES` lists them as [`stroke_cost`] does; with
-/// `WGPU_BACKEND=gl` the same on OpenGL. Run with `--ignored --nocapture`.
+/// within `FRAME_BOUND_MS` (16.7: 60 frames a second; a fast GPU's), the lift (the second's end laid,
+/// and the GPU done with it) within `FRAME_BOUND_LIFT_MS` (100: a stroke laid again whole as it ends
+/// took two to five times that), and the last 200 events of the long stroke within twice the first
+/// 200's (a cost that grows with the stroke, as a copy of all of it at every event would, fails).
+/// `FRAME_BOUND_BRUSHES` lists them as [`stroke_cost`] does; with `WGPU_BACKEND=gl` the same on
+/// OpenGL. Run with `--ignored --nocapture`.
 #[test]
 #[ignore]
 fn a_second_of_stroke_keeps_to_its_frames() {
@@ -793,6 +795,7 @@ fn a_second_of_stroke_keeps_to_its_frames() {
     let side: u32 = env("FRAME_BOUND_SIDE", "2048").parse().unwrap_or(2048);
     let events: usize = env("FRAME_BOUND_EVENTS", "1600").parse().unwrap_or(1600);
     let bound: f64 = env("FRAME_BOUND_MS", "16.7").parse().unwrap_or(16.7);
+    let lift_bound: f64 = env("FRAME_BOUND_LIFT_MS", "100").parse().unwrap_or(100.0);
     let Some(s) = session(side, 1600) else { return };
     if let Some(g) = s.shared.lock().gpu.as_ref() {
         let info = g.adapter.get_info();
@@ -924,6 +927,9 @@ fn a_second_of_stroke_keeps_to_its_frames() {
         );
         if p95 > bound {
             failures.push(format!("{entry}: a frame's 95th percentile {p95:.2} ms, past {bound} ms"));
+        }
+        if lift > lift_bound {
+            failures.push(format!("{entry}: the lift {lift:.2} ms, past {lift_bound} ms"));
         }
         if late > 2.0 * early + 0.05 {
             failures.push(format!("{entry}: an event {early:.3} ms early in the stroke, {late:.3} ms late"));
@@ -3175,8 +3181,10 @@ fn a_stroke_laid_again_as_it_ends_goes_on_over_frames_as_the_next_begins() {
             let mut st = s.shared.lock();
             let canvas = st.canvas.as_mut()?;
             canvas.set_relay_at_once(most);
-            // (all of its paint laid in place in each frame, however fast the GPU seems)
+            // (all of its paint laid in place in each frame, however fast the GPU seems; and laid
+            // again from its start, with no marks to go back to)
             canvas.set_in_place_paced(false);
+            canvas.set_rewinds(false, None);
         }
         s.stroke_begin(PointerKind::Stylus, vec![point(0, 90.0)]);
         for e in 1..=65 {
@@ -20014,6 +20022,84 @@ fn paint_laid_in_place_laid_again_as_it_ends_goes_back_to_a_mark_and_ends_as_lai
         );
     }
 }
+
+/// Paint laid in place with a start taper that lasts a time (its reach known only once the stroke is
+/// under way, so that its first stamps change then) lays its start again once that is known, while
+/// the stroke is a few frames long, and each stamp after once it no longer changes: its end lays
+/// again only what its end taper reaches, not the whole stroke from its start. It comes out as laid
+/// again from scratch, pixel for pixel; and within a level here and there (in at most 2% of the
+/// channels) of all of it laid again whole, a second laid by its rule included (its lots' rounding:
+/// see `a_wet_brushs_second_ends_laying_only_its_rest_within_a_level_of_laid_whole`). The stock
+/// brushes as they are: dry and wet paint, with a second and without, and seconds with a timed start
+/// taper of their own.
+#[test]
+fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_again() {
+    let side = 512;
+    let point = |k: usize| PenSample {
+        pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
+        tilt: 0.4,
+        orientation: 0.8,
+        ..sample(30.0 + k as f32 * 1.8, 256.0 + (k as f32 * 0.03).sin() * 150.0, k as f64 * 4.17)
+    };
+    let timed = |b: &procraft_engine::brush::Brush| b.pen_taper.start > 0.0 && b.setting("classic_taper") < 0.5;
+    for name in TIMED_START_WET {
+        // the layer, the dispatches at its end, and whether it held its start: ended as it ends, laid
+        // again from scratch (no marks to go back to), or all of it laid again whole
+        let ended = |rewinds: bool, whole: bool| -> Option<(Vec<u8>, u64, bool)> {
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name && timed(b))?;
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(0.3);
+            s.set_color(0.1, 0.3, 0.7);
+            {
+                let mut st = s.shared.lock();
+                let canvas = st.canvas.as_mut()?;
+                canvas.lay_ends_whole(whole);
+                canvas.set_rewinds(rewinds, None);
+            }
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=120 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    picture(&s);
+                }
+            }
+            picture(&s);
+            let (before, held) = {
+                let st = s.shared.lock();
+                (st.canvas.as_ref()?.compute_dispatches(), st.stroke.as_ref()?.holds_start())
+            };
+            s.stroke_end(vec![point(241)]);
+            picture(&s);
+            let sent = s.shared.lock().canvas.as_ref()?.compute_dispatches() - before;
+            let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+            Some((layer_rgba(&s, current), sent, held))
+        };
+        let (Some((rest, sent_rest, held)), Some((scratch, ..)), Some((whole, sent_whole, _))) =
+            (ended(true, false), ended(false, false), ended(false, true))
+        else {
+            panic!("{name}: no stock brush of paint laid in place with a timed start taper");
+        };
+        let (most, count) = differ(&whole, &rest);
+        println!(
+            "{name}: {sent_rest} dispatches at its end, {sent_whole} laid again whole; {count} of {} channels within {most} of that",
+            whole.len()
+        );
+        assert!(held, "{name}: holds its start");
+        assert_eq!(differ(&scratch, &rest), (0, 0), "{name}: ends unlike laid again from scratch");
+        assert!(
+            most <= 1 && count * 50 <= whole.len(),
+            "{name}: {count} channels differ from laid whole, by {most} at most"
+        );
+        assert!(
+            sent_rest * 3 < sent_whole,
+            "{name}: {sent_rest} dispatches at its end, against {sent_whole} laid again whole"
+        );
+    }
+}
+
+/// Stock brushes of paint laid in place with a start taper that lasts a time.
+const TIMED_START_WET: [&str; 5] = ["Lundy", "Kingsley", "Dunlin", "Copperwing", "Olympus"];
 
 /// A stroke painting in place whose marks can't all be kept (past the most bytes they may take) is
 /// laid again from its start as it ends, or from a mark it still has: either way as laid whole.

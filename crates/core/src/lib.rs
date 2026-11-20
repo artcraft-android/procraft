@@ -1349,9 +1349,15 @@ fn draw_samples(
     guide: &procraft_engine::guide::Guide,
     ahead_later: bool,
 ) -> bool {
-    // a dual brush's second, as its stamps come (no tip of its own)
+    // a dual brush's second, as its stamps come (no tip of its own); holding its start, laid again
+    // once that is known
     if let Some(second) = second {
-        canvas.add_second_stamps(&guide::mirrored(guide, &second.add(samples)));
+        let added = second.add(samples);
+        if second.holds_start() && second.take_turned() {
+            canvas.replace_second_stamps(&guide::mirrored(guide, &second.placed_stamps()));
+        } else {
+            canvas.add_second_stamps(&guide::mirrored(guide, &added));
+        }
     }
     if canvas.shows_tip() && builder.shows_tip() {
         let kept = builder.add_kept(samples);
@@ -1390,7 +1396,9 @@ fn lift_samples(
     guide: &procraft_engine::guide::Guide,
 ) {
     let stamps = builder.add(samples);
-    if !(canvas.shows_tip() && builder.shows_tip()) {
+    if builder.holds_start() && builder.take_turned() {
+        canvas.replace_stamps(&guide::mirrored(guide, &builder.placed_stamps()));
+    } else if !(canvas.shows_tip() && builder.shows_tip()) {
         canvas.add_stamps(&guide::mirrored(guide, &stamps));
     }
     if let Some(second) = second {
@@ -1462,10 +1470,14 @@ fn lay_stroke(
     // end took a while to work out whole, and longer to lay); not with a symmetry guide's copies,
     // which come after each lot of stamps rather than in the stroke's order
     let in_order = guide.copies(Vec2::ZERO).is_empty();
+    // (where its end changes what was laid, it is laid again from the first changed, from a mark
+    // before it, made only from there)
     if let Some(mut second) = second {
-        match canvas.laid_second_count().filter(|_| in_order).and_then(|n| second.finish_after(n)) {
-            Some(rest) => canvas.end_second_with(&rest),
-            None => canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish())),
+        let laid = canvas.laid_second_count().filter(|_| in_order);
+        match laid.and_then(|n| Some((n, second.finish_changed(n)?))) {
+            Some((n, (from, rest))) if from == n => canvas.end_second_with(&rest),
+            Some((_, (from, rest))) if canvas.replace_second_stamps_after(from, &rest) => {}
+            _ => canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish())),
         }
     }
     // a smudge, or an adjustment painted on, has laid its stamps for good as they came
@@ -1478,9 +1490,11 @@ fn lay_stroke(
         // for when that can't be told without it: the canvas no longer keeps what it laid, the
         // stroke being very long; a brush engine's stamps stay as they came)
         let before = (canvas.shows_tip() && !builder.is_outside() && !canvas.keeps_laid()).then(|| builder.clone());
-        match canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n)) {
-            Some(rest) => canvas.end_with(&rest),
-            None => {
+        let laid = canvas.laid_count().filter(|_| in_order);
+        match laid.and_then(|n| Some((n, builder.finish_changed(n)?))) {
+            Some((n, (from, rest))) if from == n => canvas.end_with(&rest),
+            Some((_, (from, rest))) if canvas.replace_stamps_after(from, &rest) => {}
+            _ => {
                 let for_good = before.and_then(|b| b.drawn_for_good());
                 let all = builder.finish();
                 match for_good.as_deref().and_then(|stamps| all.strip_prefix(stamps)) {
@@ -2359,6 +2373,14 @@ impl CanvasSession {
         match second {
             Some(second) => canvas.begin_dual_stroke(current, style, second),
             None => canvas.begin_stroke(current, style),
+        }
+        // paint laid in place lays its stamps for good as they come: those its start taper changes
+        // are laid once they no longer change, so that its end lays again only what that changes
+        if style.paints_in_place() && !canvas.shows_tip() && !canvas.is_pencil() {
+            builder.hold_start();
+            if let Some(second) = second_builder.as_mut() {
+                second.hold_start();
+            }
         }
         // (paint laid in place keeps marks to go back to only if its end may lay it again)
         canvas.may_lay_again(builder.end_may_change_laid());

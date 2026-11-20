@@ -329,7 +329,7 @@ impl StrokeStyle {
     }
 
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
-    fn paints_in_place(&self) -> bool {
+    pub fn paints_in_place(&self) -> bool {
         self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)
     }
 
@@ -4143,6 +4143,26 @@ impl Canvas {
             self.laid = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
         }
         self.laid_count = stamps.len();
+    }
+
+    /// Redraws the open stroke from scratch as [`Canvas::replace_stamps`] does, given its final
+    /// stamps from the `from`th on: those before are the first it laid, as they still are (only
+    /// the rest of a long stroke's end is made). False, doing nothing, if it no longer keeps those
+    /// (a very long stroke): it is to be given whole.
+    pub fn replace_stamps_after(&mut self, from: usize, rest: &[Stamp]) -> bool {
+        let Some(before) = self.laid.as_ref().and_then(|laid| laid.get(..from)) else { return false };
+        let all = [before, rest].concat();
+        self.replace_stamps(&all);
+        true
+    }
+
+    /// [`Canvas::replace_stamps_after`] for the open stroke's second (see
+    /// [`Canvas::replace_second_stamps`]).
+    pub fn replace_second_stamps_after(&mut self, from: usize, rest: &[Stamp]) -> bool {
+        let Some(before) = self.laid_second.as_ref().and_then(|laid| laid.get(..from)) else { return false };
+        let all = [before, rest].concat();
+        self.replace_second_stamps(&all);
+        true
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the

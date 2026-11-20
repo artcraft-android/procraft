@@ -1084,6 +1084,11 @@ pub struct StrokeBuilder {
     /// handed out (`usize::MAX`: none), for [`StrokeBuilder::finish_after`].
     tipped: bool,
     changed: usize,
+    /// Laid for good as it comes, its start held (see [`StrokeBuilder::hold_start`]): how many of
+    /// its stamps it has handed out as they will stay; and how many it handed out as they stood while
+    /// its start taper's reach was still moving, to be laid again once it is known.
+    held: Option<usize>,
+    provisional: usize,
     /// Once it has ended: the path's length and the end taper's span its stamps take.
     ended: Option<(f32, f32)>,
     /// The input's pressure counts though its pointer reports none (see
@@ -1421,6 +1426,8 @@ impl StrokeBuilder {
             quiet: false,
             tipped: false,
             changed: usize::MAX,
+            held: None,
+            provisional: 0,
             ended: None,
             given_pressure: false,
             pressure_tapers: [0.0; 2],
@@ -1501,12 +1508,76 @@ impl StrokeBuilder {
         if let Some(stamps) = self.add_outside(samples) {
             return stamps;
         }
+        if self.held.is_some() && !self.quiet {
+            return self.add_held(samples);
+        }
         let mut out = Vec::new();
         self.take_finer(&mut out);
         for s in samples.iter().filter(|s| s.is_finite()) {
             self.push(*s, &mut out);
         }
         out
+    }
+
+    /// Its stamps are laid for good as they come (paint laid in place, which changes its layer as it
+    /// goes, so that what changes in it is laid again from there): those its start taper changes,
+    /// whose reach is known only once the stroke is under way, are handed out once they no longer
+    /// change. Until it is known they are handed out as they stand, and once it is known, while the
+    /// stroke is a few frames long, laid again (see [`StrokeBuilder::take_turned`]): the stroke's end
+    /// then finds its start as laid, and lays again only what its end changes.
+    pub fn hold_start(&mut self) {
+        if !self.is_outside() && self.taper().start > 0.0 {
+            self.held = Some(0);
+        }
+    }
+
+    /// Whether it holds its start (see [`StrokeBuilder::hold_start`]).
+    pub fn holds_start(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// [`StrokeBuilder::add`] for a stroke holding its start (see [`StrokeBuilder::hold_start`]).
+    fn add_held(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        self.quiet = true;
+        let mut placed = Vec::new();
+        self.take_finer(&mut placed);
+        for s in samples.iter().filter(|s| s.is_finite()) {
+            self.push(*s, &mut placed);
+        }
+        self.quiet = false;
+        let start = self.start_span();
+        if self.start_open() {
+            // its reach still moving: the stamps as they stand, laid again once it is known
+            let new = self.placed.get(self.provisional..).unwrap_or_default();
+            let out: Vec<Stamp> = new.iter().map(|p| self.finish_stamp(p, start, None)).collect();
+            self.provisional = self.placed.len();
+            self.bounds = out.iter().fold(self.bounds, |b, s| b.union(s.bounds()));
+            return out;
+        }
+        // just known: those handed out meanwhile are laid again, as they are now
+        if std::mem::take(&mut self.provisional) > 0 {
+            self.turned = true;
+        }
+        let handed = self.held.unwrap_or(0);
+        let to = self.final_from(handed);
+        let out: Vec<Stamp> =
+            self.placed.get(handed..to).unwrap_or_default().iter().map(|p| self.finish_stamp(p, start, None)).collect();
+        self.held = Some(to.max(handed));
+        self.bounds = out.iter().fold(self.bounds, |b, s| b.union(s.bounds()));
+        out
+    }
+
+    /// Where the stamps from the `handed`th on stop being as they will stay (but for what the end
+    /// changes): at the first whose tapers, eased over the points around it (see
+    /// [`StrokeBuilder::eased`]), may still change, which they don't once all four points are known,
+    /// nor from the second point past where the start taper (and the pressure's rise) reaches.
+    fn final_from(&self, handed: usize) -> usize {
+        let settled = self.eased_before(f32::INFINITY);
+        let reach = self.start_span().max(self.pressure_taper(0));
+        let past = self.knots.partition_point(|&k| k < reach);
+        let past = self.knots.get(past + 1).copied().unwrap_or(f32::INFINITY);
+        let open = self.placed.get(handed..).unwrap_or_default();
+        open.iter().position(|p| p.distance >= settled && p.distance < past).map_or(self.placed.len(), |i| handed + i)
     }
 
     /// The stamps `samples` would add, without adding them (for drawing predicted input): the
@@ -1577,11 +1648,12 @@ impl StrokeBuilder {
     /// Whether its end may change only its last stamps handed out, so that those are laid again as
     /// it ends: an end taper, or pressure that falls over one. Not with a newer start taper, whose
     /// reach, known only once the stroke is under way, changes its first stamps as it ends (laid
-    /// again from its start), nor a brush engine's stroke, whose stamps stay as they came.
+    /// again from its start), unless it holds its start (see [`StrokeBuilder::hold_start`]); nor a
+    /// brush engine's stroke, whose stamps stay as they came.
     pub fn end_may_change_laid(&self) -> bool {
         let taper = self.taper();
         !self.is_outside()
-            && (taper.start <= 0.0 || self.classic())
+            && (taper.start <= 0.0 || self.classic() || self.held.is_some())
             && (taper.end > 0.0 || self.pressure_taper(1) > 0.0)
     }
 
@@ -1666,6 +1738,7 @@ impl StrokeBuilder {
         let mut copy = self.clone();
         copy.left_out += from;
         copy.kept = 0;
+        (copy.held, copy.provisional) = (None, 0);
         let open = std::mem::replace(&mut self.placed, before);
         self.placed.extend(open);
         let open_walked = std::mem::replace(&mut self.walked, walked_before);
@@ -1698,13 +1771,25 @@ impl StrokeBuilder {
         turned
     }
 
-    /// The stamps placed so far, as they are handed out while the stroke is drawn.
+    /// The stamps placed so far, as they are handed out while the stroke is drawn (holding its
+    /// start, those handed out so far).
     pub fn placed_stamps(&self) -> Vec<Stamp> {
         if let Some(outside) = &self.outside.0 {
             return outside.stamps.clone();
         }
         let start = self.start_span();
-        self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
+        let handed = if self.held.is_some() { self.handed() } else { self.placed.len() };
+        self.placed.iter().take(handed).map(|p| self.finish_stamp(p, start, None)).collect()
+    }
+
+    /// How many of its stamps it has handed out (see [`StrokeBuilder::touched`]).
+    fn handed(&self) -> usize {
+        match self.held {
+            _ if self.tipped => self.kept,
+            Some(_) if self.start_open() => self.provisional,
+            Some(held) => held,
+            None => self.placed.len(),
+        }
     }
 
     /// The stamps from `from` on as they would be drawn were the stroke to end here (its end
@@ -1735,7 +1820,11 @@ impl StrokeBuilder {
             return None;
         }
         let start = self.start_span();
-        let drawn = if self.shows_tip() { self.kept } else { self.placed.len() };
+        let drawn = match self.held {
+            _ if self.shows_tip() => self.kept,
+            Some(held) => held,
+            None => self.placed.len(),
+        };
         Some(self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect())
     }
 
@@ -1787,25 +1876,40 @@ impl StrokeBuilder {
     /// long stroke's end then makes only the rest. None if they may not be (the stroke is then laid
     /// whole: [`StrokeBuilder::finish_from`] gives it, ended).
     pub fn finish_after(&mut self, laid: usize) -> Option<Vec<Stamp>> {
+        let (from, rest) = self.finish_changed(laid)?;
+        (from == laid).then_some(rest)
+    }
+
+    /// Ends the stroke as [`StrokeBuilder::finish`] does, returning its final stamps from the first
+    /// of the first `laid` handed out that its end changes (or the `laid`th, none changing), and
+    /// where that is: those before are as they were handed out, so a long stroke's end makes only
+    /// the rest (see [`StrokeBuilder::finish_after`]). None if those handed out may have changed
+    /// anywhere (the stroke is then laid whole: [`StrokeBuilder::finish_from`] gives it, ended).
+    pub fn finish_changed(&mut self, laid: usize) -> Option<(usize, Vec<Stamp>)> {
         if self.outside.0.is_some() {
-            return Some(self.finish_from(laid));
+            return Some((laid, self.finish_from(laid)));
         }
         self.walk_to_end();
         let (length, end) = self.ended?;
         // a tap's stamp is drawn whole; and a start taper changes stamps handed out while its reach
         // grew, or (handed out as they were placed) before the points either side of them came
-        let start_kept = match self.tipped {
-            true => self.start_settled.is_some() || self.taper().start <= 0.0,
-            false => self.taper().start <= 0.0,
+        let start_kept = match (self.tipped, self.held) {
+            (true, _) => self.start_settled.is_some() || self.taper().start <= 0.0,
+            // holding its start, those handed out as they'll stay
+            (false, Some(held)) => laid <= held,
+            (false, None) => self.taper().start <= 0.0,
         };
-        let unchanged = laid <= self.placed.len() && self.changed >= laid && length > 0.0 && start_kept;
-        // nor does the end taper, or the pressure's fall (eased over the points around), reach the
-        // last of them
+        if laid > self.placed.len() || length <= 0.0 || !start_kept {
+            return None;
+        }
+        // nor does the end taper, or the pressure's fall (eased over the points around), reach those
+        // before the first it reaches (the stamps lie in order along the path)
         let end = end.max(self.pressure_taper(1));
         let reach = self.eased_before(length - end);
-        let last = laid.checked_sub(1).and_then(|i| self.placed.get(i));
-        let untapered = end <= 0.0 || last.is_none_or(|p| p.distance < reach);
-        (unchanged && untapered).then(|| self.finish_from(laid))
+        let laid_ones = self.placed.get(..laid).unwrap_or_default();
+        let tapered = if end <= 0.0 { laid } else { laid_ones.partition_point(|p| p.distance < reach) };
+        let from = tapered.min(self.changed).min(laid);
+        Some((from, self.finish_from(from)))
     }
 
     /// Walks on to where the pen lifted, as the stroke ends (once): the path catches up with the
@@ -1853,8 +1957,7 @@ impl StrokeBuilder {
     /// The stamps from the `from`th on have changed since they were placed: of those handed out
     /// for good (see [`StrokeBuilder::finish_after`]), the first such is noted.
     fn touched(&mut self, from: usize) {
-        let handed = if self.tipped { self.kept } else { self.placed.len() };
-        if from < handed {
+        if from < self.handed() {
             self.changed = self.changed.min(from);
         }
     }
@@ -4732,6 +4835,69 @@ mod tests {
         assert!(at(5.0) < 3.0, "{}", at(5.0));
         assert!((at(30.0) - 5.0).abs() < 1.0, "{}", at(30.0));
         assert_eq!(at(80.0), 10.0);
+    }
+
+    #[test]
+    fn a_stroke_holding_its_start_hands_out_its_stamps_as_they_end_and_ends_laying_the_rest() {
+        // a pen pressed unevenly along a curve, two samples an event (a 240 Hz pen)
+        let samples: Vec<Sample> = (0..160)
+            .map(|i| {
+                let t = i as f32;
+                let at = Vec2::new(20.0 + t * 3.0, 100.0 + (t * 0.06).sin() * 40.0);
+                Sample::at(at, 0.3 + 0.6 * (t * 0.09).sin().abs(), f64::from(i) * 4.17)
+            })
+            .collect();
+        // a start taper that lasts a time (its reach known at 50 ms), and a classic one; each without
+        // an end taper, and with one
+        for (classic, end) in [(false, 0.0), (true, 0.0), (false, 0.5), (true, 0.5)] {
+            let taper = Taper { start: 0.6, end, size: 0.9, opacity: 0.5 };
+            let mut brush = Brush { pen_taper: taper, ..plain() };
+            brush.set_setting("classic_taper", if classic { 1.0 } else { 0.0 });
+            brush.set_setting("pen_tip_animation", 0.0);
+            let mut whole = StrokeBuilder::new(brush, 16.0, Pointer::Stylus);
+            let mut held = whole.clone();
+            held.hold_start();
+            assert!(held.holds_start() && held.end_may_change_laid() == (end > 0.0));
+            // laid as the canvas lays them: added, or laid again from scratch once its start is known
+            let (mut laid, mut again, mut provisional) = (Vec::new(), 0, Vec::new());
+            for event in samples.chunks(2) {
+                whole.add(event);
+                let added = held.add(event);
+                if held.take_turned() {
+                    again += 1;
+                    provisional = std::mem::replace(&mut laid, held.placed_stamps());
+                } else {
+                    laid.extend(added);
+                }
+            }
+            let all = whole.finish();
+            let unchanged = laid.iter().zip(&all).take_while(|(a, b)| a == b).count();
+            let what = format!("classic {classic}, end {end}");
+            if end <= 0.0 || classic {
+                // each laid as it ends, and the end lays only the rest (a classic end taper tapers
+                // only what runs on past the lift)
+                let rest = held.finish_after(laid.len()).unwrap_or_else(|| panic!("{what}: its end lays it again"));
+                assert_eq!(unchanged, laid.len(), "{what}");
+                assert_eq!([laid, rest].concat(), all, "{what}");
+            } else {
+                // its end changes only what its taper reaches
+                assert!(held.finish_after(laid.len()).is_none(), "{what}");
+                assert!(
+                    unchanged > laid.len() * 3 / 4 && unchanged < laid.len(),
+                    "{what}: {unchanged} of {}",
+                    laid.len()
+                );
+                assert_eq!(held.finish(), all, "{what}");
+            }
+            // the timed start laid again once known, its stamps as they stood until then not as they end;
+            // the classic one's known from the first
+            if classic {
+                assert_eq!(again, 0, "{what}");
+            } else {
+                assert_eq!(again, 1, "{what}");
+                assert!(!provisional.is_empty() && !all.starts_with(&provisional), "{what}");
+            }
+        }
     }
 
     #[test]
