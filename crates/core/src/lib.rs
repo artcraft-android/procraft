@@ -205,7 +205,7 @@ pub use pickers::{
 pub use plugin_canvas::{BadgeLine, PluginBadge, PluginCanvas, PluginExport, PluginKind, plugin_kind_badge};
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
-pub use plugin_panel::{PanelRow, PluginPanel};
+pub use plugin_panel::{PanelBrush, PanelPoint, PanelRow, PluginPanel};
 pub use plugin_run::set_memory_available;
 pub use plugins::{
     InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginInfo, PluginMenuPlace, PluginOffer,
@@ -223,9 +223,10 @@ pub use project::{
 pub use project::{PackageTimeLapse, artwork_plays, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
-    QuickAction, QuickMenuSet, pen_button_actions, pen_button_actions_saved, pen_button_choices, quick_action_adjusts,
-    quick_action_label, quick_actions_listed, quick_adjustments_listed, quick_menu_active_after, quick_menu_added,
-    quick_menu_renamed, quick_menu_saved, quick_menu_slots, quick_menus, quick_menus_saved,
+    QuickAction, QuickMenuSet, pen_button_actions, pen_button_actions_saved, pen_button_choices,
+    pen_button_plugin_actions, pen_buttons_saved, quick_action_adjusts, quick_action_label, quick_actions_listed,
+    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_renamed, quick_menu_saved,
+    quick_menu_slots, quick_menus, quick_menus_saved,
 };
 pub use quickshape::{QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{

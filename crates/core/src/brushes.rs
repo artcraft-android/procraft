@@ -496,7 +496,48 @@ fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
     top * (1.0 - fy) + bottom * fy
 }
 
+/// The key a plugin knows a brush by (interface 11): where it is in the library, its set's place
+/// (past 0) in the high half and its own in the low. It holds while the library stays as it is.
+pub(crate) fn plugin_brush_key(set: u32, index: u32) -> i64 {
+    ((i64::from(set) + 1) << 32) | i64::from(index)
+}
+
 impl CanvasSession {
+    /// The brush plugin key `key` stands for (see [`plugin_brush_key`]), if one is there now.
+    pub(crate) fn plugin_brush(&self, key: i64) -> Option<crate::PanelBrush> {
+        let set = u32::try_from((key >> 32) - 1).ok()?;
+        let index = u32::try_from(key & 0xFFFF_FFFF).ok()?;
+        let st = self.shared.lock();
+        let brush = st.library.get(set as usize)?.brushes.get(index as usize)?;
+        Some(crate::PanelBrush { set, index, name: brush.name.clone() })
+    }
+
+    /// The key of the brush at `at` of the Recent set (its pinned brushes first, then the latest
+    /// painted with), 0 past its end.
+    pub(crate) fn plugin_recent_brush(&self, at: usize) -> i64 {
+        self.recent_brushes().get(at).map_or(0, |b| plugin_brush_key(b.set, b.index))
+    }
+
+    /// The key of the brush the current tool uses.
+    pub(crate) fn plugin_current_brush(&self) -> i64 {
+        let st = self.shared.lock();
+        let (set, index) = st.brush_ref(st.tool);
+        u32::try_from(set).ok().zip(u32::try_from(index).ok()).map_or(0, |(s, i)| plugin_brush_key(s, i))
+    }
+
+    /// The brush plugin key `key` stands for chosen for the current tool, as a tap in the library
+    /// chooses it; false if there is none there.
+    pub(crate) fn plugin_choose_brush(&self, key: i64) -> bool {
+        let Some(brush) = self.plugin_brush(key) else { return false };
+        self.select_brush(brush.set, brush.index)
+    }
+
+    /// The colour at `at` of the colour history (0 the latest), 0xRRGGBB; none past its end.
+    pub(crate) fn plugin_recent_colour(&self, at: usize) -> Option<u32> {
+        let history = self.shared.lock().colour_history.clone()?;
+        history.colours().get(at).map(|c| c & 0xFF_FFFF)
+    }
+
     /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]).
     /// `style` reads `brush`'s grain and shape from its file's images at their own size, as a
     /// stroke does (they are read out first: nothing is drawn under the lock).

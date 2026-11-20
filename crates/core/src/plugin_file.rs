@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 10;
+const INTERFACE: u32 = 11;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -2313,7 +2313,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(11)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(12)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
@@ -2368,6 +2368,7 @@ pub(crate) mod tests {
             ("layer", crate::plugins::PluginPlace::Layer),
             ("frame", crate::plugins::PluginPlace::Frame),
             ("canvas", crate::plugins::PluginPlace::Canvas),
+            ("pen", crate::plugins::PluginPlace::Pen),
         ] {
             assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
         }

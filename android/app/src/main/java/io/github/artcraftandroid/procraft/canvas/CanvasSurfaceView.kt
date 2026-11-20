@@ -248,6 +248,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             TouchCommand.Redo -> vm.redo()
             // a pen button set to a QuickMenu action in Pen buttons
             is TouchCommand.Run -> vm.runQuickAction(c.action, Offset(c.x, c.y))
+            // one set to a plugin's action, run where the pen is
+            is TouchCommand.RunPlugin -> vm.runPluginAction(c.key, Offset(c.x, c.y))
             TouchCommand.ClearLayer -> vm.clearCurrentLayer()
             TouchCommand.ToggleBars -> vm.toggleBars()
             TouchCommand.Fit -> vm.settleToFit()

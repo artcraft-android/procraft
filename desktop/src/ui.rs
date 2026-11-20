@@ -1300,7 +1300,7 @@ impl Interface {
     }
 
     /// Does what the touches asked.
-    fn commands(&mut self, ctx: &egui::Context, session: &CanvasSession, input: &mut Input) {
+    fn commands(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, input: &mut Input) {
         let mut slid = None;
         let mut sliding = None;
         let mut stroke_ended = false;
@@ -1396,6 +1396,8 @@ impl Interface {
                 TouchCommand::Run { action, x, y } => {
                     self.run_quick(ctx, session, action, egui::pos2(x, y) / ctx.pixels_per_point());
                 }
+                // one set to a plugin's action, run where the pen is
+                TouchCommand::RunPlugin { key, x, y } => self.run_plugin_action_at(ctx, session, key, Some((x, y))),
                 // what a pen's own settings ask its button to show
                 TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
                 TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
@@ -1953,7 +1955,26 @@ impl Interface {
             self.plugin_panel_held = None;
             return;
         };
-        let asked = crate::actions::plugin_panel(ctx, &mut self.look, &panel, &mut self.plugin_panel_held, backdrops);
+        // its brushes' sample strokes, as the library draws them
+        let brushes: Vec<((u32, u32), String)> = panel
+            .rows
+            .iter()
+            .flat_map(|row| match row {
+                procraft_core::PanelRow::Brushes { brushes, .. } => brushes.as_slice(),
+                _ => &[],
+            })
+            .map(|b| ((b.set, b.index), b.name.clone()))
+            .collect();
+        let strokes = if brushes.is_empty() {
+            crate::actions::Strokes::new()
+        } else {
+            self.library.panel_strokes(ctx, session, &brushes)
+        };
+        let asked = if panel.ring {
+            crate::actions::plugin_ring(ctx, &panel, &strokes)
+        } else {
+            crate::actions::plugin_panel(ctx, &mut self.look, &panel, &mut self.plugin_panel_held, backdrops, &strokes)
+        };
         match asked {
             Some(crate::actions::PanelTouch::Touch(row, value)) => {
                 let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
@@ -1971,11 +1992,26 @@ impl Interface {
     /// panel closes so what it does shows; anything it says, or its stopping, is told as a failure
     /// is.
     fn run_plugin_action(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, key: String) {
+        self.run_plugin_action_at(ctx, session, key, None);
+    }
+
+    /// A plugin's action `key` run as [`Self::run_plugin_action`] runs it, come from window pixel
+    /// `at` (where the pen was whose button ran it): a ring it shows opens there.
+    fn run_plugin_action_at(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        key: String,
+        at: Option<(f32, f32)>,
+    ) {
         // (what it may paint on, it checks: not a locked layer)
         self.open = None;
         let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
         std::thread::spawn(move || {
-            plugins.run_action(key, session);
+            match at {
+                Some((x, y)) => plugins.run_action_at(key, session, x, y),
+                None => plugins.run_action(key, session),
+            };
             ctx.request_repaint();
         });
     }

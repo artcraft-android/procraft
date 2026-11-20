@@ -1461,6 +1461,91 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Its action takes the second colour of the history and the first brush of the Recent set,
+    /// and shows a ring of two colours and the first three brushes of the first set (at 16 in its
+    /// memory); a tap on its ring's colours paints in that colour,
+    /// one on its brushes chooses the brush there (its place in the first set).
+    const PALETTE: &str = r#"(module
+        (import "procraft" "recent_colour" (func $colour (param i32) (result i32)))
+        (import "procraft" "recent_brush" (func $brush (param i32) (result i64)))
+        (import "procraft" "choose_brush" (func $choose (param i64) (result i32)))
+        (import "procraft" "set_brush_colour" (func $paint (param i32)))
+        (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+        (import "procraft" "close_panel" (func $close))
+        (memory (export "memory") 1)
+        (data (i32.const 16) "{\"title\":\"P\",\"ring\":true,\"rows\":[{\"type\":\"colours\",\"label\":\"C\",\"colours\":[255,65280]},{\"type\":\"brushes\",\"label\":\"B\",\"brushes\":[4294967296,4294967297,4294967298]}]}")
+        (func (export "procraft_action") (param i32) (result i32)
+            (call $paint (call $colour (i32.const 1)))
+            (drop (call $choose (call $brush (i32.const 0))))
+            (drop (call $show (i32.const 16) (i32.const 163)))
+            (i32.const 0))
+        (func (export "procraft_panel_event") (param i32 f32) (result i32)
+            (if (i32.eqz (local.get 0))
+                (then (call $paint (select (i32.const 255) (i32.const 65280) (f32.lt (local.get 1) (f32.const 0.5)))))
+                (else (drop (call $choose (i64.or (i64.const 4294967296) (i64.trunc_f32_u (local.get 1)))))))
+            (call $close)
+            (i32.const 0)))"#;
+
+    #[test]
+    fn a_plugin_reads_the_recent_colours_and_brushes_and_its_ring_opens_where_the_pen_is() {
+        let s = CanvasSession::new(64, 64);
+        let history = crate::ColourHistory::new();
+        s.use_colour_history(Arc::clone(&history));
+        for rgb in [0x112233, 0x445566] {
+            history.painted(rgb);
+        }
+        s.shared.lock().note_recent((0, 2));
+        let dir = store("palette");
+        let module = wat::parse_str(PALETTE).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(11);
+        manifest["hooks"] = json!([]);
+        manifest["permissions"] = json!(["brush", "panel"]);
+        manifest["actions"] = json!([{ "key": "open", "label": "Palette", "place": "pen" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let key = format!("{ID}.open");
+        let listed: Vec<String> = plugins.actions_in(crate::PluginPlace::Pen).into_iter().map(|a| a.key).collect();
+        assert_eq!(listed, vec![key.clone()]);
+        let rgb = |s: &CanvasSession| crate::history::hex(s.shared.lock().color);
+        // run where the pen is: the older colour of the two, the Recent set's brush, and its ring there
+        assert!(plugins.run_action_at(key.clone(), Arc::clone(&s), 30.0, 40.0));
+        assert_eq!(rgb(&s), 0x112233);
+        let brush = s.current_brush();
+        assert_eq!((brush.set, brush.index), (0, 2));
+        let panel = plugins.panel().unwrap();
+        assert!(panel.ring);
+        assert_eq!(panel.at, Some(crate::PanelPoint { x: 30.0, y: 40.0 }));
+        let crate::PanelRow::Brushes { brushes, chosen: None, .. } = &panel.rows[1] else { panic!("{:?}", panel.rows) };
+        let library = s.brush_library();
+        let names: Vec<&str> = library[0].brushes.iter().take(3).map(|b| b.name.as_str()).collect();
+        assert_eq!(brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), names);
+        assert_eq!(brushes.iter().map(|b| (b.set, b.index)).collect::<Vec<_>>(), [(0, 0), (0, 1), (0, 2)]);
+        // a brush tapped: chosen, and the ring closed
+        assert!(!plugins.panel_touched(1, 1.0, Arc::clone(&s)));
+        let brush = s.current_brush();
+        assert_eq!((brush.set, brush.index), (0, 1));
+        assert!(plugins.panel().is_none());
+        // from its card: no point, the window's middle (the Recent set's brush taken again)
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert_eq!(plugins.panel().unwrap().at, None);
+        assert_eq!((s.current_brush().set, s.current_brush().index), (0, 2));
+        assert!(!plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert_eq!(rgb(&s), 0x00FF00);
+        assert_eq!(history.colours(), [0x445566, 0x112233], "the history as painted");
+        // with nothing in them, a colour past the history's end is -1 (no colour: 0xFFFFFF) and a
+        // brush past the Recent set's 0 (none: the brush stays)
+        history.clear();
+        s.clear_recent_brushes();
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert_eq!(rgb(&s), 0xFFFFFF);
+        assert_eq!((s.current_brush().set, s.current_brush().index), (0, 2));
+        assert!(card(&plugins).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn each_plugin_is_told_its_own_mark_the_first_by_id_with_a_label_showing() {
         let hooks = Hooks::default();

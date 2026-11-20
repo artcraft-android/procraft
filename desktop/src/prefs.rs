@@ -100,6 +100,9 @@ pub struct Prefs {
     /// Pen buttons: what the pen's first and second side buttons do, a QuickMenu action each, or
     /// (`None`, as they start) what Gesture controls say.
     pub pen_buttons: Vec<Option<procraft_core::QuickAction>>,
+    /// Pen buttons: the plugins' actions (`<id>.<key>`) the pen's buttons run in place of
+    /// `pen_buttons`, `None` for none; one runs only while its plugin is on.
+    pub pen_button_plugins: Vec<Option<String>>,
 }
 
 impl Default for Prefs {
@@ -140,6 +143,7 @@ impl Default for Prefs {
             drag_image_format: 0,
             recolor_threshold: 0.0,
             pen_buttons: procraft_core::pen_button_actions(None),
+            pen_button_plugins: procraft_core::pen_button_plugin_actions(None),
         }
     }
 }
@@ -202,7 +206,10 @@ impl Prefs {
                     p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
-                "pen_buttons" => p.pen_buttons = procraft_core::pen_button_actions(Some(value.to_owned())),
+                "pen_buttons" => {
+                    p.pen_buttons = procraft_core::pen_button_actions(Some(value.to_owned()));
+                    p.pen_button_plugins = procraft_core::pen_button_plugin_actions(Some(value.to_owned()));
+                }
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 name if floating_at(name).is_some() => {
                     if let Some(slot) = floating_at(name).and_then(|at| p.floating.get_mut(at)) {
@@ -259,7 +266,10 @@ impl Prefs {
             format!("drag_format {}", self.drag_format),
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
-            format!("pen_buttons {}", procraft_core::pen_button_actions_saved(self.pen_buttons.clone())),
+            format!(
+                "pen_buttons {}",
+                procraft_core::pen_buttons_saved(self.pen_buttons.clone(), self.pen_button_plugins.clone())
+            ),
         ];
         let floating = crate::floating_panels::PANELS.into_iter().zip(self.floating).filter_map(|(panel, window)| {
             Some(format!("{} {}", procraft_core::floating_key(panel), procraft_core::floating_kept(window?)))
@@ -293,9 +303,15 @@ impl Prefs {
     /// The gesture settings as the canvas's touches take them, with the pen's buttons as Pen
     /// buttons set them.
     pub fn touch_settings(&self, gestures: &procraft_core::GestureSettings) -> procraft_core::TouchSettings {
+        // a plugin's action while its plugin is on
+        let on: Vec<String> =
+            self.plugins.actions_in(procraft_core::PluginPlace::Pen).into_iter().map(|a| a.key).collect();
+        let runs = |k: usize| self.pen_button_plugins.get(k).cloned().flatten().filter(|key| on.contains(key));
         procraft_core::TouchSettings {
             pen_button_does: self.pen_buttons.first().copied().flatten(),
             pen_second_button_does: self.pen_buttons.get(1).copied().flatten(),
+            pen_button_runs: runs(0),
+            pen_second_button_runs: runs(1),
             ..gestures.touch_settings(self.rapid_undo_ms())
         }
     }
@@ -330,4 +346,34 @@ fn place<T: PartialEq>(list: &[T], v: T) -> usize {
 
 fn pick<T: Copy>(list: &[T], value: &str) -> Option<T> {
     list.get(value.parse::<usize>().ok()?).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pen_button_runs_a_plugin_s_action_while_its_plugin_is_on_else_as_pen_buttons_say() {
+        const PALETTE: &str = "io.github.artcraftandroid.pop-up-palette";
+        let dir = std::env::temp_dir().join(format!("procraft-pen-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        let open = format!("{PALETTE}.open");
+        let prefs = Prefs {
+            plugins: Arc::clone(&plugins),
+            pen_buttons: vec![Some(procraft_core::QuickAction::Undo), Some(procraft_core::QuickAction::Redo)],
+            pen_button_plugins: vec![None, Some(open.clone())],
+            ..Prefs::default()
+        };
+        let gestures = procraft_core::GestureSettings::new(procraft_core::KeptGestures::default());
+        // it comes off: the button does what Pen buttons say besides
+        let off = prefs.touch_settings(&gestures);
+        assert_eq!((off.pen_button_runs, off.pen_second_button_runs), (None, None));
+        assert_eq!(off.pen_second_button_does, Some(procraft_core::QuickAction::Redo));
+        assert!(plugins.set_on(PALETTE.to_owned(), true));
+        let on = prefs.touch_settings(&gestures);
+        assert_eq!((on.pen_button_runs, on.pen_second_button_runs), (None, Some(open)));
+        assert_eq!(on.pen_button_does, Some(procraft_core::QuickAction::Undo));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

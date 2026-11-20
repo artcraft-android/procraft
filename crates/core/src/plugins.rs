@@ -160,6 +160,9 @@ pub enum PluginPlace {
     /// In the Actions panel's Canvas tab, after the app's own rows (interface 8): an action, or a
     /// switch or a slider shown as on the card.
     Canvas,
+    /// Among what Prefs › Pen buttons sets a pen's button to (interface 11): an action run where
+    /// the pen is as its button is pressed, see [`Plugins::run_action_at`].
+    Pen,
 }
 
 impl PluginPlace {
@@ -171,6 +174,7 @@ impl PluginPlace {
             "layer" => Some(PluginPlace::Layer),
             "frame" => Some(PluginPlace::Frame),
             "canvas" => Some(PluginPlace::Canvas),
+            "pen" => Some(PluginPlace::Pen),
             _ => None,
         }
     }
@@ -703,6 +707,8 @@ struct OpenPanel {
     id: String,
     shows: crate::PluginPanel,
     running: Arc<Mutex<Running>>,
+    /// Where its action came from, window pixels: where a ring shows.
+    at: Option<crate::PanelPoint>,
 }
 
 impl std::fmt::Debug for OpenPanel {
@@ -1542,6 +1548,18 @@ impl Plugins {
     /// controls, so its hooks go on meanwhile. A long call, not for the main thread. False if no
     /// plugin on has it, or the plugin stopped (it goes off, and says why).
     pub fn run_action(&self, key: String, session: Arc<crate::CanvasSession>) -> bool {
+        self.run_action_from(key, session, None)
+    }
+
+    /// Runs the action `key` as [`Plugins::run_action`] does, come from window pixel (`x`, `y`):
+    /// where the pen was whose button runs it (interface 11). A panel it shows as a ring shows
+    /// there.
+    pub fn run_action_at(&self, key: String, session: Arc<crate::CanvasSession>, x: f32, y: f32) -> bool {
+        let at = (x.is_finite() && y.is_finite()).then_some(crate::PanelPoint { x, y });
+        self.run_action_from(key, session, at)
+    }
+
+    fn run_action_from(&self, key: String, session: Arc<crate::CanvasSession>, at: Option<crate::PanelPoint>) -> bool {
         let found = {
             let list = self.listed();
             list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
@@ -1573,7 +1591,7 @@ impl Plugins {
                 // a panel it showed stays open, with this copy of its code
                 if let (Some(shows), false) = running.take_panel() {
                     let running = Arc::new(Mutex::new(running));
-                    *self.open_panel() = Some(OpenPanel { id, shows, running });
+                    *self.open_panel() = Some(OpenPanel { id, shows, running, at });
                 }
                 true
             }
@@ -1644,7 +1662,7 @@ impl Plugins {
 
     /// The panel a plugin's action showed, while it is open.
     pub fn panel(&self) -> Option<crate::PluginPanel> {
-        self.open_panel().as_ref().map(|open| open.shows.clone())
+        self.open_panel().as_ref().map(|open| crate::PluginPanel { at: open.at, ..open.shows.clone() })
     }
 
     /// Row `row` of the panel open touched with `value` (a slider's, a switch's 1 or 0, a choice's
@@ -3813,6 +3831,79 @@ mod tests {
         assert!(!plugins.panel_touched(0, 3.0, Arc::clone(&s)));
         let row = s.layers().into_iter().find(|l| l.id == group).unwrap();
         assert_eq!((row.kind, row.label), (crate::LayerType::Group, Some(colours[3])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pop_up_palette_opens_a_ring_of_recent_colours_and_brushes_at_the_pen() {
+        const PALETTE: &str = "io.github.artcraftandroid.pop-up-palette";
+        let dir = store("bundled-pop-up-palette");
+        let plugins = app_at(&dir);
+        let s = Arc::new(crate::CanvasSession::new(10, 10));
+        s.use_plugins(Arc::clone(&plugins));
+        let history = crate::ColourHistory::new();
+        s.use_colour_history(Arc::clone(&history));
+        for rgb in [0x0000FF, 0x00FF00, 0xFF0000] {
+            history.painted(rgb);
+        }
+        s.set_color(0.0, 1.0, 0.0);
+        for place in [(0, 3), (0, 1)] {
+            s.shared.lock().note_recent(place);
+        }
+        assert!(s.select_brush(0, 1));
+        let open = format!("{PALETTE}.open");
+        // it comes off: nothing for Pen buttons
+        assert!(plugins.actions_in(PluginPlace::Pen).is_empty());
+        assert!(plugins.set_on(PALETTE.to_owned(), true));
+        let listed: Vec<String> = plugins.actions_in(PluginPlace::Pen).into_iter().map(|a| a.label).collect();
+        assert_eq!(listed, ["Pop-up palette"]);
+        // at the pen: the colour in use, then the history after it; the Recent set's brushes, newest
+        // first; the ones in use ringed
+        let t = std::time::Instant::now();
+        assert!(plugins.run_action_at(open.clone(), Arc::clone(&s), 300.0, 200.0));
+        let opened = t.elapsed();
+        let panel = plugins.panel().unwrap();
+        assert!(panel.ring);
+        assert_eq!(panel.at, Some(crate::PanelPoint { x: 300.0, y: 200.0 }));
+        assert_eq!(
+            panel.rows[0],
+            crate::PanelRow::Colours {
+                label: "Recent colours".into(),
+                colours: vec![0x00FF00, 0xFF0000, 0x0000FF],
+                chosen: Some(0)
+            }
+        );
+        let crate::PanelRow::Brushes { brushes, chosen, .. } = &panel.rows[1] else { panic!("{:?}", panel.rows) };
+        assert_eq!(brushes.iter().map(|b| (b.set, b.index)).collect::<Vec<_>>(), [(0, 1), (0, 3)]);
+        assert_eq!(*chosen, Some(0));
+        // a brush tapped: in use, and the ring closes
+        let t = std::time::Instant::now();
+        assert!(!plugins.panel_touched(1, 1.0, Arc::clone(&s)));
+        let picked = t.elapsed();
+        assert_eq!((s.current_brush().set, s.current_brush().index), (0, 3));
+        assert!(plugins.panel().is_none());
+        // kept open: a colour tapped paints in it, and the ring shows it chosen
+        assert!(plugins.set_switch(format!("{PALETTE}.close"), false));
+        assert!(plugins.run_action_at(open.clone(), Arc::clone(&s), 1.0, 2.0));
+        assert!(plugins.panel_touched(0, 2.0, Arc::clone(&s)));
+        assert_eq!(crate::history::hex(s.shared.lock().color), 0x0000FF);
+        let panel = plugins.panel().unwrap();
+        assert!(matches!(&panel.rows[0], crate::PanelRow::Colours { chosen: Some(2), .. }), "{:?}", panel.rows);
+        assert!(matches!(&panel.rows[1], crate::PanelRow::Brushes { chosen: Some(1), .. }), "{:?}", panel.rows);
+        // its sliders: fewer colours, no brushes
+        plugins.set_slider(format!("{PALETTE}.colours"), 2.0).unwrap();
+        plugins.set_slider(format!("{PALETTE}.brushes"), 0.0).unwrap();
+        assert!(plugins.run_action(open.clone(), Arc::clone(&s)));
+        let panel = plugins.panel().unwrap();
+        assert_eq!(panel.rows.len(), 1);
+        assert!(matches!(&panel.rows[0], crate::PanelRow::Colours { colours, .. } if colours.len() == 2));
+        println!("the palette opened in {opened:?}, a brush picked in {picked:?}");
+        assert!(opened < std::time::Duration::from_millis(50), "{opened:?}");
+        assert!(picked < std::time::Duration::from_millis(50), "{picked:?}");
+        // off: nothing for Pen buttons, and its action runs no more
+        assert!(plugins.set_on(PALETTE.to_owned(), false));
+        assert!(plugins.actions_in(PluginPlace::Pen).is_empty());
+        assert!(!plugins.run_action_at(open, Arc::clone(&s), 1.0, 2.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

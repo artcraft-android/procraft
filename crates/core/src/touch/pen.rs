@@ -209,15 +209,23 @@ impl CanvasSession {
     /// double-tap does by default; the second does nothing. Set to erase in Gesture controls, the
     /// eraser is borrowed until the button is let go ([`CanvasSession::touch_pen_button_up`]).
     pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
-        let (action, does) = {
+        let (action, does, runs) = {
             let t = self.touches();
             if second {
-                (t.settings.pen_second_button, t.settings.pen_second_button_does)
+                (
+                    t.settings.pen_second_button,
+                    t.settings.pen_second_button_does,
+                    t.settings.pen_second_button_runs.clone(),
+                )
             } else {
-                (t.settings.pen_button, t.settings.pen_button_does)
+                (t.settings.pen_button, t.settings.pen_button_does, t.settings.pen_button_runs.clone())
             }
         };
         let mut out = Vec::new();
+        if let Some(key) = runs {
+            out.push(TouchCommand::RunPlugin { key, x, y });
+            return out;
+        }
         if let Some(quick) = does {
             pen_runs(quick, (x, y), &mut out);
             return out;
@@ -257,10 +265,14 @@ impl CanvasSession {
             return out;
         }
         // as the first button: set in Pen buttons, it does that
-        let (action, does) = {
+        let (action, does, runs) = {
             let t = self.touches();
-            (t.settings.pen_button, t.settings.pen_button_does)
+            (t.settings.pen_button, t.settings.pen_button_does, t.settings.pen_button_runs.clone())
         };
+        if let Some(key) = runs {
+            out.push(TouchCommand::RunPlugin { key, x, y });
+            return out;
+        }
         if let Some(quick) = does {
             pen_runs(quick, (x, y), &mut out);
             return out;

@@ -76,12 +76,19 @@ internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
  * is set to do. With painting with a finger off it paints nothing (a drag does what a finger's
  * does), and on a model it turns the model; it still has no pressure and is never taken for a hand
  * resting by the pen. The pen's buttons do what Pen buttons set them to ([penButtons], the first
- * and the second; null, what Gesture controls say).
+ * and the second; null, what Gesture controls say), or run a plugin's action ([penPlugins], its key;
+ * null for none) before that.
  */
-internal fun tabletTouchSettings(settings: TouchSettings, penButtons: List<QuickAction?> = emptyList()): TouchSettings = settings.copy(
+internal fun tabletTouchSettings(
+    settings: TouchSettings,
+    penButtons: List<QuickAction?> = emptyList(),
+    penPlugins: List<String?> = emptyList(),
+): TouchSettings = settings.copy(
     pointerFollowsTouch = true,
     penButtonDoes = penButtons.getOrNull(0),
     penSecondButtonDoes = penButtons.getOrNull(1),
+    penButtonRuns = penPlugins.getOrNull(0),
+    penSecondButtonRuns = penPlugins.getOrNull(1),
 )
 
 /**

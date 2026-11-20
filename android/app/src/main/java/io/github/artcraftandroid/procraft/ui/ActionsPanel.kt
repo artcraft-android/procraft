@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -628,22 +629,29 @@ private fun PenButtonsPage(vm: CanvasViewModel, onBack: () -> Unit) {
         }
         Text(title, color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
+    // the plugins' actions a button can run, of those on: after the app's own, by their labels
+    val pluginActions = remember(vm.pluginList) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.PEN) }
+    val pluginSet = { i: Int -> vm.penButtonPlugins.getOrNull(i)?.let { key -> pluginActions.firstOrNull { it.key == key } } }
+    val label = { i: Int -> pluginSet(i)?.label ?: penButtonLabel(vm.penButtonActions.getOrNull(i)) }
     if (second == null) {
         Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
             Group(
                 listOf(
-                    Act("Pen button", value = penButtonLabel(vm.penButtonActions.getOrNull(0))) { picking = false },
-                    Act("Pen second button", value = penButtonLabel(vm.penButtonActions.getOrNull(1))) { picking = true },
+                    Act("Pen button", value = label(0)) { picking = false },
+                    Act("Pen second button", value = label(1)) { picking = true },
                 ),
             )
         }
         return
     }
     val choices = remember { io.github.artcraftandroid.procraft.core.penButtonChoices() }
-    val set = vm.penButtonActions.getOrNull(if (second) 1 else 0)
+    val at = if (second) 1 else 0
+    val set = vm.penButtonActions.getOrNull(at)
+    val chosen = pluginSet(at)?.let { choices.size + pluginActions.indexOf(it) } ?: choices.indexOf(set).coerceAtLeast(0)
     Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
-        ChoiceGroup(choices.map(::penButtonLabel), choices.indexOf(set).coerceAtLeast(0)) {
-            vm.setPenButtonAction(second, choices.getOrNull(it))
+        ChoiceGroup(choices.map(::penButtonLabel) + pluginActions.map { it.label }, chosen) {
+            val plugin = pluginActions.getOrNull(it - choices.size)
+            if (plugin != null) vm.setPenButtonPlugin(second, plugin.key) else vm.setPenButtonAction(second, choices.getOrNull(it))
             picking = null
         }
     }
@@ -873,6 +881,7 @@ fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
                         is PanelRow.Colours -> PanelColoursRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Keys -> PanelKeysRow(row) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Brushes -> PanelBrushesRow(vm, row) { vm.touchPluginPanel(i, it.toFloat()) }
                     }
                 }
             }
@@ -934,6 +943,19 @@ private fun PanelColoursRow(row: PanelRow.Colours, onPick: (Int) -> Unit) {
                         .padding(if (chosen) 4.dp else 0.dp).clip(CircleShape)
                         .background(Color(0xFF000000L or colour.toLong())),
                 )
+            }
+        }
+    }
+}
+
+/** A row of brushes on a plugin's panel: its label, then each brush's sample stroke in a disc, the one chosen ringed; a tap picks one. */
+@Composable
+private fun PanelBrushesRow(vm: CanvasViewModel, row: PanelRow.Brushes, onPick: (Int) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 10.dp)) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            row.brushes.forEachIndexed { at, b ->
+                RingBrush(vm, b, row.chosen?.toInt() == at, 34.dp, Modifier) { onPick(at) }
             }
         }
     }

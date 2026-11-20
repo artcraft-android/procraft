@@ -282,6 +282,11 @@ class PenKeysTest {
         assertEquals(plain, undo.copy(penSecondButtonDoes = null))
         val both = tabletTouchSettings(gestures, listOf(QuickAction.REDO, QuickAction.UNDO))
         assertEquals(QuickAction.REDO to QuickAction.UNDO, both.penButtonDoes to both.penSecondButtonDoes)
+        // a plugin's action on the second, the rest as it was
+        assertNull(both.penButtonRuns)
+        val palette = tabletTouchSettings(gestures, listOf(QuickAction.REDO, null), listOf(null, "org.example.palette.open"))
+        assertEquals("org.example.palette.open", palette.penSecondButtonRuns)
+        assertEquals(tabletTouchSettings(gestures, listOf(QuickAction.REDO, null)), palette.copy(penSecondButtonRuns = null))
     }
 
     @Test

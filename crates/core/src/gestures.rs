@@ -482,6 +482,8 @@ impl GestureSettings {
             pointer_follows_touch: false,
             pen_button_does: None,
             pen_second_button_does: None,
+            pen_button_runs: None,
+            pen_second_button_runs: None,
         }
     }
 }

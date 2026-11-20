@@ -1791,6 +1791,24 @@ impl Library {
         self.previews.values().filter(|p| p.is_some()).count()
     }
 
+    /// The sample strokes of `brushes` (their places and names) for a plugin's panel, as drawn so
+    /// far: those not drawn yet are drawn on the library's thread, a frame asked for as they come.
+    pub fn panel_strokes(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        brushes: &[((u32, u32), String)],
+    ) -> crate::actions::Strokes {
+        for (key, name) in brushes {
+            if !self.previews.contains_key(key) && !self.wanted.iter().any(|(k, _)| k == key) {
+                self.wanted.push((*key, name.clone()));
+            }
+        }
+        self.draw_previews(ctx, session);
+        let drawn = |(key, _): &((u32, u32), String)| Some((*key, self.previews.get(key)?.as_ref()?.texture.id()));
+        brushes.iter().filter_map(drawn).collect()
+    }
+
     /// Takes the sample strokes drawn so far, and has those wanted drawn on a thread of their own.
     fn draw_previews(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>) {
         if let Some(drawing) = &self.drawing {

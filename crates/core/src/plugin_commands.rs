@@ -14,7 +14,7 @@ use procraft_engine::geom::IRect;
 use wasmi::{Caller, Extern, Linker, Memory, Module, StoreLimits, ValType};
 
 use crate::CanvasSession;
-use crate::plugin_panel::{PluginPanel, read_panel};
+use crate::plugin_panel::{PluginPanel, read_panel_with};
 
 /// What a plugin may ask to do besides answering hooks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -57,7 +57,9 @@ impl PluginPermission {
             PluginPermission::ArtworkWrite => {
                 "It can change your artwork when you tap one of its actions: add layers, name and mark them, set how they show and paint on them, one step undo takes back."
             }
-            PluginPermission::Brush => "It can read and set the brush's colour, size and opacity.",
+            PluginPermission::Brush => {
+                "It can read and set the brush's colour, size and opacity, read your recent colours and brushes, and choose a brush."
+            }
             PluginPermission::Notice => "It can show a short message.",
             PluginPermission::Panel => "It can show a panel of its own when you tap one of its actions.",
             PluginPermission::BrushData => {
@@ -150,6 +152,10 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
     ("set_brush_size", PluginPermission::Brush, &[F32], &[]),
     ("brush_opacity", PluginPermission::Brush, &[], &[F32]),
     ("set_brush_opacity", PluginPermission::Brush, &[F32], &[]),
+    ("recent_colour", PluginPermission::Brush, &[I32], &[I32]),
+    ("recent_brush", PluginPermission::Brush, &[I32], &[I64]),
+    ("current_brush", PluginPermission::Brush, &[], &[I64]),
+    ("choose_brush", PluginPermission::Brush, &[I64], &[I32]),
     ("notice", PluginPermission::Notice, &[I32, I32], &[]),
     ("show_panel", PluginPermission::Panel, &[I32, I32], &[I32]),
     ("close_panel", PluginPermission::Panel, &[], &[]),
@@ -465,13 +471,31 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
                 s.set_brush_opacity(opacity);
             }
         })?;
+        // the colour history's colour at `at` (0 the latest), -1 past its end (interface 11)
+        linker.func_wrap(FROM, "recent_colour", |caller: Caller<'_, Host>, at: i32| -> i32 {
+            let found = session(&caller).zip(usize::try_from(at).ok()).and_then(|(s, at)| s.plugin_recent_colour(at));
+            found.map_or(-1, |rgb| rgb as i32)
+        })?;
+        // the key of the Recent set's brush at `at` (pinned first), 0 past its end
+        linker.func_wrap(FROM, "recent_brush", |caller: Caller<'_, Host>, at: i32| -> i64 {
+            session(&caller).zip(usize::try_from(at).ok()).map_or(0, |(s, at)| s.plugin_recent_brush(at))
+        })?;
+        linker.func_wrap(FROM, "current_brush", |caller: Caller<'_, Host>| -> i64 {
+            session(&caller).map_or(0, |s| s.plugin_current_brush())
+        })?;
+        linker.func_wrap(FROM, "choose_brush", |caller: Caller<'_, Host>, key: i64| -> i32 {
+            session(&caller).map_or(0, |s| i32::from(s.plugin_choose_brush(key)))
+        })?;
     }
     if granted.contains(&PluginPermission::Panel) {
         // shown once the action or the touch ends (one that doesn't hold up shows nothing: 0)
         linker.func_wrap(FROM, "show_panel", |mut caller: Caller<'_, Host>, at: i32, len: i32| -> i32 {
             let Some(len) = usize::try_from(len).ok().filter(|&n| n <= MOST_PANEL) else { return 0 };
             let read = read_bytes(&caller, at, len).and_then(|b| String::from_utf8(b).ok());
-            let Some(panel) = read.as_deref().and_then(read_panel) else { return 0 };
+            // its brushes found by their keys, as the library is now
+            let s = session(&caller);
+            let brush = |key: i64| s.as_ref().and_then(|s| s.plugin_brush(key));
+            let Some(panel) = read.as_deref().and_then(|json| read_panel_with(json, &brush)) else { return 0 };
             // one that asks for a key press has somewhere for it to go
             let takes = |name: &str| caller.get_export(name).and_then(Extern::into_func).is_some();
             if panel.key_press && !(takes(crate::plugin_run::PANEL_KEY) && takes(crate::plugin_run::KEY_BUFFER)) {

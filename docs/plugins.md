@@ -33,6 +33,8 @@ has an action and two switches in the Canvas tab, `value-check` a switch there w
 gives a finger a pressure on the `pressure` hook, and `coloured-previews` tints the brush library's
 strokes on the `brush_preview_colour` hook. `colour-labels` keeps a mark with each layer from an
 action in its options, shows it with the `layer_label` hook, and asks for it with a row of colours.
+`pop-up-palette` has an action a pen's button runs, which shows a ring of the recent colours and
+brushes where the pen is.
 
 ## What you write
 
@@ -77,7 +79,8 @@ the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4
 and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
 `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label` hooks, layers' marks and
-panels' rows of colours 10.
+panels' rows of colours 10, and the recent colours and brushes, actions at the pen, panels' rows of
+brushes and rings 11.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -993,7 +996,11 @@ run); `"press"` runs one from a key, as a switch's `press` flips it (see
 - `"frame"`: in Animation Assist's frame options, after the app's own rows, run with that frame's
   layer current;
 - `"canvas"`: in the Actions panel's Canvas tab, after the app's own rows, with what plugins put there
-  (interface 8).
+  (interface 8);
+- `"pen"`: among what Prefs › Pen buttons sets each of a pen's buttons to, after the app's own, by
+  its label (interface 11). A button set to it runs it as it is pressed (the first button as a pen
+  double-taps too), where the pen is: a ring it shows (see [Panels](#panels)) shows there. With the
+  plugin off, the button does what Gesture controls say.
 
 A place this app doesn't have makes the file one for a newer ProCraft. Actions need interface 2. The import screen
 says what each permission lets the plugin do.
@@ -1002,7 +1009,7 @@ says what each permission lets the plugin do.
 |---|---|
 | `artwork.read` | `canvas_size`, `layer_count`, `layer_at`, `current_layer`, `read_pixels`, `layer_mark` (interface 10) |
 | `artwork.write` | `add_layer`, `write_pixels`, `set_layer_name`, `set_layer_opacity`, `set_layer_visible`, `set_layer_mark` (interface 10) |
-| `brush` | `brush_colour`, `set_brush_colour`, `brush_size`, `set_brush_size`, `brush_opacity`, `set_brush_opacity` |
+| `brush` | `brush_colour`, `set_brush_colour`, `brush_size`, `set_brush_size`, `brush_opacity`, `set_brush_opacity`; `recent_colour`, `recent_brush`, `current_brush`, `choose_brush` (interface 11) |
 | `notice` | `notice` |
 | `panel` | `show_panel`, `close_panel` (see [Panels](#panels)) |
 | `view` | `view_turn() -> f32`, how far the canvas is turned on the screen (radians, clockwise, -π to π), and `turn_view(radians: f32)`, which turns it there about the middle of the window, its zoom and what is in the middle kept, settling into place (interface 8) |
@@ -1036,6 +1043,13 @@ kit::actions!(|_| {
   most 4,096 × 4,096 pixels. A write goes over what was there.
 - Code can paint only on a pixel layer that isn't locked.
 - Sizes and opacities are 0 to 1, as the sliders show them. A colour is `0xRRGGBB`.
+- The recent colours and brushes (interface 11): `recent_colour(at: i32) -> i32` is the colour
+  history's colour at `at`, 0 the latest painted with (-1 past its end); `recent_brush(at: i32) ->
+  i64` the Recent set's brush at `at`, its pinned brushes first, then the latest painted with (0 past
+  its end); `current_brush() -> i64` the brush the current tool uses; and `choose_brush(brush: i64)
+  -> i32` makes one the brush in use, as a tap in the library does (1 if it did). A brush goes by a
+  key, never 0, that says where it is in the library: it holds while brushes aren't moved, added or
+  taken away.
 - A name or a message is UTF-8 text, at most 200 characters.
 
 An action runs in a copy of the code of its own, told the controls as they are, so its hooks go on
@@ -1065,6 +1079,14 @@ some words, or a button. The plugin describes the panel as JSON text and hands i
 - A `colours` row (interface 10) shows 1 to 8 colours to tap, each 0xRRGGBB, the one at `chosen`
   ringed (leave it out for none): `{ "type": "colours", "label": "Colour", "colours": [15026509,
   4130810], "chosen": 1 }`. A tap is told as the colour's place.
+- A `brushes` row (interface 11) shows 1 to 8 brushes to tap, each by its sample stroke and by the
+  key `recent_brush` or `current_brush` gave, the one at `chosen` ringed (leave it out for none):
+  `{ "type": "brushes", "label": "Brushes", "brushes": [4294967297], "chosen": 0 }`. A tap is told as
+  the brush's place. A key that is no brush makes the panel not hold up.
+- A panel with `"ring": true` (interface 11) shows as a ring round where its action came from: the
+  pen whose button ran it (see [Actions](#actions)), or the window's middle. Its rows, 1 to 3 and
+  each of colours or brushes (up to twelve on each), are rings about that point, the first
+  innermost; it has no title or Done, and a tap off it closes it, as Done does.
 - Labels and the title are at most 40 characters, an option at most 24, and words at most 400.
 - A field the app doesn't know, or a kind of row it doesn't have, makes the panel not hold up.
 - A `keys` row shows presses (written as for the [`key_shortcut`](#key_shortcut) hook) the way the
@@ -1775,8 +1797,10 @@ picker's picture given its controls, a picker that goes quiet or picks the hue o
 a switch under a switch, and the `interface_part_scale` and `floating_picker_only` hooks,
 interface 7 the `hide_notices` and `floating_panels` hooks, interface 8 the `gesture_lock`,
 `view_look`, `paper` and `reference_windows` hooks, the `view` permission and actions in the Canvas
-tab, interface 9 the `pressure` hook, and interface 10 the `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label`
-hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+tab, interface 9 the `pressure` hook, interface 10 the `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label`
+hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours, and interface 11
+the recent colours and brushes (`recent_colour`, `recent_brush`, `current_brush`, `choose_brush`),
+actions at the pen, and panels' rows of brushes and rings. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

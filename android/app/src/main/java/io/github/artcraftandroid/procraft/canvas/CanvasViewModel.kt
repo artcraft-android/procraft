@@ -833,13 +833,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
-    /** A plugin's action [key] run on the artwork, off the main thread (it may take seconds): the panel closes so what it does shows, and what it says, or its stopping, is told. */
-    fun runPluginAction(key: String) {
+    /**
+     * A plugin's action [key] run on the artwork, off the main thread (it may take seconds): the panel closes so what it
+     * does shows, and what it says, or its stopping, is told. [at]: where the pen was whose button ran it (window pixels),
+     * where a ring it shows opens.
+     */
+    fun runPluginAction(key: String, at: Offset? = null) {
         val s = session ?: return
         closePanels()
         viewModelScope.launch {
-            withContext(Dispatchers.Default) { plugins.runAction(key, s) }
+            withContext(Dispatchers.Default) {
+                if (at != null) plugins.runActionAt(key, s, at.x, at.y) else plugins.runAction(key, s)
+            }
             pluginPanel = plugins.panel()
+            followPluginBrush(s)
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
             if (s.takeBrushesChanged()) libraryChanged()
@@ -859,6 +866,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.Default) { plugins.panelTouched(row.toUInt(), value, s) }
             pluginPanel = plugins.panel()
+            followPluginBrush(s)
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
             // a plugin's studio changed a brush: read again and kept
@@ -870,6 +878,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun closePluginPanel() {
         plugins.closePanel()
         pluginPanel = null
+    }
+
+    /** The colour and the brush as a plugin's action or panel left them (it may set either). */
+    private fun followPluginBrush(s: CanvasSession) {
+        val c = s.color()
+        val rgb = c.take(3).map { (it.coerceIn(0f, 1f) * 255f).roundToInt() }.let { (r, g, b) -> (r shl 16) or (g shl 8) or b }
+        if (c.size >= 3 && rgb != colorRgb()) setRgb(rgb)
+        val brush = s.currentBrush()
+        if (brush.set != currentBrush?.set || brush.index != currentBrush?.index) {
+            currentBrush = brush
+            readSliders()
+            keepChoices(s)
+        }
     }
 
     /** A plugin's switch flipped; a key no control has changes nothing. */
@@ -924,6 +945,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The list as it stands: a plugin may have stopped on a stroke since it was read. */
     fun readPlugins() {
         pluginList = plugins.plugins()
+        penActionKeys = plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.PEN).map { it.key }.toSet()
         followPluginLooks()
     }
 
@@ -3152,7 +3174,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
     fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings =
-        tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0), penButtonActions)
+        tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0), penButtonActions, penButtonPlugins.map { it?.takeIf(penActionKeys::contains) })
 
     /** The middle of the screen (window pixels), for menus a button opens. */
     var screenCentre = Offset(800f, 1280f)
@@ -3715,11 +3737,35 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var penButtonActions by mutableStateOf(io.github.artcraftandroid.procraft.core.penButtonActions(interfacePrefs.getString(PEN_BUTTONS, null)))
         private set
 
+    /**
+     * Pen buttons: the plugins' actions (`<id>.<key>`) the pen's first and second buttons are set to
+     * run, in place of [penButtonActions]; null for none. One runs only while its plugin is on.
+     */
+    var penButtonPlugins by mutableStateOf(io.github.artcraftandroid.procraft.core.penButtonPluginActions(interfacePrefs.getString(PEN_BUTTONS, null)))
+        private set
+
+    /** The keys of the plugins' actions a pen button can run now: those of the plugins on. */
+    private var penActionKeys: Set<String> = emptySet()
+
     /** Sets the pen's [second] button (else its first) to do [a] (null: what Gesture controls say). */
     fun setPenButtonAction(second: Boolean, a: QuickAction?) {
         val i = if (second) 1 else 0
         penButtonActions = penButtonActions.toMutableList().also { if (i in it.indices) it[i] = a }
-        interfacePrefs.edit().putString(PEN_BUTTONS, io.github.artcraftandroid.procraft.core.penButtonActionsSaved(penButtonActions)).apply()
+        penButtonPlugins = penButtonPlugins.toMutableList().also { if (i in it.indices) it[i] = null }
+        keepPenButtons()
+    }
+
+    /** Sets the pen's [second] button (else its first) to run the plugin's action [key]. */
+    fun setPenButtonPlugin(second: Boolean, key: String) {
+        val i = if (second) 1 else 0
+        penButtonPlugins = penButtonPlugins.toMutableList().also { if (i in it.indices) it[i] = key }
+        penButtonActions = penButtonActions.toMutableList().also { if (i in it.indices) it[i] = null }
+        keepPenButtons()
+    }
+
+    private fun keepPenButtons() {
+        val kept = io.github.artcraftandroid.procraft.core.penButtonsSaved(penButtonActions, penButtonPlugins)
+        interfacePrefs.edit().putString(PEN_BUTTONS, kept).apply()
     }
 
     /**

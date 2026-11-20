@@ -313,8 +313,11 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
                 exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
             ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
-            // a plugin's own panel, while its action keeps it open
-            if (vm.pluginPanel != null) {
+            // a plugin's own panel, while its action keeps it open: a ring where the pen was, or a card
+            val ring = vm.pluginPanel?.takeIf { it.ring }
+            if (ring != null) {
+                PluginRingView(vm, ring)
+            } else if (vm.pluginPanel != null) {
                 Box(Modifier.fillMaxSize()) {
                     // what its rows don't take stays on the panel, never reaching the canvas under it
                     // (being touched is enough for that). Only a press is taken, as the brush

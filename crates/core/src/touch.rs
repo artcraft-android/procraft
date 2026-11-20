@@ -218,6 +218,13 @@ pub struct TouchSettings {
     pub pen_button_does: Option<crate::QuickAction>,
     #[uniffi(default = None)]
     pub pen_second_button_does: Option<crate::QuickAction>,
+    /// A plugin's action (`<id>.<key>`, placed at the pen) Pen buttons set the pen's first and
+    /// second buttons to run, in place of the rest; `None`, as above. The app sets one only while
+    /// its plugin is on.
+    #[uniffi(default = None)]
+    pub pen_button_runs: Option<String>,
+    #[uniffi(default = None)]
+    pub pen_second_button_runs: Option<String>,
 }
 
 impl Default for TouchSettings {
@@ -247,6 +254,8 @@ impl Default for TouchSettings {
             pointer_follows_touch: false,
             pen_button_does: None,
             pen_second_button_does: None,
+            pen_button_runs: None,
+            pen_second_button_runs: None,
         }
     }
 }
@@ -261,6 +270,13 @@ pub enum TouchCommand {
     /// button would.
     Run {
         action: crate::QuickAction,
+        x: f32,
+        y: f32,
+    },
+    /// A pen button set to a plugin's action in Pen buttons was pressed with the pen at (x, y): the
+    /// app runs it there ([`crate::Plugins::run_action_at`]).
+    RunPlugin {
+        key: String,
         x: f32,
         y: f32,
     },
@@ -3812,6 +3828,42 @@ mod tests {
         });
         assert_eq!(s.touch_pen_double_tap(PenPreferred::SwitchEraser, 5.0, 5.0), vec![TouchCommand::Undo]);
         assert_eq!(s.info().tool, ToolKind::Erase);
+    }
+
+    #[test]
+    fn a_pen_button_set_to_a_plugin_s_action_runs_it_where_the_pen_is_before_anything_else() {
+        let s = session();
+        s.set_tool(ToolKind::Paint);
+        let key = "org.example.palette.open".to_owned();
+        s.set_touch_settings(TouchSettings {
+            pen_button: Some(GestureAction::Erase),
+            pen_button_does: Some(crate::QuickAction::Undo),
+            pen_second_button_runs: Some(key.clone()),
+            ..TouchSettings::default()
+        });
+        assert_eq!(
+            s.touch_pen_button(true, 30.0, 40.0),
+            vec![TouchCommand::RunPlugin { key: key.clone(), x: 30.0, y: 40.0 }]
+        );
+        assert!(!s.touch_pen_button_up(true), "not held to erase");
+        assert_eq!(s.info().tool, ToolKind::Paint);
+        // the other button as Pen buttons set it
+        assert_eq!(s.touch_pen_button(false, 30.0, 40.0), vec![TouchCommand::Undo]);
+        // the first set to it, a pen's double-tap runs it too
+        s.set_touch_settings(TouchSettings {
+            pen_button_does: Some(crate::QuickAction::Undo),
+            pen_button_runs: Some(key.clone()),
+            ..TouchSettings::default()
+        });
+        assert_eq!(
+            s.touch_pen_button(false, 5.0, 6.0),
+            vec![TouchCommand::RunPlugin { key: key.clone(), x: 5.0, y: 6.0 }]
+        );
+        assert_eq!(
+            s.touch_pen_double_tap(PenPreferred::SwitchEraser, 7.0, 8.0),
+            vec![TouchCommand::RunPlugin { key, x: 7.0, y: 8.0 }]
+        );
+        assert_eq!(s.info().tool, ToolKind::Paint);
     }
 
     #[test]

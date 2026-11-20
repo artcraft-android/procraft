@@ -238,6 +238,37 @@ pub fn pen_button_actions_saved(actions: Vec<Option<QuickAction>>) -> String {
     actions.iter().take(PEN_BUTTONS).map(|a| a.map_or("", |a| entry(a).1)).collect::<Vec<_>>().join(",")
 }
 
+/// The plugins' actions (`<id>.<key>`) the pen's two buttons are set to run, as kept in `saved`
+/// (see [`pen_buttons_saved`]), `None` for a button set otherwise (interface 11).
+#[uniffi::export]
+pub fn pen_button_plugin_actions(saved: Option<String>) -> Vec<Option<String>> {
+    let mut actions: Vec<Option<String>> = saved
+        .unwrap_or_default()
+        .split(',')
+        .take(PEN_BUTTONS)
+        .map(|n| n.strip_prefix(PEN_PLUGIN).filter(|key| !key.is_empty()).map(str::to_owned))
+        .collect();
+    actions.resize(PEN_BUTTONS, None);
+    actions
+}
+
+/// The pen's buttons as kept: for each, its plugin's action (`plugin:` and its key) if it has one,
+/// else its QuickMenu action's name (empty for Gesture controls'), joined with commas. An app
+/// without plugins' actions there reads one as Gesture controls'.
+#[uniffi::export]
+pub fn pen_buttons_saved(actions: Vec<Option<QuickAction>>, plugin_actions: Vec<Option<String>>) -> String {
+    (0..PEN_BUTTONS)
+        .map(|k| match plugin_actions.get(k).cloned().flatten().filter(|key| !key.contains(',')) {
+            Some(key) => format!("{PEN_PLUGIN}{key}"),
+            None => actions.get(k).copied().flatten().map_or(String::new(), |a| entry(a).1.to_owned()),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// What marks a pen button's plugin action where it is kept.
+const PEN_PLUGIN: &str = "plugin:";
+
 /// What a pen button can be set to, in order: `None` (what Gesture controls say) first, then the
 /// actions by name, then the adjustments by name. Select brush is left out, as a button here keeps
 /// no brush.
@@ -449,6 +480,23 @@ mod tests {
         // a name taken by a renamed menu is skipped by the next one added
         let taken = quick_menu_renamed(menus, 0, "QuickMenu 3".into());
         assert_eq!(quick_menu_added(taken)[2].name, "QuickMenu 4");
+    }
+
+    #[test]
+    fn a_pen_button_set_to_a_plugin_s_action_is_kept_by_its_key_and_read_as_none_by_the_rest() {
+        let key = "org.example.palette.open";
+        let kept = pen_buttons_saved(vec![Some(QuickAction::Undo), None], vec![None, Some(key.to_owned())]);
+        assert_eq!(kept, "UNDO,plugin:org.example.palette.open");
+        // the QuickMenu's actions read it as Gesture controls', the plugins' as its key
+        assert_eq!(pen_button_actions(Some(kept.clone())), vec![Some(QuickAction::Undo), None]);
+        assert_eq!(pen_button_plugin_actions(Some(kept)), vec![None, Some(key.to_owned())]);
+        assert_eq!(pen_button_plugin_actions(None), vec![None, None]);
+        assert_eq!(pen_button_plugin_actions(Some("plugin:,REDO".into())), vec![None, None]);
+        // a plugin's action comes before an action of the QuickMenu's for the same button
+        let both = pen_buttons_saved(vec![Some(QuickAction::Redo)], vec![Some(key.to_owned())]);
+        assert_eq!(both, "plugin:org.example.palette.open,");
+        // as before with none
+        assert_eq!(pen_buttons_saved(vec![None, Some(QuickAction::Undo)], vec![]), ",UNDO");
     }
 
     #[test]
