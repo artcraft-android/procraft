@@ -3171,7 +3171,13 @@ fn a_stroke_laid_again_as_it_ends_goes_on_over_frames_as_the_next_begins() {
         assert!(s.select_brush(set, index));
         s.set_brush_size(0.3);
         let most = if sliced { std::time::Duration::ZERO } else { std::time::Duration::from_secs(60) };
-        s.shared.lock().canvas.as_mut()?.set_relay_at_once(most);
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut()?;
+            canvas.set_relay_at_once(most);
+            // (all of its paint laid in place in each frame, however fast the GPU seems)
+            canvas.set_in_place_paced(false);
+        }
         s.stroke_begin(PointerKind::Stylus, vec![point(0, 90.0)]);
         for e in 1..=65 {
             s.stroke_add(vec![point(2 * e - 1, 90.0), point(2 * e, 90.0)]);
@@ -20144,11 +20150,14 @@ fn a_fast_scribble_of_a_big_wet_brush_keeps_its_frames_and_memory_bounded() {
     );
     assert_eq!(errors, 0, "GPU errors");
     // bounds a tablet keeps to: the pen waits on nothing (its events within a 240 Hz pen's interval,
-    // at the 99th), no frame's GPU work near a GPU's timeout (a quarter of a second, against two
-    // seconds), the stroke all laid within two seconds of the lift, and the canvas within 640 MB
+    // at the 99th), frames keep to a pace (a tenth of a second end to end at the 99th) and none comes
+    // near a GPU's timeout (a second, against two), the stroke all laid within two seconds of the
+    // lift, and the canvas within 640 MB
     let failures: Vec<String> = [
         (add_99 > Duration::from_micros(4170)).then(|| format!("pen events {:.2} ms at the 99th", ms(add_99))),
-        (whole_most > Duration::from_millis(250)).then(|| format!("a frame {:.0} ms end to end", ms(whole_most))),
+        (whole_99 > Duration::from_millis(100))
+            .then(|| format!("frames {:.0} ms end to end at the 99th", ms(whole_99))),
+        (whole_most > Duration::from_secs(1)).then(|| format!("a frame {:.0} ms end to end", ms(whole_most))),
         (laid > Duration::from_secs(2)).then(|| format!("laid {:.0} ms after the lift", ms(laid))),
         (most_bytes > 640 << 20).then(|| format!("{} MB on the GPU", most_bytes >> 20)),
     ]

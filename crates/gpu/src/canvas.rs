@@ -130,9 +130,9 @@ const RELAY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(6);
 /// gone) or the canvas for seconds: now it falls behind the pen evenly instead, and catches up.
 const IN_PLACE_FRAME_MS: f64 = 33.0;
 /// The least work of paint laid in place a render lays however slow the GPU seems (see
-/// [`WORK_AT_ONCE`]): a frame of a big wet brush drawn quickly, on a fast GPU (a GPU's speed seen
-/// late, or with other work, can seem slower than it is).
-const IN_PLACE_LEAST: u64 = 4 * WORK_AT_ONCE;
+/// [`WORK_AT_ONCE`]): a few stamps of a big wet brush (a GPU's speed seen late, or with other work,
+/// can seem slower than it is).
+const IN_PLACE_LEAST: u64 = WORK_AT_ONCE;
 /// What a stamp counts for besides the pixels it covers; and a stamp painted in place, a compute
 /// pass for each, for each pixel and for itself.
 const STAMP_WORK: u64 = 1 << 10;
@@ -7356,9 +7356,10 @@ impl Canvas {
         for buffer in uploaded {
             self.uploads.give_back(buffer);
         }
-        // (how fast the GPU gets through paint laid in place is seen once this is done)
+        // (how fast the GPU gets through paint laid in place is seen once this is done: from when
+        // this began, as OpenGL does much of the work as it is sent)
         if in_place_laid > 0 && self.in_place_sent.is_none() {
-            self.in_place_sent = Some((sent.clone(), at, in_place_laid));
+            self.in_place_sent = Some((sent.clone(), started, in_place_laid));
         }
         self.wait_if_paced(gpu, sent, at);
         self.renders = self.renders.wrapping_add(1);
