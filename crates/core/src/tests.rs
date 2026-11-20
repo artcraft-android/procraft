@@ -3559,6 +3559,61 @@ fn a_classic_start_tapers_stroke_ends_laying_only_the_rest_as_laid_whole() {
     }
 }
 
+/// What laying a big brush's end again over frames costs, as by default and held to what the GPU
+/// gets through (`Canvas::set_relay_paced`): the frames it takes, the slowest, and how long until it
+/// is all laid, each frame drawn into a window and waited for as the apps draw them. Brushes from
+/// `RELAY_COST_BRUSHES` (`,` between; at their full size on a 2048 square canvas). To weigh the two
+/// on a device: run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn relay_end_cost() {
+    use procraft_gpu::wgpu;
+    use std::time::Instant;
+    let names = std::env::var("RELAY_COST_BRUSHES").unwrap_or_else(|_| "Quagga,Hamilton,Easterly".to_owned());
+    let side = 2048;
+    println!("brush\tpaced\tframes\tslowest_ms\tdone_ms");
+    for name in names.split(',') {
+        for paced in [false, true] {
+            let Some(s) = session(side, 1600) else { return };
+            let Some((set, index)) = library_brush(&s, |b| b.name == name) else { continue };
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(1.0);
+            s.shared.lock().canvas.as_mut().unwrap().set_relay_paced(paced);
+            let gpu = s.shared.lock().gpu.clone().unwrap();
+            let view = window_view(&s, 1600);
+            let frame = || {
+                let t = Instant::now();
+                let format = wgpu::TextureFormat::Rgba8Unorm;
+                s.draw(&view, format, (1600, 1600), procraft_engine::profile::Profile::Srgb, Instant::now());
+                gpu.flush();
+                t.elapsed().as_secs_f64() * 1000.0
+            };
+            let point = |k: usize| PenSample {
+                pressure: 0.3 + 0.6 * (k as f32 / 15.0).sin().abs(),
+                ..sample(100.0 + k as f32 * 3.5, 1000.0 + (k as f32 / 25.0).sin() * 500.0, k as f64 * 4.17)
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+            for e in 1..=240 {
+                s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+                if e % 2 == 0 {
+                    frame();
+                }
+            }
+            let t = Instant::now();
+            s.stroke_end(vec![]);
+            let (mut frames, mut slowest) = (0, 0.0f64);
+            loop {
+                slowest = slowest.max(frame());
+                frames += 1;
+                if !s.shared.lock().canvas.as_ref().unwrap().relaying() || frames >= 2000 {
+                    break;
+                }
+            }
+            println!("{name}\t{paced}\t{frames}\t{slowest:.1}\t{:.1}", t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+}
+
 /// A stroke laid again whole as it ends (its end taper reaching back over wet paint) is laid a share
 /// at each frame shown, the picture held as it was until it is all laid, and comes out as laid in
 /// one; meanwhile the next stroke begins and goes on without waiting for it.

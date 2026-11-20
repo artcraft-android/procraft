@@ -123,6 +123,21 @@ const STAMPS_AT_ONCE: u64 = 1 << 20;
 /// picture shown as it was until it is all laid: laid in one render, a long stroke of wet paint
 /// held the canvas, and every touch waiting on it, for a tenth of a second or more.
 const RELAY_AT_ONCE: std::time::Duration = std::time::Duration::from_millis(6);
+/// How long the GPU may go on with a render's share of a stroke laid again as it ends after the
+/// render has sent it, ms: what is recorded in [`RELAY_AT_ONCE`] took a GPU 30 to 150 ms a frame on
+/// a big brush, frames running that long. A render whose share the GPU went on with for more than
+/// [`RELAY_BEHIND`] times this (seen as the next begins) is followed by renders laying as much less
+/// as takes it this long; while it keeps up, all that [`RELAY_AT_ONCE`] records is laid (each
+/// frame's own work, which isn't the stroke's, takes some of the while: holding the stroke to it
+/// alone left it a sliver a frame).
+const RELAY_GPU_MS: f64 = 16.0;
+const RELAY_BEHIND: f64 = 2.0;
+/// The least work of a stroke laid again a render lays however slow the GPU seems: some big
+/// stamps (see [`stamp_work`]).
+const RELAY_LEAST: u64 = 16 << 20;
+/// A render laying a stroke again sends what it has recorded each time this long has gone into
+/// recording it, so the GPU works on it while the rest is recorded (rather than after it all).
+const RELAY_SEND_EVERY: std::time::Duration = std::time::Duration::from_micros(1500);
 /// How much GPU time a render that shows the canvas gives paint laid in place (smudging, wet paint),
 /// ms, by how fast the GPU got through such work before: the rest waits for the renders after. Laid
 /// all at once, a stroke whose GPU fell behind the pen laid more in each frame, so each frame took
@@ -3159,6 +3174,12 @@ pub struct Canvas {
     /// [`RELAY_AT_ONCE`]), and whether one is being laid over several (the picture held meanwhile).
     relay_at_once: std::time::Duration,
     relaying: bool,
+    /// The last render that laid a stroke laid again, as sent (its submission, when it was sent, and
+    /// how much work), until it is seen done; the most work the next such render lays (see
+    /// [`RELAY_GPU_MS`]); and whether it is held to that, its work sent as it is recorded.
+    relay_sent: Option<(wgpu::SubmissionIndex, std::time::Instant, u64)>,
+    relay_budget: u64,
+    relay_paced: bool,
     /// Paint laid in place left for the next render (see [`IN_PLACE_FRAME_MS`]); the last render
     /// that laid such work, as sent (its submission, when, and how much), until it is seen done; and
     /// how fast the GPU gets through such work, as seen (work a millisecond, at least).
@@ -3585,6 +3606,9 @@ impl Canvas {
             joins_synthesis: true,
             relay_at_once: RELAY_AT_ONCE,
             relaying: false,
+            relay_sent: None,
+            relay_budget: u64::MAX,
+            relay_paced: false,
             catching_up: false,
             in_place_sent: None,
             in_place_rate: None,
@@ -4701,6 +4725,38 @@ impl Canvas {
             Some(rate) if shown && self.in_place_paced => ((rate * IN_PLACE_FRAME_MS) as u64).max(IN_PLACE_LEAST),
             _ => u64::MAX,
         }
+    }
+
+    /// The most work of a stroke laid again a render that shows the canvas lays (see
+    /// [`RELAY_GPU_MS`]): none set while the GPU keeps up with what [`RELAY_AT_ONCE`] records, else
+    /// the last such render's share scaled to what the GPU gets through in that while after it is
+    /// sent, [`RELAY_LEAST`] at least. The last render that laid such work is seen here if it is
+    /// done: its time from being sent to being seen done is at least what the GPU took after it
+    /// was sent (frames laying it come one after another, so it is seen done soon after).
+    fn relay_most(&mut self, gpu: &Gpu) -> u64 {
+        if let Some((index, sent, work)) = self.relay_sent.take() {
+            let now = wgpu::PollType::Wait {
+                submission_index: Some(index.clone()),
+                timeout: Some(std::time::Duration::ZERO),
+            };
+            if gpu.device.poll(now).is_ok() {
+                self.relay_budget = relay_budget(work, sent.elapsed().as_secs_f64() * 1000.0);
+            } else {
+                self.relay_sent = Some((index, sent, work));
+            }
+        }
+        if self.relay_paced { self.relay_budget } else { u64::MAX }
+    }
+
+    /// Whether a stroke laid again as it ends is held to what the GPU gets through (see
+    /// [`RELAY_GPU_MS`]), its work sent as it is recorded (see [`RELAY_SEND_EVERY`]), else laid for
+    /// [`RELAY_AT_ONCE`] of recording a render and sent at its end, as by default: for tests and
+    /// benches comparing the two. (On a PC's GPU it kept the slowest frames of a big brush's end a
+    /// quarter shorter, but each frame's own work made the end take up to twice as long in all on
+    /// OpenGL: it waits for a tablet's GPU to be measured.)
+    #[doc(hidden)]
+    pub fn set_relay_paced(&mut self, on: bool) {
+        self.relay_paced = on;
     }
 
     /// Whether paint laid in place is laid only as fast as the GPU gets through it (see
@@ -6234,7 +6290,14 @@ impl Canvas {
         // (a stroke painting in place laid again from scratch goes back to a mark instead, where it can)
         let ops = without_passing_tips(std::mem::take(&mut self.ops));
         let ops = self.rewound(ops);
-        let ops = in_pieces(ops, self.full(), self.work_at_once, most_stamps);
+        // a stroke laid again whole as it ends (or from a mark it went back to), in a render that
+        // shows the canvas: laid for so long (see `RELAY_AT_ONCE`) and as much as the GPU gets
+        // through soon after (see `RELAY_GPU_MS`), in pieces no bigger, the rest left to the
+        // renders after, until its end is reached
+        let rewinds = ops.iter().any(|op| matches!(op, Op::RewindInPlace(_)));
+        let relays = target.is_some() && (self.relaying || rewinds || lays_ended_stroke_again(&ops));
+        let relay_most = if relays { self.relay_most(gpu) } else { u64::MAX };
+        let ops = in_pieces(ops, self.full(), (self.work_at_once, self.work_at_once.min(relay_most)), most_stamps);
         let (ops, held_back) = {
             let (mut taken, mut count) = (Vec::with_capacity(ops.len()), 0u64);
             let mut ops = ops.into_iter();
@@ -6330,15 +6393,11 @@ impl Canvas {
         let mut deferred = held_back;
         // stamps' work recorded and not sent yet
         let mut recorded = 0u64;
-        // a stroke laid again whole as it ends (or from a mark it went back to), in a render that
-        // shows the canvas: laid for so long (see `RELAY_AT_ONCE`), the rest left to the renders
-        // after, until its end is reached
-        let rewinds = ops.iter().any(|op| matches!(op, Op::RewindInPlace(_)));
-        let mut relay_until = target
-            .as_ref()
-            .filter(|_| self.relaying || rewinds || lays_ended_stroke_again(&ops))
-            .map(|_| started + self.relay_at_once);
+        let mut relay_until = relays.then(|| started + self.relay_at_once);
         let mut relaid = false;
+        let mut relay_laid = 0u64;
+        // when what was recorded was last sent, laying a stroke again (see `RELAY_SEND_EVERY`)
+        let mut relay_sent_at = started;
         self.relaying = false;
         // paint laid in place, in a render that shows the canvas: as much as the GPU gets through in
         // a little while (see `IN_PLACE_FRAME_MS`), the rest left to the renders after
@@ -6354,14 +6413,17 @@ impl Canvas {
             if !joins {
                 self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
             }
-            if let (Some(until), Op::Stamps { .. }) = (relay_until, &op)
-                && relaid
-                && std::time::Instant::now() >= until
-            {
-                let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
-                self.ops.splice(0..0, rest);
-                self.relaying = true;
-                break;
+            if let (Some(until), Op::Stamps { instances, style, second, .. }) = (relay_until, &op) {
+                // (paint laid in place keeps to its own pace, see `in_place_most`)
+                let dry = !style.in_place() || *second;
+                let work = if dry { stamps_work(instances, full, false) } else { 0 };
+                if relaid && (std::time::Instant::now() >= until || relay_laid.saturating_add(work) > relay_most) {
+                    let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
+                    self.ops.splice(0..0, rest);
+                    self.relaying = true;
+                    break;
+                }
+                relay_laid = relay_laid.saturating_add(work);
             }
             if let Op::Stamps { instances, style, second: false, pencil: false, .. } = &op
                 && style.in_place()
@@ -6401,12 +6463,15 @@ impl Canvas {
                 deferred = true;
                 break;
             }
-            // what is recorded goes first if this would make it too much for one piece
+            // what is recorded goes first if this would make it too much for one piece, or (laying
+            // a stroke again) once it has taken a while to record, so the GPU starts on it
             if let Op::Stamps { instances, style, second, .. } = &op {
                 let work = stamps_work(instances, self.full(), style.in_place() && !second);
-                if recorded > 0 && recorded.saturating_add(work) > self.work_at_once {
+                let due = relay_until.is_some() && self.relay_paced && relay_sent_at.elapsed() >= RELAY_SEND_EVERY;
+                if recorded > 0 && (recorded.saturating_add(work) > self.work_at_once || due) {
                     self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms));
                     recorded = 0;
+                    relay_sent_at = std::time::Instant::now();
                 }
                 recorded = recorded.saturating_add(work);
             }
@@ -7468,6 +7533,9 @@ impl Canvas {
         // this began, as OpenGL does much of the work as it is sent)
         if in_place_laid > 0 && self.in_place_sent.is_none() {
             self.in_place_sent = Some((sent.clone(), started, in_place_laid));
+        }
+        if relay_laid > 0 && self.relay_sent.is_none() {
+            self.relay_sent = Some((sent.clone(), std::time::Instant::now(), relay_laid));
         }
         self.wait_if_paced(gpu, sent, at);
         self.renders = self.renders.wrapping_add(1);
@@ -12574,15 +12642,25 @@ fn drop_superseded_stamps(ops: &mut Vec<Op>, layer: LayerId) {
     }
 }
 
+/// The most work of a stroke laid again the next render that shows the canvas lays, the last such
+/// render's `work` having gone on on the GPU `after` ms past being sent (see [`RELAY_GPU_MS`]).
+fn relay_budget(work: u64, after: f64) -> u64 {
+    if after > RELAY_GPU_MS * RELAY_BEHIND {
+        ((work as f64 * RELAY_GPU_MS / after) as u64).max(RELAY_LEAST)
+    } else {
+        u64::MAX
+    }
+}
+
 /// The work of `stamps` on a canvas `full` (see [`stamp_work`]).
 fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
     stamps.iter().fold(0, |work, s| work.saturating_add(stamp_work(s, full, in_place)))
 }
 
-/// `ops` with stamps of more work than `most`, or more than `most_stamps` of them, as several in a
-/// row of no more (a stamp is never cut in two): a stroke redrawn whole would otherwise reach the
-/// GPU as one piece.
-fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> {
+/// `ops` with stamps of more work than `most` (the first for paint laid in place, the second for
+/// the rest), or more than `most_stamps` of them, as several in a row of no more (a stamp is never
+/// cut in two): a stroke redrawn whole would otherwise reach the GPU as one piece.
+fn in_pieces(ops: Vec<Op>, full: IRect, (in_place_most, most): (u64, u64), most_stamps: u64) -> Vec<Op> {
     let mut pieces = Vec::with_capacity(ops.len());
     for op in ops {
         let Op::Stamps { second, instances, wet, picks, times, style, clear, layer, pencil } = op else {
@@ -12590,6 +12668,7 @@ fn in_pieces(ops: Vec<Op>, full: IRect, most: u64, most_stamps: u64) -> Vec<Op> 
             continue;
         };
         let in_place = style.in_place() && !second;
+        let most = if in_place { in_place_most } else { most };
         // how many stamps go in each
         let mut counts = Vec::new();
         let (mut count, mut work) = (0usize, 0u64);
@@ -13970,6 +14049,21 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
 
 #[cfg(test)]
 mod tests {
+    /// A stroke laid again over frames lays less a frame once the GPU is seen to fall well behind
+    /// what a frame records (a GPU went on 30 to 150 ms after each frame of a big brush's end), as
+    /// much as it gets through in [`super::RELAY_GPU_MS`]; as much as the recording time allows
+    /// while it keeps up; and some big stamps at least.
+    #[test]
+    fn a_stroke_laid_again_lays_less_a_frame_while_the_gpu_falls_behind() {
+        use super::{RELAY_BEHIND, RELAY_GPU_MS, RELAY_LEAST, relay_budget};
+        let work = 400u64 << 20;
+        assert_eq!(relay_budget(work, RELAY_GPU_MS * 0.5), u64::MAX, "kept up");
+        assert_eq!(relay_budget(work, RELAY_GPU_MS * RELAY_BEHIND), u64::MAX, "about kept up");
+        assert_eq!(relay_budget(work, RELAY_GPU_MS * 5.0), work / 5, "five times as long");
+        assert_eq!(relay_budget(work, 150.0), (work as f64 * RELAY_GPU_MS / 150.0) as u64);
+        assert_eq!(relay_budget(RELAY_LEAST, 1000.0), RELAY_LEAST, "the least");
+    }
+
     use super::*;
 
     /// The stroke's carry goes from one of a symmetry's copies to another only before a piece that
