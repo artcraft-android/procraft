@@ -146,8 +146,8 @@ pub use blend_wheel::{
 };
 pub use brush_files::BrushEngines;
 pub use brush_files::{
-    BrushFileReading, BrushFileWriting, BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip,
-    read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
+    BrushFileBytes, BrushFileReading, BrushFileWriting, BrushesRead, IMPORT_CANCELLED, OTHER_BRUSH_EXTENSIONS,
+    ReadBrushes, is_brush_zip, read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
 };
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::prepare_brushes;
@@ -206,6 +206,7 @@ pub use plugin_canvas::{BadgeLine, PluginBadge, PluginCanvas, PluginExport, Plug
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelRow, PluginPanel};
+pub use plugin_run::set_memory_available;
 pub use plugins::{
     InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginInfo, PluginMenuPlace, PluginOffer,
     PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes,

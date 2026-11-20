@@ -126,6 +126,34 @@ pub struct BrushFileIn {
     pub taken: bool,
 }
 
+/// What a plugin's brush engine said of a brush file it had: a title when something went wrong (to
+/// be told with an OK), and its text ("120 brushes imported.").
+pub type ImportNotice = (Option<String>, String);
+
+/// A batch of brush files read: their brushes (none if Cancel stopped it), and what plugins' brush
+/// engines said of them.
+type Imported = (Option<Vec<ReadBrushes>>, Vec<ImportNotice>);
+
+/// What reading a batch of brush files came to: whether any brushes came in, whether to say so, and
+/// what plugins' brush engines said of them.
+pub struct Added {
+    pub any: bool,
+    pub tell: bool,
+    pub notices: Vec<ImportNotice>,
+}
+
+/// A file's size as the import card shows it: "199 MB", "4.2 MB", "380 KB".
+pub fn file_size(bytes: u64) -> String {
+    let mb = bytes as f64 / f64::from(1 << 20);
+    if mb >= 10.0 {
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{} KB", (bytes as f64 / 1024.0).round().max(1.0))
+    }
+}
+
 /// What a press on a brush turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Way {
@@ -319,8 +347,8 @@ pub struct Library {
     pub studio: Option<Option<(u32, u32)>>,
     /// Brush files read on threads of their own (another app's big ones take a while): each
     /// batch's brushes come back (a file that held none left out; none at all if Cancel stopped
-    /// it), and whether to say that they came in.
-    importing: Vec<(std::sync::mpsc::Receiver<Option<Vec<ReadBrushes>>>, bool)>,
+    /// it) with what plugins' brush engines said of them, and whether to say that they came in.
+    importing: Vec<(std::sync::mpsc::Receiver<Imported>, bool)>,
     /// A brush file picked from a "+" menu, to be read (with the import card, which the app
     /// shows), and whether to say that its brushes came in.
     picked_file: Option<(std::path::PathBuf, String, bool)>,
@@ -387,25 +415,42 @@ impl Library {
             return;
         }
         let (done, importing) = std::sync::mpsc::channel();
-        // plugins' brush engines make theirs of the files there too
+        // plugins' brush engines make theirs of the files there too, with what an import may take;
+        // the card says so while they do, with the file's name and size, its pie how much of the
+        // file they have read
         let engines = session.brush_engines();
         let reading = BrushFileReading::new();
+        let on = Arc::new(std::sync::Mutex::new(String::new()));
+        let (shown, named) = (Arc::clone(&reading), Arc::clone(&on));
+        let progress = move || match shown.engine_size() {
+            0 => shown.progress(),
+            _ => shown.engine_progress(),
+        };
         let shown = Arc::clone(&reading);
-        let exporting = (!card.busy()).then(|| card.start_importing(move || shown.progress()));
+        let detail: crate::export_card::Detail = Box::new(move || {
+            let size = shown.engine_size();
+            let name = named.lock().map(|n| n.clone()).unwrap_or_default();
+            (size > 0).then(|| ("Importing brushes", format!("{name} · {}", file_size(size))))
+        });
+        let exporting = (!card.busy()).then(|| card.start_importing(progress, detail));
         std::thread::spawn(move || {
-            let read: Vec<ReadBrushes> = std::thread::scope(|scope| {
+            let (read, notices): (Vec<ReadBrushes>, Vec<ImportNotice>) = std::thread::scope(|scope| {
                 let (files, reading) = (&files, &reading);
                 let worker = scope.spawn(move || {
-                    let mut read = Vec::new();
+                    let (mut read, mut notices) = (Vec::new(), Vec::new());
                     for file in files {
+                        if let Ok(mut name) = on.lock() {
+                            name.clone_from(&file.name);
+                        }
                         if let Some(brushes) = read_brushes_from(&file.path, Some(file.name.clone()), reading) {
-                            read.push(engines.make(brushes));
+                            read.push(engines.make_following(brushes, reading));
+                            notices.extend(reading.notice().map(|text| (reading.notice_title(), text)));
                         }
                         if file.taken && !reading.cancelled() {
                             let _ = std::fs::remove_file(&file.path);
                         }
                     }
-                    read
+                    (read, notices)
                 });
                 // Cancel on the card stops the reading at its next brush
                 while !worker.is_finished() {
@@ -420,7 +465,8 @@ impl Library {
             if let Some(exporting) = &exporting {
                 exporting.ended(!cancelled && !read.is_empty());
             }
-            let _ = done.send((!cancelled).then_some(read));
+            let notices = if cancelled { vec![(None, procraft_core::IMPORT_CANCELLED.to_owned())] } else { notices };
+            let _ = done.send(((!cancelled).then_some(read), notices));
         });
         self.importing.push((importing, tell));
     }
@@ -435,7 +481,7 @@ impl Library {
     /// and whether to say so. Not while the library holds brushes or sets by their places (a
     /// menu, a question, a set being renamed, a brush pressed, the studio asked for or open:
     /// `studio_open`), which brushes added at the top would move; they wait for that to end.
-    pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<(bool, bool)> {
+    pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<Added> {
         let holding = self.modal()
             || self.renaming_set.is_some()
             || self.renaming_brush.is_some()
@@ -445,17 +491,23 @@ impl Library {
             return Vec::new();
         }
         let mut came = Vec::new();
+        let mut stopped = Vec::new();
         self.importing.retain(|(r, tell)| match r.try_recv() {
-            Ok(Some(read)) => {
-                came.push((read, *tell));
+            Ok((Some(read), notices)) => {
+                came.push((read, *tell, notices));
                 false
             }
-            // stopped with Cancel: nothing to add or say
-            Ok(None) => false,
+            // stopped with Cancel: nothing to add, only that
+            Ok((None, notices)) => {
+                stopped.push(Added { any: false, tell: false, notices });
+                false
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
-        came.into_iter().map(|(read, tell)| (self.add_read(session, read), tell)).collect()
+        let added =
+            came.into_iter().map(|(read, tell, notices)| Added { any: self.add_read(session, read), tell, notices });
+        added.chain(stopped).collect()
     }
 
     /// Brushes read from files added one after another, each into the set the library shows (or
@@ -486,7 +538,7 @@ impl Library {
     /// they are kept with the rest).
     pub fn finish_importing(&mut self, session: &CanvasSession) {
         for (importing, _) in std::mem::take(&mut self.importing) {
-            if let Ok(Some(read)) = importing.recv() {
+            if let Ok((Some(read), _)) = importing.recv() {
                 self.add_read(session, read);
             }
         }

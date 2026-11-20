@@ -13,6 +13,7 @@ use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
 
 use crate::brush_library::LibrarySet;
+pub use crate::plugin_brushes::BrushFileBytes;
 use crate::{CanvasSession, MobileError};
 
 /// The set brushes from single brush files go into.
@@ -147,8 +148,8 @@ pub(crate) fn brush_names<'n>(names: impl Iterator<Item = &'n str>) -> bool {
 pub enum ReadBrushes {
     /// A set of their own at the top of the library (a set file's, or another app's brushes),
     /// called `name` ("Imported" if that is blank); another app's with its file (its name, if
-    /// known, and its bytes), for a plugin's brush engine to make brushes of too.
-    Set { name: String, brushes: Vec<Brush>, file: Option<(String, std::sync::Arc<[u8]>)> },
+    /// known, and where its bytes are), for a plugin's brush engine to make brushes of too.
+    Set { name: String, brushes: Vec<Brush>, file: Option<(String, BrushFileBytes)> },
     /// One brush, at the top of the "Imported" set.
     One(Box<Brush>),
     /// A file of ours from before (a set, or a brush for the set shown), as its text.
@@ -193,7 +194,7 @@ fn read_ours(bytes: &[u8]) -> Option<ReadBrushes> {
 /// none if it holds none.
 fn read_other(bytes: &[u8], name: String, file_name: &str) -> Option<ReadBrushes> {
     let (name, brushes) = other_brushes(bytes, name)?;
-    let file = Some((file_name.to_owned(), bytes.into()));
+    let file = Some((file_name.to_owned(), BrushFileBytes::Memory(bytes.into())));
     (!brushes.is_empty()).then_some(ReadBrushes::Set { name, brushes, file })
 }
 
@@ -216,7 +217,7 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
     if other {
         // (one the app reads no brush from still comes, for the brush engines of plugins on: a
         // bundle of brushes only one of them draws)
-        let file = Some((name.clone(), bytes.into()));
+        let file = Some((name.clone(), BrushFileBytes::Memory(bytes.into())));
         return read_other(bytes, stem.clone(), &name).or(Some(ReadBrushes::Set {
             name: stem,
             brushes: Vec::new(),
@@ -242,8 +243,10 @@ impl CanvasSession {
                 // the brush engines of plugins on make brushes of another app's file too
                 let hooks = self.shared.lock().hooks.clone();
                 if let (Some(hooks), Some((file_name, bytes))) = (hooks, file) {
-                    let made = crate::plugin_brushes::make_brushes(&hooks, &file_name, &bytes);
-                    crate::plugin_brushes::join_made(&mut brushes, made);
+                    let (following, limits) = (Default::default(), crate::plugin_run::ImportLimits::now());
+                    let made =
+                        crate::plugin_brushes::make_brushes_following(&hooks, &file_name, &bytes, &following, limits);
+                    crate::plugin_brushes::join_made(&mut brushes, made.map(|m| m.made).unwrap_or_default());
                 }
                 if brushes.is_empty() {
                     return None;
@@ -294,18 +297,100 @@ impl CanvasSession {
 pub struct BrushEngines(Option<std::sync::Arc<crate::hooks::Hooks>>);
 
 impl BrushEngines {
+    /// The brush engines of the plugins on `hooks` (none: no plugin's).
+    #[cfg(test)]
+    pub(crate) fn of(hooks: Option<std::sync::Arc<crate::hooks::Hooks>>) -> BrushEngines {
+        BrushEngines(hooks)
+    }
+
     /// `read` with what the brush engines on make of its file joined to its brushes, the file let
     /// go: a long call, not for the interface's thread.
     pub fn make(&self, read: ReadBrushes) -> ReadBrushes {
+        self.make_following(read, &BrushFileReading::default())
+    }
+
+    /// The same, `reading` told how much of the file the engine has read and able to stop it (each
+    /// engine has an import's limits, see [`crate::plugin_run::ImportLimits`]); once made, it says
+    /// what came in, or what went wrong ([`BrushFileReading::notice`]).
+    pub fn make_following(&self, read: ReadBrushes, reading: &BrushFileReading) -> ReadBrushes {
+        self.make_within(read, reading, crate::plugin_run::ImportLimits::now())
+    }
+
+    pub(crate) fn make_within(
+        &self,
+        read: ReadBrushes,
+        reading: &BrushFileReading,
+        limits: crate::plugin_run::ImportLimits,
+    ) -> ReadBrushes {
         match (read, &self.0) {
             (ReadBrushes::Set { name, mut brushes, file: Some((file_name, bytes)) }, Some(hooks)) => {
-                let made = crate::plugin_brushes::make_brushes(hooks, &file_name, &bytes);
-                crate::plugin_brushes::join_made(&mut brushes, made);
+                reading.told(None);
+                reading.engine_starts(&bytes);
+                let made = crate::plugin_brushes::make_brushes_following(
+                    hooks,
+                    &file_name,
+                    &bytes,
+                    &reading.following(),
+                    limits,
+                );
+                drop(bytes);
+                reading.engine_ends();
+                if let Some(made) = made {
+                    let trouble = made.trouble.clone();
+                    crate::plugin_brushes::join_made(&mut brushes, made.made);
+                    let built_in = brushes.iter().filter(|b| b.engine.is_none()).count();
+                    let cancelled = reading.cancelled()
+                        || trouble.as_ref().is_some_and(|(_, t)| *t == crate::plugin_brushes::ImportTrouble::Cancelled);
+                    reading.told(Some(if cancelled {
+                        (None, IMPORT_CANCELLED.to_owned())
+                    } else {
+                        match trouble {
+                            Some((label, why)) => trouble_notice(&label, why, made.pack),
+                            None => (None, brushes_notice(brushes.len(), built_in)),
+                        }
+                    }));
+                }
                 ReadBrushes::Set { name, brushes, file: None }
             }
             (read, _) => read,
         }
     }
+}
+
+/// What an import stopped with Cancel says.
+pub const IMPORT_CANCELLED: &str = "Import cancelled. No brushes were added.";
+
+/// What a plugin's brush engine having made a file's brushes says: how many came in, and how many
+/// of them the app's own reading draws.
+fn brushes_notice(all: usize, built_in: usize) -> String {
+    let brushes = if all == 1 { "brush" } else { "brushes" };
+    match built_in {
+        0 => format!("{all} {brushes} imported."),
+        _ => format!("{all} {brushes} imported, {built_in} drawn by the built-in reader."),
+    }
+}
+
+/// What an engine (`label`) that couldn't make a file's brushes says, as a title and what follows:
+/// why, that they came in as the app read them, and that it is still on.
+fn trouble_notice(label: &str, why: crate::plugin_brushes::ImportTrouble, pack: bool) -> (Option<String>, String) {
+    use crate::plugin_brushes::ImportTrouble;
+    let what = if pack { "pack" } else { "file" };
+    let (title, happened) = match why {
+        ImportTrouble::TooBig => (
+            format!("{} too big for {label}", if pack { "Pack" } else { "File" }),
+            format!("This {what} is too big for {label} on this device."),
+        ),
+        ImportTrouble::TooSlow => {
+            (format!("{label} took too long"), format!("{label} took too long with this {what}."))
+        }
+        ImportTrouble::Failed | ImportTrouble::Cancelled => {
+            (format!("{label} couldn't read this {what}"), format!("{label} couldn't read this {what}."))
+        }
+    };
+    let text = format!(
+        "{happened} Its brushes came in with the built-in reader instead, so they may look a little different. {label} is still on."
+    );
+    (Some(title), text)
 }
 
 impl CanvasSession {
@@ -334,7 +419,14 @@ pub struct BrushFileReading {
     /// Brushes read so far, of how many there are (none known yet: 0).
     done: std::sync::atomic::AtomicUsize,
     of: std::sync::atomic::AtomicUsize,
-    stop: std::sync::atomic::AtomicBool,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// While a plugin's brush engine makes its brushes of the file: the file's size (0 while none
+    /// is at it), and how far into it the engine has read.
+    engine_size: std::sync::atomic::AtomicU64,
+    engine_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// What to say once an engine has had the file (a title, if it is to be asked to be read, and
+    /// the text): what came in, or what went wrong.
+    notice: std::sync::Mutex<Option<(Option<String>, String)>>,
 }
 
 #[uniffi::export]
@@ -355,11 +447,67 @@ impl BrushFileReading {
     pub fn cancel(&self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// While a plugin's brush engine makes its brushes of the file ("Importing brushes"): the
+    /// file's size in bytes; 0 while none is at it.
+    pub fn engine_size(&self) -> u64 {
+        self.engine_size.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How far into the file the engine has read, 0..1, by the bytes it had the app unpack or decode
+    /// (a pack is read through in order, what it doesn't need passed over; it may end short of 1).
+    pub fn engine_progress(&self) -> f32 {
+        let size = self.engine_size();
+        let read = self.engine_read.load(std::sync::atomic::Ordering::Relaxed);
+        if size == 0 { 0.0 } else { (read as f64 / size as f64).min(1.0) as f32 }
+    }
+
+    /// Once a plugin's brush engine has had the file: what to tell ("120 brushes imported.", or that
+    /// the file was too big for it and its brushes came in with the built-in reader); none if no
+    /// engine read it.
+    pub fn notice(&self) -> Option<String> {
+        Some(self.notice.lock().ok()?.as_ref()?.1.clone())
+    }
+
+    /// The title of the notice, when it says what went wrong: shown with an OK, as it is too long
+    /// to pass by; none for a notice that passes ("120 brushes imported.").
+    pub fn notice_title(&self) -> Option<String> {
+        self.notice.lock().ok()?.as_ref()?.0.clone()
+    }
 }
 
 impl BrushFileReading {
     pub fn cancelled(&self) -> bool {
         self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What an engine's import is followed by: this reading's Cancel, and how far into the file it
+    /// has read.
+    pub(crate) fn following(&self) -> crate::plugin_run::Following {
+        crate::plugin_run::Following {
+            cancel: Some(std::sync::Arc::clone(&self.stop)),
+            read: Some(std::sync::Arc::clone(&self.engine_read)),
+        }
+    }
+
+    /// An engine starts on `file`.
+    fn engine_starts(&self, file: &BrushFileBytes) {
+        let size = match file {
+            BrushFileBytes::Memory(bytes) => bytes.len() as u64,
+            BrushFileBytes::Disk(path) => std::fs::metadata(path).map_or(1, |m| m.len().max(1)),
+        };
+        self.engine_read.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.engine_size.store(size, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn engine_ends(&self) {
+        self.engine_size.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn told(&self, notice: Option<(Option<String>, String)>) {
+        if let Ok(mut told) = self.notice.lock() {
+            *told = notice;
+        }
     }
 
     /// There are `of` brushes to read.
@@ -437,9 +585,17 @@ pub fn read_brushes_from(
     if reading.cancelled() {
         return None;
     }
-    // another app's, or one of ours from before (its text): read whole
+    // another app's, or one of ours from before (its text): read whole; what a plugin's brush
+    // engine makes of it is read from the file again as it is handed over, so it isn't held twice
     let bytes = std::fs::read(path).ok()?;
-    read_any_brushes(&bytes, file_name)
+    let read = read_any_brushes(&bytes, file_name)?;
+    drop(bytes);
+    Some(match read {
+        ReadBrushes::Set { name, brushes, file: Some((file_name, _)) } => {
+            ReadBrushes::Set { name, brushes, file: Some((file_name, BrushFileBytes::Disk(path.to_owned()))) }
+        }
+        read => read,
+    })
 }
 
 /// The brushes in the file at `path` the user chose, called `file_name` (if known), as
@@ -460,12 +616,19 @@ pub fn read_brushes_file(
 #[uniffi::export]
 impl CanvasSession {
     /// The brush engines of plugins on make brushes of `read`'s file too (another app's), joined to
-    /// its brushes, so that adding them is quick: a long call, not for the main thread.
-    pub fn make_engine_brushes(&self, read: std::sync::Arc<BrushesRead>) {
+    /// its brushes, so that adding them is quick: a long call, not for the main thread. `reading`,
+    /// if given, follows it and can stop it, and says what came of it (see
+    /// [`BrushEngines::make_following`]).
+    pub fn make_engine_brushes(
+        &self,
+        read: std::sync::Arc<BrushesRead>,
+        reading: Option<std::sync::Arc<BrushFileReading>>,
+    ) {
         let engines = self.brush_engines();
+        let reading = reading.unwrap_or_default();
         let mut held = read.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(brushes) = held.take() {
-            *held = Some(engines.make(brushes));
+            *held = Some(engines.make_following(brushes, &reading));
         }
     }
 }

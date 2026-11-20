@@ -1423,7 +1423,7 @@ procraft_brush_under(stroke: i32, len: i32) -> i32   // optional: the colours un
 
 - `procraft_brush_import` is handed the file's name (field 1, UTF-8) and its bytes (field 2). It
   answers with a field 1 for each brush it makes: its name (field 1), its data (field 2) and, if it
-  has one, its preview as a PNG (field 3). A long call, with 256 MiB of memory.
+  has one, its preview as a PNG (field 3). See [Importing](#importing) for what it may take.
 - `procraft_brush_load` is handed the app's id for a brush (field 1, u64), its data (field 2) and,
   if the app holds how the brush looks already, field 3 (u8 1): the engine reads the brush to draw
   it and answers nothing. Otherwise it answers how the brush looks, which the app keeps on the
@@ -1532,6 +1532,34 @@ the plugin's own brushes is open (or for the current brush, if the plugin's engi
 | `brush_data_len() -> i32` | The brush's data's length, -1 for none |
 | `read_brush_data(to: i32) -> i32` | Writes the data at `to`: 1 if it did |
 | `write_brush_data(from: i32, len: i32) -> i32` | The brush's data from now on: 1 if taken |
+
+### Importing
+
+A bundle of a few hundred megabytes takes far more than a stroke ever may, so an import has limits
+of its own:
+
+- It goes on a copy of the plugin's code of its own, started for it and let go after. What it
+  leaves in that copy's memory goes with it, and isn't there for strokes.
+- That copy may have half the memory the device can spare at the time (2 GiB at most, 256 MiB at
+  least), may spend 2,000,000,000,000 steps and may take ten minutes. Everything else the engine
+  does (a load, a stroke) has the limits above, as always.
+- While it runs, the import card says "Importing brushes" with the file's name and size, its pie
+  how far into the file the bytes the engine has had the [utilities](#utilities) unpack or decode
+  reach. Cancel
+  stops it at its next slice of steps; nothing of it is kept.
+- A file too big to hand over in that memory, or one the import runs out of memory, steps or time
+  on, or crashes on, doesn't switch the plugin off: the file's brushes come in as the app read
+  them, and the app says so, and that the plugin is still on.
+
+Once an engine has had a file the app says how many brushes came in, and how many of them its own
+reading draws.
+
+Making a brush's look (a `procraft_brush_load` the app doesn't yet hold the look for) decodes every
+picture the brush uses, once for good, so it is the last of bringing the brush in: it goes on a copy
+of its own too, with an import's memory, 40,000,000,000 steps and two minutes. A look the engine
+can't make, or one the app can't take (more than 255 tips, say), isn't asked for again while the
+plugin stays on, and the brush draws as the app read it. Reading a brush to draw it (field 3, the
+look held) and its strokes have what they always had.
 
 ### What a brush keeps with a layer
 
@@ -1660,7 +1688,8 @@ It's switched off at once, all of it, and its card says why. It stays off throug
 someone taps Turn on. An action that stops partway leaves what it did so far as one step to undo.
 
 Code stops if it runs out of steps, asks for too much memory, traps, or gives an answer that makes no
-sense. Whatever it was handed goes on as it came.
+sense. Whatever it was handed goes on as it came. A brush engine's import is the one exception (see
+[Importing](#importing)): a file too much for it comes in as the app read it, and the plugin stays on.
 
 ## Building it
 

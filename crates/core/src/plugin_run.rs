@@ -329,9 +329,11 @@ const BRUSH_BEGIN: &str = "procraft_brush_begin";
 const BRUSH_ADD: &str = "procraft_brush_add";
 const BRUSH_END: &str = "procraft_brush_end";
 const BRUSH_UNDER: &str = "procraft_brush_under";
-/// What making brushes of a file may spend and take, and reading one brush (its tips decoded).
-const IMPORT_FUEL: u64 = 8_000_000_000;
-const MOST_IMPORT_TIME: Duration = Duration::from_secs(60);
+/// What making brushes of a file may spend and take, and reading one brush (its tips decoded). An
+/// import goes on a copy of the plugin's code of its own, with memory of its own too (see
+/// [`ImportLimits`]): a big bundle takes many times what a stroke ever may.
+pub(crate) const IMPORT_FUEL: u64 = 2_000_000_000_000;
+pub(crate) const MOST_IMPORT_TIME: Duration = Duration::from_secs(10 * 60);
 const BRUSH_LOAD_FUEL: u64 = 2_000_000_000;
 const MOST_BRUSH_LOAD_TIME: Duration = Duration::from_secs(10);
 /// What a stroke's start, a batch of its samples or its end may spend, and take: as a touch.
@@ -342,7 +344,7 @@ pub(crate) const DAB_BYTES: usize = 96;
 const MOST_DABS: usize = 1 << 16;
 /// The most a brush's look or the brushes made of a file may be, in bytes.
 const MOST_LOOK: usize = 128 << 20;
-const MOST_MADE: usize = 512 << 20;
+const MOST_MADE: usize = i32::MAX as usize;
 /// What a call on a plugin's own artwork may spend (its drawing, its saving), and how long; a touch,
 /// which comes with each sample while the canvas waits, far less.
 const CANVAS_FUEL: u64 = 800_000_000;
@@ -354,7 +356,7 @@ const MOST_TOUCH_TIME: Duration = Duration::from_millis(250);
 /// and the memory a plugin with kinds of layer may ask for (a layer's data in, out and worked on).
 const LAYER_FUEL: u64 = CANVAS_FUEL;
 const MOST_LAYER_TIME: Duration = MOST_CANVAS_TIME;
-const MOST_LAYER_MEMORY: usize = 256 << 20;
+pub(crate) const MOST_LAYER_MEMORY: usize = 256 << 20;
 const ACTION_FUEL: u64 = 4_000_000_000;
 const MOST_ACTION_TIME: Duration = Duration::from_secs(20);
 pub(crate) const KEY_BUFFER: &str = "procraft_key_buffer";
@@ -646,6 +648,8 @@ pub(crate) enum Stop {
     Memory,
     Nonsense,
     Damaged,
+    /// What it was doing was no longer wanted (an import's Cancel): nothing wrong with it.
+    Cancelled,
 }
 
 impl Stop {
@@ -656,6 +660,7 @@ impl Stop {
             Stop::Memory => "Switched off: it asked for too much memory.",
             Stop::Nonsense => "Switched off: it gave an answer that makes no sense.",
             Stop::Damaged => "Can't run: its files don't hold up.",
+            Stop::Cancelled => "Stopped: what it was doing was cancelled.",
         }
     }
 }
@@ -667,6 +672,82 @@ fn stop_of(error: &wasmi::Error) -> Stop {
         (Some(TrapCode::GrowthOperationLimited), _) | (_, ErrorKind::Instantiation(_)) => Stop::Memory,
         _ => Stop::Crashed,
     }
+}
+
+/// The most memory a plugin on `hooks` may ask for.
+fn memory_on(hooks: &[Hook]) -> usize {
+    if hooks.contains(&Hook::Layers) || hooks.contains(&Hook::Brushes) {
+        MOST_LAYER_MEMORY
+    } else if hooks.contains(&Hook::Inbetween) {
+        MOST_BETWEEN_MEMORY
+    } else if hooks.contains(&Hook::StrokeSound) {
+        MOST_SOUND_MEMORY
+    } else if hooks.contains(&Hook::FillMask) {
+        MOST_FILL_MEMORY
+    } else {
+        MOST_MEMORY
+    }
+}
+
+/// What a brush engine's import may take: it goes on a copy of the plugin's code of its own,
+/// started for it with this much memory and let go after, and may spend these steps and take this
+/// long. Drawing never gets more than it always did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImportLimits {
+    pub memory: usize,
+    pub steps: u64,
+    pub time: Duration,
+}
+
+/// The most memory an import may have, whatever the device has: a module's memory is at most 4 GiB,
+/// and one allocation of its at most 2.
+pub(crate) const MOST_IMPORT_MEMORY: usize = 2 << 30;
+
+/// The memory the device can spare, bytes, as the app last told (0: not told).
+static MEMORY_AVAILABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How much memory the device can spare now, bytes: what the app told (Android's), else what the
+/// system says it has free (Linux's); none where it can't be told.
+fn memory_available() -> Option<u64> {
+    let told = MEMORY_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed);
+    if told > 0 {
+        return Some(told);
+    }
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+impl ImportLimits {
+    /// The same, with `memory` bytes of memory at most.
+    pub(crate) const fn memory(self, memory: usize) -> ImportLimits {
+        ImportLimits { memory, ..self }
+    }
+
+    /// What an import may take now: half the memory the device can spare (where it can say; else
+    /// [`MOST_IMPORT_MEMORY`]), between what drawing gets and that most, ten minutes, and the steps
+    /// that fit in them.
+    pub(crate) fn now() -> ImportLimits {
+        let spare = memory_available().map_or(MOST_IMPORT_MEMORY as u64, |bytes| bytes / 2);
+        let memory = usize::try_from(spare).unwrap_or(MOST_IMPORT_MEMORY).clamp(MOST_LAYER_MEMORY, MOST_IMPORT_MEMORY);
+        ImportLimits { memory, steps: IMPORT_FUEL, time: MOST_IMPORT_TIME }
+    }
+}
+
+/// The app tells how much memory the device can spare (Android's `ActivityManager`, its available
+/// memory over its low threshold), bytes, for what a brush engine's import may take.
+#[uniffi::export]
+pub fn set_memory_available(bytes: u64) {
+    MEMORY_AVAILABLE.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What follows a call that may take long: set to stop it (it stops at its next slice of steps),
+/// and told how far into its file the bytes it has had the app's utilities unpack or decode reach.
+#[derive(Clone, Default)]
+pub(crate) struct Following {
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub read: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// `run`, a panic in the interpreter counting as a crash of the plugin: a file must not take the
@@ -873,6 +954,9 @@ fn long_call<P: WasmParams, R: WasmResults>(
             TypedResumableCall::HostTrap(_) => return Err(Stop::Crashed),
             TypedResumableCall::OutOfFuel(paused) => {
                 let need = paused.required_fuel();
+                if store.data().cancelled() {
+                    return Err(Stop::Cancelled);
+                }
                 if need > *left || *left == 0 || Instant::now() >= until {
                     return Err(Stop::TooSlow);
                 }
@@ -987,6 +1071,10 @@ pub(crate) struct Running {
     kept_buffer: Option<TypedFunc<i32, i32>>,
     kept: Option<TypedFunc<i32, ()>>,
     keep: Option<TypedFunc<(), i64>>,
+    /// The steps its last call making or reading brushes took (a file's, a load's).
+    spent: u64,
+    /// Where in its memory the last brush call's input went.
+    brush_at: Option<usize>,
 }
 
 /// Where a key answer's text is and how long, or what it says without one: as it is (none), or
@@ -1018,24 +1106,14 @@ fn presses(text: &[u8]) -> Result<Vec<crate::KeyCombo>, Stop> {
 
 impl Running {
     /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
+    #[cfg(test)]
     pub(crate) fn start_on(
         bytes: &[u8],
         controls: &[f32],
         hooks: &[Hook],
         permissions: &[PluginPermission],
     ) -> Result<Running, Stop> {
-        let most_memory = if hooks.contains(&Hook::Layers) || hooks.contains(&Hook::Brushes) {
-            MOST_LAYER_MEMORY
-        } else if hooks.contains(&Hook::Inbetween) {
-            MOST_BETWEEN_MEMORY
-        } else if hooks.contains(&Hook::StrokeSound) {
-            MOST_SOUND_MEMORY
-        } else if hooks.contains(&Hook::FillMask) {
-            MOST_FILL_MEMORY
-        } else {
-            MOST_MEMORY
-        };
-        Running::start_within(bytes, controls, most_memory, permissions)
+        Running::start_within(bytes, controls, memory_on(hooks), permissions)
     }
 
     /// `bytes` started, under its caps, and told `controls`.
@@ -1044,8 +1122,8 @@ impl Running {
         Running::start_within(bytes, controls, MOST_MEMORY, &[])
     }
 
-    /// How much memory it has come to ask for, bytes.
-    #[cfg(test)]
+    /// How much memory it has come to ask for, bytes: the most it has held (a module's memory never
+    /// gets smaller).
     pub(crate) fn memory_used(&self) -> usize {
         self.memory.as_ref().map_or(0, |memory| memory.data(&self.store).len())
     }
@@ -1257,6 +1335,8 @@ impl Running {
                 kept_buffer,
                 kept,
                 keep,
+                spent: 0,
+                brush_at: None,
             })
         })?;
         for (index, value) in controls.iter().enumerate() {
@@ -1274,7 +1354,20 @@ impl Running {
         permissions: &[PluginPermission],
         kept: Option<&[u8]>,
     ) -> Result<Running, Stop> {
-        let mut running = Running::start_on(bytes, controls, hooks, permissions)?;
+        Running::start_told_within(bytes, controls, hooks, permissions, kept, memory_on(hooks))
+    }
+
+    /// The same, with `most_memory` bytes of memory at most rather than what its hooks give: a copy
+    /// of its code for an import (see [`ImportLimits`]).
+    pub(crate) fn start_told_within(
+        bytes: &[u8],
+        controls: &[f32],
+        hooks: &[Hook],
+        permissions: &[PluginPermission],
+        kept: Option<&[u8]>,
+        most_memory: usize,
+    ) -> Result<Running, Stop> {
+        let mut running = Running::start_within(bytes, controls, most_memory, permissions)?;
         if let Some(kept) = kept {
             running.give_kept(kept)?;
         }
@@ -1522,12 +1615,13 @@ impl Running {
 
     /// `bytes` written where its brush calls take what they are handed: their length.
     fn brush_in(&mut self, bytes: &[u8], left: &mut u64, until: Instant) -> Result<i32, Stop> {
-        let Running { store, brushes, memory, .. } = self;
+        let Running { store, brushes, memory, brush_at, .. } = self;
         let (Some(calls), Some(memory)) = (brushes.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
         let len = i32::try_from(bytes.len()).map_err(|_| Stop::Nonsense)?;
         guarded(|| {
             let at = usize::try_from(long_call(store, &calls.input, len, left, until)?).map_err(|_| Stop::Nonsense)?;
             memory.write(&mut *store, at, bytes).map_err(|_| Stop::Nonsense)?;
+            *brush_at = Some(at);
             Ok(len)
         })
     }
@@ -1551,24 +1645,59 @@ impl Running {
         })
     }
 
-    /// The brushes its engine `engine` makes of a file (`file`, a record of its name and bytes),
-    /// as the record it answers: empty for none.
-    pub(crate) fn brush_import(&mut self, engine: usize, file: &[u8]) -> Result<Vec<u8>, Stop> {
-        let (mut left, until) = (IMPORT_FUEL, Instant::now() + MOST_IMPORT_TIME);
-        let len = self.brush_in(file, &mut left, until)?;
-        let engine = i32::try_from(engine).map_err(|_| Stop::Nonsense)?;
-        let made = {
+    /// The brushes its engine `engine` makes of a file (`file`, a record of its name and bytes, the
+    /// file's own at `span`: where they start in it and how many), as the record it answers: empty
+    /// for none. It may spend `steps` and take `time`; `following` is told how far into the file it
+    /// has had the app's utilities unpack or decode, and stops it when set.
+    pub(crate) fn brush_import(
+        &mut self,
+        engine: usize,
+        file: Vec<u8>,
+        span: (usize, usize),
+        (steps, time): (u64, Duration),
+        following: &Following,
+    ) -> Result<Vec<u8>, Stop> {
+        let (mut left, until) = (steps, Instant::now() + time);
+        let host = self.store.data_mut();
+        (host.cancel, host.read) = (following.cancel.clone(), following.read.clone());
+        let len = self.brush_in(&file, &mut left, until);
+        // its place in the module's memory, for the utilities to tell its bytes by
+        let at = len.as_ref().ok().and_then(|_| self.brush_at.take());
+        self.store.data_mut().file_span = at.map(|at| (at + span.0, span.1));
+        // (what the module has of it is all it needs)
+        drop(file);
+        let made = len.and_then(|len| {
+            let engine = i32::try_from(engine).map_err(|_| Stop::Nonsense)?;
             let Running { store, brushes, .. } = self;
             let Some(calls) = brushes.as_ref() else { return Err(Stop::Damaged) };
-            guarded(|| long_call(store, &calls.import, (engine, len), &mut left, until))?
-        };
-        self.brush_out(made, MOST_MADE, &mut left, until)
+            guarded(|| long_call(store, &calls.import, (engine, len), &mut left, until))
+        });
+        let out = made.and_then(|made| self.brush_out(made, MOST_MADE, &mut left, until));
+        let host = self.store.data_mut();
+        (host.cancel, host.read, host.file_span) = (None, None, None);
+        self.spent = steps - left;
+        out
+    }
+
+    /// The steps its last call making or reading brushes took.
+    pub(crate) fn spent(&self) -> u64 {
+        self.spent
     }
 
     /// How a brush its engine `engine` made (`data`) looks, as the record it answers: none if it
     /// refuses the data.
     pub(crate) fn brush_load(&mut self, engine: usize, data: &[u8]) -> Result<Option<Vec<u8>>, Stop> {
-        let (mut left, until) = (BRUSH_LOAD_FUEL, Instant::now() + MOST_BRUSH_LOAD_TIME);
+        self.brush_load_within(engine, data, (BRUSH_LOAD_FUEL, MOST_BRUSH_LOAD_TIME))
+    }
+
+    /// The same, spending at most `steps` and taking at most `time`.
+    pub(crate) fn brush_load_within(
+        &mut self,
+        engine: usize,
+        data: &[u8],
+        (steps, time): (u64, Duration),
+    ) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (steps, Instant::now() + time);
         let len = self.brush_in(data, &mut left, until)?;
         let engine = i32::try_from(engine).map_err(|_| Stop::Nonsense)?;
         let look = {
@@ -1577,9 +1706,12 @@ impl Running {
             guarded(|| long_call(store, &calls.load, (engine, len), &mut left, until))?
         };
         if look < 0 {
+            self.spent = steps - left;
             return Ok(None);
         }
-        self.brush_out(look, MOST_LOOK, &mut left, until).map(Some)
+        let out = self.brush_out(look, MOST_LOOK, &mut left, until).map(Some);
+        self.spent = steps - left;
+        out
     }
 
     /// A stroke started (`stroke`, a record): its number, or none if its brush must be loaded first.

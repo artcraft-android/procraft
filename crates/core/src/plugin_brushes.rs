@@ -33,7 +33,7 @@ use procraft_gpu::{SecondStroke, StrokeStyle, StrokeTool, TipKind};
 use crate::CanvasSession;
 use crate::hooks::{Hooks, Shared, at_work};
 use crate::plugin_layers::{Record, fields};
-use crate::plugin_run::{DAB_BYTES, Stop};
+use crate::plugin_run::{DAB_BYTES, Following, ImportLimits, Stop};
 
 /// A brush engine a plugin has: its key (`<id>.<key>`), what it is called and the endings of the
 /// names of the brush files it reads.
@@ -603,26 +603,177 @@ pub(crate) fn data_id(data: &[u8]) -> u64 {
     crate::project::pixels_hash(data) ^ (data.len() as u64).rotate_left(17)
 }
 
-/// The brushes the engines on make of a file called `name` (`bytes`): those whose `accepts` has the
-/// ending of its name, or every engine for a name without one.
-pub(crate) fn make_brushes(hooks: &Hooks, name: &str, bytes: &[u8]) -> Vec<MadeBrush> {
-    let ending = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    let mut file = Record::default();
-    file.field(field::FILE_NAME, name.as_bytes()).field(field::FILE_BYTES, bytes);
-    let file = file.bytes();
-    let mut made = Vec::new();
-    for (plugin, running, index, key) in hooks.engines_reading(ending.as_deref()) {
-        let answer = at_work(&running).brush_import(index, &file);
-        match answer {
-            Ok(record) => made.extend(read_made(&record, &key)),
-            Err(stop) => hooks.stopped(&plugin, stop),
+/// Where a brush file's bytes are: in memory, or in its file on the disk, read as they are handed to
+/// an engine.
+#[derive(Clone, Debug)]
+pub enum BrushFileBytes {
+    Memory(Arc<[u8]>),
+    Disk(std::path::PathBuf),
+}
+
+/// The record a file called `name` (`file`) is handed to an engine as: its name and its bytes, and
+/// where its bytes are in it (from, how many); its bytes read straight into it, never held twice.
+/// None if it can't be read, or is over `most` bytes (then the second is true).
+fn file_record(name: &str, file: &BrushFileBytes, most: usize) -> Result<(Vec<u8>, (usize, usize)), bool> {
+    use std::io::Read;
+    let len = match file {
+        BrushFileBytes::Memory(bytes) => bytes.len(),
+        BrushFileBytes::Disk(path) => {
+            usize::try_from(std::fs::metadata(path).map_err(|_| false)?.len()).map_err(|_| true)?
+        }
+    };
+    if len > most || u32::try_from(len).is_err() {
+        return Err(true);
+    }
+    let head = |record: &mut Vec<u8>, id: u16, len: usize| {
+        record.extend_from_slice(&id.to_le_bytes());
+        record.extend_from_slice(&u32::try_from(len).unwrap_or(0).to_le_bytes());
+    };
+    let mut record = Vec::new();
+    record.try_reserve_exact(12 + name.len() + len).map_err(|_| true)?;
+    head(&mut record, field::FILE_NAME, name.len());
+    record.extend_from_slice(name.as_bytes());
+    head(&mut record, field::FILE_BYTES, len);
+    let from = record.len();
+    match file {
+        BrushFileBytes::Memory(bytes) => record.extend_from_slice(bytes),
+        BrushFileBytes::Disk(path) => {
+            let mut f = std::fs::File::open(path).map_err(|_| false)?;
+            f.read_to_end(&mut record).map_err(|_| false)?;
         }
     }
-    made
+    if record.len() != from + len {
+        return Err(false);
+    }
+    Ok((record, (from, len)))
+}
+
+/// What making a brush's look may take: an import's memory, and less time than a file's (a look
+/// is made as the brush is first drawn).
+const LOOK_LIMITS: ImportLimits = ImportLimits {
+    memory: crate::plugin_run::MOST_IMPORT_MEMORY,
+    steps: 40_000_000_000,
+    time: std::time::Duration::from_secs(120),
+};
+
+/// Why an engine couldn't make its brushes of a file: too big for what an import may have on this
+/// device, too long, it crashed or answered nonsense, or the import was cancelled. The plugin stays
+/// on whichever: the file's brushes come in as the app read them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImportTrouble {
+    TooBig,
+    TooSlow,
+    Failed,
+    Cancelled,
+}
+
+impl ImportTrouble {
+    fn of(stop: Stop) -> ImportTrouble {
+        match stop {
+            Stop::Memory => ImportTrouble::TooBig,
+            Stop::TooSlow => ImportTrouble::TooSlow,
+            Stop::Cancelled => ImportTrouble::Cancelled,
+            Stop::Crashed | Stop::Nonsense | Stop::Damaged => ImportTrouble::Failed,
+        }
+    }
+}
+
+/// What the engines on made of a brush file: the brushes; if one couldn't, its label and why;
+/// whether the file is a pack of brushes (a zip) rather than one; and the most memory an import's
+/// copy of a plugin's code came to (bytes).
+#[derive(Debug, Default)]
+pub(crate) struct EnginesMade {
+    pub made: Vec<MadeBrush>,
+    pub trouble: Option<(String, ImportTrouble)>,
+    pub pack: bool,
+    pub memory: usize,
+}
+
+/// The brushes the engines on make of a file called `name` (`bytes`): those whose `accepts` has the
+/// ending of its name, or every engine for a name without one.
+#[cfg(test)]
+pub(crate) fn make_brushes(hooks: &Hooks, name: &str, bytes: &[u8]) -> Vec<MadeBrush> {
+    let file = BrushFileBytes::Memory(bytes.into());
+    let made = make_brushes_following(hooks, name, &file, &Following::default(), ImportLimits::now());
+    made.map(|m| m.made).unwrap_or_default()
+}
+
+/// What the engines on make of a file called `name` (`file`), as [`make_brushes`] says; none if no
+/// engine on reads it. `following` stops it and is told how far it has come.
+///
+/// Each engine gets the file on a copy of its plugin's code of its own, started with `limits`'s
+/// memory and let go after, and may spend its steps and take its time: what drawing may have is
+/// far less. A file that is too much for that (too big for the memory, too long) or that the
+/// engine fails on comes in as the app read it, and the plugin stays on: the trouble is told, not
+/// held against it.
+pub(crate) fn make_brushes_following(
+    hooks: &Hooks,
+    name: &str,
+    file: &BrushFileBytes,
+    following: &Following,
+    limits: ImportLimits,
+) -> Option<EnginesMade> {
+    let ending = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    let engines = hooks.engines_reading(ending.as_deref());
+    if engines.is_empty() {
+        return None;
+    }
+    let cancelled = || following.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+    let mut out = EnginesMade::default();
+    for (plugin, running, index, key) in engines {
+        let label = hooks.engine_label(&key).unwrap_or_default();
+        if cancelled() {
+            out.trouble = Some((label, ImportTrouble::Cancelled));
+            break;
+        }
+        let (record, span) = match file_record(name, file, limits.memory) {
+            Ok(record) => record,
+            Err(too_big) => {
+                log::warn!("{name} couldn't be handed to {key} (too big: {too_big})");
+                let why = if too_big { ImportTrouble::TooBig } else { ImportTrouble::Failed };
+                out.trouble = Some((label, why));
+                continue;
+            }
+        };
+        out.pack |= record.get(span.0..span.0 + 4) == Some(&b"PK\x03\x04"[..]);
+        let started = std::time::Instant::now();
+        let answer = match hooks.copier(&plugin) {
+            Some(copy) => copy(limits.memory).and_then(|mut copied| {
+                let answer = copied.brush_import(index, record, span, (limits.steps, limits.time), following);
+                out.memory = out.memory.max(copied.memory_used());
+                log::info!(
+                    "{key} had {name}: {} steps in {:?}, its memory at most {} MB",
+                    copied.spent(),
+                    started.elapsed(),
+                    copied.memory_used() >> 20
+                );
+                answer
+            }),
+            // (code put on its hooks alone, as tests do: on that code, which stops if it fails)
+            None => {
+                let answer =
+                    at_work(&running).brush_import(index, record, span, (limits.steps, limits.time), following);
+                if let Err(stop) = answer
+                    && stop != Stop::Cancelled
+                {
+                    hooks.stopped(&plugin, stop);
+                }
+                answer
+            }
+        };
+        match answer {
+            Ok(answer) => out.made.extend(read_made(&answer, &key)),
+            Err(stop) => {
+                log::warn!("{key} couldn't make brushes of {name}: {stop:?}");
+                out.trouble = Some((label, ImportTrouble::of(stop)));
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The brushes in the record an engine `key` answered an import with.
-fn read_made(record: &[u8], key: &str) -> Vec<MadeBrush> {
+pub(crate) fn read_made(record: &[u8], key: &str) -> Vec<MadeBrush> {
     let mut made = Vec::new();
     for (f, value) in fields(record) {
         if f != field::MADE {
@@ -696,14 +847,23 @@ pub(crate) struct Starting {
 }
 
 /// The look of `brush` drawn by its engine, if that is on (asked of it once for its data, then
-/// kept, in memory and on the disk), and the id it goes by. One that stops goes off, and the brush
-/// draws as the app read it.
+/// kept, in memory and on the disk), and the id it goes by. A look that can't be had (too much for
+/// its call, or one the app can't take) isn't asked for again, and the brush draws as the app read
+/// it.
+///
+/// Making a brush's look decodes every picture it uses, once for good (the app keeps it): the last
+/// of bringing the brush in. So it goes as an import does, on a copy of the plugin's code with an
+/// import's limits (see [`ImportLimits`]), and one too much even for those leaves the plugin on.
+/// Its strokes go on the plugin's own code, with what drawing always had.
 pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u64)> {
     let outside = brush.engine.as_ref()?;
     let (plugin, running, index) = hooks.engine(&outside.engine)?;
     let id = data_id(&outside.data);
     if let Some(look) = hooks.look_kept(&outside.engine, id) {
         return Some((look, id));
+    }
+    if hooks.has_no_look(&outside.engine, id) {
+        return None;
     }
     // kept on the disk by an earlier start (one that doesn't hold up is asked for again)
     let kept = hooks.look_on_disk(&plugin, &outside.engine, id).and_then(|bytes| look_kept_as(&bytes, id));
@@ -712,9 +872,29 @@ pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u
         hooks.keep_look(&outside.engine, id, Arc::clone(&look));
         return Some((look, id));
     }
-    let answer = at_work(&running).brush_load(index, &load_record(id, &outside.data, false));
+    let load = load_record(id, &outside.data, false);
+    let answer = match hooks.copier(&plugin) {
+        Some(copy) => {
+            let limits = LOOK_LIMITS.memory(ImportLimits::now().memory);
+            let answer = copy(limits.memory)
+                .and_then(|mut copied| copied.brush_load_within(index, &load, (limits.steps, limits.time)));
+            if let Err(stop) = answer {
+                log::warn!("{} couldn't make the look of {}: {stop:?}", outside.engine, brush.name);
+                hooks.no_look(&outside.engine, id);
+                return None;
+            }
+            answer
+        }
+        // (code put on its hooks alone, as tests do: on that code, which stops if it fails)
+        None => at_work(&running).brush_load(index, &load),
+    };
     let record = match answer {
-        Ok(record) => record?,
+        Ok(Some(record)) => record,
+        // (refused)
+        Ok(None) => {
+            hooks.no_look(&outside.engine, id);
+            return None;
+        }
         Err(stop) => {
             hooks.stopped(&plugin, stop);
             return None;
@@ -722,6 +902,7 @@ pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u
     };
     let Some(look) = read_look(&record, id) else {
         log::warn!("a brush engine's look of {} doesn't hold up", brush.name);
+        hooks.no_look(&outside.engine, id);
         return None;
     };
     hooks.keep_look_on_disk(&plugin, &outside.engine, id, &kept_look(&look));
@@ -1444,6 +1625,7 @@ impl CanvasSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn tip(w: u32, h: u32) -> Vec<u8> {
         let mut t = Record::default();
@@ -1576,7 +1758,7 @@ mod tests {
         s.use_plugins(Arc::clone(&plugins));
         // read off the interface's thread, the engine making its brushes there too, then added
         let read = crate::read_brushes(square_preset(), Some("Squares.kpp".to_owned())).unwrap();
-        s.make_engine_brushes(Arc::clone(&read));
+        s.make_engine_brushes(Arc::clone(&read), None);
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), "made by the engine too");
         assert!(s.select_brush(set, 0));
@@ -1631,7 +1813,7 @@ mod tests {
             Some("Eraser.kpp".to_owned()),
         )
         .unwrap();
-        s.make_engine_brushes(Arc::clone(&read));
+        s.make_engine_brushes(Arc::clone(&read), None);
         let erasers = s.add_brushes_read(read, 0).unwrap();
         let preview = s.brush_preview(erasers, 0, 400, 120).expect("an eraser's preview");
         assert!(preview.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "an eraser's preview draws");
@@ -1784,7 +1966,7 @@ mod tests {
         zip.add("paintoppresets/Wet_Drag.myb", brush(1.0).as_bytes());
         zip.add("paintoppresets/Plain_Ink.myb", brush(0.0).as_bytes());
         let read = crate::read_brushes(zip.finish(), Some("Drag.bundle".to_owned())).unwrap();
-        s.make_engine_brushes(Arc::clone(&read));
+        s.make_engine_brushes(Arc::clone(&read), None);
         let set = s.add_brushes_read(read, 0).expect("the engine's brushes come in");
         (s, plugins, id, set, dir)
     }
@@ -2362,7 +2544,7 @@ mod tests {
             kpp.extend(chunk(b"IEND", &[]));
             let read = crate::read_brushes(kpp, Some("Bar.kpp".to_owned())).unwrap();
             if engine {
-                s.make_engine_brushes(Arc::clone(&read));
+                s.make_engine_brushes(Arc::clone(&read), None);
             }
             let set = s.add_brushes_read(read, 0).unwrap();
             assert_eq!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), engine);
@@ -2411,6 +2593,428 @@ mod tests {
                 let (on, off) = (alpha(&rgba, notch.0, notch.1), alpha(&rgba, mirrored.0, mirrored.1));
                 assert!(on > 200 && off < 20, "{way}, {degrees}°: the notch {on} at {notch:?}, {off} mirrored");
             }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine's module: `import` and `load` the bodies of its import and load (a made brush called
+    /// N is at 512, a look of one tip a pixel big at 600, what it is handed at 1024: its file's name,
+    /// then its bytes).
+    fn engine_module(import: &str, load: &str) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(module
+            (import "procraft" "inflate" (func $inflate (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 2)
+            (global $out (mut i32) (i32.const 512))
+            (data (i32.const 512) "\01\00\0e\00\00\00\01\00\01\00\00\00N\02\00\01\00\00\00d")
+            (data (i32.const 600) "\01\00\1b\00\00\00\01\00\04\00\00\00\01\00\00\00\02\00\04\00\00\00\01\00\00\00\03\00\01\00\00\00\ff")
+            (func (export "procraft_brush_in") (param i32) (result i32) (i32.const 1024))
+            (func (export "procraft_brush_out") (result i32) (global.get $out))
+            (func (export "procraft_brush_import") (param i32 i32) (result i32) (global.set $out (i32.const 512)) {import})
+            (func (export "procraft_brush_load") (param i32 i32) (result i32) (global.set $out (i32.const 600)) {load})
+            (func (export "procraft_brush_begin") (param i32) (result i32) (i32.const -1))
+            (func (export "procraft_brush_add") (param i32 i32) (result i32) (i32.const 0))
+            (func (export "procraft_brush_end") (param i32) (result i32) (i32.const 0)))"#
+        ))
+        .unwrap()
+    }
+
+    /// Makes the brush N.
+    const MAKES: &str = "(i32.const 20)";
+    /// Asks for 300 MB more memory (drawing may have 256 at most), then makes N.
+    const GROWS: &str = "(drop (memory.grow (i32.const 4800))) (i32.const 20)";
+    /// Never ends.
+    const LOOPS: &str = "(loop $l (br $l)) (i32.const 0)";
+    /// Has the app unpack the whole of its file, then never ends.
+    const READS_THEN_LOOPS: &str = "(drop (call $inflate
+            (i32.add (i32.const 1036) (i32.load (i32.const 1026)))
+            (i32.load (i32.add (i32.const 1032) (i32.load (i32.const 1026))))
+            (i32.const 0)))
+        (loop $l (br $l)) (i32.const 0)";
+
+    const PENS: &str = "org.example.pens";
+    const PENS_KEY: &str = "org.example.pens.pens";
+
+    /// Hooks with an engine of [`engine_module`] on, called Pens and reading `.pens` files, and how a
+    /// copy of its code starts.
+    fn pens_on(import: &str, load: &str) -> Arc<Hooks> {
+        use crate::plugin_run::{Hook, Running};
+        let bytes = engine_module(import, load);
+        let hooks = Arc::new(Hooks::default());
+        hooks.put_on(PENS.to_owned(), Running::start_on(&bytes, &[], &[Hook::Brushes], &[]).unwrap(), &[Hook::Brushes]);
+        let engine = BrushEngine {
+            key: PENS_KEY.to_owned(),
+            label: "Pens".to_owned(),
+            accepts: vec!["pens".to_owned()],
+            studio: None,
+        };
+        hooks.brush_engines(PENS, vec![engine]);
+        hooks.give_copier(
+            PENS,
+            Arc::new(move |memory| Running::start_told_within(&bytes, &[], &[Hook::Brushes], &[], None, memory)),
+        );
+        hooks
+    }
+
+    fn limits(memory: usize, time: std::time::Duration) -> ImportLimits {
+        ImportLimits { memory, steps: crate::plugin_run::IMPORT_FUEL, time }
+    }
+
+    /// The app read two brushes of a `.pens` file holding `bytes`: N and Other.
+    fn pens_read(bytes: &[u8]) -> crate::ReadBrushes {
+        let named = |name: &str| Brush { name: name.to_owned(), ..Brush::round_pen() };
+        crate::ReadBrushes::Set {
+            name: "Pens".to_owned(),
+            brushes: vec![named("N"), named("Other")],
+            file: Some(("Pens.pens".to_owned(), BrushFileBytes::Memory(bytes.into()))),
+        }
+    }
+
+    /// `pens_read(bytes)` through the engines on `hooks` within `limits`: the brushes, and what the
+    /// reading says after (its title, if any, then a new line, then its text).
+    fn pens_made(
+        hooks: &Arc<Hooks>,
+        bytes: &[u8],
+        reading: &crate::BrushFileReading,
+        limits: ImportLimits,
+    ) -> (Vec<Brush>, String) {
+        let engines = crate::brush_files::BrushEngines::of(Some(Arc::clone(hooks)));
+        let crate::ReadBrushes::Set { brushes, file, .. } = engines.make_within(pens_read(bytes), reading, limits)
+        else {
+            panic!()
+        };
+        assert!(file.is_none());
+        let titled = reading.notice_title().map(|t| format!("{t}\n")).unwrap_or_default();
+        (brushes, titled + &reading.notice().unwrap_or_default())
+    }
+
+    /// An import goes on a copy of the plugin's code with an import's memory, many times what
+    /// drawing has: what its load can't ask for, its import can; and the plugin's own code is never
+    /// touched by it. What came in is told, the brushes the app's own reading draws counted.
+    #[test]
+    fn an_import_has_more_memory_than_drawing_on_a_copy_of_its_own() {
+        let hooks = pens_on(GROWS, &GROWS.replace("(i32.const 20)", "(i32.const -1)"));
+        let reading = crate::BrushFileReading::default();
+        let (brushes, notice) = pens_made(&hooks, b"pens", &reading, limits(512 << 20, Duration::from_secs(60)));
+        assert!(brushes[0].engine.is_some() && brushes[1].engine.is_none());
+        assert_eq!(notice, "2 brushes imported, 1 drawn by the built-in reader.");
+        let (_, running, index) = hooks.engine(PENS_KEY).unwrap();
+        let mut running = at_work(&running);
+        assert_eq!((running.spent(), running.memory_used()), (0, 2 << 16), "the import went on a copy");
+        // a load (drawing) asking the same is refused: it has what it always had
+        assert_eq!(running.brush_load(index, b"d"), Err(Stop::Memory));
+    }
+
+    /// An import too big for the memory an import has on this device, a file bigger than that, an
+    /// import taking too long, and one the engine crashes on each come in as the app read them, the
+    /// plugin still on, and say so.
+    #[test]
+    fn an_import_too_much_for_its_limits_comes_in_as_read_and_says_so() {
+        let said = |import: &str, bytes: &[u8], limits: ImportLimits| {
+            let hooks = pens_on(import, MAKES);
+            let (brushes, notice) = pens_made(&hooks, bytes, &crate::BrushFileReading::default(), limits);
+            assert!(brushes.iter().all(|b| b.engine.is_none()), "as the app read them");
+            assert_eq!(brushes.len(), 2);
+            assert!(hooks.engine(PENS_KEY).is_some(), "still on");
+            notice
+        };
+        let minute = Duration::from_secs(60);
+        let too_big = said(GROWS, b"pens", limits(64 << 20, minute));
+        assert_eq!(
+            too_big,
+            "File too big for Pens\nThis file is too big for Pens on this device. Its brushes came in with the built-in reader instead, so they may look a little different. Pens is still on."
+        );
+        assert_eq!(said(MAKES, &[7; 4096], limits(1000, minute)), too_big, "a file over the memory isn't handed over");
+        let t = std::time::Instant::now();
+        let too_long = said(LOOPS, b"pens", limits(512 << 20, Duration::from_millis(200)));
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        assert!(
+            too_long.starts_with("Pens took too long\nPens took too long with this file. Its brushes came in"),
+            "{too_long}"
+        );
+        let crashed = said("unreachable", b"pens", limits(512 << 20, minute));
+        assert!(
+            crashed.starts_with("Pens couldn't read this file\nPens couldn't read this file.")
+                && crashed.ends_with("Pens is still on.")
+        );
+        // a pack: a zip
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("a.kpp", b"a");
+        assert!(
+            said(GROWS, &zip.finish(), limits(64 << 20, minute))
+                .starts_with("Pack too big for Pens\nThis pack is too big for Pens")
+        );
+    }
+
+    /// While an import runs, its progress is how far into its file it has had the app unpack; Cancel
+    /// stops it at once, whatever it is doing, and says so; the plugin stays on.
+    #[test]
+    fn an_import_shows_how_far_it_has_read_and_cancel_stops_it() {
+        let hooks = pens_on(READS_THEN_LOOPS, MAKES);
+        let reading = Arc::new(crate::BrushFileReading::default());
+        let watcher = {
+            let reading = Arc::clone(&reading);
+            std::thread::spawn(move || {
+                let until = std::time::Instant::now() + Duration::from_secs(30);
+                let mut seen = Vec::new();
+                while std::time::Instant::now() < until {
+                    let shown = (reading.engine_size(), reading.engine_progress());
+                    if seen.last() != Some(&shown) {
+                        seen.push(shown);
+                    }
+                    if shown.1 >= 1.0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                reading.cancel();
+                (seen, std::time::Instant::now())
+            })
+        };
+        let file = vec![3_u8; 3000];
+        let (brushes, notice) = pens_made(&hooks, &file, &reading, limits(512 << 20, Duration::from_secs(120)));
+        let ended = std::time::Instant::now();
+        let (seen, cancelled) = watcher.join().unwrap();
+        assert!(seen.iter().any(|&(size, progress)| size == 3000 && progress >= 1.0), "{seen:?}");
+        assert!(ended.duration_since(cancelled) < Duration::from_secs(5), "stopped at once");
+        assert_eq!(notice, crate::brush_files::IMPORT_CANCELLED);
+        assert_eq!(brushes.iter().filter(|b| b.engine.is_some()).count(), 0);
+        assert!(hooks.engine(PENS_KEY).is_some(), "still on");
+        assert_eq!((reading.engine_size(), reading.engine_progress()), (0, 0.0), "none at it after");
+    }
+
+    /// A brush's look is made as an import's work is, on a copy of the plugin's code with an import's
+    /// memory: a look drawing has no room for comes. One the engine can't make is asked for once,
+    /// the plugin staying on, and so is one the app can't take.
+    #[test]
+    fn a_look_is_made_with_an_import_s_limits_and_one_it_cant_have_is_asked_once() {
+        let brush = Brush {
+            engine: Some(OutsideBrush { engine: PENS_KEY.to_owned(), data: Arc::from(&b"d"[..]) }),
+            ..Brush::round_pen()
+        };
+        let id = data_id(b"d");
+        let hooks = pens_on(MAKES, "(drop (memory.grow (i32.const 4800))) (i32.const 33)");
+        let (look, _) = look_of(&hooks, &brush).expect("made on a copy");
+        assert_eq!(look.tips.layers.len(), 1);
+        let (_, running, _) = hooks.engine(PENS_KEY).unwrap();
+        assert_eq!(at_work(&running).memory_used(), 2 << 16, "not on the plugin's own code");
+        for load in ["unreachable", "(i32.const -1)", "(i32.const 6)"] {
+            let hooks = pens_on(MAKES, load);
+            assert!(look_of(&hooks, &brush).is_none(), "{load}");
+            assert!(hooks.has_no_look(PENS_KEY, id), "{load}: not asked again");
+            assert!(look_of(&hooks, &brush).is_none());
+            assert!(hooks.engine(PENS_KEY).is_some(), "{load}: still on");
+        }
+    }
+
+    /// A GIMP brush `w` x `h` in colour, all `v`.
+    fn colour_gbr(w: u32, h: u32, v: u8) -> Vec<u8> {
+        let mut b = Vec::new();
+        for x in [28 + 2, 2, w, h, 4] {
+            b.extend_from_slice(&u32::to_be_bytes(x));
+        }
+        b.extend_from_slice(b"GIMP");
+        b.extend_from_slice(&25_u32.to_be_bytes());
+        b.extend_from_slice(b"t\0");
+        b.resize(b.len() + (w * h * 4) as usize, v);
+        b
+    }
+
+    /// A bundle far too big for what drawing may have comes in through the Krita plugin with an
+    /// import's: 24 presets, each with a tip of its own of 12 MB, 300 MB unpacked. The plugin's own
+    /// code couldn't take it; the import does, every preset made, and the plugin stays on.
+    #[test]
+    fn a_bundle_too_big_for_drawing_s_limits_comes_in_with_an_import_s() {
+        let dir = std::env::temp_dir().join(format!("procraft-big-bundle-{}", std::process::id()));
+        let (_plugins, hooks, plugin, index, key) = krita_on(&dir);
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        for i in 0..24 {
+            let tip = format!(r#"<Brush type="gbr_brush" filename="tip{i}.gbr" spacing="0.5" scale="1"/>"#);
+            let preset = preset_named(&format!("Big {i}"), &tip);
+            zip.add(&format!("paintoppresets/Big {i}.kpp"), &preset);
+            zip.add(&format!("brushes/tip{i}.gbr"), &colour_gbr(1536, 2048, i as u8));
+        }
+        let bytes: Arc<[u8]> = zip.finish().into();
+        let file = BrushFileBytes::Memory(Arc::clone(&bytes));
+        // drawing's limits: the plugin's own code runs out of memory on it (and would go off)
+        let (record, span) = file_record("Big.bundle", &file, usize::MAX).unwrap();
+        let mut own = hooks.copier(&plugin).unwrap()(crate::plugin_run::MOST_LAYER_MEMORY).unwrap();
+        let following = Following::default();
+        let answer = own.brush_import(
+            index,
+            record,
+            span,
+            (crate::plugin_run::IMPORT_FUEL, Duration::from_secs(120)),
+            &following,
+        );
+        assert_eq!(answer.map(|a| a.len()), Err(Stop::Memory));
+        // an import's
+        let t = std::time::Instant::now();
+        let made =
+            make_brushes_following(&hooks, "Big.bundle", &file, &following, limits(1 << 30, Duration::from_secs(300)))
+                .unwrap();
+        println!(
+            "24 presets, 300 MB unpacked, made in {:?}, the copy's memory at most {} MB",
+            t.elapsed(),
+            made.memory >> 20
+        );
+        assert_eq!((made.made.len(), made.trouble), (24, None));
+        assert!(made.memory > crate::plugin_run::MOST_LAYER_MEMORY, "more than drawing may have");
+        assert!(made.made.iter().all(|m| m.data.len() > 12 << 20), "each with its tip");
+        assert!(hooks.engine(&key).is_some(), "still on");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Krita preset called `name` whose tip is `brush` (a `Brush` element): a PNG with only its
+    /// settings in it.
+    fn preset_named(name: &str, brush: &str) -> Vec<u8> {
+        let xml = format!(
+            r#"<Preset name="{name}" paintopid="paintbrush"><param name="brush_definition" type="string"><![CDATA[{brush}]]></param></Preset>"#
+        );
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend_from_slice(kind);
+            c.extend_from_slice(data);
+            c.extend_from_slice(&[0; 4]);
+            c
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut header = Vec::new();
+        for v in [1_u32, 1] {
+            header.extend_from_slice(&v.to_be_bytes());
+        }
+        header.extend_from_slice(&[8, 0, 0, 0, 0]);
+        png.extend(chunk(b"IHDR", &header));
+        let mut text = b"preset\0".to_vec();
+        text.extend_from_slice(xml.as_bytes());
+        png.extend(chunk(b"tEXt", &text));
+        png.extend(chunk(b"IEND", &[]));
+        png
+    }
+
+    /// The Krita plugin (the one the app comes with, or the one at `KRITA_PLUGIN`) installed and on
+    /// in a store of its own at `dir`: the plugins, their hooks, and the engine's plugin, place and
+    /// key.
+    fn krita_on(dir: &std::path::Path) -> (Arc<crate::Plugins>, Arc<Hooks>, String, usize, String) {
+        let packed = match std::env::var("KRITA_PLUGIN") {
+            Ok(path) => std::fs::read(path).unwrap(),
+            Err(_) => crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "krita-brushes").unwrap().1.to_vec(),
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        assert_eq!(plugins.install(packed), None);
+        let id = plugins.plugins().into_iter().find(|p| p.name == "Krita brushes").unwrap().id;
+        assert!(plugins.set_on(id, true));
+        let hooks = plugins.hooks();
+        let (plugin, _, index, key) = hooks.engines_reading(Some("bundle")).into_iter().next().unwrap();
+        (plugins, hooks, plugin, index, key)
+    }
+
+    fn megabytes(bytes: usize) -> f64 {
+        bytes as f64 / f64::from(1 << 20)
+    }
+
+    /// A real Krita bundle through the Krita plugin, with numbers: as drawing's limits would take it,
+    /// then with an import's; each brush made then read for its look on the plugin's own code, as
+    /// the library's previews read it (`KRITA_FILE=x.bundle [KRITA_PLUGIN=x.procraft-plugin] cargo
+    /// test -p procraft-core krita_bundle_calls -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn krita_bundle_calls() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("KRITA_FILE") else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-krita-calls-{}", std::process::id()));
+        let (_plugins, hooks, plugin, index, key) = krita_on(&dir);
+        let copy = hooks.copier(&plugin).unwrap();
+        let file = BrushFileBytes::Disk(path.clone().into());
+        let following = Following::default();
+        for (what, memory) in
+            [("drawing's", crate::plugin_run::MOST_LAYER_MEMORY), ("an import's", ImportLimits::now().memory)]
+        {
+            let (record, span) = file_record(&path, &file, usize::MAX).unwrap();
+            let mut copied = copy(memory).unwrap();
+            let t = Instant::now();
+            let steps = (crate::plugin_run::IMPORT_FUEL, crate::plugin_run::MOST_IMPORT_TIME);
+            let answer = copied.brush_import(index, record, span, steps, &following);
+            println!(
+                "with {what} memory ({:.0} MB): {:?} in {:.1?}, {} M steps, memory at most {:.0} MB",
+                megabytes(memory),
+                answer.map(|a| read_made(&a, &key).len()),
+                t.elapsed(),
+                copied.spent() / 1_000_000,
+                megabytes(copied.memory_used())
+            );
+        }
+        let t = Instant::now();
+        let made = make_brushes_following(&hooks, &path, &file, &following, ImportLimits::now()).unwrap();
+        let data: usize = made.made.iter().map(|m| m.data.len()).sum();
+        println!(
+            "made {} in {:.1?} ({:?}), the copy's memory at most {:.0} MB, the brushes' data {:.0} MB",
+            made.made.len(),
+            t.elapsed(),
+            made.trouble,
+            megabytes(made.memory),
+            megabytes(data)
+        );
+        let mut brushes = Vec::new();
+        join_made(&mut brushes, made.made);
+        let (_, running, _) = hooks.engine(&key).unwrap();
+        for brush in &brushes {
+            let t = Instant::now();
+            let look = look_of(&hooks, brush);
+            let took = t.elapsed();
+            let r = at_work(&running);
+            println!(
+                "  look of {}: {} in {took:.1?}, {} M steps, the plugin's memory {:.0} MB",
+                brush.name,
+                look.is_some(),
+                r.spent() / 1_000_000,
+                megabytes(r.memory_used())
+            );
+        }
+        println!("the plugin still on: {}", hooks.engine(&key).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Big real Krita bundles (`KRITA_BIG_PACKS`, their paths with `;` between: they are never kept
+    /// here, and without it this passes over), read as the app reads a file the user picks: every
+    /// preset comes in through the plugin, the plugin staying on, and stays on as the looks of its
+    /// brushes are made.
+    #[test]
+    fn big_krita_bundles_come_in_through_the_plugin() {
+        use std::time::Instant;
+        let Ok(paths) = std::env::var("KRITA_BIG_PACKS") else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-krita-big-{}", std::process::id()));
+        let (_plugins, hooks, _, _, key) = krita_on(&dir);
+        let engines = crate::brush_files::BrushEngines::of(Some(Arc::clone(&hooks)));
+        for path in paths.split(';').filter(|p| !p.trim().is_empty()) {
+            let path = std::path::Path::new(path.trim());
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let presets = procraft_engine::zip::ZipReader::open(path)
+                .unwrap()
+                .names()
+                .filter(|n| n.starts_with("paintoppresets/") && n.ends_with(".kpp"))
+                .count();
+            let reading = crate::BrushFileReading::default();
+            let t = Instant::now();
+            let read = crate::read_brushes_from(path, Some(name.clone()), &reading).unwrap();
+            let read_in = t.elapsed();
+            let t = Instant::now();
+            let crate::ReadBrushes::Set { brushes, .. } = engines.make_following(read, &reading) else { panic!() };
+            let notice = reading.notice().unwrap_or_default();
+            println!("{name}: read by the app in {read_in:.1?}, by the plugin in {:.1?}: {notice}", t.elapsed());
+            assert_eq!(
+                brushes.iter().filter(|b| b.engine.is_some()).count(),
+                presets,
+                "every preset through the plugin"
+            );
+            assert_eq!(notice, format!("{presets} brushes imported."));
+            assert!(hooks.engine(&key).is_some(), "the plugin stays on");
+            // each brush's look, as the library's previews ask for them
+            let t = Instant::now();
+            let looks = brushes.iter().filter(|b| b.engine.is_some() && look_of(&hooks, b).is_some()).count();
+            println!("  {looks} of {presets} looks made in {:.1?} (the rest drawn as the app read them)", t.elapsed());
+            assert!(hooks.engine(&key).is_some(), "the plugin stays on as its brushes are drawn");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

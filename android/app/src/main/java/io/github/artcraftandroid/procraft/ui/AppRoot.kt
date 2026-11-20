@@ -332,6 +332,7 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             ModelPicture(vm)
             BlockedDialog(vm)
             ModelWarningsAlert(vm)
+            ImportTroubleAlert(vm)
             SharedLayerAlert(vm)
             PluginOfferAlert(vm)
             // a fill a plugin is finishing, or a dropped colour's being made: nothing is touched until
@@ -518,6 +519,24 @@ internal fun ModelWarningsAlert(vm: CanvasViewModel) {
         action = "OK",
         onCancel = { vm.modelWarnings = emptyList() },
         onAction = { vm.modelWarnings = emptyList() },
+        destructive = false,
+        alone = true,
+    )
+}
+
+/**
+ * What a plugin's brush engine couldn't do with a brush file (too big for it on this device, too
+ * long, unreadable): its brushes came in with the built-in reader, and the plugin is still on.
+ */
+@Composable
+internal fun ImportTroubleAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.importTrouble,
+        title = { it.first },
+        message = { it.second },
+        action = "OK",
+        onCancel = { vm.importTrouble = null },
+        onAction = { vm.importTrouble = null },
         destructive = false,
         alone = true,
     )

@@ -868,12 +868,31 @@ impl Plugins {
                 self.hooks.brush_keys(&plugin.id, plugin.brush_controls.iter().map(|c| c.key.clone()).collect());
                 // the kinds of layer it adds, for the sessions' layers of them to go through it
                 self.hooks.layer_kinds(&plugin.id, plugin.layer_kinds.clone());
-                // its brush engines, for brush files and the brushes made of them
+                // its brush engines, for brush files and the brushes made of them, and how a copy of
+                // its code of its own starts for their imports
                 if hooks.contains(&Hook::Brushes)
                     && let Some(store) = store
                 {
                     let engines = plugin_file::read_brush_engines(store, &plugin.id, &plugin.version);
                     self.hooks.brush_engines(&plugin.id, engines);
+                    if let Some((_, bytes)) = plugin_file::read_code(store, &plugin.id, &plugin.version) {
+                        let kept = plugin_file::read_kept(store, &plugin.id);
+                        let (id, values, permissions, on) =
+                            (plugin.id.clone(), values.clone(), plugin.permissions.clone(), hooks.clone());
+                        let copier: crate::hooks::Copier = Arc::new(move |memory| {
+                            let mut running = Running::start_told_within(
+                                &bytes,
+                                &values,
+                                &on,
+                                &permissions,
+                                kept.as_deref(),
+                                memory,
+                            )?;
+                            running.own(&id);
+                            Ok(running)
+                        });
+                        self.hooks.give_copier(&plugin.id, copier);
+                    }
                 }
                 // a picker's picture, for the sessions to draw
                 if hooks.contains(&Hook::Picker)

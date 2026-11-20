@@ -1772,11 +1772,20 @@ impl Interface {
         let added = self.library.added(session, self.studio.open);
         // brushes from a file are on disk once they show in the library, not later on a thread
         // of its own: the app stopping right after (closed, or crashing) still has them
-        if added.iter().any(|&(any, _)| any) {
+        if added.iter().any(|a| a.any) {
             crate::files::keep_brushes(session);
         }
-        for (any, tell) in added {
-            if tell {
+        for crate::library::Added { any, tell, notices } in added {
+            // what a plugin's brush engine said (what came in, or what it couldn't do, with an OK),
+            // in place of the app's own word
+            if !notices.is_empty() {
+                for (title, text) in notices {
+                    match title {
+                        Some(title) => self.plugin_alert.tell(&title, &text, None),
+                        None => self.overlays.notice(text, false),
+                    }
+                }
+            } else if tell {
                 let said = if any { "Brushes added to the library." } else { "This file has no brushes in it." };
                 self.overlays.notice(said, false);
             } else if !any {

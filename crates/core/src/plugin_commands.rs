@@ -80,11 +80,43 @@ pub(crate) struct Host {
     pub(crate) owner: String,
     /// What the last utility made, until the plugin reads it.
     pub(crate) answer: Vec<u8>,
+    /// While it makes brushes of a file: set when that is no longer wanted (a long call stops at
+    /// its next slice of steps); where the file is in its memory (start, length), and how far into
+    /// it the bytes it has handed the utilities reach.
+    pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) file_span: Option<(usize, usize)>,
+    pub(crate) read: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Host {
     pub(crate) fn new(limits: StoreLimits) -> Host {
-        Host { limits, session: None, panel: None, close_panel: false, owner: String::new(), answer: Vec::new() }
+        Host {
+            limits,
+            session: None,
+            panel: None,
+            close_panel: false,
+            owner: String::new(),
+            answer: Vec::new(),
+            cancel: None,
+            file_span: None,
+            read: None,
+        }
+    }
+
+    /// Whether what it is doing is no longer wanted.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The `len` bytes at `from` were handed a utility: how far into the file it makes brushes of
+    /// they reach, if they are of it.
+    fn reads(&self, from: i32, len: i32) {
+        let (Some((start, size)), Some(read)) = (self.file_span, self.read.as_ref()) else { return };
+        let (Ok(from), Ok(len)) = (usize::try_from(from), usize::try_from(len)) else { return };
+        let end = from.saturating_add(len);
+        if from >= start && end <= start.saturating_add(size) {
+            read.fetch_max((end - start) as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -193,12 +225,14 @@ fn link_utilities(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
         read_bytes(caller, from, len)
     }
     linker.func_wrap(FROM, "inflate", |mut caller: Caller<'_, Host>, from: i32, len: i32, kind: i32| -> i32 {
+        caller.data().reads(from, len);
         let made = handed(&caller, from, len).and_then(|bytes| inflated(&bytes, kind));
         let length = made.as_ref().map_or(-1, |m| i32::try_from(m.len()).unwrap_or(-1));
         caller.data_mut().answer = made.unwrap_or_default();
         length
     })?;
     linker.func_wrap(FROM, "decode_image", |mut caller: Caller<'_, Host>, from: i32, len: i32| -> i64 {
+        caller.data().reads(from, len);
         let made = handed(&caller, from, len).and_then(|bytes| decoded_image(&bytes));
         let size = made.as_ref().map_or(0, |(w, h, _)| (u64::from(*w) | (u64::from(*h) << 32)) as i64);
         caller.data_mut().answer = made.map(|(_, _, pixels)| pixels).unwrap_or_default();

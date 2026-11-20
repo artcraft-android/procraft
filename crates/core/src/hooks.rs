@@ -41,7 +41,19 @@ struct OnHook {
     /// by engine and data (the latest last).
     brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
     looks: Vec<(String, u64, Arc<crate::plugin_brushes::BrushLook>)>,
+    /// Starts a copy of its code of its own with that much memory at most: what its brush engines
+    /// make brushes of files on (see `plugin_brushes.rs`).
+    copier: Option<Copier>,
+    /// The brushes (by engine and data) whose looks it couldn't make, or made such as the app can't
+    /// take: drawn as the app read them, not asked again until it comes on again.
+    no_looks: Vec<(String, u64)>,
 }
+
+/// The most brushes whose looks couldn't be made are remembered, the latest kept.
+const MOST_NO_LOOKS: usize = 1024;
+
+/// Starts a copy of a plugin's code of its own, as it is on now, with that much memory at most.
+pub(crate) type Copier = Arc<dyn Fn(usize) -> Result<Running, Stop> + Send + Sync>;
 
 /// A picker plugin's picture: its code, the keys it reads its plugin's controls by (written to
 /// interface 6 or later; none before), and their values now.
@@ -517,6 +529,8 @@ impl Hooks {
                 layer_kinds: Vec::new(),
                 brush_engines: Vec::new(),
                 looks: Vec::new(),
+                copier: None,
+                no_looks: Vec::new(),
             },
         );
         self.rehook(&working);
@@ -780,6 +794,18 @@ impl Hooks {
         }
     }
 
+    /// How a copy of `id`'s code of its own starts, for its brush engines' imports.
+    pub(crate) fn give_copier(&self, id: &str, copier: Copier) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.copier = Some(copier);
+        }
+    }
+
+    /// How a copy of `id`'s code of its own starts, if it is on and has one.
+    pub(crate) fn copier(&self, id: &str) -> Option<Copier> {
+        self.working().on.iter().find(|p| p.id == id)?.copier.clone()
+    }
+
     /// The brush engines on that read files whose names end `ending` (all of them for none): each
     /// plugin's id, code, the engine's place among its engines and its key.
     pub(crate) fn engines_reading(&self, ending: Option<&str>) -> Vec<(String, Shared, usize, String)> {
@@ -796,6 +822,12 @@ impl Hooks {
             }
         }
         found
+    }
+
+    /// What brush engine `key` (`<id>.<key>`) is called, if its plugin is on.
+    pub(crate) fn engine_label(&self, key: &str) -> Option<String> {
+        let working = self.working();
+        working.on.iter().find_map(|p| p.brush_engines.iter().find(|e| e.key == key).map(|e| e.label.clone()))
     }
 
     /// The brush engine `key` (`<id>.<key>`), if its plugin is on: its plugin's id, code and the
@@ -834,6 +866,23 @@ impl Hooks {
 
     /// The look engine `key` gave the brush whose data is `id`, kept while its plugin stays on (the
     /// last few).
+    /// Engine `key` couldn't give the brush whose data is `id` a look the app takes: it isn't asked
+    /// again while its plugin stays on.
+    pub(crate) fn no_look(&self, key: &str, id: u64) {
+        let mut working = self.working();
+        if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {
+            plugin.no_looks.push((key.to_owned(), id));
+            let over = plugin.no_looks.len().saturating_sub(MOST_NO_LOOKS);
+            plugin.no_looks.drain(..over);
+        }
+    }
+
+    /// Whether engine `key` couldn't give the brush whose data is `id` a look.
+    pub(crate) fn has_no_look(&self, key: &str, id: u64) -> bool {
+        let working = self.working();
+        working.on.iter().any(|p| p.no_looks.iter().any(|(k, i)| k == key && *i == id))
+    }
+
     pub(crate) fn keep_look(&self, key: &str, id: u64, look: Arc<crate::plugin_brushes::BrushLook>) {
         let mut working = self.working();
         if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {

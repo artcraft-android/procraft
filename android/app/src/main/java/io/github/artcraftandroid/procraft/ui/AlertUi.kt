@@ -198,11 +198,16 @@ fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewMo
 
 /**
  * The card over everything while a file is brought in ([shown] not null): as the export card, with
- * "Importing" after the import glyph and the file's name under it.
+ * "Importing" after the import glyph and the file's name under it; "Importing brushes" and the
+ * file's size too while a plugin's brush engine reads it.
  */
 @Composable
-fun ImportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ImportShown?, onCancel: () -> Unit) =
-    ProgressCard(shown?.let { CardShown(it.progress, it.done, it.name) }, "Importing", PcIcons.TabImport, onCancel)
+fun ImportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ImportShown?, onCancel: () -> Unit) {
+    // the title kept as the card goes, as the rest of what it shows is
+    val title = remember { arrayOf("Importing") }
+    if (shown != null) title[0] = shown.title
+    ProgressCard(shown?.let { CardShown(it.progress, it.done, it.name) }, title[0], PcIcons.TabImport, onCancel)
+}
 
 /**
  * The card over everything while the gallery is searched for lost artworks ([progress] not null):

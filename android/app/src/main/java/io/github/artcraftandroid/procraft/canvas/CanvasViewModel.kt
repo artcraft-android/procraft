@@ -2327,8 +2327,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (open && session == null && made.size == 1) openImported(made.first())
     }
 
-    /** An import under way as its card shows it: the file's [name], how far it has come (0..1), and once [done]. */
-    data class ImportShown(val name: String, val progress: Float, val done: Boolean = false)
+    /**
+     * An import under way as its card shows it: the file's [name], how far it has come (0..1), and
+     * once [done]; [title] what it is doing ("Importing brushes" while a plugin's brush engine reads
+     * the file, the name then with the file's size).
+     */
+    data class ImportShown(val name: String, val progress: Float, val done: Boolean = false, val title: String = "Importing")
 
     /** The import card, while a file is brought in (null without one). */
     var importShown by mutableStateOf<ImportShown?>(null)
@@ -2349,6 +2353,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** How far the import has come as its work tells it (the copy in), 0..1. */
     @Volatile
     private var importStep = 0f
+
+    /**
+     * A brush file's reading while a plugin's brush engine makes its brushes: the card follows it
+     * (set and cleared on the main thread, as the card's following reads it).
+     */
+    private var importReading: io.github.artcraftandroid.procraft.core.BrushFileReading? = null
 
     /** The import card's Cancel: the card goes at once, and what the import makes is thrown away. */
     fun cancelImport() {
@@ -2376,7 +2386,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             var creep = 0f
             while (true) {
                 creep += (IMPORT_CREEP_TO - creep) * IMPORT_CREEP
-                if (!importCancelled) importShown = ImportShown(name, maxOf(importStep, creep))
+                if (importCancelled) importReading?.cancel()
+                val size = importReading?.engineSize() ?: 0uL
+                if (!importCancelled) {
+                    importShown = if (size == 0uL) {
+                        ImportShown(name, maxOf(importStep, creep))
+                    } else {
+                        // a plugin's brush engine reading the file: how much of it it has read
+                        val progress = importReading?.engineProgress() ?: 0f
+                        ImportShown("$name · ${fileSize(size.toLong())}", progress, title = "Importing brushes")
+                    }
+                }
                 kotlinx.coroutines.delay(EXPORT_POLL_MS)
             }
         }
@@ -5644,8 +5664,44 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (importBusy || exportShown != null) return@launch
             val name = withContext(Dispatchers.IO) { fileName(uri) }
-            withImportCard(name ?: "Untitled") { importBrushesFrom(uri, name) }
+            importNotice = null
+            val made = withImportCard(name ?: "Untitled") { importBrushesFrom(uri, name) }
+            // once the card has gone: what came in, or what a plugin's brush engine couldn't do
+            if (made != null) importNotice?.let { tellImport(it) }
+            importNotice = null
         }
+    }
+
+    /**
+     * What a plugin's brush engine having had the last brush file says, a title (when it went wrong)
+     * and its text: how many brushes came in, or that the file was too much for it and they came in
+     * with the built-in reader (told once the card has gone).
+     */
+    private var importNotice: Pair<String?, String>? = null
+
+    /** What a plugin's brush engine couldn't do with a brush file, asked to be read (a title and its text). */
+    var importTrouble by mutableStateOf<Pair<String, String>?>(null)
+
+    /** [notice] told: what went wrong with an OK, what came in passing by under the top bar. */
+    private fun tellImport(notice: Pair<String?, String>) {
+        val (title, text) = notice
+        if (title != null) importTrouble = title to text else message = text
+    }
+
+    /** What a brush file's reading has to say once a plugin's brush engine has had it, if anything. */
+    private fun noticeOf(reading: io.github.artcraftandroid.procraft.core.BrushFileReading): Pair<String?, String>? =
+        reading.notice()?.let { reading.noticeTitle() to it }
+
+    /**
+     * The core told how much memory the device can spare now, for what a plugin's brush engine may
+     * take importing a file: what is available over the point the system starts closing apps.
+     */
+    private fun tellMemoryAvailable() {
+        val manager = getApplication<Application>().getSystemService(android.content.Context.ACTIVITY_SERVICE)
+            as? android.app.ActivityManager ?: return
+        val info = android.app.ActivityManager.MemoryInfo()
+        manager.getMemoryInfo(info)
+        io.github.artcraftandroid.procraft.core.setMemoryAvailable(maxOf(0L, info.availMem - info.threshold).toULong())
     }
 
     /**
@@ -5693,19 +5749,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = if (kept) "Brushes will be added to the library when a canvas opens." else NO_ROOM_TO_IMPORT
             return
         }
-        val read = readBrushesFile(file, name)
-        if (importCancelled) {
-            read?.destroy()
-            return
+        val reading = io.github.artcraftandroid.procraft.core.BrushFileReading()
+        try {
+            val read = readBrushesFile(file, name, reading)
+            if (importCancelled) {
+                read?.destroy()
+                message = IMPORT_CANCELLED
+                return
+            }
+            if (read == null) {
+                message = "This file has no brushes in it."
+                return
+            }
+            // plugins' brush engines make theirs of the file here too, off the main thread, with what an
+            // import may take; the card follows how much of the file they have read
+            tellMemoryAvailable()
+            importReading = reading
+            withContext(Dispatchers.Default) { runCatching { s.makeEngineBrushes(read, reading) } }
+            importReading = null
+            if (importCancelled) {
+                read.destroy()
+                message = IMPORT_CANCELLED
+                return
+            }
+            importNotice = noticeOf(reading)
+            brushesRead += read
+            addBrushesRead()
+        } finally {
+            importReading = null
+            reading.destroy()
         }
-        if (read == null) {
-            message = "This file has no brushes in it."
-            return
-        }
-        // plugins' brush engines make theirs of the file here too, off the main thread
-        withContext(Dispatchers.Default) { runCatching { s.makeEngineBrushes(read) } }
-        brushesRead += read
-        addBrushesRead()
     }
 
     /**
@@ -5713,8 +5786,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * card's pie following from where the copy left it; its Cancel stops the reading. None if it
      * holds none (or it was stopped).
      */
-    private suspend fun readBrushesFile(file: File, name: String?): io.github.artcraftandroid.procraft.core.BrushesRead? {
-        val reading = io.github.artcraftandroid.procraft.core.BrushFileReading()
+    private suspend fun readBrushesFile(
+        file: File,
+        name: String?,
+        reading: io.github.artcraftandroid.procraft.core.BrushFileReading? = null,
+    ): io.github.artcraftandroid.procraft.core.BrushesRead? {
+        val ours = reading == null
+        val reading = reading ?: io.github.artcraftandroid.procraft.core.BrushFileReading()
         val from = importStep
         val following = viewModelScope.launch {
             while (true) {
@@ -5731,7 +5809,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
         } finally {
             following.cancel()
-            reading.destroy()
+            if (ours) reading.destroy()
         }
     }
 
@@ -5783,14 +5861,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             var unread = false
             while (session != null) {
                 val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
+                tellMemoryAvailable()
+                val reading = io.github.artcraftandroid.procraft.core.BrushFileReading()
                 val read = withContext(Dispatchers.Default) {
                     // named after the set, for another app's (kept as .abr by earlier versions); a
                     // big set read a brush at a time, never whole
                     runCatching {
                         io.github.artcraftandroid.procraft.core.readBrushesFile(f.path, f.name.substringAfter('-'), null)
-                            ?.also { r -> session?.makeEngineBrushes(r) }
+                            ?.also { r -> session?.makeEngineBrushes(r, reading) }
                     }.getOrNull()
                 }
+                // what a plugin's brush engine couldn't do with it is told (what came in is said below)
+                noticeOf(reading)?.takeIf { it.first != null }?.let { tellImport(it) }
+                reading.destroy()
                 if (session == null) break
                 if (read != null) {
                     brushesRead += read
@@ -9140,7 +9223,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Told once when the device has no room for a file brought in. */
         private const val NO_ROOM_TO_IMPORT = "There isn't enough room on this device to import this file."
         private const val IMPORT_CREEP_TO = 0.95f
+
         private const val IMPORT_CREEP = 0.03f
+
+        /** What a brush import stopped with Cancel says. */
+        private const val IMPORT_CANCELLED = "Import cancelled. No brushes were added."
+
+        /** A file's size as the import card shows it: "199 MB", "4.2 MB", "380 KB". */
+        fun fileSize(bytes: Long): String {
+            val mb = bytes / (1024.0 * 1024.0)
+            return when {
+                mb >= 10 -> "${kotlin.math.round(mb).toLong()} MB"
+                mb >= 1 -> "${kotlin.math.round(mb * 10) / 10} MB"
+                else -> "${maxOf(1L, kotlin.math.round(bytes / 1024.0).toLong())} KB"
+            }
+        }
 
         /** A model's turntable: its frame rate, and its sizes (720p, 1080p, 4K, Square). */
         const val TURNTABLE_FPS = 30
