@@ -3558,16 +3558,27 @@ fn an_autosave_that_finds_a_stroke_saves_as_it_ends() {
     s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
     std::thread::sleep((every + std::time::Duration::from_millis(100)).saturating_sub(started.elapsed()));
     assert_eq!(s.edits_saved(), None, "nothing saved with a stroke under way");
+    // judged by when it looks once the stroke has ended (it decides to save there), not by when
+    // the save is written, which a busy machine's disc can hold up any length of time
+    let looks = s.activity().autosave_looks;
+    let ended = std::time::Instant::now();
     s.stroke_end(vec![]);
+    let looked = (0..60_000).find_map(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        (s.activity().autosave_looks > looks).then(|| ended.elapsed())
+    });
+    // (the stroke's edits as its frame counts them)
     let _ = pixel(&s, 0, 0);
     let edits = s.edits();
-    let saved = (0..400).any(|_| {
+    let saved = (0..60_000).any(|_| {
         std::thread::sleep(std::time::Duration::from_millis(1));
         s.edits_saved() == Some(edits)
     });
     s.stop_autosave();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(saved, "saved in the gap, before its next turn");
+    eprintln!("a stroke ended: the autosave looked {looked:?} after (its turns {every:?} apart)");
+    assert!(saved, "saved once the stroke ended");
+    assert!(looked.is_some_and(|t| t < every / 2), "looked in the gap ({looked:?}), not at its next turn");
 }
 
 /// A device lost holds nothing to save: the autosave stops and the last save stands, and what
@@ -17421,12 +17432,14 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
     });
     let [(direct, under, _), (placed, placed_under, staged)] = runs;
     assert!(staged > 0, "no copy started where it isn't placed");
-    // alike but for a level at a few channels: while other programs work the GPU hard, the same
-    // work can come out a level apart in a few channels from one run to the next (measured over 20
-    // runs and 18 rounds of the previews: never more than a level; at most 22 of a preview's
-    // 343,440 channels and 43 of the canvas's 1,638,400; none with the GPU to itself), where copies
-    // placed where they aren't broke pictures into blocks thousands of channels and up to 162 levels
-    // off. So: at most a level, in at most one channel in ten thousand (16 at the least)
+    // alike but for a level or two at a few channels: while other programs work the GPU hard, the
+    // same work can come out a level apart in a few channels from one run to the next (measured over
+    // 20 runs and 18 rounds of the previews: at most 22 of a preview's 343,440 channels and 43 of the
+    // canvas's 1,638,400; none with the GPU to itself). Measured again over 4 runs: each preview
+    // that differs does so in the same few channels whenever it does (two outcomes for a brush, not
+    // noise everywhere), a level apart; one full run elsewhere saw two. Copies placed where they
+    // aren't broke pictures into blocks thousands of channels and up to 162 levels off. So: at most
+    // two levels, in at most one channel in ten thousand (16 at the least)
     let differing: Vec<(String, u8, usize, usize)> = direct
         .iter()
         .zip(&placed)
@@ -17438,7 +17451,7 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
         .filter(|d| d.2 > 0)
         .collect();
     eprintln!("pictures differing (most, channels, allowed): {differing:?}");
-    let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 1 || count > allowed).collect();
+    let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 2 || count > allowed).collect();
     assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels, allowed): {unlike:?}");
     assert_eq!(under, placed_under, "the layers under touches");
 }
@@ -19705,16 +19718,22 @@ fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     LoopRunning { shared, thread: Some(thread), mode, configures }
 }
 
-/// Waits until `s` has drawn no frame for a while (its caches made, the first frames drawn), at
-/// most a few seconds.
+/// Waits until `s` has drawn no frame for a while and owes none: no frame wanted, and no caches
+/// still being remade (a render at a time). A single render slower than the quiet spell (a busy
+/// machine's GPU) no longer ends the wait with frames still to come. However long that takes, up
+/// to a minute.
 fn settled(s: &CanvasSession) {
     let started = std::time::Instant::now();
     let mut last = s.activity().frames;
     let mut still_since = std::time::Instant::now();
-    while started.elapsed() < std::time::Duration::from_secs(10) {
+    while started.elapsed() < std::time::Duration::from_secs(60) {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let now = s.activity().frames;
-        if now != last {
+        let owed = {
+            let st = s.shared.lock();
+            st.needs_frame || st.canvas.as_ref().is_some_and(|c| c.busy())
+        };
+        if now != last || owed {
             last = now;
             still_since = std::time::Instant::now();
         } else if still_since.elapsed() >= std::time::Duration::from_millis(200) {
