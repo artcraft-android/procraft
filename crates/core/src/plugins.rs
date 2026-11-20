@@ -415,6 +415,16 @@ impl Plugins {
     }
 }
 
+/// How the side bar's slider tracks look as the plugins say (interface 11): each part none where
+/// they leave it as the app has it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, uniffi::Record)]
+pub struct SliderLook {
+    /// How opaque the tracks are, 0 to 1 (the app's own: about .79 dark, .75 light).
+    pub track_opacity: Option<f32>,
+    /// Whether what is behind them is frosted as the bar's glass is, rather than softened.
+    pub frosted: Option<bool>,
+}
+
 /// The most bytes of a picture a file control keeps (interface 11).
 pub(crate) const MOST_PICTURE: usize = 32 << 20;
 
@@ -2055,6 +2065,16 @@ impl Plugins {
     /// interface another; none: as measured.
     pub fn accent_colour(&self) -> Option<u32> {
         self.hooks().interface_colour(0)
+    }
+
+    /// How the side bar's slider tracks look, as the plugins on the slider look's hook say
+    /// (interface 11).
+    pub fn slider_look(&self) -> SliderLook {
+        let hooks = self.hooks();
+        SliderLook {
+            track_opacity: hooks.slider_look(crate::hooks::SLIDER_OPACITY),
+            frosted: hooks.slider_look(crate::hooks::SLIDER_FROSTED).map(|v| v >= 0.5),
+        }
     }
 
     /// A hardware keyboard's `press` on the canvas (its key named as [`crate::key_shortcut`] takes
@@ -4007,6 +4027,25 @@ mod tests {
         s.use_plugins(Arc::clone(&plugins));
         assert_eq!(surround(), crate::SURROUND);
         assert!(s.shared.lock().surround_picture.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slider_look_makes_the_tracks_see_through_and_frosted_as_its_controls_say() {
+        const LOOK: &str = "io.github.artcraftandroid.slider-look";
+        let dir = store("bundled-slider-look");
+        let plugins = app_at(&dir);
+        // it comes off: the app's own
+        assert_eq!(plugins.slider_look(), SliderLook::default());
+        assert!(plugins.set_on(LOOK.to_owned(), true));
+        assert_eq!(plugins.slider_look(), SliderLook { track_opacity: Some(0.35), frosted: Some(true) });
+        plugins.set_slider(format!("{LOOK}.opacity"), 0.8).unwrap();
+        assert!(plugins.set_switch(format!("{LOOK}.frosted"), false));
+        let look = plugins.slider_look();
+        assert!(look.track_opacity.is_some_and(|a| (a - 0.8).abs() < 1e-6), "{look:?}");
+        assert_eq!(look.frosted, Some(false));
+        assert!(plugins.set_on(LOOK.to_owned(), false));
+        assert_eq!(plugins.slider_look(), SliderLook::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

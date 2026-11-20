@@ -190,7 +190,10 @@ object Pc {
     // over white; light 235 and 244); the thumbs opaque (#a6a6a6 over white and over the dark
     // surround alike; white on the light look), each with a soft shadow a point below it
     val SideBar: Color get() = pick(0xE7171717, 0xCFE5E5E5)
-    val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0)
+    val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0).let { c -> sliderLook.trackOpacity?.let { c.copy(alpha = it) } ?: c }
+
+    /** How the side bar's slider tracks look as a plugin says (their opacity, and whether what is behind is frosted). */
+    var sliderLook by mutableStateOf(io.github.artcraftandroid.procraft.core.SliderLook(null, null))
     // a lighter rim round each track, more of what is behind showing through it (#5a5a5a over the
     // dark surround, #969696 over white; light 249 over white)
     val SliderRim: Color get() = pick(0xB96E6E6E, 0xB9F7F7F7)

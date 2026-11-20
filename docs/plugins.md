@@ -36,7 +36,8 @@ action in its options, shows it with the `layer_label` hook, and asks for it wit
 `pop-up-palette` has an action a pen's button runs, which shows a ring of the recent colours and
 brushes where the pen is. `canvas-surround` colours the area round the canvas on the
 `interface_colour` hook's surround, or shows a picture picked for its `file` control there on the
-`surround_picture` hook.
+`surround_picture` hook. `slider-look` makes the side bar's sliders see-through frosted glass on the
+`slider_look` hook.
 
 ## What you write
 
@@ -82,8 +83,8 @@ and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `ref
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
 `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label` hooks, layers' marks and
 panels' rows of colours 10, and the recent colours and brushes, actions at the pen, panels' rows of
-brushes and rings, the `interface_colour` hook's surround, the `surround_picture` hook and `file`
-controls of pictures 11.
+brushes and rings, the `interface_colour` hook's surround, the `surround_picture` and `slider_look`
+hooks and `file` controls of pictures 11.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -693,6 +694,25 @@ this hook, the first by id that answers is used.
 
 The Canvas surround plugin the app comes with gives the surround a colour from its Hue, Saturation
 and Brightness (black at none), or, with A picture of your own on, the picture picked for it.
+
+### `slider_look`
+
+How the side bar's size and opacity sliders look (interface 11), asked part by part:
+
+```
+procraft_slider_look(what: i32) -> f32
+```
+
+| `what` | |
+|---|---|
+| 0 | How opaque their tracks are, 0 (clear) to 1; the app's own are about .79 (.75 light) |
+| 1 | Whether what is behind them is frosted as the bar's glass is (1), rather than only softened as the app has it (0) |
+
+Answer below 0 to leave a part as the app has it, as for one you don't know: more may come. An answer
+past 1, or that isn't a number, stops the plugin. It's asked as the plugins change. With several
+plugins on this hook, the first by id that answers each part is used.
+
+The Slider look plugin the app comes with makes the tracks frosted and as opaque as its Opacity says.
 
 ### `pin_panels`
 
@@ -1827,7 +1847,7 @@ tab, interface 9 the `pressure` hook, interface 10 the `gesture_lock` hook's fit
 hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours, and interface 11
 the recent colours and brushes (`recent_colour`, `recent_brush`, `current_brush`, `choose_brush`),
 actions at the pen, panels' rows of brushes and rings, the `interface_colour` hook's surround, the
-`surround_picture` hook and `file` controls of pictures. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+`surround_picture` and `slider_look` hooks and `file` controls of pictures. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

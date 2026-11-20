@@ -613,6 +613,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** What the plugins change in how the interface looks: its accent, Classic's picker and menu, the floating colours and panels, the notices; and whether strokes are heard. */
     private fun followPluginLooks() {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
+        io.github.artcraftandroid.procraft.ui.Pc.sliderLook = plugins.sliderLook()
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
         io.github.artcraftandroid.procraft.ui.Pc.picker = if (plugins.pickerOn()) {
             io.github.artcraftandroid.procraft.ui.ClassicPicker(

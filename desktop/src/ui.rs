@@ -830,6 +830,8 @@ impl Interface {
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
+            // its tracks as the plugins have them look
+            self.side_bar.slider_look = self.prefs.plugins.slider_look();
             self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()

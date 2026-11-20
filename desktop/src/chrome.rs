@@ -256,6 +256,8 @@ pub struct SideBar {
     pressed: Option<Press>,
     panel: Option<Slider>,
     changed: bool,
+    /// How its slider tracks look as a plugin says (interface 11).
+    pub slider_look: procraft_core::SliderLook,
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +283,18 @@ const SLIDER_PANEL_GAP: f32 = 8.0;
 const SLIDER_PANEL_RISE: f32 = 10.0;
 const SLIDER_PANEL_FILL: Themed = Themed(0xC93E3E3E, 0xFFE7E7E7);
 const SLIDER_PANEL_INK: Themed = Themed(0xFFF0F0F0, 0xFF393939);
+
+/// The slider tracks' fill: the interface's own, or as see-through as a plugin says (`opacity`, 0 to 1).
+fn track_colour(opacity: Option<f32>) -> Color32 {
+    let ink = argb(pc::SLIDER_TRACK);
+    match opacity.filter(|a| a.is_finite()) {
+        Some(a) => {
+            let [r, g, b, _] = ink.to_srgba_unmultiplied();
+            Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8)
+        }
+        None => ink,
+    }
+}
 
 impl SideBar {
     /// The side bar against the window's left edge (the right one, `right`-handed: everything
@@ -322,9 +336,12 @@ impl SideBar {
             bar.with_min_x(bar.left() - pc::SIDE_BAR_CORNER)
         };
         frost(backdrops, to_window.mul_rect(past), pc::SIDE_BAR_CORNER * scale, ppp);
-        for (_, y, _) in tracks {
-            let track = to_window.mul_rect(at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height));
-            frost(windows, track, pc::SLIDER_CORNER * scale, ppp);
+        // the tracks' thin glass, unless a plugin has them frosted as the bar's glass under them is
+        if self.slider_look.frosted != Some(true) {
+            for (_, y, _) in tracks {
+                let track = to_window.mul_rect(at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height));
+                frost(windows, track, pc::SLIDER_CORNER * scale, ppp);
+            }
         }
         let area = Id::unique("side bar");
         ctx.set_transform_layer(LayerId::new(Order::Middle, area), to_window);
@@ -486,8 +503,13 @@ impl SideBar {
             Slider::Size => "size slider",
             Slider::Opacity => "opacity slider",
         };
-        let key =
-            ((value * 10_000.0).round() as i32, notches.iter().map(|n| (n * 10_000.0) as i32).collect::<Vec<_>>());
+        // the track as a plugin has it see-through, else as the interface has it
+        let track_ink = track_colour(self.slider_look.track_opacity);
+        let key = (
+            (value * 10_000.0).round() as i32,
+            notches.iter().map(|n| (n * 10_000.0) as i32).collect::<Vec<_>>(),
+            track_ink.to_array(),
+        );
         look.shape(ui, slot, key, rect, |pixmap, t| {
             let size = rect.size();
             let thumb = vec2(pc::THUMB_WIDTH, pc::THUMB_HEIGHT);
@@ -503,7 +525,7 @@ impl SideBar {
             let mut track = tiny_skia::PathBuilder::new();
             round_rect(&mut track, inside, [corner - rim; 4]);
             round_rect(&mut track, knob, [thumb.y / 2.0; 4]);
-            fill(pixmap, track.finish(), argb(pc::SLIDER_TRACK), t);
+            fill(pixmap, track.finish(), track_ink, t);
             let mut ring = tiny_skia::PathBuilder::new();
             round_rect(&mut ring, outer, [corner; 4]);
             round_rect(&mut ring, inside, [corner - rim; 4]);
@@ -680,6 +702,19 @@ mod tests {
             output.textures_delta.clear();
         }
 
+        /// The bar's frost and its tracks' thin glass, as one frame lays them.
+        fn glass(&mut self) -> (Vec<f32>, Vec<f32>) {
+            let (mut frost, mut windows) = (Vec::new(), Vec::new());
+            let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, WINDOW)), ..RawInput::default() };
+            let Hand { ctx, look, side, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let info = session.info();
+                side.show(ui, look, session, &info, false, false, &mut frost, &mut windows);
+            });
+            output.textures_delta.clear();
+            (frost, windows)
+        }
+
         fn button(at: Pos2, pressed: bool) -> Event {
             Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
         }
@@ -736,6 +771,28 @@ mod tests {
     /// on the mark goes back to the size; on it, the thumb tapped brings up the panel, whose "-"
     /// takes the saved size away; the thumb tapped again takes the panel away. Held still, the
     /// slider brings the panel up too, and let go it stays.
+    #[test]
+    fn a_plugin_s_slider_look_frosts_the_tracks_and_lets_them_show_through() {
+        let mut hand = Hand::new();
+        // as the app has them: the bar's frost and each track's thin glass over it
+        let (frost, windows) = hand.glass();
+        assert_eq!((frost.len(), windows.len()), (6, 12));
+        assert_eq!(super::track_colour(None), crate::look::argb(pc::SLIDER_TRACK));
+        // frosted: the bar's frost goes on under them, and no thin glass
+        hand.side.slider_look = procraft_core::SliderLook { track_opacity: Some(0.25), frosted: Some(true) };
+        let (frost, windows) = hand.glass();
+        assert_eq!((frost.len(), windows.len()), (6, 0));
+        // see-through as it says, the colour kept
+        let [r, g, b, a] = super::track_colour(Some(0.25)).to_srgba_unmultiplied();
+        let [r0, g0, b0, _] = crate::look::argb(pc::SLIDER_TRACK).to_srgba_unmultiplied();
+        // (kept premultiplied: a channel comes back within a few levels)
+        assert_eq!(a, 64);
+        for (c, c0) in [(r, r0), (g, g0), (b, b0)] {
+            assert!(c.abs_diff(c0) <= 3, "{c} {c0}");
+        }
+        assert_eq!(super::track_colour(Some(f32::NAN)), crate::look::argb(pc::SLIDER_TRACK));
+    }
+
     #[test]
     fn a_size_is_saved_from_the_panel_left_up_after_a_drag_gone_back_to_and_taken_away() {
         let mut h = Hand::new();

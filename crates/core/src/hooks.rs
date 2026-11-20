@@ -11,6 +11,11 @@ use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
+/// What the slider look's hook is asked of the side bar's slider tracks: their opacity, and how
+/// frosted what is behind them is (interface 11).
+pub(crate) const SLIDER_OPACITY: i32 = 0;
+pub(crate) const SLIDER_FROSTED: i32 = 1;
+
 /// The role of the colour hook's that is the area round the canvas (interface 11).
 pub(crate) const SURROUND_ROLE: i32 = 1;
 
@@ -717,6 +722,19 @@ impl Hooks {
         self.through(Hook::BrushPreviewColour, None, |running, said| match said {
             Some(colour) => Ok(Some(colour)),
             None => running.brush_preview_colour(current, chosen),
+        })
+    }
+
+    /// The slider look's hook: what the first plugin by id on it that answers says of `what` of the
+    /// side bar's slider tracks' look (0 their opacity, 1 how frosted what is behind them is), 0 to
+    /// 1; none for the app's own.
+    pub(crate) fn slider_look(&self, what: i32) -> Option<f32> {
+        if !self.has(Hook::SliderLook) {
+            return None;
+        }
+        self.through(Hook::SliderLook, None, |running, said| match said {
+            Some(v) => Ok(Some(v)),
+            None => running.slider_look(what),
         })
     }
 
@@ -1604,6 +1622,43 @@ pub(crate) mod tests {
             let hooks = Hooks::default();
             hooks.put_on("odd".to_owned(), picturing(odd), &[Hook::SurroundPicture]);
             assert_eq!(hooks.surround_picture(), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+        }
+    }
+
+    /// A plugin on the slider look's hook answering `body` (WAT, given what is asked).
+    fn slider_looking(body: &str) -> Running {
+        let text = format!(r#"(module (func (export "procraft_slider_look") (param i32) (result f32) {body}))"#);
+        Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_slider_tracks_look_as_the_first_plugin_that_answers_says_and_quickly() {
+        let hooks = Hooks::default();
+        assert_eq!((hooks.slider_look(SLIDER_OPACITY), hooks.slider_look(SLIDER_FROSTED)), (None, None));
+        // an opacity of a quarter, and frosted
+        let quarter = "(if (result f32) (local.get 0) (then (f32.const 1)) (else (f32.const 0.25)))";
+        hooks.put_on("b".to_owned(), slider_looking(quarter), &[Hook::SliderLook]);
+        assert_eq!((hooks.slider_look(SLIDER_OPACITY), hooks.slider_look(SLIDER_FROSTED)), (Some(0.25), Some(1.0)));
+        // one before it by id that leaves it (below 0) doesn't count; one that answers does
+        hooks.put_on("a".to_owned(), slider_looking("(f32.const -1)"), &[Hook::SliderLook]);
+        assert_eq!(hooks.slider_look(SLIDER_OPACITY), Some(0.25));
+        hooks.put_on("a".to_owned(), slider_looking("(f32.const 0.5)"), &[Hook::SliderLook]);
+        assert_eq!(hooks.slider_look(SLIDER_OPACITY), Some(0.5));
+        assert!(hooks.take_stopped().is_empty());
+        // asked as the plugins change and as the desktop draws its side bar: quick
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            assert_eq!(hooks.slider_look(std::hint::black_box(SLIDER_OPACITY)), Some(0.5));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the slider look asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+        // past 1, or no number, stops it
+        for odd in ["(f32.const 1.5)", "(f32.const nan)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), slider_looking(odd), &[Hook::SliderLook]);
+            assert_eq!(hooks.slider_look(SLIDER_OPACITY), None, "{odd}");
             assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
         }
     }

@@ -210,7 +210,7 @@ pub use plugin_panel::{PanelBrush, PanelPoint, PanelRow, PluginPanel};
 pub use plugin_run::set_memory_available;
 pub use plugins::{
     InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginFileKind, PluginInfo, PluginMenuPlace,
-    PluginOffer, PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    PluginOffer, PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins, SliderLook,
     plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices,
     plugin_slider_chosen, plugin_slider_shown, plugin_slider_whole,
 };

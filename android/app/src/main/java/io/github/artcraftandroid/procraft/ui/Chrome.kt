@@ -206,7 +206,9 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
     val moved = Offset(aside, 0f)
     val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else Pc.SideBarCorner, pastRight = if (right) Pc.SideBarCorner else 0.dp)
-    val track = BarGlass(shown, moved, window = true)
+    // the tracks' own thin glass, unless a plugin has them frosted as the bar is (which the bar's
+    // glass under them is already)
+    val track = BarGlass(shown, moved, window = true).takeIf { Pc.sliderLook.frosted != true }
     Box(
         Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
             // a touch on it keeps a slider's panel up
@@ -242,7 +244,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 drawPath(ring, Pc.SliderEdge)
             },
     ) {
-        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
+        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(track?.let { rememberFrost(Pc.SliderCorner, it) } ?: Modifier), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
         // the modify button: the next touch on the canvas picks a colour
         Box(
             Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).pointerInput(Unit) {
@@ -270,7 +272,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 },
             )
         }
-        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
+        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop).then(track?.let { rememberFrost(Pc.SliderCorner, it) } ?: Modifier), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
         // beside the slider it belongs to, a little above it, outside the bar
         vm.sliderPanel?.let { which ->
             val top = if (which == CanvasViewModel.SliderPanel.SIZE) SizeTrackTop else opacityTop

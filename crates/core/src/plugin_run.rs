@@ -88,6 +88,9 @@
 //!   `procraft_pressure_taper(pointer: i32, end: i32) -> f32`, asked as each stroke begins: how far
 //!   (window points, 0 to [`MOST_PRESSURE_TAPER`]) its pressure grows from nothing at its start
 //!   (`end` 0) and falls to nothing at its end (1), for a stroke whose pressure counts.
+//! - `procraft_slider_look(what: i32) -> f32`: for the hook `slider_look` (interface 11), how the
+//!   side bar's slider tracks look: `what` 0 their opacity (0 to 1), 1 whether what is behind them
+//!   is frosted as the bar's glass (1) or only softened (0); below 0 to leave it as it is.
 //! - `procraft_surround_picture() -> i32`: for the hook `surround_picture` (interface 11), the place
 //!   in its `controls` of a `file` control of pictures whose picture shows round the canvas, -1 for
 //!   none.
@@ -279,6 +282,7 @@ pub(crate) const MOST_PRESSURE_TAPER: f32 = 1000.0;
 const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const LAYER_LABEL: &str = "procraft_layer_label";
 const SURROUND_PICTURE: &str = "procraft_surround_picture";
+const SLIDER_LOOK: &str = "procraft_slider_look";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -441,6 +445,8 @@ pub(crate) enum Hook {
     LayerLabel,
     /// The picture shown round the canvas, of one of the plugin's file controls (interface 11).
     SurroundPicture,
+    /// How the side bar's slider tracks look (interface 11).
+    SliderLook,
 }
 
 impl Hook {
@@ -479,6 +485,7 @@ impl Hook {
             "brush_preview_colour" => Some(Hook::BrushPreviewColour),
             "layer_label" => Some(Hook::LayerLabel),
             "surround_picture" => Some(Hook::SurroundPicture),
+            "slider_look" => Some(Hook::SliderLook),
             _ => None,
         }
     }
@@ -521,6 +528,7 @@ impl Hook {
             Hook::BrushPreviewColour => "This plugin can draw the brush library's sample strokes in another colour.",
             Hook::LayerLabel => "This plugin can show a colour on the rows of layers it has marked.",
             Hook::SurroundPicture => "This plugin can show a picture you pick round the canvas.",
+            Hook::SliderLook => "This plugin can change how the side bar's sliders look.",
         }
     }
 
@@ -562,6 +570,7 @@ impl Hook {
             Hook::BrushPreviewColour => exports(module, BRUSH_PREVIEW_COLOUR, &[ValType::I32; 2], &[ValType::I32]),
             Hook::LayerLabel => exports(module, LAYER_LABEL, &[ValType::I64], &[ValType::I32]),
             Hook::SurroundPicture => exports(module, SURROUND_PICTURE, &[], &[ValType::I32]),
+            Hook::SliderLook => exports(module, SLIDER_LOOK, &[ValType::I32], &[ValType::F32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -1053,6 +1062,7 @@ pub(crate) struct Running {
     brush_preview_colour: Option<TypedFunc<(i32, i32), i32>>,
     layer_label: Option<TypedFunc<i64, i32>>,
     surround_picture: Option<TypedFunc<(), i32>>,
+    slider_look: Option<TypedFunc<i32, f32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1210,6 +1220,7 @@ impl Running {
             let brush_preview_colour = instance.get_typed_func(&store, BRUSH_PREVIEW_COLOUR).ok();
             let layer_label = instance.get_typed_func(&store, LAYER_LABEL).ok();
             let surround_picture = instance.get_typed_func(&store, SURROUND_PICTURE).ok();
+            let slider_look = instance.get_typed_func(&store, SLIDER_LOOK).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1320,6 +1331,7 @@ impl Running {
                 brush_preview_colour,
                 layer_label,
                 surround_picture,
+                slider_look,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2458,6 +2470,22 @@ impl Running {
             -1 => Ok(None),
             0..=255 => Ok(u32::try_from(said).ok()),
             _ => Err(Stop::Nonsense),
+        }
+    }
+
+    /// What it says of `what` of the side bar's slider tracks' look, 0 to 1; none where it leaves it
+    /// as it is (below 0). One past 1, or not a number, stops it.
+    pub(crate) fn slider_look(&mut self, what: i32) -> Result<Option<f32>, Stop> {
+        let Running { store, slider_look, .. } = self;
+        let Some(slider_look) = slider_look else { return Ok(None) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            slider_look.call(&mut *store, what).map_err(|e| stop_of(&e))
+        })?;
+        match said {
+            _ if said.is_nan() || said > 1.0 => Err(Stop::Nonsense),
+            _ if said < 0.0 => Ok(None),
+            _ => Ok(Some(said)),
         }
     }
 
