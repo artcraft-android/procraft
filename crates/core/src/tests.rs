@@ -17070,18 +17070,25 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
     });
     let [(direct, under, _), (placed, placed_under, staged)] = runs;
     assert!(staged > 0, "no copy started where it isn't placed");
-    // alike but for a level at a few pixels (the same stamps can come out so from one run to the
-    // next while other work shares the GPU)
-    let unlike: Vec<(String, u8, usize)> = direct
+    // alike but for a level at a few channels: while other programs work the GPU hard, the same
+    // work can come out a level apart in a few channels from one run to the next (measured over 20
+    // runs and 18 rounds of the previews: never more than a level; at most 22 of a preview's
+    // 343,440 channels and 43 of the canvas's 1,638,400; none with the GPU to itself), where copies
+    // placed where they aren't broke pictures into blocks thousands of channels and up to 162 levels
+    // off. So: at most a level, in at most one channel in ten thousand (16 at the least)
+    let differing: Vec<(String, u8, usize, usize)> = direct
         .iter()
         .zip(&placed)
-        .filter_map(|((name, a), (_, b))| {
+        .map(|((name, a), (_, b))| {
             assert_eq!(a.len(), b.len(), "{name}");
             let (most, count) = differ(a, b);
-            (most > 1 || count > 16).then(|| (name.clone(), most, count))
+            (name.clone(), most, count, (a.len() / 10_000).max(16))
         })
+        .filter(|d| d.2 > 0)
         .collect();
-    assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels): {unlike:?}");
+    eprintln!("pictures differing (most, channels, allowed): {differing:?}");
+    let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 1 || count > allowed).collect();
+    assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels, allowed): {unlike:?}");
     assert_eq!(under, placed_under, "the layers under touches");
 }
 
