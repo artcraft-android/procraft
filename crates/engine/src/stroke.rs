@@ -1152,6 +1152,45 @@ fn wrapped(angle: f32) -> f32 {
     (angle + PI).rem_euclid(TAU) - PI
 }
 
+/// The way a stamp that turns `follow` as far as the stroke goes before the stroke goes anywhere,
+/// a stroke's random turn `turn` on top (see [`StrokeBuilder::dab_way`]).
+fn resting_way(follow: f32, turn: f32) -> f32 {
+    -wrapped(std::f32::consts::FRAC_PI_4 * (1.0 + follow) + turn)
+}
+
+/// How a pen held over the canvas is turned (radians): the way it leans, as a sample's azimuth,
+/// and its barrel (0 for one that doesn't say).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldPen {
+    pub azimuth: f32,
+    pub roll: f32,
+}
+
+/// The rotation (radians, on the canvas) a stamp of `brush` would have laid where a pointer hovers,
+/// as a stroke's first stamps have: going `heading` (radians on the canvas; none before it has
+/// moved, the way a still dab has), held as `pen` says (none for a pointer that doesn't tell, as a
+/// mouse or a finger), on a canvas turned `view_turn` on the screen. A brush that follows the stroke
+/// turns with the way the pointer goes; one turned by the pen, as the pen is held. (Without the
+/// random turn of a stroke, which is each stroke's own.)
+pub fn hover_angle(brush: &Brush, heading: Option<f32>, pen: Option<HeldPen>, view_turn: f32) -> f32 {
+    let shape = &brush.shape;
+    let follow = if shape.follow_azimuth && pen.is_some() { 0.0 } else { shape.follow };
+    let way = heading.filter(|h| h.is_finite()).unwrap_or_else(|| resting_way(shape.follow, 0.0));
+    let screen = if brush.setting("orient_to_screen") >= 0.5 && view_turn.is_finite() { view_turn } else { 0.0 };
+    let mut own = shape.rotation;
+    if let Some(pen) = pen {
+        if shape.follow_azimuth && pen.azimuth.is_finite() {
+            own += pen.azimuth;
+        }
+        // a barrel turning stamps from where it was as the stroke begins turns a first stamp none
+        let from_start = brush.setting("relative_to_stroke") >= 0.5;
+        if brush.setting("input_style") >= 1.5 && !from_start && pen.roll.is_finite() {
+            own += pen.roll;
+        }
+    }
+    follow * way - screen + own
+}
+
 /// Two amounts, 0..1, together: each takes away what the other leaves.
 fn together(a: f32, b: f32) -> f32 {
     1.0 - (1.0 - a.clamp(0.0, 1.0)) * (1.0 - b.clamp(0.0, 1.0))
@@ -1457,7 +1496,7 @@ impl StrokeBuilder {
     /// screen for one that follows it, less the less it does, and on by the stroke's random turn
     /// (so a stamp that follows the stroke has none).
     fn dab_way(&self) -> f32 {
-        -wrapped(std::f32::consts::FRAC_PI_4 * (1.0 + self.brush.shape.follow) + self.stroke_turn)
+        resting_way(self.brush.shape.follow, self.stroke_turn)
     }
 
     /// A random colour change by `jitter` (hue, saturation, lightness, darkness): the hue turned
@@ -1780,6 +1819,15 @@ impl StrokeBuilder {
         let start = self.start_span();
         let handed = if self.held.is_some() { self.handed() } else { self.placed.len() };
         self.placed.iter().take(handed).map(|p| self.finish_stamp(p, start, None)).collect()
+    }
+
+    /// The rotation of the newest stamp placed (radians, on the canvas), none before the first: a
+    /// brush cursor shown while the stroke is painted turns as it.
+    pub fn last_angle(&self) -> Option<f32> {
+        match &self.outside.0 {
+            Some(outside) => outside.stamps.last().map(|s| s.angle),
+            None => self.placed.last().map(|p| p.angle),
+        }
     }
 
     /// How many of its stamps it has handed out (see [`StrokeBuilder::touched`]).
@@ -5745,6 +5793,74 @@ mod tests {
         assert!((angle(Pointer::Stylus, 0.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 0.0));
         assert!((angle(Pointer::Finger, 0.0) - quarter).abs() < 1e-4, "{}", angle(Pointer::Finger, 0.0));
         assert!((angle(Pointer::Stylus, 1.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 1.0));
+    }
+
+    /// A stamp laid where a pointer hovers turns as a stroke laid there would: going its way, as
+    /// the stroke's stamps do once its way is known, and still, as its first does; with the pen as
+    /// held (its azimuth, its barrel), the canvas's turn under a brush oriented to the screen and its
+    /// own fixed rotation.
+    #[test]
+    fn a_stamp_where_a_pointer_hovers_turns_as_a_stroke_there_would() {
+        // shape rotation (following), input style, relative to the stroke, orient to the screen,
+        // fixed rotation
+        let brushes = [
+            (1.0, 0.0, 0.0, 0.0, 0.0),
+            (0.5, 0.0, 0.0, 0.0, 0.4),
+            (-1.0, 0.0, 0.0, 1.0, 0.0),
+            (1.0, 1.0, 0.0, 0.0, 0.2),
+            (0.0, 2.0, 0.0, 0.0, 0.0),
+            (1.0, 2.0, 1.0, 1.0, -0.3),
+        ];
+        let (heading, view_turn) = (0.6f32, 0.3f32);
+        let off = |a: f32, b: f32| wrapped(a - b).abs();
+        for (follow, style, relative, orient, rotation) in brushes {
+            for pen in [None, Some(HeldPen { azimuth: 0.7, roll: 0.25 })] {
+                let mut b = plain();
+                b.set_setting("shape_rotation", follow);
+                b.set_setting("input_style", style);
+                b.set_setting("relative_to_stroke", relative);
+                b.set_setting("orient_to_screen", orient);
+                b.shape.rotation = rotation;
+                let pointer = if pen.is_some() { Pointer::Stylus } else { Pointer::Finger };
+                let (azimuth, roll) = pen.map_or((0.0, 0.0), |p| (p.azimuth, p.roll));
+                let way = Vec2::new(heading.cos(), heading.sin());
+                let at =
+                    |i: u32| Sample { azimuth, roll, ..Sample::at(way * (i as f32 * 8.0), 1.0, f64::from(i) * 8.0) };
+                let stroke = |samples: &[Sample]| {
+                    StrokeBuilder::new(b.clone(), 10.0, pointer).on_view_turned(view_turn).preview(samples)
+                };
+                let case = format!("{follow} {style} {relative} {orient} {rotation} {pen:?}");
+                // going its way: the stamps once the way has settled
+                let going = stroke(&(0..=30).map(at).collect::<Vec<_>>());
+                let laid = going.last().map_or(f32::NAN, |s| s.angle);
+                let hovered = hover_angle(&b, Some(heading), pen, view_turn);
+                assert!(off(laid, hovered) < 1e-3, "{case}: laid {laid}, hovering {hovered}");
+                // still: a dab
+                let dab = stroke(&[at(0)]).first().map_or(f32::NAN, |s| s.angle);
+                let resting = hover_angle(&b, None, pen, view_turn);
+                assert!(off(dab, resting) < 1e-4, "{case}: a dab {dab}, hovering still {resting}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_newest_stamp_s_rotation_is_the_last_placed() {
+        let mut b = plain();
+        b.set_setting("shape_rotation", 1.0);
+        let mut stroke = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
+        assert_eq!(stroke.last_angle(), None);
+        // right, then down the canvas: it ends heading down
+        let right: Vec<Sample> =
+            (0..=20).map(|i| Sample::at(Vec2::new(i as f32 * 8.0, 0.0), 1.0, f64::from(i) * 8.0)).collect();
+        let down: Vec<Sample> =
+            (1..=40).map(|i| Sample::at(Vec2::new(160.0, i as f32 * 8.0), 1.0, 160.0 + f64::from(i) * 8.0)).collect();
+        stroke.add(&right);
+        let along = stroke.last_angle().unwrap_or(f32::NAN);
+        assert!(along.abs() < 0.05, "{along}");
+        stroke.add(&down);
+        let turned = stroke.last_angle().unwrap_or(f32::NAN);
+        assert!((turned - std::f32::consts::FRAC_PI_2).abs() < 0.05, "{turned}");
+        assert_eq!(Some(turned), stroke.placed_stamps().last().map(|s| s.angle));
     }
 
     /// The library's sample stroke tells no pen's turn: a brush turned as the pen is held turns its

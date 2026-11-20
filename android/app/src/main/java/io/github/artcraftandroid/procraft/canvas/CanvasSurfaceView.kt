@@ -44,6 +44,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The pen is hovering over the canvas. */
     private var penHovering = false
 
+    /** How the pen hovering was last held (its lean's way; Android tells no barrel), for its cursor. */
+    private var hoverPen: io.github.artcraftandroid.procraft.core.CursorPen? = null
+
     /** The pen's side buttons as its events last said. */
     private val penButtons = PenButtons()
 
@@ -513,6 +516,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
                 session?.setTouchPenHovering(true)?.let(::obey)
+                hoverPen = io.github.artcraftandroid.procraft.core.CursorPen(e.getOrientation(0), 0f)
                 hovered(Offset(e.x, e.y))
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
@@ -546,7 +550,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // not over the bars or an open panel, where the gaps between their buttons and rows come
         // here and the buttons don't: it came and went as the pen crossed them, drawn under them
         val over = vm.overInterface(at)
-        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
+        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true, pen = hoverPen)
         // and Liquify's ring where the pen hovers
         if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { over })
     }

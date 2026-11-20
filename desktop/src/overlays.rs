@@ -71,7 +71,8 @@ pub struct Overlays {
     /// circle).
     cursor_shape: Vec<Vec<f32>>,
     /// How much more the shape is turned on the screen than its own rotation, radians clockwise,
-    /// as the stamps are: with the canvas, and as a pen that the brush follows leans.
+    /// as the stamps it stands for are (the core's): painting, as the newest stamp; hovering, as one
+    /// laid there, going the way the pointer goes and held as the pen is.
     cursor_turn: f32,
     /// How the cursor is drawn (Advanced cursor settings).
     pub cursor_style: CursorStyle,
@@ -142,8 +143,8 @@ impl Overlays {
         if self.cursor.is_none() && at.is_some() {
             self.cursor_shape = session.brush_outline();
         }
-        // turned as the pen turns, through the stroke
-        self.cursor_turn = cursor_turn(session);
+        // turned as the newest stamp, through the stroke (as it hovered before it has one)
+        self.cursor_turn = session.cursor_turn();
         // filled only while it hovers
         self.cursor_fill = None;
         self.cursor = at.map(|(x, y)| {
@@ -161,10 +162,18 @@ impl Overlays {
     /// The brush's outline goes to `at` (points), where the pointer hovers, sized for the brush
     /// as it is now (`info`); or away.
     pub fn hover(&mut self, session: &CanvasSession, info: &procraft_core::CanvasInfo, ppp: f32, at: Option<Pos2>) {
-        if at.is_some() {
-            // the core keeps the brush's outline: asked again, it is handed back as it was
-            self.cursor_shape = session.brush_outline();
-            self.cursor_turn = cursor_turn(session);
+        match at {
+            Some(at) => {
+                // the core keeps the brush's outline: asked again, it is handed back as it was
+                self.cursor_shape = session.brush_outline();
+                // turned as a stamp laid there: going the way the pointer goes, as the pen is held
+                let pen = crate::pen::azimuth()
+                    .map(|azimuth| procraft_core::CursorPen { azimuth, roll: crate::pen::barrel().unwrap_or(0.0) });
+                self.cursor_turn = session.cursor_hovers(at.x * ppp, at.y * ppp, pen);
+            }
+            // (hovering again, it goes on from where it comes back)
+            None if self.cursor.is_some() => session.cursor_hover_gone(),
+            None => {}
         }
         self.cursor = at.map(|at| {
             let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
@@ -659,31 +668,6 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
         QuickShapeKind::Rectangle => &icons::SHAPE_RECT,
         QuickShapeKind::Square => &icons::SHAPE_SQUARE,
     }
-}
-
-/// How much more the brush's stamps turn on the screen than its own rotation (radians clockwise),
-/// as the strokes turn them: with the canvas, unless the brush is oriented to the screen; and, for a
-/// brush that follows the pen, as the pen near the window leans (its azimuth). The barrel's roll
-/// turns the stamps from where it was as a stroke begins, so a stroke's first stamp is as the
-/// outline shows it however the barrel is turned.
-fn cursor_turn(session: &CanvasSession) -> f32 {
-    let setting = |key: &str| session.current_brush_setting(key.into());
-    let mut turn = 0.0;
-    if setting("orient_to_screen") < 0.5 {
-        let v = session.view_matrix();
-        turn += v.get(1).copied().unwrap_or(0.0).atan2(v.first().copied().unwrap_or(1.0));
-    }
-    if let Some(azimuth) = crate::pen::azimuth().filter(|_| setting("input_style") >= 0.5) {
-        turn += azimuth;
-    }
-    // turned by the barrel from its zero, as the stamps will be (relative to the stroke, the first
-    // stamp isn't)
-    if let Some(barrel) =
-        crate::pen::barrel().filter(|_| setting("input_style") >= 1.5 && setting("relative_to_stroke") < 0.5)
-    {
-        turn += barrel;
-    }
-    turn
 }
 
 /// How the brush cursor's outline is drawn in `style` for a brush whose own outline is `own` (0

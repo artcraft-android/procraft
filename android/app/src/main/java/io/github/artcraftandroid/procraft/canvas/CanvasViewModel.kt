@@ -397,7 +397,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cursorShape by mutableStateOf<List<List<Float>>>(emptyList())
         private set
 
-    /** How far the cursor's shape is turned on the screen past its own rotation (radians, clockwise), as the stamps are: with the canvas. */
+    /**
+     * How far the cursor's shape is turned on the screen past its own rotation (radians, clockwise),
+     * as the stamps it stands for are (the core's): painting, as the newest stamp; hovering, as one
+     * laid there, going the way the pen goes and held as it is.
+     */
     var cursorTurn by mutableStateOf(0f)
         private set
 
@@ -497,11 +501,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Shows the brush cursor at window point [p] (or hides it), sized for the current brush and
-     * zoom, as long as it shows when [hovering] (or painting).
+     * zoom, as long as it shows when [hovering] (or painting); a hovering pen held as [pen] says
+     * (none: a mouse, or a pen that doesn't tell).
      */
-    fun showCursor(p: Offset?, hovering: Boolean = false) {
+    fun showCursor(p: Offset?, hovering: Boolean = false, pen: io.github.artcraftandroid.procraft.core.CursorPen? = null) {
         val wanted = if (hovering) cursorShows != CursorShows.PAINTING else cursorShows != CursorShows.HOVERING
         if (!brushCursorOn || p == null || !wanted) {
+            // (hovering again, it goes on from where it comes back)
+            if (p == null) session?.cursorHoverGone()
             cursorAt = null
             return
         }
@@ -514,13 +521,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             // a shape or a fill that can't be read leaves the round tip's circle, in lines: the
             // cursor still shows
             cursorShape = runCatching { s.brushOutline() }.getOrDefault(emptyList())
-            // turned with the canvas, as its stamps are (unless the brush keeps to the screen)
-            cursorTurn = if (s.currentBrushSetting("orient_to_screen") < 0.5f) s.viewMatrix().let { m -> kotlin.math.atan2(m[1], m[0]) } else 0f
             val look = if (hovering) runCatching { s.hoverFill() }.getOrNull() else null
             cursorFill = look?.let { runCatching { fillStamp(s) }.getOrNull() }
             look?.let { cursorFillLook = it }
             cursorReadAt = now
         }
+        // turned as its stamps are: the newest one painting, one laid where it hovers else (read
+        // without waiting on the canvas)
+        session?.let { s -> cursorTurn = if (hovering) s.cursorHovers(p.x, p.y, pen) else s.cursorTurn() }
         cursorHovering = hovering
         cursorAt = p
     }

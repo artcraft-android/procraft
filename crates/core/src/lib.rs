@@ -32,6 +32,7 @@ mod colour_drag;
 mod colour_models;
 mod crop;
 mod crop_edit;
+mod cursor_turn;
 mod device;
 mod drawn_previews;
 mod floating;
@@ -166,6 +167,7 @@ pub use colour_models::{
     oklab_tracks, oklab_value_slid, oklab_value_tracks,
 };
 pub use crop_edit::{CropReadout, CropShown};
+pub use cursor_turn::CursorPen;
 pub use device::keep_device;
 pub use floating::{
     FloatingPanel, FloatingRoom, FloatingSizes, FloatingWindow, floating_at, floating_fitted, floating_kept,
@@ -1546,6 +1548,8 @@ pub(crate) struct Shared {
     /// [`CanvasSession::stroke_add`]).
     queued: parking_lot::Mutex<QueuedInput>,
     input_queued: std::sync::atomic::AtomicBool,
+    /// How the brush cursor's outline turns, read without waiting on the canvas.
+    pub(crate) cursor: cursor_turn::CursorTurns,
 }
 
 /// Pen input waiting for the canvas (see [`Shared::queued`]): the stroke's samples in order (those
@@ -2138,6 +2142,7 @@ impl CanvasSession {
                 nudge: Arc::new(activity::Nudge::default()),
                 queued: parking_lot::Mutex::new(QueuedInput::default()),
                 input_queued: std::sync::atomic::AtomicBool::new(false),
+                cursor: cursor_turn::CursorTurns::default(),
             }),
         })
     }
@@ -2217,6 +2222,7 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
         // (input left waiting by a stroke that has gone is for no stroke now)
         self.shared.drop_queued_input();
         // pressed as plugins say, before anything takes them
@@ -2390,6 +2396,7 @@ impl CanvasSession {
         st.stroke = Some(builder);
         st.second = second_builder;
         st.ahead = false;
+        self.shared.note_painted_turn(st);
         self.shared.frame(st);
     }
 
@@ -2483,6 +2490,7 @@ impl Shared {
             st.redraw_painted_on();
             self.frame(st);
         }
+        self.note_painted_turn(st);
     }
 
     /// Where the input is predicted to go next, the canvas held (see
@@ -2519,6 +2527,7 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
         // (the input waiting for the canvas came before)
         self.shared.take_queued_input(st);
         let mut samples = samples;
@@ -2588,6 +2597,7 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
         self.shared.drop_queued_input();
         st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {

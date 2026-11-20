@@ -8156,6 +8156,116 @@ fn a_tip_of_its_own_outlines_however_fine_its_lines() {
     }
 }
 
+/// Sets the current tool's brush's setting `key` to `value`.
+fn set_current_brush(s: &CanvasSession, key: &str, value: f32) {
+    let mut st = s.shared.lock();
+    let (set, index) = st.brush_ref(st.tool);
+    st.library[set].brushes[index].set_setting(key, value);
+}
+
+/// Hovering, the brush cursor's outline turns as a stamp laid there would: a brush that follows the
+/// stroke with the way the pointer goes (as a still dab lies before it has gone anywhere), one that
+/// holds still not at all, one turned by the pen as the pen leans.
+#[test]
+fn the_brush_cursor_turns_with_the_way_the_pointer_hovers_for_a_brush_that_follows_the_stroke() {
+    use crate::CursorPen;
+    use std::f32::consts::FRAC_PI_2;
+    let s = CanvasSession::new(64, 64);
+    let plain = [("shape_rotation", 1.0), ("input_style", 0.0), ("relative_to_stroke", 0.0), ("orient_to_screen", 0.0)];
+    for (key, value) in plain.into_iter().chain([("randomized", 0.0), ("scatter", 0.0)]) {
+        set_current_brush(&s, key, value);
+    }
+    // still: up the screen, as a dab lies
+    let still = s.cursor_hovers(100.0, 100.0, None);
+    assert!((still + FRAC_PI_2).abs() < 1e-4, "{still}");
+    // across the screen, then down it: it comes round to each way
+    let mut turn = still;
+    for i in 1..40 {
+        turn = s.cursor_hovers(100.0 + i as f32 * 12.0, 100.0, None);
+    }
+    assert!(turn.abs() < 0.02, "across: {turn}");
+    for i in 1..40 {
+        turn = s.cursor_hovers(568.0, 100.0 + i as f32 * 12.0, None);
+    }
+    assert!((turn - FRAC_PI_2).abs() < 0.02, "down: {turn}");
+    // not painting, the cursor turns as it hovers
+    assert_eq!(s.cursor_turn(), turn);
+    // gone and back elsewhere: the jump is no way of its own
+    s.cursor_hover_gone();
+    assert_eq!(s.cursor_hovers(10.0, 10.0, None), turn);
+    // a brush holding still: not at all
+    set_current_brush(&s, "shape_rotation", 0.0);
+    assert!(s.cursor_hovers(10.0, 30.0, None).abs() < 1e-5);
+    // turned by the pen: as it leans, whichever way the pen goes, followed or not
+    set_current_brush(&s, "input_style", 1.0);
+    let pen = Some(CursorPen { azimuth: 0.7, roll: 0.3 });
+    for follow in [0.0, 1.0] {
+        set_current_brush(&s, "shape_rotation", follow);
+        let leant = s.cursor_hovers(10.0, 50.0 + follow * 20.0, pen);
+        assert!((leant - 0.7).abs() < 1e-5, "following {follow}: {leant}");
+    }
+    // and by its barrel as well
+    set_current_brush(&s, "input_style", 2.0);
+    let rolled = s.cursor_hovers(10.0, 90.0, pen);
+    assert!((rolled - 1.0).abs() < 1e-5, "{rolled}");
+}
+
+/// While a stroke is painted the brush cursor's outline turns as its newest stamp: with the
+/// stroke's way for a brush that follows it, as the pen leans for one turned by the pen, and with
+/// the canvas on the screen. Lifted, it turns as it hovers again.
+#[test]
+fn the_brush_cursor_turns_as_the_newest_stamp_while_a_stroke_is_painted() {
+    use procraft_engine::geom::Vec2;
+    use std::f32::consts::FRAC_PI_2;
+    let Some(s) = session(400, 400) else { return };
+    no_streamline(&s);
+    // small, so the stroke's way turns within a few samples
+    s.set_brush_size(0.2);
+    let plain = [("shape_rotation", 1.0), ("input_style", 0.0), ("relative_to_stroke", 0.0), ("orient_to_screen", 0.0)];
+    for (key, value) in plain.into_iter().chain([("randomized", 0.0), ("scatter", 0.0)]) {
+        set_current_brush(&s, key, value);
+    }
+    // the canvas turned on the screen
+    let view_turn = 0.4;
+    if let Some(v) = s.shared.lock().view.as_mut() {
+        v.gesture(Vec2::new(200.0, 200.0), Vec2::ZERO, 1.0, view_turn);
+    }
+    let hovered = s.cursor_hovers(100.0, 200.0, None);
+    s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 200.0, 0.0)]);
+    // right across the screen, then down it
+    for i in 1..30 {
+        s.stroke_add(vec![sample(100.0 + i as f32 * 8.0, 200.0, f64::from(i) * 8.0)]);
+    }
+    let across = s.cursor_turn();
+    assert!(across.abs() < 0.05, "across: {across}");
+    for i in 1..30 {
+        s.stroke_add(vec![sample(332.0, 200.0 + i as f32 * 8.0, 240.0 + f64::from(i) * 8.0)]);
+    }
+    let down = s.cursor_turn();
+    assert!((down - FRAC_PI_2).abs() < 0.05, "down: {down}");
+    {
+        // as the newest stamp lies on the canvas past the brush's own rotation, and with the canvas
+        let st = s.shared.lock();
+        let last = st.stroke.as_ref().and_then(procraft_engine::stroke::StrokeBuilder::last_angle);
+        let own = st.brush(st.tool).shape.rotation;
+        let expected = last.map_or(f32::NAN, |a| a - own + view_turn);
+        assert!((down - expected).abs() < 1e-5, "{down} {expected}");
+    }
+    s.stroke_end(vec![]);
+    assert_eq!(s.cursor_turn(), hovered);
+    // a brush turned by the pen: as it leans, the canvas's turn on top (as its stamps show)
+    set_current_brush(&s, "input_style", 1.0);
+    let leaning = |x: f32, t: f64| PenSample { orientation: 0.7, ..sample(x, 100.0, t) };
+    s.stroke_begin(PointerKind::Stylus, vec![leaning(100.0, 0.0)]);
+    for i in 1..20 {
+        s.stroke_add(vec![leaning(100.0 + i as f32 * 8.0, f64::from(i) * 8.0)]);
+    }
+    let leant = s.cursor_turn();
+    assert!((leant - (0.7 + view_turn)).abs() < 1e-4, "{leant}");
+    s.stroke_cancel();
+    assert_eq!(s.cursor_turn(), hovered);
+}
+
 #[test]
 fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
     use procraft_engine::plist::Value;
