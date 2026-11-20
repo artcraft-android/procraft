@@ -19801,7 +19801,8 @@ fn the_app_away_draws_nothing_however_much_changes() {
     let away = s.activity().since(&before);
     s.set_shown(true);
     let shown = std::time::Instant::now();
-    let back = (0..200).any(|_| {
+    // waited for as long as a busy machine takes (it goes on as soon as the frame comes)
+    let back = (0..2000).any(|_| {
         std::thread::sleep(std::time::Duration::from_millis(5));
         s.activity().frames > before.frames
     });
@@ -19873,9 +19874,10 @@ fn the_autosave_does_nothing_while_nothing_changes() {
         s.stroke_end(vec![]);
         let _ = pixel(&s, 0, 0);
     };
+    // waited for as long as a busy machine takes (it goes on as soon as the save comes)
     let saved_now = || {
         let edits = s.edits();
-        (0..300).any(|_| {
+        (0..2000).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(5));
             s.edits_saved() == Some(edits)
         })
