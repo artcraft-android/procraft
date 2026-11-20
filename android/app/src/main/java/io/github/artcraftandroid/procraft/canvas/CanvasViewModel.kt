@@ -409,6 +409,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cursorFill by mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
         private set
 
+    /**
+     * How the fill shows: as the brush would paint at its estimated hover pressure, a share of the
+     * cursor's diameter and of the opacity painted with (the core's).
+     */
+    var cursorFillLook by mutableStateOf(io.github.artcraftandroid.procraft.core.HoverFill(1f, 1f))
+        private set
+
     /** The stamp [cursorFill] was made from, and its side, to make it again only when it changes. */
     private var cursorFillMade: Pair<Int, ByteArray>? = null
 
@@ -509,7 +516,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             cursorShape = runCatching { s.brushOutline() }.getOrDefault(emptyList())
             // turned with the canvas, as its stamps are (unless the brush keeps to the screen)
             cursorTurn = if (s.currentBrushSetting("orient_to_screen") < 0.5f) s.viewMatrix().let { m -> kotlin.math.atan2(m[1], m[0]) } else 0f
-            cursorFill = if (hovering && s.currentBrushSetting("hover_fill").roundToInt() > 0) runCatching { fillStamp(s) }.getOrNull() else null
+            val look = if (hovering) runCatching { s.hoverFill() }.getOrNull() else null
+            cursorFill = look?.let { runCatching { fillStamp(s) }.getOrNull() }
+            look?.let { cursorFillLook = it }
             cursorReadAt = now
         }
         cursorHovering = hovering

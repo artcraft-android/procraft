@@ -150,7 +150,7 @@ pub use brush_files::{
 };
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::prepare_brushes;
-pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
+pub use brushes::{BrushInfo, BrushSetInfo, HoverFill, RecentBrush};
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,

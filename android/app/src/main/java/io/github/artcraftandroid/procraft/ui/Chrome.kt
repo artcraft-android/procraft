@@ -529,15 +529,18 @@ fun BrushCursor(vm: CanvasViewModel) {
     val shape = vm.cursorShape
     val turn = vm.cursorTurn
     val fill = vm.cursorFill.takeIf { vm.cursorHovering }
-    val strength = vm.opacity.coerceIn(0f, 1f)
+    // as the brush would paint at its estimated pressure: as strong, and as big
+    val look = vm.cursorFillLook
+    val strength = hoverFillStrength(vm.opacity, look.opacity)
+    val fillR = r * look.size.coerceIn(0f, 1f)
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-        // the stamp under the outline, across the brush's diameter, turned as the stamps are
-        if (fill != null) {
+        // the stamp under the outline, turned as the stamps are
+        if (fill != null && fillR >= 1f) {
             rotate(Math.toDegrees(turn.toDouble()).toFloat(), pivot = at) {
                 drawImage(
                     fill,
-                    dstOffset = androidx.compose.ui.unit.IntOffset((at.x - r).roundToInt(), (at.y - r).roundToInt()),
-                    dstSize = androidx.compose.ui.unit.IntSize((2f * r).roundToInt(), (2f * r).roundToInt()),
+                    dstOffset = androidx.compose.ui.unit.IntOffset((at.x - fillR).roundToInt(), (at.y - fillR).roundToInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize((2f * fillR).roundToInt(), (2f * fillR).roundToInt()),
                     alpha = strength,
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(paint),
                 )
@@ -571,6 +574,9 @@ fun BrushCursor(vm: CanvasViewModel) {
 
 /** A hover fill drawn at least this strong (the brush's opacity) shows by itself. */
 private const val CURSOR_FILL_SEEN = 0.1f
+
+/** How strongly the hover fill shows: the opacity painted with ([opacity]), times what the brush's estimated hover pressure leaves of it ([atPressure]). */
+internal fun hoverFillStrength(opacity: Float, atPressure: Float): Float = opacity.coerceIn(0f, 1f) * atPressure.coerceIn(0f, 1f)
 
 /** How the brush cursor's outline is drawn: not at all, a thin dark line with a light edge, or in the colour. */
 internal enum class CursorLines { NONE, CONTRAST, COLOUR }

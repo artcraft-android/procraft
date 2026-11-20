@@ -11,6 +11,14 @@ use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 use crate::CanvasSession;
 use crate::layers::ThumbnailImage;
 
+/// The brush cursor's fill while the pen hovers ([`CanvasSession::hover_fill`]): how big, a share
+/// of the cursor's diameter, and how strong, a share of the opacity painted with.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct HoverFill {
+    pub size: f32,
+    pub opacity: f32,
+}
+
 /// Where a shape's outline is traced: where its paint is a quarter strong.
 const OUTLINE_LEVEL: f32 = 0.25;
 
@@ -203,6 +211,29 @@ impl CanvasSession {
             .collect();
         *kept = Some((key, loops.clone()));
         loops
+    }
+
+    /// What the brush cursor's fill shows while the pen hovers, if the current tool's brush's
+    /// Hover fill says to fill it: the stamp as it would paint at the brush's estimated pressure
+    /// (its Hover setting), how big (a share of the cursor's diameter) and how strong (a share of
+    /// the opacity slider's). A brush whose size or opacity follows the pressure fills smaller or
+    /// fainter there; one that follows neither, all of the cursor at the opacity painted with.
+    pub fn hover_fill(&self) -> Option<HoverFill> {
+        let st = self.shared.lock();
+        let brush = st.brush(st.tool);
+        if brush.setting("hover_fill").round() < 1.0 {
+            return None;
+        }
+        let pressure = brush.setting("hover_pressure");
+        let pressure = if pressure.is_finite() { pressure.clamp(0.01, 1.0) } else { 0.44 };
+        let [size, opacity, ..] = brush.pressures(pressure);
+        let (size, opacity) = brush.factors(size, opacity);
+        // the size goes down to the brush's least, not to nothing (as a stroke's stamps do)
+        let diameter = brush.diameter(st.shown_sliders().size);
+        let least = (brush.min_size.min(brush.biggest()) / diameter.max(0.5)).clamp(0.0, 1.0);
+        let size = least + (1.0 - least) * size.clamp(0.0, 1.0);
+        let fill = HoverFill { size, opacity: opacity.clamp(0.0, 1.0) };
+        (fill.size.is_finite() && fill.opacity.is_finite()).then_some(fill)
     }
 
     /// The current tool's brush's stamp as it paints, `side` x `side` pixels of coverage (0..255):
@@ -758,6 +789,36 @@ mod tests {
     use procraft_engine::brush::Brush;
 
     use crate::CanvasSession;
+
+    /// Hovering, the cursor fills as the brush would paint at its estimated pressure: a brush whose
+    /// opacity follows the pressure fills faintly at 44% and the picture shows through (#332),
+    /// one whose size does fills less of the cursor, one that follows neither fills it all at the
+    /// opacity painted with; a brush whose Hover fill is None fills nothing.
+    #[test]
+    fn the_hover_fill_is_the_stamp_at_the_brushs_estimated_pressure() {
+        let s = CanvasSession::new(64, 64);
+        let set = |settings: &[(&str, f32)]| {
+            s.studio_begin();
+            for &(key, value) in settings {
+                s.set_studio_setting(key.into(), value);
+            }
+            s.studio_end(true);
+            s.hover_fill()
+        };
+        assert_eq!(set(&[("hover_fill", 0.0)]), None);
+        let plain =
+            set(&[("hover_fill", 1.0), ("hover_pressure", 0.44), ("pressure_size", 0.0), ("pressure_opacity", 0.0)]);
+        assert_eq!(plain, Some(super::HoverFill { size: 1.0, opacity: 1.0 }));
+        let fading = set(&[("pressure_opacity", 1.0)]).unwrap_or(super::HoverFill { size: 0.0, opacity: 1.0 });
+        assert!(fading.opacity < 0.6 && fading.opacity > 0.1 && fading.size == 1.0, "{fading:?}");
+        // pressed harder in the estimate, stronger
+        let harder = set(&[("hover_pressure", 0.9)]).unwrap_or(fading);
+        assert!(harder.opacity > fading.opacity + 0.2, "{harder:?} against {fading:?}");
+        let thinning = set(&[("pressure_opacity", 0.0), ("pressure_size", 1.0), ("hover_pressure", 0.44)])
+            .unwrap_or(super::HoverFill { size: 1.0, opacity: 0.0 });
+        assert!(thinning.size < 0.7 && thinning.opacity == 1.0, "{thinning:?}");
+        eprintln!("hover fill: plain {plain:?}, by opacity {fading:?} (at 90% {harder:?}), by size {thinning:?}");
+    }
 
     /// A brush file whose own preview is blank (a brush imported from another app can bring one):
     /// the library draws the brush instead of showing nothing.

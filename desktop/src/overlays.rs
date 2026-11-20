@@ -73,7 +73,7 @@ pub struct Overlays {
     pub cursor_style: CursorStyle,
     /// The brush's stamp the cursor fills while the pointer hovers (its Hover fill), its side in
     /// pixels and how strongly the brush paints; none painting, or when the brush has no fill.
-    cursor_fill: Option<(Vec<u8>, usize, f32)>,
+    cursor_fill: Option<(Vec<u8>, usize, f32, f32)>,
     /// The stamp's picture, by what it was made from.
     cursor_fill_picture: Option<(u64, TextureHandle)>,
 }
@@ -166,10 +166,12 @@ impl Overlays {
             let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
             (at, info.brush_diameter * info.zoom / 2.0 / ppp, outline)
         });
-        // the stamp it paints, filling it, if the brush's Hover fill says so
-        self.cursor_fill = at.filter(|_| session.current_brush_setting("hover_fill".into()).round() >= 1.0).map(|_| {
+        // the stamp it paints, filling it, if the brush's Hover fill says so: as it would paint at
+        // its estimated pressure, as big and as strong
+        self.cursor_fill = at.and_then(|_| session.hover_fill()).map(|look| {
             let side = ((info.brush_diameter * info.zoom).ceil() as usize).clamp(2, CURSOR_FILL_MOST);
-            (session.brush_stamp(side as u32), side, info.opacity.clamp(0.0, 1.0))
+            let strength = info.opacity.clamp(0.0, 1.0) * look.opacity.clamp(0.0, 1.0);
+            (session.brush_stamp(side as u32), side, strength, look.size.clamp(0.0, 1.0))
         });
     }
 
@@ -264,8 +266,9 @@ impl Overlays {
                 self.notice_band(ui, under_bar, window);
                 // hovering, the brush's stamp in the colour, as strongly as it paints, under its
                 // outline
-                if let (Some((at, r, _)), Some((stamp, side, strength))) = (self.cursor, &self.cursor_fill)
+                if let (Some((at, r, _)), Some((stamp, side, strength, size))) = (self.cursor, &self.cursor_fill)
                     && r >= 2.0
+                    && r * size >= 1.0
                     && stamp.len() >= side * side
                 {
                     let key = crate::chrome::stamp_key(stamp, *side);
@@ -278,7 +281,7 @@ impl Overlays {
                         }
                     };
                     let (sin, cos) = self.cursor_turn.sin_cos();
-                    let corner = |x: f32, y: f32| at + vec2(x * cos - y * sin, x * sin + y * cos) * r;
+                    let corner = |x: f32, y: f32| at + vec2(x * cos - y * sin, x * sin + y * cos) * r * *size;
                     let colour = current.gamma_multiply(*strength);
                     let mut mesh = egui::Mesh::with_texture(picture.id());
                     for (x, y, u, v) in
