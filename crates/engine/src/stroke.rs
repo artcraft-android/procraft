@@ -1821,12 +1821,13 @@ impl StrokeBuilder {
         self.placed.iter().take(handed).map(|p| self.finish_stamp(p, start, None)).collect()
     }
 
-    /// The rotation of the newest stamp placed (radians, on the canvas), none before the first: a
-    /// brush cursor shown while the stroke is painted turns as it.
-    pub fn last_angle(&self) -> Option<f32> {
+    /// The newest stamp placed, as it is laid (its start taper and pressure in, the end taper not
+    /// yet: that comes as the stroke ends), none before the first: a brush cursor shown while the
+    /// stroke is painted is its footprint, as big and turned as it.
+    pub fn newest_stamp(&self) -> Option<Stamp> {
         match &self.outside.0 {
-            Some(outside) => outside.stamps.last().map(|s| s.angle),
-            None => self.placed.last().map(|p| p.angle),
+            Some(outside) => outside.stamps.last().copied(),
+            None => self.placed.last().map(|p| self.finish_stamp(p, self.start_span(), None)),
         }
     }
 
@@ -5848,19 +5849,42 @@ mod tests {
         let mut b = plain();
         b.set_setting("shape_rotation", 1.0);
         let mut stroke = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
-        assert_eq!(stroke.last_angle(), None);
+        assert_eq!(stroke.newest_stamp(), None);
         // right, then down the canvas: it ends heading down
         let right: Vec<Sample> =
             (0..=20).map(|i| Sample::at(Vec2::new(i as f32 * 8.0, 0.0), 1.0, f64::from(i) * 8.0)).collect();
         let down: Vec<Sample> =
             (1..=40).map(|i| Sample::at(Vec2::new(160.0, i as f32 * 8.0), 1.0, 160.0 + f64::from(i) * 8.0)).collect();
         stroke.add(&right);
-        let along = stroke.last_angle().unwrap_or(f32::NAN);
+        let along = stroke.newest_stamp().map_or(f32::NAN, |s| s.angle);
         assert!(along.abs() < 0.05, "{along}");
         stroke.add(&down);
-        let turned = stroke.last_angle().unwrap_or(f32::NAN);
+        let turned = stroke.newest_stamp().map_or(f32::NAN, |s| s.angle);
         assert!((turned - std::f32::consts::FRAC_PI_2).abs() < 0.05, "{turned}");
-        assert_eq!(Some(turned), stroke.placed_stamps().last().map(|s| s.angle));
+        assert_eq!(stroke.newest_stamp(), stroke.placed_stamps().last().copied());
+    }
+
+    /// The newest stamp is as big as it is laid: as its pressure makes it, with no end taper while
+    /// the stroke goes on.
+    #[test]
+    fn the_newest_stamp_is_as_big_as_it_is_laid() {
+        let b = Brush {
+            pressure_size: 1.0,
+            pen_taper: Taper { start: 0.0, end: 0.5, size: 1.0, ..Taper::NONE },
+            min_size: 0.0,
+            ..plain()
+        };
+        let mut stroke = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        let at = |i: u32, pressure: f32| Sample::at(Vec2::new(i as f32 * 4.0, 0.0), pressure, f64::from(i) * 8.0);
+        stroke.add(&(0..120).map(|i| at(i, 1.0)).collect::<Vec<_>>());
+        let full = stroke.newest_stamp().map_or(f32::NAN, |s| s.radius);
+        // pressed fully, at the end of the path so far: whole (its end taper comes as it ends)
+        assert!(full > 15.0, "{full}");
+        // pressed lightly: smaller, as laid
+        stroke.add(&(120..160).map(|i| at(i, 0.3)).collect::<Vec<_>>());
+        let light = stroke.newest_stamp().map_or(f32::NAN, |s| s.radius);
+        assert!(light < 0.6 * full, "{light} pressed lightly, {full} fully");
+        assert_eq!(stroke.newest_stamp(), stroke.placed_stamps().last().copied());
     }
 
     /// The library's sample stroke tells no pen's turn: a brush turned as the pen is held turns its

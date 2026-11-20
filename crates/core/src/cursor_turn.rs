@@ -1,13 +1,14 @@
-//! How the brush cursor's outline turns: as the stamps it stands for.
+//! How the brush cursor's outline turns, and how big it is while painting: as the stamps it
+//! stands for.
 //!
-//! While a stroke is painted it is the newest stamp's footprint, turned as that stamp is (the
-//! stroke's way for a brush that follows it, the pen's azimuth and barrel for one turned by the pen,
-//! a random turn or scatter included). Hovering, it turns as a stamp laid there would: the way the
+//! While a stroke is painted it is the newest stamp's footprint, as big as that stamp is laid (its
+//! pressure and start taper) and turned as it is (the stroke's way for a brush that follows it, the
+//! pen's azimuth and barrel for one turned by the pen, a random turn or scatter included). Hovering, it turns as a stamp laid there would: the way the
 //! pointer has been going, smoothed, stands for the stroke's way, so a brush that follows the stroke
 //! shows which way it would lie as the pen moves over the canvas; and as the pen is held.
 //!
-//! The turn is read without waiting on the canvas (a frame laying a stroke's paint holds it): the
-//! newest stamp's is noted as the stamps are laid, the hover's as the pointer moves.
+//! Both are read without waiting on the canvas (a frame laying a stroke's paint holds it): the
+//! newest stamp's are noted as the stamps are laid, the hover's turn as the pointer moves.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -73,8 +74,10 @@ impl Heading {
 
 /// The brush cursor's turns, kept beside the canvas's lock.
 pub(crate) struct CursorTurns {
-    /// The newest stamp's while a stroke is painted (an f32's bits; NaN before it has one).
+    /// The newest stamp's while a stroke is painted (an f32's bits; NaN before it has one), and
+    /// its radius on the screen (window pixels).
     painted: AtomicU32,
+    painted_radius: AtomicU32,
     /// As last worked out where the pointer hovers.
     hovered: AtomicU32,
     heading: parking_lot::Mutex<Heading>,
@@ -86,6 +89,7 @@ impl Default for CursorTurns {
     fn default() -> CursorTurns {
         CursorTurns {
             painted: AtomicU32::new(f32::NAN.to_bits()),
+            painted_radius: AtomicU32::new(f32::NAN.to_bits()),
             hovered: AtomicU32::new(0f32.to_bits()),
             heading: parking_lot::Mutex::new(Heading::default()),
             points: AtomicU32::new(1f32.to_bits()),
@@ -115,10 +119,13 @@ impl State {
         if turn.is_finite() { turn } else { 0.0 }
     }
 
-    /// The cursor's turn for the newest stamp of the stroke painted, none before it has one.
-    fn painted_turn(&self) -> Option<f32> {
-        let angle = self.stroke.as_ref()?.last_angle()?;
-        Some(self.cursor_turn_for(angle))
+    /// The cursor's turn and radius on the screen (window pixels) for the newest stamp of the
+    /// stroke painted, none before it has one.
+    fn painted_stamp(&self) -> Option<(f32, f32)> {
+        let stamp = self.stroke.as_ref()?.newest_stamp()?;
+        let zoom = self.view.map_or(1.0, |v| v.zoom());
+        let radius = stamp.radius * zoom;
+        Some((self.cursor_turn_for(stamp.angle), if radius.is_finite() { radius.max(0.0) } else { f32::NAN }))
     }
 
     /// The cursor's turn hovering, going `heading` (radians on the screen; none before it has
@@ -133,14 +140,18 @@ impl State {
 }
 
 impl Shared {
-    /// Notes the newest stamp's turn for the cursor, the stroke's stamps laid (as `st` now is).
+    /// Notes the newest stamp's turn and size for the cursor, the stroke's stamps laid (as `st`
+    /// now is).
     pub(crate) fn note_painted_turn(&self, st: &State) {
-        store(&self.cursor.painted, st.painted_turn().unwrap_or(f32::NAN));
+        let (turn, radius) = st.painted_stamp().unwrap_or((f32::NAN, f32::NAN));
+        store(&self.cursor.painted, turn);
+        store(&self.cursor.painted_radius, radius);
     }
 
-    /// No stroke is painted: the cursor turns as it hovers.
+    /// No stroke is painted: the cursor turns as it hovers, as big as the brush.
     pub(crate) fn forget_painted_turn(&self) {
         store(&self.cursor.painted, f32::NAN);
+        store(&self.cursor.painted_radius, f32::NAN);
     }
 }
 
@@ -180,6 +191,13 @@ impl CanvasSession {
     pub fn cursor_turn(&self) -> f32 {
         let painted = load(&self.shared.cursor.painted);
         if painted.is_finite() { painted } else { load(&self.shared.cursor.hovered) }
+    }
+
+    /// How big the brush cursor's outline is while a stroke is painted: its newest stamp's radius
+    /// on the screen (window pixels), as it is laid (its pressure and start taper in); none before
+    /// it has one, or not painting (the brush's own size then). Read without waiting on the canvas.
+    pub fn cursor_radius(&self) -> Option<f32> {
+        Some(load(&self.shared.cursor.painted_radius)).filter(|r| r.is_finite())
     }
 }
 

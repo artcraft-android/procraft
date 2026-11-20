@@ -8452,7 +8452,7 @@ fn the_brush_cursor_turns_as_the_newest_stamp_while_a_stroke_is_painted() {
     {
         // as the newest stamp lies on the canvas past the brush's own rotation, and with the canvas
         let st = s.shared.lock();
-        let last = st.stroke.as_ref().and_then(procraft_engine::stroke::StrokeBuilder::last_angle);
+        let last = st.stroke.as_ref().and_then(procraft_engine::stroke::StrokeBuilder::newest_stamp).map(|n| n.angle);
         let own = st.brush(st.tool).shape.rotation;
         let expected = last.map_or(f32::NAN, |a| a - own + view_turn);
         assert!((down - expected).abs() < 1e-5, "{down} {expected}");
@@ -8470,6 +8470,59 @@ fn the_brush_cursor_turns_as_the_newest_stamp_while_a_stroke_is_painted() {
     assert!((leant - (0.7 + view_turn)).abs() < 1e-4, "{leant}");
     s.stroke_cancel();
     assert_eq!(s.cursor_turn(), hovered);
+}
+
+/// While a stroke is painted the brush cursor's outline is as big as its newest stamp is laid, on
+/// the screen at the canvas's zoom: smaller where the pen presses lightly on a brush whose size
+/// follows the pressure; and not painting, none (the brush's own size).
+#[test]
+fn the_brush_cursor_is_as_big_as_the_newest_stamp_while_a_stroke_is_painted() {
+    use procraft_engine::geom::Vec2;
+    let Some(s) = session(400, 400) else { return };
+    no_streamline(&s);
+    s.set_brush_size(0.3);
+    for (key, value) in [("pen_taper_start", 0.0), ("pen_taper_end", 0.0)] {
+        set_current_brush(&s, key, value);
+    }
+    {
+        let mut st = s.shared.lock();
+        let (set, index) = st.brush_ref(st.tool);
+        let brush = &mut st.library[set].brushes[index];
+        brush.pressure_size = 1.0;
+        brush.min_size = 0.0;
+        brush.pressure_smoothing = 0.0;
+    }
+    assert_eq!(s.cursor_radius(), None);
+    let pressed = |x: f32, t: f64, pressure: f32| PenSample { pressure, ..sample(x, 200.0, t) };
+    // a stroke across, pressed fully and then lightly, its newest stamp's radius each time
+    let stroke = |s: &CanvasSession| {
+        s.stroke_begin(PointerKind::Stylus, vec![pressed(60.0, 0.0, 1.0)]);
+        for i in 1..30 {
+            s.stroke_add(vec![pressed(60.0 + i as f32 * 4.0, f64::from(i) * 8.0, 1.0)]);
+        }
+        let full = s.cursor_radius();
+        let newest = s.shared.lock().stroke.as_ref().and_then(procraft_engine::stroke::StrokeBuilder::newest_stamp);
+        for i in 30..60 {
+            s.stroke_add(vec![pressed(60.0 + i as f32 * 4.0, f64::from(i) * 8.0, 0.25)]);
+        }
+        let light = s.cursor_radius();
+        s.stroke_end(vec![]);
+        s.undo();
+        (full.unwrap_or(f32::NAN), light.unwrap_or(f32::NAN), newest.map_or(f32::NAN, |n| n.radius))
+    };
+    let zoom = s.info().zoom;
+    let (full, light, stamp) = stroke(&s);
+    assert!((full - stamp * zoom).abs() < 1e-3, "{full} on the screen, the stamp's {stamp} at {zoom}");
+    assert!(full > 4.0 && light < 0.6 * full, "pressed fully {full}, lightly {light}");
+    assert_eq!(s.cursor_radius(), None, "lifted: the brush's own size");
+    // the canvas shown twice as big
+    if let Some(v) = s.shared.lock().view.as_mut() {
+        v.gesture(Vec2::new(200.0, 200.0), Vec2::ZERO, 2.0, 0.0);
+    }
+    let doubled_zoom = s.info().zoom;
+    assert!((doubled_zoom - 2.0 * zoom).abs() < 1e-3, "{doubled_zoom}");
+    let (doubled, _, stamp_again) = stroke(&s);
+    assert!((doubled - stamp_again * doubled_zoom).abs() < 1e-3, "{doubled}, the stamp's {stamp_again}");
 }
 
 #[test]

@@ -136,8 +136,8 @@ impl Overlays {
         }
     }
 
-    /// The brush's outline goes to (x, y), window pixels (sized and styled as the stroke begins),
-    /// or away.
+    /// The brush's outline goes to (x, y), window pixels (styled as the stroke begins, sized as its
+    /// newest stamp once it has one), or away.
     pub fn cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, at: Option<(f32, f32)>) {
         let ppp = ctx.pixels_per_point();
         if self.cursor.is_none() && at.is_some() {
@@ -155,6 +155,8 @@ impl Overlays {
                     session.current_brush_setting("cursor_outline".into()).round() as i32,
                 )
             });
+            // as big as the newest stamp is laid, once the stroke has one
+            let r = session.cursor_radius().map_or(r, |r| r / ppp);
             (pos2(x, y) / ppp, r, outline)
         });
     }

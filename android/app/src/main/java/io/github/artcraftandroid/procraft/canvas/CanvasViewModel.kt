@@ -513,7 +513,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         // sized as it shows, and while hovering again now and then: the size may have changed
-        // meanwhile (painting, it keeps the size the stroke began at)
+        // meanwhile (painting, it takes its newest stamp's below)
         val now = android.os.SystemClock.uptimeMillis()
         if (cursorAt == null || (hovering && now - cursorReadAt >= CURSOR_REREAD_MS)) session?.let { s ->
             cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
@@ -526,9 +526,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             look?.let { cursorFillLook = it }
             cursorReadAt = now
         }
-        // turned as its stamps are: the newest one painting, one laid where it hovers else (read
-        // without waiting on the canvas)
-        session?.let { s -> cursorTurn = if (hovering) s.cursorHovers(p.x, p.y, pen) else s.cursorTurn() }
+        // turned as its stamps are: the newest one painting, one laid where it hovers else; and
+        // painting, as big as the newest stamp is laid (read without waiting on the canvas)
+        session?.let { s ->
+            cursorTurn = if (hovering) s.cursorHovers(p.x, p.y, pen) else s.cursorTurn()
+            if (!hovering) s.cursorRadius()?.let { cursorRadius = it }
+        }
         cursorHovering = hovering
         cursorAt = p
     }

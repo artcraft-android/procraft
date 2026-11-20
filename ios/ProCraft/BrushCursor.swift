@@ -2,8 +2,9 @@ import QuartzCore
 import UIKit
 
 /// The brush's outline where the Pencil (or the pointer) hovers over the canvas: the brush's own
-/// shape at the size it paints on the screen, as the core gives it, drawn as a thin dark line
-/// edged in white, or in the paint colour, as the brush says (none at all for some).
+/// shape at the size it paints on the screen, turned as a stamp laid there would be, as the core
+/// gives it, drawn as a thin dark line edged in white, or in the paint colour, as the brush says
+/// (none at all for some).
 final class BrushCursorView: UIView {
     private let under = CAShapeLayer()
     private let over = CAShapeLayer()
@@ -32,8 +33,9 @@ final class BrushCursorView: UIView {
     }
 
     /// Shows the outline at `point` (points in this view), `alpha` strong, sized and shaped for
-    /// the current brush as `session` has it (`pixels` window pixels a point).
-    func show(at point: CGPoint, alpha: CGFloat, session: CanvasSession, pixels: CGFloat) {
+    /// the current brush as `session` has it (`pixels` window pixels a point), turned `turn`
+    /// radians clockwise past the brush's own rotation (the core's `cursorHovers`).
+    func show(at point: CGPoint, alpha: CGFloat, session: CanvasSession, pixels: CGFloat, turn: CGFloat) {
         let now = CACurrentMediaTime()
         // read as it appears, and again now and then: the brush or its size may change meanwhile
         if isHidden || now - readAt >= 0.1 {
@@ -53,6 +55,8 @@ final class BrushCursorView: UIView {
         CATransaction.setDisableActions(true)
         under.position = point
         over.position = point
+        under.setAffineTransform(CGAffineTransform(rotationAngle: turn))
+        over.setAffineTransform(CGAffineTransform(rotationAngle: turn))
         self.alpha = min(alpha, 1)
         isHidden = false
         CATransaction.commit()
