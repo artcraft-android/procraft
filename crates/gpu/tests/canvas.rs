@@ -1259,6 +1259,33 @@ fn a_stroke_tip_shows_until_the_next_one_replaces_it() {
     assert_eq!(at(&mut canvas, &mut doc, 20), white);
 }
 
+/// A read beside the frames (a time-lapse frame, the autosave) waits for what they lay a share at
+/// a time only as far as the stroke still open: an ended stroke's queued end counts, the open
+/// stroke's own stamps don't (a read that counted them waited until that stroke ended).
+#[test]
+fn work_laid_over_frames_counts_an_ended_strokes_not_the_open_ones() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(100, 100);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(20.0, 50.0), 5.0)]);
+    assert!(!canvas.lays_over_frames(), "an open stroke's own stamps");
+    canvas.end_stroke();
+    assert!(canvas.lays_over_frames(), "its end queued");
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(60.0, 50.0), 5.0)]);
+    assert!(canvas.lays_over_frames(), "the ended stroke's end, queued before the open one's stamps");
+    canvas.render(&gpu, &mut doc, None);
+    canvas.add_stamps(&[dot(Vec2::new(70.0, 50.0), 5.0)]);
+    assert!(!canvas.lays_over_frames(), "only the open stroke's stamps left");
+    canvas.end_stroke();
+    assert!(canvas.lays_over_frames());
+    canvas.render(&gpu, &mut doc, None);
+    assert!(!canvas.lays_over_frames());
+}
+
 #[test]
 fn a_transform_moves_the_layer_and_undoes_as_one_step() {
     let Some(gpu) = gpu() else { return };

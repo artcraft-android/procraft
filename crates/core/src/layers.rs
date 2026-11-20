@@ -1166,11 +1166,16 @@ impl CanvasSession {
 
     /// The picture a time-lapse frame keeps, scaled to fit `max_side` pixels (premultiplied): as
     /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
-    /// never shows in the replay or its video. None before the canvas exists.
+    /// never shows in the replay or its video. None before the canvas exists, or while the frames
+    /// are still laying a stroke's end after waiting for them a while.
     pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
         // read once the frames have laid what they lay a share at a time (a stroke's end), which
-        // the read would otherwise lay at once, touches and frames waiting on it
-        self.shared.await_frames_laid();
+        // the read would otherwise lay at once, touches and frames waiting on it; strokes ending
+        // one after another, each with its end still being laid, none is read (the frame after
+        // the next stroke has it)
+        if !self.shared.await_frames_laid() {
+            return None;
+        }
         // the copy started under the lock, waited for once it is let go: touches and frames go
         // on while the GPU copies it
         let pending = {

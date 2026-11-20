@@ -572,7 +572,7 @@ impl CanvasSession {
                 let Some(session) = session.upgrade() else { return };
                 // (in the gap after a stroke: once the frames have laid its end, which reading the
                 // layers would otherwise lay at once, touches and frames waiting on it)
-                session.shared.await_frames_laid();
+                let _ = session.shared.await_frames_laid();
                 let mut saved = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
                 if saved.autosave != mine {
                     return;

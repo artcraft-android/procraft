@@ -4668,8 +4668,13 @@ impl Canvas {
     /// Whether renders that show the canvas have work to lay a share at a time, or work queued
     /// for the next one to take: a stroke's end laid again, paint laid in place catching up, any
     /// queued op. A render that shows nothing (a thumbnail's, a read of the layers) lays all of it
-    /// at once, holding whatever waits on the canvas meanwhile.
+    /// at once, holding whatever waits on the canvas meanwhile. A stroke still open doesn't count:
+    /// its work comes as the pen moves, so a read waiting for it would wait until it ended (and
+    /// take some of it), only what came before it, an ended stroke's end among it.
     pub fn lays_over_frames(&self) -> bool {
+        if self.active.is_some() {
+            return self.ops.iter().any(|op| matches!(op, Op::Commit(_) | Op::Cancel));
+        }
         self.relaying || self.catching_up || !self.ops.is_empty()
     }
 

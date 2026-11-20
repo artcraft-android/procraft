@@ -6799,6 +6799,153 @@ fn a_time_lapse_frame_waits_for_the_frames_to_lay_a_strokes_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A time-lapse frame read while the frames are still laying a stroke's end once its wait has run
+/// out (strokes ending one after another, each end still being laid) is left for the next stroke's
+/// rather than laying the rest at once in its hold of the canvas: that held the frames and touches
+/// for most of a second at a time while painting quickly on a large canvas. Once the end is laid,
+/// a frame is read. Printed: how long the read waited.
+#[test]
+fn a_time_lapse_frame_left_waiting_on_the_frames_lays_nothing_at_once() {
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Easterly") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(0.5);
+    // the end laid a stamp at each frame, the frames drawn slowly: it takes longer than the wait
+    {
+        let mut st = s.shared.lock();
+        let canvas = st.canvas.as_mut().unwrap();
+        canvas.set_relay_at_once(Duration::ZERO);
+        canvas.set_work_at_once(1);
+    }
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let view = window_view(&s, 512);
+    let frame = || {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (512, 512), procraft_engine::profile::Profile::Srgb, Instant::now());
+        gpu.flush();
+    };
+    let lays = || s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames);
+    s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 200.0, 0.0)]);
+    // back and forth across the canvas, long enough for hundreds of stamps
+    for i in 1..200 {
+        let x = 40.0 + (i % 100) as f32 * 4.3;
+        let y = 100.0 + (i / 100) as f32 * 90.0 + (x / 40.0).sin() * 30.0;
+        s.stroke_add(vec![PenSample { pressure: 0.5, ..sample(x, y, i as f64 * 8.0) }]);
+        if i % 2 == 0 {
+            frame();
+        }
+    }
+    s.stroke_end(vec![]);
+    frame();
+    assert!(lays(), "the stroke's end is laid over frames");
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-left-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    let reader = {
+        let (s, lapse) = (std::sync::Arc::clone(&s), std::sync::Arc::clone(&lapse));
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            (s.record_time_lapse(lapse), t.elapsed())
+        })
+    };
+    // (a frame at least every 250 ms, or the read takes the frames to have stopped)
+    while !reader.is_finished() {
+        frame();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (kept, waited) = reader.join().unwrap();
+    println!("the time-lapse frame waited {waited:?} on the frames, then was left");
+    assert!(!kept, "none kept while the end is still being laid");
+    assert!(lays(), "the read laid none of the end at once");
+    assert!(waited >= crate::FRAMES_LAY_MOST, "{waited:?}");
+    // the rest laid as frames lay it by default
+    {
+        let mut st = s.shared.lock();
+        let canvas = st.canvas.as_mut().unwrap();
+        canvas.set_relay_at_once(Duration::from_millis(6));
+        canvas.set_work_at_once(64 << 20);
+    }
+    let mut frames = 0;
+    while lays() && frames < 20_000 {
+        frame();
+        frames += 1;
+    }
+    println!("its end laid over {frames} more frames");
+    assert!(s.record_time_lapse(std::sync::Arc::clone(&lapse)), "kept once the end is laid");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(gpu.errors(), 0);
+}
+
+/// A time-lapse frame read while the frames lay one stroke's end, the pen already on the next,
+/// waits only for that end: the open stroke's work, which comes as the pen moves, isn't waited for
+/// (the read waited for that stroke to end, up to three seconds, and then took part of it). Bound:
+/// the read is done within a second, while the next stroke is still being drawn (for 2.5 s).
+#[test]
+fn a_time_lapse_frame_waits_for_an_ended_strokes_end_not_the_stroke_begun_after_it() {
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Easterly") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(1.0);
+    // the end laid a piece at each frame
+    s.shared.lock().canvas.as_mut().unwrap().set_relay_at_once(Duration::ZERO);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let view = window_view(&s, 512);
+    let frame = || {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (512, 512), procraft_engine::profile::Profile::Srgb, Instant::now());
+        gpu.flush();
+    };
+    let lays = || s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames);
+    let at = |i: usize, y: f32| {
+        let x = 40.0 + (i % 60) as f32 * 7.0;
+        PenSample { pressure: 0.5, ..sample(x, y + (x / 40.0).sin() * 60.0, i as f64 * 8.0) }
+    };
+    s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 150.0, 0.0)]);
+    for i in 1..60 {
+        s.stroke_add(vec![at(i, 150.0)]);
+        if i % 2 == 0 {
+            frame();
+        }
+    }
+    s.stroke_end(vec![]);
+    frame();
+    assert!(lays(), "the stroke's end is laid over frames");
+    // the next stroke begun at once, a time-lapse frame read meanwhile
+    s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 350.0, 0.0)]);
+    let dir = std::env::temp_dir().join(format!("procraft-lapse-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lapse = crate::TimeLapse::new(dir.to_string_lossy().into_owned());
+    let reader = {
+        let (s, lapse) = (std::sync::Arc::clone(&s), std::sync::Arc::clone(&lapse));
+        std::thread::spawn(move || s.record_time_lapse(lapse))
+    };
+    let started = Instant::now();
+    let (mut events, mut read_at) = (0, None);
+    while started.elapsed() < Duration::from_millis(2500) {
+        frame();
+        // the pen goes on as each frame is drawn: the open stroke always has work queued
+        events += 1;
+        s.stroke_add(vec![at(events, 350.0)]);
+        if read_at.is_none() && reader.is_finished() {
+            read_at = Some(started.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    s.stroke_end(vec![]);
+    while lays() {
+        frame();
+    }
+    let kept = reader.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("the time-lapse frame read after {read_at:?} of the next stroke's 2.5 s ({events} pen events)");
+    assert!(kept, "a frame kept");
+    let read_at = read_at.expect("the read done while the next stroke was being drawn");
+    assert!(read_at < Duration::from_secs(1), "{read_at:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
 /// What reading a time-lapse frame right after each stroke (as the apps do, the time-lapse kept
 /// by default) costs the frames and the app's thread, for a few heavy brushes (wet, dual, big; at
 /// their full size) on a large canvas (`LAPSE_COST_SIDE`, 2944x1840, ten layers), the frames drawn

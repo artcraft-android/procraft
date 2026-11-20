@@ -1711,7 +1711,8 @@ impl Shared {
     /// then lays all of that at once, and the app's thread and the frames wait behind it (a third
     /// of a second after a heavy brush's stroke on a large canvas). With no frame drawn in the last
     /// [`FRAMES_GONE`] it doesn't wait: no frame would lay it. Never from the thread that draws.
-    pub(crate) fn await_frames_laid(&self) {
+    /// Whether the frames have nothing more to lay (false: still laying it when the wait ran out).
+    pub(crate) fn await_frames_laid(&self) -> bool {
         let until = std::time::Instant::now() + FRAMES_LAY_MOST;
         loop {
             let waiting = {
@@ -1719,8 +1720,11 @@ impl Shared {
                 st.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_GONE)
                     && st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
             };
-            if !waiting || std::time::Instant::now() >= until {
-                return;
+            if !waiting {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
