@@ -4601,8 +4601,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** [canvas] is the canvas at its own size (not made smaller): its pixels are the canvas's. */
         var canvasWhole by mutableStateOf(false)
             private set
+        /** The picture imported into it, held while the window shows: a hidden window holds none. */
         var image by mutableStateOf<ImageBitmap?>(null)
             private set
+
+        /** The picture imported is being read from the artwork, to show. */
+        var readingPicture by mutableStateOf(false)
+            private set
+        private var pictureJob: Job? = null
 
         /** How the window shows the canvas and a picture imported, each zoomed and moved by two fingers on its own. */
         var canvasView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
@@ -4666,27 +4672,42 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             canvasView = w.canvasView
             imageView = w.imageView
             on = w.shown
-            viewModelScope.launch {
-                val picture = withContext(Dispatchers.IO) {
-                    s.referencePictureAt(index.toUInt())?.let { png ->
-                        runCatching {
-                            // no larger than a picture imported now would be
-                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            BitmapFactory.decodeByteArray(png, 0, png.size, bounds)
-                            var sample = 1
-                            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
-                            BitmapFactory.decodeByteArray(png, 0, png.size, BitmapFactory.Options().apply { inSampleSize = sample })
-                        }.getOrNull()
-                    }
-                }
-                if (picture != null && session === s) image = picture.asImageBitmap()
-            }
+            readPicture(s)
             refresh()
+        }
+
+        /** The picture imported into it read from the artwork [s], while the window shows and has none yet. */
+        private fun readPicture(s: CanvasSession) {
+            if (!on || image != null || pictureJob?.isActive == true) return
+            readingPicture = true
+            pictureJob = viewModelScope.launch {
+                val picture = withContext(Dispatchers.IO) {
+                    runCatching {
+                        s.referencePictureAt(index.toUInt())?.let { png -> windowPicture { o -> BitmapFactory.decodeByteArray(png, 0, png.size, o) } }
+                    }.getOrNull()
+                }
+                if (picture != null && session === s && on) image = picture.asImageBitmap()
+                readingPicture = false
+            }
+        }
+
+        /** The picture being read from the artwork no longer wanted. */
+        private fun stopReading() {
+            pictureJob?.cancel()
+            readingPicture = false
+        }
+
+        /** The window has gone from the screen (faded out): a hidden one holds no picture, and reads it again as it shows. */
+        fun gone() {
+            if (on) return
+            stopReading()
+            image = null
         }
 
         /** No artwork is open: the window belongs to the canvas, so nothing of it stays for the gallery or the next artwork. */
         fun forget() {
             job?.cancel()
+            stopReading()
             stale = false
             on = false
             mode = ReferenceMode.CANVAS
@@ -4729,7 +4750,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         fun changeOn(on: Boolean) {
             this.on = on
             keep()
-            if (on) refresh()
+            if (on) {
+                session?.let(::readPicture)
+                refresh()
+            }
         }
 
         fun changeMode(mode: ReferenceMode) {
@@ -4779,16 +4803,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 val image = withContext(Dispatchers.IO) {
                     runCatching {
                         val resolver = getApplication<Application>().contentResolver
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-                        var sample = 1
-                        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_PICTURE) sample *= 2
-                        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
+                        // no bigger than the core keeps it
+                        windowPicture { o -> resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) } }
                     }.getOrNull()
                 }
                 if (image == null) {
                     message = "This picture can't be opened."
                 } else if (s != null && session === s) {
+                    stopReading()
                     this@ReferenceWindow.image = image.asImageBitmap()
                     imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
                     keep()
@@ -4815,6 +4837,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         fun clear() {
+            stopReading()
             image = null
             imageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
             session?.clearReferencePictureAt(index.toUInt())

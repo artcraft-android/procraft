@@ -1234,8 +1234,10 @@ impl CanvasSession {
             st.info.tracked_ms = (imported.tracked_seconds * 1000.0) as u64;
             st.info.author = imported.author;
             st.reference_window = imported.reference;
-            st.reference_picture =
-                imported.reference_picture.map(|(png, turn)| Arc::new(crate::reference_window::upright(png, turn)));
+            // upright, and no bigger than a window keeps a picture
+            st.reference_picture = imported.reference_picture.map(|(png, turn)| {
+                Arc::new(crate::reference_window::kept_picture(crate::reference_window::upright(png, turn)))
+            });
         }
         Ok(session)
     }

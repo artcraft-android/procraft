@@ -229,7 +229,8 @@ pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };
 pub use reference_window::{
-    ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_window_fitted, reference_window_size,
+    ReferencePictureSize, ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_picture_size,
+    reference_window_fitted, reference_window_size,
 };
 pub use scene3d::{
     ModelFile, ModelInfo, ModelLight, ModelTextureFile, ModelWarning, SubmeshInfo, Turntable, model_warning_name,

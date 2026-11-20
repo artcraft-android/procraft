@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, pos2, vec2};
 use procraft_core::{
     CanvasSession, ReferenceShows, ReferenceSizes, ReferenceView, ReferenceWindowState, reference_picture_point,
-    reference_picture_rect, reference_view_pinched, reference_window_fitted, reference_window_size,
+    reference_picture_rect, reference_picture_size, reference_view_pinched, reference_window_fitted,
+    reference_window_size,
 };
 
 use crate::icons;
@@ -48,8 +49,6 @@ const REFRESH: Duration = Duration::from_millis(300);
 const CANVAS_PIXELS: u32 = 700;
 /// The side of the picture of a model it shows.
 const MODEL_PIXELS: u32 = 720;
-/// A picture imported is kept at most this large.
-const MOST_PICTURE: u32 = 2048;
 
 /// How far a press may move and still be held still (points), for the eyedropper.
 const STILL: f32 = 6.0;
@@ -104,6 +103,17 @@ fn glass_of(width: usize, height: usize, rgba: &[u8]) -> egui::ColorImage {
         }
     }
     egui::ColorImage::new([w + 2, h + 2], pixels)
+}
+
+/// `picture` as big as a window keeps a picture (see [`reference_picture_size`]): one bigger made
+/// smaller.
+fn kept_picture(picture: image::DynamicImage) -> image::DynamicImage {
+    let kept = reference_picture_size(picture.width(), picture.height());
+    if (kept.width, kept.height) == (picture.width(), picture.height()) {
+        picture
+    } else {
+        picture.thumbnail_exact(kept.width, kept.height)
+    }
 }
 
 /// What the eyedropper on the window's picture did: moved to window point `at` (points), over
@@ -341,11 +351,7 @@ impl Reference {
         };
         match image::open(path) {
             Ok(picture) => {
-                let picture = if picture.width().max(picture.height()) > MOST_PICTURE {
-                    picture.thumbnail(MOST_PICTURE, MOST_PICTURE)
-                } else {
-                    picture
-                };
+                let picture = kept_picture(picture);
                 self.take_picture(ctx, &picture);
                 self.image_view = ReferenceView::default();
                 // kept with the artwork as a PNG, whatever kind of file it came from
@@ -383,10 +389,11 @@ impl Reference {
         // as big as it was sized, within its least and most, and no bigger than the screen
         let size = shown_size(self.size, screen);
         let tall = TOP_BAR + size.y + BOTTOM_BAR;
+        // (an artwork's picture may be from before pictures were kept no bigger)
         if let Some(png) = self.picture_due.take()
             && let Ok(picture) = image::load_from_memory(&png)
         {
-            self.take_picture(ctx, &picture);
+            self.take_picture(ctx, &kept_picture(picture));
         }
         // the first time: in the middle near the bottom of the screen; then where it was put, all
         // of it on the screen (an artwork may have left it on a screen of another shape, or the

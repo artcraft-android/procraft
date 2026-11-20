@@ -93,7 +93,11 @@ fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
                 Modifier.matchParentSize(),
                 enter = androidx.compose.animation.fadeIn(Motion.referenceFade()),
                 exit = androidx.compose.animation.fadeOut(Motion.referenceFade()),
-            ) { ReferenceWindowContent(vm, w) }
+            ) {
+                ReferenceWindowContent(vm, w)
+                // faded out: a hidden window lets its picture go
+                androidx.compose.runtime.DisposableEffect(w) { onDispose { w.gone() } }
+            }
         }
     }
 }
@@ -169,7 +173,8 @@ private fun ReferenceWindowContent(vm: CanvasViewModel, w: CanvasViewModel.Refer
                 when (w.mode) {
                     CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> Unit
                     CanvasViewModel.ReferenceMode.IMAGE -> {
-                        if (w.image == null) {
+                        // (not while its picture is being read to show)
+                        if (w.image == null && !w.readingPicture) {
                             Box(
                                 Modifier.width(180.dp).height(60.dp).clip(RoundedCornerShape(30.dp)).background(ImportFill)
                                     .clickable { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
