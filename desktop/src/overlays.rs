@@ -26,6 +26,10 @@ const MODE_TEXT: u32 = 0xFFC5C5C5;
 const MODES_FILL: Themed = Themed(0xFF7B7B7B, 0xFFFFFFFF);
 /// The hover fill's stamp is made at most this many pixels across (larger, it is drawn bigger).
 const CURSOR_FILL_MOST: usize = 256;
+/// A hover fill whose stamp is nowhere stronger than this (of 255) is too faint to see.
+const CURSOR_FILL_FAINTEST: u8 = 8;
+/// A hover fill drawn at least this strong (the brush's opacity) shows by itself.
+const CURSOR_FILL_SEEN: f32 = 0.1;
 
 /// A passing message under the top bar; a warning stays longer.
 struct Notice {
@@ -168,23 +172,27 @@ impl Overlays {
         });
         // the stamp it paints, filling it, if the brush's Hover fill says so: as it would paint at
         // its estimated pressure, as big and as strong
-        self.cursor_fill = at.and_then(|_| session.hover_fill()).map(|look| {
-            let side = ((info.brush_diameter * info.zoom).ceil() as usize).clamp(2, CURSOR_FILL_MOST);
-            let strength = info.opacity.clamp(0.0, 1.0) * look.opacity.clamp(0.0, 1.0);
-            (session.brush_stamp(side as u32), side, strength, look.size.clamp(0.0, 1.0))
-        });
+        self.cursor_fill = at
+            .and_then(|_| session.hover_fill())
+            .map(|look| {
+                let side = ((info.brush_diameter * info.zoom).ceil() as usize).clamp(2, CURSOR_FILL_MOST);
+                let strength = info.opacity.clamp(0.0, 1.0) * look.opacity.clamp(0.0, 1.0);
+                (session.brush_stamp(side as u32), side, strength, look.size.clamp(0.0, 1.0))
+            })
+            // (one too faint to see is none: the outline shows instead)
+            .filter(|(stamp, ..)| stamp.iter().any(|&a| a >= CURSOR_FILL_FAINTEST));
     }
 
     /// The brush's outline as it shows this frame: where, its radius, and how it is drawn (1
     /// contrasting rings, 2 the colour); none without one, or with one too small to see.
     fn outline(&self) -> Option<(Pos2, f32, i32)> {
         let (at, r, outline) = self.cursor.filter(|(_, r, _)| *r >= 2.0)?;
-        // the style chosen, or as the brush says: none, contrasting rings, or the colour
-        let outline = match self.cursor_style {
-            CursorStyle::Contrast => 1,
-            CursorStyle::Colour => 2,
-            CursorStyle::Brush => outline,
-        };
+        // its stamp filling it as it shows (a fill at the faintest opacities is as good as none)
+        let filled = self
+            .cursor_fill
+            .as_ref()
+            .is_some_and(|(_, _, strength, size)| *strength >= CURSOR_FILL_SEEN && r * size >= 1.0);
+        let outline = cursor_lines(self.cursor_style, outline, filled);
         (outline != 0).then_some((at, r, outline))
     }
 
@@ -678,6 +686,21 @@ fn cursor_turn(session: &CanvasSession) -> f32 {
     turn
 }
 
+/// How the brush cursor's outline is drawn in `style` for a brush whose own outline is `own` (0
+/// none, 1 contrasting rings, 2 the colour), its hover fill showing under it if `filled`: 0 not at
+/// all, 1 contrasting rings, 2 the colour. Per brush, one whose own is none shows its fill alone
+/// where it has one (hovering); painting, or with no fill, it still shows contrasting rings, so a
+/// brush cursor turned on never goes missing.
+fn cursor_lines(style: CursorStyle, own: i32, filled: bool) -> i32 {
+    match style {
+        CursorStyle::Contrast => 1,
+        CursorStyle::Colour => 2,
+        CursorStyle::Brush if own == 2 => 2,
+        CursorStyle::Brush if own == 0 && filled => 0,
+        CursorStyle::Brush => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use egui::{Event, Modifiers, PointerButton, RawInput};
@@ -744,6 +767,32 @@ mod tests {
         /// Whether a press at `at` is the interface's, as the window's events go by.
         fn interface_at(&self, at: Pos2) -> bool {
             self.ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
+        }
+    }
+
+    /// Per brush, a brush whose own outline is none still shows contrasting rings while it paints
+    /// (no fill then), and hovering with no fill to show; its fill alone where it shows one.
+    #[test]
+    fn a_brush_with_no_outline_of_its_own_still_shows_its_cursor_while_painting() {
+        let at = pos2(300.0, 300.0);
+        let mut o = Overlays { cursor: Some((at, 20.0, 0)), cursor_style: CursorStyle::Brush, ..Overlays::default() };
+        // painting: rings, standing in for the system's pointer
+        assert_eq!(o.outline(), Some((at, 20.0, 1)));
+        assert!(o.outline_shown());
+        // hovering with its stamp filling it: the fill alone; one too faint to see, the rings
+        o.cursor_fill = Some((vec![255; 4], 2, 0.8, 1.0));
+        assert_eq!(o.outline(), None);
+        o.cursor_fill = Some((vec![255; 4], 2, 0.05, 1.0));
+        assert_eq!(o.outline(), Some((at, 20.0, 1)));
+        // its own outline whatever the fill, and the style chosen for all over the brush's
+        o.cursor = Some((at, 20.0, 2));
+        assert_eq!(o.outline(), Some((at, 20.0, 2)));
+        for (style, lines) in [(CursorStyle::Contrast, 1), (CursorStyle::Colour, 2)] {
+            for own in 0..=2 {
+                for filled in [false, true] {
+                    assert_eq!(cursor_lines(style, own, filled), lines);
+                }
+            }
         }
     }
 
