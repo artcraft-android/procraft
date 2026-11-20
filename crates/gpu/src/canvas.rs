@@ -11605,6 +11605,23 @@ impl Canvas {
         start_reading_part(gpu, &layer.texture, rect).pixels()
     }
 
+    /// [`Canvas::read_layer_part`] started: the copy queued, the pixels waited for later (once
+    /// whatever guards the canvas is let go).
+    pub fn start_reading_layer_part(&self, gpu: &Gpu, id: LayerId, rect: IRect) -> Result<Readback, GpuError> {
+        let rect = rect.intersect(self.full());
+        if rect.is_empty() {
+            return Ok(Readback::Ready(Vec::new()));
+        }
+        if rect == self.full() {
+            return self.start_reading_layer(gpu, id);
+        }
+        if self.parked.contains_key(&id) && !self.layers.contains_key(&id) {
+            return self.read_layer(gpu, id).map(|p| Readback::Ready(cropped(&p, self.width, rect)));
+        }
+        let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
+        Ok(start_reading_part(gpu, &layer.texture, rect))
+    }
+
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
     pub fn read_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
         if let Some(parked) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {

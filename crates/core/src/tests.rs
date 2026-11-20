@@ -1755,6 +1755,83 @@ fn the_main_thread_never_waits_on_a_dropped_colour_s_fill() {
     assert!(white(&s));
 }
 
+/// A dropped colour reads (and measures) the layer it fills with the canvas let go while the GPU
+/// copies it back: with the GPU busy on work sent before (a heavy stroke's end, a frame), frames and
+/// touches waited on that copy for as long as the GPU took to get to it. Here the GPU is kept busy
+/// for a while (a large texture cleared over and over) as the colour is dropped on the fill's
+/// thread: the longest another thread waits for the canvas meanwhile stays under half of how long
+/// that work takes. Printed: both.
+#[test]
+fn a_dropped_colour_reads_its_layer_with_the_canvas_let_go() {
+    use procraft_gpu::wgpu;
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let busy = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("busy"),
+        size: wgpu::Extent3d { width: 4096, height: 4096, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = busy.create_view(&Default::default());
+    let keep_busy = |passes: usize| {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for k in 0..passes {
+            let clear = wgpu::Color { r: k as f64 / passes as f64, g: 0.5, b: 0.25, a: 1.0 };
+            drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("busy"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }));
+        }
+        gpu.queue.submit([encoder.finish()]);
+    };
+    // as much busy work as takes the GPU a quarter of a second or more
+    let mut passes = 50;
+    let busy_ms = loop {
+        let t = Instant::now();
+        keep_busy(passes);
+        gpu.flush();
+        let took = t.elapsed().as_secs_f64() * 1000.0;
+        if took >= 250.0 || passes >= 20_000 {
+            break took;
+        }
+        passes = (passes as f64 * (300.0 / took.max(1.0)).clamp(1.5, 20.0)) as usize;
+    };
+    keep_busy(passes);
+    let fill = std::thread::spawn({
+        let s = std::sync::Arc::clone(&s);
+        move || {
+            let poured = s.pour_drop(40.0, 40.0, 0.9, 0.2, 0.1, 0.3);
+            s.pour_end(true, None);
+            poured
+        }
+    });
+    let mut waited = 0.0f64;
+    while !fill.is_finished() {
+        let t = Instant::now();
+        drop(s.shared.lock());
+        waited = waited.max(t.elapsed().as_secs_f64() * 1000.0);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(fill.join().unwrap(), "poured");
+    println!("the GPU busy {busy_ms:.0} ms ({passes} clears): the canvas waited for at most {waited:.1} ms meanwhile");
+    assert!(waited < busy_ms / 2.0, "waited {waited:.1} ms on the canvas with the GPU busy {busy_ms:.0} ms");
+    assert_eq!(gpu.errors(), 0);
+}
+
 /// What ColorDrop costs on a large canvas (`POUR_COST_SIDE`, 4096 square): a colour dropped into a
 /// small ring, its threshold slid, and let go, each timed as the app waits for it; then the same
 /// into the whole empty layer. Run on a device with `--ignored --nocapture`.
