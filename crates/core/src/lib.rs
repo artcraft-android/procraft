@@ -667,6 +667,9 @@ pub(crate) struct State {
     /// (`predicting`), as the prediction that follows draws it again; drawn at the next frame if
     /// none came (see [`State::draw_ahead`]).
     pub(crate) ahead: bool,
+    /// The platform's newest prediction of where the input goes next (canvas pixels), drawn ahead
+    /// of the stroke at the next frame (see [`State::draw_ahead`]); none since the samples after it.
+    pub(crate) ahead_of: Vec<Sample>,
     /// The platform sends predicted input after the stroke's samples.
     pub(crate) predicting: bool,
     /// The open stroke's pressure as plugins give it.
@@ -1427,18 +1430,22 @@ fn show_ahead(
 }
 
 impl State {
-    /// Draws what runs ahead of the open stroke as its last samples left it, if no prediction drew
-    /// it since (see [`State::ahead`]).
+    /// Draws what runs ahead of the open stroke, as its last samples left it or on to where the
+    /// newest prediction since says the input goes (see [`State::ahead`]): once a frame, however
+    /// many pen events came, not on the thread the input comes on.
     pub(crate) fn draw_ahead(&mut self) {
         if !std::mem::take(&mut self.ahead) {
             return;
         }
+        let predicted = std::mem::take(&mut self.ahead_of);
         let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
         let guide = self.doc.stroke_guide();
         if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&guide, &builder.tip_now()));
+            // a stroke shown with its tip ends it where the input is predicted to go
+            let tip = if predicted.is_empty() { builder.tip_now() } else { builder.preview_tip(&predicted) };
+            canvas.set_tip(&guide::mirrored(&guide, &tip));
         } else {
-            show_ahead(canvas, builder, &[], &guide);
+            show_ahead(canvas, builder, &predicted, &guide);
         }
     }
 }
@@ -2032,6 +2039,7 @@ impl CanvasSession {
             pad_strokes: None,
             airbrush: None,
             ahead: false,
+            ahead_of: Vec::new(),
             predicting: false,
             pressing: pressure::Pressing::default(),
             engine_asking: plugin_brushes::Asking::default(),
@@ -2396,6 +2404,7 @@ impl CanvasSession {
         st.stroke = Some(builder);
         st.second = second_builder;
         st.ahead = false;
+        st.ahead_of.clear();
         self.shared.note_painted_turn(st);
         self.shared.frame(st);
     }
@@ -2487,6 +2496,8 @@ impl Shared {
         let later = st.predicting;
         if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
             st.ahead = later;
+            // (a prediction made before these samples no longer runs ahead of them)
+            st.ahead_of.clear();
             st.redraw_painted_on();
             self.frame(st);
         }
@@ -2506,17 +2517,14 @@ impl Shared {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
-        // (what the samples before left to run ahead is drawn again here)
         st.predicting = !canvas_samples.is_empty();
-        st.ahead = false;
-        let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        let guide = st.doc.stroke_guide();
-        // a stroke shown with its tip ends it where the input is predicted to go
-        if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&guide, &builder.preview_tip(&canvas_samples)));
-        } else {
-            show_ahead(canvas, builder, &canvas_samples, &guide);
+        if st.stroke.is_none() || st.canvas.is_none() {
+            return;
         }
+        // what runs ahead is worked out at the next frame, on to the newest prediction (and what
+        // the samples before left to run ahead with it): a pen's events come faster than frames
+        st.ahead_of = canvas_samples;
+        st.ahead = true;
         self.frame(st);
     }
 }
@@ -2569,6 +2577,7 @@ impl CanvasSession {
         st.engine_asking = plugin_brushes::Asking::default();
         st.read_finer(&samples);
         st.ahead = false;
+        st.ahead_of.clear();
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let mut second = st.second.take();
         lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
@@ -2614,6 +2623,7 @@ impl CanvasSession {
         }
         st.stroke = None;
         st.ahead = false;
+        st.ahead_of.clear();
         st.second = None;
         st.shape = None;
         st.began = None;

@@ -777,6 +777,208 @@ fn stroke_cost() {
     assert_eq!(errors, 0, "GPU validation errors");
 }
 
+/// A pen's events come faster than frames: the platform's prediction after each is kept to draw
+/// what runs ahead of the stroke at the next frame, on to the newest of them, not worked out as it
+/// comes (where it held up the pen's next event by milliseconds for an inking pen showing its tip).
+#[test]
+fn a_prediction_is_drawn_ahead_of_the_stroke_at_the_next_frame() {
+    let Some(s) = session(300, 300) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Tundra") else { return };
+    assert!(s.select_brush(set, index));
+    let at = |i: usize| sample(20.0 + i as f32 * 6.0, 150.0, i as f64 * 8.0);
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    for i in 1..10 {
+        s.stroke_add(vec![at(i)]);
+        s.stroke_predict(vec![at(i + 1), at(i + 2)]);
+        let st = s.shared.lock();
+        assert!(st.ahead, "event {i}: nothing left for the frame");
+        assert_eq!(st.ahead_of.len(), 2, "event {i}");
+    }
+    // the next samples come before their prediction: the last one no longer runs ahead of them
+    s.stroke_add(vec![at(10)]);
+    assert!(s.shared.lock().ahead_of.is_empty());
+    s.stroke_predict(vec![at(11)]);
+    // the frame draws it, once
+    {
+        let mut st = s.shared.lock();
+        st.draw_ahead();
+        assert!(!st.ahead && st.ahead_of.is_empty());
+    }
+    s.stroke_end(vec![at(11)]);
+    let st = s.shared.lock();
+    assert!(!st.ahead && st.ahead_of.is_empty());
+}
+
+/// What the Pens set's brushes cost a pen (#337), on a canvas painted on (2048 square): each pen
+/// event's work on the thread the input comes on (two samples, then the platform's prediction of
+/// two more, as the Android app sends them; a 240 Hz pen), each frame's (drawn into a window as the
+/// apps draw them, one every two events, the GPU waited for), and the lift's until the canvas wants
+/// no more frames. Each brush's numbers are printed. Bounds: an event's median within
+/// `PENS_EVENT_MS` (1; the pens showing their tip took 2 to 4.7 ms here when each event worked out
+/// the tip on to its prediction) and its 95th percentile within two and a half times that, a
+/// frame's 95th percentile within `PENS_FRAME_MS` (16.7), and the lift within `PENS_LIFT_MS` (100).
+/// `PENS_BRUSHES` lists the brushes (`,` between; the set's by default), `PENS_SIZE` the size
+/// slider (as each starts, unless given). Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn the_pens_keep_up_with_a_pen() {
+    use procraft_gpu::wgpu;
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let event_bound: f64 = env("PENS_EVENT_MS", "1").parse().unwrap_or(1.0);
+    let frame_bound: f64 = env("PENS_FRAME_MS", "16.7").parse().unwrap_or(16.7);
+    let lift_bound: f64 = env("PENS_LIFT_MS", "100").parse().unwrap_or(100.0);
+    let size: Option<f32> = std::env::var("PENS_SIZE").ok().and_then(|v| v.parse().ok());
+    let (side, window) = (2048u32, 1600u32);
+    let Some(s) = session(side, window) else { return };
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = {
+        let st = s.shared.lock();
+        let Some(gpu) = st.gpu.as_ref() else { return };
+        let info = gpu.adapter.get_info();
+        println!("{} ({:?}), canvas {side} square", info.name, info.backend);
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("window"),
+            size: wgpu::Extent3d { width: window, height: window, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+    };
+    let view = target.create_view(&Default::default());
+    let started = std::time::Instant::now();
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let at = |v: &[f64], q: f64| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
+    };
+    // a frame as the render thread draws it, the GPU done with it
+    let frame = |s: &CanvasSession| {
+        let mut st = s.shared.lock();
+        st.draw_frame(&view, format, (window, window), procraft_engine::profile::Profile::Srgb, started);
+        if let Some(g) = st.gpu.as_ref() {
+            g.flush();
+        }
+    };
+    let wants = |s: &CanvasSession| {
+        let st = s.shared.lock();
+        st.needs_frame || st.canvas.as_ref().is_some_and(|c| c.wants_render() || c.relaying() || c.catching_up())
+    };
+    let settle = |s: &CanvasSession| {
+        for _ in 0..400 {
+            if !wants(s) {
+                break;
+            }
+            frame(s);
+        }
+    };
+    // across the window and back in a wave, pressed unevenly, the pen leaning
+    let point = |k: usize, of: usize| {
+        let t = k as f32 / (2 * of) as f32;
+        PenSample {
+            x: 100.0 + t * 1400.0,
+            y: 800.0 + (t * 25.0).sin() * 500.0,
+            pressure: 0.3 + 0.6 * (t * 40.0).sin().abs(),
+            tilt: 0.4,
+            orientation: 0.8,
+            time_ms: k as f64 * 4.17,
+            roll: 0.0,
+        }
+    };
+    let library = s.brush_library();
+    let pens: Vec<String> = library
+        .iter()
+        .find(|set| set.name == "Pens")
+        .map(|set| set.brushes.iter().map(|b| b.name.clone()).collect())
+        .unwrap_or_default();
+    let wanted = env("PENS_BRUSHES", &pens.join(","));
+    let pick = |wanted: &str| {
+        library
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)))
+    };
+    // paint under the strokes
+    if let Some((set, index)) = pick("Soft Airbrush") {
+        s.select_brush(set, index);
+        s.set_brush_size(1.0);
+        for (k, y) in [300.0_f32, 700.0, 1100.0, 1400.0].into_iter().enumerate() {
+            s.set_color(k as f32 / 3.0, 0.4, 1.0 - k as f32 / 3.0);
+            s.stroke_begin(PointerKind::Stylus, vec![sample(80.0, y, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(80.0 + i as f32 * 50.0, y, i as f64 * 8.0)).collect());
+            s.stroke_end(vec![]);
+            frame(&s);
+        }
+        settle(&s);
+    }
+    s.set_color(0.8, 0.2, 0.1);
+    let mut failures = Vec::new();
+    for name in wanted.split(',').filter(|n| !n.is_empty()) {
+        let Some((set, index)) = pick(name) else {
+            failures.push(format!("no brush {name}"));
+            continue;
+        };
+        s.select_brush(set, index);
+        if let Some(size) = size {
+            s.set_brush_size(size);
+        }
+        // a stroke of `of` events, timed
+        let stroke = |of: usize| {
+            let (mut adds, mut predicts, mut events, mut frames) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            s.stroke_begin(PointerKind::Stylus, vec![point(0, of)]);
+            for e in 1..=of {
+                let t = std::time::Instant::now();
+                s.stroke_add(vec![point(2 * e - 1, of), point(2 * e, of)]);
+                adds.push(ms(t));
+                let p = std::time::Instant::now();
+                s.stroke_predict(vec![point(2 * e + 1, of), point(2 * e + 2, of)]);
+                predicts.push(ms(p));
+                events.push(ms(t));
+                if e % 2 == 0 {
+                    let t = std::time::Instant::now();
+                    frame(&s);
+                    frames.push(ms(t));
+                }
+            }
+            let t = std::time::Instant::now();
+            s.stroke_end(vec![]);
+            frame(&s);
+            settle(&s);
+            let lift = ms(t);
+            (adds, predicts, events, frames, lift)
+        };
+        // warmed up (its pictures and pipelines made), then measured
+        let _ = stroke(12);
+        s.undo();
+        settle(&s);
+        let (adds, predicts, events, frames, lift) = stroke(240);
+        s.undo();
+        settle(&s);
+        let (event, event95, frame95) = (at(&events, 0.5), at(&events, 0.95), at(&frames, 0.95));
+        println!(
+            "{name:<12} event {event:.3} ms (95th {event95:.3}; add {:.3}, prediction {:.3}) | frame {:.3} ms (95th {frame95:.3}) | lift {lift:.1} ms",
+            at(&adds, 0.5),
+            at(&predicts, 0.5),
+            at(&frames, 0.5),
+        );
+        if event > event_bound || event95 > 2.5 * event_bound {
+            failures.push(format!("{name}: an event {event:.3} ms (95th {event95:.3})"));
+        }
+        if frame95 > frame_bound {
+            failures.push(format!("{name}: a frame's 95th {frame95:.3} ms"));
+        }
+        if lift > lift_bound {
+            failures.push(format!("{name}: the lift {lift:.1} ms"));
+        }
+    }
+    let errors = s.shared.lock().gpu.as_ref().map_or(0, Gpu::errors);
+    assert_eq!(errors, 0, "GPU validation errors");
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// What a second of pen stroke costs a frame, for the heavy kinds of brush (dual, wet, wet and
 /// dual, smudge, big textured, a big wet dual brush at its full size) on a canvas painted on (`FRAME_BOUND_SIDE`, 2048 square): a 240 Hz
 /// pen at 120 frames a second, each frame its two events, its render and the GPU done with it (as
@@ -2978,9 +3180,9 @@ fn prediction_is_drawn_but_never_kept() {
 }
 
 /// While the platform predicts input, what runs ahead of a stroke (a pen's shown taper, or the
-/// path on to the input) is worked out for each prediction, not again for the samples before it,
-/// and shows as it did: the pictures after each sample's prediction, and at a frame between the
-/// two, are those of a stroke that works it out at each sample.
+/// path on to the input) is worked out at the frame after each prediction, not again for the
+/// samples before it, and shows as it did: the pictures after each sample's prediction, and at a
+/// frame between the two, are those of a stroke that works it out at each sample.
 #[test]
 fn what_runs_ahead_of_a_predicted_stroke_shows_as_worked_out_at_each_sample() {
     let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
@@ -3016,6 +3218,8 @@ fn what_runs_ahead_of_a_predicted_stroke_shows_as_worked_out_at_each_sample() {
                     shots.push(picture(&s));
                 }
                 s.stroke_predict(vec![at(i + 1), at(i + 2)]);
+                // (drawn as the frame after it draws what runs ahead)
+                s.shared.lock().draw_ahead();
                 shots.push(picture(&s));
             }
             s.stroke_end(vec![at(40)]);
@@ -3511,6 +3715,8 @@ fn a_finger_strokes_head_is_drawn_in_its_layer_under_those_above() {
     s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 70.0, 0.0)]);
     // the head runs ahead, up under the blue layer and out past it
     s.stroke_predict(vec![sample(60.0, 20.0, 16.0), sample(90.0, 90.0, 32.0)]);
+    // (drawn as the frame after it draws what runs ahead)
+    s.shared.lock().draw_ahead();
     let red = |p: [u8; 4]| p[0] > 200 && p[2] < 50;
     let ahead = (60..100).find(|x| red(pixel(&s, *x, 64))).expect("the head shows ahead");
     assert_eq!(pixel(&s, 60, 20), [0, 0, 255, 255], "under the layer above");
