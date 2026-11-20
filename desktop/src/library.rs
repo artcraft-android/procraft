@@ -51,6 +51,11 @@ const PREVIEW: (u32, u32) = (530, 162);
 const PREVIEWS_AT_A_TIME: usize = 4;
 /// How often the interface looks for sample strokes drawn while a thread is at them.
 const PREVIEW_LOOK: Duration = Duration::from_millis(16);
+/// How many sample strokes' pictures are kept on the GPU at most (each [`PREVIEW`] big, 343 KB:
+/// 22 MB in all): past it, those out of sight go, the longest unseen first (to come back drawn
+/// already, from the strokes the session keeps). Every brush's, as the library is browsed, came
+/// to 205 MB for the 598 it ships with.
+const PREVIEWS_KEPT: usize = 64;
 /// Menus stay below the top bar; the set's menu sits this far left of it.
 const MENU_TOP: f32 = 57.0;
 const SET_MENU_GAP: f32 = 6.0;
@@ -101,10 +106,12 @@ const PINCH_TO_LIBRARIES: f32 = 0.66;
 const PINCH_TO_LIBRARY: f32 = 2.0;
 const PINCH_QUIET: Duration = Duration::from_millis(200);
 
-/// A brush's sample stroke, and whether it runs under the name (which then sits on a dark pill).
+/// A brush's sample stroke, whether it runs under the name (which then sits on a dark pill), and
+/// the frame it was last in sight in.
 struct Preview {
     texture: TextureHandle,
     shaded: bool,
+    seen: u64,
 }
 
 /// A sample stroke drawn on its thread: the brush's, its picture (none if it draws nothing), and
@@ -241,6 +248,8 @@ pub struct Library {
     recent_menu: Menu,
     found: Option<(u32, u32)>,
     previews: HashMap<(u32, u32), Option<Preview>>,
+    /// The frames shown so far, by which the sample strokes are seen.
+    frames: u64,
     /// The brushes in sight without a sample stroke yet, and those being drawn on a thread of
     /// their own (the GPU takes a while over each: the list isn't held up for it).
     wanted: Vec<((u32, u32), String)>,
@@ -522,6 +531,9 @@ impl Library {
         };
         // the cards' strokes forgotten last frame are drawn no more
         self.card_retired.clear();
+        // nor the sample strokes out of sight past those kept (before any is drawn this frame)
+        self.keep_previews_seen(PREVIEWS_KEPT);
+        self.frames += 1;
         // tinted as the plugins say by the colour now, the strokes themselves drawn once
         self.tints = [false, true].map(|chosen| session.brush_preview_colour(chosen).map(opaque));
         if std::mem::take(&mut self.stale) {
@@ -1678,12 +1690,53 @@ impl Library {
         }
     }
 
-    /// Asks for a brush's sample stroke when it is in sight and not drawn yet.
+    /// Asks for a brush's sample stroke when it is in sight and not drawn yet (one drawn is seen).
     fn want_preview(&mut self, ui: &Ui, b: &BrushInfo, cell: Rect) {
         let key = (b.set, b.index);
-        if !self.previews.contains_key(&key) && ui.is_rect_visible(cell) {
-            self.wanted.push((key, b.name.clone()));
+        if !ui.is_rect_visible(cell) {
+            return;
         }
+        match self.previews.get_mut(&key) {
+            Some(Some(p)) => p.seen = self.frames,
+            Some(None) => {}
+            None => self.wanted.push((key, b.name.clone())),
+        }
+    }
+
+    /// Lets go of the sample strokes' pictures out of sight last frame past `most` kept, the
+    /// longest unseen first: one scrolled back into sight is asked for again (and comes from the
+    /// strokes the session keeps, drawn already).
+    fn keep_previews_seen(&mut self, most: usize) {
+        let held = self.previews.values().filter(|p| p.is_some()).count();
+        if held <= most {
+            return;
+        }
+        // (called before the frame's count goes up: those seen last frame were seen at it)
+        let last = self.frames;
+        let mut unseen: Vec<(u64, (u32, u32))> = self
+            .previews
+            .iter()
+            .filter_map(|(k, p)| p.as_ref().filter(|p| p.seen < last).map(|p| (p.seen, *k)))
+            .collect();
+        unseen.sort_unstable();
+        for (_, key) in unseen.into_iter().take(held - most) {
+            self.previews.remove(&key);
+        }
+    }
+
+    /// Lets go of every sample stroke's picture, the cards' too (the GPU short of memory): those in
+    /// sight are asked for again, and come from the strokes the session keeps. Between frames only,
+    /// as one may draw them.
+    pub fn let_go_of_previews(&mut self) {
+        self.previews.clear();
+        self.card_previews.clear();
+        self.card_retired.clear();
+    }
+
+    /// How many sample strokes' pictures are held.
+    #[cfg(test)]
+    fn previews_held(&self) -> usize {
+        self.previews.values().filter(|p| p.is_some()).count()
     }
 
     /// Takes the sample strokes drawn so far, and has those wanted drawn on a thread of their own.
@@ -1694,7 +1747,7 @@ impl Library {
                     Ok((key, drawn)) => {
                         let preview = drawn.map(|(image, shaded)| {
                             let texture = ctx.load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR);
-                            Preview { texture, shaded }
+                            Preview { texture, shaded, seen: self.frames }
                         });
                         self.previews.insert(key, preview);
                     }
@@ -2080,6 +2133,176 @@ mod tests {
                 .collect();
             shown.get(shown.len() / 3).copied().unwrap_or(Pos2::ZERO)
         }
+    }
+
+    /// The library shown in a window of a laptop's size with its sample strokes drawn on the GPU
+    /// (one device) and shown through egui-wgpu as the window shows them (another, whose memory is
+    /// the interface's alone), scrolled by a finger.
+    struct Shown {
+        ctx: egui::Context,
+        look: Look,
+        library: Library,
+        session: Arc<CanvasSession>,
+        showing: procraft_gpu::Gpu,
+        renderer: egui_wgpu::Renderer,
+        time: f64,
+    }
+
+    impl Shown {
+        /// The window's height (points), as a laptop's of 1080 pixels at 1.25 pixels a point.
+        const HEIGHT: f32 = 820.0;
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1500.0, Self::HEIGHT))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Shown { ctx, look, library, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
+                library.show(ui.ctx(), look, session, crate::panel::Hang::Button(button), &mut Vec::new());
+            });
+            let (device, queue) = (&self.showing.device, &self.showing.queue);
+            for (id, deltas) in &output.textures_delta.set {
+                for delta in deltas {
+                    self.renderer.update_texture(device, queue, *id, delta);
+                }
+            }
+            for id in &output.textures_delta.free {
+                self.renderer.free_texture(id);
+            }
+            output.textures_delta.clear();
+        }
+
+        /// Frames until every sample stroke in sight is drawn and shown, and the list is still.
+        fn settle(&mut self) {
+            let mut at = f32::NAN;
+            for _ in 0..20_000 {
+                self.frame(Vec::new());
+                let still = self.library.list_at == at;
+                at = self.library.list_at;
+                if still && self.library.drawing.is_none() && self.library.wanted.is_empty() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// A finger drags the brushes up the list by `by` points, slowly (no fling).
+        fn drag_up(&mut self, by: f32) {
+            let low = Self::HEIGHT - 200.0;
+            let Some(from) = self.library.brush_rects.iter().map(|(_, r)| r.center()).find(|c| c.y > low) else {
+                return;
+            };
+            let touch =
+                |phase, pos| Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos, force: None };
+            let press = |pos, pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![touch(TouchPhase::Start, from), Event::PointerMoved(from), press(from, true)]);
+            let steps = (by / 8.0).ceil() as usize;
+            let mut at = from;
+            for _ in 0..steps {
+                at.y -= 8.0;
+                self.frame(vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+            }
+            // held still a moment, so it isn't flicked on
+            for _ in 0..10 {
+                self.frame(vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+            }
+            self.frame(vec![touch(TouchPhase::End, at), press(at, false)]);
+        }
+
+        /// What the interface's device holds, bytes.
+        fn held(&self) -> u64 {
+            self.showing.flush();
+            self.showing.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        }
+    }
+
+    /// Every set of the library as it ships browsed, scrolled from its top to its end, each brush's
+    /// sample stroke drawn and shown in turn: the pictures held on the GPU stay within those kept
+    /// ([`PREVIEWS_KEPT`]), not every brush's (all 598 of them came to 205 MB, which a laptop's
+    /// integrated GPU runs out of beside a canvas). `PREVIEWS_MEASURED=1` says what was held after
+    /// each set.
+    #[test]
+    fn browsing_every_set_holds_few_sample_strokes_on_the_gpu() {
+        use procraft_gpu::{Gpu, wgpu};
+        let (Ok(drawing), Ok(showing)) = (Gpu::headless(), Gpu::headless()) else {
+            return eprintln!("skipped: no GPU");
+        };
+        let session = CanvasSession::new(64, 64);
+        session.use_gpu(drawing.clone());
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let renderer = egui_wgpu::Renderer::new(&showing.device, format, egui_wgpu::RendererOptions::default());
+        let (ctx, look, library) = (egui::Context::default(), Look::default(), Library::default());
+        let mut shown = Shown { ctx, look, library, session, showing, renderer, time: 0.0 };
+        // laid out first, its fonts' pictures made: what the strokes hold is counted from there
+        shown.frame(Vec::new());
+        shown.frame(Vec::new());
+        let before = shown.held();
+        let drawn = |gpu: &Gpu| {
+            gpu.flush();
+            gpu.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        };
+        let drawing_before = drawn(&drawing);
+        let sets = shown.session.brush_library();
+        let measured = std::env::var_os("PREVIEWS_MEASURED").is_some();
+        let (mut most, mut seen) = (0, std::collections::HashSet::new());
+        for (i, set) in sets.iter().enumerate() {
+            shown.library.shown_set = Some(i);
+            shown.settle();
+            // scrolled down to the set's end, most of a window's height at a time
+            loop {
+                let at = shown.library.list_at;
+                seen.extend(shown.library.previews.iter().filter(|(_, p)| p.is_some()).map(|(k, _)| *k));
+                most = most.max(shown.library.previews_held());
+                shown.drag_up(Shown::HEIGHT - 300.0);
+                shown.settle();
+                if shown.library.list_at <= at + 1.0 {
+                    break;
+                }
+            }
+            seen.extend(shown.library.previews.iter().filter(|(_, p)| p.is_some()).map(|(k, _)| *k));
+            most = most.max(shown.library.previews_held());
+            if measured {
+                let mb = shown.held().saturating_sub(before) as f64 / f64::from(1 << 20);
+                let held = shown.library.previews_held();
+                println!("{:<20} {:3} brushes: {held:3} pictures held, {mb:5.1} MB", set.name, set.brushes.len());
+            }
+        }
+        let brushes: usize = sets.iter().map(|s| s.brushes.len()).sum();
+        let picture = u64::from(PREVIEW.0 * PREVIEW.1 * 4);
+        let bytes = shown.held().saturating_sub(before);
+        let drawing_bytes = drawn(&drawing).saturating_sub(drawing_before);
+        println!("the strokes' own device holds {:.1} MB more", drawing_bytes as f64 / f64::from(1 << 20));
+        println!(
+            "{} of {brushes} brushes' strokes shown in {} sets: at most {most} pictures held, {:.1} MB on the GPU after \
+             (every one's would be {:.1} MB)",
+            seen.len(),
+            sets.len(),
+            bytes as f64 / f64::from(1 << 20),
+            (seen.len() as u64 * picture) as f64 / f64::from(1 << 20)
+        );
+        // every brush's stroke shown on the way (the window shows each in turn)
+        assert!(seen.len() * 10 >= brushes * 9, "{} of {brushes} brushes' strokes shown", seen.len());
+        // those kept and those in sight at once, which is fewer
+        assert!(most <= PREVIEWS_KEPT + 16, "{most} pictures held");
+        // the pictures kept, half more for the device's alignment, and 16 MB for the meshes' buffers
+        // (34 MB on the PC it was written on; every brush's came to 205); where the device can't
+        // say, nothing to compare
+        let bound = PREVIEWS_KEPT as u64 * picture * 3 / 2 + (16 << 20);
+        assert!(bytes <= bound, "{bytes} bytes held on the GPU, past {bound}");
+        // and the strokes' own device, which draws them all on the one canvas kept for them, holds
+        // as much whatever the number drawn (102 MB there)
+        assert!(drawing_bytes <= 160 << 20, "{drawing_bytes} bytes held drawing the strokes");
+        assert_eq!(drawing.errors() + shown.showing.errors(), 0);
     }
 
     #[test]

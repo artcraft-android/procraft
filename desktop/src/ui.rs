@@ -473,6 +473,12 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
+    /// Lets go of the pictures the interface keeps only to be quicker: the brush library's sample
+    /// strokes (the GPU short of memory). Between frames only.
+    pub fn let_go_of_kept(&mut self) {
+        self.library.let_go_of_previews();
+    }
+
     /// The plugins, which say how big the interface shows.
     pub fn plugins(&self) -> &procraft_core::Plugins {
         &self.prefs.plugins

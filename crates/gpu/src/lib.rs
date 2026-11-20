@@ -629,6 +629,13 @@ impl Gpu {
         WEAK.load(Ordering::Relaxed) || weak_gpu(&info.name, info.device_type)
     }
 
+    /// Whether the GPU's memory is the computer's own: an integrated GPU's (a laptop's Intel or
+    /// AMD graphics, a Mac's) or the system's software one. What it holds, the system and every
+    /// other app go without, and its share of it is smaller than a graphics card's own memory.
+    pub fn shares_memory(&self) -> bool {
+        matches!(self.adapter.get_info().device_type, wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu)
+    }
+
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl

@@ -32,6 +32,7 @@ mod guide_editor;
 mod held_layers;
 mod icons;
 mod input;
+mod interface_pass;
 mod layer_choice;
 mod layers;
 mod library;
@@ -133,8 +134,26 @@ impl Importing {
 }
 
 /// What the layers' textures may take on the GPU, bytes: past it, the layers not worked on are kept
-/// compressed in memory until needed.
+/// compressed in memory until needed. A graphics card's (see [`layers_on_gpu`]).
 const LAYERS_ON_GPU: u64 = 2 << 30;
+/// The least they may take on a GPU that shares the computer's memory.
+const LAYERS_ON_SHARED_GPU_LEAST: u64 = 512 << 20;
+
+/// What the layers' textures may take on the GPU (see [`LAYERS_ON_GPU`]), on a GPU that has its own
+/// memory or `shares` the computer's `memory` (bytes, none if the system doesn't say). A graphics
+/// card holds 2 GiB of them. An integrated GPU has at most half the computer's memory (as Windows
+/// gives it), which the system and every other app draw on too, and running out of it loses the
+/// device (wgpu loses it on a copy it can't make room for): its layers take an eighth of the
+/// computer's memory, 512 MiB to 2 GiB. A laptop of 8 GB gives them 1 GiB, which the canvas takes
+/// for a device of little memory: its history's older steps kept compressed off the GPU, and fewer
+/// of wet paint's marks to go back to.
+fn layers_on_gpu(shares: bool, memory: Option<u64>) -> u64 {
+    match (shares, memory) {
+        (false, _) => LAYERS_ON_GPU,
+        (true, Some(memory)) => (memory / 8).clamp(LAYERS_ON_SHARED_GPU_LEAST, LAYERS_ON_GPU),
+        (true, None) => LAYERS_ON_GPU / 2,
+    }
+}
 
 /// The computer's memory, bytes; none if the system doesn't say.
 #[cfg(windows)]
@@ -458,6 +477,11 @@ impl ApplicationHandler for App {
         let screen = match Screen::new(window, &display, order, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
+                // the layers' room on the GPU, by whether its memory is the computer's (before any
+                // canvas is made)
+                let layers = layers_on_gpu(s.gpu.shares_memory(), memory_total());
+                log::info!("the layers' textures may take {} MB on the GPU", layers >> 20);
+                procraft_core::set_resident_budget(layers);
                 s
             }
             Err(e) => {
@@ -638,6 +662,20 @@ impl ApplicationHandler for App {
         if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
             self.gpu_lost(event_loop);
             return;
+        }
+        // the interface's last frame couldn't go up to the GPU: what is kept is let go of and it is
+        // drawn again, and frame after frame missed, the app starts again as on a device lost
+        match self.screen.as_mut().map(Screen::take_after_frame) {
+            Some(interface_pass::AfterFrame::LetGoAndRetry) => self.let_go_of_kept(),
+            Some(interface_pass::AfterFrame::StartAgain) => {
+                log::error!(
+                    "the interface's frames couldn't go up to the GPU {} times in a row",
+                    interface_pass::MISSES_MOST
+                );
+                self.gpu_lost(event_loop);
+                return;
+            }
+            Some(interface_pass::AfterFrame::Fine) | None => {}
         }
         if let Some(fine) = self.screen.as_mut().and_then(Screen::canvases_made) {
             self.canvases_made(fine, event_loop);
@@ -1314,6 +1352,23 @@ impl App {
     #[cfg(not(any(windows, target_os = "macos")))]
     fn drag_out(&mut self, _artwork: &procraft_core::GalleryArtwork) {}
 
+    /// The interface's frame couldn't go up to the GPU (short of memory): what is kept on it only to
+    /// be quicker is let go of (the brush library's sample strokes, the canvas's spares and the
+    /// buffers kept, the preview's canvas), the GPU given the time to free it, and the window drawn
+    /// again.
+    fn let_go_of_kept(&mut self) {
+        log::warn!("letting go of what is kept on the GPU, to draw the interface again");
+        if let Some(session) = &self.session {
+            session.trim_memory();
+        }
+        self.ui.let_go_of_kept();
+        if let Some(screen) = &self.screen {
+            screen.gpu.let_go_of_kept_buffers();
+            screen.gpu.flush();
+            screen.window.request_redraw();
+        }
+    }
+
     /// The graphics device was lost (its driver reset or stopped), and all it held: nothing is
     /// saved from it (the gallery keeps the artwork as it was last saved, seconds before); the
     /// windows go, and the app says so and starts again.
@@ -1521,5 +1576,23 @@ mod tests {
     fn the_computers_memory_is_read() {
         let total = super::memory_total().expect("the system says how much memory there is");
         assert!(total >= 1 << 30, "{total} bytes");
+    }
+
+    #[test]
+    fn a_gpu_sharing_the_computers_memory_gives_the_layers_an_eighth_of_it() {
+        use super::layers_on_gpu;
+        const GB: u64 = 1 << 30;
+        // a graphics card: 2 GiB, whatever the computer has
+        assert_eq!(layers_on_gpu(false, Some(8 * GB)), 2 * GB);
+        assert_eq!(layers_on_gpu(false, None), 2 * GB);
+        // an integrated GPU: an eighth of the computer's memory, 512 MiB to 2 GiB (a laptop of 8 GB,
+        // as #341's, 1 GiB: a device of little memory to the canvas, at most 1280 MiB)
+        assert_eq!(layers_on_gpu(true, Some(8 * GB)), GB);
+        assert!(layers_on_gpu(true, Some(8 * GB)) <= 1280 << 20);
+        assert_eq!(layers_on_gpu(true, Some(4 * GB)), 512 << 20);
+        assert_eq!(layers_on_gpu(true, Some(2 * GB)), 512 << 20);
+        assert_eq!(layers_on_gpu(true, Some(16 * GB)), 2 * GB);
+        assert_eq!(layers_on_gpu(true, Some(64 * GB)), 2 * GB);
+        assert_eq!(layers_on_gpu(true, None), GB);
     }
 }

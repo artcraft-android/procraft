@@ -20864,3 +20864,101 @@ fn pen_input_never_waits_for_a_frame_holding_the_canvas() {
     assert!(longest < Duration::from_millis(30), "an event waited {longest:?} for the canvas");
     assert_eq!(differ(&free, &held), (0, 0), "drawn as with the canvas free");
 }
+
+/// #341: the biggest brushes painted at their full size, a stroke across a canvas the size of a
+/// laptop's screen each, with the layers' textures given 1 GiB, as the desktop app gives them on a
+/// laptop of 8 GB whose GPU shares its memory: what the GPU holds stops growing after a few strokes
+/// (the history's older steps kept compressed off it) and stays within half the budget, at its
+/// fullest within the budget. With 2 GiB, as such a laptop had before, it grew by about a layer's
+/// worth a stroke, to 1 GB more after 24. `BIG_BRUSHES` (12) says how many brushes.
+#[test]
+fn the_biggest_brushes_at_their_full_size_keep_a_shared_gpu_within_its_budget() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    const BUDGET: u64 = 1 << 30;
+    let count: usize = std::env::var("BIG_BRUSHES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let report =
+        |gpu: &Gpu| gpu.device.generate_allocator_report().map(|r| (r.total_allocated_bytes, r.total_reserved_bytes));
+    if report(&gpu).is_none() {
+        return eprintln!("skipped: the GPU's memory can't be told");
+    }
+    // the budget on this canvas alone (the app's is the whole process's, and other tests run beside)
+    let side = 2732u32;
+    let s = session_on(gpu.clone(), side, 1600);
+    if let Some(canvas) = s.shared.lock().canvas.as_mut() {
+        let per = u64::from(side) * u64::from(side) * 4;
+        canvas.set_resident_budget(BUDGET.saturating_sub(crate::layers::CANVAS_LAYERS * per));
+    }
+    let mb = |b: u64| b as f64 / f64::from(1u32 << 20);
+    let peak = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let (gpu, peak, stop) = (gpu.clone(), Arc::clone(&peak), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                peak.fetch_max(
+                    gpu.device.generate_allocator_report().map_or(0, |r| r.total_reserved_bytes),
+                    Ordering::Relaxed,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        })
+    };
+    // the biggest at their full size, those of a size in the library's order
+    let mut sized: Vec<(f32, u32, u32)> = {
+        let st = s.shared.lock();
+        let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+            set.brushes.iter().enumerate().map(move |(j, b)| (b.diameter(1.0), i as u32, j as u32))
+        });
+        all.collect()
+    };
+    sized.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+        }
+    };
+    gpu.flush();
+    let (start, start_reserved) = report(&gpu).unwrap_or_default();
+    peak.store(start_reserved, Ordering::Relaxed);
+    let mut held = Vec::new();
+    for &(diameter, set, index) in sized.iter().take(count) {
+        s.select_brush(set, index);
+        s.set_brush_size(1.0);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 800.0, 0.0)]);
+        for e in 1..=120 {
+            let (x, y) = (100.0 + e as f32 * 11.0, 800.0 + (e as f32 * 0.1).sin() * 400.0);
+            s.stroke_add(vec![sample(x, y, f64::from(e) * 8.0)]);
+            if e % 2 == 0 {
+                frame(&s);
+            }
+        }
+        s.stroke_end(vec![]);
+        frame(&s);
+        gpu.flush();
+        let (allocated, _) = report(&gpu).unwrap_or_default();
+        let name = s.shared.lock().library[set as usize].brushes[index as usize].name.clone();
+        println!("{name:<20} {diameter:5.0} px: {:6.1} MB more held", mb(allocated.saturating_sub(start)));
+        held.push(allocated.saturating_sub(start));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let _ = sampler.join();
+    let fullest = peak.load(Ordering::Relaxed).saturating_sub(start_reserved);
+    let (most, last) = (held.iter().copied().max().unwrap_or(0), held.last().copied().unwrap_or(0));
+    let settled = held.get(count / 2).copied().unwrap_or(0);
+    println!(
+        "{count} strokes: at most {:.0} MB more held, {:.0} MB after the last ({:.0} halfway); {:.0} MB more at the fullest",
+        mb(most),
+        mb(last),
+        mb(settled),
+        mb(fullest)
+    );
+    assert!(most <= BUDGET / 2, "{:.0} MB more held", mb(most));
+    assert!(last <= settled + (64 << 20), "still growing: {:.0} MB halfway, {:.0} MB after", mb(settled), mb(last));
+    assert!(fullest <= BUDGET, "{:.0} MB more at the fullest", mb(fullest));
+    assert_eq!(gpu.errors(), 0);
+    assert!(!gpu.is_lost());
+}
