@@ -53,6 +53,13 @@ impl CanvasSession {
         st.frame_due.map(|at| at.saturating_duration_since(Instant::now()))
     }
 
+    /// Whether the frames are laying work a share at a time that a read of the canvas would lay
+    /// at once (an ended stroke's end): a read made from the thread that draws waits until it is
+    /// laid (see [`CanvasSession::reference_canvas`]).
+    pub fn lays_over_frames(&self) -> bool {
+        self.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
+    }
+
     /// Something changed since the last frame was drawn.
     pub fn wants_frame(&self) -> bool {
         self.shared.input_waiting() || self.shared.lock().needs_frame

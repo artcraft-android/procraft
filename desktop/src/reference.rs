@@ -321,6 +321,11 @@ impl Reference {
             ctx.request_repaint_after(REFRESH - at.elapsed());
             return;
         }
+        // (read once the frames have laid a stroke's end: this thread draws them)
+        if session.lays_over_frames() {
+            ctx.request_repaint_after(REFRESH);
+            return;
+        }
         let picture = if self.mode == Mode::Model {
             session.reference_model_picture(MODEL_PIXELS)
         } else {

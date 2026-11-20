@@ -6941,6 +6941,58 @@ fn a_time_lapse_frame_left_waiting_on_the_frames_lays_nothing_at_once() {
     assert_eq!(gpu.errors(), 0);
 }
 
+/// The Reference window's picture of the canvas, read right after a stroke whose end the frames lay
+/// a share at a time, waits for them (the state let go meanwhile) rather than laying the rest at once
+/// in its hold of it, and waits for the GPU's copy with the state let go: the frames and the app's
+/// touches went on waiting behind that read, most of a second after a heavy brush's stroke on a
+/// large canvas. Its picture is the stroke with its end.
+#[test]
+fn the_reference_windows_read_of_the_canvas_leaves_a_strokes_end_to_the_frames() {
+    use std::time::{Duration, Instant};
+    let Some(s) = session(512, 512) else { return };
+    let Some((set, index)) = library_brush(&s, |b| b.name == "Easterly") else { return };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(1.0);
+    // the end laid a piece at each frame
+    s.shared.lock().canvas.as_mut().unwrap().set_relay_at_once(Duration::ZERO);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let view = window_view(&s, 512);
+    let frame = || {
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        s.draw(&view, format, (512, 512), procraft_engine::profile::Profile::Srgb, Instant::now());
+        gpu.flush();
+    };
+    let lays = || s.shared.lock().canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames);
+    s.stroke_begin(PointerKind::Stylus, vec![sample(40.0, 200.0, 0.0)]);
+    for i in 1..60 {
+        let x = 40.0 + i as f32 * 7.0;
+        s.stroke_add(vec![PenSample { pressure: 0.5, ..sample(x, 200.0 + (x / 40.0).sin() * 60.0, i as f64 * 8.0) }]);
+        if i % 2 == 0 {
+            frame();
+        }
+    }
+    s.stroke_end(vec![]);
+    frame();
+    assert!(lays(), "the stroke's end is laid over frames");
+    let reader = {
+        let s = std::sync::Arc::clone(&s);
+        std::thread::spawn(move || s.reference_canvas(256))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(lays(), "the read left the stroke's end to the frames");
+    let mut frames = 0;
+    while lays() && frames < 1000 {
+        frame();
+        frames += 1;
+    }
+    let read = reader.join().unwrap().expect("a picture");
+    println!("the stroke's end laid over {frames} frames, then read");
+    assert!(frames > 1, "laid over {frames} frames");
+    // the picture is the stroke with its end: as the canvas reads now
+    assert_eq!(s.canvas_thumbnail(256).map(|t| t.rgba), Some(read.rgba));
+    assert_eq!(gpu.errors(), 0);
+}
+
 /// A time-lapse frame read while the frames lay one stroke's end, the pen already on the next,
 /// waits only for that end: the open stroke's work, which comes as the pen moves, isn't waited for
 /// (the read waited for that stroke to end, up to three seconds, and then took part of it). Bound:

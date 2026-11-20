@@ -267,8 +267,12 @@ impl CanvasSession {
     /// The whole picture for the Reference windows that show the canvas, as
     /// [`CanvasSession::canvas_thumbnail`] makes it, but read back from the GPU once while the
     /// artwork stays as it is: every window showing the canvas takes the same, so more windows
-    /// cost no more reads. None before the canvas exists.
+    /// cost no more reads. None before the canvas exists. Read once the frames have laid what
+    /// they lay a share at a time (the stroke's end it is read after), which the read would
+    /// otherwise lay at once, frames and touches waiting on it: not from the thread that draws
+    /// (the desktop asks [`CanvasSession::lays_over_frames`] first).
     pub fn reference_canvas(&self, max_side: u32) -> Option<crate::ThumbnailImage> {
+        let _ = self.shared.await_frames_laid();
         let edits = self.edits();
         {
             let st = self.shared.lock();

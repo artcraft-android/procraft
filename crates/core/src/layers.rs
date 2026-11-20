@@ -1155,12 +1155,18 @@ impl CanvasSession {
     }
 
     /// The whole picture scaled to fit `max_side` pixels (premultiplied), for the reference
-    /// window; none before the canvas exists.
+    /// window; none before the canvas exists. The copy is started under the lock and waited for
+    /// once it is let go: frames and touches go on while the GPU gets through the work before it
+    /// (read after each stroke, with a heavy brush's end before it that held them for most of a
+    /// second).
     pub fn canvas_thumbnail(&self, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        let t = canvas.composite_thumbnail(gpu, &mut st.doc, max_side).ok()?;
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+            canvas.start_composite_thumbnail_without(gpu, &mut st.doc, max_side, &[])
+        };
+        let t = pending.pixels().ok()?;
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
