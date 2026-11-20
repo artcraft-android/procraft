@@ -4062,6 +4062,129 @@ fn a_transform_moves_the_layer_as_one_undo_step() {
     assert_eq!(s.view_matrix(), vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 }
 
+/// A square outline one pixel wide (columns and rows 30 and 69, from 30 to 69) moved `dx`, `dy`
+/// whole pixels, black on a clear 100 × 100 layer (premultiplied RGBA8).
+fn outline_at(dx: i32, dy: i32) -> Vec<u8> {
+    (0..100 * 100)
+        .flat_map(|i: i32| {
+            let (u, v) = (i % 100 - dx, i / 100 - dy);
+            let inside = (30..=69).contains(&u) && (30..=69).contains(&v);
+            let on = inside && (u == 30 || u == 69 || v == 30 || v == 69);
+            [0, 0, 0, if on { 255 } else { 0 }]
+        })
+        .collect()
+}
+
+/// A 100 × 100 session whose current layer holds [`outline_at`]`(0, 0)`, and that layer's id.
+fn outlined() -> Option<(std::sync::Arc<CanvasSession>, u64)> {
+    let s = session(100, 100)?;
+    let id = s.layers().into_iter().find(|l| l.current)?.id;
+    let whole = procraft_engine::geom::IRect::from_size(100, 100);
+    s.shared.lock().rewrite_layer(procraft_engine::document::LayerId(id), whole, outline_at(0, 0));
+    Some((s, id))
+}
+
+/// How sharp a layer drawn from [`outline_at`] is against `exact`: the pixels partly covered,
+/// the sum of how far each pixel's cover is from `exact`'s, and how many pixels deep the top edge
+/// is down column 60 (above row 60).
+fn softness(rgba: &[u8], exact: &[u8]) -> (usize, u64, usize) {
+    let alpha = |px: &[u8]| px.as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<u8>>();
+    let (a, b) = (alpha(rgba), alpha(exact));
+    let soft = a.iter().filter(|&&v| v != 0 && v != 255).count();
+    let off = a.iter().zip(&b).map(|(p, q)| u64::from(p.abs_diff(*q))).sum();
+    let edge = a.iter().skip(60).step_by(100).take(60).filter(|&&v| v > 0).count();
+    (soft, off, edge)
+}
+
+/// The current layer moved by a transform of its own, kept: taken at window point `from`, then
+/// dragged through `path`.
+fn moved_once(s: &CanvasSession, from: (f32, f32), path: &[(f32, f32)]) {
+    use crate::transform::TransformHandle;
+    s.transform_begin().unwrap();
+    s.transform_grab(TransformHandle::Move, from.0, from.1);
+    for &(x, y) in path {
+        s.transform_drag(x, y);
+    }
+    s.transform_release();
+    s.transform_end(true);
+}
+
+#[test]
+fn moves_within_one_transform_draw_from_the_pixels_it_began_with() {
+    let Some((s, id)) = outlined() else { return };
+    // 20 drags, each a fraction of a pixel on from the last, then back where it was taken
+    let mut path: Vec<(f32, f32)> = (1..=20).map(|i| (50.0 + 0.37 * i as f32, 50.0 + 0.23 * i as f32)).collect();
+    path.push((50.0, 50.0));
+    moved_once(&s, (50.0, 50.0), &path);
+    let back = softness(&layer_rgba(&s, id), &outline_at(0, 0));
+    eprintln!("20 drags then back: {back:?} (soft pixels, cover off, edge depth)");
+    assert_eq!(back, (0, 0, 1), "as it was, to the pixel");
+    // 20 drags ending 3.4, 2.6 away: the same pixels as one drag straight there
+    s.undo();
+    let path: Vec<(f32, f32)> = (1..=20).map(|i| (50.0 + 0.17 * i as f32, 50.0 + 0.13 * i as f32)).collect();
+    moved_once(&s, (50.0, 50.0), &path);
+    let many = layer_rgba(&s, id);
+    s.undo();
+    moved_once(&s, (50.0, 50.0), &path[19..]);
+    let one = layer_rgba(&s, id);
+    assert!(many == one, "20 drags draw as one");
+    // and on whole pixels: the nearest, 3 and 3 on
+    let once = softness(&one, &outline_at(3, 3));
+    eprintln!("one move of 3.4, 2.6: {once:?}");
+    assert_eq!(once, (0, 0, 1), "a move lands on whole pixels");
+}
+
+#[test]
+fn moves_by_fractions_of_a_pixel_stay_sharp_however_many() {
+    // the drawing moved again and again, each move a transform of its own: 20 moves of 0.6 one
+    // way and back, 0.7 down and up
+    let Some((s, id)) = outlined() else { return };
+    for i in 0..20 {
+        let k = if i % 2 == 0 { 1.0 } else { -1.0 };
+        moved_once(&s, (50.0, 50.0), &[(50.0 + 0.6 * k, 50.0 + 0.7 * k)]);
+    }
+    let back = softness(&layer_rgba(&s, id), &outline_at(0, 0));
+    eprintln!("20 moves by fractions, each its own transform: {back:?} (soft pixels, cover off, edge depth)");
+    assert_eq!(back, (0, 0, 1), "back as it was, to the pixel");
+    // 20 moves of 0.6 the same way: each a whole pixel, none of them softened
+    for _ in 0..20 {
+        moved_once(&s, (50.0, 50.0), &[(50.6, 50.6)]);
+    }
+    let on = softness(&layer_rgba(&s, id), &outline_at(20, 20));
+    eprintln!("20 moves of 0.6, 0.6: {on:?}");
+    assert_eq!(on, (0, 0, 1), "20 pixels on, to the pixel");
+}
+
+#[test]
+fn a_whole_pixel_move_keeps_every_pixel_with_each_filter() {
+    use crate::transform::Interpolation;
+    for filter in [Interpolation::Nearest, Interpolation::Bilinear, Interpolation::Bicubic] {
+        let Some((s, id)) = outlined() else { return };
+        s.transform_set_interpolation(filter);
+        moved_once(&s, (50.0, 50.0), &[(57.0, 46.0)]);
+        assert!(layer_rgba(&s, id) == outline_at(7, -4), "{filter:?}");
+    }
+}
+
+#[test]
+fn a_quarter_turn_or_mirror_keeps_every_pixel_and_other_turns_are_filtered() {
+    use crate::transform::TransformAction;
+    let Some((s, id)) = outlined() else { return };
+    // turned a quarter about its middle and mirrored, the square outline is itself
+    s.transform_begin().unwrap();
+    s.transform_apply(TransformAction::Rotate45);
+    s.transform_apply(TransformAction::Rotate45);
+    s.transform_apply(TransformAction::FlipHorizontal);
+    s.transform_end(true);
+    assert!(layer_rgba(&s, id) == outline_at(0, 0), "a quarter turn and a mirror");
+    // an eighth of a turn: filtered between pixels
+    s.transform_begin().unwrap();
+    s.transform_apply(TransformAction::Rotate45);
+    s.transform_end(true);
+    let (soft, ..) = softness(&layer_rgba(&s, id), &outline_at(0, 0));
+    assert!(soft > 100, "{soft} pixels between");
+}
+
 #[test]
 fn where_layers_are_painted_is_found_on_the_gpu_as_on_the_cpu() {
     // wider than tall, past a stretch of the GPU's lines each way
