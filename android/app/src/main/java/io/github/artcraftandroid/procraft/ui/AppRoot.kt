@@ -258,12 +258,16 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     else -> false
                 }
                 val seen = if (undocking) 0f else alpha
+                // (where it covers the canvas: the pen hovering over it shows no brush cursor)
+                val cover = androidx.compose.runtime.remember { Any() }
+                DisposableEffect(cover) { onDispose { vm.covers(cover, null) } }
                 val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.graphicsLayer {
                     this.alpha = seen
                     scaleX = scale
                     scaleY = scale
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / (width * k), 0f)
                 }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
+                    .onGloballyPositioned { vm.covers(cover, it.boundsInRoot().translate(-keptClear.corner)) }
                 // the screen as a panel at its size measures it: the room under the top bar
                 // as it shows, in the panel's own dp (the panels take the bar's height off it)
                 val room = (maxHeight - Pc.barShown) / k + Pc.BarHeight

@@ -75,6 +75,18 @@ private val OpacityTrackTop = 248.dp
 internal fun overBars(p: Offset, barBottom: Float, sideBar: androidx.compose.ui.geometry.Rect?, hidden: Boolean): Boolean =
     !hidden && (p.y <= barBottom || sideBar?.contains(p) == true)
 
+/**
+ * Whether window point [p] is over the bars (see [overBars]) or one of [covers], the panels open over
+ * the canvas (window pixels), however the bars show: the canvas under them isn't where the pen hovers.
+ */
+internal fun overInterface(
+    p: Offset,
+    barBottom: Float,
+    sideBar: androidx.compose.ui.geometry.Rect?,
+    hidden: Boolean,
+    covers: Collection<androidx.compose.ui.geometry.Rect>,
+): Boolean = overBars(p, barBottom, sideBar, hidden) || covers.any { it.contains(p) }
+
 /** A tap target without a ripple: the bars show their state through colour alone. */
 private fun Modifier.tap(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
     clickable(remember { MutableInteractionSource() }, indication = null, enabled = enabled, onClick = onClick)

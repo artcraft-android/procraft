@@ -7803,6 +7803,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun overBars(p: Offset): Boolean =
         io.github.artcraftandroid.procraft.ui.overBars(p, io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density, sideBarBounds, barsHidden)
 
+    /** Where the panels open over the canvas are (window pixels), by what put each there. */
+    private val covering = HashMap<Any, androidx.compose.ui.geometry.Rect>()
+
+    /** [key]'s panel covers [bounds] of the canvas (window pixels), or (none) no longer shows. */
+    fun covers(key: Any, bounds: androidx.compose.ui.geometry.Rect?) {
+        if (bounds == null) covering.remove(key) else covering[key] = bounds
+    }
+
+    /** Whether window point [p] is over the bars or a panel open over the canvas. */
+    fun overInterface(p: Offset): Boolean = io.github.artcraftandroid.procraft.ui.overInterface(
+        p, io.github.artcraftandroid.procraft.ui.Pc.barShown.value * density, sideBarBounds, barsHidden, covering.values,
+    )
+
     /** The threshold the colour fills with (0..1), kept from one drop to the next. */
     var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
         private set

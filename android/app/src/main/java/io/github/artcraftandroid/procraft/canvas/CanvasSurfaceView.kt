@@ -532,7 +532,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
      */
     private fun mouseHover(e: MotionEvent): Boolean {
         val at = Offset(e.x, e.y)
-        val gone = e.actionMasked == MotionEvent.ACTION_HOVER_EXIT || vm.overBars(at)
+        val gone = e.actionMasked == MotionEvent.ACTION_HOVER_EXIT || vm.overInterface(at)
         if (gone || !painting()) vm.showCursor(null) else vm.showCursor(at, hovering = true)
         if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { gone })
         return true
@@ -543,12 +543,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // a spray can's sound (a plugin's) rattles shaken above the canvas
         if (vm.strokeSoundOn) session?.soundHover(at.x, at.y)
         penHovering = true
-        // not over the bars, where the gaps between their buttons come here and the
-        // buttons don't: it came and went as the pen crossed them
-        val overBars = vm.overBars(at)
-        if (overBars) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
+        // not over the bars or an open panel, where the gaps between their buttons and rows come
+        // here and the buttons don't: it came and went as the pen crossed them, drawn under them
+        val over = vm.overInterface(at)
+        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
         // and Liquify's ring where the pen hovers
-        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { overBars })
+        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { over })
     }
 
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
