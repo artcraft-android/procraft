@@ -13,7 +13,7 @@ use std::num::NonZeroU64;
 use procraft_engine::geom::{IRect, Vec2};
 
 use super::{
-    Canvas, LAYER_FORMAT, SLOT, SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UniformData, copy_at, extent,
+    Canvas, Kept, LAYER_FORMAT, SLOT, SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UniformData, copy_at, extent,
     smudge_params, texture,
 };
 use crate::Gpu;
@@ -99,8 +99,9 @@ pub(super) enum Pipe {
 
 /// A piece of a smudge stroke's work, done in one window: its dispatches in order (each with which
 /// of its uniforms it reads, the window's fields filled in where it is laid, and its workgroups),
-/// the pass of wet paint they read (an offset in its uniforms), the pixels they read and write, and
-/// whether they change the layer or what the stroke keeps.
+/// the pass of wet paint they read (an offset in its uniforms), the pixels they read and write,
+/// whether they change the layer or what the stroke keeps, and which of a symmetry's copies of the
+/// stroke it lays (whose carry it works in, see `Carry`).
 pub(super) struct Piece {
     pub uniforms: Vec<SmudgeUniform>,
     pub dispatches: Vec<(Pipe, usize, [u32; 2])>,
@@ -109,6 +110,43 @@ pub(super) struct Piece {
     pub writes: IRect,
     pub work: bool,
     pub kept: bool,
+    pub carry: usize,
+}
+
+impl Piece {
+    /// What of its copy's carry the piece reads from that copy's stamps before (its first dispatch
+    /// to work in the carry: those after read what it left), and what of it the copy's next stamp
+    /// reads once it is laid (none: as before); none if it doesn't work in a carry (paint laid apart
+    /// put together).
+    pub(super) fn carry_use(&self) -> Option<(Kept, Option<Kept>)> {
+        let mut used: Option<(Kept, Option<Kept>)> = None;
+        for &(pipe, which, _) in &self.dispatches {
+            let Some(u) = self.uniforms.get(which) else { continue };
+            let from_before = u.kept >= 0;
+            let (needs, leaves) = match pipe {
+                Pipe::Carry => {
+                    (if from_before { Kept::Cells(u.kept) } else { Kept::Nothing }, Some(Kept::Cells(u.half)))
+                }
+                Pipe::WetPlots => {
+                    let needs = if from_before {
+                        Kept::Plot { which: u.index.min(1), texels: u.carried * u.carried }
+                    } else {
+                        Kept::Nothing
+                    };
+                    (needs, Some(Kept::Plot { which: 1 - u.index.min(1), texels: u.plot * u.plot }))
+                }
+                Pipe::Dull | Pipe::BlurDown | Pipe::BlurAcross | Pipe::Deposit | Pipe::DepositRun => {
+                    (Kept::Nothing, None)
+                }
+                Pipe::Synthesize => continue,
+            };
+            used = Some(match used {
+                Some((first, last)) => (first, leaves.or(last)),
+                None => (needs, leaves),
+            });
+        }
+        used
+    }
 }
 
 /// Bytes a row of a window `width` pixels wide takes (rows start at multiples of [`PLACEMENT`]).
@@ -321,6 +359,7 @@ impl Canvas {
             writes,
             work: !writes.is_empty(),
             kept: false,
+            carry: 0,
         };
         let reach = carry_reach(&u, [0, 0, n, n], full).union(bbox);
         // what it carries made one colour, a workgroup's work
@@ -350,6 +389,16 @@ impl Canvas {
         pieces
     }
 
+    /// Each smudge stamp's work (its uniform, where it lays down, whether it blurs, and which of a
+    /// symmetry's copies of the stroke it is on) as [`Canvas::smudge_pieces`] cuts it.
+    pub(super) fn smudged_pieces(&self, laid: Vec<(SmudgeUniform, IRect, bool, usize)>) -> Vec<Piece> {
+        laid.into_iter()
+            .flat_map(|(uniform, bbox, blurs, copy)| {
+                self.smudge_pieces(uniform, bbox, blurs).into_iter().map(move |piece| Piece { carry: copy, ..piece })
+            })
+            .collect()
+    }
+
     /// A dispatch over `rect` (its uniform `u`, reading only the pixels it writes), in bands of rows
     /// that each fit a window: what it changes, the layer (`work`) or what the stroke keeps
     /// (`kept`), and the pass of wet paint it reads.
@@ -377,6 +426,7 @@ impl Canvas {
                     writes: r,
                     work,
                     kept,
+                    carry: 0,
                 }
             })
             .collect()
@@ -415,12 +465,14 @@ impl Canvas {
                     writes: IRect::EMPTY,
                     work: false,
                     kept: false,
+                    carry: pass.carry,
                 }
             })
             .collect();
         if let Some(&stamp) = pass.uniforms.get(1) {
             let [x0, y0, x1, y1] = stamp.bbox;
-            pieces.extend(self.bands(Pipe::Deposit, stamp, IRect::new(x0, y0, x1, y1), changes, pass.listed));
+            let bands = self.bands(Pipe::Deposit, stamp, IRect::new(x0, y0, x1, y1), changes, pass.listed);
+            pieces.extend(bands.into_iter().map(|band| Piece { carry: pass.carry, ..band }));
         }
         pieces
     }
@@ -435,6 +487,7 @@ impl Canvas {
         pieces: &[Piece],
         (brush, second): (&wgpu::BindGroup, Option<&wgpu::TextureView>),
     ) {
+        self.ready_asides(&gpu.device, pieces);
         let together = self.smudge_most.min(TOGETHER_MOST);
         let mut from = 0;
         while let Some(first) = pieces.get(from) {
@@ -503,6 +556,9 @@ impl Canvas {
         // (never begun without them: see `Canvas::smudges`)
         let Some(compute) = self.pipelines.compute.as_ref() else { return false };
         let Some(carry) = smudge.carry.as_ref() else { return false };
+        // where the carry goes from one of a symmetry's copies to another's
+        let (overs, resident) = super::carry_hand_overs(smudge.resident, pieces);
+        let mut overs = overs.into_iter().peekable();
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -554,10 +610,20 @@ impl Canvas {
             ],
         });
         let stride = row_bytes(reach.width()) / 4;
-        let mut pass =
-            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("smudge"), timestamp_writes: None });
-        pass.set_bind_group(1, brush, &[]);
-        for piece in pieces {
+        let begin = |encoder: &mut wgpu::CommandEncoder| {
+            let mut pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("smudge"), timestamp_writes: None })
+                .forget_lifetime();
+            pass.set_bind_group(1, brush, &[]);
+            pass
+        };
+        let mut pass = begin(encoder);
+        for (k, piece) in pieces.iter().enumerate() {
+            if let Some((_, out, into)) = overs.next_if(|o| o.0 == k) {
+                drop(pass);
+                hand_over(encoder, carry, &smudge.carries, out, into);
+                pass = begin(encoder);
+            }
             let offsets: Vec<u32> = piece
                 .uniforms
                 .iter()
@@ -583,8 +649,58 @@ impl Canvas {
             }
         }
         drop(pass);
+        if let Some(smudge) = self.smudge.as_mut() {
+            smudge.resident = resident;
+        }
         self.window_out(gpu, encoder, reach, writes, (work, kept));
         true
+    }
+
+    /// Makes room to put aside the carries of the copies of the stroke that `pieces` work in (and of
+    /// the one whose carry the stroke's holds), where more than one copy is among them. A copy whose
+    /// carry can't be put aside (past the GPU's memory) works in the carry as the others leave it.
+    fn ready_asides(&mut self, device: &wgpu::Device, pieces: &[Piece]) {
+        let in_fragments = self.pipelines.compute.is_none();
+        let Some(smudge) = self.smudge.as_mut() else { return };
+        let mut copies: Vec<usize> = pieces.iter().filter(|p| p.carry_use().is_some()).map(|p| p.carry).collect();
+        copies.extend(smudge.resident.map(|r| r.0));
+        copies.sort_unstable();
+        copies.dedup();
+        if copies.len() < 2 {
+            return;
+        }
+        let wet = smudge.wet;
+        for copy in copies {
+            let Some(carry) = smudge.carries.get_mut(copy) else { continue };
+            if carry.aside.is_some() || carry.unkept {
+                continue;
+            }
+            let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let aside = if in_fragments {
+                let side = if wet { super::WET_PLOT_MOST } else { super::SMUDGE_GRID };
+                super::Aside::Texture(super::fragments::Tex::new(
+                    device,
+                    "smudge carry aside",
+                    side,
+                    side,
+                    super::fragments::CARRY_FORMAT,
+                ))
+            } else {
+                super::Aside::Buffer(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge carry aside"),
+                    size: aside_bytes(wet),
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }))
+            };
+            if let Some(why) = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop())) {
+                log::error!("smudging: a symmetry's copy's carry couldn't be put aside: {why}");
+                carry.unkept = true;
+                continue;
+            }
+            carry.aside = Some(aside);
+        }
     }
 
     /// Room for `count` more smudge uniforms: when the buffer they go in is full, what it holds is
@@ -955,12 +1071,60 @@ impl Canvas {
     }
 }
 
+/// Bytes a copy's carry takes put aside: wet paint's carried-over plot, or a smudge's grid.
+fn aside_bytes(wet: bool) -> u64 {
+    let side = if wet { super::WET_PLOT_MOST } else { super::SMUDGE_GRID };
+    u64::from(side * side) * 16
+}
+
+/// Where what is kept of a copy's carry lies (see [`Kept`]): bytes into the stroke's carry buffer
+/// and into the copy's put aside, and how many; none for nothing.
+fn kept_bytes(kept: Kept) -> Option<(u64, u64, u64)> {
+    match kept {
+        Kept::Nothing => None,
+        // the grid's rows within that many cells of its middle
+        Kept::Cells(cells) => {
+            let cells = cells.clamp(0, super::SMUDGE_REACH);
+            let row = u64::from(super::SMUDGE_GRID) * 16;
+            let at = u64::from((super::SMUDGE_GRID as i32 / 2 - cells).unsigned_abs()) * row;
+            Some((at, at, (2 * cells.unsigned_abs() as u64 + 1) * row))
+        }
+        Kept::Plot { which, texels } => {
+            let carried = u64::from(super::WET_PLOT_MOST * super::WET_PLOT_MOST);
+            Some((u64::from(which.min(1)) * carried * 16, 0, u64::from(texels).min(carried) * 16))
+        }
+    }
+}
+
+/// Hands the stroke's carry buffer `carry` from copy `out` (what of its carry is kept goes aside) to
+/// copy `into` (what of its carry its piece reads comes back).
+fn hand_over(
+    encoder: &mut wgpu::CommandEncoder,
+    carry: &wgpu::Buffer,
+    carries: &[super::Carry],
+    out: Option<(usize, Kept)>,
+    (into, needs): (usize, Kept),
+) {
+    let aside = |copy: usize| match carries.get(copy).and_then(|c| c.aside.as_ref()) {
+        Some(super::Aside::Buffer(buffer)) => Some(buffer),
+        _ => None,
+    };
+    if let Some((copy, kept)) = out
+        && let (Some(aside), Some((at, aside_at, bytes))) = (aside(copy), kept_bytes(kept))
+    {
+        encoder.copy_buffer_to_buffer(carry, at, aside, aside_at, bytes);
+    }
+    if let (Some(aside), Some((at, aside_at, bytes))) = (aside(into), kept_bytes(needs)) {
+        encoder.copy_buffer_to_buffer(aside, aside_at, carry, at, bytes);
+    }
+}
+
 /// A smudge stroke's tiles, by where they are.
 pub(super) type Tiles = BTreeMap<(u32, u32), Tile>;
 
 impl super::Smudge {
     /// The textures the stroke holds: its tiles' and its window's (and in fragment passes, what
-    /// the brush carries).
+    /// the brush carries, and what its copies' carries are put aside in).
     pub(super) fn textures(&self) -> Vec<&wgpu::Texture> {
         let tiles = self.tiles.values().flat_map(|t| {
             std::iter::once(&t.before)
@@ -969,8 +1133,16 @@ impl super::Smudge {
                 .chain(t.shown.iter())
                 .chain(t.more.iter())
         });
-        let fragments =
-            self.held.iter().flat_map(|h| h.textures()).chain(self.frag_window.iter().flat_map(|w| w.textures()));
+        let asides = self.carries.iter().filter_map(|c| match &c.aside {
+            Some(super::Aside::Texture(tex)) => Some(&tex.texture),
+            _ => None,
+        });
+        let fragments = self
+            .held
+            .iter()
+            .flat_map(|h| h.textures())
+            .chain(self.frag_window.iter().flat_map(|w| w.textures()))
+            .chain(asides);
         tiles
             .chain(self.window.as_ref().map(|w| &w.before))
             .chain(self.passed.as_ref().map(|p| &p.0))

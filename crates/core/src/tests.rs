@@ -4972,6 +4972,129 @@ fn symmetry_mirrors_smudge_erase_and_liquify() {
     s.adjust_end(true);
 }
 
+/// Each copy a symmetry draws of a smudge picks up and carries the paint under its own path, as
+/// the stroke itself does: on a picture that the guide's mirrors and turns take into itself, the
+/// smudged picture is mirrored and turned as well, under each of the four symmetries, on a GPU
+/// and on an old one (fragment passes). So are a wet brush's strokes (what it carries is each
+/// copy's own too, and its moving grain mirrors with a mirrored copy) and the eraser's. Each copy's
+/// pixels round to 8 bits as the stroke's do. (The copies carried the stroke's paint along with
+/// them, a mirrored wet copy read its grain unmirrored and each rounded at random of its own: up
+/// to 53 levels off for the smudge and 56 for the wet brush, 300 to 2,300 pixels more than 1.)
+#[test]
+fn a_symmetry_s_copies_of_a_smudge_each_carry_the_paint_under_their_own_path() {
+    use crate::guide::{GuideType, SymmetryType};
+    use procraft_engine::brush::Brush;
+    let (Ok(full), Ok(old)) = (Gpu::headless(), Gpu::headless_old()) else { return eprintln!("skipped: no GPU") };
+    let side = 200u32;
+    let (n, last) = (side as usize, side - 1);
+    // sharp bands of colour that the canvas's mirrors across its middle lines and its diagonals
+    // (and so its turns by right angles) take into themselves
+    let rgba: Vec<u8> = (0..n * n)
+        .flat_map(|i| {
+            let (x, y) = ((i % n) as u32, (i / n) as u32);
+            let (u, v) = (x.min(last - x), y.min(last - y));
+            let (a, b) = (u.min(v), u.max(v));
+            [(a * 37 + b * 11) % 256, ((a / 3) ^ (b / 5)) * 29 % 256, (a + 2 * b) / 4 * 53 % 256, 255].map(|c| c as u8)
+        })
+        .collect();
+    // where a pixel lands mirrored across the upright line, the level one and a diagonal, and
+    // turned a quarter and a half round about the middle
+    type Map = fn(u32, u32, u32) -> (u32, u32);
+    let across: Map = |l, x, y| (l - x, y);
+    let down: Map = |l, x, y| (x, l - y);
+    let diagonal: Map = |_, x, y| (y, x);
+    let quarter: Map = |l, x, y| (l - y, x);
+    let half: Map = |l, x, y| (l - x, l - y);
+    type Kind<'a> = (&'a str, SymmetryType, &'a [(&'a str, Map)]);
+    let kinds: [Kind<'_>; 4] = [
+        ("vertical", SymmetryType::Vertical, &[("across", across)]),
+        ("horizontal", SymmetryType::Horizontal, &[("down", down)]),
+        ("quadrant", SymmetryType::Quadrant, &[("across", across), ("down", down), ("half", half)]),
+        (
+            "radial",
+            SymmetryType::Radial,
+            &[("across", across), ("down", down), ("diagonal", diagonal), ("quarter", quarter)],
+        ),
+    ];
+    // a curve within one of the radial guide's parts (from the middle, between its lines going left
+    // and up-left), its brush clear of them, so that no copy meets another; its stamps between
+    // pixels, as a pen's are
+    let at = |e: usize| {
+        let t = e as f32 / 40.0;
+        let (turn, reach) = ((196.0 + 18.0 * t).to_radians(), 54.0 + 30.0 * t + 3.0 * (t * 9.0).sin());
+        let (x, y) = (100.0 + reach * turn.cos(), 100.0 + reach * turn.sin());
+        PenSample { pressure: 0.6 + 0.35 * (t * 7.0).sin().abs(), ..sample(x, y, e as f64 * 7.0) }
+    };
+    let tools = ["smudge", "wet paint", "eraser"];
+    let mut worst: Vec<(String, u8, usize)> = Vec::new();
+    for ((gpu_name, gpu), tool) in [("", &full), ("old GPU, ", &old)].into_iter().flat_map(|g| tools.map(|t| (g, t))) {
+        for (name, kind, maps) in kinds {
+            let s = session_on(gpu.clone(), side, side);
+            s.set_guide_on(true);
+            s.set_guide_kind(GuideType::Symmetry);
+            s.set_guide_symmetry(kind, false);
+            let layer =
+                s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
+            assert!(s.select_layer(layer.unwrap()));
+            s.set_guide_assisted(true);
+            match tool {
+                "smudge" => s.set_tool(ToolKind::Smudge),
+                "eraser" => s.set_tool(ToolKind::Erase),
+                _ => {
+                    let wet = {
+                        let st = s.shared.lock();
+                        let wet = |b: &Brush| b.mixes_wet() && b.mixes_with_stroke() && b.secondary.is_none();
+                        let found = st
+                            .library
+                            .iter()
+                            .enumerate()
+                            .find_map(|(i, set)| set.brushes.iter().position(wet).map(|j| (i as u32, j as u32)));
+                        found.unwrap()
+                    };
+                    assert!(s.select_brush(wet.0, wet.1));
+                    s.set_color(0.1, 0.6, 0.9);
+                }
+            }
+            s.set_brush_size(0.2);
+            s.set_brush_opacity(1.0);
+            let before = picture(&s);
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=40 {
+                s.stroke_add(vec![at(e)]);
+                // drawn as it goes, frame by frame
+                if e % 3 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+            let px = picture(&s);
+            let changed = differ(&before, &px).1;
+            let level = |x: u32, y: u32, c: usize| px.get(((y * side + x) * 4) as usize + c).copied().unwrap_or(0);
+            for (how, map) in maps {
+                let (mut off, mut most) = (0usize, 0u8);
+                for y in 0..side {
+                    for x in 0..side {
+                        let (mx, my) = map(last, x, y);
+                        let d = (0..4).map(|c| level(x, y, c).abs_diff(level(mx, my, c))).max().unwrap_or(0);
+                        off += usize::from(d > 1);
+                        most = most.max(d);
+                    }
+                }
+                let what = format!("{gpu_name}{tool}, {name}, {how}");
+                eprintln!("{what}: {changed} channels changed, {off} pixels off by more than 1, at most {most}");
+                assert!(changed > 800, "{what}: the stroke and its copies changed the picture ({changed})");
+                worst.push((what, most, off));
+            }
+        }
+    }
+    // (the wet brush's paint put together at last rounds by the canvas's pixel: a level apart)
+    let unlike: Vec<_> = worst.iter().filter(|(_, most, off)| *most > 2 || *off > 4).collect();
+    assert!(
+        unlike.is_empty(),
+        "copies that aren't the stroke mirrored or turned (most, pixels off by more than 1): {unlike:?}"
+    );
+}
+
 #[test]
 fn liquify_pushes_a_layer_s_mask_along() {
     use crate::adjust::{LiquifyBrush, LiquifyKind};

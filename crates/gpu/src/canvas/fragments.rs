@@ -15,9 +15,10 @@
 use procraft_engine::geom::IRect;
 
 use super::{
-    Canvas, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, RULE_LISTS_KEPT, SMUDGE_GRID,
-    SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData, WET_PASS_SIZE, WET_PLOT_MOST,
-    WET_PLOTS_TEXELS, by_rule, copy_at, extent, quad_reach, rule_lists, smudge, texture,
+    Aside, Canvas, Carry, Kept, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, RULE_LISTS_KEPT,
+    SMUDGE_GRID, SMUDGE_REACH, SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData,
+    WET_PASS_SIZE, WET_PLOT_MOST, WET_PLOTS_TEXELS, by_rule, carry_hand_overs, copy_at, extent, quad_reach, rule_lists,
+    smudge, texture,
 };
 use crate::Gpu;
 
@@ -710,6 +711,42 @@ impl Held {
     }
 }
 
+/// Hands the stroke's carry textures `held` from copy `out` (what of its carry is kept goes aside) to
+/// copy `into` (what of its carry its piece reads comes back), as `smudge::hand_over` does buffers.
+fn hand_over(
+    encoder: &mut wgpu::CommandEncoder,
+    held: &Held,
+    carries: &[Carry],
+    out: Option<(usize, Kept)>,
+    (into, needs): (usize, Kept),
+) {
+    let aside = |copy: usize| match carries.get(copy).and_then(|c| c.aside.as_ref()) {
+        Some(Aside::Texture(tex)) => Some(tex),
+        _ => None,
+    };
+    // where it lies: the grid's rows within that many cells of its middle, or the rows of the
+    // carried-over plot its texels take (in the copy's put aside, the same)
+    let kept_in = |kept: Kept| match (kept, held) {
+        (Kept::Cells(cells), Held::Smudge { carry, .. }) => {
+            let (cells, middle) = (cells.clamp(0, SMUDGE_REACH), SMUDGE_GRID as i32 / 2);
+            Some((carry, IRect::new(0, middle - cells, SMUDGE_GRID as i32, middle + cells + 1)))
+        }
+        (Kept::Plot { which, texels }, Held::Wet { carried, .. }) => {
+            let rows = texels.div_ceil(CARRIED_ROW).min(CARRIED_ROW);
+            carried.get(which.min(1) as usize).map(|t| (t, IRect::new(0, 0, CARRIED_ROW as i32, rows as i32)))
+        }
+        _ => None,
+    };
+    if let Some((copy, kept)) = out
+        && let (Some(aside), Some((tex, rect))) = (aside(copy), kept_in(kept))
+    {
+        copy_rect(encoder, tex, aside, rect, 0);
+    }
+    if let (Some(aside), Some((tex, rect))) = (aside(into), kept_in(needs)) {
+        copy_rect(encoder, aside, tex, rect, 0);
+    }
+}
+
 /// A dulling stamp's sums are summed in this many parts (as the shader's `DULL_PARTS`).
 const DULL_PARTS: u32 = 64;
 
@@ -869,6 +906,9 @@ impl Canvas {
             (spares.eight.view.clone(), spares.word.view.clone(), spares.words.view.clone());
         let Some(smudge) = self.smudge.as_ref() else { return false };
         let (Some(window), Some(held)) = (smudge.frag_window.as_ref(), smudge.held.as_ref()) else { return false };
+        // where the carry goes from one of a symmetry's copies to another's
+        let (overs, resident) = carry_hand_overs(smudge.resident, pieces);
+        let mut overs = overs.into_iter().peekable();
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -931,7 +971,10 @@ impl Canvas {
             IRect::new(r.x0 - reach.x0, r.y0 - reach.y0, r.x1 - reach.x0, r.y1 - reach.y0)
         };
         let grid = SMUDGE_GRID as i32;
-        for piece in pieces {
+        for (k, piece) in pieces.iter().enumerate() {
+            if let Some((_, out, into)) = overs.next_if(|o| o.0 == k) {
+                hand_over(encoder, held, &smudge.carries, out, into);
+            }
             let laid: Vec<(u32, SmudgeUniform)> = piece
                 .uniforms
                 .iter()
@@ -1022,6 +1065,9 @@ impl Canvas {
                     _ => {}
                 }
             }
+        }
+        if let Some(smudge) = self.smudge.as_mut() {
+            smudge.resident = resident;
         }
         self.window_out_fragments(encoder, reach, writes, (work, kept));
         true

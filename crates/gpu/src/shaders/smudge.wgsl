@@ -147,6 +147,11 @@ struct SmudgeStamp {
     // a run of a pass's stamps laid at once (see cs_deposit_run): its first and its end among
     // them (`bbox` then all of theirs)
     run: vec4<u32>,
+    // 1: a moving grain read mirrored (each point's way from the middle turned over top to bottom
+    // first, as the stamp shader reads a symmetry's mirrored copy's)
+    grain_mirrored: u32,
+    // what the stamp rounds its paint to 8 bits by (see `deposit`)
+    dither: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -158,11 +163,13 @@ struct WetStamp {
     paint: vec4<f32>,
     // what it lays by itself (see `Dab`): its alpha, transfer, grain turn and shape; its grain's
     // tile size and depth, how hard it presses into it and how much that counts; where its moving
-    // grain is read from at its middle, and its mirroring; and its bounds
+    // grain is read from at its middle, and its mirroring; its bounds; and (1) its moving grain
+    // read mirrored and its dither (as bits), then room for more
     laid: vec4<f32>,
     grain: vec4<f32>,
     place: vec4<f32>,
     bbox: vec4<i32>,
+    more: vec4<f32>,
 }
 
 struct WetPass {
@@ -189,6 +196,8 @@ struct Dab {
     bbox: vec4<i32>,
     paint: vec4<f32>,
     index: u32,
+    grain_mirrored: bool,
+    dither: u32,
 }
 
 @group(0) @binding(0) var<uniform> st: SmudgeStamp;
@@ -228,6 +237,8 @@ fn own_dab() -> Dab {
     d.bbox = st.bbox;
     d.paint = st.paint;
     d.index = st.index;
+    d.grain_mirrored = st.grain_mirrored != 0u;
+    d.dither = st.dither;
     return d;
 }
 
@@ -252,6 +263,8 @@ fn pass_dab(k: u32) -> Dab {
     d.bbox = w.bbox;
     d.paint = w.paint;
     d.index = k;
+    d.grain_mirrored = w.more.x > 0.5;
+    d.dither = bitcast<u32>(w.more.y);
     return d;
 }
 
@@ -606,8 +619,13 @@ fn grain_plain(d: Dab, p: vec2<f32>) -> f32 {
     var at = p;
     if (d.grain_scale < 0.0) {
         // a moving grain: read as far from where the stamp's middle is in it as the pixel is from
-        // the middle on the canvas, so a rolling grain stays put as the stamps move over it
-        at = p - d.center + d.grain_offset;
+        // the middle on the canvas, so a rolling grain stays put as the stamps move over it (the
+        // way turned over top to bottom where it is read mirrored)
+        var from_middle = p - d.center;
+        if (d.grain_mirrored) {
+            from_middle.y = -from_middle.y;
+        }
+        at = from_middle + d.grain_offset;
     }
     let gc = cos(d.grain_rotation);
     let gs = sin(d.grain_rotation);
@@ -769,9 +787,12 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
     // outside the selection the layer stays as it is
     out = mix(w, out, selected_at(p));
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
-    // add up as they should instead of rounding away
-    // (wet paint laid apart is kept as it was laid; shown by cs_synthesize)
-    let h = dither(u32(p.x), u32(p.y), bitcast<u32>(d.center.x) ^ (bitcast<u32>(d.center.y) * 2654435761u));
+    // add up as they should instead of rounding away (wet paint laid apart is kept as it was laid;
+    // shown by cs_synthesize). At random by the pixel's place from the stamp's middle pixel, the
+    // same each way round, and by which stamp it is: a symmetry's copies of a stamp, mirrored or
+    // turned by right angles, round each pixel as the stamp does the one it lands on.
+    let o = abs(p - vec2<i32>(floor(d.center)));
+    let h = dither(u32(min(o.x, o.y)), u32(max(o.x, o.y)), d.dither);
     dep.out = clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
     dep.laid = true;
     return dep;

@@ -90,6 +90,9 @@ pub struct Stamp {
     /// Its shape made sharp: what is over the first (0..1; 0: as it is) paints fully, what is
     /// under that share of it (the second, 0..1) of it not at all, what lies between as it is.
     pub threshold: [f32; 2],
+    /// Which of a symmetry's copies of its stroke it is on (0: the stroke itself): each copy picks
+    /// up and carries paint along its own path, as the stroke does.
+    pub copy: u8,
 }
 
 impl Stamp {
@@ -123,6 +126,7 @@ impl Stamp {
             lightness: 1.0,
             pick_up: None,
             threshold: [0.0; 2],
+            copy: 0,
         }
     }
 
@@ -3316,6 +3320,7 @@ impl StrokeBuilder {
             lightness: 1.0,
             pick_up: None,
             threshold: [0.0; 2],
+            copy: 0,
         }
     }
 

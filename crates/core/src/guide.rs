@@ -124,13 +124,15 @@ fn length_label(px: f32, unit: LengthUnit, dpi: f32) -> String {
 /// `stamps` and the copies the guide's symmetry draws of them: each the stamp itself, the same
 /// randomness and all, moved as the canvas is by the copy's mirror or turn, its shape and its
 /// moving grain with it (the grain each copy's own reflection or turn of the stamp's, not read
-/// afresh where the copy lands).
+/// afresh where the copy lands), and told which copy it is on (a smudge's copies each carry the
+/// paint along their own paths).
 pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
     let mut out = stamps.to_vec();
     for s in stamps {
-        for (at, turn, mirror) in guide.copies(s.center) {
+        for (k, (at, turn, mirror)) in guide.copies(s.center).into_iter().enumerate() {
             let mut copy = *s;
             copy.center = at;
+            copy.copy = u8::try_from(k + 1).unwrap_or(u8::MAX);
             if mirror {
                 // mirrored across a line at half `turn`: the shape drawn at the turn less its own
                 // and turned over top to bottom in its own frame; the grain's way from the middle
