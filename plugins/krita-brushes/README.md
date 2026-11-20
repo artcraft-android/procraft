@@ -14,7 +14,9 @@ It comes with the app, off.
   pictures (their filled shapes drawn as Krita draws an SVG tip: grey over white, 1000 pixels
   across), GIMP
   brushes (`.gbr`) and pipes (`.gih`, a cell picked per dab by each dimension's selection: constant,
-  incremental, random, pressure, angular, velocity, tilt), applied as the preset says: as a mask,
+  incremental, random, pressure, angular, velocity, tilt; a pipe of more than the 255 cells a tip
+  may have sampled down, each dimension evenly over all its steps, its first and last kept where it
+  is picked along a range), applied as the preset says: as a mask,
   stamped in their own colours, as a lightness map (its strength an option of its own) or as a
   gradient map (from the colour to the secondary colour), a colour picture's grey through its
   middle point, brightness and contrast; older presets' scale and adjustments read as Krita reads

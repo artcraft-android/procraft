@@ -911,6 +911,99 @@ mod tests {
         assert_eq!(file, [(1, &b"t.png"[..]), (2, &b"hello"[..])]);
     }
 
+    /// A brush of a pipe of `count` one-pixel colour cells, each its number in red and green, `ranks`
+    /// and `selections` its settings line's (as `rank0:18 sel0:angular`): read whole.
+    fn pipe_brush(count: u32, settings: &str) -> crate::brush::Brush {
+        let mut pipe = format!("cells\n{count} ncells:{count} {settings}\n").into_bytes();
+        for i in 0..count {
+            for x in [28 + 2, 2, 1, 1, 4] {
+                pipe.extend_from_slice(&u32::to_be_bytes(x));
+            }
+            pipe.extend_from_slice(b"GIMP");
+            pipe.extend_from_slice(&10_u32.to_be_bytes());
+            pipe.extend_from_slice(b"c\0");
+            pipe.extend_from_slice(&[(i & 255) as u8, (i >> 8) as u8, 7, 255]);
+        }
+        let xml = r#"<Preset name="P" paintopid="paintbrush"><param name="brush_definition"><![CDATA[<Brush type="gbr_brush" filename="cells.gih" spacing="0.1" scale="1" BrushVersion="2" brushApplication="1"/>]]></param></Preset>"#;
+        let mut file = Record::new();
+        file.field(1, b"cells.gih").field(2, &pipe);
+        let mut data = Record::new();
+        data.field(1, xml.as_bytes()).field(2, &file.bytes());
+        load(&data.bytes(), false).unwrap()
+    }
+
+    /// The cells a stroke of `brush` along `samples` lays, by the numbers they had in the pipe.
+    fn cells_laid(brush: crate::brush::Brush, samples: &[Sample]) -> Vec<u32> {
+        let masks: Vec<Vec<u8>> = brush.tip.masks.iter().map(|m| m.pixels.clone()).collect();
+        let mut stroke = Stroke::new(
+            Rc::new(brush),
+            Begin { colour: [0.0; 3], secondary: [1.0; 3], diameter: 1.0, start_diameter: 1.0, seed: 3, turn: 0.0 },
+        );
+        stroke.add(samples);
+        stroke.finish();
+        stroke.out.iter().map(|d| masks[d.tip as usize][0] as u32 | (masks[d.tip as usize][1] as u32) << 8).collect()
+    }
+
+    /// A pipe of more cells than a tip may have is sampled down to what fits, each dimension evenly
+    /// over all it had, and a stroke still walks the whole of it: by pressure from its first cell to
+    /// its last, in turn through cells spread over all of them, by the drawing angle all round.
+    #[test]
+    fn a_pipe_of_more_cells_than_fit_is_sampled_down_and_still_walked_whole() {
+        let ranks = |brush: &crate::brush::Brush| match &brush.tip.tips {
+            crate::brush::Tips::Images { pipe: Some(p), .. } => p.ranks.clone(),
+            _ => Vec::new(),
+        };
+        // 738 cells, 18 angles by 41 in turn (a real impasto pipe's): 10 by 25
+        let big = pipe_brush(738, "dim:2 rank0:18 sel0:angular rank1:41 sel1:incremental");
+        assert_eq!((big.tip.masks.len(), ranks(&big)), (250, vec![10, 25]));
+        let line = |n: usize, pressure: &dyn Fn(f32) -> f32| -> Vec<Sample> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / (n - 1) as f32;
+                    Sample {
+                        x: 10.0 + i as f32,
+                        y: 50.0,
+                        pressure: pressure(t),
+                        ms: i as f64 * 4.0,
+                        ..Sample::default()
+                    }
+                })
+                .collect()
+        };
+        // in turn, along a line (one angle): the 25 steps of 41 kept, spread over them all
+        let laid = cells_laid(big, &line(400, &|_| 1.0));
+        let turns: std::collections::BTreeSet<u32> = laid.iter().map(|c| c % 41).collect();
+        assert_eq!(turns.len(), 25, "{turns:?}");
+        assert!(*turns.first().unwrap() <= 1 && *turns.last().unwrap() >= 39, "{turns:?}");
+        // by pressure, 300 cells: from the first to the last
+        let pressed = pipe_brush(300, "dim:1 rank0:300 sel0:pressure");
+        assert_eq!((pressed.tip.masks.len(), ranks(&pressed)), (255, vec![255]));
+        let laid = cells_laid(pressed, &line(600, &|t| t));
+        assert_eq!((laid.iter().min(), laid.iter().max()), (Some(&0), Some(&299)), "the whole range");
+        assert!(laid.windows(2).all(|w| w[0] <= w[1]), "in order as the pressure grows");
+        // by the drawing angle, 400 cells: a circle's dabs pick all round
+        let turned = pipe_brush(400, "dim:1 rank0:400 sel0:angular");
+        assert_eq!(turned.tip.masks.len(), 255);
+        let circle: Vec<Sample> = (0..2000)
+            .map(|i| {
+                let a = i as f32 / 2000.0 * std::f32::consts::TAU;
+                Sample {
+                    x: 200.0 + 150.0 * a.cos(),
+                    y: 200.0 + 150.0 * a.sin(),
+                    pressure: 1.0,
+                    ms: i as f64 * 4.0,
+                    ..Sample::default()
+                }
+            })
+            .collect();
+        let laid: std::collections::BTreeSet<u32> = cells_laid(turned, &circle).into_iter().collect();
+        assert!(laid.len() > 200, "{} of 255", laid.len());
+        assert!(*laid.first().unwrap() < 4 && *laid.last().unwrap() > 395, "{laid:?}");
+        // one that fits is as it was
+        let small = pipe_brush(200, "dim:1 rank0:200 sel0:incremental");
+        assert_eq!((small.tip.masks.len(), ranks(&small)), (200, vec![200]));
+    }
+
     /// A picture a preset carries is read off its text as reading the whole preset finds it: by its
     /// file name, else by its name.
     #[test]
