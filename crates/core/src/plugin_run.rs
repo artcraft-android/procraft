@@ -3348,4 +3348,81 @@ pub(crate) mod tests {
         assert_eq!(keys, Some(vec![combo("command+=")]));
         assert_eq!(running.key_shortcut_keys(&combo("view:fit")).unwrap(), None);
     }
+
+    /// What a colour dropped at (`x`, `y`) on a vector layer hands its plugin, as the app makes it:
+    /// black, ColorDrop's threshold at 10%, on a picture `side` pixels square of what is drawn.
+    fn dropped(x: f32, y: f32, side: u32, coverage: &[u8]) -> Vec<u8> {
+        let floats = |values: &[f32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let mut area = crate::plugin_layers::Record::default();
+        area.field(1, &0_u32.to_le_bytes()).field(2, &0_u32.to_le_bytes());
+        area.field(3, &side.to_le_bytes()).field(4, &side.to_le_bytes()).field(5, coverage);
+        let mut r = crate::plugin_layers::Record::default();
+        r.field(1, &floats(&[x])).field(2, &floats(&[y])).field(3, &floats(&[0.0; 3]));
+        r.field(4, &floats(&[0.1])).field(5, &floats(&[1.0])).field(6, &area.bytes());
+        r.bytes()
+    }
+
+    /// A layer's fill of `drop` as [`Running::layer_fill`] calls it, on as many steps as it needs:
+    /// what it answered, and the steps it took.
+    fn fill_spending(running: &mut Running, drop: &[u8]) -> (Result<bool, Stop>, u64) {
+        let budget = LAYER_FUEL * 8;
+        let (mut left, until) = (budget, Instant::now() + Duration::from_secs(600));
+        let answer = (|| {
+            let len = running.layer_in(drop, &mut left, until)?;
+            let Running { store, layers, .. } = &mut *running;
+            let fill = layers.as_ref().and_then(|calls| calls.fill.as_ref()).ok_or(Stop::Damaged)?;
+            Ok(guarded(|| long_call(store, fill, len, &mut left, until))? != 0)
+        })();
+        (answer, budget - left)
+    }
+
+    #[test]
+    fn the_vector_layers_plugin_fills_the_largest_picture_well_within_a_layer_call_s_steps() {
+        // the largest picture a dropped colour comes with, 2048 square: a ring of lines 4 wide round
+        // its middle with a gap 4 wide in its top (closed by the card's 6), and 300 short strokes
+        // scattered outside it, each a hole in a fill round them
+        let side = 2048_usize;
+        let mut coverage = vec![0_u8; side * side];
+        let mut put = |x0: usize, y0: usize, x1: usize, y1: usize| {
+            for y in y0..y1.min(side) {
+                coverage[y * side + x0..y * side + x1.min(side)].fill(255);
+            }
+        };
+        let (from, to, thick) = (624, 1424, 4);
+        put(from, from, 1022, from + thick);
+        put(1026, from, to, from + thick);
+        put(from, to - thick, to, to);
+        put(from, from, from + thick, to);
+        put(to - thick, from, to, to);
+        let mut seed = 7_u64;
+        let mut next = |most: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) % most) as usize
+        };
+        for _ in 0..300 {
+            let (x, y) = (next(2000) + 10, next(560) + 10);
+            let (x, y) = if next(2) == 0 { (x, y) } else { (x, y + 1460) };
+            put(x, y, x + 24, y + 3);
+        }
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-layers").unwrap();
+        let package = crate::plugin_file::read_package(file).unwrap();
+        let code = package.file(MODULE).unwrap().to_vec();
+        // its controls as they start (the eraser as a mask, masks taken, gaps up to 6 closed,
+        // nudges), and with the widest gaps the card closes, 32: within a quarter of a call's steps
+        // as it starts, and half with the widest
+        let mut spent = Vec::new();
+        for (gap, most) in [(6.0, LAYER_FUEL / 4), (32.0, LAYER_FUEL / 2)] {
+            let mut running =
+                Running::start_on(&code, &[0.0, 0.0, 1.0, gap, 1.0], &package.manifest.hooks, &[]).unwrap();
+            for (what, x, y) in [("inside the ring", 1024.0, 1024.0), ("round it", 5.0, 5.0)] {
+                assert_eq!(running.layer_load(0, &[]), Ok(true));
+                let t = Instant::now();
+                let (answer, steps) = fill_spending(&mut running, &dropped(x, y, side as u32, &coverage));
+                spent.push((gap, what, steps, t.elapsed()));
+                assert_eq!(answer, Ok(true), "{what}: {spent:?}");
+                assert!(steps < most, "{spent:?}");
+            }
+        }
+        eprintln!("steps a fill took (of {LAYER_FUEL} a call may take): {spent:?}");
+    }
 }
