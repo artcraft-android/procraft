@@ -1568,7 +1568,16 @@ impl State {
         let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return (IRect::EMPTY, false) };
         let engine = hooks.and_then(|hooks| {
             let look = (item.alpha_lock, false);
-            crate::plugin_brushes::engine_stroke(&hooks, &brush, item.tool.stroke_tool(), starting, look, canvas, gpu)
+            crate::plugin_brushes::engine_stroke(
+                &hooks,
+                &brush,
+                item.tool.stroke_tool(),
+                starting,
+                look,
+                canvas,
+                gpu,
+                false,
+            )
         });
         let (style, second) = match engine {
             Some(o) => {

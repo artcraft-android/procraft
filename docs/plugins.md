@@ -1558,8 +1558,10 @@ Making a brush's look (a `procraft_brush_load` the app doesn't yet hold the look
 picture the brush uses, once for good, so it is the last of bringing the brush in: it goes on a copy
 of its own too, with an import's memory, 40,000,000,000 steps and two minutes. A look the engine
 can't make, or one the app can't take (more than 255 tips, say), isn't asked for again while the
-plugin stays on, and the brush draws as the app read it. Reading a brush to draw it (field 3, the
-look held) and its strokes have what they always had.
+plugin stays on, and the brush draws as the app read it. It is made on a thread of its own, as the
+brush is chosen or first drawn: a stroke never waits for it (until it is made, strokes draw as the
+app read the brush), and the library's sample stroke shows none until it is. Reading a brush to draw
+it (field 3, the look held) and its strokes have what they always had.
 
 ### What a brush keeps with a layer
 

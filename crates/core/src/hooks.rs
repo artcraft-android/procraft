@@ -47,6 +47,8 @@ struct OnHook {
     /// The brushes (by engine and data) whose looks it couldn't make, or made such as the app can't
     /// take: drawn as the app read them, not asked again until it comes on again.
     no_looks: Vec<(String, u64)>,
+    /// The looks (by engine and data) being made on threads of their own.
+    making: Vec<(String, u64, Arc<crate::plugin_brushes::Making>)>,
 }
 
 /// The most brushes whose looks couldn't be made are remembered, the latest kept.
@@ -531,6 +533,7 @@ impl Hooks {
                 looks: Vec::new(),
                 copier: None,
                 no_looks: Vec::new(),
+                making: Vec::new(),
             },
         );
         self.rehook(&working);
@@ -874,6 +877,27 @@ impl Hooks {
             plugin.no_looks.push((key.to_owned(), id));
             let over = plugin.no_looks.len().saturating_sub(MOST_NO_LOOKS);
             plugin.no_looks.drain(..over);
+        }
+    }
+
+    /// The look engine `key` is making of the brush whose data is `id`, to wait on, and whether this
+    /// ask is the one that starts it (none if the engine's plugin is off).
+    pub(crate) fn making_look(&self, key: &str, id: u64) -> Option<(Arc<crate::plugin_brushes::Making>, bool)> {
+        let mut working = self.working();
+        let plugin = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key))?;
+        if let Some((_, _, making)) = plugin.making.iter().find(|(k, i, _)| k == key && *i == id) {
+            return Some((Arc::clone(making), false));
+        }
+        let making = Arc::new(crate::plugin_brushes::Making::default());
+        plugin.making.push((key.to_owned(), id, Arc::clone(&making)));
+        Some((making, true))
+    }
+
+    /// Engine `key`'s look of the brush whose data is `id` is no longer being made (kept, or not had).
+    pub(crate) fn made_look(&self, key: &str, id: u64) {
+        let mut working = self.working();
+        for plugin in &mut working.on {
+            plugin.making.retain(|(k, i, _)| !(k == key && *i == id));
         }
     }
 

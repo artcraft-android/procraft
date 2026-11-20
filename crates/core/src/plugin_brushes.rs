@@ -846,16 +846,40 @@ pub(crate) struct Starting {
     pub under_at: Option<(procraft_engine::document::LayerId, f32, f32)>,
 }
 
+/// A look being made on a thread of its own, which those asking for it may wait on.
+#[derive(Default)]
+pub(crate) struct Making {
+    done: Mutex<bool>,
+    ended: std::sync::Condvar,
+}
+
+impl Making {
+    fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*done {
+            done = self.ended.wait(done).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn end(&self) {
+        *self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.ended.notify_all();
+    }
+}
+
 /// The look of `brush` drawn by its engine, if that is on (asked of it once for its data, then
 /// kept, in memory and on the disk), and the id it goes by. A look that can't be had (too much for
 /// its call, or one the app can't take) isn't asked for again, and the brush draws as the app read
 /// it.
 ///
 /// Making a brush's look decodes every picture it uses, once for good (the app keeps it): the last
-/// of bringing the brush in. So it goes as an import does, on a copy of the plugin's code with an
-/// import's limits (see [`ImportLimits`]), and one too much even for those leaves the plugin on.
-/// Its strokes go on the plugin's own code, with what drawing always had.
-pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u64)> {
+/// of bringing the brush in, which can take seconds. So it goes as an import does, on a copy of the
+/// plugin's code with an import's limits (see [`ImportLimits`]), one too much even for those
+/// leaving the plugin on; and on a thread of its own, once however many ask. Unless `wait`, a look
+/// not had yet is none: a stroke never waits (the interface's thread starts it), and draws as the
+/// app read the brush meanwhile; a preview, drawn off the interface's threads, waits. Its strokes
+/// go on the plugin's own code, with what drawing always had.
+pub(crate) fn look_of(hooks: &Arc<Hooks>, brush: &Brush, wait: bool) -> Option<(Arc<BrushLook>, u64)> {
     let outside = brush.engine.as_ref()?;
     let (plugin, running, index) = hooks.engine(&outside.engine)?;
     let id = data_id(&outside.data);
@@ -872,42 +896,82 @@ pub(crate) fn look_of(hooks: &Hooks, brush: &Brush) -> Option<(Arc<BrushLook>, u
         hooks.keep_look(&outside.engine, id, Arc::clone(&look));
         return Some((look, id));
     }
-    let load = load_record(id, &outside.data, false);
-    let answer = match hooks.copier(&plugin) {
-        Some(copy) => {
+    let Some(copy) = hooks.copier(&plugin) else {
+        // (code put on its hooks alone, as tests do: made here, on that code, which stops if it fails)
+        let answer = at_work(&running).brush_load(index, &load_record(id, &outside.data, false));
+        return made_look(hooks, &plugin, &outside.engine, id, &brush.name, answer);
+    };
+    let (making, starts) = hooks.making_look(&outside.engine, id)?;
+    if starts {
+        let (on, key, data, name, made) = (
+            Arc::clone(hooks),
+            outside.engine.clone(),
+            Arc::clone(&outside.data),
+            brush.name.clone(),
+            Arc::clone(&making),
+        );
+        let thread = std::thread::Builder::new().name("brush look".into());
+        let started = thread.spawn(move || {
             let limits = LOOK_LIMITS.memory(ImportLimits::now().memory);
+            let load = load_record(id, &data, false);
             let answer = copy(limits.memory)
                 .and_then(|mut copied| copied.brush_load_within(index, &load, (limits.steps, limits.time)));
-            if let Err(stop) = answer {
-                log::warn!("{} couldn't make the look of {}: {stop:?}", outside.engine, brush.name);
-                hooks.no_look(&outside.engine, id);
-                return None;
+            match answer {
+                Ok(answer) => {
+                    made_look(&on, &plugin, &key, id, &name, Ok(answer));
+                }
+                Err(stop) => {
+                    log::warn!("{key} couldn't make the look of {name}: {stop:?}");
+                    on.no_look(&key, id);
+                }
             }
-            answer
+            on.made_look(&key, id);
+            made.end();
+        });
+        if started.is_err() {
+            hooks.no_look(&outside.engine, id);
+            hooks.made_look(&outside.engine, id);
+            making.end();
         }
-        // (code put on its hooks alone, as tests do: on that code, which stops if it fails)
-        None => at_work(&running).brush_load(index, &load),
-    };
+    }
+    if !wait {
+        return None;
+    }
+    making.wait();
+    look_of(hooks, brush, false)
+}
+
+/// What engine `key` of plugin `plugin` answered asked for the look of the brush whose data is
+/// `id` (`name`): kept, in memory and on the disk, if it holds up; one that doesn't, or a refusal,
+/// not asked for again; a stop of the plugin's own code switches it off.
+fn made_look(
+    hooks: &Hooks,
+    plugin: &str,
+    key: &str,
+    id: u64,
+    name: &str,
+    answer: Result<Option<Vec<u8>>, Stop>,
+) -> Option<(Arc<BrushLook>, u64)> {
     let record = match answer {
         Ok(Some(record)) => record,
         // (refused)
         Ok(None) => {
-            hooks.no_look(&outside.engine, id);
+            hooks.no_look(key, id);
             return None;
         }
         Err(stop) => {
-            hooks.stopped(&plugin, stop);
+            hooks.stopped(plugin, stop);
             return None;
         }
     };
     let Some(look) = read_look(&record, id) else {
-        log::warn!("a brush engine's look of {} doesn't hold up", brush.name);
-        hooks.no_look(&outside.engine, id);
+        log::warn!("a brush engine's look of {name} doesn't hold up");
+        hooks.no_look(key, id);
         return None;
     };
-    hooks.keep_look_on_disk(&plugin, &outside.engine, id, &kept_look(&look));
+    hooks.keep_look_on_disk(plugin, key, id, &kept_look(&look));
     let look = Arc::new(look);
-    hooks.keep_look(&outside.engine, id, Arc::clone(&look));
+    hooks.keep_look(key, id, Arc::clone(&look));
     Some((look, id))
 }
 
@@ -1446,7 +1510,8 @@ fn look_styles(
 }
 
 /// A stroke of `brush` drawn by the brush engine that made it, if that is on, on `canvas` with
-/// `tool`, as `starting` says (`look`: the layer's alpha lock, and whether it is a preview's).
+/// `tool`, as `starting` says (`look`: the layer's alpha lock, and whether it is a preview's); one
+/// whose look isn't had yet is none unless `wait` (see [`look_of`]).
 pub(crate) fn engine_stroke(
     hooks: &Arc<Hooks>,
     brush: &Brush,
@@ -1455,9 +1520,10 @@ pub(crate) fn engine_stroke(
     look: (bool, bool),
     canvas: &mut procraft_gpu::Canvas,
     gpu: &procraft_gpu::Gpu,
+    wait: bool,
 ) -> Option<OutsideStroke> {
     brush.engine.as_ref()?;
-    let (brush_look, id) = look_of(hooks, brush)?;
+    let (brush_look, id) = look_of(hooks, brush, wait)?;
     let (style, second) = look_styles(&brush_look, tool, &starting, look, canvas, gpu)?;
     let airbrush = brush_look.airbrush;
     let store = if style.tool == StrokeTool::Smudge { brush_look.store } else { 0 };
@@ -1549,10 +1615,11 @@ impl crate::State {
         let (canvas, gpu) = (self.canvas.as_mut()?, self.gpu.as_ref()?);
         // an engine wanting the colours under where the stroke starts reads the layer as it is now,
         // what is still to be laid on it laid first
-        if first.is_some() && look_of(&hooks, brush).is_some_and(|(l, _)| l.under_start > 0) {
+        if first.is_some() && look_of(&hooks, brush, false).is_some_and(|(l, _)| l.under_start > 0) {
             canvas.render(gpu, &mut self.doc, None);
         }
-        let mut stroke = engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu);
+        // (never waiting for a look being made: this is the interface's thread)
+        let mut stroke = engine_stroke(&hooks, brush, tool.stroke_tool(), starting, look, canvas, gpu, false);
         // a stroke of the pen's on the canvas is told the colours under the dabs it asks about
         if first.is_some() {
             self.engine_asking = stroke.as_ref().map(|o| o.first.asking()).unwrap_or_default();
@@ -1617,8 +1684,28 @@ impl CanvasSession {
         let Some(brush) = st.library.get_mut(set).and_then(|s| s.brushes.get_mut(index)) else { return false };
         let Some(engine) = brush.engine.as_mut() else { return false };
         engine.data = data.into();
+        // its look, new with its data, made now on a thread of its own, for its next stroke
+        let changed = brush.clone();
+        if let Some(hooks) = st.hooks.clone() {
+            look_of(&hooks, &changed, false);
+        }
         st.brushes_changed = true;
         true
+    }
+}
+
+#[cfg(test)]
+impl CanvasSession {
+    /// Waits for the look of the current tool's brush, if a plugin's brush engine is making it (a
+    /// stroke started before draws as the app read the brush).
+    pub(crate) fn wait_for_look(&self) {
+        let (hooks, brush) = {
+            let st = self.shared.lock();
+            (st.hooks.clone(), st.brush(st.tool).clone())
+        };
+        if let Some(hooks) = hooks {
+            look_of(&hooks, &brush, true);
+        }
     }
 }
 
@@ -1762,6 +1849,7 @@ mod tests {
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), "made by the engine too");
         assert!(s.select_brush(set, 0));
+        s.wait_for_look();
         s.set_color(0.0, 0.0, 0.0);
         let draw = |s: &crate::CanvasSession| {
             let layer = s.add_layer();
@@ -1836,6 +1924,7 @@ mod tests {
         assert!(plugins.panel_touched(row as u32, 40.0, Arc::clone(&s)));
         assert!(s.take_brushes_changed(), "the brush changed");
         assert!(!s.take_brushes_changed());
+        s.wait_for_look();
         let bigger = draw(&s);
         assert!(alpha(&bigger, 38, 60) > 240, "the first square, 40 across");
         assert!(alpha(&bigger, 100, 60) > 240 && alpha(&bigger, 60, 60) == 0, "the next, 80 on");
@@ -1884,6 +1973,7 @@ mod tests {
         let read = crate::read_brushes(kpp, Some("Smear.kpp".to_owned())).unwrap();
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.select_brush(set, 0));
+        s.wait_for_look();
         // red on the left half
         let layer = s.add_layer();
         {
@@ -1995,6 +2085,7 @@ mod tests {
         let index = s.shared.lock().library[set as usize].brushes.iter().position(|b| b.name == name).unwrap();
         assert!(s.shared.lock().library[set as usize].brushes[index].engine.is_some());
         assert!(s.select_brush(set, index as u32));
+        s.wait_for_look();
     }
 
     /// A brush engine that asks what lies under its dabs is told, a batch of samples later: a Krita
@@ -2148,6 +2239,7 @@ mod tests {
         let read = crate::read_brushes(kpp, Some("Thick.kpp".to_owned())).unwrap();
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.select_brush(set, 0));
+        s.wait_for_look();
         let layer = procraft_engine::document::LayerId(s.add_layer());
         // a mid grey all over: its lightness 0.5 goes lighter and darker as the tip's grey says
         s.set_color(0.5, 0.5, 0.5);
@@ -2217,6 +2309,7 @@ mod tests {
         let read = crate::read_brushes(kpp, Some("Soak.kpp".to_owned())).unwrap();
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.select_brush(set, 0));
+        s.wait_for_look();
         // red on the left half of the layer
         let layer = s.add_layer();
         {
@@ -2270,6 +2363,7 @@ mod tests {
         let read = crate::read_brushes(preset_of(airbrush), Some("Air.kpp".to_owned())).unwrap();
         let set = s.add_brushes_read(read, 0).unwrap();
         assert!(s.select_brush(set, 0));
+        s.wait_for_look();
         let at = |t: f64| crate::PenSample {
             x: 50.0,
             y: 60.0,
@@ -2307,7 +2401,7 @@ mod tests {
         join_made(&mut brushes, make_brushes(&hooks, "Squares.kpp", &square_preset()));
         let brush = &brushes[0];
         let key = brush.engine.as_ref().unwrap().engine.clone();
-        let (look, data) = look_of(&hooks, brush).unwrap();
+        let (look, data) = look_of(&hooks, brush, true).unwrap();
         let kept = hooks.look_on_disk(&id, &key, data).expect("kept on the disk");
         assert_eq!(look_kept_as(&kept, data).as_ref(), Some(&*look));
         drop((plugins, hooks));
@@ -2320,7 +2414,7 @@ mod tests {
         other.field(field::TIP, &tip(3, 5));
         let other = read_look(&other.bytes(), data).unwrap();
         crate::plugin_file::write_look(&dir, &id, &key, data, &kept_look(&other));
-        let (again, _) = look_of(&hooks, brush).unwrap();
+        let (again, _) = look_of(&hooks, brush, true).unwrap();
         assert_eq!(*again, other);
         // the engine reads the brush, its look held, and draws it
         let starting = Starting {
@@ -2371,7 +2465,7 @@ mod tests {
         let (mut loading, mut drawing, mut dabs) = (std::time::Duration::ZERO, std::time::Duration::ZERO, 0);
         for brush in &brushes {
             let t = Instant::now();
-            let Some((look, id)) = look_of(&hooks, brush) else { continue };
+            let Some((look, id)) = look_of(&hooks, brush, true) else { continue };
             loading += t.elapsed();
             let starting = Starting {
                 colour: [0.0; 3],
@@ -2411,7 +2505,7 @@ mod tests {
         let (mut begun, mut looking) = (0, std::time::Duration::ZERO);
         for brush in &brushes {
             let t = Instant::now();
-            let Some((look, id)) = look_of(&hooks, brush) else { continue };
+            let Some((look, id)) = look_of(&hooks, brush, true) else { continue };
             looking += t.elapsed();
             let starting = Starting {
                 colour: [0.0; 3],
@@ -2549,6 +2643,8 @@ mod tests {
             let set = s.add_brushes_read(read, 0).unwrap();
             assert_eq!(s.shared.lock().library[set as usize].brushes[0].engine.is_some(), engine);
             assert!(s.select_brush(set, 0));
+            s.wait_for_look();
+            s.wait_for_look();
             if !engine {
                 // the app's own brush at its biggest, to be measured as finely
                 s.set_brush_size(1.0);
@@ -2794,17 +2890,118 @@ mod tests {
         };
         let id = data_id(b"d");
         let hooks = pens_on(MAKES, "(drop (memory.grow (i32.const 4800))) (i32.const 33)");
-        let (look, _) = look_of(&hooks, &brush).expect("made on a copy");
+        let (look, _) = look_of(&hooks, &brush, true).expect("made on a copy");
         assert_eq!(look.tips.layers.len(), 1);
         let (_, running, _) = hooks.engine(PENS_KEY).unwrap();
         assert_eq!(at_work(&running).memory_used(), 2 << 16, "not on the plugin's own code");
         for load in ["unreachable", "(i32.const -1)", "(i32.const 6)"] {
             let hooks = pens_on(MAKES, load);
-            assert!(look_of(&hooks, &brush).is_none(), "{load}");
+            assert!(look_of(&hooks, &brush, true).is_none(), "{load}");
             assert!(hooks.has_no_look(PENS_KEY, id), "{load}: not asked again");
-            assert!(look_of(&hooks, &brush).is_none());
+            assert!(look_of(&hooks, &brush, true).is_none());
             assert!(hooks.engine(PENS_KEY).is_some(), "{load}: still on");
         }
+    }
+
+    /// A look that takes long is made on a thread of its own, once: asked without waiting (as a
+    /// stroke asks, on the interface's thread) it is none at once, however often it is asked while
+    /// it is made; a preview's ask waits for it; once made it is had at once.
+    #[test]
+    fn a_slow_look_never_holds_up_an_ask_that_doesnt_wait() {
+        let slow = "(local.set 1 (i32.const 0))
+            (loop $l (local.set 1 (i32.add (local.get 1) (i32.const 1)))
+                (br_if $l (i32.lt_u (local.get 1) (i32.const 150000000))))
+            (i32.const 33)";
+        let brush = Brush {
+            engine: Some(OutsideBrush { engine: PENS_KEY.to_owned(), data: Arc::from(&b"d"[..]) }),
+            ..Brush::round_pen()
+        };
+        let id = data_id(b"d");
+        let hooks = pens_on(MAKES, slow);
+        let t = std::time::Instant::now();
+        let (mut asks, mut longest) = (0, Duration::ZERO);
+        while t.elapsed() < Duration::from_secs(120) {
+            let ask = std::time::Instant::now();
+            let had = look_of(&hooks, &brush, false).is_some();
+            longest = longest.max(ask.elapsed());
+            asks += 1;
+            if had {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let made_in = t.elapsed();
+        println!("the look made in {made_in:.2?}: {asks} asks meanwhile, the longest {longest:.2?}");
+        assert!(made_in > Duration::from_millis(300), "slow enough to tell: {made_in:?}");
+        assert!(longest < Duration::from_millis(50), "{longest:?}");
+        assert!(hooks.look_kept(PENS_KEY, id).is_some());
+        // a preview's ask waits for the one being made
+        let hooks = pens_on(MAKES, slow);
+        assert!(look_of(&hooks, &brush, false).is_none(), "being made");
+        assert!(look_of(&hooks, &brush, true).is_some(), "waited for");
+    }
+
+    /// The first stroke of a brush whose look takes seconds to make (a pipe of 200 cells 300 pixels
+    /// across) starts and ends at once on the interface's thread, drawn as the app read the brush
+    /// while its look is made; once it is, strokes are the engine's.
+    #[test]
+    fn a_stroke_never_waits_on_a_look_being_made() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-slow-look-{}", std::process::id()));
+        let (plugins, hooks, _, _, _) = krita_on(&dir);
+        let s = crate::CanvasSession::new(200, 120);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 120);
+            st.view = Some(procraft_engine::view::View::fit((200, 120), (200, 120)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        s.use_plugins(Arc::clone(&plugins));
+        let mut pipe = b"slow\n200 ncells:200 dim:1 rank0:200 sel0:incremental\n".to_vec();
+        for i in 0..200 {
+            pipe.extend(colour_gbr(300, 300, i as u8));
+        }
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        let tip = r#"<Brush type="gbr_brush" filename="slow.gih" spacing="0.5" scale="1" BrushVersion="2"/>"#;
+        zip.add("paintoppresets/Slow.kpp", &preset_named("Slow", tip));
+        zip.add("brushes/slow.gih", &pipe);
+        let read = crate::read_brushes(zip.finish(), Some("Slow.bundle".to_owned())).unwrap();
+        s.make_engine_brushes(Arc::clone(&read), None);
+        let set = s.add_brushes_read(read, 0).unwrap();
+        let brush = s.shared.lock().library[set as usize].brushes[0].clone();
+        let key = brush.engine.as_ref().unwrap().engine.clone();
+        let id = data_id(&brush.engine.as_ref().unwrap().data);
+        // chosen: its look starts being made
+        let chosen = std::time::Instant::now();
+        assert!(s.select_brush(set, 0));
+        let at = |x: f32| crate::PenSample {
+            x,
+            y: 60.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: f64::from(x),
+            roll: 0.0,
+        };
+        let mut longest = chosen.elapsed();
+        let timed = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        longest = longest.max(timed(&|| s.stroke_begin(crate::PointerKind::Stylus, vec![at(20.0)])));
+        let made_yet = hooks.look_kept(&key, id).is_some();
+        longest = longest.max(timed(&|| s.stroke_add((21..=180).map(|x| at(x as f32)).collect())));
+        longest = longest.max(timed(&|| s.stroke_end(vec![])));
+        s.wait_for_look();
+        let made_in = chosen.elapsed();
+        println!("the look made in {made_in:.2?}; the interface's longest wait meanwhile {longest:.2?}");
+        assert!(!made_yet, "the stroke began before the look was made");
+        assert!(made_in > Duration::from_millis(500), "slow enough to tell: {made_in:?}");
+        assert!(longest < Duration::from_millis(250), "{longest:?}");
+        assert!(hooks.look_kept(&key, id).is_some(), "made");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A GIMP brush `w` x `h` in colour, all `v`.
@@ -2959,20 +3156,43 @@ mod tests {
         let mut brushes = Vec::new();
         join_made(&mut brushes, made.made);
         let (_, running, _) = hooks.engine(&key).unwrap();
+        let (mut drawn, mut most) = (0, 0);
         for brush in &brushes {
+            // made as a look is, on a copy of its own: what it takes, and whether the app takes it
+            let outside = brush.engine.as_ref().unwrap();
+            let id = data_id(&outside.data);
+            let limits = LOOK_LIMITS.memory(ImportLimits::now().memory);
+            let mut copied = copy(limits.memory).unwrap();
             let t = Instant::now();
-            let look = look_of(&hooks, brush);
+            let answer =
+                copied.brush_load_within(index, &load_record(id, &outside.data, false), (limits.steps, limits.time));
             let took = t.elapsed();
-            let r = at_work(&running);
+            let tips = answer
+                .as_ref()
+                .ok()
+                .and_then(|a| a.as_ref())
+                .and_then(|a| read_look(a, id))
+                .map(|l| l.tips.layers.len());
+            drawn += usize::from(tips.is_some());
+            most = most.max(copied.memory_used());
             println!(
-                "  look of {}: {} in {took:.1?}, {} M steps, the plugin's memory {:.0} MB",
+                "  look of {}: {tips:?} tips in {took:.1?}, {} M steps, its copy's memory {:.0} MB{}",
                 brush.name,
-                look.is_some(),
-                r.spent() / 1_000_000,
-                megabytes(r.memory_used())
+                copied.spent() / 1_000_000,
+                megabytes(copied.memory_used()),
+                answer.err().map(|e| format!(", {e:?}")).unwrap_or_default()
             );
         }
-        println!("the plugin still on: {}", hooks.engine(&key).is_some());
+        println!("{drawn} of {} drawn by the plugin; a look's copy at most {:.0} MB", brushes.len(), megabytes(most));
+        for brush in &brushes {
+            look_of(&hooks, brush, true);
+        }
+        let r = at_work(&running);
+        println!(
+            "the plugin still on: {}, its own memory {:.0} MB",
+            hooks.engine(&key).is_some(),
+            megabytes(r.memory_used())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3012,7 +3232,7 @@ mod tests {
             assert!(hooks.engine(&key).is_some(), "the plugin stays on");
             // each brush's look, as the library's previews ask for them
             let t = Instant::now();
-            let looks = brushes.iter().filter(|b| b.engine.is_some() && look_of(&hooks, b).is_some()).count();
+            let looks = brushes.iter().filter(|b| b.engine.is_some() && look_of(&hooks, b, true).is_some()).count();
             println!("  {looks} of {presets} looks made in {:.1?} (the rest drawn as the app read them)", t.elapsed());
             assert!(hooks.engine(&key).is_some(), "the plugin stays on as its brushes are drawn");
         }

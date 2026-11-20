@@ -3228,8 +3228,16 @@ impl State {
         // the screen's canvas holds its own copies of the brush's shape and grain
         screen.use_sources(gpu, &mut style, &brush);
         if let Some((hooks, starting)) = engine
-            && let Some(o) =
-                crate::plugin_brushes::engine_stroke(&hooks, &brush, style.tool, starting, (false, false), screen, gpu)
+            && let Some(o) = crate::plugin_brushes::engine_stroke(
+                &hooks,
+                &brush,
+                style.tool,
+                starting,
+                (false, false),
+                screen,
+                gpu,
+                false,
+            )
         {
             style = o.style;
             builder = builder.with_engine(Box::new(o.first));

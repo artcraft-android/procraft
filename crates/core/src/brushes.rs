@@ -381,6 +381,11 @@ impl CanvasSession {
         st.note_choice((set, index));
         warm_pictures([st.brush(st.tool)]);
         st.warm_sharper();
+        // a brush a plugin's brush engine draws: its look made now, on a thread of its own, for its
+        // first stroke
+        if let Some(hooks) = st.hooks.clone() {
+            crate::plugin_brushes::look_of(&hooks, st.brush(st.tool), false);
+        }
         true
     }
 
@@ -747,6 +752,8 @@ impl CanvasSession {
             under_at: None,
             turn: 0.0,
         };
+        // (drawn off the interface's threads, it waits for the look being made, showing none
+        // meanwhile)
         let o = crate::plugin_brushes::engine_stroke(
             hooks,
             brush,
@@ -755,6 +762,7 @@ impl CanvasSession {
             (false, true),
             canvas,
             gpu,
+            true,
         )?;
         let layer = doc.current();
         match o.second {
