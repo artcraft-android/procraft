@@ -2,12 +2,14 @@
 //! action buttons, the tools, Layers and the colour) and the side bar (brush size, the modify
 //! button, opacity, undo and redo, and a slider's panel).
 
+use std::sync::Arc;
+
 use egui::emath::TSTransform;
 use egui::layers::{PaintList, ShapeIdx};
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use procraft_core::{
-    CanvasInfo, CanvasSession, InterfacePart, SideSliderTap, ToolKind, side_slider_drag_share, side_slider_tap,
-    side_thumb_shadow,
+    CanvasInfo, CanvasSession, InterfacePart, SideBarDrag, SideBarDragState, SideBarShown, SideSliderTap, ToolKind,
+    side_slider_drag_share, side_slider_tap, side_thumb_shadow,
 };
 use resvg::tiny_skia;
 
@@ -215,10 +217,11 @@ impl SideBarFit {
 }
 
 /// The side bar in `window`, against its right edge or its left, under a top bar reaching
-/// `bar_bottom` down, shown `scale` times as big as the rest: fitted to the window as it measures
-/// the window at its own size.
-pub fn fit_side_bar(window: Rect, right: bool, scale: f32, bar_bottom: f32) -> SideBarFit {
-    let (top, track) = pc::side_bar_fit(window.height() / scale, bar_bottom / scale);
+/// `bar_bottom` down, shown `scale` times as big as the rest, its centre kept at `centre` (a share
+/// of the window's height): fitted to the window as it measures the window at its own size.
+pub fn fit_side_bar(window: Rect, right: bool, scale: f32, bar_bottom: f32, centre: f32) -> SideBarFit {
+    let procraft_core::SideBarFit { top, track, .. } =
+        procraft_core::side_bar_fit(window.height() / scale, bar_bottom / scale, centre);
     // shorter tracks bring what is under each up with them
     let shorter = pc::SLIDER_HEIGHT - track;
     let left = if right { window.right() - pc::SIDE_BAR_WIDTH * scale } else { window.left() };
@@ -246,11 +249,15 @@ pub struct SideTaps {
     pub modify_down: bool,
     /// A slider was let go or a notch saved or taken away: the brush's settings changed.
     pub brush_changed: bool,
+    /// The bar was moved by its modify button and let go: its centre, to be kept, a share of the
+    /// window's height.
+    pub centre: Option<f32>,
 }
 
 /// The side bar's own state: the slider pressed (its value before a notch pulls it in, when, and
-/// whether it moved), the slider whose panel shows, and whether the brush's settings changed this
-/// frame.
+/// whether it moved), the slider whose panel shows, whether the brush's settings changed this
+/// frame, the modify button's press (which dragged out moves the bar), and the bar let go sliding
+/// back to its edge.
 #[derive(Default)]
 pub struct SideBar {
     pressed: Option<Press>,
@@ -258,7 +265,29 @@ pub struct SideBar {
     changed: bool,
     /// How its slider tracks look as a plugin says (interface 11).
     pub slider_look: procraft_core::SliderLook,
+    modify: Option<ModifyDrag>,
+    settle: Option<Settle>,
 }
+
+/// The modify button pressed: the bar's drag, and where the bar shows as it goes.
+struct ModifyDrag {
+    drag: Arc<SideBarDrag>,
+    shown: SideBarShown,
+    /// Where the pointer last was (the window's points).
+    last: Pos2,
+}
+
+/// The side bar let go where its modify button dragged it: where it was then (its top and how far
+/// out from its edge, its own points), and when (s).
+#[derive(Clone, Copy)]
+struct Settle {
+    top: f32,
+    out: f32,
+    since: f64,
+}
+
+/// Let go, the side bar slides back to its edge and its place in this long (s), easing out.
+const SETTLE_S: f64 = 0.15;
 
 #[derive(Clone, Copy)]
 struct Press {
@@ -301,7 +330,9 @@ impl SideBar {
     /// mirrored but the glyphs); it and a slider's panel add their frost to `backdrops`, and its
     /// slider tracks their thin glass to `windows` (see [`frost`]). It shows at the size a plugin
     /// gives it, under the top bar as that shows: laid out at its own size, and drawn and touched
-    /// that many times as big from its top left, a slider's panel with it.
+    /// that many times as big from its top left, a slider's panel with it. Its centre is kept at
+    /// `centre` (a share of the window's height); its modify button dragged out from its edge and
+    /// then up or down moves it, and let go it slides back to its edge there (and says where).
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -311,6 +342,7 @@ impl SideBar {
         info: &CanvasInfo,
         modify_lit: bool,
         right: bool,
+        centre: f32,
         backdrops: &mut Vec<f32>,
         windows: &mut Vec<f32>,
     ) -> SideTaps {
@@ -318,7 +350,12 @@ impl SideBar {
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
         let scale = crate::panel::part_scale(&ctx, InterfacePart::SideBar);
-        let fit = fit_side_bar(window, right, scale, crate::panel::bar_shown(&ctx));
+        let bar_bottom = crate::panel::bar_shown(&ctx);
+        let now = ctx.input(|i| i.time);
+        let rest = fit_side_bar(window, right, scale, bar_bottom, centre);
+        let fit = self.shown_at(&ctx, rest, right, now);
+        // pulled out from its edge, its edge's corners round too (and its frost stays its size)
+        let out = (fit.at.x - rest.at.x).abs() / scale;
         let track_height = fit.track;
         // shorter tracks bring what is under each up with them
         let shorter = pc::SLIDER_HEIGHT - track_height;
@@ -330,7 +367,9 @@ impl SideBar {
         let tracks = [(Slider::Size, SIZE_TRACK_TOP, info.size), (Slider::Opacity, opacity_top, info.opacity)];
         // its frost goes past the window's edge, so that side's corners are square
         let ppp = ctx.pixels_per_point();
-        let past = if right {
+        let past = if out > 0.0 {
+            bar
+        } else if right {
             bar.with_max_x(bar.right() + pc::SIDE_BAR_CORNER)
         } else {
             bar.with_min_x(bar.left() - pc::SIDE_BAR_CORNER)
@@ -351,10 +390,11 @@ impl SideBar {
         egui::Area::new(area).fixed_pos(bar.min).order(Order::Middle).constrain_to(measured).show(&ctx, |ui| {
             ui.set_min_size(bar.size());
             // translucent, with windows where the slider tracks are: they show what is behind
-            look.shape(ui, "side bar", (right, track_height.to_bits()), bar, |pixmap, t| {
+            let edge = out.clamp(0.0, pc::SIDE_BAR_CORNER);
+            look.shape(ui, "side bar", (right, track_height.to_bits(), edge.to_bits()), bar, |pixmap, t| {
                 let mut pb = tiny_skia::PathBuilder::new();
                 let c = pc::SIDE_BAR_CORNER;
-                let corners = if right { [c, 0.0, 0.0, c] } else { [0.0, c, c, 0.0] };
+                let corners = if right { [c, edge, edge, c] } else { [edge, c, c, edge] };
                 round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), bar.size()), corners);
                 let windows = tracks.map(|(_, y, _)| {
                     Rect::from_min_size(pos2(x(SLIDER_LEFT, pc::SLIDER_WIDTH), y), vec2(pc::SLIDER_WIDTH, track_height))
@@ -389,8 +429,12 @@ impl SideBar {
             // Tap □ is set to (opens the eyedropper)
             let modify = at(5.0, 191.0 - shorter, 40.0, 41.0);
             let response = ui.interact(modify, ui.scope_id().with("modify"), Sense::click_and_drag());
-            taps.modify_down = response.is_pointer_button_down_on();
-            taps.modify_tapped = response.clicked();
+            let down = response.is_pointer_button_down_on();
+            // dragged out from the bar's edge it moves the bar, and is no press
+            let place = (window, scale, bar_bottom, centre);
+            let moved = self.modify_drag(&ctx, down, right, place, now, &mut taps);
+            taps.modify_down = down && !moved;
+            taps.modify_tapped = response.clicked() && !moved;
             let square = egui::Rect::from_center_size(modify.center(), vec2(pc::MODIFY_SIZE, pc::MODIFY_SIZE));
             let w = pc::MODIFY_STROKE;
             ui.painter().rect_stroke(
@@ -442,6 +486,83 @@ impl SideBar {
         }
         taps.brush_changed = std::mem::take(&mut self.changed);
         taps
+    }
+
+    /// Where the bar shows, `rest` where it is kept: as the modify button drags it, sliding back to
+    /// its edge after (at `now`, s), or there.
+    fn shown_at(&mut self, ctx: &egui::Context, rest: SideBarFit, right: bool, now: f64) -> SideBarFit {
+        let window = ctx.content_rect();
+        let rest_top = (rest.at.y - window.top()) / rest.scale;
+        let moving = self.modify.as_ref().map(|m| m.shown).filter(|s| s.state == SideBarDragState::Moving);
+        let (top, out) = if let Some(shown) = moving {
+            (shown.top, shown.out)
+        } else if let Some(settle) = self.settle {
+            let t = ((now - settle.since) / SETTLE_S) as f32;
+            if t >= 1.0 {
+                self.settle = None;
+                (rest_top, 0.0)
+            } else {
+                ctx.request_repaint();
+                let e = crate::look::cubic_bezier(0.0, 0.0, 0.58, 1.0, t);
+                (settle.top + (rest_top - settle.top) * e, settle.out * (1.0 - e))
+            }
+        } else {
+            (rest_top, 0.0)
+        };
+        let outward = if right { -1.0 } else { 1.0 };
+        SideBarFit { at: pos2(rest.at.x + out * rest.scale * outward, window.top() + top * rest.scale), ..rest }
+    }
+
+    /// The modify button's press as it goes (`down` on it or not, at `now`, s), the bar in `place`
+    /// (the window, how big the bar shows, the top bar's bottom, and its kept centre): the bar's
+    /// drag started, told where the pointer goes (the bar's points), and let go; let go moved, the
+    /// bar slides back to its edge and its centre goes in `taps`. Whether it moves the bar.
+    fn modify_drag(
+        &mut self,
+        ctx: &egui::Context,
+        down: bool,
+        right: bool,
+        place: (Rect, f32, f32, f32),
+        now: f64,
+        taps: &mut SideTaps,
+    ) -> bool {
+        let (window, scale, bar_bottom, centre) = place;
+        let (origin, latest) = ctx.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()));
+        let ms = now * 1000.0;
+        // the window's points as the bar's
+        let local = |p: Pos2| (p - window.min) / scale;
+        match (&mut self.modify, down) {
+            (None, true) => {
+                let Some(at) = origin.or(latest) else { return false };
+                let p = local(at);
+                let (height, top_bar) = (window.height() / scale, bar_bottom / scale);
+                let drag = SideBarDrag::new(p.x, p.y, ms, right, height, top_bar, centre);
+                let shown = drag.now();
+                self.modify = Some(ModifyDrag { drag, shown, last: at });
+                self.settle = None;
+            }
+            (Some(m), true) => {
+                if let Some(at) = latest.filter(|&at| at != m.last) {
+                    let p = local(at);
+                    m.shown = m.drag.moved(p.x, p.y, ms);
+                    m.last = at;
+                    ctx.request_repaint();
+                }
+            }
+            (Some(_), false) => {
+                if let Some(m) = self.modify.take() {
+                    let kept = m.drag.let_go();
+                    if kept.state == SideBarDragState::Moving {
+                        taps.centre = Some(kept.centre);
+                        self.settle = Some(Settle { top: m.shown.top, out: m.shown.out, since: now });
+                        ctx.request_repaint();
+                        return true;
+                    }
+                }
+            }
+            (None, false) => {}
+        }
+        self.modify.as_ref().is_some_and(|m| m.shown.state == SideBarDragState::Moving)
     }
 
     /// An upright slider moved by dragging anywhere on it: the thumb follows the pointer (not
@@ -657,17 +778,20 @@ mod tests {
     use procraft_core::CanvasSession;
 
     use super::{
-        HOLD, SIZE_TRACK_TOP, SLIDER_LEFT, SLIDER_PANEL_GAP, SLIDER_PANEL_RISE, SideBar, Slider, fit_side_bar,
+        HOLD, SIZE_TRACK_TOP, SLIDER_LEFT, SLIDER_PANEL_GAP, SLIDER_PANEL_RISE, SideBar, SideTaps, Slider, fit_side_bar,
     };
     use crate::look::{Look, pc};
 
-    /// The side bar over a canvas, with a pointer on it as the window's reach the interface.
+    /// The side bar over a canvas, with a pointer on it as the window's reach the interface: its
+    /// centre kept where its modify button last left it, and what it was asked each frame.
     struct Hand {
         ctx: egui::Context,
         look: Look,
         side: SideBar,
         session: Arc<CanvasSession>,
         time: f64,
+        centre: f32,
+        taps: Vec<SideTaps>,
     }
 
     const WINDOW: egui::Vec2 = vec2(1200.0, 900.0);
@@ -681,6 +805,8 @@ mod tests {
                 side: SideBar::default(),
                 session,
                 time: 0.0,
+                centre: procraft_core::side_bar_first_centre(),
+                taps: Vec::new(),
             };
             hand.frame(Vec::new());
             hand
@@ -694,10 +820,15 @@ mod tests {
                 events,
                 ..RawInput::default()
             };
-            let Hand { ctx, look, side, session, .. } = self;
+            let Hand { ctx, look, side, session, centre, taps, .. } = self;
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 let info = session.info();
-                side.show(ui, look, session, &info, false, false, &mut Vec::new(), &mut Vec::new());
+                let tapped =
+                    side.show(ui, look, session, &info, false, false, *centre, &mut Vec::new(), &mut Vec::new());
+                if let Some(kept) = tapped.centre {
+                    *centre = kept;
+                }
+                taps.push(tapped);
             });
             output.textures_delta.clear();
         }
@@ -706,13 +837,33 @@ mod tests {
         fn glass(&mut self) -> (Vec<f32>, Vec<f32>) {
             let (mut frost, mut windows) = (Vec::new(), Vec::new());
             let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, WINDOW)), ..RawInput::default() };
-            let Hand { ctx, look, side, session, .. } = self;
+            let Hand { ctx, look, side, session, centre, .. } = self;
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 let info = session.info();
-                side.show(ui, look, session, &info, false, false, &mut frost, &mut windows);
+                side.show(ui, look, session, &info, false, false, *centre, &mut frost, &mut windows);
             });
             output.textures_delta.clear();
             (frost, windows)
+        }
+
+        /// The pointer, pressed, moved to `to` from `from` in `steps` frames.
+        fn moves(&mut self, from: Pos2, to: Pos2, steps: u32) {
+            for k in 1..=steps {
+                let at = from + (to - from) * (k as f32 / steps as f32);
+                self.frame(vec![Event::PointerMoved(at)]);
+            }
+        }
+
+        /// Where the side bar shows now (its area, as drawn).
+        fn shown(&self) -> Rect {
+            let id = egui::Id::unique("side bar");
+            self.ctx.memory(|m| m.area_rect(id)).expect("the side bar shows")
+        }
+
+        /// The middle of the modify button, where the bar shows now.
+        fn modify(&self) -> Pos2 {
+            let bar = self.shown();
+            pos2(bar.left() + 25.0, bar.top() + 191.0 + 20.5)
         }
 
         fn button(at: Pos2, pressed: bool) -> Event {
@@ -744,12 +895,12 @@ mod tests {
         }
 
         fn bar(&self) -> Rect {
-            fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT).shown()
+            fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT, self.centre).shown()
         }
 
         /// Where the size slider's thumb sits for `value`.
         fn on_size(&self, value: f32) -> Pos2 {
-            let fit = fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT);
+            let fit = fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT, self.centre);
             let travel = fit.track - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
             let top = self.bar().top() + SIZE_TRACK_TOP + pc::THUMB_INSET + pc::THUMB_HEIGHT / 2.0;
             pos2(self.bar().left() + SLIDER_LEFT + pc::SLIDER_WIDTH / 2.0, top + travel * (1.0 - value))
@@ -835,12 +986,68 @@ mod tests {
         assert_eq!(h.side.panel, Some(Slider::Size));
     }
 
+    /// The modify button dragged out from the bar's edge and down: the bar follows (out from its
+    /// edge too), the button neither held nor tapped once it moves; let go, it slides back to its
+    /// edge where it was taken and is kept there. A press on the canvas dragged over the button,
+    /// and a drag down the button first, move nothing; a tap on it is a tap.
+    #[test]
+    fn the_modify_button_dragged_out_and_down_moves_the_bar_and_a_stroke_from_the_canvas_never_does() {
+        // within a pixel: the area lands on whole ones
+        let near = |a: Rect, b: Rect| (a.min - b.min).length() < 0.6 && (a.max - b.max).length() < 0.6;
+        let mut h = Hand::new();
+        let rest = h.bar();
+        assert!(near(h.shown(), rest), "{:?} against {rest:?}", h.shown());
+        let first = h.centre;
+        // a press on the canvas, dragged across the bar and the button and down: nothing moves
+        let on_button = h.modify();
+        h.down(pos2(700.0, on_button.y));
+        h.moves(pos2(700.0, on_button.y), on_button, 12);
+        h.moves(on_button, on_button + vec2(0.0, 120.0), 8);
+        h.up(on_button + vec2(0.0, 120.0));
+        assert!(near(h.shown(), rest));
+        assert!(h.taps.iter().all(|t| t.centre.is_none() && !t.modify_down && !t.modify_tapped));
+        assert_eq!(h.centre, first);
+        // the button pressed and dragged down first: held, not moving the bar
+        h.taps.clear();
+        h.down(on_button);
+        h.moves(on_button, on_button + vec2(0.0, 60.0), 6);
+        assert!(h.taps.last().is_some_and(|t| t.modify_down));
+        h.up(on_button + vec2(0.0, 60.0));
+        assert!(near(h.shown(), rest));
+        assert_eq!(h.centre, first);
+        // tapped: a tap
+        h.taps.clear();
+        h.tap(on_button);
+        assert!(h.taps.iter().any(|t| t.modify_tapped));
+        // pressed, dragged out 20 and down 100: the bar follows, out 20, and the press lets go
+        h.taps.clear();
+        h.down(on_button);
+        h.moves(on_button, on_button + vec2(20.0, 0.0), 4);
+        h.moves(on_button + vec2(20.0, 0.0), on_button + vec2(20.0, 100.0), 10);
+        h.frame(Vec::new());
+        let moved = h.shown();
+        assert!(near(moved, rest.translate(vec2(20.0, 100.0))), "{moved:?} from {rest:?}");
+        assert!(h.taps.last().is_some_and(|t| !t.modify_down));
+        // let go: kept there, and back at its edge once it has slid
+        h.up(on_button + vec2(20.0, 100.0));
+        for _ in 0..12 {
+            h.frame(Vec::new());
+        }
+        assert!(h.taps.iter().all(|t| !t.modify_tapped));
+        assert_eq!(h.taps.iter().filter(|t| t.centre.is_some()).count(), 1);
+        assert!((h.centre - (rest.top() + 100.0 + pc::SIDE_BAR_HEIGHT / 2.0) / WINDOW.y).abs() < 1e-4);
+        assert!(near(h.bar(), rest.translate(vec2(0.0, 100.0))));
+        assert!(near(h.shown(), h.bar()), "{:?}", h.shown());
+    }
+
     #[test]
     fn the_side_bar_as_big_as_the_rest_is_where_it_was_measured() {
         for (height, right) in [(1133.0, false), (744.0, true), (500.0, false), (500.0, true)] {
             let window = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, height));
-            let fit = fit_side_bar(window, right, 1.0, pc::BAR_HEIGHT);
-            let (top, track) = pc::side_bar_fit(height, pc::BAR_HEIGHT);
+            let centre = procraft_core::side_bar_first_centre();
+            let fit = fit_side_bar(window, right, 1.0, pc::BAR_HEIGHT, centre);
+            let procraft_core::SideBarFit { top, track, .. } =
+                procraft_core::side_bar_fit(height, pc::BAR_HEIGHT, centre);
             let left = if right { 1000.0 - pc::SIDE_BAR_WIDTH } else { 0.0 };
             let tall = pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0;
             let measured = Rect::from_min_size(pos2(left, top), vec2(pc::SIDE_BAR_WIDTH, tall));
@@ -855,7 +1062,7 @@ mod tests {
             let window = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, height as f32));
             for (scale, bar) in [(1.5, 1.5), (1.5, 1.0), (0.5, 1.5), (0.75, 0.5), (1.25, 1.25)] {
                 for right in [false, true] {
-                    let fit = fit_side_bar(window, right, scale, pc::BAR_HEIGHT * bar);
+                    let fit = fit_side_bar(window, right, scale, pc::BAR_HEIGHT * bar, 0.5);
                     let (shown, laid_out) = (fit.shown(), fit.laid_out());
                     let case = format!("{height} {scale} {bar} {right}");
                     // drawn at its scale from its top left

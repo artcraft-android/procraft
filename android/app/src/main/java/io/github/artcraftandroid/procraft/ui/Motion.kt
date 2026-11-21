@@ -174,6 +174,9 @@ object Motion {
     fun sideBarOut(right: Boolean): androidx.compose.animation.ExitTransition =
         androidx.compose.animation.slideOutHorizontally(tween(130, easing = CubicBezierEasing(0.42f, 0f, 1f, 1f))) { if (right) it else -it }
 
+    /** The side bar let go where its modify button dragged it: back to its edge and its place, 0.15 s, easing out. */
+    fun sideBarSettle(): AnimationSpec<Float> = tween(150, easing = EaseOut)
+
     /** A tool's header (crop, guides) fading in over the top bar as its mode begins. */
     fun toolHeaderIn(): AnimationSpec<Float> = tween(220, easing = EaseInOut)
 

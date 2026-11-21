@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -51,6 +50,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -193,10 +193,11 @@ private const val LIGHT_RING_ABOVE = 0.85f
 /**
  * The side bar against the left edge (the right one, [right]-handed): brush size, the modify
  * button, opacity, undo and redo, its tracks [trackHeight] long. On the right everything is
- * mirrored but the glyphs.
+ * mirrored but the glyphs. Pulled [out] from its edge (its modify button dragged), its edge's
+ * corners round too.
  */
 @Composable
-fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f) {
+fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f, out: Dp = 0.dp) {
     // a control's left edge, mirrored on the right
     fun x(left: Dp, width: Dp) = if (right) Pc.SideBarWidth - left - width else left
     // shorter tracks bring what is under each up with them
@@ -205,7 +206,10 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     // its glass slides out with it as the interface hides, its screen side's corners off the screen
     val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
     val moved = Offset(aside, 0f)
-    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else Pc.SideBarCorner, pastRight = if (right) Pc.SideBarCorner else 0.dp)
+    // its glass goes past the screen's edge (to take that side's corners off the screen), or, pulled
+    // out from the edge, stays its own size
+    val past = if (out > 0.dp) 0.dp else Pc.SideBarCorner
+    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else past, pastRight = if (right) past else 0.dp)
     // the tracks' own thin glass, unless a plugin has them frosted as the bar is (which the bar's
     // glass under them is already)
     val track = BarGlass(shown, moved, window = true).takeIf { Pc.sliderLook.frosted != true }
@@ -224,7 +228,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 }
                 val body = Path().apply {
                     fillType = PathFillType.EvenOdd
-                    val (inner, outer) = CornerRadius.Zero to CornerRadius(r)
+                    val (inner, outer) = CornerRadius(out.toPx().coerceIn(0f, r)) to CornerRadius(r)
                     addRoundRect(
                         if (right) RoundRect(0f, 0f, size.width, size.height, outer, inner, inner, outer)
                         else RoundRect(0f, 0f, size.width, size.height, inner, outer, outer, inner),
@@ -246,15 +250,39 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     ) {
         BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(track?.let { rememberFrost(Pc.SliderCorner, it) } ?: Modifier), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
         // the modify button: the next touch on the canvas picks a colour
+        // (where it is on the window as a touch goes on: the bar may move under the finger)
+        val placed = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
         Box(
-            Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).pointerInput(Unit) {
-                // held, it changes what a canvas touch does; tapped, it does what Tap □ is set to
+            Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).onPlaced { placed[0] = it }.pointerInput(Unit) {
+                // held, it changes what a canvas touch does; tapped, it does what Tap □ is set to;
+                // dragged out from the bar's edge and then up or down, it moves the bar
                 awaitEachGesture {
-                    awaitFirstDown().consume()
-                    vm.modifyPressed()
-                    val up = waitForUpOrCancellation()
-                    up?.consume()
-                    vm.modifyReleased(cancelled = up == null)
+                    val down = awaitFirstDown()
+                    down.consume()
+                    // the window's pixels as the bar's points
+                    fun onWindow(p: Offset): Offset = (placed[0]?.takeIf { it.isAttached }?.localToWindow(p) ?: p) / density
+                    val first = onWindow(down.position)
+                    val touch = vm.modifyTouch(down.id.value, first.x, first.y, down.uptimeMillis)
+                    var lifted = false
+                    try {
+                        while (!lifted) {
+                            val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: continue
+                            if (!c.pressed) {
+                                // a cancelled touch ends already consumed; a lift doesn't
+                                touch.lifted(c.id.value, cancelled = c.isConsumed)
+                                c.consume()
+                                lifted = true
+                            } else {
+                                val on = c.position.x in 0f..size.width.toFloat() && c.position.y in 0f..size.height.toFloat()
+                                val at = onWindow(c.position)
+                                touch.moved(c.id.value, at.x, at.y, c.uptimeMillis, onButton = on)
+                                c.consume()
+                            }
+                        }
+                    } finally {
+                        // the bar put away mid-touch: let go of it all the same
+                        if (!lifted) touch.lifted(down.id.value, cancelled = true)
+                    }
                 }
             },
             contentAlignment = Alignment.Center,

@@ -119,6 +119,7 @@ pub fn undock_grabber(ui: &Ui, body: Rect) -> Option<(Pos2, Pos2)> {
 struct SideBarPlace {
     shown: bool,
     right: bool,
+    centre: f32,
 }
 
 /// How big each part of the interface shows next to the rest of it this frame, as the plugins say
@@ -207,16 +208,19 @@ pub fn area(ctx: &egui::Context, id: egui::Id, rect: Rect) -> egui::Area {
     egui::Area::new(id).fixed_pos(rect.min).order(egui::Order::Foreground).constrain_to(screen(ctx))
 }
 
-/// The side bar shows (or not) on the right (or the left), for the panels placed this frame.
-pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
+/// The side bar shows (or not) on the right (or the left), its centre kept at `centre` (a share of
+/// the window's height), for the panels placed this frame.
+pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool, centre: f32) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right, centre }));
 }
 
 /// Where the side bar shows this frame, if it shows.
 pub fn side_bar_shown_at(ctx: &egui::Context) -> Option<Rect> {
     let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))?;
     let scale = part_scale(ctx, InterfacePart::SideBar);
-    side.shown.then(|| crate::chrome::fit_side_bar(ctx.content_rect(), side.right, scale, bar_shown(ctx)).shown())
+    side.shown.then(|| {
+        crate::chrome::fit_side_bar(ctx.content_rect(), side.right, scale, bar_shown(ctx), side.centre).shown()
+    })
 }
 
 /// Where a panel `width` wide goes, hanging from a button centred at `button_x`: its left edge and
@@ -227,9 +231,11 @@ pub fn place(ctx: &egui::Context, width: f32, button_x: f32) -> (f32, f32) {
     let to_window = to_window(ctx);
     let (k, x) = (to_window.scaling, to_window.translation.x);
     let screen = ctx.content_rect();
-    let side = ctx
-        .data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))
-        .unwrap_or(SideBarPlace { shown: true, right: false });
+    let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place"))).unwrap_or(SideBarPlace {
+        shown: true,
+        right: false,
+        centre: procraft_core::side_bar_first_centre(),
+    });
     let side_bar = pc::SIDE_BAR_WIDTH * part_scale(ctx, InterfacePart::SideBar);
     let clear = if side.shown { side_bar + POPOVER_GAP } else { POPOVER_GAP };
     let (min_left, min_right) = if side.right { (POPOVER_GAP, clear) } else { (clear, POPOVER_GAP) };
@@ -564,7 +570,7 @@ mod tests {
             for side in [1.0, 1.5] {
                 put_part_scales(ctx, [1.0, 1.0, side, 1.0, 1.0]);
                 for right in [false, true] {
-                    side_bar_at(ctx, true, right);
+                    side_bar_at(ctx, true, right, procraft_core::side_bar_first_centre());
                     for scale in [0.5, 1.0, 1.5] {
                         let space = PanelSpace::new(window, pc::BAR_HEIGHT, scale);
                         drawing_panel(ctx, Some(space));

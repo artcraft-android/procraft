@@ -3186,6 +3186,61 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (!cancelled && !modifyUsed && android.os.SystemClock.uptimeMillis() - modifyDownAt < MODIFY_TAP_MS) tapModify()
     }
 
+    /**
+     * The side bar's centre down its edge, a share of the window's height, kept from one start to the
+     * next (the same for either edge and either way up). Moved by dragging the modify button.
+     */
+    var sideBarCentre by mutableFloatStateOf(
+        io.github.artcraftandroid.procraft.core.sideBarKeptCentre(
+            interfacePrefs.getFloat(io.github.artcraftandroid.procraft.core.sideBarCentreKey(), io.github.artcraftandroid.procraft.core.sideBarFirstCentre()),
+        ),
+    )
+        private set
+
+    /** The window as the side bar measures it (its own points): its height, and the top bar's bottom. */
+    var sideBarRoom = floatArrayOf(0f, io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value)
+
+    /** Where the side bar shows while the modify button drags it (null at its place). */
+    var sideBarMoving by mutableStateOf<io.github.artcraftandroid.procraft.core.SideBarShown?>(null)
+        private set
+
+    /** The side bar was let go where it was dragged: it slides back to its edge, at its kept place. */
+    var sideBarSettling by mutableStateOf(false)
+
+    private val modifyPress = object : io.github.artcraftandroid.procraft.ui.ModifyPress {
+        override fun pressed() = modifyPressed()
+
+        override fun released(cancelled: Boolean) = modifyReleased(cancelled)
+    }
+
+    /**
+     * A touch (pointer [id]) going down on the modify button at ([x], [y]) at [ms] (the side bar's
+     * points, on the window): it presses the button, or dragged out from the bar's edge moves the bar.
+     */
+    fun modifyTouch(id: Long, x: Float, y: Float, ms: Long): io.github.artcraftandroid.procraft.ui.ModifyTouch {
+        val (height, topBar) = sideBarRoom[0] to sideBarRoom[1]
+        val drag = io.github.artcraftandroid.procraft.core.SideBarDrag(x, y, ms.toDouble(), rightHanded, height, topBar, sideBarCentre)
+        val bar = object : io.github.artcraftandroid.procraft.ui.BarDrag {
+            override fun moved(x: Float, y: Float, ms: Long): io.github.artcraftandroid.procraft.core.SideBarDragState {
+                val shown = drag.moved(x, y, ms.toDouble())
+                if (shown.state == io.github.artcraftandroid.procraft.core.SideBarDragState.MOVING) sideBarMoving = shown
+                return shown.state
+            }
+
+            override fun letGo() {
+                val shown = drag.letGo()
+                drag.close()
+                if (shown.state == io.github.artcraftandroid.procraft.core.SideBarDragState.MOVING) {
+                    sideBarCentre = shown.centre
+                    interfacePrefs.edit().putFloat(io.github.artcraftandroid.procraft.core.sideBarCentreKey(), shown.centre).apply()
+                    sideBarSettling = true
+                }
+                sideBarMoving = null
+            }
+        }
+        return io.github.artcraftandroid.procraft.ui.ModifyTouch(id, modifyPress, bar)
+    }
+
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
     fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings =
         tabletTouchSettings(gestures.touchSettings(rapidUndoDelay * 1000.0), penButtonActions, penButtonPlugins.map { it?.takeIf(penActionKeys::contains) })

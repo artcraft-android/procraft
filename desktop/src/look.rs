@@ -139,11 +139,6 @@ pub mod pc {
     pub const SIDE_BAR_WIDTH: f32 = 51.0;
     pub const SIDE_BAR_HEIGHT: f32 = 519.0;
     pub const SIDE_BAR_CORNER: f32 = 20.0;
-    /// Where the side bar's centre sits, as a fraction of the window's height.
-    pub const SIDE_BAR_CENTRE: f32 = 0.5234;
-    /// Left under the side bar in a window too short for its measured tracks, and how short they go.
-    const SHORT_SIDE_BAR_FOOT: f32 = 17.0;
-    const SHORTEST_TRACK: f32 = 44.0;
     pub const SLIDER_WIDTH: f32 = 40.0;
     pub const SLIDER_HEIGHT: f32 = 170.0;
     pub const SLIDER_CORNER: f32 = 13.0;
@@ -176,19 +171,6 @@ pub mod pc {
             BAR_MARGIN * 2.0 + GALLERY_WIDTH + (BAR_BUTTON_WIDTH + action) * 4.0 + BAR_BUTTON_WIDTH * 5.0 + tool * 4.0
         };
         [measured, (8.0, 14.0)].into_iter().find(|&gaps| needs(gaps) <= width).unwrap_or((2.0, 4.0))
-    }
-
-    /// The side bar in a window `height` tall under a top bar reaching `bar_bottom` down: its top
-    /// from the window's, and how long each of its two tracks is. At `SIDE_BAR_CENTRE` with its
-    /// measured tracks wherever that clears the top bar; in a shorter window just under the top
-    /// bar, its tracks giving up what it is short of, so that all of it can be reached.
-    pub fn side_bar_fit(height: f32, bar_bottom: f32) -> (f32, f32) {
-        let top = height * SIDE_BAR_CENTRE - SIDE_BAR_HEIGHT / 2.0;
-        if top >= bar_bottom {
-            return (top, SLIDER_HEIGHT);
-        }
-        let rest = SIDE_BAR_HEIGHT - SLIDER_HEIGHT * 2.0;
-        (bar_bottom, ((height - bar_bottom - SHORT_SIDE_BAR_FOOT - rest) / 2.0).clamp(SHORTEST_TRACK, SLIDER_HEIGHT))
     }
 }
 
@@ -815,22 +797,6 @@ mod tests {
                 + pc::BAR_BUTTON_WIDTH * 5.0
                 + tool * 4.0;
             assert!(needs <= width, "{width}");
-        }
-    }
-
-    #[test]
-    fn the_side_bar_stays_as_measured_or_fits_under_the_top_bar() {
-        // portrait top 333.5, landscape top 130
-        assert!((pc::side_bar_fit(1133.0, pc::BAR_HEIGHT).0 - 333.5).abs() < 0.1);
-        assert!((pc::side_bar_fit(744.0, pc::BAR_HEIGHT).0 - 130.0).abs() < 0.1);
-        for height in 580..2000 {
-            assert_eq!(pc::side_bar_fit(height as f32, pc::BAR_HEIGHT).1, pc::SLIDER_HEIGHT);
-        }
-        for height in 480..580 {
-            let height = height as f32;
-            let (top, track) = pc::side_bar_fit(height, pc::BAR_HEIGHT);
-            assert_eq!(top, pc::BAR_HEIGHT);
-            assert!(top + pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0 <= height, "{height}");
         }
     }
 

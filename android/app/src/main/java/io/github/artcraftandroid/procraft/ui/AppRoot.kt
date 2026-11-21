@@ -46,6 +46,8 @@ import io.github.artcraftandroid.procraft.canvas.SelectionPopup
 import io.github.artcraftandroid.procraft.canvas.TransformPopup
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.ToolKind
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
@@ -176,13 +178,42 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
                 }
                 val side = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR)
-                val sideBar = Pc.sideBarFit(maxHeight / side, Pc.barShown / side)
+                // the window as the side bar measures it, at its kept place (its modify button
+                // dragged, it follows the finger, and let go slides back to its edge)
+                vm.sideBarRoom = floatArrayOf(maxHeight.value / side, Pc.barShown.value / side)
+                val sideBar = io.github.artcraftandroid.procraft.core.sideBarFit(maxHeight.value / side, Pc.barShown.value / side, vm.sideBarCentre)
+                val sideTop = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(sideBar.top) }
+                val sideOut = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+                val moving = vm.sideBarMoving
+                androidx.compose.runtime.LaunchedEffect(moving, vm.sideBarSettling, sideBar.top) {
+                    when {
+                        moving != null -> {
+                            sideTop.snapTo(moving.top)
+                            sideOut.snapTo(moving.out)
+                        }
+                        vm.sideBarSettling -> {
+                            kotlinx.coroutines.coroutineScope {
+                                launch { sideOut.animateTo(0f, Motion.sideBarSettle()) }
+                                sideTop.animateTo(sideBar.top, Motion.sideBarSettle())
+                            }
+                            vm.sideBarSettling = false
+                        }
+                        else -> {
+                            sideTop.snapTo(sideBar.top)
+                            sideOut.snapTo(0f)
+                        }
+                    }
+                }
                 // a mode taking the screen slides it off its edge, and back when it ends
                 androidx.compose.animation.AnimatedVisibility(
                     vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                         vm.opacityLayer == null &&
                         (vm.adjustment == null || vm.adjustPencil),
-                    Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top * side),
+                    Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset {
+                        val k = side * density
+                        val outward = if (vm.rightHanded) -1f else 1f
+                        androidx.compose.ui.unit.IntOffset((sideOut.value * k * outward).roundToInt(), (sideTop.value * k).roundToInt())
+                    },
                     enter = Motion.sideBarIn(vm.rightHanded),
                     exit = Motion.sideBarOut(vm.rightHanded),
                 ) {
@@ -193,8 +224,9 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                             vm,
                             aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInRoot().translate(-keptClear.corner) },
                             right = vm.rightHanded,
-                            trackHeight = sideBar.track,
+                            trackHeight = sideBar.track.dp,
                             shown = barsShown,
+                            out = sideOut.value.dp,
                         )
                     }
                 }

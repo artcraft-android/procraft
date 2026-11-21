@@ -826,17 +826,24 @@ impl Interface {
             && session.touch_layer_opacity().is_none()
             && !self.text.editing()
             && (adjusting.adjustment.is_none() || adjusting.pencil);
-        crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
+        let side_bar_centre = self.prefs.side_bar_centre;
+        crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed, side_bar_centre);
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
             // its tracks as the plugins have them look
             self.side_bar.slider_look = self.prefs.plugins.slider_look();
-            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
+            let (look, centre) = (&mut self.look, side_bar_centre);
+            self.side_bar.show(ui, look, session, &info, modify_lit, right, centre, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()
         };
         self.keep_brushes |= taps.brush_changed;
+        // the side bar moved by its modify button: kept where it was let go
+        if let Some(centre) = taps.centre {
+            self.prefs.side_bar_centre = centre;
+            self.prefs.keep();
+        }
         if taps.undo {
             self.undo(session);
         }
@@ -3587,7 +3594,8 @@ mod tests {
         /// `scale` times as big under a top bar shown `bar` times as big.
         fn undo_redo(&self, scale: f32, bar: f32) -> (Pos2, Pos2) {
             let window = Rect::from_min_size(Pos2::ZERO, self.size);
-            let fit = crate::chrome::fit_side_bar(window, self.ui.prefs.right_handed, scale, pc::BAR_HEIGHT * bar);
+            let (right, centre) = (self.ui.prefs.right_handed, self.ui.prefs.side_bar_centre);
+            let fit = crate::chrome::fit_side_bar(window, right, scale, pc::BAR_HEIGHT * bar, centre);
             let (laid_out, to_window) = (fit.laid_out(), fit.to_window());
             let shorter = pc::SLIDER_HEIGHT - fit.track;
             let at = |y: f32| to_window * Pos2::new(laid_out.center().x, laid_out.top() + y - shorter * 2.0);

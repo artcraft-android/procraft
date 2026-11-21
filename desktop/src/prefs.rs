@@ -44,6 +44,9 @@ pub struct Prefs {
     pub selection_x_ray: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
+    /// The side bar's centre down its edge, a share of the window's height (its modify button
+    /// dragged moves it).
+    pub side_bar_centre: f32,
     /// Brush sizes relative to the screen (else to the canvas).
     pub brush_on_screen: bool,
     pub brush_cursor: bool,
@@ -111,6 +114,7 @@ impl Default for Prefs {
             light_interface: false,
             selection_x_ray: false,
             right_handed: false,
+            side_bar_centre: procraft_core::side_bar_first_centre(),
             brush_on_screen: false,
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
@@ -211,6 +215,9 @@ impl Prefs {
                     p.pen_button_plugins = procraft_core::pen_button_plugin_actions(Some(value.to_owned()));
                 }
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
+                name if name == procraft_core::side_bar_centre_key() => {
+                    p.side_bar_centre = procraft_core::side_bar_kept_centre(number.unwrap_or(f32::NAN));
+                }
                 name if floating_at(name).is_some() => {
                     if let Some(slot) = floating_at(name).and_then(|at| p.floating.get_mut(at)) {
                         *slot = procraft_core::floating_read(value.to_owned());
@@ -237,6 +244,7 @@ impl Prefs {
             format!("light_interface {}", self.light_interface),
             format!("selection_x_ray {}", self.selection_x_ray),
             format!("right_handed {}", self.right_handed),
+            format!("{} {}", procraft_core::side_bar_centre_key(), self.side_bar_centre),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
             format!("cursor_shows {}", place(&SHOWS, self.cursor_shows)),

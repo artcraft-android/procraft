@@ -216,11 +216,6 @@ object Pc {
     val SideBarWidth = 51.dp
     val SideBarHeight = 519.dp
     val SideBarCorner = 20.dp
-    /** Where the side bar's centre sits, as a fraction of the screen height. */
-    const val SIDE_BAR_CENTRE = 0.5234f
-    /** Left under the side bar in a window too short for its measured tracks, and how short they go. */
-    private val ShortSideBarFoot = 17.dp
-    private val ShortestTrack = 44.dp
     val SliderWidth = 40.dp
     val SliderHeight = 170.dp
     val SliderCorner = 13.dp
@@ -280,20 +275,6 @@ object Pc {
         return if (measured.needs <= width) measured else NarrowBars.firstOrNull { it.needs <= width } ?: NarrowBars.last()
     }
 
-    /** Where the side bar goes: its top, and how long each of its two tracks is. */
-    data class SideBarFit(val top: Dp, val track: Dp)
-
-    /**
-     * The side bar in a window [height] tall: at [SIDE_BAR_CENTRE] with its measured tracks wherever
-     * that clears the top bar; in a shorter window (split screen) just under the top bar, its tracks
-     * giving up what it is short of, so that all of it can be reached.
-     */
-    fun sideBarFit(height: Dp, barBottom: Dp = BarHeight): SideBarFit {
-        val top = height * SIDE_BAR_CENTRE - SideBarHeight / 2
-        if (top >= barBottom) return SideBarFit(top, SliderHeight)
-        val rest = SideBarHeight - SliderHeight * 2
-        return SideBarFit(barBottom, ((height - barBottom - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
-    }
 }
 
 /**

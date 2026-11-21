@@ -73,32 +73,6 @@ class ChromeFitTest {
     }
 
     @Test
-    fun aTabletsSideBarStaysWhereItWasMeasured() {
-        // portrait top 333.5, landscape top 130
-        assertEquals(333.5f, Pc.sideBarFit(1133.dp).top.value, 0.1f)
-        assertEquals(130f, Pc.sideBarFit(744.dp).top.value, 0.1f)
-        for (height in widths(580, 2000)) {
-            val fit = Pc.sideBarFit(height)
-            assertEquals(Pc.SliderHeight, fit.track)
-            assertEquals(height * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2, fit.top)
-            assertTrue(fit.top >= Pc.BarHeight)
-        }
-    }
-
-    @Test
-    fun theSideBarFitsUnderTheTopBarOfAShortWindow() {
-        for (height in widths(328, 579)) {
-            val fit = Pc.sideBarFit(height)
-            assertEquals(Pc.BarHeight, fit.top)
-            val bar = Pc.SideBarHeight - (Pc.SliderHeight - fit.track) * 2
-            assertTrue("$height", fit.top + bar <= height)
-            assertTrue(fit.track <= Pc.SliderHeight)
-        }
-        // no jump where the two meet
-        assertEquals(170f, Pc.sideBarFit(579.dp).track.value, 0.6f)
-    }
-
-    @Test
     fun aPanelInAWideEnoughWindowGoesWhereItAlwaysDid() {
         // as it was before narrow windows were thought of
         fun old(width: Dp, tip: Dp, screen: Dp, minLeft: Dp, minRight: Dp) =

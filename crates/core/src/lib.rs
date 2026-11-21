@@ -92,6 +92,7 @@ mod scene3d;
 mod selection;
 mod sharp;
 mod sharper;
+mod side_bar;
 mod side_slider;
 mod sound_file;
 mod stock_brushes;
@@ -242,6 +243,10 @@ pub use scene3d::{
     unpack_model_artwork, zip_model_name,
 };
 pub use selection::{SelectionDisplay, SelectionJoin};
+pub use side_bar::{
+    SideBarDrag, SideBarDragState, SideBarFit, SideBarShown, side_bar_centre_key, side_bar_first_centre, side_bar_fit,
+    side_bar_kept_centre,
+};
 pub use side_slider::{ShadowStep, SideSliderTap, side_slider_drag_share, side_slider_tap, side_thumb_shadow};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
