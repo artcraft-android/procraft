@@ -295,6 +295,10 @@ pub(crate) const FRAMES_LAY_MOST: std::time::Duration = std::time::Duration::fro
 /// With no frame drawn for this long, frames are taken not to be drawn (the app away, a test
 /// drawing none): nothing waits for them.
 pub(crate) const FRAMES_GONE: std::time::Duration = std::time::Duration::from_millis(250);
+/// A frame drawn this long ago, the app still showing, is taken as frames held up (the GPU behind)
+/// rather than stopped: a time-lapse frame, or a save's snapshot, still leaves their work to them
+/// rather than laying it at once (the frames and touches would wait on that too).
+pub(crate) const FRAMES_HELD_UP: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_WIDTH_PT: f32 = 4.0 / 3.0;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -673,6 +677,12 @@ pub(crate) struct State {
     /// When a frame was last drawn: a read beside the frames waits for them to lay what they lay a
     /// share at a time only while they are being drawn (see [`Shared::await_frames_laid`]).
     pub(crate) frame_drawn_at: Option<std::time::Instant>,
+    /// A time-lapse frame asked for while frames are drawn, for this time-lapse: the frame that
+    /// has laid what the frames lay a share at a time takes its picture (see
+    /// [`State::take_lapse_picture`]).
+    pub(crate) lapse_wanted: Option<Arc<crate::timelapse::TimeLapse>>,
+    /// Keeps the time-lapse frames taken, in order, off the thread that took them.
+    pub(crate) lapse_keeper: crate::timelapse::FrameKeeper,
     /// The drawing pad's strokes as drawn (pointer and input), drawn again when the brush changes;
     /// `None` on a canvas that keeps none.
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
@@ -872,6 +882,19 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Whether frames are being drawn: one was in the last [`FRAMES_HELD_UP`], and the app isn't
+    /// away.
+    pub(crate) fn frames_drawn(&self) -> bool {
+        !self.hidden && self.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_HELD_UP)
+    }
+
+    /// Whether the frames, being drawn, have work to lay a share at a time (see
+    /// [`procraft_gpu::Canvas::lays_over_frames`]).
+    pub(crate) fn frames_laying(&self) -> bool {
+        self.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_GONE)
+            && self.canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
+    }
+
     /// Window pixels per point of what the interface draws, its handles over the canvas too.
     pub(crate) fn interface_scale(&self) -> f32 {
         self.display_scale * self.interface_size
@@ -1716,19 +1739,16 @@ impl Shared {
 
     /// Waits, the state let go meanwhile, while the frames being drawn lay work a share at a time
     /// (see [`procraft_gpu::Canvas::lays_over_frames`]), for at most [`FRAMES_LAY_MOST`]: a read
-    /// made beside them from a thread of its own (a time-lapse frame after each stroke) started
-    /// then lays all of that at once, and the app's thread and the frames wait behind it (a third
-    /// of a second after a heavy brush's stroke on a large canvas). With no frame drawn in the last
-    /// [`FRAMES_GONE`] it doesn't wait: no frame would lay it. Never from the thread that draws.
-    /// Whether the frames have nothing more to lay (false: still laying it when the wait ran out).
+    /// made beside them from a thread of its own (the Reference window's picture after each
+    /// stroke) started then lays all of that at once, and the app's thread and the frames wait
+    /// behind it (a third of a second after a heavy brush's stroke on a large canvas). With no
+    /// frame drawn in the last [`FRAMES_GONE`] it doesn't wait: no frame would lay it. Never from
+    /// the thread that draws. Whether the frames have nothing more to lay (false: still laying it
+    /// when the wait ran out).
     pub(crate) fn await_frames_laid(&self) -> bool {
         let until = std::time::Instant::now() + FRAMES_LAY_MOST;
         loop {
-            let waiting = {
-                let st = self.lock();
-                st.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_GONE)
-                    && st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
-            };
+            let waiting = self.lock().frames_laying();
             if !waiting {
                 return true;
             }
@@ -1737,6 +1757,15 @@ impl Shared {
             }
             std::thread::sleep(std::time::Duration::from_millis(4));
         }
+    }
+
+    /// Whether nothing is under way that a save would cut short ([`State::idle`]) and the frames,
+    /// while they are drawn, have nothing to lay a share at a time (which a render that shows
+    /// nothing, as a save's does, would lay at once, the frames and touches waiting on it). A
+    /// short hold.
+    pub(crate) fn quiet(&self) -> bool {
+        let st = self.lock();
+        st.idle() && !(st.frames_drawn() && st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::lays_over_frames))
     }
 
     /// The lock, taken once the canvas has finished remaking its caches (made a render at a
@@ -2092,6 +2121,8 @@ impl CanvasSession {
             projection_stop: false,
             frames: 0,
             frame_drawn_at: None,
+            lapse_wanted: None,
+            lapse_keeper: crate::timelapse::FrameKeeper::default(),
             pad_strokes: None,
             airbrush: None,
             ahead: false,

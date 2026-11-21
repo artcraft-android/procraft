@@ -5480,6 +5480,12 @@ impl Canvas {
         self.pictures.get(&id)
     }
 
+    /// The layers whose pixels changed since [`Canvas::take_changed`] was last done, as they are
+    /// (a save reading ahead of its snapshot looks at them without taking them).
+    pub fn changed(&self) -> &HashSet<LayerId> {
+        &self.changed
+    }
+
     /// The layers whose pixels changed since this was last done (by painting, undo, uploads and
     /// every other change), forgotten here: a save reads only these.
     pub fn take_changed(&mut self) -> HashSet<LayerId> {
@@ -11555,8 +11561,9 @@ impl Canvas {
 
     /// Starts reading a layer's pixels back (premultiplied RGBA8): see [`Readback`].
     pub fn start_reading_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Readback, GpuError> {
-        if self.parked.contains_key(&id) && !self.layers.contains_key(&id) {
-            return self.read_layer(gpu, id).map(Readback::Ready);
+        // a parked layer's compressed rows taken as they are, decoded once the pixels are waited for
+        if let Some(parked) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
+            return Ok(Readback::Packed(Packed { parked: parked.clone(), width: self.width, height: self.height }));
         }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
         Ok(start_reading(gpu, &layer.texture, self.width, self.height))
@@ -12940,10 +12947,13 @@ impl ReadyToPark {
 }
 
 /// A parked layer's pixels: the rectangle painted (none if nothing), its rows compressed, so a
-/// layer drawn on in one place costs little to keep and to bring back.
+/// layer drawn on in one place costs little to keep and to bring back. The rows are shared, so a
+/// read of the layer takes them as they are and decodes them once whatever guards the canvas is
+/// let go (see [`Readback::Packed`]).
+#[derive(Clone)]
 struct Parked {
     rect: Option<IRect>,
-    lz4: Vec<u8>,
+    lz4: Arc<[u8]>,
 }
 
 impl Parked {
@@ -12959,7 +12969,7 @@ impl Parked {
                 rows.extend_from_slice(rgba.get(start..start + row).unwrap_or_default());
             }
         }
-        Parked { rect, lz4: procraft_engine::applz4::encode(&rows) }
+        Parked { rect, lz4: Arc::from(procraft_engine::applz4::encode(&rows)) }
     }
 
     /// The painted rectangle's rows, one after another; none if damaged.
@@ -14018,6 +14028,8 @@ fn padded_row(width: u32) -> u64 {
 pub enum Readback {
     /// Already here.
     Ready(Vec<u8>),
+    /// A parked layer's compressed pixels, decoded when they are asked for.
+    Packed(Packed),
     /// The copy couldn't be made (why): nothing is coming.
     Failed(String),
     Copying {
@@ -14033,6 +14045,14 @@ pub enum Readback {
         padded: usize,
         mapped: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     },
+}
+
+/// A parked layer's pixels as [`Readback::Packed`] holds them: its compressed rows (shared with
+/// the canvas, never changed) and the canvas's size.
+pub struct Packed {
+    parked: Parked,
+    width: u32,
+    height: u32,
 }
 
 /// The layers' coverage at a point, as [`Canvas::start_alphas_at`] started reading it.
@@ -14068,6 +14088,7 @@ impl Readback {
     pub fn bytes(&self) -> usize {
         match self {
             Readback::Ready(p) => p.len(),
+            Readback::Packed(p) => p.width as usize * p.height as usize * 4,
             Readback::Failed(_) => 0,
             Readback::Copying { size, .. } => usize::try_from(*size).unwrap_or(usize::MAX),
         }
@@ -14078,6 +14099,12 @@ impl Readback {
     pub fn pixels(self) -> Result<Vec<u8>, GpuError> {
         let (device, buffer, size, kept, row, padded, mapped) = match self {
             Readback::Ready(p) => return Ok(p),
+            Readback::Packed(p) => {
+                return p
+                    .parked
+                    .pixels(p.width, p.height)
+                    .ok_or_else(|| GpuError::Readback("a parked layer damaged".into()));
+            }
             Readback::Failed(why) => return Err(GpuError::Readback(why)),
             Readback::Copying { device, lost, buffer, size, kept, row, padded, mapped } => {
                 if lost.load(Ordering::Relaxed) {

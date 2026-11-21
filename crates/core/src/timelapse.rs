@@ -30,6 +30,8 @@ use crate::project::{PackageTimeLapse, file_error, write_atomically};
 pub const TIME_LAPSE_FPS: u32 = 30;
 /// A frame's longest side kept, pixels.
 pub(crate) const FRAME_SIDE: u32 = 1280;
+/// The longest a save (or a frame taken with none drawn) waits for the frames taken to be kept.
+pub(crate) const KEEP_MOST: std::time::Duration = std::time::Duration::from_secs(5);
 const JPEG_QUALITY: u8 = 85;
 /// A package's videos are made again as one rather than be more than this (while every frame is
 /// still a picture to make them of).
@@ -60,6 +62,86 @@ fn noting(artwork: &Path) -> Arc<Mutex<()>> {
     let lock = Arc::new(Mutex::new(()));
     folders.push((key, Arc::downgrade(&lock)));
     lock
+}
+
+/// Keeps the time-lapse frames taken (their pictures' copies started on the GPU) one after
+/// another, in the order taken, on a thread of its own: each picture waited for, made into a JPEG
+/// and written there, so what took it (a frame) never waits for the GPU or the disk. The thread
+/// starts when there is a picture to keep and ends when none is left.
+#[derive(Clone, Default)]
+pub(crate) struct FrameKeeper {
+    inner: Arc<Keeping>,
+}
+
+#[derive(Default)]
+struct Keeping {
+    queue: Mutex<KeepQueue>,
+    kept: parking_lot::Condvar,
+}
+
+#[derive(Default)]
+struct KeepQueue {
+    pictures: std::collections::VecDeque<(Arc<TimeLapse>, procraft_gpu::PendingThumbnail)>,
+    /// The thread is keeping them (one it took from the queue, it may be).
+    running: bool,
+}
+
+impl FrameKeeper {
+    /// `picture` to be kept as `lapse`'s next frame, after those handed over before it.
+    pub(crate) fn keep(&self, lapse: Arc<TimeLapse>, picture: procraft_gpu::PendingThumbnail) {
+        let mut queue = self.inner.queue.lock();
+        queue.pictures.push_back((lapse, picture));
+        if queue.running {
+            return;
+        }
+        queue.running = true;
+        drop(queue);
+        let inner = Arc::clone(&self.inner);
+        let started = std::thread::Builder::new().name("time-lapse".into()).spawn(move || inner.run());
+        if let Err(e) = started {
+            log::error!("keeping time-lapse frames: {e}");
+            let mut queue = self.inner.queue.lock();
+            queue.pictures.clear();
+            queue.running = false;
+            self.inner.kept.notify_all();
+        }
+    }
+
+    /// Waits until every picture handed over is kept, for at most `most`: whether they are.
+    pub(crate) fn settle(&self, most: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + most;
+        let mut queue = self.inner.queue.lock();
+        while queue.running || !queue.pictures.is_empty() {
+            if self.inner.kept.wait_until(&mut queue, until).timed_out() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Keeping {
+    /// Keeps the pictures handed over until none is left.
+    fn run(&self) {
+        loop {
+            let next = {
+                let mut queue = self.queue.lock();
+                let next = queue.pictures.pop_front();
+                if next.is_none() {
+                    queue.running = false;
+                    self.kept.notify_all();
+                }
+                next
+            };
+            let Some((lapse, picture)) = next else { return };
+            match picture.pixels() {
+                Ok(t) => {
+                    lapse.record(t.rgba, t.width, t.height);
+                }
+                Err(e) => log::warn!("a time-lapse frame couldn't be read: {e}"),
+            }
+        }
+    }
 }
 
 /// A video being made is named so, apart from the ones noted, until it is noted.

@@ -1195,16 +1195,55 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
-    /// Records the canvas as `lapse`'s next frame, read back at the size frames are kept (not the
-    /// video's): the picture stays in the core, never crossing to the app and back, so a frame
-    /// after each stroke moves a few MB, not dozens. Whether one was kept (none before the canvas
-    /// exists, while it doesn't record, or when nothing changed since the last).
+    /// Records the canvas as `lapse`'s next frame (unless it is the same as the last), read back
+    /// at the size frames are kept (not the video's): the picture stays in the core, never
+    /// crossing to the app and back. It is taken from the composite in a frame that has laid the
+    /// change: while frames are being drawn, the first frame that has laid what the frames lay a
+    /// share at a time (a stroke's end) takes the picture, its copy started on the GPU after that
+    /// frame's work and made into the frame on a thread of its own, in order; the call returns at
+    /// once (true). Nothing waits for the frames or lays their work at once,
+    /// and a stroke right after another doesn't leave the first one's frame out. With no frames
+    /// drawn (the app away, an artwork never shown) it is taken now and kept before this returns:
+    /// whether it was. False before the canvas exists, or while it doesn't record.
     pub fn record_time_lapse(&self, lapse: std::sync::Arc<crate::timelapse::TimeLapse>) -> bool {
         if !lapse.recording() {
             return false;
         }
-        let Some(t) = self.time_lapse_frame(crate::timelapse::FRAME_SIDE) else { return false };
-        lapse.record(t.rgba, t.width, t.height)
+        let keeper = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if st.canvas.is_none() || st.gpu.is_none() {
+                return false;
+            }
+            if st.frames_drawn() {
+                st.lapse_wanted = Some(lapse);
+                self.shared.frame(st);
+                return true;
+            }
+            st.lapse_keeper.clone()
+        };
+        // none drawn: taken now, those taken before kept first, so the count tells of this one
+        keeper.settle(crate::timelapse::KEEP_MOST);
+        let before = lapse.count();
+        {
+            let mut st = self.shared.lock();
+            st.lapse_wanted = Some(std::sync::Arc::clone(&lapse));
+            st.take_lapse_picture(true);
+        }
+        keeper.settle(crate::timelapse::KEEP_MOST);
+        lapse.count() > before
+    }
+
+    /// Takes a time-lapse frame asked for and not taken yet (the frames stopped before laying what
+    /// it waited for), laying that at once, and waits until every frame taken is kept (at most
+    /// [`crate::timelapse::KEEP_MOST`]): the app may make a video of them next.
+    pub(crate) fn keep_time_lapse(&self) {
+        let keeper = {
+            let mut st = self.shared.lock();
+            st.take_lapse_picture(true);
+            st.lapse_keeper.clone()
+        };
+        keeper.settle(crate::timelapse::KEEP_MOST);
     }
 
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
@@ -1564,6 +1603,33 @@ impl CanvasSession {
     /// layer, a plugin's own).
     pub(crate) fn add_layer_quietly(&self) -> u64 {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+    }
+}
+
+impl crate::State {
+    /// Takes the time-lapse frame asked for (see [`CanvasSession::record_time_lapse`]), if there
+    /// is one: in a frame (`at_once` false) once the frames have laid what they lay a share at a
+    /// time and the caches are whole (else a frame after this one does, more asked for until
+    /// then); otherwise now, laying that at once. Its picture (private layers left out, so a
+    /// private insert never shows in the replay or its video) is only started on the GPU here and
+    /// handed to the keeper, never waited for.
+    pub(crate) fn take_lapse_picture(&mut self, at_once: bool) {
+        if self.lapse_wanted.is_none() {
+            return;
+        }
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        if !at_once && (canvas.busy() || canvas.lays_over_frames()) {
+            self.needs_frame = true;
+            return;
+        }
+        let Some(lapse) = self.lapse_wanted.take() else { return };
+        if !lapse.recording() {
+            return;
+        }
+        let private = self.doc.private_layers();
+        let picture =
+            canvas.start_composite_thumbnail_without(gpu, &mut self.doc, crate::timelapse::FRAME_SIDE, &private);
+        self.lapse_keeper.keep(lapse, picture);
     }
 }
 

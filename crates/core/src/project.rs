@@ -158,11 +158,6 @@ pub(crate) struct SaveSnapshot {
     layers: Vec<(LayerId, u64, Vec<u8>)>,
     /// Layers on their way back from the GPU, to be checked against the folder once here.
     reading: Vec<(LayerId, procraft_gpu::Readback)>,
-    /// Changed layers past [`READ_AFTER_LOCK`] left to read in holds of their own (see
-    /// [`CanvasSession::read_later`]), and every layer's pixels' version as the snapshot found
-    /// them, to tell whether any changed meanwhile.
-    later: Vec<LayerId>,
-    versions: Vec<(LayerId, u64)>,
     /// Layers still the PNG files they were opened from (not shown yet), written as they are.
     files: Vec<(LayerId, Vec<u8>)>,
     /// The picture for the gallery, made small on the GPU (only it comes back, not the canvas).
@@ -190,9 +185,17 @@ pub(crate) struct SaveSnapshot {
     store_files: Vec<(LayerId, Vec<u8>)>,
 }
 
+#[cfg(test)]
+impl SaveSnapshot {
+    /// The layers the snapshot started back from the GPU (not taken as read ahead).
+    pub(crate) fn read_again(&self) -> Vec<u64> {
+        self.reading.iter().map(|(id, _)| id.0).collect()
+    }
+}
+
 /// How much of a save's layers may still be on their way back from the GPU when the lock is let
-/// go; past it they are read (and those unchanged let go) under it, or for the autosave in holds
-/// of their own as much at a time.
+/// go; past it they are read (and those unchanged let go) under it, or for the autosave read
+/// ahead of its snapshot as much at a time (see [`LayersAhead`]).
 const READ_AFTER_LOCK: usize = 256 << 20;
 
 /// [`READ_AFTER_LOCK`], in tests [`TESTS_READ_AFTER_LOCK`].
@@ -203,10 +206,56 @@ fn read_after_lock() -> usize {
 /// The tests' [`READ_AFTER_LOCK`]: small, so their saves go every way (the app's for a benchmark).
 pub(crate) static TESTS_READ_AFTER_LOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(64 << 10);
 
-/// How many autosaves in a row may give way to something changing as their layers are read in
-/// holds of their own before the next reads them all in one hold (so one is never put off for
-/// good).
-const SAVES_GIVING_WAY: u32 = 3;
+/// How long an autosave, once it has read ahead what changed, waits for a moment with nothing
+/// under way (between strokes) to take its snapshot in, before it gives way and looks again later.
+const SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 2 } else { 4 });
+/// How often it looks for that moment.
+const SNAPSHOT_LOOK: std::time::Duration = std::time::Duration::from_millis(8);
+/// How many times a save asked for reads ahead what changed before the snapshot reads what is
+/// still left in its hold (only when changes keep coming as it reads).
+const SAVE_READS_AHEAD: u32 = 3;
+
+/// Layers a save read ahead of its snapshot, outside the snapshot's hold of the canvas (see
+/// [`CanvasSession::read_layers_ahead`]), painting going on meanwhile: each with its pixels'
+/// version as read, and their hash with the pixels, or none where they are what the folder has.
+/// The snapshot takes a layer as read when its version hasn't moved since (its pixels are the
+/// same: every change gives a layer a new version, in the render that makes it), and reads again
+/// only those whose has, so the save is the artwork at the snapshot's moment whatever was painted
+/// while it read.
+#[derive(Default)]
+pub(crate) struct LayersAhead {
+    layers: std::collections::HashMap<LayerId, ReadLayer>,
+}
+
+/// A layer read ahead (see [`LayersAhead`]).
+struct ReadLayer {
+    version: u64,
+    hash: u64,
+    /// None where the folder has these pixels already.
+    rgba: Option<Vec<u8>>,
+}
+
+impl LayersAhead {
+    /// Whether layer `id` was read at `version`.
+    fn has(&self, id: LayerId, version: u64) -> bool {
+        self.layers.get(&id).is_some_and(|l| l.version == version)
+    }
+
+    /// Layer `id` as read, if it was read at `version`: its hash and its pixels (none where the
+    /// folder has them).
+    fn take(&mut self, id: LayerId, version: u64) -> Option<(u64, Option<Vec<u8>>)> {
+        if !self.has(id, version) {
+            return None;
+        }
+        self.layers.remove(&id).map(|l| (l.hash, l.rgba))
+    }
+
+    /// How many layers are held read (for tests).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.layers.len()
+    }
+}
 
 /// What the last saves wrote: the folder, and a hash of each layer's pixels, so layers that
 /// haven't changed aren't written again.
@@ -223,9 +272,6 @@ pub(crate) struct Saved {
     more_pictures: Vec<Option<u64>>,
     /// A hash of each plugin's layer's data as its file in the folder has it.
     pub(crate) layer_data: std::collections::HashMap<LayerId, u64>,
-    /// Autosaves in a row that gave way to a change as their layers were read (see
-    /// [`SAVES_GIVING_WAY`]).
-    gave_way: u32,
 }
 
 impl Saved {
@@ -284,19 +330,26 @@ impl crate::State {
         self.revision.wrapping_add(steps)
     }
 
-    /// Nothing under way that saving would end or cut short.
-    pub(crate) fn idle(&self) -> bool {
-        self.stroke.is_none()
-            && self.plugin_artwork.as_ref().is_none_or(|a| !a.down)
-            && self.transform.is_none()
+    /// Nothing long under way that saving would end or cut short (a transform, an adjustment, text
+    /// being edited, a selection or a fill being made): strokes aside, which come and go.
+    pub(crate) fn settled(&self) -> bool {
+        self.transform.is_none()
             && !self.adjusting
             && self.text_edit.is_none()
-            && self.shape.is_none()
             && self.pending_doc.is_none()
             && self.feather_base.is_none()
             && self.selection_before.is_none()
             // a ColorDrop's fill still open
             && self.pour.is_none()
+    }
+
+    /// Nothing under way that saving would end or cut short: nothing long ([`State::settled`]) and
+    /// no stroke.
+    pub(crate) fn idle(&self) -> bool {
+        self.settled()
+            && self.stroke.is_none()
+            && self.plugin_artwork.as_ref().is_none_or(|a| !a.down)
+            && self.shape.is_none()
             && self.scene.as_ref().is_none_or(|s| !s.stroking)
     }
 
@@ -304,13 +357,17 @@ impl crate::State {
     /// among the `known` and its file there) is let go as soon as it is read, so a save holds only
     /// the layers that changed. Up to [`READ_AFTER_LOCK`] of the layers, and the picture, are
     /// only started back from the GPU here, to be waited for once the lock is let go; the rest
-    /// are read here, or with `later` left to read in holds of their own.
+    /// are read here. Layers read `ahead` as they are now are taken as read. `bounded`: none is
+    /// waited for here, the rest only started back; but if those come to more than
+    /// [`READ_AFTER_LOCK`], nothing is taken and there is no snapshot (none: they are read ahead
+    /// first).
     pub(crate) fn save_snapshot(
         &mut self,
         dir: &Path,
         known: &std::collections::HashMap<LayerId, u64>,
-        later: bool,
-    ) -> Result<SaveSnapshot, MobileError> {
+        mut ahead: Option<&mut LayersAhead>,
+        bounded: bool,
+    ) -> Result<Option<SaveSnapshot>, MobileError> {
         let changed = |id: LayerId, rgba: Vec<u8>| {
             let hash = pixels_hash(&rgba);
             let there = known.get(&id) == Some(&hash) && layer_path(dir, id).exists();
@@ -346,8 +403,6 @@ impl crate::State {
         };
         let mut layers = Vec::new();
         let mut reading = Vec::new();
-        let mut left = Vec::new();
-        let mut versions = Vec::new();
         let mut files = Vec::new();
         let mut composite = None;
         let mut unshown = None;
@@ -360,10 +415,26 @@ impl crate::State {
         }
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.render(gpu, &mut self.doc, None);
+            let (w, h) = (self.doc.width(), self.doc.height());
+            // bounded: what is left to read must come back after the hold, a lot of it at most
+            if bounded {
+                let changed = canvas.changed();
+                let read = |id: LayerId| ahead.as_deref().is_some_and(|a| a.has(id, canvas.layer_version(id)));
+                let unread = self
+                    .doc
+                    .pixel_layer_ids()
+                    .filter(|&id| {
+                        let wanted = changed.contains(&id) || !known.contains_key(&id) || !layer_path(dir, id).exists();
+                        let left_as_it_is = self.unreadable.contains(&id) && !changed.contains(&id);
+                        wanted && !left_as_it_is && !read(id)
+                    })
+                    .count();
+                if unread > 1 && unread.saturating_mul(layer_read_bytes(w, h)) > read_after_lock() {
+                    return Ok(None);
+                }
+            }
             let changed_now = canvas.take_changed();
             changed_ids = changed_now.iter().copied().collect();
-            versions = self.doc.pixel_layer_ids().map(|id| (id, canvas.layer_version(id))).collect();
-            let (w, h) = (self.doc.width(), self.doc.height());
             let mut read_all = || -> Result<(), MobileError> {
                 // the layers with pixels (a group has none of its own)
                 for id in self.doc.pixel_layer_ids() {
@@ -383,14 +454,16 @@ impl crate::State {
                         }
                         self.unreadable.remove(&id);
                     }
-                    let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
-                    // past what may be on its way back at once: left for a hold of its own
-                    if later && !reading.is_empty() && after + layer_read_bytes(w, h) > read_after_lock() {
-                        left.push(id);
+                    // read ahead as it is now: taken as read (its pixels' version hasn't moved)
+                    if let Some((hash, rgba)) = ahead.as_deref_mut().and_then(|a| a.take(id, canvas.layer_version(id)))
+                    {
+                        layers.extend(rgba.map(|rgba| (id, hash, rgba)));
                         continue;
                     }
+                    let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
                     let read = canvas.start_reading_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
-                    if after + read.bytes() <= read_after_lock() || later {
+                    // (bounded, what is left was found to be little: all of it comes back after)
+                    if after + read.bytes() <= read_after_lock() || bounded {
                         reading.push((id, read));
                     } else {
                         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
@@ -487,13 +560,11 @@ impl crate::State {
             .filter(|l| !self.layer_data_unread.contains(&l.id))
             .filter_map(|l| Some((l.id, l.plugin.as_ref()?.data.clone().unwrap_or_default())))
             .collect();
-        Ok(SaveSnapshot {
+        Ok(Some(SaveSnapshot {
             changed: changed_ids,
             file,
             layers,
             reading,
-            later: left,
-            versions,
             files,
             composite,
             unshown,
@@ -506,7 +577,7 @@ impl crate::State {
             stores,
             stores_kept,
             store_files,
-        })
+        }))
     }
 }
 
@@ -587,7 +658,8 @@ impl CanvasSession {
                 if lost() {
                     return;
                 }
-                if !session.shared.lock().idle() {
+                // (strokes, which come and go, the save waits for itself, reading ahead meanwhile)
+                if !session.shared.lock().settled() {
                     wait = again;
                     unsaved = Some(unsaved.map_or(again, |w| (w * 2).min(AUTOSAVE_LONGEST)));
                     continue;
@@ -627,84 +699,130 @@ impl CanvasSession {
         }
     }
 
-    /// [`CanvasSession::save_if_idle`] with what the last saves wrote (its lock held).
+    /// [`CanvasSession::save_if_idle`] with what the last saves wrote (its lock held). The saving
+    /// goes on beside the painting, the canvas held only a moment at a time: the layers that
+    /// changed are read ahead (see [`LayersAhead`]) a lot at a time, each lot's copies started in
+    /// a short hold and waited for once it is let go, strokes going on meanwhile; then, at a
+    /// moment with nothing under way, the snapshot takes the document and those read as they
+    /// still are, and starts back the few that changed since. Nothing is waited for under a hold,
+    /// however many layers changed. False if no such moment came within [`SNAPSHOT_WAIT`] (looked
+    /// for again later).
     fn save_if_idle_with(&self, saved: &mut Saved, dir: &str) -> Result<bool, MobileError> {
-        // the layers past what may come back at once read in holds of their own, so a large
-        // canvas's app isn't held for seconds; unless the last few gave way
-        let later = saved.gave_way < SAVES_GIVING_WAY;
-        let known = saved.known(Path::new(dir));
-        let (mut snapshot, edits) = {
-            let mut guard = self.shared.lock_finished();
-            let st = &mut *guard;
-            if !st.idle() {
+        let dir = Path::new(dir);
+        let known = saved.known(dir);
+        let mut ahead = LayersAhead::default();
+        // read ahead first, and again only when the snapshot finds more left than it may start
+        let mut read = true;
+        let mut until = std::time::Instant::now();
+        loop {
+            // a model's layers are its colour's only while the snapshot is taken: read in its hold
+            let flat = self.shared.lock().scene.is_none();
+            if read {
+                if flat {
+                    self.read_layers_ahead(&mut ahead, dir, &known)?;
+                }
+                read = false;
+                until = std::time::Instant::now() + SNAPSHOT_WAIT;
+            }
+            // a moment with nothing under way, and nothing the frames lay a share at a time (which
+            // the snapshot's render would lay at once, the frames and touches waiting on it)
+            if self.shared.quiet() {
+                let mut guard = self.shared.lock_finished();
+                let st = &mut *guard;
+                if st.idle() {
+                    // a model saves its colour as the artwork's document
+                    let ahead = (flat && st.scene.is_none()).then_some(&mut ahead);
+                    let bounded = ahead.is_some();
+                    match st.with_colour(|st| st.save_snapshot(dir, &known, ahead, bounded))? {
+                        Some(snapshot) => {
+                            let edits = st.edits();
+                            drop(guard);
+                            write_or_keep_changed(self, saved, dir, snapshot)?;
+                            self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
+                            return Ok(true);
+                        }
+                        // more changed since the look ahead than may come back after the hold
+                        None => read = true,
+                    }
+                }
+            }
+            if !read && std::time::Instant::now() >= until {
                 return Ok(false);
             }
-            // (a model's layers are its colour's only while the snapshot is taken)
-            let later = later && st.scene.is_none();
-            // a model saves its colour as the artwork's document
-            (st.with_colour(|st| st.save_snapshot(Path::new(dir), &known, later))?, st.edits())
-        };
-        match self.read_later(&mut snapshot, edits, Path::new(dir), &known) {
-            Ok(true) => saved.gave_way = 0,
-            given_way => {
-                // the layers it had as changed are so again, for the next
-                if let Some(canvas) = self.shared.lock().canvas.as_mut() {
-                    canvas.mark_changed(snapshot.changed);
-                }
-                saved.gave_way = saved.gave_way.saturating_add(1);
-                return given_way;
-            }
+            std::thread::sleep(SNAPSHOT_LOOK);
         }
-        write_or_keep_changed(self, saved, Path::new(dir), snapshot)?;
-        self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
-        Ok(true)
     }
 
-    /// Reads the layers `snapshot` left to read (see [`SaveSnapshot::later`]), as much at a time
-    /// as may be on its way back from the GPU, each lot started in a hold of its own: those
-    /// already on their way waited for first, and those unchanged since the last save into `dir`
-    /// (`known`) let go. False, and nothing more read, once anything changed meanwhile (the
-    /// artwork's `edits`, a layer's pixels, something under way): the save is then made again.
-    pub(crate) fn read_later(
+    /// Reads ahead, outside the snapshot's hold (see [`LayersAhead`]), what a save into `dir` would
+    /// read: the layers changed, or not in the folder as they are (`known` its layers' hashes),
+    /// that weren't read already as they are now; as much at a time as may be on its way back
+    /// from the GPU at once, the buffers made first, each lot's copies started in a short hold
+    /// and waited for once it is let go. Painting may go on meanwhile: a layer it changes after
+    /// it was read is read again by the snapshot (or by the next look ahead).
+    pub(crate) fn read_layers_ahead(
         &self,
-        snapshot: &mut SaveSnapshot,
-        edits: u64,
+        ahead: &mut LayersAhead,
         dir: &Path,
         known: &std::collections::HashMap<LayerId, u64>,
-    ) -> Result<bool, MobileError> {
-        while !snapshot.later.is_empty() {
-            for (id, read) in std::mem::take(&mut snapshot.reading) {
+    ) -> Result<(), MobileError> {
+        // which layer files there are, looked at once outside the holds
+        let there: std::collections::HashSet<LayerId> =
+            known.keys().copied().filter(|&id| layer_path(dir, id).exists()).collect();
+        // what to read, as the canvas is now
+        let (gpu, bytes, ids) = {
+            let st = self.shared.lock();
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_ref(), st.gpu.as_ref()) else { return Ok(()) };
+            let changed = canvas.changed();
+            let ids: Vec<LayerId> = st
+                .doc
+                .pixel_layer_ids()
+                .filter(|&id| changed.contains(&id) || !there.contains(&id))
+                // (one whose file couldn't be read is the snapshot's to see to)
+                .filter(|id| !st.unreadable.contains(id))
+                .filter(|&id| !ahead.has(id, canvas.layer_version(id)))
+                .collect();
+            (gpu.clone(), layer_read_bytes(st.doc.width(), st.doc.height()), ids)
+        };
+        let per_lot = (read_after_lock() / bytes.max(1)).max(1);
+        for lot in ids.chunks(per_lot) {
+            // the buffers the lot is copied into made before its hold
+            gpu.keep_readbacks(bytes as u64, lot.len());
+            let reads = {
+                let st = self.shared.lock();
+                let Some(canvas) = st.canvas.as_ref() else { return Ok(()) };
+                let mut reads = Vec::new();
+                for &id in lot {
+                    let version = canvas.layer_version(id);
+                    if st.doc.layer(id).is_none() || ahead.has(id, version) {
+                        continue;
+                    }
+                    // (one the canvas hasn't made yet, added since its last render, is the snapshot's
+                    // to read, after its render)
+                    let Ok(read) = canvas.start_reading_layer(&gpu, id) else { continue };
+                    reads.push((id, version, read));
+                }
+                reads
+            };
+            for (id, version, read) in reads {
                 let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
                 let hash = pixels_hash(&rgba);
-                if known.get(&id) != Some(&hash) || !layer_path(dir, id).exists() {
-                    snapshot.layers.push((id, hash, rgba));
-                }
+                let as_there = known.get(&id) == Some(&hash) && there.contains(&id);
+                ahead.layers.insert(id, ReadLayer { version, hash, rgba: (!as_there).then_some(rgba) });
             }
-            let mut guard = self.shared.lock_finished();
-            let st = &mut *guard;
-            // whatever was queued laid first, so it shows in the versions
-            if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-                canvas.render(gpu, &mut st.doc, None);
-            }
-            let still = st.idle() && st.edits() == edits;
-            let (w, h) = (st.doc.width(), st.doc.height());
-            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Ok(false) };
-            if !still || snapshot.versions.iter().any(|&(id, version)| canvas.layer_version(id) != version) {
-                return Ok(false);
-            }
-            let mut after = 0;
-            while let Some(&id) = snapshot.later.first() {
-                if after > 0 && after + layer_read_bytes(w, h) > read_after_lock() {
-                    break;
-                }
-                let read = canvas.start_reading_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
-                after += read.bytes();
-                snapshot.reading.push((id, read));
-                snapshot.later.remove(0);
-            }
+            #[cfg(test)]
+            std::thread::sleep(std::time::Duration::from_millis(TESTS_READ_AHEAD_PAUSE.get()));
         }
-        Ok(true)
+        // a buffer for the snapshot's read of the layer painted on meanwhile, likewise
+        gpu.keep_readbacks(bytes as u64, 1);
+        Ok(())
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// The tests' pause after each lot read ahead on this thread (ms), so painting goes on
+    /// between lots.
+    pub(crate) static TESTS_READ_AHEAD_PAUSE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The bytes a layer of a `width` x `height` canvas takes on its way back from the GPU (its rows
@@ -1110,16 +1228,35 @@ impl CanvasSession {
     /// app going into the background) stays open: its layers are saved as they show, and again
     /// once it ends.
     pub fn save(&self, dir: String) -> Result<(), MobileError> {
+        // a time-lapse frame asked for and not taken yet (the frames stopped), and those on their
+        // way to the disk, kept first: the app may make a video of them next
+        self.keep_time_lapse();
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-        let (snapshot, edits) = {
+        let dir = Path::new(&dir);
+        let known = saved.known(dir);
+        // the layers that changed read ahead first, the canvas held only a moment at a time (as
+        // the autosave reads them); after a few rounds, whatever is still left is read in the
+        // snapshot's hold
+        let mut ahead = LayersAhead::default();
+        let mut round = 0;
+        let (snapshot, edits) = loop {
+            // (a model's layers are its colour's only while the snapshot is taken: read in its hold)
+            let flat = self.shared.lock().scene.is_none();
+            if flat {
+                self.read_layers_ahead(&mut ahead, dir, &known)?;
+            }
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
+            let ahead = (flat && st.scene.is_none()).then_some(&mut ahead);
+            let bounded = ahead.is_some() && round < SAVE_READS_AHEAD;
             // a model saves its colour as the artwork's document
-            let known = saved.known(Path::new(&dir));
-            (st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known, false))?, st.edits())
+            if let Some(snapshot) = st.with_colour(|st| st.save_snapshot(dir, &known, ahead, bounded))? {
+                break (snapshot, st.edits());
+            }
+            round += 1;
         };
-        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot)?;
+        write_or_keep_changed(self, &mut saved, dir, snapshot)?;
         self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
         // saves work again: the autosave's next failure is told
         self.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner()).1 = false;

@@ -4503,14 +4503,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val s = session ?: return
         frameJob = viewModelScope.launch {
+            var asked = false
             do {
                 frameStale = false
                 // read back at the size frames are kept, private layers left out, and kept by the
-                // core without the picture coming here: a frame after each stroke (one the core
-                // fails to read is left out, and goes in the log)
+                // core without the picture coming here: a frame after each stroke, taken by the
+                // frame that lays it and kept off this thread (one the core fails to read is left
+                // out, and goes in the log)
                 withContext(Dispatchers.Default) {
                     try {
-                        t.recordFrom(s)
+                        if (t.recordFrom(s)) asked = true
                     } catch (fault: io.github.artcraftandroid.procraft.core.InternalException) {
                         AppLog.e("timelapse", "a time-lapse frame failed in the core", fault)
                     }
@@ -4518,7 +4520,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 // one that couldn't be kept (the storage full) is told once
                 t.takeProblem()?.let { message = it }
             } while (frameStale)
-            timeLapseRecorded = t.count > 0
+            // (a frame asked for is kept a moment later)
+            timeLapseRecorded = asked || t.count > 0
         }
     }
 

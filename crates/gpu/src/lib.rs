@@ -548,6 +548,26 @@ impl Gpu {
         })
     }
 
+    /// Makes sure `count` readback buffers of `size` bytes or more are kept (see
+    /// [`Gpu::readback_buffer`]), making those missing now: a reader about to start that many
+    /// copies in a hold of whatever guards what it reads makes them before it, so the memory is
+    /// got (and cleared by the system, a large buffer's slowest part) with nothing waiting on it.
+    pub fn keep_readbacks(&self, size: u64, count: usize) {
+        let have = {
+            let kept = self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            kept.iter().filter(|b| b.size() >= size).count()
+        };
+        for _ in have..count {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(buffer);
+        }
+    }
+
     /// Lets go of the readback buffers kept for next time (see [`Gpu::readback_buffer`]).
     pub fn let_go_of_kept_buffers(&self) {
         self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();

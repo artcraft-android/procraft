@@ -236,6 +236,10 @@ impl State {
             }
         }
         self.heed_filter_run();
+        // a time-lapse frame asked for: taken once this frame has laid what it waited for (a model
+        // or the pad as a sphere lays the canvas only as a read does: taken at once)
+        let at_once = self.scene_shown() || self.sphere.is_some();
+        self.take_lapse_picture(at_once);
     }
 }
 
