@@ -3357,6 +3357,54 @@ fn a_wet_dual_brush_s_second_shows_more_of_its_wash_never_plain_paint() {
     }
 }
 
+/// A dry first laid in place, raised by its second well past what it laid at its soft rim, shows its
+/// own plain colour there whatever the layer under it: over stripes of red and blue a column wide
+/// (where an average of what the paint changed, near and far, would bring the stripes in).
+#[test]
+fn a_dual_brush_s_dry_paint_raised_past_what_it_laid_is_its_own_colour_over_any_layer() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(48, 48);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    for (x, colour) in (0..48).map(|x| (x, if x % 2 == 0 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] })) {
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, colour, 1.0));
+        canvas.add_stamps(&(0..48).map(|y| dot(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), 0.5)).collect::<Vec<_>>());
+        canvas.end_stroke();
+    }
+    canvas.render(&gpu, &mut doc, None);
+    let first = StrokeStyle {
+        rendering: Rendering::Gradual,
+        laid_in_place: true,
+        hardness: 0.1,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 1.0, 0.0], 1.0)
+    };
+    // Lighten by a full second: the first shows whole wherever it laid enough to be raised whole
+    let second = procraft_gpu::SecondStroke {
+        style: StrokeStyle::new(StrokeTool::Paint, [0.0, 1.0, 0.0], 1.0),
+        mode: 6,
+        threshold: -1.0,
+        classic: false,
+    };
+    canvas.begin_dual_stroke(doc.current(), first, second);
+    canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 24.0), 40.0, 1.0)]);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(24.0, 24.0), 12.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // the rim 9.5 to 10.5 out, where the soft first laid about a tenth (raised tenfold)
+    let mut worst = [0u8, 255, 0];
+    for y in 0..48u32 {
+        for x in 0..48u32 {
+            let d = (x as f32 + 0.5 - 24.0).hypot(y as f32 + 0.5 - 24.0);
+            if (9.5..=10.5).contains(&d) {
+                let [r, g, b, _] = pixel(&layer, 48, x, y);
+                worst = [worst[0].max(r), worst[1].min(g), worst[2].max(b)];
+            }
+        }
+    }
+    assert!(worst[0] <= 6 && worst[1] >= 249 && worst[2] <= 6, "the rim strayed from green to {worst:?}");
+}
+
 /// A dual brush's second shows past its first's stamps as the stroke is drawn, and stays there as
 /// it is kept: ended with only the rest, or laid whole again (its first changed at the end), paint
 /// built up in the stroke or laid in place wet. Where only the second reaches, what is kept is what
