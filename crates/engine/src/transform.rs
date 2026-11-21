@@ -86,6 +86,10 @@ pub struct Guides {
 /// Smallest scale a handle can bring the box to.
 const MIN_SCALE: f32 = 0.01;
 
+/// How much one pinch can scale what the box holds, from where the fingers took it: down to
+/// 1/1024 and up to 1024 times.
+const PINCH_SCALE: (f32, f32) = (1.0 / 1024.0, 1024.0);
+
 /// The step magnetics keeps directions and turns to.
 const MAGNETIC_STEP: f32 = std::f32::consts::PI / 12.0;
 
@@ -196,14 +200,33 @@ impl Transform {
             return false;
         }
         let (middle_was, middle) = (from[0].lerp(from[1], 0.5), to[0].lerp(to[1], 0.5));
+        let spread = now.length() / was.length();
+        let scale = if spread.is_nan() { PINCH_SCALE.0 } else { spread.clamp(PINCH_SCALE.0, PINCH_SCALE.1) };
         let m = Affine::translate(Vec2::ZERO - middle_was)
-            .then(Affine::scale((now.length() / was.length()).max(MIN_SCALE)))
+            .then(Affine::scale(scale))
             .then(Affine::rotate(angle(now) - angle(was)))
             .then(Affine::translate(middle));
         let next = map_placement(&start, m);
+        // pinched again and again, the content could go past what can be drawn (to a point, or out
+        // past any number): it stays where the last step that could be drawn left it
+        if !self.drawable(&next) {
+            return false;
+        }
         let moved = next != self.now;
         self.now = next;
         moved
+    }
+
+    /// Whether content placed as in `p` can be drawn: every point a number, the box's sides too,
+    /// and its pixels found again from where they go (the map from the source to its place
+    /// undoes).
+    fn drawable(&self, p: &Placement) -> bool {
+        let finite = p.content.iter().chain(&p.frame).chain(p.warp.iter().flatten()).all(|v| v.is_finite());
+        let [a, b, _, d] = p.frame;
+        finite
+            && a.distance(b).is_finite()
+            && a.distance(d).is_finite()
+            && Homography::quad_to_quad(p.content, self.source).is_some()
     }
 
     /// The lines (x across, y down, canvas pixels) the box held in a move has snapped onto: shown
@@ -841,6 +864,52 @@ mod tests {
         let [tl, tr, ..] = t.frame();
         assert!(tr.x > tl.x);
         t.cancel_drag();
+        assert!(quad_close(t.frame(), rect(100.0, 100.0, 100.0, 200.0)));
+    }
+
+    /// The width of the box, and whether what it holds can be drawn where it is.
+    fn width_drawable(t: &Transform) -> (f32, bool) {
+        let content = t.content();
+        let drawable = content.iter().chain(&t.frame()).all(|p| p.is_finite())
+            && Homography::quad_to_quad(content, t.source()).is_some();
+        (t.size().0, drawable)
+    }
+
+    #[test]
+    fn one_pinch_scales_1024_times_at_most_and_pinches_again_and_again_leave_it_drawable() {
+        let mut t = box_100x200();
+        let (a, b) = (Vec2::new(150.0, 200.0), Vec2::new(250.0, 200.0));
+        // fingers 100 apart brought to a hair: a 1024th of the size, no less
+        t.grab(Handle::Move, a);
+        assert!(t.pinch([a, b], [Vec2::new(199.9994, 200.0), Vec2::new(200.0006, 200.0)]));
+        t.release();
+        assert!((t.size().0 - 100.0 / 1024.0).abs() < 1e-4, "{:?}", t.size());
+        // a hair apart spread wide: 1024 times, no more
+        let mut wide = box_100x200();
+        wide.grab(Handle::Move, a);
+        assert!(wide.pinch([Vec2::new(199.9994, 200.0), Vec2::new(200.0006, 200.0)], [a, b]));
+        assert!((wide.size().0 - 100.0 * 1024.0).abs() < 1.0, "{:?}", wide.size());
+        // pinched in quickly again and again, about wherever the fingers are: it gets as small as
+        // can still be drawn, and stays drawable
+        for k in 0..40 {
+            let (a, b) = (Vec2::new(100.0 + k as f32, 300.0), Vec2::new(300.0 + k as f32, 300.0));
+            t.grab(Handle::Move, a);
+            t.pinch([a, b], [Vec2::new(199.9994, 300.0), Vec2::new(200.0006, 300.0)]);
+            t.release();
+            let (width, drawable) = width_drawable(&t);
+            assert!(drawable && width > 0.0, "pinch {k}: {:?}", t.frame());
+        }
+        // and spread out again and again, it stays a number
+        for k in 0..40 {
+            let (a, b) = (Vec2::new(199.9994, 300.0), Vec2::new(200.0006, 300.0));
+            wide.grab(Handle::Move, a);
+            wide.pinch([a, b], [Vec2::new(100.0 - k as f32, 300.0), Vec2::new(300.0 + k as f32, 300.0)]);
+            wide.release();
+            let (width, drawable) = width_drawable(&wide);
+            assert!(drawable && width.is_finite(), "pinch {k}: {:?}", wide.frame());
+        }
+        // every step back undoes, to where it started
+        while t.undo() {}
         assert!(quad_close(t.frame(), rect(100.0, 100.0, 100.0, 200.0)));
     }
 

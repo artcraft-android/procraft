@@ -4812,6 +4812,62 @@ fn a_layer_s_mask_moves_with_it_in_a_transform() {
     assert_eq!(pixel(&s, 30, 30), [255, 255, 255, 255]);
 }
 
+/// Two fingers on a transform's box pinched in again and again, each pinch as fast as a hand
+/// makes one (the fingers ending a hair apart), on a group, on a layer in one, and on a layer:
+/// the box never goes to nothing, every step draws, and the transform ends kept or put back.
+#[test]
+fn pinching_a_transform_to_nothing_and_ending_it_never_breaks() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let lower = s.layers().into_iter().find(|l| l.current).unwrap().id;
+    let upper = s.add_layer();
+    s.stroke_begin(PointerKind::Finger, vec![sample(140.0, 140.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.pick_layer(lower));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    let finite = |b: &crate::TransformBox| {
+        b.corners.iter().chain(&b.mesh).chain([&b.width, &b.height, &b.angle]).all(|v| v.is_finite())
+    };
+    for (target, commit) in [(group, true), (group, false), (upper, true), (lower, false)] {
+        assert!(s.select_layer(target));
+        let b = s.transform_begin().unwrap_or_else(|| panic!("{target}"));
+        assert!(finite(&b));
+        for round in 0..12 {
+            // a pinch about the box's middle, the fingers from 80 apart to a hair
+            let [x0, y0, _, _, x2, y2, ..] = s.shared.lock().transform_box().unwrap().corners[..] else { panic!() };
+            let (cx, cy) = ((x0 + x2) / 2.0, (y0 + y2) / 2.0);
+            s.transform_pinch_grab((cx - 40.0, cy));
+            for (i, half) in [30.0, 10.0, 1.0, 0.01, 0.0005].into_iter().enumerate() {
+                let b = s.transform_pinch([(cx - 40.0, cy), (cx + 40.0, cy)], [(cx - half, cy), (cx + half, cy)]);
+                let b = b.unwrap_or_else(|| panic!("round {round}, step {i}"));
+                assert!(finite(&b), "round {round}, step {i}: {b:?}");
+                pixel(&s, 0, 0);
+            }
+            let b = s.transform_release().unwrap();
+            assert!(finite(&b), "round {round}: {b:?}");
+            // the box keeps some size, however far it is pinched
+            assert!(b.width > 0.0 && b.height > 0.0, "round {round}: {b:?}");
+            pixel(&s, 0, 0);
+        }
+        s.transform_end(commit);
+        pixel(&s, 0, 0);
+        // kept: undone, redone and undone, the layers as they were for the next
+        if commit {
+            for redo in [false, true, false] {
+                if redo {
+                    s.redo()
+                } else {
+                    s.undo()
+                };
+                pixel(&s, 0, 0);
+            }
+        }
+    }
+}
+
 #[test]
 fn a_transform_moves_the_layer_as_one_undo_step() {
     use crate::transform::{Interpolation, TransformAction, TransformHandle, TransformKind};
