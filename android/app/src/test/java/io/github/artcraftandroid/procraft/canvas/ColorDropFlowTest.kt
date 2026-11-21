@@ -18,6 +18,9 @@ class ColorDropFlowTest {
     ) : DropPours {
         val calls: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
+        /** The thread each touch's fill was made on. */
+        val threads: MutableList<Thread> = java.util.Collections.synchronizedList(mutableListOf())
+
         override fun drop(at: Offset, colour: Int, threshold: Float): DropPours.Dropped {
             calls += "drop ${at.x.toInt()},${at.y.toInt()}"
             Thread.sleep(dropMs)
@@ -26,6 +29,7 @@ class ColorDropFlowTest {
 
         override fun pour(at: Offset, r: Float, g: Float, b: Float, threshold: Float): Boolean {
             calls += "pour ${at.x.toInt()},${at.y.toInt()}"
+            threads += Thread.currentThread()
             Thread.sleep(dropMs)
             return outcome == DropPours.Dropped.POURED
         }
@@ -191,18 +195,48 @@ class ColorDropFlowTest {
      * Continue filling's touches, as the app did them on the main thread (each touch's whole-layer
      * fill waited for there) and now (handed to the fill's thread): a touch, its threshold slid and
      * let go, then a second touch let go at once, a third taken back by a second finger, and an undo.
-     * Printed: the main thread's longest wait before and now. Bound: under 8 ms, the screen never held
-     * (a touch may come meanwhile), the fills and the undo in order.
+     * Printed: the main thread's longest wait before and now. Bound: no fill made on the main thread,
+     * the longest wait under 8 ms in the quickest of three runs after a warm-up (a machine busy
+     * with other work may stall any one run; a main thread waiting on a fill waits its 150 ms in
+     * every run), the screen never held (a touch may come meanwhile), the fills and the undo in
+     * order.
      */
     @Test
     fun continueFillingsTouchesFillOnTheFillsThreadAndTheScreenGoesOn() {
+        val testThread = Thread.currentThread()
         val pours = Pours()
         // as before: the main thread poured and ended each touch's fill itself
         val before = held {
             pours.pour(Offset(40f, 40f), 1f, 0f, 0f, 0.5f)
             pours.end(true)
         }
-        pours.calls.clear()
+        // the code run once first (classes loaded, the fill's thread started), as an app that has run
+        continueFilling(Pours(dropMs = 0, slideMs = 0))
+        val runs = List(3) {
+            val run = Pours()
+            val (longest, busy) = continueFilling(run)
+            assertTrue("the screen was held: $busy", busy.isEmpty())
+            assertEquals(
+                listOf("pour 40,40", "end true", "pour 300,40", "end true", "pour 600,40", "end false", "undo"),
+                run.calls.toList(),
+            )
+            assertTrue("a fill was made on the main thread", run.threads.none { it == testThread })
+            longest
+        }
+        val quickest = runs.min()
+        println(
+            "Continue filling's three touches (each a ${pours.dropMs} ms fill) and an undo: the main thread waited up to %.1f ms before, now %s ms (quickest %.2f)"
+                .format(java.util.Locale.ROOT, before, runs.joinToString { "%.2f".format(java.util.Locale.ROOT, it) }, quickest),
+        )
+        assertTrue("the main thread waited $quickest ms in the quickest run", quickest < 8.0)
+        assertTrue(before >= pours.dropMs.toDouble())
+    }
+
+    /**
+     * Continue filling's three touches and an undo through a new flow on [pours]: the main thread's
+     * longest wait (milliseconds), and whether the screen was held each time it was asked.
+     */
+    private fun continueFilling(pours: Pours): Pair<Double, List<Boolean>> {
         val drops = flow(pours)
         val busy = mutableListOf<Boolean>()
         drops.onBusy = { busy += it }
@@ -214,7 +248,7 @@ class ColorDropFlowTest {
         waits += held { drops.tap(Offset(600f, 40f), 0f, 0f, 1f, 0.6f) }
         waits += held { drops.tapEnd(false) }
         var undone = false
-        assertTrue(drops.pending > 0)
+        assertTrue(drops.pending > 0 || pours.dropMs == 0L)
         waits += held {
             drops.afterFills {
                 pours.calls += "undo"
@@ -223,15 +257,8 @@ class ColorDropFlowTest {
         }
         val until = System.nanoTime() + 5_000_000_000L
         while (!(undone && drops.pending == 0) && System.nanoTime() < until) main.poll(5, TimeUnit.MILLISECONDS)?.let { waits += held(it) }
-        val longest = waits.max()
-        println("Continue filling's three touches (each a ${pours.dropMs} ms fill) and an undo: the main thread waited up to %.1f ms before, %.2f ms now".format(java.util.Locale.ROOT, before, longest))
-        assertTrue("the main thread waited $longest ms", longest < 8.0)
-        assertTrue(before >= pours.dropMs.toDouble())
-        assertTrue("the screen was held: $busy", busy.isEmpty())
-        assertEquals(
-            listOf("pour 40,40", "end true", "pour 300,40", "end true", "pour 600,40", "end false", "undo"),
-            pours.calls.toList(),
-        )
+        assertTrue("the fills didn't come back", undone && drops.pending == 0)
+        return waits.max() to busy
     }
 
     @Test
