@@ -4163,6 +4163,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    const LASSO_FILL: &str = "io.github.artcraftandroid.lasso-fill";
+
+    #[test]
+    fn lasso_fill_fills_every_stroke_while_its_switch_is_on_and_a_brush_s_own_by_its_row() {
+        // the brush in use, every one of its rows at `row` (0 Off, 1 Fill what it encloses)
+        let brush = |row: f32| {
+            move |keys: &[String]| crate::stroke_sound::SoundBrush {
+                name: "Studio pen".to_owned(),
+                set: "Inking".to_owned(),
+                controls: keys.iter().map(|_| row).collect(),
+                key: u64::from(row.to_bits()),
+            }
+        };
+        let dir = store("bundled-lasso-fill");
+        let plugins = app_at(&dir);
+        let hooks = plugins.hooks();
+        // as it comes, off: no stroke fills, whatever the brush says
+        assert!(!card(&plugins, LASSO_FILL).on);
+        assert_eq!(hooks.stroke_fill(0, 1, brush(1.0)), 0);
+        assert!(!hooks.listens(crate::plugin_run::Hook::StrokeFill));
+        assert!(plugins.set_on(LASSO_FILL.to_owned(), true));
+        // on, its switch off and the brush's row Off: strokes paint as they did
+        let row: Vec<(String, usize)> =
+            card(&plugins, LASSO_FILL).brush_controls.iter().map(|c| (c.label.clone(), c.choices.len())).collect();
+        assert_eq!(row, [("Fill".to_owned(), 2)]);
+        assert_eq!(hooks.stroke_fill(0, 1, brush(0.0)), 0);
+        // a brush whose Fill row says: its strokes fill, shown as they grow; the eraser's only with
+        // Eraser too
+        assert_eq!(hooks.stroke_fill(0, 1, brush(1.0)), 1);
+        assert_eq!(hooks.stroke_fill(1, 1, brush(1.0)), 0);
+        assert!(plugins.set_switch(format!("{LASSO_FILL}.eraser"), true));
+        assert_eq!(hooks.stroke_fill(1, 2, brush(1.0)), 1);
+        // every stroke while Lasso fill is on, a finger's too; with Show the fill while drawing
+        // off, shown as a plain stroke and filled as it ends
+        assert!(plugins.set_switch(format!("{LASSO_FILL}.every"), true));
+        assert!(plugins.set_switch(format!("{LASSO_FILL}.growing"), false));
+        assert_eq!((hooks.stroke_fill(0, 0, brush(0.0)), hooks.stroke_fill(1, 0, brush(0.0))), (2, 2));
+        // asked once a stroke: quick, even unoptimised
+        let t = std::time::Instant::now();
+        for i in 0..1000 {
+            std::hint::black_box(hooks.stroke_fill(i % 2, 1, brush((i % 2) as f32)));
+        }
+        let each = t.elapsed() / 1000;
+        println!("a stroke asked whether it fills in {each:?}");
+        assert!(each < std::time::Duration::from_micros(500), "{each:?}");
+        // off again: as it came
+        assert!(plugins.set_on(LASSO_FILL.to_owned(), false));
+        assert_eq!(hooks.stroke_fill(0, 1, brush(1.0)), 0);
+        assert!(!hooks.listens(crate::plugin_run::Hook::StrokeFill));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn with_nowhere_to_keep_them_nothing_is_added() {
         let plugins = Plugins::new();

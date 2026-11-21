@@ -101,6 +101,11 @@
 //!   `brush_preview_colour` (interface 10), the colour (0xRRGGBB) the brush library draws a brush's
 //!   sample stroke in, told the current colour (0xRRGGBB) and whether the brush is the one in use
 //!   (1, its row on the accent); -1 to leave it as the app draws it.
+//! - `procraft_stroke_fill(tool: i32, pointer: i32) -> i32`: for the hook `stroke_fill`
+//!   (interface 12), asked as each stroke begins, after it is told the brush and its rows: whether
+//!   the stroke fills the region its path encloses (1, shown filling as it is drawn; 2, shown as a
+//!   plain stroke and filled as it ends) or paints as usual (0). `tool` 0 paint, 1 erase; `pointer`
+//!   as the `pressure` hook's.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -283,6 +288,7 @@ const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const LAYER_LABEL: &str = "procraft_layer_label";
 const SURROUND_PICTURE: &str = "procraft_surround_picture";
 const SLIDER_LOOK: &str = "procraft_slider_look";
+const STROKE_FILL: &str = "procraft_stroke_fill";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -447,6 +453,8 @@ pub(crate) enum Hook {
     SurroundPicture,
     /// How the side bar's slider tracks look (interface 11).
     SliderLook,
+    /// Whether a stroke fills the region its path encloses (interface 12).
+    StrokeFill,
 }
 
 impl Hook {
@@ -486,6 +494,7 @@ impl Hook {
             "layer_label" => Some(Hook::LayerLabel),
             "surround_picture" => Some(Hook::SurroundPicture),
             "slider_look" => Some(Hook::SliderLook),
+            "stroke_fill" => Some(Hook::StrokeFill),
             _ => None,
         }
     }
@@ -529,6 +538,7 @@ impl Hook {
             Hook::LayerLabel => "This plugin can show a colour on the rows of layers it has marked.",
             Hook::SurroundPicture => "This plugin can show a picture you pick round the canvas.",
             Hook::SliderLook => "This plugin can change how the side bar's sliders look.",
+            Hook::StrokeFill => "This plugin can make your strokes fill what they go round.",
         }
     }
 
@@ -571,6 +581,7 @@ impl Hook {
             Hook::LayerLabel => exports(module, LAYER_LABEL, &[ValType::I64], &[ValType::I32]),
             Hook::SurroundPicture => exports(module, SURROUND_PICTURE, &[], &[ValType::I32]),
             Hook::SliderLook => exports(module, SLIDER_LOOK, &[ValType::I32], &[ValType::F32]),
+            Hook::StrokeFill => exports(module, STROKE_FILL, &[ValType::I32, ValType::I32], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -1063,6 +1074,7 @@ pub(crate) struct Running {
     layer_label: Option<TypedFunc<i64, i32>>,
     surround_picture: Option<TypedFunc<(), i32>>,
     slider_look: Option<TypedFunc<i32, f32>>,
+    stroke_fill: Option<TypedFunc<(i32, i32), i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1221,6 +1233,7 @@ impl Running {
             let layer_label = instance.get_typed_func(&store, LAYER_LABEL).ok();
             let surround_picture = instance.get_typed_func(&store, SURROUND_PICTURE).ok();
             let slider_look = instance.get_typed_func(&store, SLIDER_LOOK).ok();
+            let stroke_fill = instance.get_typed_func(&store, STROKE_FILL).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1332,6 +1345,7 @@ impl Running {
                 layer_label,
                 surround_picture,
                 slider_look,
+                stroke_fill,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2487,6 +2501,32 @@ impl Running {
             _ if said < 0.0 => Ok(None),
             _ => Ok(Some(said)),
         }
+    }
+
+    /// Whether it says a stroke beginning with `tool` (0 paint, 1 erase) by `pointer` (numbered as
+    /// for the pressure hook) fills what it encloses: 0 no, 1 shown filling as it is drawn, 2 shown
+    /// plainly and filled as it ends. Told `brush` first, when that changed. An answer past 0..2
+    /// stops it.
+    pub(crate) fn stroke_fill(
+        &mut self,
+        brush: &crate::stroke_sound::SoundBrush,
+        tool: i32,
+        pointer: i32,
+    ) -> Result<u8, Stop> {
+        if self.stroke_fill.is_none() {
+            return Ok(0);
+        }
+        if self.told_brush != Some(brush.key) {
+            self.tell_brush(brush)?;
+            self.told_brush = Some(brush.key);
+        }
+        let Running { store, stroke_fill, .. } = self;
+        let Some(stroke_fill) = stroke_fill else { return Ok(0) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            stroke_fill.call(&mut *store, (tool, pointer)).map_err(|e| stop_of(&e))
+        })?;
+        u8::try_from(said).ok().filter(|said| *said <= 2).ok_or(Stop::Nonsense)
     }
 
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).

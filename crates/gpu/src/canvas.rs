@@ -326,6 +326,20 @@ impl StrokeStyle {
         StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
     }
 
+    /// The style as a stroke that fills what its path encloses (see [`Canvas::fill_stroke`]):
+    /// built up in the stroke texture, dry, never in place; its grain fixed to the canvas (a fill
+    /// has no stamps for a moving one to travel with); no edges of its own, no threshold.
+    pub fn as_fill(self) -> StrokeStyle {
+        StrokeStyle {
+            laid_in_place: false,
+            wet_edges: 0.0,
+            burnt_edges: 0.0,
+            alpha_threshold: -1.0,
+            grain_mode: GrainMode::Texturized,
+            ..self.dry()
+        }
+    }
+
     /// The style without its wet mix: dry, as the brush would be with none set (a preview that
     /// shows it dry).
     pub fn dry(self) -> StrokeStyle {
@@ -2298,6 +2312,13 @@ enum Op {
         layer: LayerId,
         /// Into the adjustment's mask instead of the stroke.
         pencil: bool,
+    },
+    /// The open stroke's paint is cleared and becomes its colour over `coverage` (a byte a pixel,
+    /// `rect`'s rows, 255 all of it): a fill stroke's region (see [`Canvas::fill_stroke`]).
+    Region {
+        rect: IRect,
+        coverage: Vec<u8>,
+        colour: [f32; 3],
     },
     Commit(ActiveStroke),
     /// The next stroke committed changed pixels only within these rectangles: its undo step
@@ -4523,6 +4544,47 @@ impl Canvas {
         self.ops.push(Op::Over { layer, rect, within, pixels });
     }
 
+    /// The open stroke's paint becomes its colour over `coverage` (a byte a pixel, `rect`'s rows,
+    /// 255 all of it) and nothing else, whatever it held: the region a stroke that fills what it
+    /// encloses fills. It shows and is laid as any stroke's paint is (its opacity, the grain fixed
+    /// to the canvas, the paper, its blend, the alpha lock, erasing), as often as the region
+    /// changes; what keeps it inside the selection is the caller's. A stroke laid in place, a
+    /// smudge or one with a second takes none, nor does a coverage of the wrong size.
+    pub fn fill_stroke(&mut self, rect: IRect, coverage: Vec<u8>) {
+        let Some(active) = self.active.as_mut() else { return };
+        let fits = coverage.len() == rect.width() as usize * rect.height() as usize;
+        if active.style.in_place() || active.second.is_some() || active.pencil || !fits {
+            return;
+        }
+        // only the canvas's part of it
+        let on = rect.intersect(IRect::from_size(self.width, self.height));
+        let coverage = if on == rect {
+            coverage
+        } else {
+            let (w, x0) = (rect.width() as usize, (on.x0 - rect.x0) as usize);
+            let rows = (on.y0 - rect.y0) as usize..(on.y1 - rect.y0) as usize;
+            let row = |y: usize| coverage.get(y * w + x0..y * w + x0 + on.width() as usize).unwrap_or_default();
+            rows.flat_map(row).copied().collect()
+        };
+        let rect = on;
+        // where its paint was is drawn again too, cleared
+        self.dirty = self.dirty.union(active.bounds).union(rect);
+        active.bounds = active.bounds.union(rect);
+        active.first = active.bounds;
+        if self.measuring {
+            return;
+        }
+        self.prediction.clear();
+        // a tip shown goes first, so nothing put back from under it comes over the region
+        let colour = active.style.color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 });
+        self.untip();
+        // what is still queued of it, last, would only be cleared
+        if matches!(self.ops.last(), Some(Op::Region { .. })) {
+            self.ops.pop();
+        }
+        self.ops.push(Op::Region { rect, coverage, colour });
+    }
+
     /// Whether strokes are only being measured (see [`Canvas::measure`]).
     pub fn measuring(&self) -> bool {
         self.measuring
@@ -6679,6 +6741,30 @@ impl Canvas {
                             Some(_) => self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect),
                             None => self.second_unsynthesized = self.second_unsynthesized.union(rect),
                         }
+                    }
+                }
+                Op::Region { rect, coverage, colour } => {
+                    drop(render_pass(
+                        &mut encoder,
+                        "region clear",
+                        &self.stroke_view,
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    ));
+                    self.clear_built_up(&mut encoder, &self.stroke);
+                    if !rect.is_empty() {
+                        let format = self.pipelines.stroke_format;
+                        let texels = region_texels(format, colour, &coverage);
+                        let wide = texels.len() / coverage.len().max(1);
+                        let row = rect.width() as usize * wide;
+                        uploaded.extend(self.upload_texels(
+                            device,
+                            &mut encoder,
+                            &self.stroke,
+                            rect,
+                            &texels,
+                            row,
+                            wide,
+                        ));
                     }
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
@@ -11445,14 +11531,30 @@ impl Canvas {
         offset: usize,
         row: usize,
     ) -> Option<wgpu::Buffer> {
+        let data = data.get(offset..).unwrap_or_default();
+        self.upload_texels(device, encoder, texture, rect, data, row, 4)
+    }
+
+    /// [`Canvas::upload`] of texels `texel` bytes each, from `data`'s start.
+    #[allow(clippy::too_many_arguments)]
+    fn upload_texels(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        rect: IRect,
+        data: &[u8],
+        row: usize,
+        texel: usize,
+    ) -> Option<wgpu::Buffer> {
         let (w, h) = (rect.width(), rect.height());
-        let last = offset + (h as usize).saturating_sub(1) * row + w as usize * 4;
+        let last = (h as usize).saturating_sub(1) * row + w as usize * texel;
         if w == 0 || h == 0 || data.len() < last {
             log::error!("an upload of {w} x {h} given {} bytes", data.len());
             return None;
         }
         // copies from a buffer take rows 256 bytes apart
-        let stride = (w * 4).div_ceil(256) * 256;
+        let stride = (w * texel as u32).div_ceil(256) * 256;
         let size = u64::from(stride) * u64::from(h);
         let buffer = self.uploads.take(device, size);
         {
@@ -11460,9 +11562,9 @@ impl Canvas {
                 log::error!("an upload buffer wasn't mapped");
                 return None;
             };
-            let (wide, stride) = (w as usize * 4, stride as usize);
+            let (wide, stride) = (w as usize * texel, stride as usize);
             for y in 0..h as usize {
-                let from = offset + y * row;
+                let from = y * row;
                 if let Some(src) = data.get(from..from + wide) {
                     view.slice(y * stride..y * stride + wide).copy_from_slice(src);
                 }
@@ -13768,6 +13870,52 @@ fn brush_bind(
 /// A one-channel texture of coverage, `width` × `height`, from `data` (one byte a pixel).
 /// The rectangle holding every pixel `rows` (whole rows of a coverage `width` pixels wide, the
 /// first of them row `first`) selects any of; empty where none is.
+/// A fill stroke's region as its stroke texture (in `format`) holds paint: `colour` (0..1) over
+/// `coverage` (a byte a pixel), premultiplied; half floats, or 8 bits a channel.
+fn region_texels(format: wgpu::TextureFormat, colour: [f32; 3], coverage: &[u8]) -> Vec<u8> {
+    let [r, g, b] = colour;
+    if format == STROKE_FORMAT {
+        let mut out = Vec::with_capacity(coverage.len() * 8);
+        for &c in coverage {
+            let a = f32::from(c) / 255.0;
+            for v in [r * a, g * a, b * a, a] {
+                out.extend_from_slice(&half_bits(v).to_le_bytes());
+            }
+        }
+        out
+    } else {
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        let mut out = Vec::with_capacity(coverage.len() * 4);
+        for &c in coverage {
+            let a = f32::from(c) / 255.0;
+            out.extend_from_slice(&[byte(r * a), byte(g * a), byte(b * a), c]);
+        }
+        out
+    }
+}
+
+/// `v` (0..1, clamped) as a half float's bits, to the nearest.
+fn half_bits(v: f32) -> u16 {
+    let bits = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }.to_bits();
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+    // a half's exponent
+    let e = exp - 127 + 15;
+    if exp == 0 || e < -10 {
+        return 0;
+    }
+    if e <= 0 {
+        // too small for a normal half: one of its subnormals, 2^-24 apart
+        let m = mant | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        return ((m + (1 << (shift - 1))) >> shift) as u16;
+    }
+    let half = ((e as u32) << 10) | (mant >> 13);
+    let rest = mant & 0x1fff;
+    let up = rest > 0x1000 || (rest == 0x1000 && half & 1 == 1);
+    (half + u32::from(up)) as u16
+}
+
 fn coverage_bounds(rows: &[u8], width: u32, first: usize) -> IRect {
     use procraft_engine::selection::{first_set, last_set};
     let w = (width as usize).max(1);
@@ -15197,6 +15345,28 @@ mod tests {
             assert!((f64::from(g) - want).abs() <= 1e-6 + 1e-3 * want, "{c}: {g}, not {want}");
             assert!(g * c <= 1.0 + 1e-5, "{c}: {g}");
         }
+    }
+
+    #[test]
+    fn a_region_s_paint_goes_into_half_floats_to_the_nearest_and_into_bytes_as_given() {
+        // exact ones, the nearest of a value between two, the subnormals, and what's out of range
+        assert_eq!([half_bits(0.0), half_bits(1.0), half_bits(0.5), half_bits(0.25)], [0, 0x3c00, 0x3800, 0x3400]);
+        assert_eq!(half_bits(1.0 / 3.0), 0x3555);
+        assert_eq!([half_bits(-1.0), half_bits(2.0), half_bits(f32::NAN)], [0, 0x3c00, 0]);
+        assert_eq!([half_bits(2f32.powi(-24)), half_bits(2f32.powi(-15))], [1, 0x200]);
+        // every byte of coverage over every byte's colour: back within half a level
+        let back = |h: u16| {
+            let (e, m) = (i32::from(h >> 10), f32::from(h & 0x3ff));
+            if e == 0 { m * 2f32.powi(-24) } else { (1.0 + m / 1024.0) * 2f32.powi(e - 15) }
+        };
+        for c in 0..=255_u8 {
+            let v = f32::from(c) / 255.0;
+            assert!((back(half_bits(v)) - v).abs() <= v * 1e-3 + 1e-7, "{c}");
+        }
+        let texels = region_texels(STROKE_FORMAT, [1.0, 0.5, 0.0], &[255, 0]);
+        let halves: Vec<u16> = texels.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
+        assert_eq!(halves, [0x3c00, 0x3800, 0, 0x3c00, 0, 0, 0, 0]);
+        assert_eq!(region_texels(LAYER_FORMAT, [1.0, 0.5, 0.0], &[255, 102]), [255, 128, 0, 255, 102, 51, 0, 102]);
     }
 
     #[test]

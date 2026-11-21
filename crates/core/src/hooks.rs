@@ -773,6 +773,48 @@ impl Hooks {
         })
     }
 
+    /// The stroke-fill hook: whether a stroke beginning with `tool` (0 paint, 1 erase) by `pointer`
+    /// (numbered as for [`Hooks::pressure`]) fills the region its path encloses, as the first
+    /// plugin on it by id that says so says (1 shown filling as it is drawn, 2 filled as it ends),
+    /// each told the brush first, with the values of its own rows (`brush_of` its keys); 0 while
+    /// none says.
+    pub(crate) fn stroke_fill(
+        &self,
+        tool: i32,
+        pointer: i32,
+        brush_of: impl Fn(&[String]) -> crate::stroke_sound::SoundBrush,
+    ) -> u8 {
+        if !self.has(Hook::StrokeFill) {
+            return 0;
+        }
+        let mut working = self.working();
+        let mut i = 0;
+        let mut said = 0;
+        while let Some(plugin) = working.on.get_mut(i) {
+            if plugin.hooks & Hook::StrokeFill.bit() == 0 {
+                i += 1;
+                continue;
+            }
+            let brush = brush_of(&plugin.brush_keys);
+            let answer = at_work(&plugin.running).stroke_fill(&brush, tool, pointer);
+            match answer {
+                Ok(fill) => {
+                    said = fill;
+                    if said != 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+                Err(stop) => {
+                    let gone = working.on.remove(i);
+                    self.note_stop(&mut working, gone.id, stop);
+                }
+            }
+        }
+        self.rehook(&working);
+        said
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -3808,6 +3850,82 @@ pub(crate) mod tests {
         assert_eq!(hooks.pressure(PressureAsked { pointer: 1, ..finger_at(50.0) }), Some(0.45));
         assert_eq!(hooks.pressure_tapers(0), [10.0, 30.0]);
         assert_eq!(hooks.take_stopped(), Vec::new());
+    }
+
+    /// Answers the stroke-fill hook: a paint stroke fills (as it ends) while its brush's row is 1.
+    const FILLS_BY_ROW: &str = r#"(module
+        (global $row (mut f32) (f32.const 0))
+        (func (export "procraft_brush_control") (param i32 f32) (global.set $row (local.get 1)))
+        (func (export "procraft_stroke_fill") (param i32 i32) (result i32)
+            (if (result i32) (i32.and (i32.eqz (local.get 0)) (f32.eq (global.get $row) (f32.const 1)))
+                (then (i32.const 2))
+                (else (i32.const 0)))))"#;
+
+    /// A plugin on the stroke-fill hook answering `answer` (a WAT body).
+    fn stroke_fill_module(answer: &str) -> Vec<u8> {
+        let text = format!(r#"(module (func (export "procraft_stroke_fill") (param i32 i32) (result i32) {answer}))"#);
+        wat::parse_str(text).unwrap()
+    }
+
+    /// A brush whose every row is `row`, as the stroke-fill hook is told it.
+    fn brush_rows(row: f32) -> impl Fn(&[String]) -> crate::stroke_sound::SoundBrush {
+        move |keys: &[String]| crate::stroke_sound::SoundBrush {
+            name: "Pen".to_owned(),
+            set: "Inking".to_owned(),
+            controls: keys.iter().map(|_| row).collect(),
+            key: u64::from(row.to_bits()),
+        }
+    }
+
+    #[test]
+    fn the_stroke_fill_hook_asks_each_plugin_told_its_rows_and_the_first_that_fills_says_how() {
+        let hooks = Hooks::default();
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(1.0)), 0, "none on");
+        let by_row = Running::start(&wat::parse_str(FILLS_BY_ROW).unwrap(), &[]).unwrap();
+        hooks.put_on("b".to_owned(), by_row, &[Hook::StrokeFill]);
+        hooks.brush_keys("b", vec!["plugin:b:fill".to_owned()]);
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(1.0)), 2);
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(0.0)), 0, "told the row as it changed");
+        assert_eq!(hooks.stroke_fill(1, 1, brush_rows(1.0)), 0, "the eraser");
+        // one before it by id that always fills, shown as it grows, says first
+        let always = Running::start(&stroke_fill_module("(i32.const 1)"), &[]).unwrap();
+        hooks.put_on("a".to_owned(), always, &[Hook::StrokeFill]);
+        assert_eq!(hooks.stroke_fill(1, 0, brush_rows(0.0)), 1);
+        assert!(hooks.listens(Hook::StrokeFill));
+        assert_eq!(hooks.take_stopped(), Vec::new());
+    }
+
+    #[test]
+    fn a_stroke_fill_answer_that_makes_no_sense_stops_its_plugin() {
+        for answer in ["(i32.const 3)", "(i32.const -1)", "(loop (br 0)) (i32.const 0)", "unreachable"] {
+            let hooks = Hooks::default();
+            let running = Running::start(&stroke_fill_module(answer), &[]).unwrap();
+            hooks.put_on("odd".to_owned(), running, &[Hook::StrokeFill]);
+            assert_eq!(hooks.stroke_fill(0, 1, brush_rows(0.0)), 0, "{answer}");
+            assert!(!hooks.listens(Hook::StrokeFill), "{answer}: still on");
+            assert_eq!(hooks.take_stopped().len(), 1, "{answer}");
+        }
+    }
+
+    #[test]
+    fn the_stroke_fill_hook_costs_a_stroke_little_and_nothing_with_none_on() {
+        let time = |hooks: &Hooks, runs: u32| {
+            let start = Instant::now();
+            for i in 0..runs {
+                std::hint::black_box(hooks.stroke_fill(std::hint::black_box((i % 2) as i32), 1, brush_rows(1.0)));
+            }
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(runs)
+        };
+        let hooks = Hooks::default();
+        let none = time(&hooks, 100_000);
+        let by_row = Running::start(&wat::parse_str(FILLS_BY_ROW).unwrap(), &[]).unwrap();
+        hooks.put_on("b".to_owned(), by_row, &[Hook::StrokeFill]);
+        hooks.brush_keys("b", vec!["plugin:b:fill".to_owned()]);
+        let on = time(&hooks, 2_000);
+        println!("stroke_fill: none on {:.3} µs a stroke, one on {on:.1} µs", none);
+        // asked once a stroke: far under a frame even in a debug build
+        assert!(none < 1.0, "none on: {none} µs");
+        assert!(on < 1000.0, "one on: {on} µs");
     }
 
     #[test]

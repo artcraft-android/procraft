@@ -82,9 +82,9 @@ the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4
 and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
 hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hook 9, and the
 `gesture_lock` hook's fit, the `brush_preview_colour` and `layer_label` hooks, layers' marks and
-panels' rows of colours 10, and the recent colours and brushes, actions at the pen, panels' rows of
+panels' rows of colours 10, the recent colours and brushes, actions at the pen, panels' rows of
 brushes and rings, the `interface_colour` hook's surround, the `surround_picture` and `slider_look`
-hooks and `file` controls of pictures 11.
+hooks and `file` controls of pictures 11, and the `stroke_fill` hook 12.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -640,6 +640,40 @@ used. With the plugin off, its marks stay and show nothing.
 
 The Colour labels plugin the app comes with gives a layer one of eight colours from Colour label in
 its options, a panel of the eight and No label, and keeps the colour's place as the layer's mark.
+
+### `stroke_fill`
+
+Whether a stroke fills what it goes round rather than painting its path (interface 12):
+
+```
+procraft_stroke_fill(tool: i32, pointer: i32) -> i32
+```
+
+It's asked as each stroke begins, after the plugin is told the brush and its rows in the brush
+studio (as for [`stroke_sound`](#stroke_sound)): `tool` is 0 for paint and 1 for the eraser (a smudge
+is never asked), and `pointer` is numbered as for [`pressure`](#pressure). It answers 0 for a stroke
+painted as usual, 1 for one that fills and shows its fill as it is drawn, or 2 for one that shows as
+a plain stroke while it is drawn and fills as it ends. How it fills is the app's, whichever plugin
+asks:
+
+- The region is what the stroke's path encloses, closed by a straight line from where the pen
+  lifted back to where it began. The path is smoothed as the brush smooths it (its StreamLine),
+  without its jitter.
+- It fills by the non-zero winding rule, one coat: a loop drawn round twice is no darker than one
+  drawn once, and both lobes of a figure eight fill.
+- It is laid as the stroke's paint is: in the colour, at the brush's opacity times the opacity
+  slider, its edges smoothed, taking the paper and the brush's grain (fixed to the canvas), inside
+  the selection and keeping the layer's alpha lock, its blend mode as the brush's. A fill with the
+  eraser takes away what it encloses. Each copy a symmetry makes fills too. Undo takes it back as
+  one step, Lasso fill.
+- It isn't asked on the brush studio's pad, on a layer of a plugin's own, on a model or for
+  painting an adjustment on; nor does a fill snap with QuickShape.
+
+An answer past 0 to 2 stops the plugin. With several plugins on this hook, the first by id that says
+a stroke fills says how it shows.
+
+The Lasso fill plugin the app comes with fills every stroke while its switch is on, and a brush's
+strokes whose Fill row says so.
 
 ### `floating_panels`
 
@@ -1847,7 +1881,7 @@ tab, interface 9 the `pressure` hook, interface 10 the `gesture_lock` hook's fit
 hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colours, and interface 11
 the recent colours and brushes (`recent_colour`, `recent_brush`, `current_brush`, `choose_brush`),
 actions at the pen, panels' rows of brushes and rings, the `interface_colour` hook's surround, the
-`surround_picture` and `slider_look` hooks and `file` controls of pictures. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+`surround_picture` and `slider_look` hooks and `file` controls of pictures, and interface 12 the `stroke_fill` hook. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

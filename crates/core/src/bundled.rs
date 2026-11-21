@@ -19,6 +19,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("interface", include_bytes!("../bundled-plugins/interface.procraft-plugin")),
     ("keyboard-shortcuts", include_bytes!("../bundled-plugins/keyboard-shortcuts.procraft-plugin")),
     ("krita-brushes", include_bytes!("../bundled-plugins/krita-brushes.procraft-plugin")),
+    ("lasso-fill", include_bytes!("../bundled-plugins/lasso-fill.procraft-plugin")),
     ("layer-fills", include_bytes!("../bundled-plugins/layer-fills.procraft-plugin")),
     ("layer-tools", include_bytes!("../bundled-plugins/layer-tools.procraft-plugin")),
     ("paper", include_bytes!("../bundled-plugins/paper.procraft-plugin")),
