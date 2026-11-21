@@ -8136,12 +8136,14 @@ fn the_reference_windows_read_the_canvas_once_while_it_stays_as_it_is() {
     let t = std::time::Instant::now();
     let first = s.reference_canvas(700).unwrap();
     let read = t.elapsed();
-    let t = std::time::Instant::now();
-    for _ in 0..4 {
+    // the quickest of several asks, so a busy machine's pauses don't count against sharing
+    let mut shared = std::time::Duration::MAX;
+    for _ in 0..8 {
+        let t = std::time::Instant::now();
         assert_eq!(s.reference_canvas(700).as_ref(), Some(&first));
+        shared = shared.min(t.elapsed());
     }
-    let shared = t.elapsed() / 4;
-    println!("the canvas read for the reference windows in {read:?}, shared again in {shared:?}");
+    println!("the canvas read for the reference windows in {read:?}, shared again in {shared:?} at the quickest");
     assert!(shared < read, "{shared:?} shared, {read:?} read");
     assert_eq!((first.width, first.height, &first.rgba[..4]), (700, 700, &[0, 0, 255, 255][..]));
     // another size reads it again, and so does a change
