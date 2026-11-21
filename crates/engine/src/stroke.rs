@@ -1324,6 +1324,18 @@ impl StrokeBuilder {
         self
     }
 
+    /// The stroke drawn as `like` was: through the same input settings (the app's pressure curve,
+    /// its pressure smoothing, speed and tilt), on the canvas turned and seen as it was, and on the
+    /// pad if it was there. Its path's own smoothing it keeps: a stroke laid again along a shape
+    /// follows the shape.
+    pub fn drawn_like(mut self, like: &StrokeBuilder) -> StrokeBuilder {
+        self.input = like.input.clone();
+        self.screen_turn = like.screen_turn;
+        self.points_per_pixel = like.points_per_pixel;
+        self.pad = like.pad;
+        self
+    }
+
     /// The stroke's stamps laid by `engine` from its input, in place of the brush's settings: it
     /// is handed the samples as they come, and nothing predicts or previews ahead of them.
     pub fn with_engine(mut self, engine: Box<dyn OutsideEngine>) -> StrokeBuilder {

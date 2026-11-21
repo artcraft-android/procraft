@@ -2461,6 +2461,13 @@ impl CanvasSession {
         st.last_stroke = None;
         st.kept_shape = None;
         st.unkept_shape = None;
+        // a dual brush's second, to draw again with it (not a brush engine's, which draws its own)
+        let second_again = match (&laid, &second, &second_builder) {
+            (None, Some((_, stroke, _)), Some(fresh)) => {
+                Some(quickshape::SecondAgain { stroke: *stroke, fresh: fresh.clone() })
+            }
+            _ => None,
+        };
         st.began =
             matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase).then(|| quickshape::LastStroke {
                 layer: current,
@@ -2472,7 +2479,8 @@ impl CanvasSession {
                 drawn: Vec::new(),
                 pace: quickshape::SAMPLE_PACE,
                 stroke: 0,
-                fresh: second.is_none().then(|| builder.clone()),
+                fresh: (second.is_none() || second_again.is_some()).then(|| builder.clone()),
+                second: second_again,
                 samples: Vec::new(),
                 line: builder.clone(),
                 seed,

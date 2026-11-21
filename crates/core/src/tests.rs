@@ -6706,6 +6706,204 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     s.stroke_end(vec![]);
 }
 
+/// The layer's alpha as the last render left it: how many pixels hold paint (past a few levels)
+/// and how much ink there is in all (alpha summed, 0..1 a pixel).
+fn layer_ink(s: &CanvasSession) -> (usize, f64) {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let id = st.doc.current();
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render_finished(gpu, &mut st.doc);
+    let px = canvas.read_layer(gpu, id).unwrap();
+    let alphas = px.chunks(4).map(|p| p[3]);
+    (alphas.clone().filter(|&a| a > 8).count(), alphas.map(|a| f64::from(a) / 255.0).sum())
+}
+
+#[test]
+fn a_dual_brush_s_shape_is_drawn_with_its_second_as_its_stroke_is() {
+    use crate::quickshape::QuickShapeKind;
+    use procraft_engine::brush::Brush;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.3);
+    s.set_color(0.0, 0.0, 0.0);
+    // a line across, drawn as it is or held until it snaps to a line (the same line), its ink
+    let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect();
+    let line = |s: &CanvasSession, held: bool| {
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+        if held {
+            assert_eq!(s.quickshape_hold().map(|i| i.kind), Some(QuickShapeKind::Line));
+        }
+        s.stroke_end(vec![]);
+        if held {
+            s.quickshape_done();
+        }
+        let ink = layer_ink(s);
+        s.undo();
+        ink
+    };
+    let first_alone = line(&s, false);
+    // its second: wide dabs far apart, multiplied with the first, so the stroke shows only where
+    // both are: wet or dry, the shape is cut by it as the stroke drawn is (it was its first alone)
+    let mut second = Brush { name: "Dabs".to_owned(), ..Brush::round_pen() };
+    second.set_setting("spacing", 1.0);
+    for wet in [false, true] {
+        {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let tool = st.tool;
+            let brush = st.brush_mut(tool).unwrap();
+            brush.secondary = Some(Box::new(second.clone()));
+            brush.set_setting("dual_blend", 1.0);
+            if wet {
+                brush.set_setting("wet_dilution", 0.5);
+                brush.set_setting("wet_charge", 1.0);
+                assert!(brush.mixes_wet());
+            }
+        }
+        let drawn = line(&s, false);
+        let snapped = line(&s, true);
+        eprintln!("wet {wet}: first alone {first_alone:?}, drawn {drawn:?}, snapped {snapped:?}");
+        assert!(drawn.0 < first_alone.0 * 3 / 4, "the second cuts the stroke drawn: {drawn:?} of {first_alone:?}");
+        let pixels = snapped.0 as f64 / drawn.0 as f64;
+        let ink = snapped.1 / drawn.1;
+        assert!((0.9..1.1).contains(&pixels) && (0.9..1.1).contains(&ink), "wet {wet}: {snapped:?} against {drawn:?}");
+        // and given way to again, the stroke as it was drawn, its second too
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+        s.quickshape_hold().unwrap();
+        s.stroke_end(vec![]);
+        s.quickshape_done();
+        assert!(s.quickshape_undo(), "the shape gives way to its stroke");
+        let back = layer_ink(&s);
+        assert!((back.0 as f64 / drawn.0 as f64 - 1.0).abs() < 0.1, "wet {wet}: back {back:?} against {drawn:?}");
+        s.undo();
+    }
+}
+
+#[test]
+fn a_shape_is_drawn_through_the_app_s_pressure_curve_as_its_stroke_was() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.3);
+    s.set_color(0.0, 0.0, 0.0);
+    // a pen pressing half way, through an app pressure curve that takes that up to nine tenths, and
+    // a brush whose opacity follows the pressure
+    s.shared.lock().input.pressure_curve = procraft_engine::curve::Curve::new(&[
+        procraft_engine::geom::Vec2::new(0.0, 0.0),
+        procraft_engine::geom::Vec2::new(0.5, 0.9),
+        procraft_engine::geom::Vec2::new(1.0, 1.0),
+    ]);
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let tool = st.tool;
+        st.brush_mut(tool).unwrap().set_setting("pressure_opacity", 1.0);
+    }
+    let pts: Vec<PenSample> = (0..=40)
+        .map(|i| PenSample { pressure: 0.5, ..sample(20.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0) })
+        .collect();
+    let line = |held: bool| {
+        s.stroke_begin(PointerKind::Stylus, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+        if held {
+            assert_eq!(s.quickshape_hold().map(|i| i.kind), Some(QuickShapeKind::Line));
+        }
+        s.stroke_end(vec![]);
+        if held {
+            s.quickshape_done();
+        }
+        let ink = layer_ink(&s);
+        s.undo();
+        ink
+    };
+    let (drawn, snapped) = (line(false), line(true));
+    eprintln!("drawn {drawn:?}, snapped {snapped:?}");
+    // (the curve's own pressure, not the pen's: drawn without it the line came out far fainter)
+    assert!((snapped.1 / drawn.1 - 1.0).abs() < 0.1, "{snapped:?} against {drawn:?}");
+}
+
+#[test]
+fn a_long_wet_stroke_made_a_shape_is_laid_quickly_and_never_breaks() {
+    use procraft_engine::brush::Brush;
+    let Some(s) = session(1024, 1024) else { return };
+    s.set_brush_size(0.5);
+    s.set_color(0.1, 0.2, 0.8);
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let tool = st.tool;
+        let brush = st.brush_mut(tool).unwrap();
+        brush.set_setting("wet_dilution", 0.6);
+        brush.set_setting("wet_charge", 0.5);
+        brush.set_setting("wet_pull", 0.5);
+        brush.secondary = Some(Box::new(Brush { name: "Second".to_owned(), ..Brush::round_pen() }));
+        brush.set_setting("dual_blend", 1.0);
+    }
+    let finish = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render_finished(gpu, &mut st.doc);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    };
+    // a long line, an ellipse and a zigzag, each held until it snaps, then moved about
+    let line: Vec<(f32, f32)> = (0..=200).map(|i| (60.0 + i as f32 * 4.5, 500.0)).collect();
+    let round: Vec<(f32, f32)> = (0..=200)
+        .map(|i| {
+            let t = i as f32 / 200.0 * std::f32::consts::TAU;
+            (512.0 + 380.0 * t.cos(), 512.0 + 260.0 * t.sin())
+        })
+        .collect();
+    let zigzag: Vec<(f32, f32)> = (0..=200)
+        .map(|i| {
+            (
+                60.0 + i as f32 * 4.5,
+                400.0 + if (i / 50) % 2 == 0 { (i % 50) as f32 * 6.0 } else { 300.0 - (i % 50) as f32 * 6.0 },
+            )
+        })
+        .collect();
+    for (name, path) in [("line", line), ("ellipse", round), ("polyline", zigzag)] {
+        let pts: Vec<PenSample> = path.iter().enumerate().map(|(i, &(x, y))| sample(x, y, i as f64 * 8.0)).collect();
+        let began = std::time::Instant::now();
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        for some in pts[1..].chunks(4) {
+            s.stroke_add(some.to_vec());
+            finish(&s);
+        }
+        let drawn_ms = began.elapsed().as_secs_f64() * 1000.0 / (pts.len() as f64 / 4.0);
+        let snap = std::time::Instant::now();
+        let Some(info) = s.quickshape_hold() else { panic!("{name}: no shape") };
+        finish(&s);
+        let snap_ms = snap.elapsed().as_secs_f64() * 1000.0;
+        s.stroke_end(vec![]);
+        // dragged about: each move redrawn by the next frame
+        let mut moves = Vec::new();
+        for k in 0..6 {
+            let t = std::time::Instant::now();
+            s.quickshape_move(400.0, 400.0, 400.0 + k as f32 * 3.0, 400.0 + k as f32 * 2.0);
+            s.shared.lock().draw_moved_shape();
+            finish(&s);
+            moves.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        // and a handle dragged onto another: a shape of no size, which draws a dot or nothing
+        let (hx, hy) = (info.handles[0], info.handles[1]);
+        for k in 1..info.handles.len() / 2 {
+            s.quickshape_move_handle(k as u32, hx, hy);
+            s.shared.lock().draw_moved_shape();
+            finish(&s);
+        }
+        s.quickshape_done();
+        finish(&s);
+        let worst = moves.iter().copied().fold(0.0, f64::max);
+        eprintln!(
+            "{name} ({:?}): a frame of drawing {drawn_ms:.1} ms, the snap {snap_ms:.1} ms, a move at most {worst:.1} ms",
+            info.kind
+        );
+        s.undo();
+    }
+}
+
 #[test]
 fn an_edited_shape_is_turned_by_its_outline_and_moved_elsewhere() {
     use crate::quickshape::QuickShapeKind;
