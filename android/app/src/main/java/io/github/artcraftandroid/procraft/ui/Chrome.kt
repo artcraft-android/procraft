@@ -61,6 +61,7 @@ import io.github.artcraftandroid.procraft.core.ShadowStep
 import io.github.artcraftandroid.procraft.core.SideSliderTap
 import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.sideSliderDragShare
+import io.github.artcraftandroid.procraft.core.sideSliderShownPercent
 import io.github.artcraftandroid.procraft.core.sideSliderTap
 import io.github.artcraftandroid.procraft.core.sideThumbShadow
 
@@ -373,7 +374,7 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
                 pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold))
                 append(if (size) "Size" else "Opacity")
                 pop()
-                append(" ${(value * 100f).roundToInt()}%")
+                append(" ${sideSliderShownPercent(size, value)}%")
             },
             color = SliderPanelInk,
             fontSize = 19.sp,

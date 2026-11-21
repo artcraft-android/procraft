@@ -9,7 +9,7 @@ use egui::layers::{PaintList, ShapeIdx};
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use procraft_core::{
     CanvasInfo, CanvasSession, InterfacePart, SideBarDrag, SideBarDragState, SideBarShown, SideSliderTap, ToolKind,
-    side_slider_drag_share, side_slider_tap, side_thumb_shadow,
+    side_slider_drag_share, side_slider_shown_percent, side_slider_tap, side_thumb_shadow,
 };
 use resvg::tiny_skia;
 
@@ -713,7 +713,7 @@ fn slider_panel(
             Slider::Size => ("Size", info.size),
             Slider::Opacity => ("Opacity", info.opacity),
         };
-        let shown = format!(" {}%", (value * 100.0).round());
+        let shown = format!(" {}%", side_slider_shown_percent(which == Slider::Size, value));
         let line = pos2(rect.left() + 16.0, rect.top() + 6.0 + 16.0);
         text_runs(
             painter,

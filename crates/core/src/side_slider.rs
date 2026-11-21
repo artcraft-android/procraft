@@ -112,8 +112,32 @@ pub fn side_thumb_shadow() -> Vec<ShadowStep> {
     steps
 }
 
+/// The percent a side slider's panel shows for its value (0..1): the size slider's share of the
+/// brush's size range, which goes as the slider to the power [`procraft_engine::brush::SIZE_CURVE`]
+/// (its middle 22%), the opacity slider's value as it is. (It showed the slider's place, so a size
+/// read "35%" painted a tenth of the range, and the low sizes read alike.)
+#[uniffi::export]
+pub fn side_slider_shown_percent(size: bool, value: f32) -> i32 {
+    let v = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+    let shown = if size { v.powf(procraft_engine::brush::SIZE_CURVE) } else { v };
+    (shown * 100.0).round() as i32
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_size_panel_shows_the_share_of_the_size_range() {
+        // as measured: "Size 3%" with the thumb at 0.21 of the bar, "15%" to "17%" at 0.43 to
+        // 0.45; the opacity as it is
+        assert_eq!(side_slider_shown_percent(true, 0.21), 3);
+        assert_eq!(side_slider_shown_percent(true, 0.43), 16);
+        assert_eq!(side_slider_shown_percent(true, 0.45), 17);
+        assert_eq!(side_slider_shown_percent(true, 1.0), 100);
+        assert_eq!(side_slider_shown_percent(true, 0.0), 0);
+        assert_eq!(side_slider_shown_percent(false, 0.21), 21);
+        assert_eq!(side_slider_shown_percent(true, f32::NAN), 0);
+    }
+
     use super::*;
 
     /// How dark `steps` show `below` points under the thumb's lower edge, at its middle.
