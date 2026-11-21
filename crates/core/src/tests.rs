@@ -4575,6 +4575,124 @@ fn content_shape_holds_every_painted_pixel() {
     assert_eq!(content_shape(&px, 0), None);
 }
 
+/// A selection on a large canvas (4096 square) sends the GPU only the rows it holds as it is made,
+/// undone and redone (all of the canvas's rows went each time), and painting keeps to it as
+/// before. Printed: how long making, undoing and redoing it took on this thread (the quickest of
+/// 3). Bound: a band of the canvas sends that band's rows, less than a third of the canvas's.
+#[test]
+fn a_selection_sends_the_gpu_only_the_rows_it_holds() {
+    use crate::SelectionJoin;
+    let Some(s) = session(4096, 1024) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let sent = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().selection_bytes_sent();
+    let (mut made, mut undone, mut redone) = (f64::MAX, f64::MAX, f64::MAX);
+    let mut each = 0;
+    for _ in 0..3 {
+        let before = sent(&s);
+        let t = std::time::Instant::now();
+        // a band across the middle: a quarter of the canvas's rows
+        s.select_shape(false, 0.0, 384.0, 1024.0, 640.0, SelectionJoin::Add);
+        made = made.min(ms(t));
+        each = sent(&s) - before;
+        let t = std::time::Instant::now();
+        s.undo();
+        undone = undone.min(ms(t));
+        assert!(!s.has_selection());
+        let t = std::time::Instant::now();
+        s.redo();
+        redone = redone.min(ms(t));
+        assert!(s.has_selection());
+        s.select_none();
+    }
+    let whole = 4096u64 * 4096;
+    println!(
+        "a band a quarter of a 4096 square canvas selected: {:.1} MB sent of the canvas's {:.1} MB; made in {made:.1} ms, undone in {undone:.1} ms, redone in {redone:.1} ms",
+        each as f64 / 1e6,
+        whole as f64 / 1e6
+    );
+    assert!(each > 0 && each * 3 < whole, "{each} bytes sent for a quarter of the rows");
+    // painting keeps to it: a stroke across the canvas lays paint only in the band
+    s.select_shape(false, 0.0, 384.0, 1024.0, 640.0, SelectionJoin::Add);
+    s.set_brush_size(1.0);
+    for x in [100.0f32, 900.0] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 100.0, 0.0)]);
+        s.stroke_end(vec![sample(x, 920.0, 40.0)]);
+    }
+    assert_eq!(pixel(&s, 400, 400)[..3], [255, 255, 255], "above the band");
+    assert_ne!(pixel(&s, 400, 2048)[..3], [255, 255, 255], "in the band");
+    assert_eq!(pixel(&s, 400, 3700)[..3], [255, 255, 255], "below the band");
+}
+
+/// Opening a transform on a large canvas (4096 square) finds the box and outline of what its
+/// layers hold, within a soft selection, from each row's ends found on the GPU (a few bytes a row
+/// sent back), not from their pixels read back and gone over on the interface's thread: the same
+/// box and outline either way, for one layer and for two, selected and not. Printed: how long each
+/// way took (the quickest of 5). Bound: the same shape, and the GPU's way under half the time over
+/// the four (one alone can wait behind other tests' work on the GPU).
+#[test]
+fn a_transform_s_box_is_found_from_its_rows_ends_not_its_pixels() {
+    use crate::SelectionJoin;
+    use crate::transform::{shape_on_gpu, shape_read_back, transform_area};
+    let Some(s) = session(4096, 1200) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    // a soft brush's strokes on two layers, partly over the selection's soft edge
+    let first = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    let second = s.add_layer();
+    for (layer, y) in [(first, 300.0f32), (second, 700.0)] {
+        s.select_layer(layer);
+        s.set_brush_size(0.6);
+        s.stroke_begin(PointerKind::Finger, vec![sample(100.0, y, 0.0)]);
+        s.stroke_add(
+            (1..60)
+                .map(|i| sample(100.0 + i as f32 * 17.0, y + (i as f32 * 0.2).sin() * 150.0, f64::from(i) * 8.0))
+                .collect(),
+        );
+        s.stroke_end(vec![]);
+    }
+    let shapes = |s: &CanvasSession, targets: &[procraft_engine::document::LayerId]| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let size = (st.doc.width(), st.doc.height());
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        gpu.flush();
+        let area = transform_area(canvas, gpu, targets, st.selection.as_ref(), size);
+        let (mut on_gpu, mut read) = (f64::MAX, f64::MAX);
+        let (mut a, mut b) = (None, None);
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            a = shape_on_gpu(canvas, gpu, targets, area, st.selection.as_ref());
+            on_gpu = on_gpu.min(ms(t));
+            let t = std::time::Instant::now();
+            b = shape_read_back(canvas, gpu, targets, area, st.selection.as_ref());
+            read = read.min(ms(t));
+        }
+        (a.expect("found on the GPU"), b, on_gpu, read)
+    };
+    let layer = |id: u64| procraft_engine::document::LayerId(id);
+    let (mut on_gpu_all, mut read_all) = (0.0, 0.0);
+    for selected in [false, true] {
+        if selected {
+            s.select_shape(true, 150.0, 150.0, 1050.0, 900.0, SelectionJoin::Add);
+            s.select_feather(0.4);
+            s.select_feather_done();
+        }
+        for targets in [vec![layer(first)], vec![layer(first), layer(second)]] {
+            let (found, read, on_gpu, read_ms) = shapes(&s, &targets);
+            println!(
+                "{} layer(s), {}: found on the GPU in {on_gpu:.1} ms, read back in {read_ms:.1} ms",
+                targets.len(),
+                if selected { "a soft selection" } else { "nothing selected" }
+            );
+            assert!(found.is_some(), "something to transform");
+            assert_eq!(found, read, "the same box and outline either way");
+            on_gpu_all += on_gpu;
+            read_all += read_ms;
+        }
+    }
+    assert!(on_gpu_all < 0.5 * read_all, "found on the GPU in {on_gpu_all:.1} ms, read back in {read_all:.1} ms");
+}
+
 #[test]
 fn a_layer_s_mask_moves_with_it_in_a_transform() {
     use crate::transform::TransformHandle;

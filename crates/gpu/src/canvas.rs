@@ -2962,6 +2962,10 @@ pub(crate) struct Pipelines {
     changed_layout: wgpu::BindGroupLayout,
     changed_rows: wgpu::RenderPipeline,
     changed_columns: wgpu::RenderPipeline,
+    /// Where each stretch of a layer's rows holds any alpha, and as far as a selection leaves it
+    /// (see [`Canvas::row_ends`]).
+    row_ends: wgpu::RenderPipeline,
+    row_ends_masked: wgpu::RenderPipeline,
     /// A layer mirrored left to right, and top to bottom.
     flip_across: wgpu::RenderPipeline,
     flip_down: wgpu::RenderPipeline,
@@ -3131,6 +3135,8 @@ pub struct Canvas {
     work_at_once: u64,
     /// The most stamps one render uploads (see [`STAMPS_AT_ONCE`]).
     stamps_at_once: u64,
+    /// Bytes of the selection's coverage sent to the GPU.
+    selection_sent: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
     /// Each piece waited for on the GPU before the next is sent, and pieces of no more than
@@ -3496,8 +3502,8 @@ impl Canvas {
         let grain_sampler = mipmapped("grain", wgpu::AddressMode::Repeat);
         let table = texture(device, "adjustment table", 256, 1, LAYER_FORMAT);
         let table_view = table.create_view(&wgpu::TextureViewDescriptor::default());
-        let everything =
-            coverage_texture(device, &gpu.queue, 1, 1, &[255]).create_view(&wgpu::TextureViewDescriptor::default());
+        let everything = coverage_texture(device, &gpu.queue, (1, 1), &[255], IRect::new(0, 0, 1, 1))
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let brush_bind = brush_bind(
             device,
             &pipelines.brush_layout,
@@ -3588,6 +3594,7 @@ impl Canvas {
             work_at_once: WORK_AT_ONCE,
             stamps_at_once: STAMPS_AT_ONCE,
             pieces_sent: 0,
+            selection_sent: 0,
             paced: false,
             paced_longest: std::time::Duration::ZERO,
             dispatched: AtomicU64::new(0),
@@ -4798,6 +4805,12 @@ impl Canvas {
         self.pieces_sent
     }
 
+    /// How many bytes of the selection's coverage have been sent to the GPU: for tests.
+    #[doc(hidden)]
+    pub fn selection_bytes_sent(&self) -> u64 {
+        self.selection_sent
+    }
+
     /// Paces the canvas's work on the GPU (`on`): pieces of no more than [`PACED_WORK`], each
     /// waited for before the next is sent. For a canvas drawn on a thread of its own beside the
     /// window's frames (a brush's sample stroke): a frame then never queues behind more than a short
@@ -5797,6 +5810,7 @@ impl Canvas {
                 if self.fill_preview.is_some() {
                     self.dirty = self.dirty.union(rows);
                 }
+                self.selection_sent = self.selection_sent.saturating_add(changed.len() as u64);
                 queue.write_texture(
                     copy_at(&shown.texture, 0, i32::try_from(first).unwrap_or(0)),
                     changed,
@@ -5815,10 +5829,11 @@ impl Canvas {
         }
         let width = self.width;
         let selection = coverage.map(|coverage| {
-            let texture = coverage_texture(device, queue, self.width, self.height, &coverage);
+            let bounds = coverage_bounds(&coverage, width, 0);
+            let texture = coverage_texture(device, queue, (self.width, self.height), &coverage, bounds);
+            self.selection_sent = self.selection_sent.saturating_add(u64::from(bounds.height()) * u64::from(width));
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind = sampled_bind(device, &self.pipelines.sampled_layout, &view, &self.sampler);
-            let bounds = coverage_bounds(&coverage, width, 0);
             SelectionGpu { coverage: coverage.into_owned(), texture, view, bind, bounds }
         });
         // a fill shown over what was selected goes from there, and shows over what is now
@@ -11657,6 +11672,66 @@ impl Canvas {
             .collect()
     }
 
+    /// Where each row of `layers` together holds pixels with any alpha, as far as the selection
+    /// leaves them (`masked`: each pixel's alpha times its coverage, as bytes, rounded to a byte;
+    /// see `fs_row_ends`): each row's first such pixel and the one past its last (columns), none
+    /// for a row with none. Found on the GPU, which sends back four bytes for each stretch of each
+    /// row, not the pixels; none if a layer isn't on the GPU (parked), nothing is selected while
+    /// `masked`, or the GPU didn't say. Waits for the GPU.
+    pub fn row_ends(&self, gpu: &Gpu, layers: &[LayerId], masked: bool) -> Option<Vec<Option<(u32, u32)>>> {
+        let device = &gpu.device;
+        let mask = if masked { Some(&self.selection.as_ref()?.view) } else { None };
+        let (h, across) = (self.height, self.width.div_ceil(BOUNDS_STRETCH).max(1));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("row ends") });
+        let mut targets = Vec::with_capacity(layers.len());
+        for id in layers {
+            let layer = self.layers.get(id)?;
+            let view =
+                |binding, view| wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) };
+            let (layout, pipeline, entries) = match mask {
+                Some(mask) => (
+                    &self.pipelines.changed_layout,
+                    &self.pipelines.row_ends_masked,
+                    vec![view(0, &layer.view), view(1, mask)],
+                ),
+                None => (&self.pipelines.bounds_layout, &self.pipelines.row_ends, vec![view(0, &layer.view)]),
+            };
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("row ends"),
+                layout,
+                entries: &entries,
+            });
+            let target = texture(device, "row ends", h, across, LAYER_FORMAT);
+            let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut pass =
+                render_pass(&mut encoder, "row ends", &target_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+            targets.push(target);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        // all copied back together, then each read
+        let reads: Vec<Readback> = targets.iter().map(|t| start_reading(gpu, t, h, across)).collect();
+        let mut rows: Vec<Option<(u32, u32)>> = vec![None; h as usize];
+        for read in reads {
+            let pixels = read.pixels().ok()?;
+            // target pixel (y, k) holds row y's stretch k
+            for (k, line) in (0u32..).zip(pixels.chunks_exact((4 * h as usize).max(1))) {
+                for (row, &[f0, f1, l0, l1]) in rows.iter_mut().zip(line.as_chunks::<4>().0) {
+                    let (first, last) = (u32::from(f0) | u32::from(f1) << 8, u32::from(l0) | u32::from(l1) << 8);
+                    if first == 0 {
+                        continue;
+                    }
+                    let (from, to) = (k * BOUNDS_STRETCH + first - 1, k * BOUNDS_STRETCH + last);
+                    *row = Some(row.map_or((from, to), |(a, b)| (a.min(from), b.max(to))));
+                }
+            }
+        }
+        Some(rows)
+    }
+
     /// A layer's pixels inside `rect` (on the canvas), rows top to bottom; none if it is off the
     /// canvas. Waits for the GPU.
     pub fn read_layer_part(&self, gpu: &Gpu, id: LayerId, rect: IRect) -> Result<Vec<u8>, GpuError> {
@@ -12016,6 +12091,8 @@ impl Pipelines {
             bounds_pipeline(&changed_layout, "fs_changed_rows"),
             bounds_pipeline(&changed_layout, "fs_changed_columns"),
         );
+        let (row_ends, row_ends_masked) =
+            (bounds_pipeline(&bounds_layout, "fs_row_ends"), bounds_pipeline(&changed_layout, "fs_row_ends_masked"));
         let flip_module = module("flip", include_str!("shaders/flip.wgsl"));
         let flip_layout = layout("flip", &[Some(&bounds_layout)]);
         let flip_pipeline =
@@ -12345,6 +12422,8 @@ impl Pipelines {
             changed_layout,
             changed_rows,
             changed_columns,
+            row_ends,
+            row_ends_masked,
             flip_across,
             flip_down,
             invert,
@@ -13656,10 +13735,11 @@ fn brush_bind(
 /// The rectangle holding every pixel `rows` (whole rows of a coverage `width` pixels wide, the
 /// first of them row `first`) selects any of; empty where none is.
 fn coverage_bounds(rows: &[u8], width: u32, first: usize) -> IRect {
+    use procraft_engine::selection::{first_set, last_set};
     let w = (width as usize).max(1);
     let mut bounds = IRect::EMPTY;
     for (j, row) in rows.chunks(w).enumerate() {
-        let (Some(left), Some(right)) = (row.iter().position(|&c| c > 0), row.iter().rposition(|&c| c > 0)) else {
+        let (Some(left), Some(right)) = (first_set(row), last_set(row)) else {
             continue;
         };
         let y = i32::try_from(first + j).unwrap_or(i32::MAX);
@@ -13669,7 +13749,15 @@ fn coverage_bounds(rows: &[u8], width: u32, first: usize) -> IRect {
     bounds
 }
 
-fn coverage_texture(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, data: &[u8]) -> wgpu::Texture {
+/// A texture of the coverage `data` (`width` × `height`, a byte a pixel), of which only the rows of
+/// `bounds` (where any is) are sent: a texture starts clear.
+fn coverage_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    (width, height): (u32, u32),
+    data: &[u8],
+    bounds: IRect,
+) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("selection"),
         size: extent(width, height),
@@ -13680,17 +13768,17 @@ fn coverage_texture(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, heig
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        data,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width), rows_per_image: Some(height) },
-        extent(width, height),
-    );
+    let rows = bounds.intersect(IRect::from_size(width, height));
+    let (y0, y1) = (rows.y0.max(0).cast_unsigned(), rows.y1.max(0).cast_unsigned());
+    let sent = data.get(y0 as usize * width as usize..y1 as usize * width as usize).filter(|_| !rows.is_empty());
+    if let Some(sent) = sent {
+        queue.write_texture(
+            copy_at(&texture, 0, rows.y0),
+            sent,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width), rows_per_image: Some(y1 - y0) },
+            extent(width, y1 - y0),
+        );
+    }
     texture
 }
 
