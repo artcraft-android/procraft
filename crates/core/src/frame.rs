@@ -100,6 +100,20 @@ impl State {
         screen: Profile,
         started: Instant,
     ) {
+        self.lay_frame(view, format, size, screen, started);
+        // and when it ends: a frame that took long (a weak GPU's, a third of a second) still counts
+        // as one being drawn, so a read beside the frames keeps leaving them what they lay
+        self.frame_drawn_at = Some(Instant::now());
+    }
+
+    fn lay_frame(
+        &mut self,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        screen: Profile,
+        started: Instant,
+    ) {
         self.needs_frame = false;
         self.frame_due = None;
         self.frame_drawn_at = Some(Instant::now());
