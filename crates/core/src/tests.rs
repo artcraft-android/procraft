@@ -4868,6 +4868,44 @@ fn pinching_a_transform_to_nothing_and_ending_it_never_breaks() {
     }
 }
 
+/// A brush of one's own made in Brush Studio with a wet mix (#351): with water in its paint
+/// (Dilution over nothing) the paint tool picks up the colour of the band it crosses; with Pull,
+/// Charge and Attack set and no water it paints plainly, as a wet mix comes on with Dilution; and
+/// with water but a full Charge it lays its own colour, which its charge holds.
+#[test]
+fn a_new_brush_with_water_in_its_wet_mix_picks_up_the_colour_it_paints_over() {
+    let Some(s) = session(200, 200) else { return };
+    // a red band across the layer
+    s.set_brush_size(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    for y in [90.0, 100.0, 110.0] {
+        stroke_line(&s, (10.0, y), (190.0, y));
+    }
+    assert_eq!(pixel(&s, 100, 100), [255, 0, 0, 255]);
+    let painted_across = |[dilution, charge, attack, pull]: [f32; 4], x: f32| {
+        assert_eq!(s.new_brush(0), Some(0));
+        s.studio_begin();
+        for (key, value) in
+            [("wet_dilution", dilution), ("wet_charge", charge), ("wet_attack", attack), ("wet_pull", pull)]
+        {
+            s.set_studio_setting(key.to_owned(), value);
+        }
+        s.studio_end(true);
+        assert!((s.current_brush_setting("wet_dilution".to_owned()) - dilution).abs() < 1e-6);
+        assert!((s.current_brush_setting("wet_pull".to_owned()) - pull).abs() < 1e-6);
+        s.set_brush_size(0.6);
+        s.set_color(0.0, 0.0, 1.0);
+        stroke_line(&s, (x, 20.0), (x, 180.0));
+        pixel(&s, x as u32, 104)
+    };
+    let wet = painted_across([0.6, 0.0, 0.0, 0.0], 40.0);
+    assert!(wet[0] > 128 && wet[2] > 10, "the red under it mixed into the blue: {wet:?}");
+    let dry = painted_across([0.0, 0.3, 0.2, 0.8], 100.0);
+    assert!(dry[0] < 8 && dry[2] > 240, "no water, no wet mix: {dry:?}");
+    let charged = painted_across([0.6, 1.0, 0.0, 0.0], 160.0);
+    assert!(charged[0] < 40 && charged[2] > 200, "a full charge lays its own colour: {charged:?}");
+}
+
 #[test]
 fn a_transform_moves_the_layer_as_one_undo_step() {
     use crate::transform::{Interpolation, TransformAction, TransformHandle, TransformKind};
