@@ -18298,6 +18298,61 @@ fn brush_previews_come_out_the_same_on_a_device_starved_of_memory_and_threads() 
     assert_eq!(gpu.errors(), 0);
 }
 
+/// Wet stock brushes' sample strokes, drawn paced beside the window's frames (their work sent a
+/// short piece at a time), keep one piece on the GPU while the next is made ready, rather than
+/// waiting for each before making the next: the same strokes, the same each time, sooner. Printed:
+/// the strokes' time both ways (the quicker of 2 rounds each). Bound: the same pixels, and under
+/// 0.9 of the time waiting for each piece took.
+#[test]
+fn paced_sample_strokes_make_the_next_piece_ready_while_the_gpu_lays_one() {
+    let Some(s) = session(64, 64) else { return };
+    let names = ["Kingsley", "Plover", "Whitsand Bay", "Copperwing", "Gyrfalcon"];
+    let found: Vec<(u32, u32)> = names
+        .iter()
+        .filter_map(|n| {
+            s.brush_library().iter().find_map(|set| set.brushes.iter().find(|b| b.name == *n).map(|b| (b.set, b.index)))
+        })
+        .collect();
+    assert_eq!(found.len(), names.len(), "the wet stock brushes");
+    // the previews' canvas made (and its pipelines) first
+    let _ = s.brush_preview(0, 0, 530, 162);
+    let draw = |each: bool| -> (Vec<Vec<u8>>, f64) {
+        if let Some((canvas, _)) = s.shared.lock().preview.as_mut() {
+            canvas.pace_each_piece(each);
+        }
+        let t = std::time::Instant::now();
+        let drawn = found
+            .iter()
+            .map(|&(set, index)| {
+                s.shared.lock().drawn_previews = Default::default();
+                s.brush_preview(set, index, 530, 162).expect("drawn").rgba
+            })
+            .collect();
+        (drawn, t.elapsed().as_secs_f64() * 1000.0)
+    };
+    let (mut each_ms, mut ready_ms) = (f64::MAX, f64::MAX);
+    let mut first: Option<Vec<Vec<u8>>> = None;
+    for _ in 0..2 {
+        for each in [true, false] {
+            let (drawn, ms) = draw(each);
+            if each {
+                each_ms = each_ms.min(ms);
+            } else {
+                ready_ms = ready_ms.min(ms);
+            }
+            match &first {
+                Some(first) => assert!(*first == drawn, "drawn alike each time, either way"),
+                None => first = Some(drawn),
+            }
+        }
+    }
+    println!(
+        "{} wet stock brushes' sample strokes: {each_ms:.0} ms waiting for each piece, {ready_ms:.0} ms with the next made ready meanwhile",
+        names.len()
+    );
+    assert!(ready_ms < 0.9 * each_ms, "{ready_ms:.0} ms against {each_ms:.0} ms");
+}
+
 /// A brush's sample stroke comes out the same drawn paced (its work sent a short piece at a time,
 /// each waited for) as unpaced: wet paint alone and with a second, dual brushes, glazes and strokes
 /// built up gradually, on a full GPU and an old one's fragment passes, but for a level here and

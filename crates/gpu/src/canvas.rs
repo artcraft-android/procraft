@@ -3139,10 +3139,14 @@ pub struct Canvas {
     selection_sent: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
-    /// Each piece waited for on the GPU before the next is sent, and pieces of no more than
-    /// [`PACED_WORK`] (see [`Canvas::pace`]); and the longest one took since last asked.
+    /// Each piece waited for on the GPU before the one after the next is sent, and pieces of no
+    /// more than [`PACED_WORK`] (see [`Canvas::pace`]); and the longest one took since last asked.
     paced: bool,
     paced_longest: std::time::Duration,
+    /// A paced canvas's piece sent and not yet waited for, and when it was sent; and whether each
+    /// is waited for at once instead (as before: for tests comparing the two).
+    paced_in_flight: Option<(wgpu::SubmissionIndex, std::time::Instant)>,
+    paced_each: bool,
     /// Compute dispatches recorded for smudges, paint laid in place and stamps laid by their rule.
     dispatched: AtomicU64,
     /// Wet paint and paint laid in place go down a stamp a dispatch, as they did before runs of
@@ -3597,6 +3601,8 @@ impl Canvas {
             selection_sent: 0,
             paced: false,
             paced_longest: std::time::Duration::ZERO,
+            paced_in_flight: None,
+            paced_each: false,
             dispatched: AtomicU64::new(0),
             stamp_by_stamp: false,
             rewinds: true,
@@ -4812,13 +4818,22 @@ impl Canvas {
     }
 
     /// Paces the canvas's work on the GPU (`on`): pieces of no more than [`PACED_WORK`], each
-    /// waited for before the next is sent. For a canvas drawn on a thread of its own beside the
-    /// window's frames (a brush's sample stroke): a frame then never queues behind more than a short
-    /// piece of its work, and no piece runs long enough for a driver to stop it. What is laid is the
-    /// same but for a level here and there where pieces meet, as with any stroke sent in pieces.
+    /// waited for before the one after it is sent (so the next is made ready while the GPU works
+    /// through it), and a render's all waited for by its end. For a canvas drawn on a thread of its
+    /// own beside the window's frames (a brush's sample stroke): a frame then never queues behind
+    /// more than two short pieces of its work, and no piece runs long enough for a driver to stop
+    /// it. What is laid is the same but for a level here and there where pieces meet, as with any
+    /// stroke sent in pieces; the pieces, and so what they lay, are the same each time.
     pub fn pace(&mut self, on: bool) {
         self.paced = on;
         self.work_at_once = if on { PACED_WORK } else { WORK_AT_ONCE };
+    }
+
+    /// A paced canvas's pieces each waited for as soon as it is sent (`on`), as they were before
+    /// the next was made ready meanwhile: for tests comparing the two.
+    #[doc(hidden)]
+    pub fn pace_each_piece(&mut self, on: bool) {
+        self.paced_each = on;
     }
 
     /// The longest a paced piece of work took on the GPU, from being sent to being done, since
@@ -4827,12 +4842,16 @@ impl Canvas {
         std::mem::take(&mut self.paced_longest)
     }
 
-    /// Waits for the piece of work sent as `index` at `sent`, if the canvas is paced (see
-    /// [`Canvas::pace`]).
-    fn wait_if_paced(&mut self, gpu: &Gpu, index: wgpu::SubmissionIndex, sent: std::time::Instant) {
+    /// A paced canvas's piece of work sent as `index` at `sent` (see [`Canvas::pace`]): the piece
+    /// before it is waited for, this one left to the GPU while the next is made ready (`last`: the
+    /// render's last, waited for at once, and so all before it).
+    fn wait_if_paced(&mut self, gpu: &Gpu, index: wgpu::SubmissionIndex, sent: std::time::Instant, last: bool) {
         if !self.paced {
             return;
         }
+        let before = self.paced_in_flight.replace((index, sent));
+        let waited = if last || self.paced_each { self.paced_in_flight.take() } else { before };
+        let Some((index, sent)) = waited else { return };
         let wait = wgpu::PollType::Wait { submission_index: Some(index), timeout: Some(PACED_WAIT_MOST) };
         if let Err(e) = gpu.device.poll(wait) {
             log::warn!("waiting for a paced piece of work: {e}");
@@ -7552,7 +7571,7 @@ impl Canvas {
         if relay_laid > 0 && self.relay_sent.is_none() {
             self.relay_sent = Some((sent.clone(), std::time::Instant::now(), relay_laid));
         }
-        self.wait_if_paced(gpu, sent, at);
+        self.wait_if_paced(gpu, sent, at, true);
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
         self.pack_history(gpu);
@@ -9868,7 +9887,7 @@ impl Canvas {
         *smudge = UniformData::default();
         *wet = UniformData::default();
         self.pieces_sent = self.pieces_sent.wrapping_add(1);
-        self.wait_if_paced(gpu, sent, at);
+        self.wait_if_paced(gpu, sent, at, false);
     }
 
     /// Goes on remaking the caches for a while (parts of whole items, each part's layers brought
