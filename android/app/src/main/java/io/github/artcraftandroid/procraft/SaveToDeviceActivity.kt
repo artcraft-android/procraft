@@ -59,7 +59,7 @@ class SaveToDeviceActivity : ComponentActivity() {
         Executors.newSingleThreadExecutor().execute {
             val saved = runCatching(work).getOrDefault(false)
             runOnUiThread {
-                if (!saved) Toast.makeText(app, "Couldn't save the file", Toast.LENGTH_LONG).show()
+                if (!saved) Toast.makeText(app, Zh.t("Couldn't save the file"), Toast.LENGTH_LONG).show()
                 finish()
             }
         }
