@@ -177,8 +177,7 @@ private fun ColorButton(vm: CanvasViewModel, width: Dp) {
     val ringed = if (Pc.light) vm.brightness > LIGHT_RING_ABOVE else vm.brightness < DARK_RING_BELOW
     // held a moment, the previous colour (and held again, back)
     // dragged out onto the canvas, it fills there (ColorDrop)
-    val hold = io.github.artcraftandroid.procraft.core.colourHoldMs().toLong()
-    Box(Modifier.size(width, Pc.BarButtonHeight).dropSource(vm, holdMs = hold, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
+    Box(Modifier.size(width, Pc.BarButtonHeight).dropSource(vm, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
         val dot = Modifier.size(Pc.ColorDot * Pc.barGlyphScale(width)).clip(CircleShape).background(CanvasSpace.color(rgb))
         Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
     }

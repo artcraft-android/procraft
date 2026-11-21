@@ -917,13 +917,11 @@ impl Colours {
                 let slot = (row * 10 + i) as u32;
                 let id = ui.scope_id().with(("palette swatch", slot));
                 match rgb {
-                    Some(c) => {
-                        match drop.source(ui, session, id, cell, c, true, Some(crate::colour_drop::HOLD), Some(panel)) {
-                            Some(Touch::Tap) => self.set_rgb(session, c),
-                            Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
-                            Some(Touch::Dragged) | None => {}
-                        }
-                    }
+                    Some(c) => match drop.source(ui, session, id, cell, c, true, Some(panel)) {
+                        Some(Touch::Tap) => self.set_rgb(session, c),
+                        Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
+                        Some(Touch::Dragged) | None => {}
+                    },
                     // not the swatch's id: a hold that took a colour out doesn't tap the slot it
                     // leaves when let go
                     None => {

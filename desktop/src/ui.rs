@@ -805,8 +805,7 @@ impl Interface {
         if let Some(rect) = bar.rect(BarButton::Colour) {
             let id = ui.scope_id().with("colour button");
             let rgb = to_hex(self.colours.rgb());
-            let hold = std::time::Duration::from_millis(u64::from(procraft_core::COLOUR_HOLD_MS));
-            match self.drop.source(ui, session, id, rect, rgb, false, Some(hold), None) {
+            match self.drop.source(ui, session, id, rect, rgb, false, None) {
                 Some(Touch::Tap) => self.toggle(session, Popover::Colour),
                 Some(Touch::Hold) => self.previous_colour(session),
                 Some(Touch::Dragged) => self.open = None,
@@ -3571,17 +3570,29 @@ mod tests {
         /// The mouse clicking at `at`.
         fn click(&mut self, at: Pos2) {
             self.hover(at);
-            for (pressed, state) in [(true, ElementState::Pressed), (false, ElementState::Released)] {
-                let button = egui::PointerButton::Primary;
-                self.events.push(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
-                self.canvas_hears(&WindowEvent::MouseInput {
-                    device_id: DeviceId::dummy(),
-                    state,
-                    button: MouseButton::Left,
-                });
-                self.frame();
-            }
+            self.mouse_button(at, true);
+            self.mouse_button(at, false);
             self.frame();
+        }
+
+        /// The mouse's button pressed, or let go, at `at`.
+        fn mouse_button(&mut self, at: Pos2, pressed: bool) {
+            let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+            let button = egui::PointerButton::Primary;
+            self.events.push(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
+            self.canvas_hears(&WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state,
+                button: MouseButton::Left,
+            });
+            self.frame();
+        }
+
+        /// The mouse dragged from `from` to `to` in `steps` frames, its button held.
+        fn mouse_drag(&mut self, from: Pos2, to: Pos2, steps: usize) {
+            for k in 1..=steps {
+                self.hover(from + (to - from) * (k as f32 / steps as f32));
+            }
         }
 
         /// `key` pressed and let go with Ctrl (and Shift) held, as a keyboard sends it or a tablet's
@@ -3755,6 +3766,50 @@ mod tests {
             w.ctrl_key(Key::Z, true);
             assert_eq!(w.steps(), (true, false), "{size:?}");
         }
+    }
+
+    #[test]
+    fn the_colour_button_tapped_opens_the_colours_held_goes_back_and_dragged_out_fills() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        let button = w.tool_button(BarButton::Colour, 1.0);
+        let artwork = pos2(600.0, 400.0);
+        // red, then green picked: red is the colour to go back to
+        w.ui.colours.set_rgb(&w.session, 0xFF0000);
+        w.ui.colours.picked(&w.session, 0x00FF00);
+        // tapped: the colours open, and close again
+        w.click(button);
+        assert_eq!(w.ui.open, Some(Popover::Colour));
+        w.click(button);
+        assert_eq!(w.ui.open, None);
+        // held still a third of a second: back to red; dragged onto the artwork afterwards and let
+        // go there, nothing fills
+        w.hover(button);
+        w.mouse_button(button, true);
+        for _ in 0..20 {
+            w.frame();
+        }
+        assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
+        w.mouse_drag(button, artwork, 12);
+        w.mouse_button(artwork, false);
+        w.frame();
+        assert_eq!(w.steps(), (false, false));
+        assert_eq!(w.ui.open, None);
+        // moved a little (within the hold's reach) and let go: a tap
+        w.hover(button);
+        w.mouse_button(button, true);
+        w.mouse_drag(button, button + vec2(-6.0, 6.0), 3);
+        w.mouse_button(button + vec2(-6.0, 6.0), false);
+        assert_eq!(w.ui.open, Some(Popover::Colour));
+        w.click(button);
+        assert_eq!(w.ui.open, None);
+        // dragged out without stopping: still red, it fills where it is let go
+        w.hover(button);
+        w.mouse_button(button, true);
+        w.mouse_drag(button, artwork, 12);
+        w.mouse_button(artwork, false);
+        w.frame();
+        assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
+        assert_eq!(w.steps(), (true, false));
     }
 
     #[test]

@@ -30,6 +30,7 @@ mod colour;
 mod colour_blob;
 mod colour_drag;
 mod colour_models;
+mod colour_press;
 mod crop;
 mod crop_edit;
 mod cursor_turn;
@@ -168,6 +169,7 @@ pub use colour_models::{
     colour_model_square_side, colour_model_tracks, colour_models, oklab_of, oklab_of_hsv, oklab_slid, oklab_to_rgb,
     oklab_tracks, oklab_value_slid, oklab_value_tracks,
 };
+pub use colour_press::{ColourPress, PressTurn};
 pub use crop_edit::{CropReadout, CropShown};
 pub use cursor_turn::CursorPen;
 pub use device::keep_device;
