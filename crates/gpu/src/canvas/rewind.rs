@@ -212,6 +212,16 @@ impl Rewind {
 }
 
 impl Canvas {
+    /// Whether [`Canvas::mark_in_place`] marks the open stroke before stamps input from `time_ms`
+    /// on (it is time for one).
+    pub(super) fn marks_in_place(&self, time_ms: f64) -> bool {
+        self.smudge
+            .as_ref()
+            .and_then(|s| s.rewind.as_ref())
+            .filter(|r| r.on && r.laid > 0)
+            .is_some_and(|r| r.marks.back().is_none_or(|m| time_ms - m.time_ms >= MARK_EVERY_MS))
+    }
+
     /// Marks the open stroke painting in place to go back to, before stamps input from `time_ms`
     /// on are laid (if it is time for one).
     pub(super) fn mark_in_place(&mut self, encoder: &mut wgpu::CommandEncoder, device: &wgpu::Device, time_ms: f64) {

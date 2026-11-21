@@ -7715,8 +7715,13 @@ impl Canvas {
             let newest = smudge.pending.last().map(key);
             let ready = smudge.pending.iter().take_while(|s| Some(key(s)) != newest).count();
             let ready: Vec<_> = smudge.pending.drain(..ready).collect();
-            // a mark to go back to before them (see `rewind.rs`)
+            // a mark to go back to before them (see `rewind.rs`), a dual brush's second still to be
+            // put together put together first, so that the mark holds the layer with it (see
+            // `synthesis_due`): gone back to, the stroke would lay again without it
             if let Some(first) = ready.first() {
+                if self.marks_in_place(first.2.time_ms) {
+                    self.synthesize_due(gpu, encoder, params);
+                }
                 self.mark_in_place(encoder, device, first.2.time_ms);
             }
             self.lay_wet(gpu, encoder, (params, passes), &ready, style);

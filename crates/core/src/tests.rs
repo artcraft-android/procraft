@@ -21837,6 +21837,118 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
     assert!(joined * 5 <= apart * 4, "{joined} windows in all, against {apart}");
 }
 
+/// A wet dual brush's second put together with its paint's next stamps lays what it lays put
+/// together on its own also where a stroke's end goes back to a mark (its end taper reaching back
+/// over paint laid in place): the mark holds the second's newest stamps put together, as it did when
+/// they were put together as they came. Strokes over paint to pick up, drawn a frame at a time as the
+/// apps draw them, then one pressed from nothing to full whose end is laid again from a mark.
+#[test]
+fn a_wet_dual_brushs_stroke_gone_back_to_a_mark_ends_as_with_its_second_put_together_apart() {
+    let (side, window) = (2048, 1600);
+    let drawn = |joined: bool| -> Option<Vec<u8>> {
+        let gpu = match Gpu::headless() {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return None;
+            }
+        };
+        let s = CanvasSession::new(side, side);
+        s.use_gpu(gpu);
+        s.show_in(window, window);
+        let view = window_view(&s, window);
+        let frame = || {
+            let _ = s.draw(
+                &view,
+                procraft_gpu::wgpu::TextureFormat::Rgba8Unorm,
+                (window, window),
+                procraft_engine::profile::Profile::Srgb,
+                std::time::Instant::now(),
+            );
+        };
+        let settle = || {
+            for _ in 0..400 {
+                let owed = s
+                    .shared
+                    .lock()
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|c| c.wants_render() || c.relaying() || c.catching_up());
+                if !owed {
+                    break;
+                }
+                frame();
+            }
+        };
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut()?;
+            // a piece of a stroke's end a frame and paint laid in place all at once: the same
+            // frames each time, whatever the time
+            canvas.set_relay_at_once(std::time::Duration::ZERO);
+            canvas.set_in_place_paced(false);
+            canvas.join_synthesis(joined);
+        }
+        // paint to pick up: four bands of colour across, airbrushed
+        let (set, index) = library_brush(&s, |b| b.name == "Soft Airbrush")?;
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(1.0);
+        for (k, y) in [300.0_f32, 700.0, 1100.0, 1400.0].into_iter().enumerate() {
+            s.set_color(k as f32 / 3.0, 0.4, 1.0 - k as f32 / 3.0);
+            s.shared.lock().strokes = 500 + k as u32;
+            s.stroke_begin(PointerKind::Stylus, vec![sample(80.0, y, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(80.0 + i as f32 * 50.0, y, f64::from(i) * 8.0)).collect());
+            s.stroke_end(vec![]);
+            frame();
+        }
+        settle();
+        let (set, index) = library_brush(&s, |b| b.name == "Numbat" && b.secondary.is_some())?;
+        assert!(s.select_brush(set, index));
+        s.set_color(0.8, 0.2, 0.1);
+        let pen = |x: f32, y: f32, pressure: f32, tilt: f32, orientation: f32, k: usize| PenSample {
+            x,
+            y,
+            pressure,
+            tilt,
+            orientation,
+            time_ms: k as f64 * 4.17,
+            roll: 0.0,
+        };
+        // strokes of `frames` frames, two pen events a frame and the next two predicted
+        let seed = std::cell::Cell::new(1000);
+        let stroke = |frames: usize, at: &dyn Fn(usize, usize) -> PenSample| {
+            let n = 4 * frames + 2;
+            seed.set(seed.get() + 1);
+            s.shared.lock().strokes = seed.get();
+            s.stroke_begin(PointerKind::Stylus, vec![at(0, n)]);
+            for f in 1..=frames {
+                for e in [2 * f - 1, 2 * f] {
+                    s.stroke_add(vec![at(2 * e - 1, n), at(2 * e, n)]);
+                    s.stroke_predict(vec![at(2 * e + 1, n), at(2 * e + 2, n)]);
+                }
+                frame();
+            }
+            s.stroke_end(vec![]);
+            frame();
+            settle();
+        };
+        // slow and waving, fast across, then pressed from nothing to full along a line
+        stroke(24, &|k, _| {
+            let t = k as f32;
+            pen(150.0 + t * 2.5, 220.0 + 30.0 * (t * 0.05).sin(), 0.5 + 0.3 * (t * 0.07).sin(), 0.3, 1.0, k)
+        });
+        stroke(8, &|k, _| pen(100.0 + k as f32 * 40.0, 420.0 + k as f32 * 8.0, 0.8, 0.2, 0.5, k));
+        stroke(20, &|k, n| {
+            let t = k as f32 / (n - 1) as f32;
+            pen(120.0 + k as f32 * 16.0, 640.0, (t * 1.02).clamp(0.0, 1.0), 0.0, 0.0, k)
+        });
+        let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        Some(layer_rgba(&s, current))
+    };
+    let (Some(joined), Some(apart)) = (drawn(true), drawn(false)) else { return };
+    assert_eq!(differ(&joined, &apart), (0, 0), "its second put together with its paint, against apart");
+}
+
 /// A thin brush's stroke painting in place keeps its layer in tiles a thin brush's side across, a
 /// big brush's in tiles twice as wide (each window copies each tile it covers in and out, a copy at
 /// a time, and on OpenGL a big brush's whatever the brush: copies are dear there): in a big brush's
