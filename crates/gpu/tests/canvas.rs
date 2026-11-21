@@ -3159,6 +3159,204 @@ fn a_wet_dual_brush_s_first_fades_into_its_second_s_colour() {
     assert!(a > 250 && r > 60 && b > 60, "red {r} blue {b} alpha {a}");
 }
 
+/// How a dual brush's first stroke's coverage `a` and its second's `b` combine by dual mode `mode`,
+/// worked out here apart from the shaders: the blend modes' own rules on the one channel, the first
+/// the backdrop and the second the source, but soft light from a quarter of the way in and hard
+/// mix full where vivid light comes to half; the modes that only carry colour leave the first as
+/// it is; the two heights cut the first by the second.
+fn dual_combined(a: f32, b: f32, mode: u32) -> f32 {
+    let burn =
+        |a: f32, b: f32| if b <= 0.0 { if a >= 1.0 { 1.0 } else { 0.0 } } else { 1.0 - ((1.0 - a) / b).min(1.0) };
+    let dodge = |a: f32, b: f32| if b >= 1.0 { if a > 0.0 { 1.0 } else { 0.0 } } else { (a / (1.0 - b)).min(1.0) };
+    let vivid = |a: f32, b: f32| if b < 0.5 { burn(a, 2.0 * b) } else { dodge(a, 2.0 * b - 1.0) };
+    let r = match mode {
+        0 => a + (1.0 - a) * b,
+        1 => a * b,
+        2 => a.min(b),
+        3 => burn(a, b),
+        4 => a + b - 1.0,
+        6 => a.max(b),
+        7 => a + b - a * b,
+        8 => dodge(a, b),
+        9 => a + b,
+        11 => {
+            if a < 0.5 {
+                2.0 * a * b
+            } else {
+                1.0 - 2.0 * (1.0 - a) * (1.0 - b)
+            }
+        }
+        12 => {
+            let k = 0.5 * a + 0.25;
+            if b < 0.5 { 2.0 * b * k } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - k) }
+        }
+        13 => {
+            if b < 0.5 {
+                2.0 * a * b
+            } else {
+                1.0 - 2.0 * (1.0 - a) * (1.0 - b)
+            }
+        }
+        14 => vivid(a, b),
+        15 => a + 2.0 * b - 1.0,
+        16 => {
+            if b < 0.5 {
+                a.min(2.0 * b)
+            } else {
+                a.max(2.0 * b - 1.0)
+            }
+        }
+        17 => {
+            if vivid(a, b) >= 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        18 => (a - b).abs(),
+        19 => a + b - 2.0 * a * b,
+        20 => a - b,
+        21 => {
+            if b <= 0.0 {
+                if a > 0.0 { 1.0 } else { 0.0 }
+            } else {
+                (a / b).min(1.0)
+            }
+        }
+        27 | 28 => {
+            let mid = 2.0 * (0.5 - (a - 0.5).abs());
+            let rise = 40.0 * (0.2 - b).max(0.0) * (a.powi(6) + mid.powi(6));
+            (rise + 0.5 * a).max((rise - a) * b + 2.0 * a)
+        }
+        _ => a,
+    };
+    r.clamp(0.0, 1.0)
+}
+
+/// A dual brush's two strokes combine by each dual mode's own rule, dry or wet
+/// (paint laid in place): sixteen strengths of the first under a second of a quarter, a half and
+/// three quarters, each read where it is laid alone and together.
+#[test]
+fn a_dual_brush_s_two_strokes_combine_by_each_mode_s_own_rule() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let at = |i: u32| Vec2::new(8.0 * i as f32 + 4.5, 16.5);
+    let firsts: Vec<Stamp> = (0..16).map(|i| Stamp::round(at(i), 3.0, (i + 1) as f32 / 16.0)).collect();
+    let read = |canvas: &mut Canvas, doc: &mut Document| {
+        canvas.render(&gpu, doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let alphas: Vec<f32> = (0..16).map(|i| f32::from(pixel(&layer, 128, 8 * i + 4, 16)[3]) / 255.0).collect();
+        canvas.undo();
+        alphas
+    };
+    let mut worst = (0.0f32, 0u32, 0.0f32, false);
+    for wet in [false, true] {
+        let first = StrokeStyle {
+            wet_pull: wet.then_some(0.5),
+            hardness: 1.0,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        let plain = StrokeStyle { hardness: 1.0, ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0) };
+        let mut doc = Document::new(128, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), first);
+        canvas.add_stamps(&firsts);
+        canvas.end_stroke();
+        let alone = read(&mut canvas, &mut doc);
+        for b in [0.25f32, 0.5, 0.75] {
+            let whole = [Stamp::round(Vec2::new(64.0, 16.0), 200.0, b)];
+            canvas.begin_stroke(doc.current(), plain);
+            canvas.add_stamps(&whole);
+            canvas.end_stroke();
+            let second_alone = read(&mut canvas, &mut doc)[0];
+            for mode in (0..=21).chain([27, 28]) {
+                let second = procraft_gpu::SecondStroke { style: plain, mode, threshold: -1.0, classic: false };
+                canvas.begin_dual_stroke(doc.current(), first, second);
+                canvas.add_second_stamps(&whole);
+                canvas.add_stamps(&firsts);
+                canvas.end_stroke();
+                let both = read(&mut canvas, &mut doc);
+                for (i, (&a, &got)) in alone.iter().zip(&both).enumerate() {
+                    let want = dual_combined(a, second_alone, mode);
+                    // (where a step of a level in either moves the answer by much, it is no test:
+                    // the steep dodges and burns, hard mix at its edge)
+                    let steep = [-1.0f32, 1.0].iter().any(|d| {
+                        let off = 1.0 / 255.0 * d;
+                        (dual_combined(a + off, second_alone, mode) - want).abs() > 2.0 / 255.0
+                            || (dual_combined(a, second_alone + off, mode) - want).abs() > 2.0 / 255.0
+                    });
+                    let off = (got - want).abs();
+                    if !steep && off > worst.0 {
+                        worst = (off, mode, a, wet);
+                    }
+                    assert!(
+                        steep || off <= 3.0 / 255.0,
+                        "mode {mode}, wet {wet}: first {a} second {second_alone}: {got} against {want} (stamp {i})"
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("worst off by {:.4} (mode {}, first {}, wet {})", worst.0, worst.1, worst.2, worst.3);
+}
+
+/// A wet dual brush's second, wherever it raises how much of the first shows, shows more of the
+/// paint the first laid there (the layer goes towards the stroke's mixed colour by the amount the
+/// two make together): never the stroke's plain colour, which the first's thin rim once took past
+/// four times what it laid, a dark ring of specks round a pale wash.
+#[test]
+fn a_wet_dual_brush_s_second_shows_more_of_its_wash_never_plain_paint() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the stroke in black: a soft wet first along the middle, inside a wide solid second
+    let stroke = |canvas: &mut Canvas, doc: &Document, dilution: f32, mode: u32| {
+        let first = StrokeStyle {
+            hardness: 0.1,
+            wet_pull: Some(0.5),
+            dilution,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+            mode,
+            threshold: -1.0,
+            classic: false,
+        };
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(48.0, 24.0), 60.0, 1.0)]);
+        canvas.add_stamps(&(0..9).map(|k| dot(Vec2::new(16.0 + k as f32 * 8.0, 24.0), 14.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+    };
+    // every mode a second can raise the first by: Lighten, Screen, Colour Dodge, Add, Overlay, Soft
+    // Light, Hard Light, Vivid Light, Linear Light, Pin Light, Hard Mix, Divide, the two heights
+    let raising = [6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 21, 27, 28];
+    for mode in raising {
+        // water alone (all its paint is what it picks up) over white: the layer stays white
+        let mut doc = Document::new(96, 48);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0));
+        canvas.add_stamps(&(0..48).map(|y| dot(Vec2::new(48.0, y as f32), 80.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        stroke(&mut canvas, &doc, 1.0, mode);
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let darkest = layer.chunks(4).map(|p| p[0].min(p[1]).min(p[2])).min().unwrap();
+        assert!(darkest >= 250, "mode {mode}: water over white went down to {darkest}");
+        // a thin wash over nothing: its rim, raised to full by the second, no stronger than its
+        // middle raised to full (its own colour, about a fifth of the paint)
+        let mut doc = Document::new(96, 48);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        stroke(&mut canvas, &doc, 0.5, mode);
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let middle = pixel(&layer, 96, 48, 24)[3];
+        let strongest = layer.chunks(4).map(|p| p[3]).max().unwrap();
+        eprintln!("mode {mode}: wash middle {middle}, strongest {strongest}");
+        assert!(middle > 0 && u32::from(strongest) <= u32::from(middle) + 24, "mode {mode}: {strongest} over {middle}");
+    }
+}
+
 /// A dual brush's second shows past its first's stamps as the stroke is drawn, and stays there as
 /// it is kept: ended with only the rest, or laid whole again (its first changed at the end), paint
 /// built up in the stroke or laid in place wet. Where only the second reaches, what is kept is what

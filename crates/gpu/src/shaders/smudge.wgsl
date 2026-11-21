@@ -802,8 +802,41 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
 // second's went: the paint over the layer as it was, as far as how much of it was laid combines
 // with the grain by its mode, then the second's coverage (cut at its threshold) by the dual mode. Wet
 // paint keeps what it laid: its change to the layer, scaled from how much was laid to that. Only
-// this far: more, and the change's own rounding shows as speckle.
+// this far at a pixel: more, and the change's own rounding shows as speckle; past that, the change
+// for each unit laid is read over the pixels round about (see `laid_change_near`).
 const LAID_MOST_SCALE: f32 = 4.0;
+
+// How many pixels each way `laid_change_near` reads.
+const LAID_NEAR: i32 = 2;
+
+// `c` in the space paint laid apart is shown in over the layer (see `over_layer`).
+fn laid_space(c: vec4<f32>) -> vec4<f32> {
+    return select(c, to_mix(c), st.luminance == 2u);
+}
+
+// How far wet paint laid apart around canvas pixel `p` takes the layer from what it was, for each
+// unit of it laid there (in `laid_space`): the change summed over the pixels near, over how much
+// they took all told. Kept to 8 bits, a thin wash's change at one pixel is mostly rounding, so
+// scaled up to what a second makes of it it would speckle; over a few pixels' worth it is the
+// wash's own colour. (A second raising the paint shows more of the paint as it mixed there,
+// never paint that isn't there, as plain colour would: a thin wash's rim stays a thin wash.)
+fn laid_change_near(p: vec2<i32>) -> vec4<f32> {
+    let lo = max(st.bbox.xy, vec2<i32>(0));
+    let hi = min(st.bbox.zw, vec2<i32>(st.size)) - 1;
+    var change = vec4<f32>(0.0);
+    var took = 0.0;
+    for (var dy = -LAID_NEAR; dy <= LAID_NEAR; dy++) {
+        for (var dx = -LAID_NEAR; dx <= LAID_NEAR; dx++) {
+            let q = clamp(p + vec2<i32>(dx, dy), lo, hi);
+            let s = shown_at(q);
+            if (s > 0.0) {
+                change += laid_space(grained_at(q)) - laid_space(before_at(q));
+                took += s;
+            }
+        }
+    }
+    return change / max(took, 1e-6);
+}
 
 // The layer at canvas pixel `p` (one of the stamp's bounds, and selected) once paint laid apart is
 // put together there, dithered, before it is rounded to 8 bits.
@@ -849,7 +882,7 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
         out = vec4<f32>(min(added.rgb, vec3<f32>(added.a)), added.a);
     }
     if (st.laid_apart == 2u && laid > 0.0) {
-        // what a second adds past that is laid as plain paint, as it is where none was laid at all
+        // the paint as laid, scaled to how much of it shows with the second (as far as one pixel can)
         let scale = min(a / laid, LAID_MOST_SCALE);
         var kept = over_layer(was, grained_at(p), scale);
         // (the paint as it was laid, for a Normal second)
@@ -865,7 +898,14 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
             kept = over_layer(was, burning, laid * scale);
             first = over_layer(was, burning, laid);
         }
-        out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
+        out = kept;
+        let rest = max(a - laid * scale, 0.0);
+        if (rest > 0.0) {
+            // what the second adds past that: more of the paint as it was laid round about
+            let past = laid_space(kept) + laid_change_near(p) * rest;
+            out = clamp(select(past, from_mix(past), st.luminance == 2u), vec4<f32>(0.0), vec4<f32>(1.0));
+            out = vec4<f32>(min(out.rgb, vec3<f32>(out.a)), out.a);
+        }
         if (toward > 0.0) {
             // a Normal second: the paint as laid turned toward the stroke's own colour as far as
             // the second shows where the first laid little, then shown as far as the two together
