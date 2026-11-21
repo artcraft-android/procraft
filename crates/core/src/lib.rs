@@ -1095,14 +1095,7 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
         }
-        // a brush file's grain at its own size, fixed to the canvas or moving with each stamp
-        let full = brush.grain_file_now().and_then(|f| f.full.as_ref());
-        if let Some(full) = full
-            && let Some(pixels) = self.grain_store.pixels(full)
-            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
-        {
-            canvas.use_full_grain(gpu, &mut style, full.id, full.side, &pixels);
-        }
+        self.use_full_grain(&mut style, &brush);
         self.use_full_shape(&mut style, &brush);
         self.use_sharper(&mut style, &brush, diameter);
         (brush, style, diameter)
@@ -1159,6 +1152,17 @@ impl State {
     }
 
     /// `style` reads `brush`'s shape from its file's image at its own size, if it has one.
+    /// `style` reads a brush file's grain at its own size, fixed to the canvas or moving with each
+    /// stamp, if `brush` has one.
+    fn use_full_grain(&mut self, style: &mut StrokeStyle, brush: &Brush) {
+        if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref())
+            && let Some(pixels) = self.grain_store.pixels(full)
+            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
+        {
+            canvas.use_full_grain(gpu, style, full.id, full.side, &pixels);
+        }
+    }
+
     fn use_full_shape(&mut self, style: &mut StrokeStyle, brush: &Brush) {
         if let Some(full) = brush.shape_file_now().map(|f| &f.full)
             && let Some(pixels) = self.grain_store.pixels(full)
@@ -1217,6 +1221,7 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &second);
         }
+        self.use_full_grain(&mut style, &second);
         self.use_full_shape(&mut style, &second);
         self.use_sharper(&mut style, &second, diameter);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;

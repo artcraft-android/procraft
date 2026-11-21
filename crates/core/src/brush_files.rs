@@ -111,7 +111,10 @@ impl CanvasSession {
             secondary: brush.secondary.as_ref().map(|second| {
                 Box::new(Made {
                     shape: self.shape_png(second),
-                    grain: grain_pixels(second).map(|p| gray_png(&p)),
+                    grain: match self.full_grain(second) {
+                        Some((side, pixels)) => Some(sized_gray_png(side, side, &pixels)),
+                        None => grain_pixels(second).map(|p| gray_png(&p)),
+                    },
                     metallic: material_pixels(&second.metallic).map(|p| gray_png(&p)),
                     roughness: material_pixels(&second.roughness).map(|p| gray_png(&p)),
                     thumbnail: Vec::new(),
@@ -2321,8 +2324,9 @@ pub(crate) fn brush_from(file: &BrushFile) -> Brush {
     }
     b.notches = file.notches.clone();
     b.sliders = file.sliders;
-    // (a second's grain goes on stamp by stamp, so by the grain's own tile)
-    b.secondary = file.secondary.as_deref().map(|second| Box::new(Brush { grain_file: None, ..brush_from(second) }));
+    // (a second's grain goes on stamp by stamp, by the grain's own tile, but from the file's
+    // image at its own size, as the first's does)
+    b.secondary = file.secondary.as_deref().map(|second| Box::new(brush_from(second)));
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
     b.grain_file = grain_file_for(&file.grain, source.as_ref());

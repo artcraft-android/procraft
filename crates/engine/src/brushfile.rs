@@ -1253,6 +1253,59 @@ mod tests {
     }
 
     #[test]
+    fn a_dual_brush_s_second_keeps_every_setting_of_its_own_through_its_file() {
+        // the second set otherwise than the first in every control a file keeps, its size range,
+        // curves and pictures its own
+        let mut second = Brush { name: "Second".to_owned(), ..Brush::round_pen() };
+        for (k, (key, _, kept)) in PLAIN.iter().enumerate() {
+            let v = match kept {
+                Kept::Switch | Kept::Whole | Kept::LastTwoSwapped => (k % 2) as f32,
+                _ => 0.05 + (k % 17) as f32 / 20.0,
+            };
+            second.set_setting(key, v);
+        }
+        second.set_setting("rendering_mode", 4.0);
+        second.set_setting("blend_mode", BlendMode::Multiply.id() as f32);
+        second.set_setting("max_size", 0.8);
+        second.set_setting("min_size", 0.1);
+        second.size_curve = crate::curve::Curve::new(&[Vec2::new(0.0, 0.1), Vec2::new(0.6, 0.3), Vec2::new(1.0, 1.0)]);
+        let mut first =
+            Brush { name: "First".to_owned(), secondary: Some(Box::new(second.clone())), ..Brush::round_pen() };
+        first.set_setting("dual_blend", BlendMode::ColorDodge.id() as f32);
+        let pictures = |shape: &'static [u8], grain: &'static [u8], secondary| Pictures {
+            shape_png: shape,
+            grain_png: Some(grain),
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"thumb",
+            author_png: None,
+            signature_png: None,
+            secondary,
+        };
+        let file =
+            write(&first, "", &pictures(b"shape", b"grain", Some(Box::new(pictures(b"shape2", b"grain2", None)))));
+        let back = read(&file).unwrap();
+        assert!(back.settings.iter().any(|(k, v)| k == "dual_blend" && *v == BlendMode::ColorDodge.id() as f32));
+        let theirs = back.secondary.unwrap();
+        assert_eq!(theirs.name, "Second");
+        assert_eq!(theirs.shape, Texture::Image { bytes: b"shape2".to_vec(), inverted: false });
+        assert_eq!(theirs.grain, Texture::Image { bytes: b"grain2".to_vec(), inverted: false });
+        let curve = theirs.size_curve.as_ref().unwrap();
+        assert!((curve[1] - Vec2::new(0.6, 0.3)).length() < 1e-5);
+        let mut again = Brush::round_pen();
+        for (k, v) in &theirs.settings {
+            again.set_setting(k, *v);
+        }
+        set_sizes(&mut again, theirs.max_size, theirs.min_size);
+        let keys = PLAIN.iter().map(|(key, _, _)| *key).chain(["rendering_mode", "blend_mode", "max_size", "min_size"]);
+        let off: Vec<(&str, f32, f32)> = keys
+            .filter(|key| (again.setting(key) - second.setting(key)).abs() > 1e-3)
+            .map(|key| (key, second.setting(key), again.setting(key)))
+            .collect();
+        assert!(off.is_empty(), "the second's settings changed: {off:?}");
+    }
+
+    #[test]
     fn a_dual_brush_s_blend_mode_is_kept_whatever_its_number() {
         // a layer mode past Multiply and the grain's own heights, as the setting and as read
         for mode in [BlendMode::ColorBurn.id(), BlendMode::Divide.id(), GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT] {
