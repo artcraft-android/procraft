@@ -336,6 +336,12 @@ fn main() {
     }
 }
 
+/// Whether `window` is an X11 one.
+fn is_x11(window: &Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    matches!(window.window_handle().map(|h| h.as_raw()), Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)))
+}
+
 struct App {
     /// Wakes the loop from other threads (the pen's, on Wayland).
     wake: winit::event_loop::EventLoopProxy<()>,
@@ -472,6 +478,8 @@ impl ApplicationHandler for App {
         files::dialogs_over(&window);
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
+        // an X11 window manager may hold each touch back and hand it on whole
+        input::set_whole_touches(is_x11(&window));
         // the brushes read while the gallery shows, so the first artwork opens without reading them
         let read = std::thread::Builder::new().name("procraft-read-brushes".to_owned());
         if let Err(e) = read.spawn(|| procraft_core::prepare_brushes(files::brushes_dir())) {

@@ -34,6 +34,33 @@ const R_TAP: Duration = Duration::from_millis(300);
 
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
+
+/// A finger's touch heard from landing to lifting in less than this (milliseconds, not counting
+/// the time the canvas spent on it) came whole: no finger lifts that fast, so it was held back and
+/// handed on at once (see [`Input::hold_whole_touches`]).
+const WHOLE_TOUCH_MS: f64 = 4.0;
+/// A finger's touch that came whole lifts once no other has landed for this long (milliseconds):
+/// the fingers of a tap a window manager hands on one after the other lift together.
+const HELD_LIFT_MS: f64 = 120.0;
+
+/// Whether the window's touches may come held back and whole (an X11 window), for each [`Input`]
+/// made from now on.
+static WHOLE_TOUCHES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The window is an X11 one (`on`), whose window manager may hold each touch back and hand it on
+/// whole (see [`Input::hold_whole_touches`]), or isn't.
+pub fn set_whole_touches(on: bool) {
+    WHOLE_TOUCHES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A finger's touch down on the canvas: how long it has been heard from, without the canvas's own
+/// time on it, and when that last ended (milliseconds).
+#[derive(Clone, Copy, Debug)]
+struct FingerHeard {
+    id: u64,
+    idle_ms: f64,
+    done_ms: f64,
+}
 /// How many moves a stroke the mouse pointer began with no tablet pen read waits for the pen's
 /// reading, to be the pen's: a reading late at all comes a frame or two after the press.
 const UNREAD_MOVES: u32 = 4;
@@ -214,6 +241,19 @@ pub struct Input {
     /// How many times moves went to the canvas, and how many samples they took there.
     #[cfg_attr(not(test), allow(dead_code))]
     handed: Handed,
+    /// Touches may come held back and whole. Under X11 a window manager can take every touch first
+    /// (Cinnamon's does, for its own gestures: each until it has moved 30 px, lifted, or 150 ms
+    /// have gone) and then hand each to the window by itself, all of it at once. Fingers tapped
+    /// together then come one after the other, each landed and lifted, and make no tap together.
+    /// So a finger that comes whole and alone has its lift held back until no other finger has
+    /// landed for [`HELD_LIFT_MS`]: the fingers that came that way lift together, as they did.
+    pub hold_whole_touches: bool,
+    /// The fingers down on the canvas, as heard (see [`FingerHeard`]).
+    fingers: Vec<FingerHeard>,
+    /// Fingers that came whole and lifted, their lifts held back (where each lifted), and when
+    /// those go on (milliseconds).
+    held_lifts: Vec<(u64, (f32, f32))>,
+    held_until: Option<f64>,
     /// The time samples are read at in place of the clock's, milliseconds: a test's own.
     #[cfg(test)]
     test_clock: Option<f64>,
@@ -257,6 +297,10 @@ impl Default for Input {
             turns_model: false,
             waiting: Vec::new(),
             handed: Handed::default(),
+            hold_whole_touches: WHOLE_TOUCHES.load(std::sync::atomic::Ordering::Relaxed),
+            fingers: Vec::new(),
+            held_lifts: Vec::new(),
+            held_until: None,
             #[cfg(test)]
             test_clock: None,
         }
@@ -348,9 +392,12 @@ impl Input {
         self.clock.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// When the touches next need [`Input::tick`], if ever.
+    /// When the touches next need [`Input::tick`], if ever (a held lift too).
     pub fn next_deadline(&self, session: &CanvasSession) -> Option<Instant> {
-        let due = session.touch_deadline()?;
+        let due = match (session.touch_deadline(), self.held_until) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b)?,
+        };
         Some(self.clock + Duration::from_secs_f64((due / 1000.0).max(0.0)))
     }
 
@@ -359,10 +406,38 @@ impl Input {
     /// airbrush held still lays its latest again, not one from before them.
     pub fn tick(&mut self, session: &CanvasSession) -> bool {
         let now = self.now_ms();
+        let lifted = self.held_until.is_some_and(|until| until <= now) && self.lift_held(session);
         let due = !self.waiting.is_empty() && session.touch_deadline().is_some_and(|due| due <= now);
         let flushed = due && self.flush(session);
         let out = session.touch_tick(now);
-        self.take(out) || flushed
+        self.take(out) || flushed || lifted
+    }
+
+    /// The lifts held back go on, in the order they came. True if there were any.
+    fn lift_held(&mut self, session: &CanvasSession) -> bool {
+        self.held_until = None;
+        let held = std::mem::take(&mut self.held_lifts);
+        for &(id, at) in &held {
+            self.lifted(session, id, at, 1.0, false);
+        }
+        !held.is_empty()
+    }
+
+    /// Finger `id`'s touch is heard from at `now` (milliseconds): the time since it was last
+    /// counts as heard, and its time on the canvas starts.
+    fn finger_heard(&mut self, id: u64, now: f64) -> Option<FingerHeard> {
+        let f = self.fingers.iter_mut().find(|f| f.id == id)?;
+        f.idle_ms += now - f.done_ms;
+        f.done_ms = now;
+        Some(*f)
+    }
+
+    /// The canvas is done with finger `id`'s touch for now: its time from here counts as heard.
+    fn finger_done(&mut self, id: u64) {
+        let now = self.now_ms();
+        if let Some(f) = self.fingers.iter_mut().find(|f| f.id == id) {
+            f.done_ms = now;
+        }
     }
 
     /// The moves waiting go to the canvas, each pointer's samples together, as a tablet's batched
@@ -764,6 +839,7 @@ impl Input {
             // is, and what shows once it lifts starts from there)
             self.cursor = Some(p);
         }
+        let now = self.now_ms();
         let known = self.down.contains(&touch.id);
         match phase {
             TouchPhase::Started => {
@@ -775,7 +851,18 @@ impl Input {
                     self.ignored.push(touch.id);
                     return true;
                 }
+                if self.held_lifts.iter().any(|(id, _)| *id == touch.id) {
+                    self.lift_held(session);
+                }
                 self.pressed(session, touch.id, kind, p, pressure);
+                if pen.is_none() && self.hold_whole_touches {
+                    self.fingers.retain(|f| f.id != touch.id);
+                    self.fingers.push(FingerHeard { id: touch.id, idle_ms: 0.0, done_ms: self.now_ms() });
+                    // lifts held back wait for the fingers still coming
+                    if self.held_until.is_some() {
+                        self.held_until = Some(now + HELD_LIFT_MS);
+                    }
+                }
                 true
             }
             // a pen's moves wait for the frame; a finger's go on at once, for the gestures fingers
@@ -785,15 +872,30 @@ impl Input {
                 true
             }
             TouchPhase::Moved if known => {
+                self.finger_heard(touch.id, now);
                 let out = session.touch_move(touch.id, vec![self.sample(touch.id, p, pressure)]);
                 self.take(out);
+                self.finger_done(touch.id);
                 true
             }
             TouchPhase::Ended if known => {
+                let heard = self.finger_heard(touch.id, now);
+                self.fingers.retain(|f| f.id != touch.id);
+                // a finger that came whole, with none down but those held back: held back too
+                let held = |id: &u64| self.held_lifts.iter().any(|(h, _)| h == id);
+                let alone = self.down.iter().all(|id| *id == touch.id || held(id));
+                if alone && heard.is_some_and(|f| f.idle_ms < WHOLE_TOUCH_MS) {
+                    self.held_lifts.push((touch.id, p));
+                    self.held_until = Some(now + HELD_LIFT_MS);
+                    return true;
+                }
+                self.lift_held(session);
                 self.lifted(session, touch.id, p, pressure, false);
                 true
             }
             TouchPhase::Cancelled if known => {
+                self.fingers.retain(|f| f.id != touch.id);
+                self.lift_held(session);
                 self.lifted(session, touch.id, p, pressure, true);
                 true
             }
@@ -988,6 +1090,138 @@ mod tests {
         input.commands.clear();
         tap(&mut input, (9003, 9004));
         assert!(input.commands.contains(&TouchCommand::Undo), "after the pen: {:?}", input.commands);
+    }
+
+    /// A finger's touch as winit gives it under X11 at `ms`: no force, the system saying nothing of
+    /// what it is, and the first finger down (`first`) moving the pointer just before it.
+    fn x11_finger(
+        input: &mut Input,
+        session: &CanvasSession,
+        id: u64,
+        phase: TouchPhase,
+        at: (f64, f64),
+        first: bool,
+        ms: f64,
+    ) {
+        input.test_clock = Some(ms);
+        let location = PhysicalPosition::new(at.0, at.1);
+        if first && phase != TouchPhase::Ended {
+            send(input, session, &WindowEvent::CursorMoved { device_id: DeviceId::dummy(), position: location });
+        }
+        send(
+            input,
+            session,
+            &WindowEvent::Touch(Touch { device_id: DeviceId::dummy(), phase, location, force: None, id }),
+        );
+    }
+
+    /// A finger's whole touch handed on at once at `ms`, as an X11 window manager that held it
+    /// back does once it lifted: landing at `at`, moving half a pixel, lifting.
+    fn x11_whole_tap(input: &mut Input, session: &CanvasSession, id: u64, at: (f64, f64), ms: f64) {
+        x11_finger(input, session, id, TouchPhase::Started, at, true, ms);
+        x11_finger(input, session, id, TouchPhase::Moved, (at.0 + 0.5, at.1), true, ms);
+        x11_finger(input, session, id, TouchPhase::Ended, (at.0 + 0.5, at.1), true, ms);
+    }
+
+    #[test]
+    fn fingers_tapped_together_that_x11_hands_on_one_after_the_other_still_undo_and_redo() {
+        let x11 = |hold| {
+            let input = Input { hold_whole_touches: hold, test_clock: Some(0.0), ..Input::default() };
+            let session = shown();
+            session.set_touch_settings(procraft_core::TouchSettings::default());
+            (session, input)
+        };
+        let undid = |input: &Input| input.commands.contains(&TouchCommand::Undo);
+        // two fingers tapped together, each handed on whole as it lifted, 40 ms apart (Cinnamon
+        // holds each until it lifts): as the window had them, two taps of one finger each
+        let (session, mut input) = x11(false);
+        x11_whole_tap(&mut input, &session, 3101, (300.0, 300.0), 1000.0);
+        x11_whole_tap(&mut input, &session, 3102, (400.0, 300.0), 1040.0);
+        input.test_clock = Some(1040.0 + HELD_LIFT_MS);
+        input.tick(&session);
+        assert!(!undid(&input), "{:?}", input.commands);
+        // held back, they lift together: an undo, once no more fingers come
+        let (session, mut input) = x11(true);
+        x11_whole_tap(&mut input, &session, 3103, (300.0, 300.0), 1000.0);
+        x11_whole_tap(&mut input, &session, 3104, (400.0, 300.0), 1040.0);
+        assert!(!undid(&input));
+        input.test_clock = Some(1040.0 + HELD_LIFT_MS - 1.0);
+        assert!(!input.tick(&session));
+        assert!(input.next_deadline(&session).is_some());
+        input.test_clock = Some(1040.0 + HELD_LIFT_MS);
+        assert!(input.tick(&session));
+        assert!(undid(&input), "{:?}", input.commands);
+        assert!(input.idle());
+        // three that way: a redo
+        input.commands.clear();
+        for (k, id) in [3105, 3106, 3107].into_iter().enumerate() {
+            x11_whole_tap(&mut input, &session, id, (300.0 + 100.0 * k as f64, 300.0), 2000.0 + 30.0 * k as f64);
+        }
+        input.test_clock = Some(2060.0 + HELD_LIFT_MS);
+        assert!(input.tick(&session));
+        assert!(input.commands.contains(&TouchCommand::Redo), "{:?}", input.commands);
+        assert!(!undid(&input), "{:?}", input.commands);
+    }
+
+    #[test]
+    fn x11_fingers_heard_as_they_go_lift_at_once_and_pinch_and_a_lone_whole_tap_lifts_a_moment_later() {
+        let (session, mut input) =
+            (shown(), Input { hold_whole_touches: true, test_clock: Some(0.0), ..Input::default() });
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        // a two-finger tap heard as it went: the undo at the first lift, nothing held
+        x11_finger(&mut input, &session, 3201, TouchPhase::Started, (300.0, 300.0), true, 1000.0);
+        x11_finger(&mut input, &session, 3202, TouchPhase::Started, (400.0, 300.0), false, 1020.0);
+        x11_finger(&mut input, &session, 3201, TouchPhase::Ended, (300.0, 300.0), true, 1090.0);
+        x11_finger(&mut input, &session, 3202, TouchPhase::Ended, (400.0, 300.0), false, 1100.0);
+        assert!(input.commands.contains(&TouchCommand::Undo), "{:?}", input.commands);
+        assert_eq!(input.next_deadline(&session), None);
+        assert!(input.idle());
+        // a pinch whose first finger's moves came held back, all at once, then the second's, then
+        // both as they went: the canvas zooms, and both lift as they do
+        input.commands.clear();
+        let before = view(&session).0;
+        x11_finger(&mut input, &session, 3203, TouchPhase::Started, (300.0, 300.0), true, 3000.0);
+        for k in 1..=5 {
+            x11_finger(
+                &mut input,
+                &session,
+                3203,
+                TouchPhase::Moved,
+                (300.0 - 6.0 * f64::from(k), 300.0),
+                true,
+                3000.0,
+            );
+        }
+        x11_finger(&mut input, &session, 3204, TouchPhase::Started, (500.0, 300.0), false, 3040.0);
+        for k in 1..=5 {
+            x11_finger(
+                &mut input,
+                &session,
+                3204,
+                TouchPhase::Moved,
+                (500.0 + 6.0 * f64::from(k), 300.0),
+                false,
+                3040.0,
+            );
+        }
+        for k in 1..=10 {
+            let (ms, out) = (3040.0 + 10.0 * f64::from(k), 30.0 + 6.0 * f64::from(k));
+            x11_finger(&mut input, &session, 3203, TouchPhase::Moved, (300.0 - out, 300.0), true, ms);
+            x11_finger(&mut input, &session, 3204, TouchPhase::Moved, (500.0 + out, 300.0), false, ms);
+        }
+        x11_finger(&mut input, &session, 3203, TouchPhase::Ended, (210.0, 300.0), true, 3150.0);
+        x11_finger(&mut input, &session, 3204, TouchPhase::Ended, (590.0, 300.0), false, 3155.0);
+        assert!(view(&session).0 > before * 1.5, "{} from {before}", view(&session).0);
+        assert!(input.idle() && input.held_lifts.is_empty());
+        assert!(!input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        // one finger's whole tap: its dot's stroke ends once no other has come
+        input.commands.clear();
+        x11_whole_tap(&mut input, &session, 3205, (300.0, 300.0), 5000.0);
+        assert!(!input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        input.test_clock = Some(5000.0 + HELD_LIFT_MS);
+        assert!(input.tick(&session));
+        assert!(input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        assert!(!input.commands.contains(&TouchCommand::Undo), "{:?}", input.commands);
     }
 
     #[test]
