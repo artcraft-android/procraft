@@ -14,6 +14,12 @@ interface DropPours {
      */
     fun drop(at: Offset, colour: Int, threshold: Float): Dropped
 
+    /**
+     * Continue filling's touch: fills from window point [at] with ([r], [g], [b], 0..1) at
+     * [threshold], shown at once (not spreading); false if nothing was filled.
+     */
+    fun pour(at: Offset, r: Float, g: Float, b: Float, threshold: Float): Boolean
+
     /** The open fill redone at [threshold]. */
     fun threshold(threshold: Float)
 
@@ -30,6 +36,10 @@ interface DropPours {
  * for one: what each did comes back on it ([post]). A large fill takes a moment on a slow device,
  * and the screen goes on meanwhile. What comes after them waits for them ([afterFills]), so undo
  * takes back the fill and not what was before it.
+ *
+ * Continue filling's touches fill the same way ([tap], [tapEnd]), but the screen goes on taking
+ * touches meanwhile: the next touch's fill waits its turn, and a second finger still takes a fill
+ * back.
  *
  * Main thread only, but for [run]'s blocks.
  */
@@ -58,8 +68,11 @@ class ColorDropFlow(
     /** The newest threshold for the fill's thread, and whether one is on its way there. */
     private val threshold = ConcurrentHashMap<String, Float>()
 
-    /** Told whether fills are being made (for the screen to take no touches meanwhile). */
+    /** Told whether a dragged colour's fills are being made (for the screen to take no touches meanwhile). */
     var onBusy: (Boolean) -> Unit = {}
+
+    /** Fills handed over that hold the screen (a dragged colour's, not Continue filling's) and not yet back. */
+    private var holding = 0
 
     /** A drag begins: nothing filled yet. */
     fun start() {
@@ -132,6 +145,19 @@ class ColorDropFlow(
         }
     }
 
+    /**
+     * Continue filling's touch landed at [at]: it fills there with ([r], [g], [b]) at [threshold] on
+     * the fill's thread, in turn (its threshold slid is redone after it there).
+     */
+    fun tap(at: Offset, r: Float, g: Float, b: Float, threshold: Float) {
+        submit(holds = false) { pours.pour(at, r, g, b, threshold) }
+    }
+
+    /** Continue filling's touch let go: its fill is kept ([keep]) or taken back, once it is made. */
+    fun tapEnd(keep: Boolean) {
+        submit(holds = false) { pours.end(keep) }
+    }
+
     /** What waits for the fills under way to be done, in the order it came. */
     private val waiting = ArrayDeque<() -> Unit>()
 
@@ -140,18 +166,24 @@ class ColorDropFlow(
         if (pending == 0) block() else waiting.addLast(block)
     }
 
-    /** Hands [block] to the fill's thread, counting it until it is back. */
-    private fun submit(block: () -> Unit) {
+    /** Hands [block] to the fill's thread, counting it until it is back; [holds]: the screen takes no touches meanwhile. */
+    private fun submit(holds: Boolean = true, block: () -> Unit) {
         pending += 1
-        if (pending == 1) onBusy(true)
+        if (holds) {
+            holding += 1
+            if (holding == 1) onBusy(true)
+        }
         run {
             try {
                 block()
             } finally {
                 post {
                     pending -= 1
+                    if (holds) {
+                        holding -= 1
+                        if (holding == 0) onBusy(false)
+                    }
                     if (pending == 0) {
-                        onBusy(false)
                         while (pending == 0) waiting.removeFirstOrNull()?.invoke() ?: break
                     }
                 }

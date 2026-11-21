@@ -564,24 +564,77 @@ fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
     st.window_texel(x, y)
 }
 
+/// What a fill at a window point lands on: nothing it fills (off the artwork, or a layer that takes
+/// none), text (which takes none until it is rasterized), a plugin's layer (which makes of it what
+/// it will, as one step), or a layer it pours into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PourTarget {
+    Nothing,
+    Text,
+    Plugin,
+    Layer,
+}
+
+/// What a fill at window point (`x`, `y`) lands on, as [`CanvasSession::pour_begin`] goes by it
+/// (whether a plugin's layer takes it is for its plugin to say).
+pub(crate) fn pour_target(st: &State, x: f32, y: f32) -> PourTarget {
+    match layer_target(st) {
+        PourTarget::Text => PourTarget::Text,
+        _ if seed_at(st, x, y).is_none() => PourTarget::Nothing,
+        target => target,
+    }
+}
+
+/// What the current layer is to a fill (see [`PourTarget`]); a plugin's layer whatever its plugin
+/// would say.
+fn layer_target(st: &State) -> PourTarget {
+    let current = st.doc.current();
+    let Some(layer) = st.doc.layer(current) else { return PourTarget::Nothing };
+    if layer.text.is_some() {
+        PourTarget::Text
+    } else if st.doc.is_locked(current) {
+        PourTarget::Nothing
+    } else if layer.plugin.is_some() {
+        PourTarget::Plugin
+    } else {
+        PourTarget::Layer
+    }
+}
+
 /// Where the artwork is on the screen as last seen (its view and its size; none while a model is
-/// shown, whose surface goes by more than that): whether a dragged colour lands on it is told from
-/// this while a pour holds the canvas, which a whole layer's does for a while.
+/// shown, whose surface goes by more than that), and what its current layer is to a fill: whether
+/// a dragged colour lands on it, and what Continue filling's touch fills, are told from this while
+/// a pour holds the canvas, which a whole layer's does for a while.
 #[derive(Default)]
-pub(crate) struct LandsOn(parking_lot::Mutex<Option<(procraft_engine::view::View, (u32, u32))>>);
+pub(crate) struct LandsOn(parking_lot::Mutex<Option<Seen>>);
+
+/// The view the artwork was last seen through, its size, and what its current layer is to a fill.
+type Seen = (procraft_engine::view::View, (u32, u32), PourTarget);
 
 impl LandsOn {
     /// Notes where the artwork is as `st` has it.
     pub(crate) fn note(&self, st: &State) {
-        let seen = st.view.filter(|_| !st.scene_shown()).map(|v| (v, (st.doc.width(), st.doc.height())));
+        let seen =
+            st.view.filter(|_| !st.scene_shown()).map(|v| (v, (st.doc.width(), st.doc.height()), layer_target(st)));
         *self.0.lock() = seen;
     }
 
     /// Whether window point (`x`, `y`) is on the artwork as last noted; none if that isn't known.
     fn lands(&self, x: f32, y: f32) -> Option<bool> {
-        let (view, (w, h)) = (*self.0.lock())?;
+        let (view, (w, h), _) = (*self.0.lock())?;
         let p = view.screen_to_canvas(Vec2::new(x, y))?;
         Some(p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32)
+    }
+
+    /// What a fill at window point (`x`, `y`) lands on as last noted (see [`pour_target`]); none if
+    /// that isn't known.
+    pub(crate) fn target(&self, x: f32, y: f32) -> Option<PourTarget> {
+        let target = self.0.lock().map(|(.., target)| target)?;
+        Some(match target {
+            PourTarget::Text => PourTarget::Text,
+            _ if !self.lands(x, y)? => PourTarget::Nothing,
+            target => target,
+        })
     }
 }
 

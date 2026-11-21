@@ -1367,6 +1367,17 @@ impl Interface {
                     self.drop.slid(threshold);
                     slid = Some(threshold);
                 }
+                // Continue filling's touch fills where it landed, and its fill ends (a threshold slid
+                // just before it is redone first, if it is kept): here, at once
+                TouchCommand::PourAt { x, y, fill } => {
+                    session.pour_begin(x, y, fill.r, fill.g, fill.b, fill.threshold);
+                }
+                TouchCommand::PourEnd { keep } => {
+                    if let Some(threshold) = slid.take().filter(|_| keep) {
+                        session.pour_threshold(threshold);
+                    }
+                    session.pour_end(keep, None);
+                }
                 TouchCommand::Filled => {
                     self.drop.filled();
                     slid = None;

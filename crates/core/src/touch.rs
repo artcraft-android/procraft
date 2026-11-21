@@ -29,6 +29,7 @@ pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
 use crate::adjust::PerspectiveKind;
 use crate::adjust_menu::Adjustment;
 use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP, DIRECTIONAL_INNER, DIRECTIONAL_REACH, POSITIONAL_GRAB};
+use crate::pour::{PourTarget, pour_target};
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
@@ -343,11 +344,27 @@ pub enum TouchCommand {
         x: f32,
         y: f32,
     },
+    /// Continue filling: the touch landed where it fills: the app pours `fill` there
+    /// (`pour_begin`), on a thread of its own if it has one (a whole layer's fill takes a while on
+    /// a large canvas), the touch's own work going on meanwhile; this touch's fill ends with
+    /// [`TouchCommand::PourEnd`]. (On a plugin's layer, whose plugin says at once whether it takes
+    /// the fill, the touch pours itself.)
+    PourAt {
+        x: f32,
+        y: f32,
+        fill: Fill,
+    },
     /// Continue filling: a touch slid the fill's threshold to this (keep it for the next, and redo
     /// the fill with it, `pour_threshold`, when next drawing: it redoes the whole fill, so once a
-    /// frame at most), and the fill was let go of (kept, at the threshold it was let go at).
+    /// frame at most; one coming just before [`TouchCommand::PourEnd`] is redone before it ends);
+    /// the touch's fill ends (`pour_end`: `keep` makes it an undo step, else it is taken back, by a
+    /// second finger), after what was asked of it before, on the thread it was poured on; and the
+    /// fill was let go of (kept, at the threshold it was let go at).
     FillThreshold {
         threshold: f32,
+    },
+    PourEnd {
+        keep: bool,
     },
     Filled,
     /// A transform's touch came down (its popovers close); the box as it now is; the node held and
@@ -2065,18 +2082,24 @@ impl CanvasSession {
             out.push(TouchCommand::TransformTouched);
             return;
         }
-        // Continue filling: the touch fills where it lands; slid, it changes the threshold
+        // Continue filling: the touch fills where it lands (the app pours, see `PourAt`); slid, it
+        // changes the threshold
         if let Some(fill) = t.filling {
             t.stroke_pointer = id;
             t.pour_moved = false;
             t.pour_last = (at.0, now);
-            if self.current_is_text() {
-                out.push(TouchCommand::TextLayer);
-                t.mode = Mode::Idle;
-            } else {
-                let poured = self.pour_begin(at.0, at.1, fill.r, fill.g, fill.b, fill.threshold);
-                t.mode = if poured { Mode::Pour } else { Mode::Idle };
-            }
+            t.mode = match self.pour_target_at(at) {
+                PourTarget::Text => {
+                    out.push(TouchCommand::TextLayer);
+                    Mode::Idle
+                }
+                PourTarget::Layer => {
+                    out.push(TouchCommand::PourAt { x: at.0, y: at.1, fill });
+                    Mode::Pour
+                }
+                PourTarget::Plugin if self.pour_begin(at.0, at.1, fill.r, fill.g, fill.b, fill.threshold) => Mode::Pour,
+                PourTarget::Plugin | PourTarget::Nothing => Mode::Idle,
+            };
             return;
         }
         // on a shown model a finger turns it, unless set to paint; the pen paints. Held still, it
@@ -2204,7 +2227,7 @@ impl CanvasSession {
         // of what the box holds is kept when the fingers go on to take it); it keeps the opacity
         // dragged so far
         if t.mode == Mode::Pour {
-            self.pour_end(false, None);
+            out.push(TouchCommand::PourEnd { keep: false });
         }
         if t.mode == Mode::Opacity {
             self.opacity_lifted(t);
@@ -2507,10 +2530,9 @@ impl CanvasSession {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
                 drop(t);
                 if let Some(threshold) = slid.filter(|_| !cancelled) {
-                    self.pour_threshold(threshold);
                     out.push(TouchCommand::FillThreshold { threshold });
                 }
-                self.pour_end(!cancelled, None);
+                out.push(TouchCommand::PourEnd { keep: !cancelled });
                 out.push(TouchCommand::Filled);
             }
             // a tap in the guide editor: on a handle, its menu (the turn handle has none); elsewhere a
@@ -2799,6 +2821,21 @@ impl CanvasSession {
             y: node.1,
             right: node.0 > middle + 1.0,
         })
+    }
+
+    /// What Continue filling's touch at window point `at` lands on (see [`PourTarget`]). Never
+    /// waiting on a pour that holds the canvas (the last touch's, still being made): it goes by
+    /// what the artwork was last seen to be then.
+    fn pour_target_at(&self, at: (f32, f32)) -> PourTarget {
+        if let Some(st) = self.shared.try_lock() {
+            self.shared.lands_on.note(&st);
+            return pour_target(&st, at.0, at.1);
+        }
+        // (a plugin's layer says whether it takes the fill as it is poured, here)
+        match self.shared.lands_on.target(at.0, at.1).filter(|t| *t != PourTarget::Plugin) {
+            Some(target) => target,
+            None => pour_target(&self.shared.lock(), at.0, at.1),
+        }
     }
 
     /// Whether the current layer is a text layer (it takes no paint until rasterized).

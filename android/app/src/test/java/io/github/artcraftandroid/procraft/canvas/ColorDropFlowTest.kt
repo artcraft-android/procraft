@@ -24,6 +24,12 @@ class ColorDropFlowTest {
             return outcome
         }
 
+        override fun pour(at: Offset, r: Float, g: Float, b: Float, threshold: Float): Boolean {
+            calls += "pour ${at.x.toInt()},${at.y.toInt()}"
+            Thread.sleep(dropMs)
+            return outcome == DropPours.Dropped.POURED
+        }
+
         override fun threshold(threshold: Float) {
             calls += "threshold $threshold"
             Thread.sleep(slideMs)
@@ -179,6 +185,53 @@ class ColorDropFlowTest {
         assertEquals(false, kept)
         assertEquals(2, said)
         assertTrue(pours.calls.none { it.startsWith("end") })
+    }
+
+    /**
+     * Continue filling's touches, as the app did them on the main thread (each touch's whole-layer
+     * fill waited for there) and now (handed to the fill's thread): a touch, its threshold slid and
+     * let go, then a second touch let go at once, a third taken back by a second finger, and an undo.
+     * Printed: the main thread's longest wait before and now. Bound: under 8 ms, the screen never held
+     * (a touch may come meanwhile), the fills and the undo in order.
+     */
+    @Test
+    fun continueFillingsTouchesFillOnTheFillsThreadAndTheScreenGoesOn() {
+        val pours = Pours()
+        // as before: the main thread poured and ended each touch's fill itself
+        val before = held {
+            pours.pour(Offset(40f, 40f), 1f, 0f, 0f, 0.5f)
+            pours.end(true)
+        }
+        pours.calls.clear()
+        val drops = flow(pours)
+        val busy = mutableListOf<Boolean>()
+        drops.onBusy = { busy += it }
+        val waits = mutableListOf<Double>()
+        waits += held { drops.tap(Offset(40f, 40f), 1f, 0f, 0f, 0.5f) }
+        waits += held { drops.tapEnd(true) }
+        waits += held { drops.tap(Offset(300f, 40f), 0f, 1f, 0f, 0.6f) }
+        waits += held { drops.tapEnd(true) }
+        waits += held { drops.tap(Offset(600f, 40f), 0f, 0f, 1f, 0.6f) }
+        waits += held { drops.tapEnd(false) }
+        var undone = false
+        assertTrue(drops.pending > 0)
+        waits += held {
+            drops.afterFills {
+                pours.calls += "undo"
+                undone = true
+            }
+        }
+        val until = System.nanoTime() + 5_000_000_000L
+        while (!(undone && drops.pending == 0) && System.nanoTime() < until) main.poll(5, TimeUnit.MILLISECONDS)?.let { waits += held(it) }
+        val longest = waits.max()
+        println("Continue filling's three touches (each a ${pours.dropMs} ms fill) and an undo: the main thread waited up to %.1f ms before, %.2f ms now".format(java.util.Locale.ROOT, before, longest))
+        assertTrue("the main thread waited $longest ms", longest < 8.0)
+        assertTrue(before >= pours.dropMs.toDouble())
+        assertTrue("the screen was held: $busy", busy.isEmpty())
+        assertEquals(
+            listOf("pour 40,40", "end true", "pour 300,40", "end true", "pour 600,40", "end false", "undo"),
+            pours.calls.toList(),
+        )
     }
 
     @Test

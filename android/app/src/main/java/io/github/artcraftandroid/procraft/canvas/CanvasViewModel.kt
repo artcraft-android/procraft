@@ -8061,6 +8061,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     return if (s.pourDrop(at.x, at.y, r, g, b, threshold)) DropPours.Dropped.POURED else DropPours.Dropped.NOTHING
                 }
 
+                override fun pour(at: Offset, r: Float, g: Float, b: Float, threshold: Float): Boolean =
+                    session?.pourBegin(at.x, at.y, r, g, b, threshold) == true
+
                 override fun threshold(threshold: Float) {
                     session?.pourThreshold(threshold)
                 }
@@ -8248,11 +8251,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold)
     }
 
+    /**
+     * Continue filling's touch fills from window point [at] with [fill], on the fill's thread: the main
+     * thread goes on meanwhile (a whole layer's fill takes a while on a large canvas).
+     */
+    fun tapFill(at: Offset, fill: io.github.artcraftandroid.procraft.core.Fill) = drops.tap(at, fill.r, fill.g, fill.b, fill.threshold)
+
+    /** Continue filling's touch's fill ends, on the fill's thread once it is made: [keep] makes it an undo step. */
+    fun tapFillEnd(keep: Boolean) = drops.tapEnd(keep)
+
+    /**
+     * Whether Continue filling's touch may fill: the current layer takes it (else a dialog says why).
+     * Asked while no fill is being made; with one under way (which holds the canvas) the touch goes
+     * on as the last did, and the fill's thread finds out.
+     */
+    fun tapFillAllowed(): Boolean = drops.pending > 0 || currentTakesChanges(paint = true)
+
     /** The touches' fill was let go of (kept, or taken back by a second finger): a slid threshold is kept for the next. */
     fun filled() {
         if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
         dropSliding = false
-        refresh()
+        // what the fill changed read once it is made (the main thread doesn't wait for it)
+        drops.afterFills { refresh() }
     }
 
     /** The fill under way redone with [threshold], which is kept for the next. */

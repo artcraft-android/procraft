@@ -1832,6 +1832,96 @@ fn a_dropped_colour_reads_its_layer_with_the_canvas_let_go() {
     assert_eq!(gpu.errors(), 0);
 }
 
+/// Continue filling's touches on a large canvas (2048 square), as the Android app makes them: the
+/// touch hands its fill to the app (`PourAt`), which pours on its fill thread, the touch going on
+/// meanwhile: slid, let go, and a second touch landing while the first's fill is still being made.
+/// Printed: the longest the main thread waited as the touch poured itself (as it did), and now.
+/// Bound: under 8 ms; each touch's fill kept as one step, in order.
+#[test]
+fn continue_filling_s_touches_never_wait_on_their_fill() {
+    use crate::TouchCommand;
+    use crate::touch::Fill;
+    use std::sync::mpsc;
+    let Some(s) = session(2048, 2048) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let red = |s: &CanvasSession, x: u32, y: u32| {
+        let [r, g, b, _] = pixel(s, x, y);
+        r > 200 && g < 60 && b < 40
+    };
+    // a line down the middle: two halves to fill
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(1024.0, -10.0, 0.0)]);
+    s.stroke_end(vec![sample(1024.0, 2100.0, 30.0)]);
+    let fill = Fill { r: 0.9, g: 0.1, b: 0.1, threshold: 0.3 };
+    // as it was: the touch poured itself, a whole half of the layer, on the main thread
+    let t = std::time::Instant::now();
+    assert!(s.pour_begin(500.0, 1000.0, fill.r, fill.g, fill.b, fill.threshold));
+    s.pour_end(true, None);
+    let poured_here = ms(t);
+    assert!(red(&s, 500, 1000));
+    s.undo();
+    assert!(!red(&s, 500, 1000));
+    // now: the app's fill thread pours what the touches hand it, in order
+    let (to_fill, asked) = mpsc::channel::<TouchCommand>();
+    let filler = std::thread::spawn({
+        let s = std::sync::Arc::clone(&s);
+        move || {
+            for c in asked {
+                match c {
+                    TouchCommand::PourAt { x, y, fill } => {
+                        _ = s.pour_begin(x, y, fill.r, fill.g, fill.b, fill.threshold)
+                    }
+                    TouchCommand::FillThreshold { threshold } => s.pour_threshold(threshold),
+                    TouchCommand::PourEnd { keep } => s.pour_end(keep, None),
+                    _ => {}
+                }
+            }
+        }
+    });
+    s.set_touch_filling(Some(fill));
+    let mut waited = 0.0f64;
+    let mut handed = Vec::new();
+    let mut touch = |call: &dyn Fn() -> Vec<TouchCommand>| {
+        let t = std::time::Instant::now();
+        let out = call();
+        waited = waited.max(ms(t));
+        for c in out {
+            if matches!(
+                c,
+                TouchCommand::PourAt { .. } | TouchCommand::FillThreshold { .. } | TouchCommand::PourEnd { .. }
+            ) {
+                handed.push(c.clone());
+                let _ = to_fill.send(c);
+            }
+        }
+    };
+    // the left half: down, a slide (to a lower threshold), up; the right half tapped at once, its
+    // fill waiting its turn
+    touch(&|| s.touch_down(1, PointerKind::Finger, vec![sample(500.0, 1000.0, 1000.0)]));
+    for k in 1..=6 {
+        touch(&|| s.touch_move(1, vec![sample(500.0 - 12.0 * k as f32, 1000.0, 1000.0 + 16.0 * f64::from(k))]));
+    }
+    touch(&|| s.touch_up(1, vec![sample(428.0, 1000.0, 1110.0)]));
+    touch(&|| s.touch_down(2, PointerKind::Finger, vec![sample(1500.0, 1000.0, 1200.0)]));
+    touch(&|| s.touch_up(2, vec![sample(1500.0, 1000.0, 1230.0)]));
+    drop(to_fill);
+    assert!(filler.join().is_ok());
+    println!(
+        "a 2048 square layer's halves filled by Continue filling's touches: the main thread waited up to {poured_here:.1} ms as the touch poured itself, {waited:.2} ms now"
+    );
+    let pours = handed.iter().filter(|c| matches!(c, TouchCommand::PourAt { .. })).count();
+    let ends: Vec<bool> =
+        handed.iter().filter_map(|c| if let TouchCommand::PourEnd { keep } = c { Some(*keep) } else { None }).collect();
+    assert_eq!((pours, ends), (2, vec![true, true]), "{handed:?}");
+    assert!(waited < 8.0, "the main thread waited {waited:.2} ms");
+    // both halves filled, each its own step
+    assert!(red(&s, 500, 1000) && red(&s, 1500, 1000));
+    s.undo();
+    assert!(red(&s, 500, 1000) && !red(&s, 1500, 1000));
+    s.undo();
+    assert!(!red(&s, 500, 1000));
+}
+
 /// What ColorDrop costs on a large canvas (`POUR_COST_SIDE`, 4096 square): a colour dropped into a
 /// small ring, its threshold slid, and let go, each timed as the app waits for it; then the same
 /// into the whole empty layer. Run on a device with `--ignored --nocapture`.
@@ -15986,6 +16076,12 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
                     TouchCommand::Undo => _ = s.undo(),
                     TouchCommand::Redo => _ = s.redo(),
                     TouchCommand::ClearLayer => s.clear_layer(),
+                    // Continue filling's touches pour as the app pours them
+                    TouchCommand::PourAt { x, y, fill } => {
+                        _ = s.pour_begin(x, y, fill.r, fill.g, fill.b, fill.threshold)
+                    }
+                    TouchCommand::FillThreshold { threshold } => s.pour_threshold(threshold),
+                    TouchCommand::PourEnd { keep } => s.pour_end(keep, None),
                     _ => {}
                 }
             }

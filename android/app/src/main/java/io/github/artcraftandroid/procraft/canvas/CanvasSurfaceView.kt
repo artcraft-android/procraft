@@ -283,8 +283,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // Recolor's reticle dragged or tapped elsewhere (its fills on the view model's fill thread)
             is TouchCommand.RecolorMoved -> vm.recolorMoveTo(Offset(c.x, c.y))
             is TouchCommand.RecolorTapped -> vm.recolorTap(Offset(c.x, c.y))
-            // Continue filling's threshold slid (redone on the view model's fill thread), and the fill let go
+            // Continue filling: the touch fills where it landed, its threshold slid redoes the fill, and let go (or
+            // taken back by a second finger) it ends, each on the view model's fill thread; and the fill let go
+            is TouchCommand.PourAt -> vm.tapFill(Offset(c.x, c.y), c.fill)
             is TouchCommand.FillThreshold -> vm.pourThreshold(c.threshold)
+            is TouchCommand.PourEnd -> vm.tapFillEnd(c.keep)
             TouchCommand.Filled -> vm.filled()
             // a transform's touch: its popovers close; the box as it now is; the node held, and let go
             // (a rotate or box-turning node springs back); a node tapped types its numbers beside it
@@ -350,7 +353,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // the strokes' sound, resting while none was drawn, wakes for this one
             vm.canvasTouched()
             // Continue filling on a layer that takes no fill: the dialog says why, and the touch does nothing
-            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges(paint = true)) {
+            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.tapFillAllowed()) {
                 skipping = true
                 return true
             }
