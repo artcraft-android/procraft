@@ -322,14 +322,16 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
+        // as big as the brush, as the other apps draw it: its stamp's fill shows what the estimated
+        // pressure makes of it
         let at = CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale)
-        showCursor(at: at, hovering: true, alpha: CGFloat(shown.alpha), size: CGFloat(shown.scale), turn: hoverTurn)
+        showCursor(at: at, hovering: true, alpha: CGFloat(shown.alpha), turn: hoverTurn)
     }
 
     /// The brush's outline at `point` (points), as long as Brush cursor shows it when hovering (or
-    /// painting); none, it goes. It is `size` of the brush's size, turned `turn` past the brush's
-    /// own rotation.
-    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1, turn: CGFloat = 0) {
+    /// painting); none, it goes. Hovering, it is turned `turn` past the brush's own rotation;
+    /// painting, it is as big and turned as the newest stamp laid, as the core has it.
+    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, turn: CGFloat = 0) {
         let settings = AppSettings.shared
         let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
         guard let point, settings.brushCursorOn, wanted else {
@@ -340,7 +342,14 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
-        cursor.show(at: point, alpha: alpha, scale: size, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turn)
+        if hovering {
+            cursor.show(at: point, alpha: alpha, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turn)
+        } else {
+            // read without waiting on the canvas: the newest stamp's size (pressure and taper in)
+            let radius = session.cursorRadius().map { CGFloat($0) / scale }
+            let turned = CGFloat(session.cursorTurn())
+            cursor.show(at: point, alpha: alpha, painting: true, painted: radius, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turned)
+        }
     }
 
     /// A shape drawn snapped into place: Apple Pencil Pro feels it, where the Pencil is.
