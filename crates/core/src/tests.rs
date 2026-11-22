@@ -8377,10 +8377,14 @@ fn brushes_and_sets_are_made_copied_and_deleted() {
     let start = s.current_brush();
     let set_name = s.brush_library()[start.set as usize].name.clone();
     let first = names(start.set as usize);
-    // a copy goes just above; the tool keeps its brush, now one down
+    // a copy goes just above, numbered ("Yarra" gives "Yarra 2"); the tool keeps its brush, now
+    // one down
+    let name = first[start.index as usize].clone();
     assert_eq!(s.duplicate_brush(start.set, start.index), Some(start.index));
     assert_eq!(names(start.set as usize).len(), first.len() + 1);
     assert_eq!(s.current_brush().index, start.index + 1);
+    assert_eq!(names(start.set as usize)[start.index as usize], format!("{name} 2"));
+    assert_eq!(s.current_brush().name, name);
     // the copy is edited, and the original deleted: the copy stays current
     assert!(s.select_brush(start.set, start.index));
     s.studio_begin();

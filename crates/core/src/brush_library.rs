@@ -425,6 +425,27 @@ const FIRST_SHIPPED: [u32; 6] = [3, 3, 3, 2, 2, 2];
 /// and sliders, and how many brushes of each shipped set it has seen.
 pub(crate) const LIBRARY_FILE: &str = "library.json";
 
+/// A copy's name: `name` numbered on from its own number (one if it has none, so "Yarra" gives
+/// "Yarra 2" and "Brush 7" gives "Brush 8"), the first such that isn't `taken`.
+fn numbered_copy(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let (base, own) = match name.rsplit_once(' ') {
+        Some((base, n)) if !base.trim().is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => {
+            (base, n.parse::<u64>().unwrap_or(u64::MAX / 2))
+        }
+        _ => (name, 1),
+    };
+    let mut n = own.saturating_add(1).max(2);
+    // (every name in a set can't be taken: a set holds far fewer brushes)
+    for _ in 0..100_000 {
+        let next = format!("{base} {n}");
+        if !taken(&next) {
+            return next;
+        }
+        n = n.saturating_add(1);
+    }
+    format!("{base} {n}")
+}
+
 /// Held while a library or its choices are read out and written, and while another library is
 /// brought into use, so that writes from two threads (a window's, one keeping it in the background)
 /// land in the order they read it, and none lands in a library's files once it was left.
@@ -1147,12 +1168,14 @@ impl CanvasSession {
         st.pinned_brushes.clear();
     }
 
-    /// A copy of a brush just above it in its set; returns the copy's index.
+    /// A copy of a brush just above it in its set, numbered after it ("Yarra" gives "Yarra 2", then
+    /// "Yarra 3"); returns the copy's index.
     pub fn duplicate_brush(&self, set: u32, index: u32) -> Option<u32> {
         let mut st = self.shared.lock();
         let (s, i) = (set as usize, index as usize);
         let entry = st.library.get_mut(s)?;
-        let brush = entry.brushes.get(i)?.clone();
+        let mut brush = entry.brushes.get(i)?.clone();
+        brush.name = numbered_copy(&brush.name, |name| entry.brushes.iter().any(|b| b.name == name));
         let origin = entry.origins.get(i).copied().flatten();
         entry.brushes.insert(i, brush);
         entry.origins.insert(i, origin);
@@ -1922,6 +1945,24 @@ impl CanvasSession {
 #[cfg(test)]
 mod keeping {
     use crate::CanvasSession;
+
+    /// A copy is numbered on from its brush's own number, the first one the set doesn't have.
+    #[test]
+    fn a_copy_is_numbered_on_from_its_brush() {
+        use super::numbered_copy;
+        let set = ["Yarra", "Yarra 2", "Yarra 4", "Brush 7", "Pen 2 1"];
+        let taken = |name: &str| set.contains(&name);
+        assert_eq!(numbered_copy("Yarra", taken), "Yarra 3");
+        assert_eq!(numbered_copy("Yarra", |_| false), "Yarra 2");
+        assert_eq!(numbered_copy("Yarra 2", taken), "Yarra 3");
+        assert_eq!(numbered_copy("Yarra 4", taken), "Yarra 5");
+        assert_eq!(numbered_copy("Brush 7", taken), "Brush 8");
+        assert_eq!(numbered_copy("Pen 2 1", taken), "Pen 2 2");
+        // a name of a number alone, or a number with no space before it, is a name like any
+        assert_eq!(numbered_copy("42", taken), "42 2");
+        assert_eq!(numbered_copy("6B", taken), "6B 2");
+        assert_eq!(numbered_copy(" 3", taken), " 3 2");
+    }
 
     #[test]
     fn a_brush_renamed_from_its_menu_keeps_the_name_and_its_settings() {
