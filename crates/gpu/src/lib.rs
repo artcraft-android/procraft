@@ -339,6 +339,9 @@ impl Gpu {
         if std::env::var_os("PROCRAFT_HEADLESS_OLD").is_some() {
             return Gpu::headless_old();
         }
+        if std::env::var_os("PROCRAFT_HEADLESS_DOWNLEVEL").is_some() {
+            return Gpu::headless_limited(wgpu::Limits::downlevel_defaults());
+        }
         Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
     }
 
@@ -349,6 +352,15 @@ impl Gpu {
     pub fn headless_old() -> Result<Gpu, GpuError> {
         let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
         Gpu::create(instance, None, true, false)
+    }
+
+    /// [`Gpu::headless`] held to `limits` (where the GPU's own are lower, to those), as a weak
+    /// phone's GPU that reports less: for testing what the canvas does within them. With
+    /// `PROCRAFT_HEADLESS_DOWNLEVEL` set, [`Gpu::headless`] is held to wgpu's downlevel limits.
+    #[doc(hidden)]
+    pub fn headless_limited(limits: wgpu::Limits) -> Result<Gpu, GpuError> {
+        let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
+        Gpu::create_within(instance, None, Some(limits), false, false)
     }
 
     /// [`Gpu::headless_old`] on the system's software GPU (Direct3D 12's WARP, Vulkan's lavapipe),
@@ -432,6 +444,18 @@ impl Gpu {
         old: bool,
         software: bool,
     ) -> Result<Gpu, GpuError> {
+        Gpu::create_within(instance, surface, old.then(old_gpu_limits), old, software)
+    }
+
+    /// [`Gpu::create`], held to `within` where given (a test's limits; where the GPU's own are
+    /// lower, to those).
+    fn create_within(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        within: Option<wgpu::Limits>,
+        old: bool,
+        software: bool,
+    ) -> Result<Gpu, GpuError> {
         // a driver's own description can run over several lines: one line in the log
         fn one_line(text: &str) -> String {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -482,7 +506,8 @@ impl Gpu {
             // where the GPU has it: the pipelines' compiled form to keep between runs
             required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             // the adapter's own limits, so large canvases fit where the GPU allows them
-            required_limits: if old { old_gpu_limits() } else { adapter.limits() },
+            required_limits:
+                within.clone().map_or_else(|| adapter.limits(), |l| l.or_worse_values_from(&adapter.limits())),
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
             // is kept for good, and the larger ones held what was never used (a first read back
             // of a few bytes kept 64 MB the CPU can see)
@@ -491,9 +516,21 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
         log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
+        // what it holds to, for a report from a GPU that fails within them
+        let l = device.limits();
+        log::info!(
+            "the GPU's limits: textures {} px, a storage binding {} MB, a buffer {} MB, {} storage buffers a \
+             stage, workgroups of {} ({} KB shared)",
+            l.max_texture_dimension_2d,
+            l.max_storage_buffer_binding_size >> 20,
+            l.max_buffer_size >> 20,
+            l.max_storage_buffers_per_shader_stage,
+            l.max_compute_invocations_per_workgroup,
+            l.max_compute_workgroup_storage_size >> 10
+        );
         // new canvases and crops kept to what its textures can be (not by one made as an old GPU's
         // to test with: that would hold every other test's canvases to its size)
-        if !old {
+        if within.is_none() {
             procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
         }
         // a validation error must never take the app down: log it instead
@@ -745,6 +782,33 @@ mod tests {
     fn opengl_is_the_last_backend_tried() {
         if std::env::var_os("WGPU_BACKEND").is_none() {
             assert_eq!(super::Gpu::backends().last(), Some(&wgpu::Backends::GL));
+        }
+    }
+
+    /// Every wait on the GPU outside the tests goes through [`super::poll`], which fails soft where
+    /// wgpu's own poll panics (a device lost under it, as a phone short of memory can lose it):
+    /// the canvas's looks at how fast the GPU got through paint laid in place, or laid a stroke
+    /// again, and a sample stroke's paced waits, polled it themselves (#358).
+    #[test]
+    fn every_wait_on_the_gpu_outside_the_tests_fails_soft() {
+        let sources = [
+            ("canvas.rs", include_str!("canvas.rs")),
+            ("canvas/fragments.rs", include_str!("canvas/fragments.rs")),
+            ("canvas/plugin_filter.rs", include_str!("canvas/plugin_filter.rs")),
+            ("canvas/plugin_picture.rs", include_str!("canvas/plugin_picture.rs")),
+            ("canvas/rewind.rs", include_str!("canvas/rewind.rs")),
+            ("canvas/smudge.rs", include_str!("canvas/smudge.rs")),
+            ("canvas/store.rs", include_str!("canvas/store.rs")),
+            ("kept.rs", include_str!("kept.rs")),
+            ("lighting.rs", include_str!("lighting.rs")),
+            ("scene.rs", include_str!("scene.rs")),
+            ("sphere.rs", include_str!("sphere.rs")),
+        ];
+        for (name, text) in sources {
+            // (the code before the file's tests)
+            let code = text.split("\nmod tests {").next().unwrap_or(text);
+            let raw = code.lines().filter(|l| l.contains("device.poll(") && !l.trim_start().starts_with("//")).count();
+            assert_eq!(raw, 0, "{name} polls the device itself");
         }
     }
 

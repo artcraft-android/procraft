@@ -4791,7 +4791,7 @@ impl Canvas {
                 submission_index: Some(index.clone()),
                 timeout: Some(std::time::Duration::ZERO),
             };
-            if gpu.device.poll(now).is_ok() {
+            if crate::poll(&gpu.device, now).is_ok() {
                 let rate = work as f64 / (sent.elapsed().as_secs_f64() * 1000.0).max(0.5);
                 self.in_place_rate = Some(self.in_place_rate.map_or(rate, |r| (r * 0.9).max(rate)));
             } else {
@@ -4816,7 +4816,7 @@ impl Canvas {
                 submission_index: Some(index.clone()),
                 timeout: Some(std::time::Duration::ZERO),
             };
-            if gpu.device.poll(now).is_ok() {
+            if crate::poll(&gpu.device, now).is_ok() {
                 self.relay_budget = relay_budget(work, sent.elapsed().as_secs_f64() * 1000.0);
             } else {
                 self.relay_sent = Some((index, sent, work));
@@ -4917,7 +4917,7 @@ impl Canvas {
         let waited = if last || self.paced_each { self.paced_in_flight.take() } else { before };
         let Some((index, sent)) = waited else { return };
         let wait = wgpu::PollType::Wait { submission_index: Some(index), timeout: Some(PACED_WAIT_MOST) };
-        if let Err(e) = gpu.device.poll(wait) {
+        if let Err(e) = crate::poll(&gpu.device, wait) {
             log::warn!("waiting for a paced piece of work: {e}");
         }
         self.paced_longest = self.paced_longest.max(sent.elapsed());

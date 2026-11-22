@@ -15,31 +15,56 @@ fn window_index(p: vec2<i32>) -> u32 {
     return u32(p.y - st.origin_y) * st.stride + u32(p.x - st.origin_x);
 }
 
+// A read past the end of a buffer gives nothing (zero), as Vulkan's and the others' do: OpenGL
+// ES's (in wgpu) aren't checked, and one there reads whatever memory lies past the buffer, or
+// faults.
 fn work_at(p: vec2<i32>) -> vec4<f32> {
-    return unpack4x8unorm(work[window_index(p)]);
+    let i = window_index(p);
+    if (i >= arrayLength(&work)) {
+        return vec4<f32>(0.0);
+    }
+    return unpack4x8unorm(work[i]);
 }
 
 fn grained_at(p: vec2<i32>) -> vec4<f32> {
-    return unpack4x8unorm(grained[window_index(p)]);
+    let i = window_index(p);
+    if (i >= arrayLength(&grained)) {
+        return vec4<f32>(0.0);
+    }
+    return unpack4x8unorm(grained[i]);
+}
+
+fn amount_word(i: u32) -> f32 {
+    if (i >= arrayLength(&amount)) {
+        return 0.0;
+    }
+    return amount[i];
 }
 
 fn amount_at(p: vec2<i32>) -> f32 {
-    return amount[window_index(p)];
+    return amount_word(window_index(p));
 }
 
 fn shown_at(p: vec2<i32>) -> f32 {
-    return amount[st.stride * st.rows + window_index(p)];
+    return amount_word(st.stride * st.rows + window_index(p));
+}
+
+fn carry_word(i: u32) -> vec4<f32> {
+    if (i >= arrayLength(&carry)) {
+        return vec4<f32>(0.0);
+    }
+    return carry[i];
 }
 
 fn carry_at(k: i32) -> vec4<f32> {
-    return carry[k];
+    return carry_word(u32(k));
 }
 
 fn plot_texel(plots: u32, k: u32) -> vec4<f32> {
     if (plots == CARRIED_PLOT) {
-        return carry[st.index * CARRIED + k];
+        return carry_word(st.index * CARRIED + k);
     }
-    return carry[2u * CARRIED + k];
+    return carry_word(2u * CARRIED + k);
 }
 
 @compute @workgroup_size(8, 8)
@@ -48,7 +73,7 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!in_part(i, window_side())) {
         return;
     }
-    carry[cell_index(window_cell(i))] = carry_cell(i);
+    carry[cell_index(window_cell(i))] = kept_paint(carry_cell(i), vec4<f32>(0.0));
 }
 
 var<workgroup> dull_sums: array<vec4<f32>, 64>;
@@ -69,7 +94,7 @@ fn cs_dull(@builtin(local_invocation_index) i: u32) {
         total = total + dull_sums[k];
         weighed = weighed + dull_weights[k];
     }
-    carry[dull_index()] = dull_colour(total, weighed);
+    carry[dull_index()] = kept_paint(dull_colour(total, weighed), vec4<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -79,7 +104,7 @@ fn cs_blur_down(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let g = i32(st.grid);
-    carry[g * g + cell_index(window_cell(id.xy))] = blur_down_cell(id.xy);
+    carry[g * g + cell_index(window_cell(id.xy))] = kept_paint(blur_down_cell(id.xy), vec4<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -89,7 +114,7 @@ fn cs_blur_across(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let g = i32(st.grid);
-    carry[2 * g * g + cell_index(window_cell(id.xy))] = blur_across_cell(id.xy);
+    carry[2 * g * g + cell_index(window_cell(id.xy))] = kept_paint(blur_across_cell(id.xy), vec4<f32>(0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -195,7 +220,7 @@ fn cs_wet_plots(@builtin(global_invocation_id) id: vec3<u32>) {
     var walk = wet_walk_start(t);
     for (var k = 0u; k < st.count; k++) {
         walk = wet_walk_on(walk, k, t);
-        carry[2u * CARRIED + k * n * n + i.y * n + i.x] = from_mix(walk.out);
+        carry[2u * CARRIED + k * n * n + i.y * n + i.x] = kept_paint(from_mix(walk.out), vec4<f32>(0.0));
     }
-    carry[(1u - st.index) * CARRIED + i.y * n + i.x] = walk.out;
+    carry[(1u - st.index) * CARRIED + i.y * n + i.x] = kept_paint(walk.out, vec4<f32>(0.0));
 }
