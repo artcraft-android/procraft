@@ -58,6 +58,8 @@ final class StudioUi {
     var keypad: KeypadAsk?
     var blendList: BlendListAsk?
     var nodeMenu: NodeMenuAsk?
+    /// A slider has the touch: the settings don't scroll under it meanwhile.
+    var sliding = false
 }
 
 /// The brush studio: tabs down the left, the drawing pad above, the tab's settings below; turned
@@ -412,6 +414,7 @@ private struct StudioSettings: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 77)
             }
+            .scrollDisabled(ui.sliding)
             #if DEBUG
             .onAppear {
                 if let row = captureRow(rows) {
