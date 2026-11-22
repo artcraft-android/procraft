@@ -81,6 +81,9 @@ final class SelectionTool {
     /// While the tool is open on a plugin's layer: the box round the strokes the selection takes
     /// (four corners, x then y, canvas pixels), else empty.
     private(set) var takenBox: [Float] = []
+    /// While the tool is open: the paths of the shapes joined to the selection meanwhile (canvas
+    /// pixels, each closed), shown dashed.
+    private(set) var outlines: [[CGPoint]] = []
 
     /// A feather's work off the main thread, the newest amount when it gets there.
     @ObservationIgnored private let queue = DispatchQueue(label: "feather", qos: .userInitiated)
@@ -215,6 +218,15 @@ final class SelectionTool {
         }
     }
 
+    /// The feather's slider let go of: the line where the selection fades out goes, after the
+    /// feathering on its way.
+    func featherLetGo() {
+        let session = model.session
+        queue.async {
+            session.selectFeatherLetGo()
+        }
+    }
+
     /// Opens `next`, or closes it if it is open.
     func openPopup(_ next: SelectionPopup) {
         setPopup(popup == next ? .none : next)
@@ -303,9 +315,17 @@ final class SelectionTool {
     /// The box round the strokes the selection takes, read again while the tool is open.
     func refreshTaken() {
         let session = model.session
-        let box = model.selecting && session.hasSelection() ? session.takenPluginItemsBox() : []
+        let shown = model.selecting && session.hasSelection()
+        let box = shown ? session.takenPluginItemsBox() : []
         if box != takenBox {
             takenBox = box
+        }
+        // and the shapes' paths
+        let paths = shown ? session.selectionOutlines().map { path in
+            stride(from: 0, to: path.count - 1, by: 2).map { CGPoint(x: CGFloat(path[$0]), y: CGFloat(path[$0 + 1])) }
+        } : []
+        if paths != outlines {
+            outlines = paths
         }
     }
 }
@@ -382,7 +402,8 @@ struct SelectionPopover: View {
                         PanelSlider(
                             label: "Amount", value: amount,
                             shown: amount <= 0 ? "None" : "\(wholeNumber(amount * 100))%",
-                            onChange: { tool.featherTo($0) }
+                            onChange: { tool.featherTo($0) },
+                            onLetGo: { tool.featherLetGo() }
                         )
                     }
                 } else {
@@ -531,10 +552,20 @@ struct SelectionOverlay: View {
         let slid = tool.thresholdDrag
         let kind = tool.kind
         let taken = tool.takenBox
-        if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 {
+        let outlines = tool.outlines
+        if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 || !outlines.isEmpty {
             let points = path.map { model.canvasToWindow($0) }
+            // (read with the view, so they follow it as it moves)
+            let shapes = outlines.map { $0.map { model.canvasToWindow($0) } }
             ZStack(alignment: .top) {
                 Canvas { context, _ in
+                    // the shapes joined to the selection while the tool is open: their paths, dashed
+                    for shape in shapes where shape.count >= 2 {
+                        var edge = Path()
+                        edge.addLines(shape)
+                        edge.closeSubpath()
+                        dashed(context, edge)
+                    }
                     if taken.count == 8 {
                         drawTakenBox(context, taken)
                     }

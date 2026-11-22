@@ -150,6 +150,8 @@ struct PanelSlider: View {
     let value: Float
     let shown: String
     let onChange: (Float) -> Void
+    /// The slider let go of.
+    var onLetGo: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
@@ -184,9 +186,13 @@ struct PanelSlider: View {
                 }
                 .frame(width: w, height: 14)
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
-                    onChange(Float(min(max((drag.location.x - sliderStart) / span, 0), 1)))
-                })
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in
+                            onChange(Float(min(max((drag.location.x - sliderStart) / span, 0), 1)))
+                        }
+                        .onEnded { _ in onLetGo() }
+                )
             }
             .frame(height: 14)
             .padding(.top, 9)
