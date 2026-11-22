@@ -125,8 +125,9 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             loop {
                 // nothing is drawn while the app is away, and a device lost draws nothing again:
                 // there is only its stopping to wait for
-                // (pen input waiting for the canvas asks for one)
-                let wanted = |st: &crate::State| st.needs_frame || shared.input_waiting();
+                // (pen input waiting for the canvas asks for one; none while frames are held, the
+                // canvas being redrawn a stroke at a time: its end asks for one)
+                let wanted = |st: &crate::State| !st.holding_frames && (st.needs_frame || shared.input_waiting());
                 while !st.stop && (st.hidden || !wanted(&st) || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
                     // the GPU's end of the last frame looked for first, a little while at most
                     if let Some(again) = look_at_gpu(screen, &mut pacer, Instant::now(), None) {
@@ -241,6 +242,12 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             // the window changed size while the image was awaited (the device turned): the view is
             // already for the new size, so this image is let go and the surface configured again
             if st.window_size != size {
+                continue;
+            }
+            // frames held since the image was asked for (the brush studio's pad being drawn again
+            // as its brush changes): the image goes unshown, and the canvas half redrawn with it
+            if st.holding_frames {
+                st.frame_held = true;
                 continue;
             }
             // the pen input that came while the canvas was held goes in this frame

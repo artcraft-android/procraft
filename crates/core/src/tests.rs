@@ -22155,6 +22155,60 @@ fn the_app_away_draws_nothing_however_much_changes() {
     assert!(back, "drawn again once shown");
 }
 
+/// The brush studio's pad, drawn again a stroke at a time as its brush changes, shows no frame
+/// until it is all drawn: while frames are held the render loop draws none, however often one is
+/// asked for, and draws one as soon as they are let go. (The tablets' render loop drew on, so the
+/// pad showed cleared and half redrawn at each change: it flickered.)
+#[test]
+fn a_pad_being_drawn_again_shows_no_frame_until_it_is_done() {
+    let Some(pad) = session(200, 200) else { return };
+    pad.keep_strokes();
+    pad.begin_own_stroke();
+    pad.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+    pad.stroke_end(vec![sample(190.0, 60.0, 32.0)]);
+    let running = run_loop(&pad, READY);
+    settled(&pad);
+    // held, as while its strokes are drawn again: frames asked for again and again, 40 times
+    pad.shared.lock().holding_frames = true;
+    let before = pad.activity();
+    for _ in 0..40 {
+        pad.shared.lock().needs_frame = true;
+        pad.shared.wake.notify_all();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let held = pad.activity().since(&before);
+    // let go, as a redraw ends: a frame comes
+    {
+        let mut guard = pad.shared.lock();
+        let st = &mut *guard;
+        st.holding_frames = false;
+        st.frame_held = false;
+        pad.shared.frame(st);
+    }
+    let let_go = std::time::Instant::now();
+    let drawn = (0..2000).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        pad.activity().frames > before.frames
+    });
+    let took = let_go.elapsed();
+    // a whole redraw as the studio asks for it, the loop running: done, the stroke there again
+    let studio = CanvasSession::new(64, 64);
+    std::sync::Arc::clone(&pad).sync_pad(std::sync::Arc::clone(&studio), 1.0, 0.0, 0.0);
+    for _ in 0..500 {
+        if !pad.pad_syncing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    settled(&pad);
+    drop(running);
+    eprintln!("held, 40 asks: {held:?}; let go, a frame within {} ms", took.as_millis());
+    assert_eq!(held.frames, 0, "no frame while held: {held:?}");
+    assert!(drawn, "a frame once let go");
+    assert!(!pad.shared.lock().holding_frames);
+    assert_eq!(pixel(&pad, 100, 60)[..3], [255, 0, 0]);
+}
+
 /// A window that gives no image (or a surface that must be configured again and again) is asked
 /// ever less often, down to four times a second, instead of every 4 ms as before (250 a second);
 /// one whose images keep saying they'd do better configured again is configured once, not every
