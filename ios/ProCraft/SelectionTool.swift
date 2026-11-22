@@ -53,13 +53,15 @@ enum SelectionPopup {
 final class SelectionTool {
     private static let kindKey = "selectionKind"
     private static let thresholdKey = "selectionThreshold"
+    private static let colorFillKey = "selectionColorFill"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
     private(set) var kind: SelectionKind
     /// New shapes take away from the selection instead of adding to it.
     private(set) var removes = false
-    /// Each new selection is filled with the paint colour.
+    /// What is selected shows covered by the paint colour, and is filled with it as the tool closes;
+    /// kept between launches.
     private(set) var colorFill = false
     private(set) var hasSelection = false
     private(set) var popup = SelectionPopup.none
@@ -90,6 +92,7 @@ final class SelectionTool {
         let d = UserDefaults.standard
         kind = d.string(forKey: Self.kindKey).flatMap(SelectionKind.init(rawValue:)) ?? .freehand
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
+        colorFill = d.bool(forKey: Self.colorFillKey)
     }
 
     /// Each time the tool opens, shapes add to the selection.
@@ -97,10 +100,15 @@ final class SelectionTool {
         removes = false
     }
 
-    /// The tool closes: a path being drawn becomes a selection.
+    /// The tool closes: a path being drawn becomes a selection; with Color Fill, what is selected is
+    /// filled and the selection ends with it (one undo step, which brings it back), as the core does.
     func closed() {
-        closeFreehand()
         setPopup(.none)
+        freehand = []
+        if model.session.closeSelectionTool(colourFill: colorFill) {
+            model.refresh()
+        }
+        hasSelection = model.session.hasSelection()
     }
 
     func choose(_ next: SelectionKind) {
@@ -139,7 +147,7 @@ final class SelectionTool {
         shapeDrag = (CGPoint(x: a.x / pixels, y: a.y / pixels), CGPoint(x: b.x / pixels, y: b.y / pixels))
     }
 
-    /// The touches made a selection (or a shape dragged out ended): Color Fill fills it.
+    /// The touches made a selection (or a shape dragged out ended).
     func touched() {
         shapeDrag = nil
         changed()
@@ -153,7 +161,7 @@ final class SelectionTool {
             thresholdDrag = (CGPoint(x: p.x / model.pixels, y: p.y / model.pixels), value)
             session.setSelectionDisplay(display: .fill)
             session.selectByColour(x: Float(p.x), y: Float(p.y), threshold: value, join: join, live: true)
-            changed(fill: false)
+            changed()
             return
         }
         // the touches made the selection as it was let go
@@ -174,13 +182,13 @@ final class SelectionTool {
 
     func invert() {
         model.session.selectInvert()
-        changed(fill: false)
+        changed()
     }
 
     func copyToLayer() {
         guard model.session.copySelectionToLayer() != nil else { return }
         model.session.selectNone()
-        changed(fill: false)
+        changed()
         model.refresh()
     }
 
@@ -248,37 +256,40 @@ final class SelectionTool {
 
     func load(_ i: Int) {
         _ = model.session.loadSelection(index: UInt32(i))
-        changed(fill: false)
+        changed()
     }
 
+    /// Color Fill on or off: what is selected shows covered by the colour (only shown, the layer
+    /// as it was), filled as the tool closes; off again, the colour goes and the selection stays.
     func toggleColorFill() {
         colorFill.toggle()
-        if colorFill, hasSelection {
-            model.session.fillSelection()
-            model.refresh()
-        }
+        UserDefaults.standard.set(colorFill, forKey: Self.colorFillKey)
+        showLook()
     }
 
     func clear() {
         closeFreehand()
         model.session.selectNone()
-        changed(fill: false)
+        changed()
     }
 
-    private func changed(fill: Bool = true) {
-        let session = model.session
-        hasSelection = session.hasSelection()
-        if fill, colorFill, hasSelection {
-            session.fillSelection()
-            model.refresh()
-        }
+    private func changed() {
+        hasSelection = model.session.hasSelection()
         showLook()
     }
 
-    /// Bands over what is not selected, except while selecting by colour, which tints what is.
+    /// Bands over what is not selected, except while selecting by colour, which tints what is, and
+    /// with Color Fill on in the selection tool, which covers it with the colour.
     func showLook() {
-        let tint = model.selecting && kind == .automatic
-        model.session.setSelectionDisplay(display: tint ? .tint : .stripes)
+        let display: SelectionDisplay
+        if model.selecting, colorFill {
+            display = .colourFill
+        } else if model.selecting, kind == .automatic {
+            display = .tint
+        } else {
+            display = .stripes
+        }
+        model.session.setSelectionDisplay(display: display)
         refreshTaken()
     }
 
