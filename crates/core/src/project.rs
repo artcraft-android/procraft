@@ -515,6 +515,11 @@ impl crate::State {
                             }
                         }
                     }
+                    Opened::Png(bytes) => {
+                        if fs::read(layer_path(dir, *id)).ok().as_ref() != Some(bytes) {
+                            files.push((*id, bytes.clone()));
+                        }
+                    }
                     Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
                 }
             }
@@ -531,7 +536,7 @@ impl crate::State {
                 let (w, h) = (self.doc.width(), self.doc.height());
                 unshown = self.pending_pixels.iter().rev().find_map(|(_, layer)| match layer {
                     Opened::Pixels(rgba) => Some(thumbnail(rgba, w, h, THUMBNAIL_SIDE)),
-                    Opened::File(_) => None,
+                    Opened::File(_) | Opened::Png(_) => None,
                 });
             }
         }
@@ -1203,6 +1208,8 @@ impl CanvasSession {
         }
         {
             let mut st = session.shared.lock();
+            // noted as being opened until it shows (see `open_marks.rs`)
+            st.open_mark = crate::open_marks::Mark::new(&dir);
             st.pending_pixels = pngs;
             st.pending_stores = stores;
             st.layer_data_unread.extend(data_unread);
@@ -2060,6 +2067,8 @@ fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>
 pub(crate) enum Opened {
     Pixels(Vec<u8>),
     File(PathBuf),
+    /// Its PNG file's bytes, read before its folder went (see [`CanvasSession::hold_opened_files`]).
+    Png(Vec<u8>),
 }
 
 impl Opened {
@@ -2075,6 +2084,24 @@ impl Opened {
                     .or_else(|_| fs::File::open(&path))
                     .map_err(|e| file_error("opening a layer", e))?;
                 decode_png_into(BufReader::new(file), width, height, true)
+            }
+            Opened::Png(bytes) => decode_png_into(std::io::Cursor::new(bytes), width, height, true),
+        }
+    }
+}
+
+impl CanvasSession {
+    /// Reads the layers' files the artwork was opened from into memory, as they are (packed), so
+    /// that their folder can go before the canvas is made: an artwork opened from a folder of the
+    /// moment (a file brought in and opened at once). A file that can't be read stays where it is
+    /// (it is told, and shows empty, when the canvas is made).
+    pub fn hold_opened_files(&self) {
+        let mut st = self.shared.lock();
+        for (_, layer) in &mut st.pending_pixels {
+            if let Opened::File(path) = layer
+                && let Ok(bytes) = fs::read(&*path)
+            {
+                *layer = Opened::Png(bytes);
             }
         }
     }
@@ -2430,6 +2457,8 @@ pub fn import_pages(
         if name.trim().is_empty() { "Untitled Artwork".to_owned() } else { name.trim().chars().take(256).collect() };
     // the first page is the gallery's thumbnail until the artwork is opened
     let first = pixels.first().map(|(_, p)| thumbnail(p, w, h, THUMBNAIL_SIDE));
+    // the folder isn't an artwork until it is whole (taken away if the app stops meanwhile)
+    let importing = crate::gallery::Importing::begin(Path::new(&dir));
     let session = CanvasSession::with_document(doc, name, pixels);
     if let Err(e) = session.save(dir.clone()) {
         log::error!("saving imported pages: {e}");
@@ -2440,6 +2469,7 @@ pub fn import_pages(
     {
         log::error!("imported pages' thumbnail: {e}");
     }
+    importing.done();
     PagesOutcome::Imported
 }
 
@@ -2447,10 +2477,12 @@ pub fn import_pages(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PsdOutcome {
     Imported,
-    /// More layers than a canvas its size holds (`most`).
+    /// More layers than a canvas its size holds (`most`): none of it comes in.
     TooManyLayers {
         most: u32,
     },
+    /// A canvas larger than this device holds (its sides, or a layer's memory).
+    TooLarge,
     /// A kind of PSD not read here (bitmap, indexed, Lab, 32 bits a channel).
     Unsupported,
     /// Not a PSD, or damaged.
@@ -2492,45 +2524,92 @@ pub fn package_time_lapse(path: String, dir: String) -> Result<Option<PackageTim
 
 /// Makes the layered PSD (or PSB) at `path` an artwork named `name` in the folder `dir`: its
 /// layers, groups and masks, and its flattened picture as the gallery's thumbnail until opened.
+/// The file is only read, a part at a time where it is needed: each layer is read and written as
+/// a file of its own a few at a time, so a file of many layers is never all in memory, and the
+/// document goes last, so an import cut short (the app stopped) leaves no artwork in the gallery.
 #[uniffi::export]
 pub fn import_psd(path: String, dir: String, name: String) -> PsdOutcome {
-    use procraft_engine::psd::{self, PsdError};
-    let Ok(bytes) = fs::read(&path) else { return PsdOutcome::Unreadable };
-    let imported = match psd::read(&bytes) {
-        Ok(i) => i,
+    use procraft_engine::psd::{self, FileSource, PsdError};
+    let file = match FileSource::open(Path::new(&path)) {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("opening a PSD: {e}");
+            return PsdOutcome::Unreadable;
+        }
+    };
+    let art = match psd::open(&file) {
+        Ok(a) => a,
         Err(PsdError::TooManyLayers(most)) => {
             return PsdOutcome::TooManyLayers { most: u32::try_from(most).unwrap_or(u32::MAX) };
         }
+        Err(PsdError::TooLarge) => return PsdOutcome::TooLarge,
         Err(PsdError::Unsupported(_)) => return PsdOutcome::Unsupported,
         Err(e) => {
             log::error!("reading a PSD: {e:?}");
             return PsdOutcome::Unreadable;
         }
     };
-    let name = if name.trim().is_empty() { imported.name } else { name };
-    let session = CanvasSession::with_document(imported.document, name, imported.pixels);
-    if let Err(e) = session.save(dir.clone()) {
-        log::error!("saving an imported PSD: {e}");
-        return PsdOutcome::Unreadable;
+    if art.salvaged {
+        log::warn!("a PSD's layers couldn't be read: its flattened picture came in as its one layer");
     }
-    if let Some((w, h, flat)) = psd::flattened(&bytes) {
-        // on the white of a new canvas
-        let opaque: Vec<u8> = flat
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|&[r, g, b, a]| {
-                let over = |c: u8| ((u16::from(c) * u16::from(a) + 255 * (255 - u16::from(a)) + 127) / 255) as u8;
-                [over(r), over(g), over(b), 255]
-            })
-            .collect();
-        let (tw, th, thumb) = thumbnail(&opaque, w, h, THUMBNAIL_SIDE);
-        if let Err(e) = write_atomically(&Path::new(&dir).join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))
-        {
-            log::error!("an imported PSD's thumbnail: {e}");
+    log::info!(
+        "importing a PSD: {} x {}, {} layers",
+        art.document.width(),
+        art.document.height(),
+        art.document.layers().len()
+    );
+    // the folder isn't an artwork until it is whole (taken away if the app stops meanwhile)
+    let importing = crate::gallery::Importing::begin(Path::new(&dir));
+    match write_psd_artwork(&art, Path::new(&dir), name) {
+        Ok(()) => {
+            importing.done();
+            PsdOutcome::Imported
+        }
+        Err(e) => {
+            log::error!("saving an imported PSD: {e}");
+            PsdOutcome::Unreadable
         }
     }
-    PsdOutcome::Imported
+}
+
+/// The PSD's artwork written into the folder `dir`, named `name`: each layer read and written whole
+/// as it is read (a few side by side, as many as the memory work side by side may hold takes: each
+/// holds its pixels, what they are read from, and its file), none for a clear one; the thumbnail;
+/// the document last.
+fn write_psd_artwork<S: procraft_engine::psd::Source + ?Sized>(
+    art: &procraft_engine::psd::PsdArtwork<'_, S>,
+    dir: &Path,
+    name: String,
+) -> Result<(), MobileError> {
+    let (w, h) = (art.document.width(), art.document.height());
+    fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
+    let ids = art.layers_with_pixels();
+    let each = w as usize * h as usize * 4 * 3;
+    let written = procraft_engine::par::side_by_side_within(&ids, each, |&id| -> Result<bool, MobileError> {
+        let Some(rgba) = art.pixels(id) else { return Ok(false) };
+        write_atomically(&layer_path(dir, id), |p| write_png(p, w, h, &rgba, &[]))?;
+        Ok(true)
+    });
+    let mut files = Vec::with_capacity(ids.len());
+    for (id, done) in ids.iter().zip(written) {
+        match done.unwrap_or_else(|| Err(file_error("writing a layer", "it stopped"))) {
+            Ok(true) => files.push((*id, Opened::File(layer_path(dir, *id)))),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // the gallery's thumbnail until it is opened: the flattened picture on the white of a new
+    // canvas, made small as it is read
+    if let Some((tw, th, thumb)) = art.thumbnail(THUMBNAIL_SIDE)
+        && let Err(e) = write_atomically(&dir.join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))
+    {
+        log::error!("an imported PSD's thumbnail: {e}");
+    }
+    // the document last, its layers the files just written
+    let name = if name.trim().is_empty() { "Untitled Artwork".to_owned() } else { name };
+    let session = CanvasSession::with_document(art.document.clone(), name, Vec::new());
+    session.shared.lock().pending_pixels = files;
+    session.save(dir.to_string_lossy().into_owned())
 }
 
 /// The picture scaled down (box filter) to fit `side`, straight alpha, for viewing elsewhere.
