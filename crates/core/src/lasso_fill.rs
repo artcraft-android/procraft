@@ -473,10 +473,11 @@ mod tests {
         draw(&laid, &u);
         // as it grew, as it was laid: shown on to where the pen was, as the lift's catching up lays
         // it, but for the path's own points along that last stretch (a few rim pixels)
-        let differ = growing.chunks_exact(4).zip(ended.chunks_exact(4)).filter(|(a, b)| a != b).count();
-        let most = growing
-            .chunks_exact(4)
-            .zip(ended.chunks_exact(4))
+        let (grew, laid_px) = (growing.as_chunks::<4>().0, ended.as_chunks::<4>().0);
+        let differ = grew.iter().zip(laid_px).filter(|(a, b)| a != b).count();
+        let most = grew
+            .iter()
+            .zip(laid_px)
             .map(|(a, b)| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0))
             .max()
             .unwrap_or(0);
@@ -496,7 +497,11 @@ mod tests {
             let start = std::time::Instant::now();
             let runs = 5;
             for _ in 0..runs {
-                std::hint::black_box(coverage(std::hint::black_box(&[loop_.clone()]), side as u32, side as u32));
+                std::hint::black_box(coverage(
+                    std::hint::black_box(std::slice::from_ref(&loop_)),
+                    side as u32,
+                    side as u32,
+                ));
             }
             let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(runs);
             println!("a fill {side} px across, {} points: {ms:.2} ms", loop_.len());
