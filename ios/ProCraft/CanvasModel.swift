@@ -119,7 +119,14 @@ final class CanvasModel {
     @ObservationIgnored private var pickEnding = false
     /// A stroke held still and snapped to a shape; `quickShapeEditing` shows its handles.
     private(set) var quickShape: QuickShapeInfo?
-    var quickShapeEditing = false
+    /// The core's touches take the handles only while they show: a touch on one drags it.
+    var quickShapeEditing = false {
+        didSet {
+            if quickShapeEditing != oldValue {
+                session.setShapeEditing(editing: quickShapeEditing)
+            }
+        }
+    }
     /// The current layer turned a change away.
     private(set) var blocked: BlockedLayer?
     /// A stroke began on a text layer: it takes paint once rasterized.
