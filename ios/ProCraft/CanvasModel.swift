@@ -101,10 +101,10 @@ final class CanvasModel {
     /// The current brush's saved sizes and opacities: the side sliders' notches (0..1).
     private(set) var sizeNotches: [Float] = []
     private(set) var opacityNotches: [Float] = []
-    /// The panel beside a slider: shown while it is dragged, and kept up after it is held still.
+    /// The panel beside a slider: it comes up as the slider is dragged or held, and stays up when
+    /// the finger lifts, for its + to be tapped, until the next touch off it and the side bar, a
+    /// tap on the slider's thumb or a tap elsewhere on its track.
     var sliderPanel: SliderPanel?
-    /// The slider's panel stays up (the slider was held still) until the next touch elsewhere.
-    var sliderPanelKept = false
     private(set) var notice: Notice?
     @ObservationIgnored private var notices = 0
 
@@ -1033,7 +1033,6 @@ final class CanvasModel {
     func closePopovers() {
         closePanels()
         sliderPanel = nil
-        sliderPanelKept = false
         layerChoice = nil
         copyPasteOpen = false
     }
@@ -1973,6 +1972,9 @@ final class CanvasModel {
 
     /// A touch is coming down on an idle canvas: the touches take the settings as they are now.
     func prepareTouches() {
+        // a slider's panel goes with a touch off it and the side bar; the touch goes on to do what
+        // it does here (a stroke is drawn)
+        sliderPanel = nil
         session.setTouchSettings(settings: Gestures.shared.touchSettings())
         // the companion's Zoom or Move: a lone press zooms or moves the canvas
         session.setTouchCompanion(mode: companionMode)

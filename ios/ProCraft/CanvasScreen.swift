@@ -47,15 +47,6 @@ struct CanvasScreen: View {
                     ShowInterfaceButton(model: model)
                         .transition(.opacity)
                 }
-                // a slider's panel kept up goes with the next touch anywhere else
-                if model.sliderPanelKept, model.sliderPanel != nil {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
-                            model.sliderPanel = nil
-                            model.sliderPanelKept = false
-                        })
-                }
                 GuideOverlay(model: model)
                 if model.transforming {
                     TransformOverlay(model: model)

@@ -215,15 +215,9 @@ struct SideBar: View {
 
     private func hooks(_ which: SliderPanel) -> SliderPanelHooks {
         SliderPanelHooks(
-            show: { held in
-                model.sliderPanel = which
-                model.sliderPanelKept = held
-            },
-            hide: {
-                if !model.sliderPanelKept {
-                    model.sliderPanel = nil
-                }
-            }
+            show: { model.sliderPanel = which },
+            hide: { model.sliderPanel = nil },
+            up: { model.sliderPanel != nil }
         )
     }
 }
@@ -278,9 +272,12 @@ private struct SideButton: View {
 
 /// What a slider's panel does: shown while it is dragged (`held` false), kept up when it is held
 /// still.
+/// What a slider does with its panel: `show` it (dragged or held, it comes up and stays up when
+/// the slider is let go, for its + to be tapped), `hide` it, and whether a slider's panel is `up`.
 struct SliderPanelHooks {
-    let show: (_ held: Bool) -> Void
+    let show: () -> Void
     let hide: () -> Void
+    let up: () -> Bool
 }
 
 private let sliderPanelSide: CGFloat = 190
@@ -363,17 +360,23 @@ private struct SliderPanelView: View {
 private final class SliderTouch {
     var began = false
     var lastY: CGFloat = 0
-    /// Where the finger has taken the value, before a notch pulls it in.
+    /// Where the finger has taken the value, before a notch pulls it in; the value it began at,
+    /// and whether a slider's panel was up as it landed.
     var raw: Float = 0
+    var from: Float = 0
+    var panelWasUp = false
     var moved = false
     var held = false
     var hold: DispatchWorkItem?
 }
 
 /// An upright slider moved by dragging anywhere on it: the thumb follows the finger (relative,
-/// not jump-to-touch), 1 at the top. Moved, its `panel` shows while it moves; held still, it
-/// stays up. Its `notches` (saved values) show as marks on the track; a value dragged near one is
-/// pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
+/// not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved or
+/// held still, its `panel` comes up, and stays up when the finger lifts; its thumb tapped brings
+/// the panel up, or takes it away; a tap elsewhere on the track takes the thumb there (and the
+/// panel away), as the core says. Its `notches` (saved values) show as marks on the track; a value
+/// dragged near one is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a
+/// blue bar.
 struct BrushSlider: View {
     let value: Float
     var notches: [Float] = []
@@ -381,12 +384,18 @@ struct BrushSlider: View {
     let onChange: (Float) -> Void
 
     @State private var touch = SliderTouch()
+    /// A touch is down on the slider: gone as it lifts, or as the system takes it back (no end
+    /// comes then, and the next touch must not go on from where this one was).
+    @GestureState private var pressing = false
 
     private static let notchWidth: CGFloat = 20
     private static let notchHeight: CGFloat = 4
     private static let notchMark = Color(argb: 0x1AFF_FFFF)
-    /// A touch held this long without moving keeps the panel up (seconds).
+    /// A touch held this long without moving brings the panel up (seconds).
     private static let holdSeconds = 0.5
+    /// A touch let go within this far of where it went down (points) is a tap: a finger's wobble
+    /// as it lands and lifts doesn't make it a drag (what it moved the thumb is taken back).
+    static let tapSlop: CGFloat = 4
 
     private var travel: CGFloat {
         Pc.sliderHeight - Pc.thumbHeight - Pc.thumbInset * 2
@@ -436,18 +445,21 @@ struct BrushSlider: View {
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
+                .updating($pressing) { _, down, _ in down = true }
                 .onChanged { drag in
                     let t = touch
                     if !t.began {
                         t.began = true
                         t.lastY = drag.startLocation.y
                         t.raw = value
+                        t.from = value
+                        t.panelWasUp = panel?.up() ?? false
                         t.moved = false
                         t.held = false
                         let hold = DispatchWorkItem { [panel] in
                             if t.began, !t.moved {
                                 t.held = true
-                                panel?.show(true)
+                                panel?.show()
                             }
                         }
                         t.hold = hold
@@ -456,11 +468,13 @@ struct BrushSlider: View {
                     let dy = drag.location.y - t.lastY
                     if dy != 0 {
                         if !t.moved {
-                            panel?.show(false)
+                            panel?.show()
                         }
                         t.moved = true
                         t.lastY = drag.location.y
-                        t.raw = min(max(t.raw - Float(dy / travel), 0), 1)
+                        // the farther out to the side the finger is, the finer the thumb follows
+                        let across = Float(drag.location.x - Pc.sliderWidth / 2)
+                        t.raw = min(max(t.raw - Float(dy / travel) * sideSliderDragShare(across: across), 0), 1)
                         onChange(near(t.raw) ?? t.raw)
                     }
                 }
@@ -468,18 +482,36 @@ struct BrushSlider: View {
                     let t = touch
                     t.hold?.cancel()
                     t.hold = nil
-                    // a tap on a notch's mark goes to it
-                    if !t.moved, !t.held {
-                        let at = 1 - Float((drag.startLocation.y - Pc.thumbInset - Pc.thumbHeight / 2) / travel)
-                        if let notch = near(at, reach: Float(Pc.thumbHeight / 2 / travel)) {
-                            onChange(notch)
-                        }
-                    }
+                    t.began = false
+                    // let go after a drag or a hold, the panel stays up for its +
+                    let travelled = hypot(drag.location.x - drag.startLocation.x, drag.location.y - drag.startLocation.y)
+                    guard !t.held, travelled <= Self.tapSlop else { return }
+                    // a tap: what a finger's wobble moved is taken back; then on the thumb it brings
+                    // up the panel (or takes it away), elsewhere the thumb goes there (or onto a
+                    // notch's mark there) and the panel goes, as the core says
                     if t.moved {
+                        onChange(t.from)
+                    }
+                    let at = 1 - Float((drag.startLocation.y - Pc.thumbInset - Pc.thumbHeight / 2) / travel)
+                    let thumb = Float(Pc.thumbHeight / 2 / travel)
+                    switch sideSliderTap(at: at, value: t.from, thumb: thumb, notches: notches, panelUp: t.panelWasUp) {
+                    case .panel:
+                        panel?.show()
+                    case .closePanel:
+                        panel?.hide()
+                    case let .jump(value):
+                        onChange(value)
                         panel?.hide()
                     }
-                    t.began = false
                 }
         )
+        // taken back by the system: the touch is over all the same
+        .onChange(of: pressing) { _, down in
+            if !down, touch.began {
+                touch.hold?.cancel()
+                touch.hold = nil
+                touch.began = false
+            }
+        }
     }
 }
