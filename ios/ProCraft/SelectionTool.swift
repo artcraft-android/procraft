@@ -259,6 +259,13 @@ final class SelectionTool {
         changed()
     }
 
+    /// A kept selection deleted (its row slid left, Delete).
+    func deleteSaved(_ i: Int) {
+        model.session.deleteSavedSelection(index: UInt32(i))
+        saved = Int(model.session.savedSelectionCount())
+        loadThumbnails()
+    }
+
     /// Color Fill on or off: what is selected shows covered by the colour (only shown, the layer
     /// as it was), filled as the tool closes; off again, the colour goes and the selection stays.
     func toggleColorFill() {
@@ -386,8 +393,14 @@ struct SelectionPopover: View {
     }
 }
 
+/// A kept selection's row slid left this far shows Delete (59 x 38, 13 in from the right) beside it.
+private let savedReveal: CGFloat = 82
+private let savedDelete = Color(argb: 0xFFEE_4246)
+
 private struct SavedSelections: View {
     let tool: SelectionTool
+    /// The row slid open, if one is.
+    @State private var open: Int?
 
     var body: some View {
         let corner = toolbarMenuCorner
@@ -407,30 +420,94 @@ private struct SavedSelections: View {
         .frame(height: 40)
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 1) {
-                ForEach(0 ..< tool.saved, id: \.self) { i in
-                    HStack(spacing: 14) {
-                        ZStack {
-                            savedThumb
-                            if let picture = tool.savedThumbnails[i] {
-                                Image(uiImage: picture)
-                                    .resizable()
-                                    .scaledToFit()
+                // the newest at the top, each named by its place among them, oldest first
+                ForEach((0 ..< tool.saved).reversed(), id: \.self) { i in
+                    SavedSelectionRow(
+                        tool: tool,
+                        index: i,
+                        open: open == i,
+                        onOpen: { open = $0 ? i : nil },
+                        onTap: {
+                            if open != nil {
+                                withAnimation(Motion.swipeSettle) { open = nil }
+                            } else {
+                                tool.load(i)
                             }
+                        },
+                        onDelete: {
+                            open = nil
+                            tool.deleteSaved(i)
                         }
-                        .frame(width: 64, height: 46)
-                        .clipShape(UnevenRoundedRectangle(topLeadingRadius: corner, bottomLeadingRadius: corner, style: .circular))
-                        ToolbarMenuLabel(text: "Selection \(i + 1)")
-                        Spacer(minLength: 0)
-                    }
-                    .frame(height: 51)
-                    .background(RoundedRectangle(cornerRadius: corner, style: .circular).fill(ToolbarInk.menuGroup))
-                    .contentShape(Rectangle())
-                    .onTapGesture { tool.load(i) }
+                    )
                 }
             }
         }
         .frame(height: 172)
         .padding(.top, 8)
+    }
+}
+
+/// A kept selection's row: a tap loads it; slid left under a finger, it shows Delete.
+private struct SavedSelectionRow: View {
+    let tool: SelectionTool
+    let index: Int
+    let open: Bool
+    let onOpen: (Bool) -> Void
+    let onTap: () -> Void
+    let onDelete: () -> Void
+
+    @State private var moved: CGFloat?
+
+    var body: some View {
+        let corner = toolbarMenuCorner
+        let x = moved ?? (open ? -savedReveal : 0)
+        ZStack(alignment: .trailing) {
+            Text(verbatim: "Delete")
+                .font(.system(size: 15))
+                .foregroundStyle(Color.white)
+                .lineLimit(1)
+                .frame(width: 59, height: 38)
+                .background(RoundedRectangle(cornerRadius: 11, style: .circular).fill(savedDelete))
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDelete)
+                .padding(.trailing, 13)
+            HStack(spacing: 14) {
+                ZStack {
+                    savedThumb
+                    if let picture = tool.savedThumbnails[index] {
+                        Image(uiImage: picture)
+                            .resizable()
+                            .scaledToFit()
+                    }
+                }
+                .frame(width: 64, height: 46)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: corner, bottomLeadingRadius: corner, style: .circular))
+                ToolbarMenuLabel(text: "Selection \(index + 1)")
+                Spacer(minLength: 0)
+            }
+            .frame(height: 51)
+            .background(RoundedRectangle(cornerRadius: corner, style: .circular).fill(ToolbarInk.menuGroup))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .offset(x: x)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 14)
+                    .onChanged { drag in
+                        guard moved != nil || abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                        let from: CGFloat = open ? -savedReveal : 0
+                        moved = min(max(from + drag.translation.width, -savedReveal), 0)
+                    }
+                    .onEnded { _ in
+                        guard let end = moved else { return }
+                        withAnimation(Motion.swipeSettle) {
+                            moved = nil
+                            onOpen(end < -savedReveal / 2)
+                        }
+                    }
+            )
+        }
+        .frame(height: 51)
+        .clipped()
     }
 }
 
