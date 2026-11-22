@@ -897,7 +897,7 @@ final class CanvasModel {
             let read = bytes.flatMap { readBrushes(bytes: $0, fileName: name) }
             // plugins' brush engines make theirs of the file here too, off the main thread
             if let read {
-                session.makeEngineBrushes(read: read)
+                session.makeEngineBrushes(read: read, reading: nil)
             }
             then?()
             DispatchQueue.main.async {
@@ -934,7 +934,7 @@ final class CanvasModel {
             // the name it came with, after what kept it apart
             let name = String(file.lastPathComponent.dropFirst(37))
             if let bytes = try? Data(contentsOf: file), let read = readBrushes(bytes: bytes, fileName: name) {
-                session.makeEngineBrushes(read: read)
+                session.makeEngineBrushes(read: read, reading: nil)
                 _ = session.addBrushesRead(read: read, shown: 0)
             }
             try? manager.removeItem(at: file)

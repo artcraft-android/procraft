@@ -270,12 +270,12 @@ extension CanvasModel {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let failure = session.takeFailure() {
-                    showNotice(failure, warning: true)
+                    self.showNotice(failure, warning: true)
                 }
                 if session.takeBrushesChanged() {
-                    libraryChanged()
+                    self.libraryChanged()
                 }
-                refresh()
+                self.refresh()
             }
         }
     }

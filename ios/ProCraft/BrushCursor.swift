@@ -160,6 +160,7 @@ final class BrushCursorView: UIView {
             return true
         }
         fillMade = (side, colour, stamp)
+        let colour = self.colour
         let channel = { (i: Int) -> Float in colour.count > i ? min(max(colour[i], 0), 1) : 0 }
         let (red, green, blue) = (channel(0), channel(1), channel(2))
         var rgba = [UInt8](repeating: 0, count: side * side * 4)

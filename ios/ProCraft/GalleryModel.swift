@@ -559,6 +559,9 @@ final class GalleryModel {
         case let .tooManyLayers(most):
             Gallery.store.delete(dir: dir)
             return .said("This file has more layers than a canvas its size can hold (\(most)).")
+        case .tooLarge:
+            Gallery.store.delete(dir: dir)
+            return .said("This file's canvas is larger than this device can hold.")
         case .unsupported:
             Gallery.store.delete(dir: dir)
             return .said("This kind of PSD can't be opened.")
