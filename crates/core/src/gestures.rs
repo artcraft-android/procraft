@@ -487,6 +487,11 @@ impl GestureSettings {
             hold_ms: f64::from(self.delay(hold.unwrap_or(GesturePurpose::Eyedropper))) * 1000.0,
             quickshape_ms: f64::from(self.delay(GesturePurpose::Quickshape)) * 1000.0,
             rapid_undo_ms,
+            pointer_follows_touch: false,
+            pen_button_does: None,
+            pen_second_button_does: None,
+            pen_button_runs: None,
+            pen_second_button_runs: None,
         }
     }
 }

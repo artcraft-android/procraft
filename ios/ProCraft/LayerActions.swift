@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// What can be done to the layers, each read again afterwards. Those changing pixels have their
@@ -18,10 +19,18 @@ extension CanvasModel {
         Set(session.movingWith(id: l.id))
     }
 
-    /// Moves `l` (with what goes with it) just above or below `target`'s row; a chosen layer with
-    /// others picked takes them along, in their order (the shared core decides).
-    func moveNextTo(_ l: LayerInfo, _ target: LayerInfo, above: Bool) {
-        _ = session.moveNextTo(id: l.id, target: target.id, above: above)
+    /// Where `l`, dragged with what goes with it, lands if let go with its middle at `y`: `rows`
+    /// are the panel's rows where they are on the screen, `held` the row held over a moment, if
+    /// any (the shared core decides).
+    func rowDrop(_ l: LayerInfo, rows: [UInt64: CGRect], y: CGFloat, held: UInt64?) -> RowDrop {
+        let shown = rows.map { ShownRow(id: $0.key, top: Float($0.value.minY), bottom: Float($0.value.maxY)) }
+        return session.rowDrop(id: l.id, rows: shown, y: Float(y), held: held)
+    }
+
+    /// Moves `l` (with what goes with it) to `place`, as `rowDrop` placed it; a chosen layer with
+    /// others picked takes them along, in their order.
+    func dropRow(_ l: LayerInfo, _ place: RowDrop) {
+        _ = session.dropRow(id: l.id, place: place)
         refresh()
     }
 

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.slider-look",
+  "name": "Slider look",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Makes the side bar's size and opacity sliders see-through frosted glass, the canvas behind them blurred and showing through.",
+  "compat": { "procraft": { "interface": 11 } },
+  "permissions": [],
+  "hooks": ["slider_look"],
+  "controls": [
+    {
+      "key": "opacity", "type": "slider", "label": "Opacity", "least": 0, "most": 1, "step": 0.01, "starts": 0.35,
+      "shown_times": 100, "unit": "%", "live": true
+    },
+    { "key": "frosted", "type": "switch", "label": "Frosted", "starts": true }
+  ]
+}

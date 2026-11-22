@@ -8,7 +8,7 @@ use procraft_core::{
     CanvasPreset, CanvasSession, KeptGestures, ModelFile, PagesOutcome, PsdOutcome, ThumbnailImage, export_file_name,
     import_pages, import_psd, preset_height, preset_width,
 };
-use rfd::{FileDialog, MessageDialog, MessageLevel};
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
 use crate::ui::Interface;
 
@@ -139,21 +139,19 @@ pub fn keep_pending_brushes(paths: &[PathBuf]) -> bool {
     kept
 }
 
-/// The brush files kept while no canvas was open, oldest first, each with its own name; taken
-/// out of the folder.
-pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
+/// The brush files kept while no canvas was open, oldest first, each with its own name, to be
+/// read where they are and then taken out of the folder.
+pub fn take_pending_brushes() -> Vec<crate::library::BrushFileIn> {
     let Ok(read) = std::fs::read_dir(pending_brushes_dir()) else { return Vec::new() };
     let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
     paths
         .into_iter()
         .filter_map(|path| {
-            let bytes = std::fs::read(&path).ok();
-            let _ = std::fs::remove_file(&path);
             let kept = path.file_name()?.to_string_lossy().into_owned();
             // the name it came with, after the stamp and the number
             let name = kept.splitn(3, '-').nth(2).unwrap_or(&kept).to_owned();
-            Some((bytes?, name))
+            Some(crate::library::BrushFileIn { path, name, taken: true })
         })
         .collect()
 }
@@ -312,7 +310,27 @@ pub fn pick_sound(title: &str) -> Option<(Vec<u8>, String)> {
     }
 }
 
+/// A picture the user picks (titled `title`), a PNG or a JPEG, read whole, with its name.
+pub fn pick_control_picture(title: &str) -> Option<(Vec<u8>, String)> {
+    let path = dialog().set_title(title).add_filter("Pictures", &["png", "jpg", "jpeg"]).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some((bytes, name)),
+        Err(_) => {
+            say("This file could not be read.");
+            None
+        }
+    }
+}
+
 /// A file the user picks (titled `title`), read whole, with its name.
+/// A file the user picks, and its name; none if they pick none.
+pub fn pick_path(title: &str) -> Option<(PathBuf, String)> {
+    let path = dialog().set_title(title).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Some((path, name))
+}
+
 pub fn pick_file(title: &str) -> Option<(Vec<u8>, String)> {
     let path = dialog().set_title(title).pick_file()?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -579,6 +597,10 @@ fn open_model_artwork(path: &Path) -> Result<Arc<CanvasSession>, String> {
         return Err("This file can't be opened.".to_owned());
     }
     let opened = CanvasSession::open(dir).map_err(|e| e.to_string());
+    // its layers' files read before their folder goes (they are read as the canvas is made)
+    if let Ok(session) = &opened {
+        session.hold_opened_files();
+    }
     let _ = std::fs::remove_dir_all(&work);
     opened
 }
@@ -607,7 +629,10 @@ fn open_pdf(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
                 dir.clone(),
                 name.to_owned(),
             ) {
-                PagesOutcome::Imported => CanvasSession::open(dir).map_err(|e| e.to_string()),
+                PagesOutcome::Imported => CanvasSession::open(dir).map_err(|e| e.to_string()).inspect(|s| {
+                    // its layers' files read before their folder goes
+                    s.hold_opened_files();
+                }),
                 PagesOutcome::TooManyPages { most } => {
                     Err(format!("This PDF has more pages than a canvas its size can hold as layers ({most})."))
                 }
@@ -642,8 +667,14 @@ fn open_psd(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
     let _ = std::fs::remove_dir_all(&dir);
     let outcome = import_psd(path.to_string_lossy().into_owned(), dir.to_string_lossy().into_owned(), name.to_owned());
     let opened = match outcome {
-        PsdOutcome::Imported => CanvasSession::open(dir.to_string_lossy().into_owned()).map_err(|e| e.to_string()),
+        PsdOutcome::Imported => {
+            CanvasSession::open(dir.to_string_lossy().into_owned()).map_err(|e| e.to_string()).inspect(|s| {
+                // its layers' files read before their folder goes (they are read as the canvas is made)
+                s.hold_opened_files();
+            })
+        }
         PsdOutcome::TooManyLayers { most } => Err(format!("It has more layers than a canvas its size holds ({most}).")),
+        PsdOutcome::TooLarge => Err("Its canvas is larger than this computer can hold.".into()),
         PsdOutcome::Unsupported => {
             Err("This kind of PSD isn't read (bitmap, indexed, Lab or 32 bits a channel).".into())
         }
@@ -763,6 +794,35 @@ pub fn dialog() -> FileDialog {
     dialog
 }
 
+/// Whether to open the artwork in gallery folder `dir`: at once, unless the app ended while opening
+/// it last time (stopped for memory, or crashed); then only if the person says so, so that it can't
+/// take the app down each time it is picked (the gallery stays as it is, the artwork in it).
+pub fn open_anyway(dir: &str) -> bool {
+    if !procraft_core::opening_ended_app(dir.to_owned()) {
+        return true;
+    }
+    log::warn!("the app ended while opening {dir} last time: asking before opening it again");
+    // nothing to ask with (Linux without its dialogs' program): opened as before
+    if cfg!(target_os = "linux") && !has_program("zenity") {
+        return true;
+    }
+    let action = "Open Anyway".to_owned();
+    let answer = message()
+        .set_level(MessageLevel::Warning)
+        .set_title("This artwork closed the app")
+        .set_description(
+            "ProCraft closed while this artwork was opening last time, perhaps for want of memory. Closing other programs first may help.",
+        )
+        .set_buttons(MessageButtons::OkCancelCustom(action.clone(), "Cancel".to_owned()))
+        .show();
+    // (Windows without its newer dialogs shows OK and Cancel)
+    match answer {
+        MessageDialogResult::Ok | MessageDialogResult::Yes => true,
+        MessageDialogResult::Custom(chosen) => chosen == action,
+        _ => false,
+    }
+}
+
 /// A message box, belonging to the app's window as [`dialog`]s do.
 fn message() -> MessageDialog {
     let message = MessageDialog::new();
@@ -876,7 +936,13 @@ fn writing(
     let exporting = card.start(move || following.export_progress());
     let session = Arc::clone(session);
     write_meanwhile(true, move || {
-        let written = write(&session);
+        // a panic on the way (the GPU's driver, or wgpu on a device lost) is said as any failure,
+        // the card let go, not left turning
+        let written =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&session))).unwrap_or_else(|panic| {
+                let reason = format!("it stopped: {}", procraft_gpu::panic_message(panic.as_ref()));
+                Err(procraft_core::MobileError::File { reason })
+            });
         let placed = written.map_err(|e| e.to_string()).and_then(|files| place_written(&files, exporting.cancelled()));
         match placed {
             Ok(made) => exporting.ended(made),

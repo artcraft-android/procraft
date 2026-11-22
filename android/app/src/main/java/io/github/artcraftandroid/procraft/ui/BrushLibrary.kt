@@ -68,11 +68,14 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.ui.layout.ContentScale
@@ -120,6 +123,17 @@ private val SwipeDelete = Color(0xFFFF3A46)
 /** A brush swiped right is picked, this fill over its row; it follows the finger this far. */
 private val PickedBrush = Color(0xFF2C5281)
 private val PickReach = 72.dp
+
+/** A sample stroke tinted with [tint], the colour a plugin gives it; as drawn (white) without one. */
+private fun pluginFilter(tint: Color?): androidx.compose.ui.graphics.ColorFilter? =
+    tint?.let { androidx.compose.ui.graphics.ColorFilter.tint(it, androidx.compose.ui.graphics.BlendMode.Modulate) }
+
+/**
+ * A sample stroke on a cell, the brush in use's if [selected]: in the colour a plugin gives in [tints] (each brush's, then
+ * the brush in use's), else dark on the light interface's cells.
+ */
+private fun previewFilter(tints: Pair<Color?, Color?>, selected: Boolean): androidx.compose.ui.graphics.ColorFilter? =
+    pluginFilter((if (selected) tints.second else tints.first) ?: Color.Black.takeIf { Pc.light && !selected })
 
 /** A brush's name on its cell: on a dark pill where its sample stroke runs under it. */
 @Composable
@@ -204,6 +218,7 @@ private fun LibrarySearch(query: String, onQuery: (String) -> Unit, onFocus: (Bo
 @Composable
 private fun SearchResults(vm: CanvasViewModel, query: String) {
     val found = if (query.isBlank()) emptyList() else vm.brushSets.flatMap { it.brushes }.filter { it.name.contains(query.trim(), ignoreCase = true) }
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     if (found.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(top = 24.dp), contentAlignment = Alignment.TopCenter) {
             Text("No results", color = Pc.PanelTitle, fontSize = 15.sp, fontWeight = FontWeight.Medium)
@@ -227,7 +242,10 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
                     .background(if (selected) Pc.RowSelected else ResultFill)
                     .clickable { vm.chooseBrush(b) },
             ) {
-                preview?.let { Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                preview?.let {
+                    val tint = pluginFilter(if (selected) tints.second else tints.first)
+                    Image(it, contentDescription = null, contentScale = ContentScale.Crop, colorFilter = tint, modifier = Modifier.fillMaxSize())
+                }
                 BrushName(b.name, selected, vm.shadedNames[key] == true, Modifier.padding(start = 14.dp, top = 11.dp, end = 10.dp))
             }
         }
@@ -237,19 +255,20 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 /**
  * The brush library: sets on the left, the set's brushes with a sample stroke on the right. Tap
  * the chosen set for its menu, swipe a brush left to share, duplicate or delete it, hold it for
- * its menu (and drag it on from there onto a set or to another place in its own), pinch the lists
- * in for every library's card, and add brushes and sets with the plus.
+ * its menu (and drag it on from there onto a set, which opens after a moment over it, or to
+ * another place in its own; brushes picked go with it), pinch the lists in for every library's
+ * card, and add brushes and sets with the plus.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
+fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, floating: FloatingFrame? = null) {
     val sets = vm.brushSets
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     // the Recent set, or one of the library's
     val recent = vm.shownSet == RECENT_SET
     val shown = sets.getOrNull(vm.shownSet)
     // every library's card, or a library with no sets yet: a panel of their own
     if (vm.showingLibraries || sets.isEmpty() || (shown == null && !recent)) {
-        LibrariesPanel(vm, arrowX, modifier)
+        LibrariesPanel(vm, arrowX, modifier, floating)
         return
     }
     // the brushes shown, and whether each is pinned in the Recent set
@@ -296,6 +315,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     // a brush held and dragged: which, where the finger is and where on the brush it took hold
     // (window pixels); and where the sets, the brushes and the lists are on the screen
     var dragged by remember { mutableStateOf<BrushInfo?>(null) }
+    // the brushes going with it (it among them, those picked in its set), in their order; the
+    // finger dragging them, and the dragged cell's size (its row may go as another set opens)
+    var draggedWith by remember { mutableStateOf<List<BrushInfo>>(emptyList()) }
+    var dragPointer by remember { mutableStateOf<androidx.compose.ui.input.pointer.PointerId?>(null) }
+    var dragSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
     // or a set held and dragged (its place)
     var draggedSet by remember { mutableStateOf<Int?>(null) }
     var dragAt by remember { mutableStateOf(Offset.Zero) }
@@ -307,16 +331,24 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val overSet = if (dragged == null && draggedSet == null) null else setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key?.takeIf { it != draggedSet }
     fun drop() {
         val b = dragged ?: return
+        val moving = draggedWith.ifEmpty { listOf(b) }
         dragged = null
-        // onto a set: to its top; onto a brush of this set: to its place
-        val set = setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key
-        if (set != null) {
-            if (set != b.set.toInt()) vm.moveBrush(b, set, 0)
-            return
-        }
-        val target = shown?.brushes?.firstOrNull { brushBounds["${it.set}-${it.index}"]?.contains(dragAt) == true } ?: return
-        vm.moveBrush(b, target.set.toInt(), target.index.toInt())
+        draggedWith = emptyList()
+        dragPointer = null
+        // onto a set: to its top; onto a brush of the set shown: to its place
+        val brushes = shown?.brushes.orEmpty().mapNotNull { t -> brushBounds["${t.set}-${t.index}"]?.let { (t.set.toInt() to t.index.toInt()) to it } }
+        val (set, index) = brushesDropPlace(moving.map { it.set.toInt() to it.index.toInt() }, dragAt, setBounds, brushes) ?: return
+        vm.moveBrushes(moving, set, index)
     }
+    // held over another set a moment, the dragged brush opens it, to be let go among its brushes
+    LaunchedEffect(overSet, dragged != null) {
+        val over = overSet ?: return@LaunchedEffect
+        if (dragged == null || over == vm.shownSet) return@LaunchedEffect
+        kotlinx.coroutines.delay(SPRING_LOAD_MS)
+        if (dragged != null) vm.showSet(over)
+    }
+    // (for a hold that began before the library last changed)
+    val dropNow by androidx.compose.runtime.rememberUpdatedState(::drop)
     // a set dropped onto another takes its place
     fun dropSet() {
         val from = draggedSet ?: return
@@ -350,56 +382,60 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         }
     }
 
-    Popover(LibraryWidth, arrowX, modifier) {
+    Popover(floating?.width ?: LibraryWidth, arrowX, modifier, side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP) {
+        floating?.let { FloatingTop(it) }
         val renaming = vm.renamingLibrary == vm.libraryPlace
-        PanelHeader(
-            if (renaming) "" else vm.libraryName,
-            start = 20.dp,
-            end = 12.dp,
-            height = 52.dp,
-            chevronOn = titleMenu,
-            onTitle = { titleMenu = !titleMenu },
-            menu = {
-                if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
-                LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
-            },
-        ) {
-            // brushes picked: Delete in the plus's place, and Combine for one with the current brush
-            if (vm.pickedBrushes.isNotEmpty()) Row(Modifier.padding(top = 16.dp)) {
-                if (vm.canCombinePicked) {
-                    Box(Modifier.size(80.dp, 32.dp).clickable { vm.combinePicked() }, contentAlignment = Alignment.Center) {
-                        Text("Combine", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
-                    }
-                    Spacer(Modifier.width(4.dp))
-                }
-                Box(
-                    Modifier.size(63.dp, 32.dp).clickable { deleting = "Delete these brushes?" to { vm.deletePickedBrushes() } },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("Delete", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
-                }
-            } else Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
-                Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
-                // hangs below the plus, their right edges in line
-                LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
-                    // the Recent set holds no brushes of its own to add one to
-                    if (!recent) {
-                        MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
-                            adding = false
-                            vm.newBrush()
+        Box {
+            PanelHeader(
+                if (renaming) "" else vm.libraryName,
+                start = 20.dp,
+                end = 12.dp,
+                height = 52.dp,
+                chevronOn = titleMenu,
+                onTitle = { titleMenu = !titleMenu },
+                menu = {
+                    if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
+                    LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
+                },
+            ) {
+                // brushes picked: Delete in the plus's place, and Combine for one with the current brush
+                if (vm.pickedBrushes.isNotEmpty()) Row(Modifier.padding(top = 16.dp)) {
+                    if (vm.canCombinePicked) {
+                        Box(Modifier.size(80.dp, 32.dp).clickable { vm.combinePicked() }, contentAlignment = Alignment.Center) {
+                            Text("Combine", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
                         }
+                        Spacer(Modifier.width(4.dp))
                     }
-                    MenuItem(PcIcons.MenuNewSet, "Create new set") {
-                        adding = false
-                        vm.newBrushSet()
+                    Box(
+                        Modifier.size(63.dp, 32.dp).clickable { deleting = "Delete these brushes?" to { vm.deletePickedBrushes() } },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Delete", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
                     }
-                    MenuDivider(11.dp)
-                    MenuItem(PcIcons.MenuFolder, "Import from Files") {
-                        adding = false
-                        pick.launch(arrayOf("*/*"))
+                } else Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                    // hangs below the plus, their right edges in line
+                    LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
+                        // the Recent set holds no brushes of its own to add one to
+                        if (!recent) {
+                            MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
+                                adding = false
+                                vm.newBrush()
+                            }
+                        }
+                        MenuItem(PcIcons.MenuNewSet, "Create new set") {
+                            adding = false
+                            vm.newBrushSet()
+                        }
+                        MenuDivider(11.dp)
+                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                            adding = false
+                            pick.launch(arrayOf("*/*"))
+                        }
                     }
                 }
             }
+            LibraryGrabber(vm, floating)
         }
         // the search field scrolls away with the lists: out of sight at first, it comes down as a
         // list is pulled down past its top, and goes again as the lists scroll up. Two fingers
@@ -432,7 +468,34 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             },
         ) {
         LibrarySearch(query, onQuery = { query = it }, onFocus = { searching = it })
-        Box(Modifier.weight(1f).onGloballyPositioned { listBounds = it.boundsInWindow() }) {
+        Box(
+            Modifier.weight(1f).onGloballyPositioned { listBounds = it.boundsInWindow() }
+                // a dragged brush is followed here, over both lists, once its row has begun the drag:
+                // on as its set's list gives way to another's
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val held = dragPointer
+                            if (dragged != null && held != null) {
+                                val change = event.changes.firstOrNull { it.id == held }
+                                if (change == null) {
+                                    // the finger gone without lifting (the gesture taken away)
+                                    dragged = null
+                                    draggedWith = emptyList()
+                                    dragPointer = null
+                                } else {
+                                    change.consume()
+                                    dragAt = listBounds.topLeft + change.position
+                                    if (!change.pressed) dropNow()
+                                }
+                            }
+                            if (event.changes.none { it.pressed }) break
+                        }
+                    }
+                },
+        ) {
         if (searching || query.isNotEmpty()) {
             SearchResults(vm, query)
         } else {
@@ -585,12 +648,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                 setMenu = null
                                 share(null)
                             }
-                            if (sets.size > 1) {
-                                MenuDivider()
-                                MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
-                                    setMenu = null
-                                    deleting = "Delete this set and its brushes?" to { vm.deleteBrushSet(i) }
-                                }
+                            // the only set too: the library is then left with none
+                            MenuDivider()
+                            MenuItem(PcIcons.MenuTrash, "Delete", Pc.MenuDanger) {
+                                setMenu = null
+                                deleting = "Delete this set and its brushes?" to { vm.deleteBrushSet(i) }
                             }
                         }
                     }
@@ -613,15 +675,16 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 ) {
                     items(listed, key = { (b, _) -> "${b.set}-${b.index}" }) { (b, pinned) ->
                         val key = "${b.set}-${b.index}"
-                        // the current brush, or the brush last chosen in this set (in the Recent
-                        // set the current brush alone)
-                        val selected = if (recent) vm.currentBrush?.let { it.set == b.set && it.index == b.index } == true else vm.highlighted(b)
+                        // the brush in use alone (a set opened makes its last choice the brush)
+                        val selected = vm.highlighted(b)
                         val picked = key in vm.pickedBrushes
                         // previews go by place, and are dropped when the library changes
                         val preview = vm.previews[key]
                         LaunchedEffect(key, preview == null, vm.previewRound) { if (preview == null) vm.loadPreview(b) }
                         // gone from the list, it is nowhere: where it last was may be under another row
                         androidx.compose.runtime.DisposableEffect(key) { onDispose { brushBounds.remove(key) } }
+                        // the brush in this place now, for a hold that began before it moved here
+                        val brushNow by androidx.compose.runtime.rememberUpdatedState(b)
                         Box(Modifier.animateItem(Motion.rowFade(), Motion.rowMove(), Motion.rowFade())) {
                             SwipeBrush(
                                 open = vm.swipedBrush == key,
@@ -648,67 +711,78 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             ) {
                                 Box(
                                     Modifier.fillMaxWidth().height(BrushHeight).onGloballyPositioned { brushBounds[key] = it.boundsInWindow() }
-                                        .alpha(if (dragged?.let { d -> d.set == b.set && d.index == b.index } == true) 0.3f else 1f)
+                                        .alpha(if (draggedWith.any { d -> d.set == b.set && d.index == b.index }) 0.3f else 1f)
                                         .pointerInput(key, recent) {
-                                            // the Recent set's brushes stay where they are
-                                            if (recent) return@pointerInput
-                                            // held, its menu shows; moved on from there, the menu goes and the
-                                            // brush follows the finger
-                                            var held = Offset.Zero
-                                            var moved = Offset.Zero
-                                            detectDragGesturesAfterLongPress(
-                                                onDragStart = { at ->
-                                                    held = at
-                                                    moved = Offset.Zero
-                                                },
-                                                onDrag = { change, by ->
-                                                    change.consume()
-                                                    moved += by
-                                                    if (dragged == null && moved.getDistance() > viewConfiguration.touchSlop) {
-                                                        brushMenu = null
-                                                        vm.swipedBrush = null
-                                                        grab = held
-                                                        dragAt = (brushBounds[key]?.topLeft ?: Offset.Zero) + held + moved
-                                                        dragged = b
-                                                    } else if (dragged != null) {
-                                                        dragAt += by
-                                                    }
-                                                },
-                                                onDragEnd = { if (dragged != null) drop() },
-                                                onDragCancel = { dragged = null },
-                                            )
-                                        }
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(if (selected) Pc.RowSelected else if (picked) PickedBrush else Color.Transparent)
-                                        .combinedClickable(
-                                            onLongClick = {
+                                            // held still, its menu shows (and stays when the finger lifts); moved on
+                                            // from there, the menu goes and the brush follows the finger (the Recent
+                                            // set's brushes stay where they are). One hold for both: a tap's own
+                                            // hold would keep the rest of the press from the drag
+                                            awaitEachGesture {
+                                                val down = awaitFirstDown(requireUnconsumed = false)
+                                                val long = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
                                                 vm.swipedBrush = null
                                                 focus.clearFocus()
                                                 brushMenu = key
-                                            },
-                                        ) {
+                                                val hold = BrushHold(viewConfiguration.touchSlop, movable = !recent)
+                                                // the rest of the press is the hold's, taken before the tap under it sees
+                                                // it (letting go is no tap), until it drags the brush: the lists' box
+                                                // follows it from there (this row may go, as another set opens)
+                                                while (true) {
+                                                    val change = awaitPointerEvent(PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
+                                                    if (change == null || change.isConsumed || !change.pressed) {
+                                                        change?.consume()
+                                                        break
+                                                    }
+                                                    change.consume()
+                                                    if (hold.move(change.position - long.position)) {
+                                                        brushMenu = null
+                                                        vm.swipedBrush = null
+                                                        val now = brushNow
+                                                        val bounds = brushBounds[key]
+                                                        grab = long.position
+                                                        dragAt = (bounds?.topLeft ?: Offset.Zero) + change.position
+                                                        dragSize = bounds?.size ?: androidx.compose.ui.geometry.Size.Zero
+                                                        draggedWith = draggedTogether(now, vm.pickedBrushes, vm.highlighted(now), vm.brushSets.getOrNull(now.set.toInt())?.brushes.orEmpty())
+                                                        dragPointer = long.id
+                                                        dragged = now
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .semantics {
+                                            onLongClick {
+                                                brushMenu = key
+                                                true
+                                            }
+                                        }
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (selected) Pc.RowSelected else if (picked) PickedBrush else Color.Transparent)
+                                        .clickable {
                                             // with a brush swiped open, a tap only closes it
                                             if (vm.swipedBrush != null) {
                                                 vm.swipedBrush = null
-                                                return@combinedClickable
+                                                return@clickable
                                             }
                                             // and with brushes picked, only lets them go
                                             if (vm.pickedBrushes.isNotEmpty()) {
                                                 vm.pickedBrushes.clear()
-                                                return@combinedClickable
+                                                return@clickable
                                             }
-                                            // a highlighted brush opens in the studio
+                                            // the brush in use opens in the studio; another becomes the brush
+                                            val inUse = vm.highlighted(b)
                                             vm.chooseBrush(b)
-                                            if (selected) vm.openStudio()
+                                            if (inUse) vm.openStudio()
                                         },
                                 ) {
                                     // the sample stroke filling the cell's height (its ends past the cell's sides),
                                     // under the name
                                     preview?.let {
-                                        // the samples are drawn white: dark on the light interface's cells
+                                        // the samples are drawn white: dark on the light interface's cells, or in
+                                        // the colour a plugin gives
                                         Image(
                                             it, contentDescription = null, contentScale = ContentScale.Crop,
-                                            colorFilter = if (Pc.light && !selected) androidx.compose.ui.graphics.ColorFilter.tint(Color.Black, androidx.compose.ui.graphics.BlendMode.SrcIn) else null,
+                                            colorFilter = previewFilter(tints, selected),
                                             modifier = Modifier.fillMaxSize(),
                                         )
                                     }
@@ -767,17 +841,25 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         }
             // the dragged brush follows the finger
             dragged?.let { d ->
-                val size = brushBounds["${d.set}-${d.index}"]?.size
                 val at = dragAt - grab - listBounds.topLeft
                 Box(
                     Modifier.offset { IntOffset(at.x.roundToInt(), at.y.roundToInt()) }
-                        .size(with(density) { (size?.width ?: 0f).toDp() }, BrushHeight)
+                        .size(with(density) { dragSize.width.toDp() }, BrushHeight)
                         .clip(RoundedCornerShape(12.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
                 ) {
                     vm.previews["${d.set}-${d.index}"]?.let {
-                        Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        Image(it, contentDescription = null, contentScale = ContentScale.Crop, colorFilter = pluginFilter(tints.second), modifier = Modifier.fillMaxSize())
                     }
                     Text(d.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 18.dp, top = 11.dp))
+                    // several going together: how many
+                    if (draggedWith.size > 1) {
+                        Box(
+                            Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp).size(24.dp).clip(CircleShape).background(Color.White),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("${draggedWith.size}", color = Pc.RowSelected, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
                 }
             }
             // and the dragged set
@@ -806,6 +888,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         }
         }
         }
+        floating?.let { FloatingBottom(it) }
     }
 
     // while the question is up, brushes read from a file wait to join the library
@@ -1037,7 +1120,7 @@ private val CardBrushRows = ((CardHeight - 47.dp) / (CardBrushHeight + 2.dp)).to
  * shipped one back; or a library with no sets yet, with "+" to make one.
  */
 @Composable
-private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) {
+private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier, floating: FloatingFrame?) {
     val showing = vm.showingLibraries
     var titleMenu by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
@@ -1049,63 +1132,67 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
     var pinchedCard by remember { mutableStateOf<Int?>(null) }
     var cardZoom by remember { mutableFloatStateOf(1f) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importBrushes(it) } }
-    Popover(LibraryWidth, arrowX, modifier) {
+    Popover(floating?.width ?: LibraryWidth, arrowX, modifier, side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP) {
+        floating?.let { FloatingTop(it) }
         val renaming = !showing && vm.renamingLibrary == vm.libraryPlace
-        PanelHeader(
-            when {
-                showing -> "Brush libraries"
-                renaming -> ""
-                else -> vm.libraryName
-            },
-            start = 20.dp,
-            end = 12.dp,
-            height = 52.dp,
-            chevronOn = titleMenu,
-            onTitle = { titleMenu = true },
-            menu = {
-                if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
-                if (showing) {
-                    LibraryMenu(titleMenu, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = { titleMenu = false }, overPanel = true) {
-                        MenuItem(PcIcons.MenuRestore, "Restore default library") {
-                            titleMenu = false
-                            vm.restoreLibraries()
-                        }
-                    }
-                } else {
-                    LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
-                }
-            },
-        ) {
-            Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
-                Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
-                LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
+        Box {
+            PanelHeader(
+                when {
+                    showing -> "Brush libraries"
+                    renaming -> ""
+                    else -> vm.libraryName
+                },
+                start = 20.dp,
+                end = 12.dp,
+                height = 52.dp,
+                chevronOn = titleMenu,
+                onTitle = { titleMenu = true },
+                menu = {
+                    if (renaming) InlineName(vm.libraryName, Pc.PanelTitle, 24.sp) { vm.renameLibrary(vm.libraryPlace, it) }
                     if (showing) {
-                        MenuItem(PcIcons.MenuNewLibrary, "Create new library") {
-                            adding = false
-                            vm.newLibrary()
-                        }
-                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
-                            adding = false
-                            pick.launch(arrayOf("*/*"))
+                        LibraryMenu(titleMenu, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = { titleMenu = false }, overPanel = true) {
+                            MenuItem(PcIcons.MenuRestore, "Restore default library") {
+                                titleMenu = false
+                                vm.restoreLibraries()
+                            }
                         }
                     } else {
-                        MenuItem(PcIcons.MenuNewSet, "Create new set") {
-                            adding = false
-                            vm.newBrushSet()
-                        }
-                        MenuDivider(11.dp)
-                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
-                            adding = false
-                            pick.launch(arrayOf("*/*"))
+                        LibraryTitleMenu(vm, titleMenu) { titleMenu = false }
+                    }
+                },
+            ) {
+                Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+                    LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
+                        if (showing) {
+                            MenuItem(PcIcons.MenuNewLibrary, "Create new library") {
+                                adding = false
+                                vm.newLibrary()
+                            }
+                            MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                                adding = false
+                                pick.launch(arrayOf("*/*"))
+                            }
+                        } else {
+                            MenuItem(PcIcons.MenuNewSet, "Create new set") {
+                                adding = false
+                                vm.newBrushSet()
+                            }
+                            MenuDivider(11.dp)
+                            MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                                adding = false
+                                pick.launch(arrayOf("*/*"))
+                            }
                         }
                     }
                 }
             }
+            LibraryGrabber(vm, floating)
         }
         if (showing) {
             LazyVerticalGrid(
                 GridCells.Fixed(2),
-                Modifier.weight(1f, fill = false).onGloballyPositioned { gridOrigin = it.positionInWindow() }.pointerInput(Unit) {
+                Modifier.weight(1f, fill = floating != null).onGloballyPositioned { gridOrigin = it.positionInWindow() }.pointerInput(Unit) {
                     // two fingers pinched out on a card: it grows with them, and let go far enough apart it opens
                     awaitLibraryPinch({ gridOrigin }, { zoom, at ->
                         if (pinchedCard == null) pinchedCard = cardBounds.entries.firstOrNull { it.value.contains(at) }?.key
@@ -1164,6 +1251,7 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
                 )
             }
         }
+        floating?.let { FloatingBottom(it) }
     }
     Alert(
         vm.deletingLibrary,
@@ -1182,6 +1270,7 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraftandroid.procraft.core.BrushLibraryInfo, onOpen: () -> Unit, onMenu: () -> Unit) {
+    val tints = remember(vm.colorRgb(), vm.pluginLooks) { vm.previewTints() }
     val shape = RoundedCornerShape(CardCorner)
     Column(
         Modifier.fillMaxWidth().height(CardHeight).clip(shape).background(Pc.SetCell)
@@ -1217,11 +1306,72 @@ private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraft
                     val stroke = vm.cardPreviews[key]
                     LaunchedEffect(key, stroke == null) { if (stroke == null) vm.loadCardPreview(i, b.set.toInt(), b.index.toInt()) }
                     Box(Modifier.fillMaxWidth().height(CardBrushHeight)) {
-                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, colorFilter = pluginFilter(tints.first), modifier = Modifier.fillMaxSize()) }
                         Text(b.name, color = Pc.PanelTitle, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, top = 1.dp))
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * A brush held in the library, as the finger goes on: held still its menu shows; moved on from
+ * there past [slop] (pixels, from where it took hold) the menu goes and the brush is dragged, if it
+ * is [movable] (the Recent set's brushes stay where they are).
+ */
+internal class BrushHold(private val slop: Float, private val movable: Boolean) {
+    /** Whether the brush follows the finger, rather than its menu showing. */
+    var dragging = false
+        private set
+
+    /** The finger is [moved] from where it took hold: true when that starts the drag. */
+    fun move(moved: Offset): Boolean {
+        if (dragging || !movable || moved.getDistance() <= slop) return false
+        dragging = true
+        return true
+    }
+}
+
+/**
+ * Where a brush from place [from] (set, index) goes, let go at [at] (window pixels): onto a set of
+ * [sets] (by place), to its top; onto one of the shown set's [brushes] (by place), to its place;
+ * nowhere when that is where it is already, or when it is over neither.
+ */
+internal fun brushDropPlace(from: Pair<Int, Int>, at: Offset, sets: Map<Int, Rect>, brushes: List<Pair<Pair<Int, Int>, Rect>>): Pair<Int, Int>? =
+    brushesDropPlace(listOf(from), at, sets, brushes)
+
+/**
+ * Where brushes from places [from] (set, index; all of one set) dragged together go, let go at
+ * [at] (window pixels): onto another set of [sets] (by place), to its top; onto one of the shown
+ * set's [brushes] (by place) not among them, to its place (the first of them taking it, the rest
+ * after it); nowhere over their own set, over one of them, or over neither.
+ */
+internal fun brushesDropPlace(from: List<Pair<Int, Int>>, at: Offset, sets: Map<Int, Rect>, brushes: List<Pair<Pair<Int, Int>, Rect>>): Pair<Int, Int>? {
+    val own = from.firstOrNull()?.first ?: return null
+    sets.entries.firstOrNull { it.value.contains(at) }?.let { return if (it.key == own) null else it.key to 0 }
+    return brushes.firstOrNull { it.second.contains(at) }?.first?.takeIf { it !in from }
+}
+
+/**
+ * The brushes dragged with [held]: those picked ([picked], by place "set-index") in its set and it,
+ * in their order in its set ([brushes]), when it is one of them (the current brush, [selected],
+ * counts as picked); else it alone.
+ */
+internal fun draggedTogether(held: BrushInfo, picked: List<String>, selected: Boolean, brushes: List<BrushInfo>): List<BrushInfo> {
+    val key = "${held.set}-${held.index}"
+    if (picked.isEmpty() || (key !in picked && !selected)) return listOf(held)
+    val going = brushes.filter { b -> b.set == held.set && ("${b.set}-${b.index}" in picked || b.index == held.index) }
+    return going.ifEmpty { listOf(held) }
+}
+
+/** How long a dragged brush is held over a set before it opens (as the system's own drags do). */
+private const val SPRING_LOAD_MS = 500L
+
+/** Hanging from its button, the library's grabber tears it off into a window of its own, while a plugin lets it ([floating]: it floats). */
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.LibraryGrabber(vm: CanvasViewModel, floating: FloatingFrame?) {
+    if (floating == null && io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES in Pc.floatingPanels) {
+        PanelGrabber(vm, io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES)
     }
 }

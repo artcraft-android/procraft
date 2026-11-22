@@ -229,6 +229,7 @@ impl State {
             && self.transform.is_none()
             && !self.adjusting
             && self.reveal.is_none()
+            && self.colour_fill_preview().is_none()
             && self.view_motion.is_none()
             && !self.scene_shown()
             && self.sphere.is_none();

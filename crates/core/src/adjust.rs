@@ -188,10 +188,11 @@ impl State {
         };
         self.strokes = self.strokes.wrapping_add(1);
         let seed = self.strokes.wrapping_mul(0x9e37_79b9);
-        let mut builder = StrokeBuilder::with_seed(brush.clone(), brush.diameter(sliders.size), pointer.into(), seed)
+        let builder = StrokeBuilder::with_seed(brush.clone(), brush.diameter(sliders.size), pointer.into(), seed)
             .with_input(self.input.clone())
             .on_view_turned(self.view.map_or(0.0, |v| v.rotation()))
             .seen_at(self.view.map_or(1.0, |v| v.zoom()) / self.display_scale);
+        let mut builder = self.pressing.applied(builder, self.canvas_per_point());
         if let Some(zoom) = self.whole_pixels(samples) {
             builder = builder.read_in_whole_pixels(zoom);
         }
@@ -331,9 +332,11 @@ impl Shared {
         if steps.is_empty() {
             return;
         }
+        // with Drawing Assist on the layer, the symmetry's copies too, as a stroke's
+        let guide = st.doc.stroke_guide();
         if let Some(canvas) = st.canvas.as_mut() {
             for step in &steps {
-                canvas.liquify_stamps(step);
+                canvas.liquify_stamps(&crate::guide::mirrored_liquify(&guide, step));
             }
             if let Some(f) = st.last_filter {
                 canvas.set_filter(f);

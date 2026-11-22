@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.colour-extras",
+  "name": "Colour extras",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "The colour panel's sliders step one unit at a tap on either end, and its swatch shows the colour as the panel opened beside the colour now.",
+  "compat": { "procraft": { "interface": 12 } },
+  "permissions": [],
+  "hooks": ["colour_panel"],
+  "controls": [
+    { "key": "steps", "type": "switch", "label": "Sliders step at their ends", "starts": false },
+    { "key": "compare", "type": "switch", "label": "Colour before and now", "starts": false }
+  ]
+}

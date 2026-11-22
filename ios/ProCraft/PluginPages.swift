@@ -260,6 +260,26 @@ extension CanvasModel {
         session.setInterfaceSize(size: Float(Interface.shared.scale))
     }
 
+    /// A Pencil gesture set to a plugin's action: it runs where the Pencil is (window pixels), off
+    /// the main thread, and what it changed is read again after.
+    func runPluginAction(_ key: String, x: Float, y: Float) {
+        let store = PluginsModel.shared.store
+        let session = session
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = store.runActionAt(key: key, session: session, x: x, y: y)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure = session.takeFailure() {
+                    showNotice(failure, warning: true)
+                }
+                if session.takeBrushesChanged() {
+                    libraryChanged()
+                }
+                refresh()
+            }
+        }
+    }
+
     func setPluginFilterSlider(_ key: String, _ value: Float) {
         _ = session.pluginFilterSlider(key: key, value: value, done: false)
         readAdjust()

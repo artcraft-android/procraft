@@ -58,3 +58,5 @@ objc2 = "0.6"
 [dev-dependencies]
 # hostile modules, written out in the tests
 wat = "1"
+# the heap at its fullest, in the test of reading a big brush file
+dhat = "0.3"

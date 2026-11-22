@@ -629,6 +629,11 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.undo()
             case .redo:
                 model.redo()
+            case let .run(action, x, y):
+                // a Pencil gesture set to a QuickMenu action: done as its button would
+                model.runQuickAction(action, at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
+            case let .runPlugin(key, x, y):
+                model.runPluginAction(key, x: x, y: y)
             case .clearLayer:
                 model.clearCurrentLayer()
             case .toggleBars:
@@ -689,8 +694,12 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.selection.freehandChanged()
             case .selectionChanged:
                 model.selection.touched()
+            case let .pourAt(x, y, fill):
+                model.drop.tapFill(x: x, y: y, fill: fill)
             case let .fillThreshold(threshold):
                 model.drop.pourThreshold(threshold)
+            case let .pourEnd(keep):
+                model.drop.tapFillEnd(keep: keep)
             case .filled:
                 model.drop.filled()
             case let .quickMenu(x, y):

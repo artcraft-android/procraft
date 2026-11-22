@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.paper",
+  "name": "Paper",
+  "version": "1.1.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "A paper for each artwork, from Paper in the Layers panel or Actions > Canvas: every brush takes its grain, and it shows under the art in any colour, or a picture of your own.",
+  "compat": { "procraft": { "interface": 12 } },
+  "permissions": ["panel"],
+  "hooks": ["paper"],
+  "controls": [
+    {
+      "key": "paper", "type": "slider", "label": "Paper", "least": 0, "most": 6, "step": 1, "starts": 0,
+      "names": ["None", "Cold press", "Hot press", "Rough", "Canvas", "Laid", "Your own"], "place": "canvas", "artwork": true
+    },
+    {
+      "key": "colour", "type": "slider", "label": "Paper colour", "least": 0, "most": 6, "step": 1, "starts": 0,
+      "names": ["Background", "White", "Cream", "Ivory", "Grey", "Kraft", "Black"], "place": "canvas", "artwork": true
+    },
+    {
+      "key": "grain", "type": "slider", "label": "Grain", "least": 0, "most": 1, "step": 0.05, "starts": 0.6,
+      "shown_times": 100, "unit": "%", "place": "canvas", "artwork": true
+    },
+    {
+      "key": "size", "type": "slider", "label": "Grain size", "least": 0.5, "most": 4, "step": 0.25, "starts": 1,
+      "shown_times": 100, "unit": "%", "artwork": true
+    },
+    {
+      "key": "shown", "type": "slider", "label": "Texture under the art", "least": 0, "most": 1, "step": 0.05,
+      "starts": 0.3, "shown_times": 100, "unit": "%", "artwork": true
+    },
+    {
+      "key": "tooth", "type": "slider", "label": "Tooth", "least": 0, "most": 1, "step": 0.05, "starts": 0,
+      "shown_times": 100, "unit": "%", "artwork": true
+    },
+    { "key": "own_colour", "type": "switch", "label": "A colour of your own", "starts": false, "artwork": true },
+    {
+      "key": "hue", "type": "slider", "label": "Hue", "least": 0, "most": 360, "step": 1, "starts": 40, "unit": "°",
+      "under": "own_colour", "artwork": true
+    },
+    {
+      "key": "saturation", "type": "slider", "label": "Saturation", "least": 0, "most": 1, "step": 0.01, "starts": 0.1,
+      "shown_times": 100, "unit": "%", "under": "own_colour", "artwork": true
+    },
+    {
+      "key": "brightness", "type": "slider", "label": "Brightness", "least": 0, "most": 1, "step": 0.01, "starts": 0.96,
+      "shown_times": 100, "unit": "%", "under": "own_colour", "artwork": true
+    },
+    { "key": "picture", "type": "file", "label": "Your own paper", "accepts": "picture" }
+  ],
+  "actions": [
+    { "key": "settings", "label": "Paper", "place": "layers" }
+  ]
+}

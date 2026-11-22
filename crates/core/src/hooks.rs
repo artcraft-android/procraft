@@ -3,13 +3,30 @@
 //! plugins need, and each is as narrow as it can be.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::plugin_file;
 use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
+
+/// What the slider look's hook is asked of the side bar's slider tracks: their opacity, and how
+/// frosted what is behind them is (interface 11).
+pub(crate) const SLIDER_OPACITY: i32 = 0;
+pub(crate) const SLIDER_FROSTED: i32 = 1;
+/// What the colour panel's hook asks (interface 12): whether its sliders step one unit at a tap on
+/// either end, and whether its swatch shows the colour as the panel opened beside the colour now.
+pub(crate) const COLOUR_STEPS: i32 = 0;
+pub(crate) const COLOUR_BEFORE: i32 = 1;
+
+/// The role of the colour hook's that is the area round the canvas (interface 11).
+pub(crate) const SURROUND_ROLE: i32 = 1;
+
+/// The parts of the view the gesture lock's hook is asked about: its turn, and the fit a quick
+/// pinch in makes (interface 10).
+pub(crate) const GESTURE_TURN: i32 = 0;
+pub(crate) const GESTURE_FIT: i32 = 1;
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 pub(crate) type Shared = Arc<Mutex<Running>>;
@@ -21,8 +38,8 @@ pub(crate) fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
 struct OnHook {
     id: String,
     running: Shared,
-    /// The hooks it is on, as bits.
-    hooks: u32,
+    /// The hooks it is on, as bits (see [`Hook::bit`]).
+    hooks: u64,
     /// The keys of its rows in the brush studio, in their order.
     brush_keys: Vec<String>,
     /// On the picker hook: its picture.
@@ -36,7 +53,21 @@ struct OnHook {
     /// by engine and data (the latest last).
     brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
     looks: Vec<(String, u64, Arc<crate::plugin_brushes::BrushLook>)>,
+    /// Starts a copy of its code of its own with that much memory at most: what its brush engines
+    /// make brushes of files on (see `plugin_brushes.rs`).
+    copier: Option<Copier>,
+    /// The brushes (by engine and data) whose looks it couldn't make, or made such as the app can't
+    /// take: drawn as the app read them, not asked again until it comes on again.
+    no_looks: Vec<(String, u64)>,
+    /// The looks (by engine and data) being made on threads of their own.
+    making: Vec<(String, u64, Arc<crate::plugin_brushes::Making>)>,
 }
+
+/// The most brushes whose looks couldn't be made are remembered, the latest kept.
+const MOST_NO_LOOKS: usize = 1024;
+
+/// Starts a copy of a plugin's code of its own, as it is on now, with that much memory at most.
+pub(crate) type Copier = Arc<dyn Fn(usize) -> Result<Running, Stop> + Send + Sync>;
 
 /// A picker plugin's picture: its code, the keys it reads its plugin's controls by (written to
 /// interface 6 or later; none before), and their values now.
@@ -62,7 +93,7 @@ struct Working {
 #[derive(Default)]
 pub(crate) struct Hooks {
     /// The hooks with a plugin on them, as bits: all a stroke with none pays for is reading this.
-    hooked: AtomicU32,
+    hooked: AtomicU64,
     working: Mutex<Working>,
     /// Where a stop is written down, to stay off through a restart.
     store: Option<PathBuf>,
@@ -121,6 +152,16 @@ impl Hooks {
     /// `start` through each plugin on `hook`, in turn. One that stops is off the hooks there and then,
     /// and what it was handed goes on as it came to it.
     fn through<T: Copy>(&self, hook: Hook, start: T, mut step: impl FnMut(&mut Running, T) -> Result<T, Stop>) -> T {
+        self.through_by_id(hook, start, |_, running, at| step(running, at))
+    }
+
+    /// The same, each step told whose code it is (by its id).
+    fn through_by_id<T: Copy>(
+        &self,
+        hook: Hook,
+        start: T,
+        mut step: impl FnMut(&str, &mut Running, T) -> Result<T, Stop>,
+    ) -> T {
         let mut working = self.working();
         let mut at = start;
         let mut i = 0;
@@ -129,7 +170,7 @@ impl Hooks {
                 i += 1;
                 continue;
             }
-            let answer = step(&mut at_work(&plugin.running), at);
+            let answer = step(&plugin.id, &mut at_work(&plugin.running), at);
             match answer {
                 Ok(to) => {
                     at = to;
@@ -502,6 +543,9 @@ impl Hooks {
                 layer_kinds: Vec::new(),
                 brush_engines: Vec::new(),
                 looks: Vec::new(),
+                copier: None,
+                no_looks: Vec::new(),
+                making: Vec::new(),
             },
         );
         self.rehook(&working);
@@ -588,6 +632,201 @@ impl Hooks {
             && self.through(Hook::FloatingPickerOnly, false, |running, said| Ok(said | running.floating_picker_only()?))
     }
 
+    /// The notices hook: whether the notice of something done, of kind `kind` (by
+    /// [`crate::plugins::NoticeKind`]), goes by unseen, as any plugin on it says.
+    pub(crate) fn hide_notice(&self, kind: i32) -> bool {
+        self.has(Hook::HideNotices)
+            && self.through(Hook::HideNotices, false, |running, said| Ok(said || running.hide_notice(kind)?))
+    }
+
+    /// The floating panels hook: whether panel `panel` (by [`crate::floating::FloatingPanel`]) can be
+    /// torn off into a window of its own, as any plugin on it says.
+    pub(crate) fn floating_panel(&self, panel: i32) -> bool {
+        self.has(Hook::FloatingPanels)
+            && self.through(Hook::FloatingPanels, false, |running, said| Ok(said || running.floating_panel(panel)?))
+    }
+
+    /// The gesture lock's hook: whether a two-finger gesture leaves part `part` of the view (by
+    /// [`GESTURE_TURN`] and [`GESTURE_FIT`]) as it is, as any plugin on it says.
+    pub(crate) fn gesture_lock(&self, part: i32) -> bool {
+        self.has(Hook::GestureLock)
+            && self.through(Hook::GestureLock, false, |running, said| Ok(said || running.gesture_lock(part)?))
+    }
+
+    /// The view look's hook: the matrix the canvas's colours go through on the screen, each
+    /// plugin's in turn (in order of id); none while together they change nothing.
+    pub(crate) fn view_look(&self) -> Option<crate::ViewLook> {
+        if !self.has(Hook::ViewLook) {
+            return None;
+        }
+        let look = self.through(Hook::ViewLook, crate::view_look::IDENTITY, |running, look| {
+            Ok(running.view_look()?.map_or(look, |next| crate::view_look::then(&look, &next)))
+        });
+        (look != crate::view_look::IDENTITY).then_some(look)
+    }
+
+    /// The paper's hook: the paper the first plugin on it (by id) that gives one now gives, and
+    /// whose it is (a picture of its controls' is that plugin's).
+    pub(crate) fn paper(&self) -> Option<(String, crate::plugin_run::Paper)> {
+        if !self.has(Hook::Paper) {
+            return None;
+        }
+        let mut given = None;
+        self.through_by_id(Hook::Paper, (), |id, running, ()| {
+            if given.is_none() {
+                given = running.paper()?.map(|paper| (id.to_owned(), paper));
+            }
+            Ok(())
+        });
+        given
+    }
+
+    /// The reference windows' hook: how many Reference windows may be open at once, the most any
+    /// plugin on it says (1 with none).
+    pub(crate) fn reference_windows(&self) -> u32 {
+        if !self.has(Hook::ReferenceWindows) {
+            return 1;
+        }
+        self.through(Hook::ReferenceWindows, 1, |running, most| Ok(most.max(running.reference_windows()?)))
+    }
+
+    /// The pressure hook: the pressure a stroke's sample draws with, as the plugins on it say in
+    /// turn (in order of id), each told what the last one said; none while none says, or for a
+    /// sample that isn't a number.
+    #[inline]
+    pub(crate) fn pressure(&self, asked: crate::plugin_run::PressureAsked) -> Option<f32> {
+        let numbers = [asked.x, asked.y, asked.ms, asked.pressure].iter().all(|v| v.is_finite());
+        if !self.has(Hook::Pressure) || !numbers {
+            return None;
+        }
+        self.through(Hook::Pressure, None, |running, said: Option<f32>| {
+            let told = crate::plugin_run::PressureAsked { pressure: said.unwrap_or(asked.pressure), ..asked };
+            Ok(running.pressure(told)?.or(said))
+        })
+    }
+
+    /// The pressure hook's tapers for a stroke by `pointer` (numbered as for [`Hooks::pressure`]):
+    /// how far (window points) its pressure grows from nothing at its start and falls to nothing at
+    /// its end, each the longest any plugin on it says.
+    pub(crate) fn pressure_tapers(&self, pointer: i32) -> [f32; 2] {
+        if !self.has(Hook::Pressure) {
+            return [0.0; 2];
+        }
+        self.through(Hook::Pressure, [0.0; 2], |running, [start, end]| {
+            Ok([start.max(running.pressure_taper(pointer, 0)?), end.max(running.pressure_taper(pointer, 1)?)])
+        })
+    }
+
+    /// The brush preview's hook: the colour (0xRRGGBB) the brush library draws a brush's sample
+    /// stroke in, the current colour `current` (0xRRGGBB) and the brush the one in use if `chosen`,
+    /// as the first plugin by id that answers says; none for the app's own.
+    pub(crate) fn brush_preview_colour(&self, current: u32, chosen: bool) -> Option<u32> {
+        if !self.has(Hook::BrushPreviewColour) {
+            return None;
+        }
+        self.through(Hook::BrushPreviewColour, None, |running, said| match said {
+            Some(colour) => Ok(Some(colour)),
+            None => running.brush_preview_colour(current, chosen),
+        })
+    }
+
+    /// The slider look's hook: what the first plugin by id on it that answers says of `what` of the
+    /// side bar's slider tracks' look (0 their opacity, 1 how frosted what is behind them is), 0 to
+    /// 1; none for the app's own.
+    pub(crate) fn slider_look(&self, what: i32) -> Option<f32> {
+        if !self.has(Hook::SliderLook) {
+            return None;
+        }
+        self.through(Hook::SliderLook, None, |running, said| match said {
+            Some(v) => Ok(Some(v)),
+            None => running.slider_look(what),
+        })
+    }
+
+    /// The colour panel's hook (interface 12): whether a plugin on it says the panel does `part` of
+    /// what it may ([`COLOUR_STEPS`], [`COLOUR_BEFORE`]).
+    pub(crate) fn colour_panel(&self, part: i32) -> bool {
+        self.has(Hook::ColourPanel)
+            && self.through(Hook::ColourPanel, false, |running, said| Ok(said || running.colour_panel(part)?))
+    }
+
+    /// The surround picture's hook: the plugin (by id) and the place in its controls of the file
+    /// control whose picture shows round the canvas, as the first plugin by id on it that answers
+    /// says; none for none.
+    pub(crate) fn surround_picture(&self) -> Option<(String, u32)> {
+        if !self.has(Hook::SurroundPicture) {
+            return None;
+        }
+        let mut whose = None;
+        self.through_by_id(Hook::SurroundPicture, false, |id, running, found| {
+            if found {
+                return Ok(true);
+            }
+            let said = running.surround_picture()?;
+            if let Some(at) = said {
+                whose = Some((id.to_owned(), at));
+            }
+            Ok(said.is_some())
+        });
+        whose
+    }
+
+    /// The layer label's hook: the colour (0xRRGGBB) the row of a layer keeping `marks` (by
+    /// plugin id) shows, as the first plugin by id on it that keeps a mark there says; none for none.
+    /// Each is told only its own mark.
+    pub(crate) fn layer_label(&self, marks: &std::collections::BTreeMap<String, i64>) -> Option<u32> {
+        if marks.is_empty() || !self.has(Hook::LayerLabel) {
+            return None;
+        }
+        self.through_by_id(Hook::LayerLabel, None, |id, running, said| match (said, marks.get(id)) {
+            (Some(colour), _) => Ok(Some(colour)),
+            (None, Some(&mark)) if mark != 0 => running.layer_label(mark),
+            _ => Ok(None),
+        })
+    }
+
+    /// The stroke-fill hook: whether a stroke beginning with `tool` (0 paint, 1 erase) by `pointer`
+    /// (numbered as for [`Hooks::pressure`]) fills the region its path encloses, as the first
+    /// plugin on it by id that says so says (1 shown filling as it is drawn, 2 filled as it ends),
+    /// each told the brush first, with the values of its own rows (`brush_of` its keys); 0 while
+    /// none says.
+    pub(crate) fn stroke_fill(
+        &self,
+        tool: i32,
+        pointer: i32,
+        brush_of: impl Fn(&[String]) -> crate::stroke_sound::SoundBrush,
+    ) -> u8 {
+        if !self.has(Hook::StrokeFill) {
+            return 0;
+        }
+        let mut working = self.working();
+        let mut i = 0;
+        let mut said = 0;
+        while let Some(plugin) = working.on.get_mut(i) {
+            if plugin.hooks & Hook::StrokeFill.bit() == 0 {
+                i += 1;
+                continue;
+            }
+            let brush = brush_of(&plugin.brush_keys);
+            let answer = at_work(&plugin.running).stroke_fill(&brush, tool, pointer);
+            match answer {
+                Ok(fill) => {
+                    said = fill;
+                    if said != 0 {
+                        break;
+                    }
+                    i += 1;
+                }
+                Err(stop) => {
+                    let gone = working.on.remove(i);
+                    self.note_stop(&mut working, gone.id, stop);
+                }
+            }
+        }
+        self.rehook(&working);
+        said
+    }
+
     /// The kinds of layer `id` adds, in its manifest's order.
     pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -654,6 +893,18 @@ impl Hooks {
         }
     }
 
+    /// How a copy of `id`'s code of its own starts, for its brush engines' imports.
+    pub(crate) fn give_copier(&self, id: &str, copier: Copier) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.copier = Some(copier);
+        }
+    }
+
+    /// How a copy of `id`'s code of its own starts, if it is on and has one.
+    pub(crate) fn copier(&self, id: &str) -> Option<Copier> {
+        self.working().on.iter().find(|p| p.id == id)?.copier.clone()
+    }
+
     /// The brush engines on that read files whose names end `ending` (all of them for none): each
     /// plugin's id, code, the engine's place among its engines and its key.
     pub(crate) fn engines_reading(&self, ending: Option<&str>) -> Vec<(String, Shared, usize, String)> {
@@ -670,6 +921,12 @@ impl Hooks {
             }
         }
         found
+    }
+
+    /// What brush engine `key` (`<id>.<key>`) is called, if its plugin is on.
+    pub(crate) fn engine_label(&self, key: &str) -> Option<String> {
+        let working = self.working();
+        working.on.iter().find_map(|p| p.brush_engines.iter().find(|e| e.key == key).map(|e| e.label.clone()))
     }
 
     /// The brush engine `key` (`<id>.<key>`), if its plugin is on: its plugin's id, code and the
@@ -708,6 +965,44 @@ impl Hooks {
 
     /// The look engine `key` gave the brush whose data is `id`, kept while its plugin stays on (the
     /// last few).
+    /// Engine `key` couldn't give the brush whose data is `id` a look the app takes: it isn't asked
+    /// again while its plugin stays on.
+    pub(crate) fn no_look(&self, key: &str, id: u64) {
+        let mut working = self.working();
+        if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {
+            plugin.no_looks.push((key.to_owned(), id));
+            let over = plugin.no_looks.len().saturating_sub(MOST_NO_LOOKS);
+            plugin.no_looks.drain(..over);
+        }
+    }
+
+    /// The look engine `key` is making of the brush whose data is `id`, to wait on, and whether this
+    /// ask is the one that starts it (none if the engine's plugin is off).
+    pub(crate) fn making_look(&self, key: &str, id: u64) -> Option<(Arc<crate::plugin_brushes::Making>, bool)> {
+        let mut working = self.working();
+        let plugin = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key))?;
+        if let Some((_, _, making)) = plugin.making.iter().find(|(k, i, _)| k == key && *i == id) {
+            return Some((Arc::clone(making), false));
+        }
+        let making = Arc::new(crate::plugin_brushes::Making::default());
+        plugin.making.push((key.to_owned(), id, Arc::clone(&making)));
+        Some((making, true))
+    }
+
+    /// Engine `key`'s look of the brush whose data is `id` is no longer being made (kept, or not had).
+    pub(crate) fn made_look(&self, key: &str, id: u64) {
+        let mut working = self.working();
+        for plugin in &mut working.on {
+            plugin.making.retain(|(k, i, _)| !(k == key && *i == id));
+        }
+    }
+
+    /// Whether engine `key` couldn't give the brush whose data is `id` a look.
+    pub(crate) fn has_no_look(&self, key: &str, id: u64) -> bool {
+        let working = self.working();
+        working.on.iter().any(|p| p.no_looks.iter().any(|(k, i)| k == key && *i == id))
+    }
+
     pub(crate) fn keep_look(&self, key: &str, id: u64, look: Arc<crate::plugin_brushes::BrushLook>) {
         let mut working = self.working();
         if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {
@@ -809,12 +1104,89 @@ impl Hooks {
     }
 }
 
+impl CanvasSession {
+    /// The values of plugins' controls this artwork keeps, by their keys.
+    pub(crate) fn plugin_values(&self) -> std::collections::BTreeMap<String, f32> {
+        self.shared.lock().plugin_values.clone()
+    }
+
+    /// `value` is what the artwork keeps for the control kept under `key` from now on, saved with
+    /// it (a change being an edit, the autosave has it).
+    pub(crate) fn keep_plugin_value(&self, key: String, value: f32) {
+        let mut st = self.shared.lock();
+        if value.is_finite() && st.plugin_values.get(&key) != Some(&value) {
+            st.plugin_values.insert(key, value);
+            st.revision += 1;
+        }
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Strokes go through the plugins on in `plugins`, as they come and go, from here on.
     pub fn use_plugins(&self, plugins: Arc<Plugins>) {
+        // the controls kept with this artwork, as it keeps them, the first time it comes
+        if let Some(me) = self.me.upgrade() {
+            plugins.take_up_artwork(&me);
+        }
         let hooks = plugins.hooks();
-        self.shared.lock().hooks = Some(hooks);
+        // how the plugins have the window show the canvas, and the paper they give, asked now
+        // rather than as it is drawn
+        let look = hooks.view_look();
+        // the colour round the canvas and the picture there, read again only as it changes
+        let surround =
+            hooks.interface_colour(SURROUND_ROLE).map(|rgb| [16, 8, 0].map(|s| ((rgb >> s) & 0xFF) as f32 / 255.0));
+        let kept = self.shared.lock().surround_picture.clone();
+        let picture = crate::surround::picture_now(plugins.surround_picture_file(), kept);
+        // a paper's picture made its tile, again only as the file changes
+        let kept_paper = self.shared.lock().paper_picture.clone();
+        let mut paper_picture = None;
+        let paper = hooks.paper().and_then(|(id, p)| {
+            let tile = match p.picture {
+                Some(at) => {
+                    let made = crate::paper_picture::tile_now(plugins.picture_file(&id, at), kept_paper)?;
+                    let tile = made.tile.clone();
+                    paper_picture = Some(made);
+                    tile
+                }
+                None => p.tile,
+            };
+            Some(procraft_gpu::CanvasPaper {
+                tile,
+                strength: p.strength,
+                scale: p.scale,
+                depth: p.depth,
+                tooth: p.tooth,
+                colour: p.colour.map(|rgb| [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0)),
+            })
+        });
+        let mut st = self.shared.lock();
+        st.paper_picture = paper_picture;
+        st.hooks = Some(hooks);
+        let mut changed = false;
+        if st.plugin_look != look {
+            st.plugin_look = look;
+            changed = true;
+        }
+        if st.plugin_surround != surround {
+            st.plugin_surround = surround;
+            changed = true;
+        }
+        let id = |p: &Option<Arc<crate::surround::SurroundPicture>>| p.as_ref().map(|p| p.id);
+        if id(&st.surround_picture) != id(&picture) {
+            st.surround_picture = picture;
+            changed = true;
+        }
+        if st.plugin_paper != paper {
+            st.plugin_paper = paper;
+            st.apply_paper();
+            // the background changes with it: the Reference windows read it again
+            st.reference_canvas = None;
+            changed = true;
+        }
+        if changed {
+            self.shared.frame(&mut st);
+        }
     }
 
     /// The picker plugin's picture for `hue` (0..1), `side` pixels square: premultiplied RGBA rows,
@@ -856,10 +1228,12 @@ impl CanvasSession {
     }
 
     /// The notice an undo (`undo`) or a redo of the step `name` shows: "Undo Brush stroke", or
-    /// "Redo" for a step with no name; none while a plugin hides it.
+    /// "Redo" for a step with no name; none while a plugin hides it (the undo notice's hook, or the
+    /// notices' for what undo and redo did).
     pub fn step_notice(&self, undo: bool, name: Option<String>) -> Option<String> {
         let hooks = self.shared.lock().hooks.clone();
-        if hooks.is_some_and(|hooks| hooks.hide_undo_notice()) {
+        let step = crate::plugins::NoticeKind::Step as i32;
+        if hooks.is_some_and(|hooks| hooks.hide_undo_notice() || hooks.hide_notice(step)) {
             return None;
         }
         let word = if undo { "Undo" } else { "Redo" };
@@ -916,6 +1290,36 @@ pub(crate) mod tests {
         (func (export "procraft_control") (param i32 f32)
             (global.set $clear (f32.ne (local.get 1) (f32.const 0))))
         (func (export "procraft_keep_clear") (result i32) (global.get $clear)))"#;
+    /// Answers the pressure hook: a finger's sample (pointer 0) pressed at its x over 100, anything
+    /// else left as it came; a finger's stroke tapered over 10 points at its start and 20 at its end.
+    const PRESSES: &str = r#"(module
+        (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32)
+            (if (result f32) (i32.eqz (local.get 0))
+                (then (f32.div (local.get 2) (f32.const 100)))
+                (else (f32.const -1))))
+        (func (export "procraft_pressure_taper") (param i32 i32) (result f32)
+            (if (result f32) (i32.eqz (local.get 0))
+                (then (f32.convert_i32_s (i32.mul (i32.add (local.get 1) (i32.const 1)) (i32.const 10))))
+                (else (f32.const 0)))))"#;
+
+    /// Answers the pressure hook with half the pressure it is told, for every pointer, and a taper
+    /// of 5 points at the start and 30 at the end.
+    const PRESSES_HALF: &str = r#"(module
+        (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32)
+            (f32.mul (local.get 5) (f32.const 0.5)))
+        (func (export "procraft_pressure_taper") (param i32 i32) (result f32)
+            (select (f32.const 30) (f32.const 5) (local.get 1))))"#;
+
+    /// A plugin on the pressure hook that answers `pressure` and `taper` as given (WAT bodies).
+    fn pressure_module(pressure: &str, taper: &str) -> Vec<u8> {
+        let text = format!(
+            r#"(module
+                (func (export "procraft_pressure") (param i32 i32 f32 f32 f32 f32) (result f32) {pressure})
+                (func (export "procraft_pressure_taper") (param i32 i32) (result f32) {taper}))"#
+        );
+        wat::parse_str(text).unwrap()
+    }
+
     /// Answers the pick hook by its one switch.
     const PICKS: &str = r#"(module
         (global $layer (mut i32) (i32.const 0))
@@ -1111,6 +1515,421 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), false));
         assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
         assert_eq!(s.layers().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Its action marks the current layer one more than it was; it labels a row marked 1 red, and
+    /// marked 3 as no colour at all (past 0xFFFFFF).
+    const MARKS: &str = r#"(module
+        (import "procraft" "current_layer" (func $current (result i64)))
+        (import "procraft" "layer_mark" (func $mark (param i64) (result i64)))
+        (import "procraft" "set_layer_mark" (func $set (param i64 i64) (result i32)))
+        (func (export "procraft_action") (param i32) (result i32)
+            (drop (call $set (call $current) (i64.add (call $mark (call $current)) (i64.const 1))))
+            (i32.const 0))
+        (func (export "procraft_layer_label") (param i64) (result i32)
+            (if (result i32) (i64.eq (local.get 0) (i64.const 1))
+                (then (i32.const 0xFF0000))
+                (else (if (result i32) (i64.eq (local.get 0) (i64.const 3))
+                    (then (i32.const 0x1000000))
+                    (else (i32.const -1)))))))"#;
+
+    /// A plugin `id` whose code is [`MARKS`], on.
+    fn layer_marking(dir: &str, id: &str) -> Arc<Plugins> {
+        let module = wat::parse_str(MARKS).unwrap();
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = coded(id, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(10);
+        manifest["hooks"] = json!(["layer_label"]);
+        manifest["permissions"] = json!(["artwork.read", "artwork.write"]);
+        manifest["actions"] = json!([{ "key": "mark", "label": "Mark it", "place": "layer" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(id.to_owned(), true));
+        plugins
+    }
+
+    #[test]
+    fn a_plugin_marks_a_layer_its_row_shows_the_label_and_undo_takes_it_back() {
+        let Some(s) = session() else { return };
+        let dir = store("marks");
+        let plugins = layer_marking(&dir, ID);
+        s.use_plugins(Arc::clone(&plugins));
+        let other = s.add_layer();
+        let current = || s.layers().into_iter().find(|l| l.current).unwrap();
+        let (layer, mark) = (current().id, || s.layer_mark(ID, current().id));
+        assert_eq!((current().label, mark()), (None, 0));
+        // marked 1: its row red, the others' none
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (Some(0xFF0000), 1));
+        assert!(s.layers().iter().filter(|l| l.id != layer).all(|l| l.label.is_none()));
+        assert_eq!(layer, other, "the current layer");
+        // marked 2, which it labels with nothing
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (None, 2));
+        // each mark one step undo takes back
+        s.undo();
+        assert_eq!((current().label, mark()), (Some(0xFF0000), 1));
+        s.undo();
+        assert_eq!((current().label, mark()), (None, 0));
+        s.redo();
+        // only its own: another plugin's mark there is none
+        assert_eq!(s.layer_mark("org.example.other", layer), 0);
+        // off, no label, the mark kept as it was; on again, the label back
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!((current().label, mark()), (None, 1));
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(current().label, Some(0xFF0000));
+        // a label that is no colour stops it
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert!(plugins.run_action(format!("{ID}.mark"), Arc::clone(&s)));
+        assert_eq!((current().label, mark()), (None, 3));
+        assert!(!card(&plugins).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Its action takes the second colour of the history and the first brush of the Recent set,
+    /// and shows a ring of two colours and the first three brushes of the first set (at 16 in its
+    /// memory); a tap on its ring's colours paints in that colour,
+    /// one on its brushes chooses the brush there (its place in the first set).
+    const PALETTE: &str = r#"(module
+        (import "procraft" "recent_colour" (func $colour (param i32) (result i32)))
+        (import "procraft" "recent_brush" (func $brush (param i32) (result i64)))
+        (import "procraft" "choose_brush" (func $choose (param i64) (result i32)))
+        (import "procraft" "set_brush_colour" (func $paint (param i32)))
+        (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+        (import "procraft" "close_panel" (func $close))
+        (memory (export "memory") 1)
+        (data (i32.const 16) "{\"title\":\"P\",\"ring\":true,\"rows\":[{\"type\":\"colours\",\"label\":\"C\",\"colours\":[255,65280]},{\"type\":\"brushes\",\"label\":\"B\",\"brushes\":[4294967296,4294967297,4294967298]}]}")
+        (func (export "procraft_action") (param i32) (result i32)
+            (call $paint (call $colour (i32.const 1)))
+            (drop (call $choose (call $brush (i32.const 0))))
+            (drop (call $show (i32.const 16) (i32.const 163)))
+            (i32.const 0))
+        (func (export "procraft_panel_event") (param i32 f32) (result i32)
+            (if (i32.eqz (local.get 0))
+                (then (call $paint (select (i32.const 255) (i32.const 65280) (f32.lt (local.get 1) (f32.const 0.5)))))
+                (else (drop (call $choose (i64.or (i64.const 4294967296) (i64.trunc_f32_u (local.get 1)))))))
+            (call $close)
+            (i32.const 0)))"#;
+
+    /// Its action sets its slider (control 0) to 0.73 and shows a panel of one switch; a touch on
+    /// that sets its switch (control 1) as touched, and tries a place it has no control at (5) and a
+    /// file control (2).
+    const SETS: &str = r#"(module
+        (import "procraft" "set_control" (func $set (param i32 f32) (result i32)))
+        (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (global $slider (mut f32) (f32.const 0))
+        (global $said (mut i32) (i32.const 0))
+        (data (i32.const 16) "{\"title\":\"S\",\"rows\":[{\"type\":\"switch\",\"label\":\"On\",\"on\":false}]}")
+        (func (export "procraft_control") (param i32 f32)
+            (if (i32.eqz (local.get 0)) (then (global.set $slider (local.get 1)))))
+        (func (export "procraft_view_look") (param i32) (result f32) (global.get $slider))
+        (func (export "procraft_action") (param i32) (result i32)
+            (global.set $said (call $set (i32.const 0) (f32.const 0.73)))
+            (drop (call $show (i32.const 16) (i32.const 64)))
+            (i32.const 0))
+        (func (export "procraft_panel_event") (param i32 f32) (result i32)
+            (drop (call $set (i32.const 1) (local.get 1)))
+            (drop (call $set (i32.const 5) (f32.const 1)))
+            (drop (call $set (i32.const 2) (f32.const 1)))
+            ;; told its slider as set: shown again, the switch's row on while it is
+            (drop (call $show (i32.const 16) (i32.const 64)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn an_action_in_the_layers_panel_sets_the_plugin_s_own_controls_as_its_card_would() {
+        let s = CanvasSession::new(64, 64);
+        let dir = store("sets-controls");
+        let module = wat::parse_str(SETS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(12);
+        manifest["hooks"] = json!(["view_look"]);
+        manifest["permissions"] = json!(["panel"]);
+        manifest["controls"] = json!([
+            { "key": "size", "type": "slider", "label": "Size", "least": 0, "most": 1, "step": 0.1, "starts": 0 },
+            { "key": "lit", "type": "switch", "label": "Lit", "starts": false },
+            { "key": "picture", "type": "file", "label": "Picture", "accepts": "picture" }
+        ]);
+        manifest["actions"] = json!([{ "key": "open", "label": "Settings", "place": "layers" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let key = format!("{ID}.open");
+        let listed: Vec<String> = plugins.actions_in(crate::PluginPlace::Layers).into_iter().map(|a| a.key).collect();
+        assert_eq!(listed, vec![key.clone()]);
+        assert!(plugins.actions_in(crate::PluginPlace::Layer).is_empty());
+        // as its card shows them
+        let slider = || match card(&plugins).controls.first() {
+            Some(crate::plugins::PluginControl::Slider { control }) => control.value,
+            other => panic!("{other:?}"),
+        };
+        let switch = || matches!(card(&plugins).controls.get(1), Some(crate::plugins::PluginControl::Switch { control }) if control.on);
+        // its action sets its slider, on its steps, as the card shows it and its hooks are told
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert!((slider() - 0.7).abs() < 1e-6, "{}", slider());
+        let look = plugins.hooks().view_look().unwrap();
+        assert!((look[0][0] - 0.7).abs() < 1e-6, "{look:?}");
+        // its panel's touch sets its switch; a place with no switch or slider is left alone
+        assert!(!switch());
+        assert!(plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert!(switch());
+        // what was set, for the app to keep as the card keeps it: each once, as it is now
+        let set = plugins.take_controls_set();
+        let keys: Vec<&str> = set.iter().map(|c| c.key()).collect();
+        assert_eq!(keys, [format!("{ID}.size"), format!("{ID}.lit")]);
+        assert!((set[0].number() - 0.7).abs() < 1e-6 && set[1].number() == 1.0, "{set:?}");
+        assert!(plugins.take_controls_set().is_empty());
+        assert!(plugins.panel_touched(0, 0.0, Arc::clone(&s)));
+        assert!(!switch());
+        assert!(plugins.panel().is_some());
+        // a module asking for set_control without the panel permission is refused
+        let mut bare = manifest.clone();
+        bare["id"] = json!("org.example.bare");
+        bare["permissions"] = json!([]);
+        assert!(plugins.install(file(&bare, &module)).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_reads_the_recent_colours_and_brushes_and_its_ring_opens_where_the_pen_is() {
+        let s = CanvasSession::new(64, 64);
+        let history = crate::ColourHistory::new();
+        s.use_colour_history(Arc::clone(&history));
+        for rgb in [0x112233, 0x445566] {
+            history.painted(rgb);
+        }
+        s.shared.lock().note_recent((0, 2));
+        let dir = store("palette");
+        let module = wat::parse_str(PALETTE).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(11);
+        manifest["hooks"] = json!([]);
+        manifest["permissions"] = json!(["brush", "panel"]);
+        manifest["actions"] = json!([{ "key": "open", "label": "Palette", "place": "pen" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let key = format!("{ID}.open");
+        let listed: Vec<String> = plugins.actions_in(crate::PluginPlace::Pen).into_iter().map(|a| a.key).collect();
+        assert_eq!(listed, vec![key.clone()]);
+        let rgb = |s: &CanvasSession| crate::history::hex(s.shared.lock().color);
+        // run where the pen is: the older colour of the two, the Recent set's brush, and its ring there
+        assert!(plugins.run_action_at(key.clone(), Arc::clone(&s), 30.0, 40.0));
+        assert_eq!(rgb(&s), 0x112233);
+        let brush = s.current_brush();
+        assert_eq!((brush.set, brush.index), (0, 2));
+        let panel = plugins.panel().unwrap();
+        assert!(panel.ring);
+        assert_eq!(panel.at, Some(crate::PanelPoint { x: 30.0, y: 40.0 }));
+        let crate::PanelRow::Brushes { brushes, chosen: None, .. } = &panel.rows[1] else { panic!("{:?}", panel.rows) };
+        let library = s.brush_library();
+        let names: Vec<&str> = library[0].brushes.iter().take(3).map(|b| b.name.as_str()).collect();
+        assert_eq!(brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), names);
+        assert_eq!(brushes.iter().map(|b| (b.set, b.index)).collect::<Vec<_>>(), [(0, 0), (0, 1), (0, 2)]);
+        // a brush tapped: chosen, and the ring closed
+        assert!(!plugins.panel_touched(1, 1.0, Arc::clone(&s)));
+        let brush = s.current_brush();
+        assert_eq!((brush.set, brush.index), (0, 1));
+        assert!(plugins.panel().is_none());
+        // from its card: no point, the window's middle (the Recent set's brush taken again)
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert_eq!(plugins.panel().unwrap().at, None);
+        assert_eq!((s.current_brush().set, s.current_brush().index), (0, 2));
+        assert!(!plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert_eq!(rgb(&s), 0x00FF00);
+        assert_eq!(history.colours(), [0x445566, 0x112233], "the history as painted");
+        // with nothing in them, a colour past the history's end is -1 (no colour: 0xFFFFFF) and a
+        // brush past the Recent set's 0 (none: the brush stays)
+        history.clear();
+        s.clear_recent_brushes();
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert_eq!(rgb(&s), 0xFFFFFF);
+        assert_eq!((s.current_brush().set, s.current_brush().index), (0, 2));
+        assert!(card(&plugins).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_surround_picture_is_the_first_plugin_s_that_answers_and_a_nonsense_place_stops_it() {
+        let picturing = |body: &str| {
+            let text = format!(r#"(module (func (export "procraft_surround_picture") (result i32) {body}))"#);
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+        };
+        let hooks = Hooks::default();
+        assert_eq!(hooks.surround_picture(), None);
+        hooks.put_on("b".to_owned(), picturing("(i32.const 2)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("b".to_owned(), 2)));
+        // one before it by id with none leaves it to the next
+        hooks.put_on("a".to_owned(), picturing("(i32.const -1)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("b".to_owned(), 2)));
+        hooks.put_on("a".to_owned(), picturing("(i32.const 0)"), &[Hook::SurroundPicture]);
+        assert_eq!(hooks.surround_picture(), Some(("a".to_owned(), 0)));
+        assert!(hooks.take_stopped().is_empty());
+        for odd in ["(i32.const -2)", "(i32.const 256)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), picturing(odd), &[Hook::SurroundPicture]);
+            assert_eq!(hooks.surround_picture(), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+        }
+    }
+
+    /// A plugin on the slider look's hook answering `body` (WAT, given what is asked).
+    fn slider_looking(body: &str) -> Running {
+        let text = format!(r#"(module (func (export "procraft_slider_look") (param i32) (result f32) {body}))"#);
+        Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_colour_panel_does_what_any_plugin_on_its_hook_says_and_nonsense_stops_one() {
+        let hooks = Hooks::default();
+        let asks = |hooks: &Hooks| (hooks.colour_panel(COLOUR_STEPS), hooks.colour_panel(COLOUR_BEFORE));
+        assert_eq!(asks(&hooks), (false, false), "none on");
+        // one that says its sliders step (part 0) alone
+        let steps = "(i32.eqz (local.get 0))";
+        let text = format!(r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) {steps}))"#);
+        hooks.put_on(
+            "a".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert_eq!(asks(&hooks), (true, false));
+        // another that says its swatch shows the colour before (part 1): both
+        let before = "(i32.eq (local.get 0) (i32.const 1))";
+        let text = format!(r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) {before}))"#);
+        hooks.put_on(
+            "b".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert_eq!(asks(&hooks), (true, true));
+        // asked as the panel shows: quick
+        let t = Instant::now();
+        for i in 0..10_000 {
+            std::hint::black_box(hooks.colour_panel(i % 2));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the colour panel's hook asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(200), "{each:?}");
+        // one that traps stops, and goes off its hook
+        let text = r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) unreachable))"#;
+        let hooks = Hooks::default();
+        hooks.put_on(
+            "odd".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert!(!hooks.colour_panel(COLOUR_STEPS));
+        assert!(!hooks.listens(Hook::ColourPanel));
+        assert_eq!(hooks.take_stopped().len(), 1);
+    }
+
+    #[test]
+    fn the_slider_tracks_look_as_the_first_plugin_that_answers_says_and_quickly() {
+        let hooks = Hooks::default();
+        assert_eq!((hooks.slider_look(SLIDER_OPACITY), hooks.slider_look(SLIDER_FROSTED)), (None, None));
+        // an opacity of a quarter, and frosted
+        let quarter = "(if (result f32) (local.get 0) (then (f32.const 1)) (else (f32.const 0.25)))";
+        hooks.put_on("b".to_owned(), slider_looking(quarter), &[Hook::SliderLook]);
+        assert_eq!((hooks.slider_look(SLIDER_OPACITY), hooks.slider_look(SLIDER_FROSTED)), (Some(0.25), Some(1.0)));
+        // one before it by id that leaves it (below 0) doesn't count; one that answers does
+        hooks.put_on("a".to_owned(), slider_looking("(f32.const -1)"), &[Hook::SliderLook]);
+        assert_eq!(hooks.slider_look(SLIDER_OPACITY), Some(0.25));
+        hooks.put_on("a".to_owned(), slider_looking("(f32.const 0.5)"), &[Hook::SliderLook]);
+        assert_eq!(hooks.slider_look(SLIDER_OPACITY), Some(0.5));
+        assert!(hooks.take_stopped().is_empty());
+        // asked as the plugins change and as the desktop draws its side bar: quick
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            assert_eq!(hooks.slider_look(std::hint::black_box(SLIDER_OPACITY)), Some(0.5));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the slider look asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+        // past 1, or no number, stops it
+        for odd in ["(f32.const 1.5)", "(f32.const nan)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), slider_looking(odd), &[Hook::SliderLook]);
+            assert_eq!(hooks.slider_look(SLIDER_OPACITY), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+        }
+    }
+
+    #[test]
+    fn each_plugin_is_told_its_own_mark_the_first_by_id_with_a_label_showing() {
+        let hooks = Hooks::default();
+        let labels = |hooks: &Hooks, marks: &[(&str, i64)]| {
+            hooks.layer_label(&marks.iter().map(|(id, mark)| ((*id).to_owned(), *mark)).collect())
+        };
+        // none on: no label, whatever is marked
+        assert_eq!(labels(&hooks, &[("a", 1)]), None);
+        // [`MARKS`]'s label alone: a hook's copy of its code reaches none of the app's functions
+        let labels_only = r#"(module
+            (func (export "procraft_layer_label") (param i64) (result i32)
+                (if (result i32) (i64.eq (local.get 0) (i64.const 1))
+                    (then (i32.const 0xFF0000))
+                    (else (i32.const -1)))))"#;
+        for id in ["a", "b"] {
+            let running = Running::start(&wat::parse_str(labels_only).unwrap(), &[]).unwrap();
+            hooks.put_on(id.to_owned(), running, &[Hook::LayerLabel]);
+        }
+        // a's mark alone, b's alone, b's past a's that shows nothing, a mark of a plugin not on
+        assert_eq!(labels(&hooks, &[("a", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("b", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("a", 2), ("b", 1)]), Some(0xFF0000));
+        assert_eq!(labels(&hooks, &[("c", 1)]), None);
+        assert_eq!(labels(&hooks, &[]), None);
+        // a mark of 0 is none, and its plugin isn't asked (one asked with it would answer garbage)
+        assert_eq!(labels(&hooks, &[("a", 0)]), None);
+        assert!(hooks.take_stopped().is_empty());
+        // asked for each marked layer as the Layers panel is drawn: quick
+        let marks: std::collections::BTreeMap<String, i64> = [("b".to_owned(), 1)].into();
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            assert_eq!(hooks.layer_label(std::hint::black_box(&marks)), Some(0xFF0000));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("a layer's label asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+    }
+
+    /// What the Layers panel's list costs with every layer labelled, and with none on the hook:
+    /// printed, and failing past 2 ms for 200 layers (the desktop lists them each frame it shows).
+    #[test]
+    fn the_layers_list_with_every_layer_labelled_stays_quick() {
+        let s = CanvasSession::new(64, 64);
+        let dir = store("marks-cost");
+        let plugins = layer_marking(&dir, ID);
+        {
+            let mut st = s.shared.lock();
+            for _ in 1..200 {
+                st.doc.add_layer();
+            }
+            let ids: Vec<_> = st.doc.layers().iter().map(|l| l.id).collect();
+            for id in ids {
+                assert!(st.doc.set_mark(id, ID, 1));
+            }
+        }
+        let listed = |s: &CanvasSession| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..10 {
+                        std::hint::black_box(s.layers());
+                    }
+                    t.elapsed() / 10
+                })
+                .min()
+                .unwrap_or_default()
+        };
+        let bare = listed(&s);
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(s.layers().iter().all(|l| l.label == Some(0xFF0000)));
+        let labelled = listed(&s);
+        println!("200 layers listed in {bare:?} with no labels, {labelled:?} each labelled");
+        assert!(labelled < std::time::Duration::from_millis(2), "{labelled:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2981,6 +3800,396 @@ pub(crate) mod tests {
     fn rows_drawn(rgba: &[u8]) -> Vec<usize> {
         let rows = rgba.chunks(200 * 4).enumerate();
         rows.filter(|(_, row)| row.chunks(4).any(|p| p[3] > 0)).map(|(y, _)| y).collect()
+    }
+
+    /// Every hook, by its name in a manifest (the two a manifest never names, `Layers` and
+    /// `Brushes`, go by their kinds of layer and brush engines).
+    pub(crate) const EVERY_HOOK: &[&str] = &[
+        "position",
+        "pick_layer",
+        "interface_scale",
+        "paste_mask",
+        "fill_mask",
+        "fill_all_layers",
+        "radial_segments",
+        "hide_undo_notice",
+        "interface_colour",
+        "pin_panels",
+        "opacity_together",
+        "randomise_brush",
+        "colour_triangle",
+        "quickshape_curve",
+        "stroke_sound",
+        "inbetween",
+        "picker",
+        "stroke_kept",
+        "layer_added",
+        "key_shortcut",
+        "keep_clear",
+        "interface_part_scale",
+        "floating_picker_only",
+        "hide_notices",
+        "floating_panels",
+        "gesture_lock",
+        "view_look",
+        "paper",
+        "reference_windows",
+        "pressure",
+        "brush_preview_colour",
+        "layer_label",
+    ];
+
+    /// Every hook, `Layers` and `Brushes` too.
+    pub(crate) fn every_hook() -> Vec<Hook> {
+        let named = EVERY_HOOK.iter().map(|name| Hook::named(name).unwrap_or_else(|| panic!("{name}")));
+        named.chain([Hook::Layers, Hook::Brushes]).collect()
+    }
+
+    #[test]
+    fn a_set_of_hooks_has_room_for_64_each_its_own_bit() {
+        let every = every_hook();
+        // each hook its own bit, every one of them in the set
+        let mut all = 0u64;
+        for hook in &every {
+            assert_eq!(all & hook.bit(), 0, "{hook:?} shares a bit");
+            all |= hook.bit();
+        }
+        assert_eq!(all.count_ones() as usize, every.len());
+        // the set as the app holds it: each hook found by its bit, past the 32nd as before it
+        assert_eq!(every.len(), 34, "a new hook goes in the list");
+        assert_eq!(all, (1 << 34) - 1, "the first 34 bits: the 32 the set held before it grew, and two past");
+        let hooks = Hooks::default();
+        let module = wat::parse_str(PRESSES).unwrap();
+        hooks.put_on("a".to_owned(), Running::start(&module, &[]).unwrap(), &every);
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed), all);
+        assert!(every.iter().all(|&hook| hooks.has(hook)));
+        // the bit a 35th hook to 64th would take sits in the set the same
+        hooks.hooked.store(all | 1 << 34 | 1 << 63, Ordering::Relaxed);
+        assert!(every.iter().all(|&hook| hooks.has(hook)));
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed).count_ones(), 36);
+        hooks.take_off("a");
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
+        assert!(!every.iter().any(|&hook| hooks.has(hook)));
+    }
+
+    #[test]
+    fn plugins_written_to_interface_8_and_9_still_load_and_answer_on_the_wider_set() {
+        const LOCKS: &str = r#"(module
+            (func (export "procraft_gesture_lock") (param i32) (result i32) (i32.eqz (local.get 0))))"#;
+        for (interface, hook, code) in [(8, "gesture_lock", LOCKS), (9, "pressure", PRESSES)] {
+            let dir = store(&format!("interface-{interface}"));
+            let module = wat::parse_str(code).unwrap();
+            let mut manifest = coded(ID, &module);
+            manifest["compat"]["procraft"]["interface"] = json!(interface);
+            manifest["hooks"] = json!([hook]);
+            let plugins = Plugins::with_store(dir.clone());
+            assert_eq!(plugins.install(file(&manifest, &module)), None, "interface {interface}");
+            assert!(plugins.set_on(ID.to_owned(), true));
+            // on its hook, answering, then read back as the next start reads it, on it again
+            for plugins in [Arc::clone(&plugins), restarted(&dir, &plugins)] {
+                let hooks = plugins.hooks();
+                assert!(card(&plugins).on && card(&plugins).problem.is_none(), "interface {interface}");
+                match interface {
+                    8 => assert!(hooks.gesture_lock(GESTURE_TURN) && !hooks.gesture_lock(1)),
+                    _ => assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.5)),
+                }
+                assert_eq!(hooks.hooked.load(Ordering::Relaxed), Hook::named(hook).unwrap().bit());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// What a stroke with no plugin on pays for each hook it passes: reading the set. Printed, and
+    /// failing past 50 ns a look (about 5 among a whole test run; a 240 Hz pen sends a sample every
+    /// 4,000,000 ns, and passes a few hooks).
+    #[test]
+    fn a_hook_with_none_on_costs_a_read_of_the_set() {
+        let hooks = Hooks::default();
+        let every = every_hook();
+        const ROUNDS: u32 = 200_000;
+        let looked = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                let mut on = 0u32;
+                for i in 0..ROUNDS {
+                    let hook = every.get(i as usize % every.len()).copied().unwrap_or(Hook::Position);
+                    on += u32::from(std::hint::black_box(&hooks).has(std::hint::black_box(hook)));
+                }
+                assert_eq!(on, 0);
+                t.elapsed().as_secs_f64() * 1e9 / f64::from(ROUNDS)
+            })
+            .fold(f64::MAX, f64::min);
+        println!("a hook with none on looked at in {looked:.2} ns");
+        assert!(looked < 50.0, "{looked} ns");
+    }
+
+    /// A plugin on the brush preview's hook answering `body` (WAT, given the current colour and
+    /// whether the brush is the one in use).
+    fn previewing(body: &str) -> Running {
+        let text =
+            format!(r#"(module (func (export "procraft_brush_preview_colour") (param i32 i32) (result i32) {body}))"#);
+        Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_brush_previews_go_in_the_colour_the_first_plugin_says_and_with_none_on_the_app_s() {
+        let hooks = Hooks::default();
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), None);
+        // the first hook past bit 31: on it, it is found as any other
+        assert_eq!(Hook::BrushPreviewColour.bit(), 1 << 32);
+        // the current colour, but the brush in use left as the app draws it
+        let current = "(select (i32.const -1) (local.get 0) (local.get 1))";
+        hooks.put_on("b".to_owned(), previewing(current), &[Hook::BrushPreviewColour]);
+        assert!(hooks.listens(Hook::BrushPreviewColour) && !hooks.listens(Hook::Pressure));
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0x123456));
+        assert_eq!(hooks.brush_preview_colour(0x123456, true), None);
+        // one before it by id that answers comes first; one that leaves it doesn't
+        hooks.put_on("a".to_owned(), previewing("(i32.const 0xFF0000)"), &[Hook::BrushPreviewColour]);
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0xFF0000));
+        hooks.put_on("a".to_owned(), previewing("(i32.const -1)"), &[Hook::BrushPreviewColour]);
+        assert_eq!(hooks.brush_preview_colour(0x123456, false), Some(0x123456));
+        assert_eq!(hooks.take_stopped(), Vec::new());
+        // asked as the library draws: quick
+        let t = Instant::now();
+        for i in 0..10_000u32 {
+            assert_eq!(hooks.brush_preview_colour(i, false), Some(i));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the brush previews' colour asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
+        // an answer that is no colour stops its plugin, and the previews go as the app draws them
+        for odd in ["(i32.const 0x1000000)", "(i32.const -2)", "(unreachable)"] {
+            let hooks = Hooks::default();
+            hooks.put_on("odd".to_owned(), previewing(odd), &[Hook::BrushPreviewColour]);
+            assert_eq!(hooks.brush_preview_colour(0x123456, false), None, "{odd}");
+            assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
+            assert!(!hooks.listens(Hook::BrushPreviewColour), "{odd}");
+        }
+    }
+
+    fn finger_at(x: f32) -> crate::plugin_run::PressureAsked {
+        crate::plugin_run::PressureAsked { pointer: 0, first: true, x, y: 0.0, ms: 0.0, pressure: 0.9 }
+    }
+
+    #[test]
+    fn the_pressure_hook_presses_as_its_plugins_say_in_turn_and_with_none_on_nothing() {
+        use crate::plugin_run::PressureAsked;
+        // (the last a set of 32 had room for: the set holds 64 now)
+        assert_eq!(Hook::Pressure.bit(), 1 << 31);
+        let hooks = Hooks::default();
+        assert_eq!(hooks.pressure(finger_at(50.0)), None);
+        assert_eq!(hooks.pressure_tapers(0), [0.0; 2]);
+        hooks.put_on(
+            "a".to_owned(),
+            Running::start(&wat::parse_str(PRESSES).unwrap(), &[]).unwrap(),
+            &[Hook::Pressure],
+        );
+        assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.5));
+        assert_eq!(hooks.pressure(PressureAsked { pointer: 1, ..finger_at(50.0) }), None, "a pen's left");
+        assert_eq!((hooks.pressure_tapers(0), hooks.pressure_tapers(1)), ([10.0, 20.0], [0.0; 2]));
+        // a sample that isn't a number goes on as it came, and no plugin answers for it
+        assert_eq!(hooks.pressure(PressureAsked { x: f32::NAN, ..finger_at(1.0) }), None);
+        assert_eq!(hooks.pressure(PressureAsked { pressure: f32::INFINITY, ..finger_at(1.0) }), None);
+        assert!(hooks.listens(Hook::Pressure));
+        // a second, after it by id: told what the first said (or the sample's own, where it left
+        // it); each taper the longest either says
+        hooks.put_on(
+            "b".to_owned(),
+            Running::start(&wat::parse_str(PRESSES_HALF).unwrap(), &[]).unwrap(),
+            &[Hook::Pressure],
+        );
+        assert_eq!(hooks.pressure(finger_at(50.0)), Some(0.25));
+        assert_eq!(hooks.pressure(PressureAsked { pointer: 1, ..finger_at(50.0) }), Some(0.45));
+        assert_eq!(hooks.pressure_tapers(0), [10.0, 30.0]);
+        assert_eq!(hooks.take_stopped(), Vec::new());
+    }
+
+    /// Answers the stroke-fill hook: a paint stroke fills (as it ends) while its brush's row is 1.
+    const FILLS_BY_ROW: &str = r#"(module
+        (global $row (mut f32) (f32.const 0))
+        (func (export "procraft_brush_control") (param i32 f32) (global.set $row (local.get 1)))
+        (func (export "procraft_stroke_fill") (param i32 i32) (result i32)
+            (if (result i32) (i32.and (i32.eqz (local.get 0)) (f32.eq (global.get $row) (f32.const 1)))
+                (then (i32.const 2))
+                (else (i32.const 0)))))"#;
+
+    /// A plugin on the stroke-fill hook answering `answer` (a WAT body).
+    fn stroke_fill_module(answer: &str) -> Vec<u8> {
+        let text = format!(r#"(module (func (export "procraft_stroke_fill") (param i32 i32) (result i32) {answer}))"#);
+        wat::parse_str(text).unwrap()
+    }
+
+    /// A brush whose every row is `row`, as the stroke-fill hook is told it.
+    fn brush_rows(row: f32) -> impl Fn(&[String]) -> crate::stroke_sound::SoundBrush {
+        move |keys: &[String]| crate::stroke_sound::SoundBrush {
+            name: "Pen".to_owned(),
+            set: "Inking".to_owned(),
+            controls: keys.iter().map(|_| row).collect(),
+            key: u64::from(row.to_bits()),
+        }
+    }
+
+    #[test]
+    fn the_stroke_fill_hook_asks_each_plugin_told_its_rows_and_the_first_that_fills_says_how() {
+        let hooks = Hooks::default();
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(1.0)), 0, "none on");
+        let by_row = Running::start(&wat::parse_str(FILLS_BY_ROW).unwrap(), &[]).unwrap();
+        hooks.put_on("b".to_owned(), by_row, &[Hook::StrokeFill]);
+        hooks.brush_keys("b", vec!["plugin:b:fill".to_owned()]);
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(1.0)), 2);
+        assert_eq!(hooks.stroke_fill(0, 1, brush_rows(0.0)), 0, "told the row as it changed");
+        assert_eq!(hooks.stroke_fill(1, 1, brush_rows(1.0)), 0, "the eraser");
+        // one before it by id that always fills, shown as it grows, says first
+        let always = Running::start(&stroke_fill_module("(i32.const 1)"), &[]).unwrap();
+        hooks.put_on("a".to_owned(), always, &[Hook::StrokeFill]);
+        assert_eq!(hooks.stroke_fill(1, 0, brush_rows(0.0)), 1);
+        assert!(hooks.listens(Hook::StrokeFill));
+        assert_eq!(hooks.take_stopped(), Vec::new());
+    }
+
+    #[test]
+    fn a_stroke_fill_answer_that_makes_no_sense_stops_its_plugin() {
+        for answer in ["(i32.const 3)", "(i32.const -1)", "(loop (br 0)) (i32.const 0)", "unreachable"] {
+            let hooks = Hooks::default();
+            let running = Running::start(&stroke_fill_module(answer), &[]).unwrap();
+            hooks.put_on("odd".to_owned(), running, &[Hook::StrokeFill]);
+            assert_eq!(hooks.stroke_fill(0, 1, brush_rows(0.0)), 0, "{answer}");
+            assert!(!hooks.listens(Hook::StrokeFill), "{answer}: still on");
+            assert_eq!(hooks.take_stopped().len(), 1, "{answer}");
+        }
+    }
+
+    #[test]
+    fn the_stroke_fill_hook_costs_a_stroke_little_and_nothing_with_none_on() {
+        let time = |hooks: &Hooks, runs: u32| {
+            let start = Instant::now();
+            for i in 0..runs {
+                std::hint::black_box(hooks.stroke_fill(std::hint::black_box((i % 2) as i32), 1, brush_rows(1.0)));
+            }
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(runs)
+        };
+        let hooks = Hooks::default();
+        let none = time(&hooks, 100_000);
+        let by_row = Running::start(&wat::parse_str(FILLS_BY_ROW).unwrap(), &[]).unwrap();
+        hooks.put_on("b".to_owned(), by_row, &[Hook::StrokeFill]);
+        hooks.brush_keys("b", vec!["plugin:b:fill".to_owned()]);
+        let on = time(&hooks, 2_000);
+        println!("stroke_fill: none on {:.3} µs a stroke, one on {on:.1} µs", none);
+        // asked once a stroke: far under a frame even in a debug build
+        assert!(none < 1.0, "none on: {none} µs");
+        assert!(on < 1000.0, "one on: {on} µs");
+    }
+
+    #[test]
+    fn a_pressure_or_a_taper_that_makes_no_sense_stops_its_plugin() {
+        for (pressure, taper) in [
+            ("(f32.const 1.5)", "(f32.const 0)"),
+            ("(f32.const nan)", "(f32.const 0)"),
+            ("(f32.const 0.5)", "(f32.const -1)"),
+            ("(f32.const 0.5)", "(f32.const 1001)"),
+            ("(f32.const 0.5)", "(f32.const inf)"),
+            ("(loop (br 0)) (f32.const 0.5)", "(f32.const 0)"),
+        ] {
+            let hooks = Hooks::default();
+            let running = Running::start(&pressure_module(pressure, taper), &[]).unwrap();
+            hooks.put_on("odd".to_owned(), running, &[Hook::Pressure]);
+            let pressed = hooks.pressure(finger_at(10.0));
+            let tapers = hooks.pressure_tapers(0);
+            assert!(!hooks.listens(Hook::Pressure), "{pressure} {taper}: still on");
+            assert_eq!(hooks.take_stopped().len(), 1, "{pressure} {taper}");
+            assert_eq!(hooks.pressure(finger_at(10.0)), None);
+            assert!(pressed.is_none() || tapers == [0.0; 2], "{pressure} {taper}");
+        }
+        // below 0 leaves it, 0 and 1 are pressures, and tapers of 0 to 1000 points are taken
+        for (said, want) in [(-0.5, None), (-1e30, None), (0.0, Some(0.0)), (1.0, Some(1.0))] {
+            let hooks = Hooks::default();
+            let running = Running::start(&pressure_module(&format!("(f32.const {said})"), "(f32.const 1000)"), &[]);
+            hooks.put_on("fine".to_owned(), running.unwrap(), &[Hook::Pressure]);
+            assert_eq!((hooks.pressure(finger_at(10.0)), hooks.pressure_tapers(0)), (want, [1000.0; 2]));
+            assert!(hooks.take_stopped().is_empty());
+        }
+    }
+
+    /// A session as [`session`] gives, a window pixel a point, its brush's size by its pressure and
+    /// no taper of its own, sized `size`.
+    fn pressing_session(size: f32) -> Option<Arc<CanvasSession>> {
+        let s = session()?;
+        s.set_display_scale(1.0);
+        s.studio_begin();
+        s.set_studio_setting("pressure_size".to_owned(), 1.0);
+        for taper in ["pen_taper_start", "pen_taper_end", "touch_taper_start", "touch_taper_end"] {
+            s.set_studio_setting(taper.to_owned(), 0.0);
+        }
+        s.studio_end(true);
+        s.set_brush_size(size);
+        Some(s)
+    }
+
+    /// A stroke by `pointer` across the canvas at row 100, from x 20 to 180, `step` window pixels
+    /// every 4 ms (pressed 1, as a finger says nothing).
+    fn swipe(s: &CanvasSession, pointer: PointerKind, step: f32) {
+        s.stroke_begin(pointer, vec![sample(20.0, 100.0, 0.0)]);
+        let (mut x, mut ms, mut more) = (20.0, 0.0, Vec::new());
+        while x + step < 180.0 {
+            x += step;
+            ms += 4.0;
+            more.push(sample(x, 100.0, ms));
+        }
+        s.stroke_add(more);
+        s.stroke_end(vec![sample(180.0, 100.0, ms + 4.0)]);
+    }
+
+    /// How many rows of each column of `rgba` (200 wide) have anything drawn.
+    fn column_heights(rgba: &[u8]) -> Vec<usize> {
+        (0..200).map(|x| (0..200).filter(|y| rgba.get((y * 200 + x) * 4 + 3).is_some_and(|&a| a > 0)).count()).collect()
+    }
+
+    #[test]
+    fn finger_pressure_thins_a_fast_finger_and_tapers_it_and_leaves_pens_and_its_absence_as_they_were() {
+        const FINGER: &str = "io.github.artcraftandroid.finger-pressure";
+        let drawn = |plugins: Option<&Arc<Plugins>>, pointer: PointerKind, step: f32| {
+            let s = pressing_session(0.35)?;
+            if let Some(plugins) = plugins {
+                s.use_plugins(Arc::clone(plugins));
+            }
+            swipe(&s, pointer, step);
+            Some(picture(&s))
+        };
+        let Some(finger) = drawn(None, PointerKind::Finger, 12.0) else { return };
+        let pen = drawn(None, PointerKind::Stylus, 12.0).unwrap();
+        let dir = store("finger-pressure-strokes");
+        let plugins = Plugins::with_bundled(dir.clone());
+        // as it comes (off), nothing differs at all
+        assert!(drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap() == finger);
+        assert!(plugins.set_on(FINGER.to_owned(), true));
+        // on: a pen's stroke is as it was
+        assert!(drawn(Some(&plugins), PointerKind::Stylus, 12.0).unwrap() == pen);
+        // a finger going 3,000 points a second presses lighter, so it is thinner
+        let fast = drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap();
+        let (plain_heights, fast_heights) = (column_heights(&finger), column_heights(&fast));
+        println!(
+            "a finger's stroke 3,000 points a second, rows high at x 40, 100 and 160: {:?} without, {:?} with",
+            [plain_heights[40], plain_heights[100], plain_heights[160]],
+            [fast_heights[40], fast_heights[100], fast_heights[160]]
+        );
+        assert!(fast_heights[100] * 10 < plain_heights[100] * 9, "{} {}", fast_heights[100], plain_heights[100]);
+        // slowly, with speed counting for nothing: as thick as without in the middle, tapered to
+        // points at the ends (in over 20 points, out over 40)
+        assert!(plugins.set_slider(format!("{FINGER}.speed"), 0.0).is_some());
+        let slow_plain = column_heights(&drawn(None, PointerKind::Finger, 2.0).unwrap());
+        let slow = column_heights(&drawn(Some(&plugins), PointerKind::Finger, 2.0).unwrap());
+        println!(
+            "slowly, rows high at x 22, 30, 100, 150 and 175: {:?} without, {:?} with",
+            [22, 30, 100, 150, 175].map(|x| slow_plain[x]),
+            [22, 30, 100, 150, 175].map(|x| slow[x])
+        );
+        assert!(slow[100].abs_diff(slow_plain[100]) <= 1, "{} {}", slow[100], slow_plain[100]);
+        assert!(slow[22] * 2 < slow[100] && slow[175] * 2 < slow[100], "{slow:?}");
+        assert!(slow[22] < slow[30] && slow[150] > slow[175], "{slow:?}");
+        // off again: as if it had never been
+        assert!(plugins.set_on(FINGER.to_owned(), false));
+        assert!(drawn(Some(&plugins), PointerKind::Finger, 12.0).unwrap() == finger);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

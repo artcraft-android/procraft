@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.colour-labels",
+  "name": "Colour labels",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Gives a layer or a group a colour label, one of eight, from Colour label in its options; the label shows on its row in the Layers panel and is saved with the artwork.",
+  "compat": { "procraft": { "interface": 10 } },
+  "permissions": ["artwork.read", "artwork.write", "panel"],
+  "hooks": ["layer_label"],
+  "actions": [
+    { "key": "label", "label": "Colour label", "place": "layer" }
+  ]
+}

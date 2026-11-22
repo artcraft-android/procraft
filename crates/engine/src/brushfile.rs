@@ -10,7 +10,7 @@ use crate::document::BlendMode;
 use crate::geom::Vec2;
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
-use crate::zip::{ZipReader, ZipWriter};
+use crate::zip::{Ready, ZipReader, ZipWriter};
 
 /// A brush as a brush file holds it.
 #[derive(Clone, Debug, PartialEq)]
@@ -464,12 +464,28 @@ pub fn read(bytes: &[u8]) -> Option<BrushFile> {
     read_in(&ZipReader::new(bytes)?, "")
 }
 
+/// Reads the brush file that is the archive `zip`; none if it isn't one.
+pub fn read_zip(zip: &ZipReader<'_>) -> Option<BrushFile> {
+    read_in(zip, "")
+}
+
 /// Reads a set file: the set's name and its brushes in order; none if it isn't one.
 pub fn read_set(bytes: &[u8]) -> Option<(String, Vec<BrushFile>)> {
     let zip = ZipReader::new(bytes)?;
-    let (name, folders) = set_list(&zip.read("brushset.plist")?)?;
-    let brushes: Vec<BrushFile> = folders.iter().filter_map(|f| read_in(&zip, &format!("{f}/"))).collect();
+    let (name, folders) = set_folders(&zip)?;
+    let brushes: Vec<BrushFile> = folders.iter().filter_map(|f| read_folder(&zip, f)).collect();
     (!brushes.is_empty()).then_some((name, brushes))
+}
+
+/// A set file's name and its brushes' folders, in order, from its list; none if `zip` isn't one.
+/// Its brushes can then be read a folder at a time ([`read_folder`]), a big set never all at once.
+pub fn set_folders(zip: &ZipReader<'_>) -> Option<(String, Vec<String>)> {
+    set_list(&zip.read("brushset.plist")?)
+}
+
+/// The brush in `folder` of set file `zip`; none if it holds none.
+pub fn read_folder(zip: &ZipReader<'_>, folder: &str) -> Option<BrushFile> {
+    read_in(zip, &format!("{folder}/"))
 }
 
 /// The set's name and its brushes' folders from `brushset.plist` (XML or binary).
@@ -864,27 +880,90 @@ pub fn write(brush: &Brush, author: &str, pictures: &Pictures<'_>) -> Vec<u8> {
     zip.finish()
 }
 
+/// Writes `brush` as a brush file by `author`, with `pictures`, into `out` as it goes: `out`, or
+/// why the file isn't whole.
+pub fn write_to<W: std::io::Write>(out: W, brush: &Brush, author: &str, pictures: &Pictures<'_>) -> std::io::Result<W> {
+    let mut zip = ZipWriter::to(out);
+    add_brush(&mut zip, "", brush, author, pictures);
+    zip.finish_to()
+}
+
 /// Writes a set file named `name` of `brushes` (each with its author and pictures), each in a
 /// folder named by `id`.
 pub fn write_set(name: &str, brushes: &[(&Brush, &str, Pictures<'_>)], id: impl Fn(usize) -> String) -> Vec<u8> {
-    let mut zip = ZipWriter::new();
-    let folders: Vec<String> = (0..brushes.len()).map(id).collect();
-    let mut list = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>brushes</key>\n\t<array>\n",
-    );
-    for f in &folders {
-        list.push_str(&format!("\t\t<string>{}</string>\n", escape(f)));
+    let mut set = SetWriter::begin(Vec::new(), name, brushes.len(), id);
+    for (brush, author, pictures) in brushes {
+        set.add(brush, author, pictures);
     }
-    list.push_str(&format!("\t</array>\n\t<key>name</key>\n\t<string>{}</string>\n</dict>\n</plist>\n", escape(name)));
-    zip.add("brushset.plist", list.as_bytes());
-    for ((brush, author, pictures), folder) in brushes.iter().zip(&folders) {
-        add_brush(&mut zip, &format!("{folder}/"), brush, author, pictures);
+    set.finish().unwrap_or_default()
+}
+
+/// A set file written into a writer a brush at a time: its list of folders first, then each
+/// brush's files as it is added, so that however big the set, only the brush being added is held.
+pub struct SetWriter<W: std::io::Write> {
+    zip: ZipWriter<W>,
+    /// Each brush's folder, in order, and how many have been added.
+    folders: Vec<String>,
+    added: usize,
+}
+
+impl<W: std::io::Write> SetWriter<W> {
+    /// A set named `name` of `count` brushes, each in a folder named by `id`, written into `out`.
+    pub fn begin(out: W, name: &str, count: usize, id: impl Fn(usize) -> String) -> SetWriter<W> {
+        let mut zip = ZipWriter::to(out);
+        let folders: Vec<String> = (0..count).map(id).collect();
+        let mut list = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>brushes</key>\n\t<array>\n",
+        );
+        for f in &folders {
+            list.push_str(&format!("\t\t<string>{}</string>\n", escape(f)));
+        }
+        list.push_str(&format!(
+            "\t</array>\n\t<key>name</key>\n\t<string>{}</string>\n</dict>\n</plist>\n",
+            escape(name)
+        ));
+        zip.add("brushset.plist", list.as_bytes());
+        SetWriter { zip, folders, added: 0 }
     }
-    zip.finish()
+
+    /// The next brush (by `author`, with `pictures`), into its folder; one past the count the
+    /// set began with is left out.
+    pub fn add(&mut self, brush: &Brush, author: &str, pictures: &Pictures<'_>) {
+        let Some(folder) = self.folders.get(self.added) else { return };
+        let prefix = format!("{folder}/");
+        add_brush(&mut self.zip, &prefix, brush, author, pictures);
+        self.added += 1;
+    }
+
+    /// The set can't be made whole (`e`, what went wrong): [`SetWriter::finish`] fails.
+    pub fn fail(&mut self, e: std::io::Error) {
+        self.zip.fail(e);
+    }
+
+    /// Ends the set: the writer, or why the file isn't whole (a write failed, or fewer brushes
+    /// were added than it began with).
+    pub fn finish(mut self) -> std::io::Result<W> {
+        if self.added < self.folders.len() {
+            self.zip.fail(std::io::Error::other(format!("{} of {} brushes added", self.added, self.folders.len())));
+        }
+        self.zip.finish_to()
+    }
+}
+
+/// A picture already compressed (a PNG), kept as it is in the archive: deflating it again takes
+/// time and makes it no smaller.
+fn add_picture<W: std::io::Write>(zip: &mut ZipWriter<W>, name: &str, png: &[u8]) {
+    zip.add_ready(name, Ready::of(png, false));
 }
 
 /// A brush's files into `zip` under `prefix`.
-fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pictures: &Pictures<'_>) {
+fn add_brush<W: std::io::Write>(
+    zip: &mut ZipWriter<W>,
+    prefix: &str,
+    brush: &Brush,
+    author: &str,
+    pictures: &Pictures<'_>,
+) {
     let mut b = Builder::new();
     let root = b.reserve();
     let mut fields: Vec<(String, Value)> = Vec::new();
@@ -1021,23 +1100,23 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], refs);
     let archive = b.finish(root);
     zip.add(&format!("{prefix}Brush.archive"), &archive);
-    zip.add(&format!("{prefix}Shape.png"), pictures.shape_png);
+    add_picture(zip, &format!("{prefix}Shape.png"), pictures.shape_png);
     for (name, png) in [
         ("Grain.png", pictures.grain_png),
         ("Metallic.png", pictures.metallic_png),
         ("Roughness.png", pictures.roughness_png),
     ] {
         if let Some(png) = png {
-            zip.add(&format!("{prefix}{name}"), png);
+            add_picture(zip, &format!("{prefix}{name}"), png);
         }
     }
     // (a dual brush's second has no preview of its own)
     if !pictures.thumbnail_png.is_empty() {
-        zip.add(&format!("{prefix}QuickLook/Thumbnail.png"), pictures.thumbnail_png);
+        add_picture(zip, &format!("{prefix}QuickLook/Thumbnail.png"), pictures.thumbnail_png);
     }
     for (path, png) in [(AUTHOR_PICTURE, pictures.author_png), (SIGNATURE, pictures.signature_png)] {
         if let Some(png) = png {
-            zip.add(&format!("{prefix}{path}"), png);
+            add_picture(zip, &format!("{prefix}{path}"), png);
         }
     }
     if let Some(engine) = &brush.engine {
@@ -1171,6 +1250,59 @@ mod tests {
             again.set_setting(k, *v);
         }
         assert_eq!(keys.map(|k| again.setting(k)), [1.0, 1.0, 0.4]);
+    }
+
+    #[test]
+    fn a_dual_brush_s_second_keeps_every_setting_of_its_own_through_its_file() {
+        // the second set otherwise than the first in every control a file keeps, its size range,
+        // curves and pictures its own
+        let mut second = Brush { name: "Second".to_owned(), ..Brush::round_pen() };
+        for (k, (key, _, kept)) in PLAIN.iter().enumerate() {
+            let v = match kept {
+                Kept::Switch | Kept::Whole | Kept::LastTwoSwapped => (k % 2) as f32,
+                _ => 0.05 + (k % 17) as f32 / 20.0,
+            };
+            second.set_setting(key, v);
+        }
+        second.set_setting("rendering_mode", 4.0);
+        second.set_setting("blend_mode", BlendMode::Multiply.id() as f32);
+        second.set_setting("max_size", 0.8);
+        second.set_setting("min_size", 0.1);
+        second.size_curve = crate::curve::Curve::new(&[Vec2::new(0.0, 0.1), Vec2::new(0.6, 0.3), Vec2::new(1.0, 1.0)]);
+        let mut first =
+            Brush { name: "First".to_owned(), secondary: Some(Box::new(second.clone())), ..Brush::round_pen() };
+        first.set_setting("dual_blend", BlendMode::ColorDodge.id() as f32);
+        let pictures = |shape: &'static [u8], grain: &'static [u8], secondary| Pictures {
+            shape_png: shape,
+            grain_png: Some(grain),
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"thumb",
+            author_png: None,
+            signature_png: None,
+            secondary,
+        };
+        let file =
+            write(&first, "", &pictures(b"shape", b"grain", Some(Box::new(pictures(b"shape2", b"grain2", None)))));
+        let back = read(&file).unwrap();
+        assert!(back.settings.iter().any(|(k, v)| k == "dual_blend" && *v == BlendMode::ColorDodge.id() as f32));
+        let theirs = back.secondary.unwrap();
+        assert_eq!(theirs.name, "Second");
+        assert_eq!(theirs.shape, Texture::Image { bytes: b"shape2".to_vec(), inverted: false });
+        assert_eq!(theirs.grain, Texture::Image { bytes: b"grain2".to_vec(), inverted: false });
+        let curve = theirs.size_curve.as_ref().unwrap();
+        assert!((curve[1] - Vec2::new(0.6, 0.3)).length() < 1e-5);
+        let mut again = Brush::round_pen();
+        for (k, v) in &theirs.settings {
+            again.set_setting(k, *v);
+        }
+        set_sizes(&mut again, theirs.max_size, theirs.min_size);
+        let keys = PLAIN.iter().map(|(key, _, _)| *key).chain(["rendering_mode", "blend_mode", "max_size", "min_size"]);
+        let off: Vec<(&str, f32, f32)> = keys
+            .filter(|key| (again.setting(key) - second.setting(key)).abs() > 1e-3)
+            .map(|key| (key, second.setting(key), again.setting(key)))
+            .collect();
+        assert!(off.is_empty(), "the second's settings changed: {off:?}");
     }
 
     #[test]

@@ -72,6 +72,12 @@ object AppLog {
         return file.takeIf { written.getOrDefault(false) }
     }
 
+    /** A fact a report may need (what input the device gives), to the system's log and the file. */
+    fun i(tag: String, message: String) {
+        Log.i(tag, message)
+        toFile(LogLevel.INFO, tag, message)
+    }
+
     /** A warning, to the system's log and the file. */
     fun w(tag: String, message: String, error: Throwable? = null) {
         Log.w(tag, message, error)

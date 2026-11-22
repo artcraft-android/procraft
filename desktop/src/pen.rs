@@ -278,7 +278,7 @@ fn keep_reading(reading: Reading) {
 /// What moves the mouse pointer now: a tablet's pen with its lean (none: its tablet doesn't say),
 /// or (none) something else.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
+pub(crate) fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
     }
@@ -293,6 +293,23 @@ fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
         match pen.and_then(|(_, lean)| lean) {
             Some(lean) => leans.insert(MOUSE, lean),
             None => leans.remove(&MOUSE),
+        };
+    }
+    // no pen moving it: no roll either
+    if pen.is_none() {
+        set_mouse_pen_roll(None);
+    }
+}
+
+/// The barrel roll (radians clockwise) of the tablet pen moving the mouse pointer, if its tablet
+/// gives one (WinTab's twist, as an Art Pen's): the mouse's samples carry it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn set_mouse_pen_roll(roll: Option<f32>) {
+    if let Ok(mut rolls) = ROLLS.lock() {
+        let rolls = rolls.get_or_insert_with(Default::default);
+        match roll.filter(|_| mouse_pen().is_some()) {
+            Some(r) => rolls.insert(MOUSE, r),
+            None => rolls.remove(&MOUSE),
         };
     }
 }
@@ -378,7 +395,7 @@ fn pen_flags(id: u64, flags: u32) {
 /// The lean of a pen tilted `tilt_x` degrees towards the right and `tilt_y` towards the user
 /// (each −90..90): its angle from upright and the direction its top leans, clockwise from up.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
+pub(crate) fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
     // short of flat, where the tangent runs off
     let tangent = |degrees: f32| degrees.clamp(-89.9, 89.9).to_radians().tan();
     let (x, y) = (tangent(tilt_x), tangent(tilt_y));
@@ -912,6 +929,11 @@ mod system {
             super::wintab::activated(hwnd, wparam.0 & 0xFFFF != 0);
             return result;
         }
+        // the mouse's own moving the pointer, or pressing, with no packet from the pen: not the pen
+        // (the pointer in the window's pixels, a signed word each in `lparam`)
+        if msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN {
+            super::wintab::mouse_at((i32::from(lparam.0 as u16 as i16), i32::from((lparam.0 >> 16) as u16 as i16)));
+        }
         // a tablet's pen moving the mouse (Windows Ink off) pressing, and up again: the mouse with
         // no button held (its keys and buttons in `wparam`)
         match msg {
@@ -984,7 +1006,7 @@ mod system {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1019,7 +1041,7 @@ mod tests {
     }
 
     /// The tests of what moves the mouse pointer, one at a time: it is the app's, not a test's.
-    pub(super) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
         static ONE: Mutex<()> = Mutex::new(());
         ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }

@@ -208,6 +208,28 @@ final class ColorDrop {
         model.refresh()
     }
 
+    /// Continue filling's touch landed where it fills: `fill` poured from window pixel (`x`, `y`)
+    /// on the fill's queue, after what was asked of it before; the touch goes on meanwhile.
+    func tapFill(x: Float, y: Float, fill: Fill) {
+        let session = model.session
+        queue.async {
+            _ = session.pourBegin(x: x, y: y, r: fill.r, g: fill.g, b: fill.b, threshold: fill.threshold)
+        }
+    }
+
+    /// Continue filling's touch's fill ends on the fill's queue, after a threshold slid before it is
+    /// redone: `keep` makes it an undo step, else it is taken back. What it changed is read once
+    /// it is made.
+    func tapFillEnd(keep: Bool) {
+        let session = model.session
+        queue.async { [weak self] in
+            session.pourEnd(keep: keep, name: nil)
+            DispatchQueue.main.async {
+                self?.model.refresh()
+            }
+        }
+    }
+
     /// Fills from window point `p` with the dropped colour; false if nothing was filled.
     private func pourBegin(_ p: CGPoint) -> Bool {
         guard model.currentTakesChanges(paint: true) else { return false }

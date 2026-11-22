@@ -73,9 +73,11 @@ private final class LayersUi {
     var titleMenu = false
     /// The plus's menu, with the kinds of layer the plugins on add.
     var addKinds: [PluginKind]?
-    /// A row held and dragged, and how far.
+    /// A row held and dragged, and how far; the row its middle is over and since when (held there
+    /// a moment, what is let go goes onto it).
     var dragId: UInt64?
     var dragOffset: CGFloat = 0
+    @ObservationIgnored var over: (id: UInt64, since: CFTimeInterval)?
     var squeeze: Squeeze?
     /// Where each row is on the screen.
     @ObservationIgnored var rows: [UInt64: CGRect] = [:]
@@ -110,20 +112,25 @@ private final class LayersUi {
         DispatchQueue.main.asyncAfter(deadline: .now() + (opening ? blendOpen : blendClose + blendRowsWait), execute: job)
     }
 
-    /// Lets `l` go where its row's middle came to rest: just above or below the row it is over.
+    /// `l`'s row dragged `offset` down: the row its middle is over is noted, and since when.
+    func dragged(_ l: LayerInfo, to offset: CGFloat) {
+        dragOffset = offset
+        let y = (rows[l.id]?.midY ?? 0) + offset
+        let under = rows.first { $0.key != l.id && y >= $0.value.minY && y < $0.value.maxY }?.key
+        if under != over?.id {
+            over = under.map { ($0, CACurrentMediaTime()) }
+        }
+    }
+
+    /// Lets `l` go where its row's middle came to rest, as the shared core places it: just above
+    /// or below a row, into a group only among its layers, or onto a row held over a moment.
     func drop(_ model: CanvasModel, _ l: LayerInfo) {
         let y = (rows[l.id]?.midY ?? 0) + dragOffset
+        let held = over.flatMap { CACurrentMediaTime() - $0.since >= Double(rowHoldSeconds()) ? $0.id : nil }
         dragId = nil
         dragOffset = 0
-        let unit = model.movingWith(l)
-        let others = model.layers.filter { !unit.contains($0.id) && !model.hidden($0) }.compactMap { o in
-            rows[o.id].map { (layer: o, row: $0) }
-        }
-        let over = others.first { y >= $0.row.minY && y < $0.row.maxY }
-            ?? others.min { abs($0.row.midY - y) < abs($1.row.midY - y) }
-        if let over {
-            model.moveNextTo(l, over.layer, above: y < over.row.midY)
-        }
+        over = nil
+        model.dropRow(l, model.rowDrop(l, rows: rows, y: y, held: held))
     }
 }
 
@@ -318,7 +325,7 @@ private struct LayerItem: View {
                 ui.dragOffset = 0
                 ui.swiped = nil
             },
-            moved: { ui.dragOffset = $0 },
+            moved: { ui.dragged(l, to: $0) },
             ended: { ui.drop(model, l) }
         ))
     }

@@ -4,6 +4,7 @@
 use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
+use procraft_gpu::FillPreview;
 
 use crate::{CanvasSession, State};
 
@@ -24,8 +25,9 @@ impl From<SelectionJoin> for Combine {
 }
 
 /// How the selection shows: bands over what is not selected, or what is selected tinted (while
-/// selecting by colour) or covered (while its threshold is being dragged), or covered by the paint
-/// colour (Color Fill, which fills it as the selection tool closes).
+/// selecting by colour) or covered (while its threshold is being dragged), or filled with the paint
+/// colour on the current layer, in its place among the layers (Color Fill, which fills it as the
+/// selection tool closes; bands while that layer can't be filled).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SelectionDisplay {
     Stripes,
@@ -78,11 +80,35 @@ impl State {
         }
     }
 
+    /// Whether layer `id` takes a fill of what is selected: not a plugin's, nor locked.
+    fn fills_selected(&self, id: LayerId) -> bool {
+        self.doc.layer(id).is_some_and(|l| l.plugin.is_none()) && !self.doc.is_locked(id)
+    }
+
+    /// What Color Fill shows while the selection tool is open: the paint colour filling what is
+    /// selected on the current layer, in that layer's place among the others (those above it
+    /// cover it), if the layer takes the fill. None otherwise.
+    pub(crate) fn colour_fill_preview(&self) -> Option<FillPreview> {
+        if self.selection_display != SelectionDisplay::ColourFill
+            || self.selection.is_none()
+            || self.transform.is_some()
+        {
+            return None;
+        }
+        let current = self.doc.current();
+        let layer = self.doc.layer(current).filter(|_| self.fills_selected(current))?;
+        Some(FillPreview {
+            layer: current,
+            colour: self.color.map(|c| c.clamp(0.0, 1.0)),
+            alpha_lock: layer.alpha_lock,
+        })
+    }
+
     /// Fills the selection on the current layer with the paint colour, as one undo step (run at
     /// once); false if there is nothing selected or the layer can't be filled.
     pub(crate) fn fill_selected(&mut self) -> bool {
         let current = self.doc.current();
-        if self.doc.layer(current).is_none_or(|l| l.plugin.is_some()) || self.doc.is_locked(current) {
+        if !self.fills_selected(current) {
             return false;
         }
         let Some(mask) = self.selection.clone() else { return false };
@@ -217,16 +243,6 @@ impl State {
     fn to_canvas_points(&self, window: &[Vec2]) -> Option<Vec<Vec2>> {
         let view = self.view?;
         window.iter().map(|&p| view.screen_to_canvas(p).filter(|c| c.is_finite())).collect()
-    }
-
-    /// The current layer's pixels, after any queued work.
-    pub(crate) fn current_pixels(&mut self) -> Option<Vec<u8>> {
-        self.finish_stroke();
-        self.settle();
-        self.flush();
-        let current = self.doc.current();
-        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
-        canvas.read_layer(gpu, current).ok()
     }
 }
 

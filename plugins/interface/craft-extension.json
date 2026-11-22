@@ -2,13 +2,13 @@
   "schema": 1,
   "id": "io.github.artcraftandroid.interface",
   "name": "Interface",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
-  "description": "The interface to suit you: its size, part by part if you like, and colour, undo and redo without their notice, and panels that stay open.",
-  "compat": { "procraft": { "interface": 6 } },
+  "description": "The interface to suit you: its size, part by part if you like, and colour, undo and redo or everything done without a notice, and panels that stay open.",
+  "compat": { "procraft": { "interface": 7 } },
   "permissions": [],
-  "hooks": ["interface_scale", "interface_part_scale", "keep_clear", "interface_colour", "hide_undo_notice", "pin_panels"],
+  "hooks": ["interface_scale", "interface_part_scale", "keep_clear", "interface_colour", "hide_undo_notice", "hide_notices", "pin_panels"],
   "controls": [
     { "key": "size_on", "type": "switch", "label": "Interface size" },
     {
@@ -44,6 +44,7 @@
       "shown_times": 100, "unit": "%", "live": true, "under": "colour"
     },
     { "key": "hide_undo", "type": "switch", "label": "Hide undo notices" },
+    { "key": "hide_notices", "type": "switch", "label": "Hide all action notices" },
     { "key": "pin_panels", "type": "switch", "label": "Panels stay open" }
   ],
   "replaces": [

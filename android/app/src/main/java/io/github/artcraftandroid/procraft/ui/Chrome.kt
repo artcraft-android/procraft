@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,16 +48,22 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.Panel
+import io.github.artcraftandroid.procraft.core.ShadowStep
 import io.github.artcraftandroid.procraft.core.SideSliderTap
 import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.sideSliderDragShare
+import io.github.artcraftandroid.procraft.core.sideSliderShownPercent
 import io.github.artcraftandroid.procraft.core.sideSliderTap
+import io.github.artcraftandroid.procraft.core.sideThumbShadow
 
 private val SliderLeft = 5.dp
 private val SizeTrackTop = 6.dp
@@ -70,6 +75,18 @@ private val OpacityTrackTop = 248.dp
  */
 internal fun overBars(p: Offset, barBottom: Float, sideBar: androidx.compose.ui.geometry.Rect?, hidden: Boolean): Boolean =
     !hidden && (p.y <= barBottom || sideBar?.contains(p) == true)
+
+/**
+ * Whether window point [p] is over the bars (see [overBars]) or one of [covers], the panels open over
+ * the canvas (window pixels), however the bars show: the canvas under them isn't where the pen hovers.
+ */
+internal fun overInterface(
+    p: Offset,
+    barBottom: Float,
+    sideBar: androidx.compose.ui.geometry.Rect?,
+    hidden: Boolean,
+    covers: Collection<androidx.compose.ui.geometry.Rect>,
+): Boolean = overBars(p, barBottom, sideBar, hidden) || covers.any { it.contains(p) }
 
 /** A tap target without a ripple: the bars show their state through colour alone. */
 private fun Modifier.tap(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
@@ -128,10 +145,11 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun ActionButton(icon: ImageVector, label: String, width: Dp, selected: Boolean = false, glyph: Dp = 36.dp, onClick: () -> Unit = {}) {
     val lit = animateHighlight(selected)
+    val k = Pc.barGlyphScale(width)
     Box(Modifier.size(width, Pc.BarButtonHeight).tap(onClick = onClick), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(Pc.ActionDiscSize).clip(CircleShape).background(lerp(Pc.ActionDisc, Pc.BarGlyphSelected, lit)))
+        Box(Modifier.size(Pc.ActionDiscSize * k).clip(CircleShape).background(lerp(Pc.ActionDisc, Pc.BarGlyphSelected, lit)))
         // the glyphs are drawn in a 44 frame, shown [glyph] across (most 36)
-        Icon(icon, contentDescription = label, tint = lerp(Pc.ActionGlyph, Color.White, lit), modifier = Modifier.requiredSize(glyph))
+        Icon(icon, contentDescription = label, tint = lerp(Pc.ActionGlyph, Color.White, lit), modifier = Modifier.requiredSize(glyph * k))
     }
 }
 
@@ -148,7 +166,7 @@ private fun ToolButton(icon: ImageVector, label: String, width: Dp, selected: Bo
     val touch = if (onHold != null) Modifier.tapOrHold(onClick, onHold) else Modifier.tap(onClick = onClick)
     Box(Modifier.size(width, Pc.BarButtonHeight).then(touch), contentAlignment = Alignment.Center) {
         // a 44 frame shown as it is, over the 38 tall button
-        Icon(icon, contentDescription = label, tint = lerp(Pc.BarGlyph, Pc.BarGlyphSelected, animateHighlight(selected)), modifier = Modifier.requiredSize(44.dp))
+        Icon(icon, contentDescription = label, tint = lerp(Pc.BarGlyph, Pc.BarGlyphSelected, animateHighlight(selected)), modifier = Modifier.requiredSize(44.dp * Pc.barGlyphScale(width)))
     }
 }
 
@@ -158,10 +176,10 @@ private fun ColorButton(vm: CanvasViewModel, width: Dp) {
     // ringed only where the colour would fade into the bar: dark ones on the dark bar, light ones
     // on the light bar
     val ringed = if (Pc.light) vm.brightness > LIGHT_RING_ABOVE else vm.brightness < DARK_RING_BELOW
-    // held, the colour painted with before
+    // held a moment, the previous colour (and held again, back)
     // dragged out onto the canvas, it fills there (ColorDrop)
     Box(Modifier.size(width, Pc.BarButtonHeight).dropSource(vm, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
-        val dot = Modifier.size(Pc.ColorDot).clip(CircleShape).background(CanvasSpace.color(rgb))
+        val dot = Modifier.size(Pc.ColorDot * Pc.barGlyphScale(width)).clip(CircleShape).background(CanvasSpace.color(rgb))
         Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
     }
 }
@@ -175,10 +193,11 @@ private const val LIGHT_RING_ABOVE = 0.85f
 /**
  * The side bar against the left edge (the right one, [right]-handed): brush size, the modify
  * button, opacity, undo and redo, its tracks [trackHeight] long. On the right everything is
- * mirrored but the glyphs.
+ * mirrored but the glyphs. Pulled [out] from its edge (its modify button dragged), its edge's
+ * corners round too.
  */
 @Composable
-fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f) {
+fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f, out: Dp = 0.dp) {
     // a control's left edge, mirrored on the right
     fun x(left: Dp, width: Dp) = if (right) Pc.SideBarWidth - left - width else left
     // shorter tracks bring what is under each up with them
@@ -187,41 +206,83 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     // its glass slides out with it as the interface hides, its screen side's corners off the screen
     val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
     val moved = Offset(aside, 0f)
-    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else Pc.SideBarCorner, pastRight = if (right) Pc.SideBarCorner else 0.dp)
-    val track = BarGlass(shown, moved, window = true)
+    // its glass goes past the screen's edge (to take that side's corners off the screen), or, pulled
+    // out from the edge, stays its own size
+    val past = if (out > 0.dp) 0.dp else Pc.SideBarCorner
+    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else past, pastRight = if (right) past else 0.dp)
+    // the tracks' own thin glass, unless a plugin has them frosted as the bar is (which the bar's
+    // glass under them is already)
+    val track = BarGlass(shown, moved, window = true).takeIf { Pc.sliderLook.frosted != true }
     Box(
         Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
+            // a touch on it keeps a slider's panel up
+            .onGloballyPositioned { vm.sideBarOnWindow = it.boundsInWindow() }
             .drawBehind {
                 // translucent, with windows where the slider tracks are: they show what is behind
                 val r = Pc.SideBarCorner.toPx()
                 val track = Size(Pc.SliderWidth.toPx(), trackHeight.toPx())
                 val trackR = CornerRadius(Pc.SliderCorner.toPx())
+                val windows = listOf(SizeTrackTop, opacityTop).map { top ->
+                    val o = Offset(x(SliderLeft, Pc.SliderWidth).toPx(), top.toPx())
+                    RoundRect(o.x, o.y, o.x + track.width, o.y + track.height, trackR)
+                }
                 val body = Path().apply {
                     fillType = PathFillType.EvenOdd
-                    val (inner, outer) = CornerRadius.Zero to CornerRadius(r)
+                    val (inner, outer) = CornerRadius(out.toPx().coerceIn(0f, r)) to CornerRadius(r)
                     addRoundRect(
                         if (right) RoundRect(0f, 0f, size.width, size.height, outer, inner, inner, outer)
                         else RoundRect(0f, 0f, size.width, size.height, inner, outer, outer, inner),
                     )
-                    for (top in listOf(SizeTrackTop, opacityTop)) {
-                        val o = Offset(x(SliderLeft, Pc.SliderWidth).toPx(), top.toPx())
-                        addRoundRect(RoundRect(o.x, o.y, o.x + track.width, o.y + track.height, trackR))
-                    }
+                    windows.forEach { addRoundRect(it) }
                 }
                 drawPath(body, Pc.SideBar)
+                // a darker hairline round each window
+                val edge = Pc.SliderEdgeWidth.toPx()
+                val ring = Path().apply {
+                    fillType = PathFillType.EvenOdd
+                    for (w in windows) {
+                        addRoundRect(RoundRect(w.left - edge, w.top - edge, w.right + edge, w.bottom + edge, CornerRadius(trackR.x + edge)))
+                        addRoundRect(w)
+                    }
+                }
+                drawPath(ring, Pc.SliderEdge)
             },
     ) {
-        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
+        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(track?.let { rememberFrost(Pc.SliderCorner, it) } ?: Modifier), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
         // the modify button: the next touch on the canvas picks a colour
+        // (where it is on the window as a touch goes on: the bar may move under the finger)
+        val placed = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
         Box(
-            Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).pointerInput(Unit) {
-                // held, it changes what a canvas touch does; tapped, it does what Tap □ is set to
+            Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).onPlaced { placed[0] = it }.pointerInput(Unit) {
+                // held, it changes what a canvas touch does; tapped, it does what Tap □ is set to;
+                // dragged out from the bar's edge and then up or down, it moves the bar
                 awaitEachGesture {
-                    awaitFirstDown().consume()
-                    vm.modifyPressed()
-                    val up = waitForUpOrCancellation()
-                    up?.consume()
-                    vm.modifyReleased(cancelled = up == null)
+                    val down = awaitFirstDown()
+                    down.consume()
+                    // the window's pixels as the bar's points
+                    fun onWindow(p: Offset): Offset = (placed[0]?.takeIf { it.isAttached }?.localToWindow(p) ?: p) / density
+                    val first = onWindow(down.position)
+                    val touch = vm.modifyTouch(down.id.value, first.x, first.y, down.uptimeMillis)
+                    var lifted = false
+                    try {
+                        while (!lifted) {
+                            val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: continue
+                            if (!c.pressed) {
+                                // a cancelled touch ends already consumed; a lift doesn't
+                                touch.lifted(c.id.value, cancelled = c.isConsumed)
+                                c.consume()
+                                lifted = true
+                            } else {
+                                val on = c.position.x in 0f..size.width.toFloat() && c.position.y in 0f..size.height.toFloat()
+                                val at = onWindow(c.position)
+                                touch.moved(c.id.value, at.x, at.y, c.uptimeMillis, onButton = on)
+                                c.consume()
+                            }
+                        }
+                    } finally {
+                        // the bar put away mid-touch: let go of it all the same
+                        if (!lifted) touch.lifted(down.id.value, cancelled = true)
+                    }
                 }
             },
             contentAlignment = Alignment.Center,
@@ -239,7 +300,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 },
             )
         }
-        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
+        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop).then(track?.let { rememberFrost(Pc.SliderCorner, it) } ?: Modifier), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
         // beside the slider it belongs to, a little above it, outside the bar
         vm.sliderPanel?.let { which ->
             val top = if (which == CanvasViewModel.SliderPanel.SIZE) SizeTrackTop else opacityTop
@@ -262,15 +323,16 @@ private fun SideButton(icon: ImageVector, label: String, enabled: Boolean, modif
     }
 }
 
-/** What a slider's panel does: shown while it is dragged ([held] false), kept up when it is held still. */
-class SliderPanelHooks(val show: (held: Boolean) -> Unit, val hide: () -> Unit)
+/**
+ * What a slider does with its panel: [show] it (dragged or held, it comes up and stays up when the
+ * slider is let go, for its + to be tapped), [hide] it, and whether a slider's panel is [up].
+ */
+class SliderPanelHooks(val show: () -> Unit, val hide: () -> Unit, val up: () -> Boolean)
 
 private fun panel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel) = SliderPanelHooks(
-    show = { held ->
-        vm.sliderPanel = which
-        vm.sliderPanelKept = held
-    },
-    hide = { if (!vm.sliderPanelKept) vm.sliderPanel = null },
+    show = { vm.sliderPanel = which },
+    hide = { vm.sliderPanel = null },
+    up = { vm.sliderPanel != null },
 )
 
 private val SliderPanelSide = 190.dp
@@ -300,6 +362,8 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
     // its own size, past the bar's edge (the bar's width would otherwise squeeze it)
     Box(
         modifier.wrapContentSize(Alignment.TopStart, unbounded = true).size(SliderPanelSide)
+            // a touch on it keeps it up
+            .onGloballyPositioned { vm.sliderPanelOnWindow = it.boundsInWindow() }
             .then(if (Pc.light) Modifier else rememberFrost(22.dp))
             .clip(RoundedCornerShape(22.dp)).background(SliderPanelFill)
             // a hairline rim, as measured (about 25 over the glass)
@@ -310,7 +374,7 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
                 pushStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold))
                 append(if (size) "Size" else "Opacity")
                 pop()
-                append(" ${(value * 100f).roundToInt()}%")
+                append(" ${sideSliderShownPercent(size, value)}%")
             },
             color = SliderPanelInk,
             fontSize = 19.sp,
@@ -348,11 +412,11 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
 
 /**
  * An upright slider moved by dragging anywhere on it: the thumb follows the finger (relative,
- * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved, its
- * [panel] shows while it moves; held still or its thumb tapped, it stays up; a tap elsewhere on
- * the track takes the thumb there. Its [notches] (saved values) show as marks on the track; a
- * value dragged near one is pulled onto it, and a tap on one goes there. On a notch, the thumb
- * shows a blue bar.
+ * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved or
+ * held still, its [panel] comes up, and stays up when the finger lifts; its thumb tapped brings
+ * the panel up, or takes it away; a tap elsewhere on the track takes the thumb there (and the
+ * panel away). Its [notches] (saved values) show as marks on the track; a value dragged near one
+ * is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
  */
 @Composable
 fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier, panel: SliderPanelHooks? = null, notches: List<Float> = emptyList(), height: Dp = Pc.SliderHeight) {
@@ -388,7 +452,7 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                         }
                         val dy = c.position.y - last
                         if (dy != 0f) {
-                            if (!moved) hooks?.show(false)
+                            if (!moved) hooks?.show()
                             moved = true
                             last = c.position.y
                             // the farther out to the side the finger is, the finer the thumb follows
@@ -402,19 +466,25 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                     withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                         while (!lifted && !moved) lifted = !follow()
                     }
-                    if (!lifted && !moved) hooks?.show(true)
-                    // a tap on the thumb opens the panel and keeps it up; elsewhere the thumb goes
-                    // there (or onto a notch's mark there)
+                    if (!lifted && !moved) hooks?.show()
+                    // a tap on the thumb brings up the panel (or takes it away); elsewhere the
+                    // thumb goes there (or onto a notch's mark there) and the panel goes
                     if (lifted && !moved && !taken) {
                         val inset = Pc.ThumbInset.toPx()
                         val at = 1f - (down.position.y - inset - Pc.ThumbHeight.toPx() / 2f) / travel
-                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks)) {
-                            is SideSliderTap.Panel -> hooks?.show(true)
-                            is SideSliderTap.Jump -> change(tap.value)
+                        val up = hooks?.up?.invoke() == true
+                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks, up)) {
+                            is SideSliderTap.Panel -> hooks?.show()
+                            is SideSliderTap.ClosePanel -> hooks?.hide()
+                            is SideSliderTap.Jump -> {
+                                change(tap.value)
+                                hooks?.hide()
+                            }
                         }
                     }
                     while (!lifted) lifted = !follow()
-                    if (taken) hooks?.show(true) else if (moved) hooks?.hide()
+                    // let go, the panel stays up for its + (and so does it for a touch the pen took)
+                    if (taken) hooks?.show()
                 }
             }
             .drawBehind {
@@ -444,7 +514,17 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                 val travel = size.height - thumb.height - inset * 2
                 for (n in notches) {
                     val y = inset + thumb.height / 2f + travel * (1f - n)
-                    drawRoundRect(NotchMark, Offset((size.width - bar.width) / 2f, y - bar.height / 2f), bar, CornerRadius(bar.height / 2f))
+                    drawRoundRect(Pc.NotchMark, Offset((size.width - bar.width) / 2f, y - bar.height / 2f), bar, CornerRadius(bar.height / 2f))
+                }
+                // the thumb's soft shadow, a point below it: under the thumb, only its rim shows
+                for (step in ThumbShadow) {
+                    val grow = step.grow.dp.toPx()
+                    drawRoundRect(
+                        Color.Black.copy(alpha = step.alpha),
+                        Offset(at.x - grow, at.y - grow + step.down.dp.toPx()),
+                        Size(thumb.width + grow * 2f, thumb.height + grow * 2f),
+                        CornerRadius(thumb.height / 2f + grow),
+                    )
                 }
                 drawPath(Path().apply { addRoundRect(knob) }, Pc.SliderThumb)
                 if (notches.any { kotlin.math.abs(it - value) < 1e-4f }) {
@@ -471,7 +551,9 @@ private fun LiquifyRing(vm: CanvasViewModel) {
 
 private val NotchWidth = 20.dp
 private val NotchHeight = 4.dp
-private val NotchMark = Color(0x1AFFFFFF)
+
+/** How a side slider's thumb shadow is drawn: worked out once, the same on either look. */
+private val ThumbShadow: List<ShadowStep> by lazy { sideThumbShadow() }
 
 /**
  * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a
@@ -489,15 +571,18 @@ fun BrushCursor(vm: CanvasViewModel) {
     val shape = vm.cursorShape
     val turn = vm.cursorTurn
     val fill = vm.cursorFill.takeIf { vm.cursorHovering }
-    val strength = vm.opacity.coerceIn(0f, 1f)
+    // as the brush would paint at its estimated pressure: as strong, and as big
+    val look = vm.cursorFillLook
+    val strength = hoverFillStrength(vm.opacity, look.opacity)
+    val fillR = r * look.size.coerceIn(0f, 1f)
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-        // the stamp under the outline, across the brush's diameter, turned as the stamps are
-        if (fill != null) {
+        // the stamp under the outline, turned as the stamps are
+        if (fill != null && fillR >= 1f) {
             rotate(Math.toDegrees(turn.toDouble()).toFloat(), pivot = at) {
                 drawImage(
                     fill,
-                    dstOffset = androidx.compose.ui.unit.IntOffset((at.x - r).roundToInt(), (at.y - r).roundToInt()),
-                    dstSize = androidx.compose.ui.unit.IntSize((2f * r).roundToInt(), (2f * r).roundToInt()),
+                    dstOffset = androidx.compose.ui.unit.IntOffset((at.x - fillR).roundToInt(), (at.y - fillR).roundToInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize((2f * fillR).roundToInt(), (2f * fillR).roundToInt()),
                     alpha = strength,
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(paint),
                 )
@@ -520,17 +605,36 @@ fun BrushCursor(vm: CanvasViewModel) {
             if (paths.isEmpty()) drawCircle(color, r, at, style = Stroke(width))
             for (p in paths) drawPath(p, color, style = Stroke(width))
         }
-        val contrast = { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
-        val colour = { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
-        when (style) {
-            CanvasViewModel.CursorStyle.CONTRAST -> contrast()
-            CanvasViewModel.CursorStyle.COLOR -> colour()
-            // as the brush says: none, contrasting lines, or the colour
-            CanvasViewModel.CursorStyle.BRUSH -> when (vm.cursorOutline) {
-                0 -> Unit
-                2 -> colour()
-                else -> contrast()
-            }
+        // (a fill at the faintest opacities is as good as none: the lines show with it)
+        when (cursorLines(style, vm.cursorOutline, filled = fill != null && strength >= CURSOR_FILL_SEEN)) {
+            CursorLines.NONE -> Unit
+            CursorLines.CONTRAST -> { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
+            CursorLines.COLOUR -> { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
         }
+    }
+}
+
+/** A hover fill drawn at least this strong (the brush's opacity) shows by itself. */
+private const val CURSOR_FILL_SEEN = 0.1f
+
+/** How strongly the hover fill shows: the opacity painted with ([opacity]), times what the brush's estimated hover pressure leaves of it ([atPressure]). */
+internal fun hoverFillStrength(opacity: Float, atPressure: Float): Float = opacity.coerceIn(0f, 1f) * atPressure.coerceIn(0f, 1f)
+
+/** How the brush cursor's outline is drawn: not at all, a thin dark line with a light edge, or in the colour. */
+internal enum class CursorLines { NONE, CONTRAST, COLOUR }
+
+/**
+ * The brush cursor's outline in [style], for a brush whose own outline is [brushOutline] (0 none,
+ * 1 contrasting lines, 2 the colour), its hover fill shown under it if [filled]. Per brush, one
+ * whose own is none shows its fill alone where it has one (hovering); painting, or with no fill,
+ * it still shows contrasting lines, so a brush cursor turned on never goes missing.
+ */
+internal fun cursorLines(style: CanvasViewModel.CursorStyle, brushOutline: Int, filled: Boolean): CursorLines = when (style) {
+    CanvasViewModel.CursorStyle.CONTRAST -> CursorLines.CONTRAST
+    CanvasViewModel.CursorStyle.COLOR -> CursorLines.COLOUR
+    CanvasViewModel.CursorStyle.BRUSH -> when (brushOutline) {
+        0 -> if (filled) CursorLines.NONE else CursorLines.CONTRAST
+        2 -> CursorLines.COLOUR
+        else -> CursorLines.CONTRAST
     }
 }

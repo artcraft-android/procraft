@@ -1,5 +1,6 @@
 //! Writing pictures for other apps: layered PSD, TIFF and PDF. Each takes straight-alpha RGBA8
-//! pixels, rows top to bottom, and returns the file's bytes. A CMYK canvas's files keep its
+//! pixels, rows top to bottom, and returns the file's bytes; a PSD and a PDF can be written into
+//! a file as they are made instead, a layer or page at a time. A CMYK canvas's files keep its
 //! press's inks: its pixels go through a table to them (`press`).
 
 use crate::cms::Lut;
@@ -25,6 +26,11 @@ pub enum PsdKind<'a> {
         rgba: &'a [u8],
         mask: Option<&'a [u8]>,
     },
+    /// Pixels read only as the file is written ([`write_psd`]'s `read`), a layer at a time, so a
+    /// file of many layers never has them all in memory; and whether it has a mask.
+    Read {
+        masked: bool,
+    },
     /// The start of a group: the layers after it, up to its [`PsdKind::GroupEnd`], are in it.
     GroupStart {
         open: bool,
@@ -32,9 +38,27 @@ pub enum PsdKind<'a> {
     GroupEnd,
 }
 
-/// A layered PSD: `layers` top first (groups as a start, their layers, then an end), and the
-/// flattened picture; `icc` is the colour profile it carries (none if empty). With a `press`
-/// table it is a CMYK PSD (inks kept inverted, as PSDs keep them; the picture flattened on white).
+impl PsdKind<'_> {
+    fn has_pixels(&self) -> bool {
+        matches!(self, PsdKind::Pixels { .. } | PsdKind::Read { .. })
+    }
+
+    fn has_mask(&self) -> bool {
+        matches!(self, PsdKind::Pixels { mask: Some(_), .. } | PsdKind::Read { masked: true })
+    }
+}
+
+/// A layer's pixels as [`write_psd`] reads them: straight RGBA8, the canvas's size, and its mask's
+/// grey (the canvas's size) if it has one.
+pub struct PsdPixels {
+    pub rgba: Vec<u8>,
+    pub mask: Option<Vec<u8>>,
+}
+
+/// A layered PSD: `layers` top first (groups as a start, their layers, then an end; their pixels
+/// given, none [`PsdKind::Read`]), and the flattened picture; `icc` is the colour profile it
+/// carries (none if empty). With a `press` table it is a CMYK PSD (inks kept inverted, as PSDs
+/// keep them; the picture flattened on white).
 pub fn psd(
     width: u32,
     height: u32,
@@ -44,18 +68,41 @@ pub fn psd(
     composite: &[u8],
     press: Option<&Lut>,
 ) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    // into memory, every layer's pixels at hand: nothing to fail
+    let mut none = |_: usize| Err(std::io::Error::other("no pixels to read"));
+    let _ = write_psd(&mut out, width, height, dpi, icc, layers, &mut none, composite, press);
+    out.into_inner()
+}
+
+/// [`psd`] written to `out` as it is made, a layer at a time: the pixels of a layer of kind
+/// [`PsdKind::Read`] are asked of `read` (by its place in `layers`) as it is written, and let go
+/// after, so what is held at once is about one layer whatever their number. The layers' records,
+/// which come before their pixels, are written again once their sizes are known.
+pub fn write_psd<W: std::io::Write + std::io::Seek>(
+    out: &mut W,
+    width: u32,
+    height: u32,
+    dpi: f32,
+    icc: &[u8],
+    layers: &[PsdLayer<'_>],
+    read: &mut dyn FnMut(usize) -> std::io::Result<PsdPixels>,
+    composite: &[u8],
+    press: Option<&Lut>,
+) -> std::io::Result<()> {
+    use std::io::SeekFrom;
     let fixed = (dpi.clamp(1.0, 9999.0) * 65536.0).round() as u32;
-    let mut out = Vec::new();
-    out.extend_from_slice(b"8BPS");
-    put16(&mut out, 1);
-    out.extend_from_slice(&[0; 6]);
-    put16(&mut out, 4);
-    put32(&mut out, height);
-    put32(&mut out, width);
-    put16(&mut out, 8);
-    put16(&mut out, if press.is_some() { 4 } else { 3 });
+    let mut head = Vec::new();
+    head.extend_from_slice(b"8BPS");
+    put16(&mut head, 1);
+    head.extend_from_slice(&[0; 6]);
+    put16(&mut head, 4);
+    put32(&mut head, height);
+    put32(&mut head, width);
+    put16(&mut head, 8);
+    put16(&mut head, if press.is_some() { 4 } else { 3 });
     // no colour mode data
-    put32(&mut out, 0);
+    put32(&mut head, 0);
     // image resources: the resolution
     let mut resources = Vec::new();
     resources.extend_from_slice(b"8BIM");
@@ -78,59 +125,115 @@ pub fn psd(
             resources.push(0);
         }
     }
-    put32(&mut out, resources.len() as u32);
-    out.extend_from_slice(&resources);
+    put32(&mut head, resources.len() as u32);
+    head.extend_from_slice(&resources);
+    // the layers' section: its size and its info's (known at the end), the count, the records
+    let section_at = head.len() as u64;
+    put32(&mut head, 0);
+    put32(&mut head, 0);
+    put16(&mut head, (layers.len() as i16).wrapping_neg() as u16);
+    let start = out.stream_position()?;
+    out.write_all(&head)?;
 
-    // layers, listed bottom first, a group as its end marker, its layers, then its start
+    // layers, listed bottom first, a group as its end marker, its layers, then its start; each
+    // record first as it will be but for its rectangle and its channels' sizes, which take the
+    // same room
+    let order: Vec<(usize, &PsdLayer<'_>)> = layers.iter().enumerate().rev().collect();
     let mut records = Vec::new();
-    let mut channels = Vec::new();
-    let count = layers.len();
-    // each layer's channels packed side by side, then written in order
-    let order: Vec<&PsdLayer<'_>> = layers.iter().rev().collect();
-    // each layer holds its planes (and inks) apart while they are packed
-    let each = width as usize * height as usize * 9;
-    let packed = crate::par::side_by_side_within(&order, each, |layer| layer_channels(width, height, layer, press));
-    for (layer, channels_of) in order.iter().zip(packed) {
-        let (rect, data) = channels_of.unwrap_or_else(|| layer_channels(width, height, layer, press));
-        record(&mut records, &mut channels, width, height, layer, rect, &data);
+    for (_, layer) in &order {
+        let unknown: Vec<(i16, u32)> = channel_ids(layer, press).into_iter().map(|id| (id, 0)).collect();
+        record(&mut records, width, height, layer, [0; 4], &unknown);
     }
-    let mut info = Vec::new();
-    put16(&mut info, (count as i16).wrapping_neg() as u16);
-    info.extend_from_slice(&records);
-    info.extend_from_slice(&channels);
-    if info.len() % 2 == 1 {
-        info.push(0);
+    let records_at = start + head.len() as u64;
+    out.write_all(&records)?;
+    // then each layer's channels, packed as it comes
+    let mut known = Vec::with_capacity(order.len());
+    let mut channels_size = 0u64;
+    for (i, layer) in &order {
+        let (rect, data) = match layer.kind {
+            PsdKind::Read { masked } => {
+                let px = read(*i)?;
+                if px.mask.is_some() != masked || px.rgba.len() != width as usize * height as usize * 4 {
+                    return Err(std::io::Error::other("a layer's pixels aren't the canvas's"));
+                }
+                let read = PsdLayer {
+                    name: layer.name,
+                    kind: PsdKind::Pixels { rgba: &px.rgba, mask: px.mask.as_deref() },
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    blend: layer.blend,
+                    clipped: layer.clipped,
+                };
+                layer_channels(width, height, &read, press)
+            }
+            _ => layer_channels(width, height, layer, press),
+        };
+        for (_, bytes) in &data {
+            out.write_all(bytes)?;
+            channels_size += bytes.len() as u64;
+        }
+        known.push((rect, data.iter().map(|(id, bytes)| (*id, bytes.len() as u32)).collect::<Vec<_>>()));
     }
-    let mut section = Vec::new();
-    put32(&mut section, info.len() as u32);
-    section.extend_from_slice(&info);
+    let mut info_size = 2 + records.len() as u64 + channels_size;
+    if info_size % 2 == 1 {
+        out.write_all(&[0])?;
+        info_size += 1;
+    }
     // no global mask
-    put32(&mut section, 0);
-    put32(&mut out, section.len() as u32);
-    out.extend_from_slice(&section);
+    out.write_all(&0u32.to_be_bytes())?;
+    let picture_at = out.stream_position()?;
+    // the records again, with the sizes now known
+    let mut sized = Vec::with_capacity(records.len());
+    for ((_, layer), (rect, data)) in order.iter().zip(&known) {
+        record(&mut sized, width, height, layer, *rect, data);
+    }
+    if sized.len() != records.len() {
+        return Err(std::io::Error::other("a layer's record changed size"));
+    }
+    out.seek(SeekFrom::Start(records_at))?;
+    out.write_all(&sized)?;
+    out.seek(SeekFrom::Start(start + section_at))?;
+    let mut sizes = Vec::new();
+    put32(&mut sizes, (info_size + 8) as u32);
+    put32(&mut sizes, info_size as u32);
+    out.write_all(&sizes)?;
+    out.seek(SeekFrom::Start(picture_at))?;
 
-    // the flattened picture: four channels, packed (RGBA, or the inks on white)
-    let planes: Vec<Vec<u8>> = match press {
-        None => (0..4).map(|c| plane(composite, c)).collect(),
-        Some(table) => {
-            let inks = inks(composite, table, true);
-            (0..4).map(|c| inks.iter().skip(c).step_by(4).map(|v| 255 - v).collect()).collect()
+    // the flattened picture: four channels, packed (RGBA, or the inks on white), each row's size
+    // first (written again once known), a channel at a time
+    let inks = press.map(|table| inks(composite, table, true));
+    out.write_all(&1u16.to_be_bytes())?;
+    let sizes_at = out.stream_position()?;
+    let rows = height as usize;
+    out.write_all(&vec![0; 4 * rows * 2])?;
+    let mut row_sizes = Vec::with_capacity(4 * rows * 2);
+    for c in 0..4 {
+        let plane: Vec<u8> = match &inks {
+            None => plane(composite, c),
+            Some(inks) => inks.iter().skip(c).step_by(4).map(|v| 255 - v).collect(),
+        };
+        let mut packed = Vec::new();
+        for row in plane.chunks(width.max(1) as usize) {
+            let row = packbits(row);
+            put16(&mut row_sizes, row.len() as u16);
+            packed.extend_from_slice(&row);
         }
-    };
-    put16(&mut out, 1);
-    let rows: Vec<Vec<Vec<u8>>> =
-        planes.iter().map(|p| p.chunks(width.max(1) as usize).map(packbits).collect()).collect();
-    for plane in &rows {
-        for row in plane {
-            put16(&mut out, row.len() as u16);
-        }
+        out.write_all(&packed)?;
     }
-    for plane in &rows {
-        for row in plane {
-            out.extend_from_slice(row);
-        }
+    let end = out.stream_position()?;
+    out.seek(SeekFrom::Start(sizes_at))?;
+    out.write_all(&row_sizes)?;
+    out.seek(SeekFrom::Start(end))?;
+    Ok(())
+}
+
+/// The ids of a layer's channels as written: alpha and the colours (or the inks), and its mask.
+fn channel_ids(layer: &PsdLayer<'_>, press: Option<&Lut>) -> Vec<i16> {
+    let mut ids: Vec<i16> = if press.is_some() { vec![-1, 0, 1, 2, 3] } else { vec![-1, 0, 1, 2] };
+    if layer.kind.has_mask() {
+        ids.push(-2);
     }
-    out
+    ids
 }
 
 /// A layer's channels as written: the rectangle its pixels fill, and each channel (by id) packed,
@@ -147,7 +250,7 @@ fn layer_channels(
             let rect = bounds(rgba, width, height).unwrap_or([0, 0, 0, 0]);
             // five bytes a pixel for inks: the four inverted, then alpha
             let (pixels, stride) = match press {
-                None => (rgba.to_vec(), 4),
+                None => (std::borrow::Cow::Borrowed(*rgba), 4),
                 Some(table) => {
                     let inks = inks(rgba, table, false);
                     let mut five = Vec::with_capacity(rgba.len() / 4 * 5);
@@ -155,42 +258,35 @@ fn layer_channels(
                         five.extend(ink.map(|v| 255 - v));
                         five.push(px[3]);
                     }
-                    (five, 5)
+                    (std::borrow::Cow::Owned(five), 5)
                 }
             };
-            let mut data: Vec<(i16, Vec<u8>)> = ids
-                .iter()
-                .map(|&id| (id, packed(&cropped_plane(&pixels, width, rect, stride, channel(id, stride)), rect)))
-                .collect();
+            // the channels packed side by side
+            let pack = |&id: &i16| packed(&cropped_plane(&pixels, width, rect, stride, channel(id, stride)), rect);
+            let made = crate::par::side_by_side(ids, pack);
+            let mut data: Vec<(i16, Vec<u8>)> =
+                ids.iter().zip(made).map(|(id, made)| (*id, made.unwrap_or_else(|| pack(id)))).collect();
             if let Some(m) = mask {
                 data.push((-2, packed(m, [0, 0, width, height])));
             }
             (rect, data)
         }
-        // groups have no pixels: empty channels
+        // groups have no pixels: empty channels (a layer read is given its pixels first)
         _ => ([0, 0, 0, 0], ids.iter().map(|&id| (id, vec![0, 0])).collect()),
     }
 }
 
-/// A layer's record (into `records`) and its channels (`data`, from [`layer_channels`], filling
-/// `rect`) into `channels`.
-fn record(
-    records: &mut Vec<u8>,
-    channels: &mut Vec<u8>,
-    width: u32,
-    height: u32,
-    layer: &PsdLayer<'_>,
-    rect: [u32; 4],
-    data: &[(i16, Vec<u8>)],
-) {
+/// A layer's record (into `records`): its pixels filling `rect`, and its channels by id with the
+/// size each takes (see [`layer_channels`]).
+fn record(records: &mut Vec<u8>, width: u32, height: u32, layer: &PsdLayer<'_>, rect: [u32; 4], data: &[(i16, u32)]) {
     let [left, top, right, bottom] = rect;
     for v in [top, left, bottom, right] {
         put32(records, v);
     }
     put16(records, data.len() as u16);
-    for (id, bytes) in data {
+    for (id, size) in data {
         put16(records, *id as u16);
-        put32(records, bytes.len() as u32);
+        put32(records, *size);
     }
     records.extend_from_slice(b"8BIM");
     let group_start = matches!(layer.kind, PsdKind::GroupStart { .. });
@@ -203,21 +299,20 @@ fn record(
     records.push(u8::from(layer.clipped));
     // bit 1: hidden; bit 3 and 4: the record describes a group divider
     let mut flags = if layer.visible { 0 } else { 2 };
-    if !matches!(layer.kind, PsdKind::Pixels { .. }) {
+    if !layer.kind.has_pixels() {
         flags |= 0x18;
     }
     records.push(flags);
     records.push(0);
     let mut extra = Vec::new();
-    match &layer.kind {
-        PsdKind::Pixels { mask: Some(_), .. } => {
-            put32(&mut extra, 20);
-            for v in [0, 0, height, width] {
-                put32(&mut extra, v);
-            }
-            extra.extend_from_slice(&[255, 0, 0, 0]);
+    if layer.kind.has_mask() {
+        put32(&mut extra, 20);
+        for v in [0, 0, height, width] {
+            put32(&mut extra, v);
         }
-        _ => put32(&mut extra, 0),
+        extra.extend_from_slice(&[255, 0, 0, 0]);
+    } else {
+        put32(&mut extra, 0);
     }
     // no blending ranges
     put32(&mut extra, 0);
@@ -251,13 +346,10 @@ fn record(
             put32(&mut lsct, 3);
             tagged(&mut extra, b"lsct", &lsct);
         }
-        PsdKind::Pixels { .. } => {}
+        PsdKind::Pixels { .. } | PsdKind::Read { .. } => {}
     }
     put32(records, extra.len() as u32);
     records.extend_from_slice(&extra);
-    for (_, bytes) in data {
-        channels.extend_from_slice(bytes);
-    }
 }
 
 fn tagged(out: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {

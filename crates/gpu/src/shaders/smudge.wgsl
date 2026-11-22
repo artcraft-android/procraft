@@ -144,6 +144,14 @@ struct SmudgeStamp {
     warp_shift: vec2<f32>,
     warp_amount: f32,
     sharpen: f32,
+    // a run of a pass's stamps laid at once (see cs_deposit_run): its first and its end among
+    // them (`bbox` then all of theirs)
+    run: vec4<u32>,
+    // 1: a moving grain read mirrored (each point's way from the middle turned over top to bottom
+    // first, as the stamp shader reads a symmetry's mirrored copy's)
+    grain_mirrored: u32,
+    // what the stamp rounds its paint to 8 bits by (see `deposit`)
+    dither: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -153,10 +161,43 @@ struct WetStamp {
     mixing: vec4<f32>,
     // what the stamp paints with, its colour dynamics in it
     paint: vec4<f32>,
+    // what it lays by itself (see `Dab`): its alpha, transfer, grain turn and shape; its grain's
+    // tile size and depth, how hard it presses into it and how much that counts; where its moving
+    // grain is read from at its middle, and its mirroring; its bounds; and (1) its moving grain
+    // read mirrored and its dither (as bits), then room for more
+    laid: vec4<f32>,
+    grain: vec4<f32>,
+    place: vec4<f32>,
+    bbox: vec4<i32>,
+    more: vec4<f32>,
 }
 
 struct WetPass {
     stamps: array<WetStamp, 64>,
+}
+
+// What a stamp lays by itself, as its own uniform says (`own_dab`) or as a pass lists it
+// (`pass_dab`); the rest of what lays it is the pass's, the same for all its stamps.
+struct Dab {
+    center: vec2<f32>,
+    radius: f32,
+    angle: f32,
+    roundness: f32,
+    alpha: f32,
+    shape: i32,
+    transfer: f32,
+    grain_scale: f32,
+    grain_depth: f32,
+    grain_offset: vec2<f32>,
+    grain_rotation: f32,
+    grain_press: f32,
+    grain_bleed: f32,
+    flip: vec2<f32>,
+    bbox: vec4<i32>,
+    paint: vec4<f32>,
+    index: u32,
+    grain_mirrored: bool,
+    dither: u32,
 }
 
 @group(0) @binding(0) var<uniform> st: SmudgeStamp;
@@ -175,6 +216,57 @@ struct WetPass {
 // how much of each canvas pixel is selected (all of it without a selection, a single texel): paint
 // is moved only as far as that, as a brush lays it
 @group(1) @binding(4) var selected: texture_2d<f32>;
+
+// the stamp the uniform is
+fn own_dab() -> Dab {
+    var d: Dab;
+    d.center = st.center;
+    d.radius = st.radius;
+    d.angle = st.angle;
+    d.roundness = st.roundness;
+    d.alpha = st.alpha;
+    d.shape = st.shape;
+    d.transfer = st.transfer;
+    d.grain_scale = st.grain_scale;
+    d.grain_depth = st.grain_depth;
+    d.grain_offset = st.grain_offset;
+    d.grain_rotation = st.grain_rotation;
+    d.grain_press = st.grain_press;
+    d.grain_bleed = st.grain_bleed;
+    d.flip = vec2<f32>(st.flip_x, st.flip_y);
+    d.bbox = st.bbox;
+    d.paint = st.paint;
+    d.index = st.index;
+    d.grain_mirrored = st.grain_mirrored != 0u;
+    d.dither = st.dither;
+    return d;
+}
+
+// the pass's stamp `k`, as `wet_pass` lists it
+fn pass_dab(k: u32) -> Dab {
+    let w = wet_pass.stamps[k];
+    var d: Dab;
+    d.center = w.at.xy;
+    d.radius = w.at.z;
+    d.angle = w.at.w;
+    d.roundness = w.mixing.x;
+    d.alpha = w.laid.x;
+    d.transfer = w.laid.y;
+    d.grain_rotation = w.laid.z;
+    d.shape = i32(w.laid.w);
+    d.grain_scale = w.grain.x;
+    d.grain_depth = w.grain.y;
+    d.grain_press = w.grain.z;
+    d.grain_bleed = w.grain.w;
+    d.grain_offset = w.place.xy;
+    d.flip = w.place.zw;
+    d.bbox = w.bbox;
+    d.paint = w.paint;
+    d.index = k;
+    d.grain_mirrored = w.more.x > 0.5;
+    d.dither = bitcast<u32>(w.more.y);
+    return d;
+}
 
 fn selected_at(p: vec2<i32>) -> f32 {
     let last = vec2<i32>(textureDimensions(selected)) - 1;
@@ -374,7 +466,7 @@ fn dull_part(i: u32) -> DullSum {
             let co = cos(st.angle);
             let si = sin(st.angle);
             let local = vec2<f32>(d.x * co + d.y * si, -d.x * si + d.y * co);
-            w = mask(vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness)));
+            w = mask(own_dab(), vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness)));
         }
         sum = sum + carry_at(cell_index(c)) * w;
         weight = weight + w;
@@ -479,59 +571,64 @@ fn carried(p: vec2<i32>) -> vec4<f32> {
 // how far a stamp's quad reaches past the stamp each way (pixels)
 const QUAD_REACH: f32 = 0.70710678;
 
-// half the stamp across each way (pixels)
-fn stamp_half() -> vec2<f32> {
-    return vec2<f32>(st.radius, max(st.radius * st.roundness, 1e-3));
+// half stamp `d` across each way (pixels)
+fn stamp_half(d: Dab) -> vec2<f32> {
+    return vec2<f32>(d.radius, max(d.radius * d.roundness, 1e-3));
 }
 
-fn mask(t: vec2<f32>) -> f32 {
-    if (st.shape < 0) {
-        let d = length(t) * st.radius;
-        let rim = clamp(st.radius - d + 0.5, 0.0, 1.0);
-        let soft = 1.0 - smoothstep(min(st.hardness, 0.999) * st.radius, st.radius + 0.5, d);
+fn mask(d: Dab, t: vec2<f32>) -> f32 {
+    if (d.shape < 0) {
+        let r = length(t) * d.radius;
+        let rim = clamp(d.radius - r + 0.5, 0.0, 1.0);
+        let soft = 1.0 - smoothstep(min(st.hardness, 0.999) * d.radius, d.radius + 0.5, r);
         return min(rim, soft);
     }
     // the shape fills the stamp's quad, as a brush stamp's does
-    let half = stamp_half();
-    let uv = t * vec2<f32>(st.flip_x, st.flip_y) * half / (half + QUAD_REACH) * 0.5 + 0.5;
+    let half = stamp_half(d);
+    let uv = t * d.flip * half / (half + QUAD_REACH) * 0.5 + 0.5;
     if (st.shape_sharp > 0.5) {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
-        let texel = textureLoad(shapes, at, st.shape, 0);
+        let texel = textureLoad(shapes, at, d.shape, 0);
         return select(texel.r, texel.a, st.tip_kind > 0u);
     }
     // (a brush file's own image is bigger than the brush images, by as many levels)
     let side = f32(textureDimensions(shapes).x);
-    let lod = clamp(log2(0.5 * side / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap + log2(side / 256.0));
-    let texel = textureSampleLevel(shapes, shape_smp, uv, st.shape, lod);
+    let lod = clamp(log2(0.5 * side / (d.radius + QUAD_REACH)), 0.0, st.shape_lod_cap + log2(side / 256.0));
+    let texel = textureSampleLevel(shapes, shape_smp, uv, d.shape, lod);
     return select(texel.r, texel.a, st.tip_kind > 0u);
 }
 
-// how much of the stamp the grain lets through at canvas point `p`
-fn grain_at(p: vec2<f32>) -> f32 {
-    let g = grain_plain(p);
-    if (st.grain_bleed > 0.0) {
+// how much of stamp `d` the grain lets through at canvas point `p`
+fn grain_at(d: Dab, p: vec2<f32>) -> f32 {
+    let g = grain_plain(d, p);
+    if (d.grain_bleed > 0.0) {
         // pressed in as far as the pressure's bleed says
-        return mix(1.0, mix(g, pressed_in(g, st.grain_press), min(st.grain_bleed, 1.0)), st.grain_depth);
+        return mix(1.0, mix(g, pressed_in(g, d.grain_press), min(d.grain_bleed, 1.0)), d.grain_depth);
     }
-    return mix(1.0, g, st.grain_depth);
+    return mix(1.0, g, d.grain_depth);
 }
 
-// the grain at canvas point `p` as it is, before its depth and bleed
-fn grain_plain(p: vec2<f32>) -> f32 {
+// the grain under stamp `d` at canvas point `p` as it is, before its depth and bleed
+fn grain_plain(d: Dab, p: vec2<f32>) -> f32 {
     if (st.grain < 0) {
         return 1.0;
     }
-    let scale = abs(st.grain_scale);
+    let scale = abs(d.grain_scale);
     var at = p;
-    if (st.grain_scale < 0.0) {
+    if (d.grain_scale < 0.0) {
         // a moving grain: read as far from where the stamp's middle is in it as the pixel is from
-        // the middle on the canvas, so a rolling grain stays put as the stamps move over it
-        at = p - st.center + st.grain_offset;
+        // the middle on the canvas, so a rolling grain stays put as the stamps move over it (the
+        // way turned over top to bottom where it is read mirrored)
+        var from_middle = p - d.center;
+        if (d.grain_mirrored) {
+            from_middle.y = -from_middle.y;
+        }
+        at = from_middle + d.grain_offset;
     }
-    let gc = cos(st.grain_rotation);
-    let gs = sin(st.grain_rotation);
+    let gc = cos(d.grain_rotation);
+    let gs = sin(d.grain_rotation);
     let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
     let sharp = st.grain_sharp > 0.5;
     // a brush file's own image has the fine detail itself; ours only stands in for it
@@ -550,18 +647,18 @@ fn grain_plain(p: vec2<f32>) -> f32 {
     return clamp((g - 0.5) * (1.0 + st.grain_contrast) + 0.5 + st.grain_brightness, 0.0, 1.0);
 }
 
-// how much a wet stamp lays at canvas point `p` (stamp frame point `t`): its shape and its grain
+// how much wet stamp `d` lays at canvas point `p` (stamp frame point `t`): its shape and its grain
 // combined by the grain's blend mode (unless the grain is laid over the stroke once), then the
 // bleed as a contrast on that (none of the faint parts, all of the strong ones, more of both the
 // harder the pressure's bleed), times the stamp's alpha
-fn wet_weight(p: vec2<f32>, t: vec2<f32>) -> f32 {
-    var through = mask(t);
+fn wet_weight(d: Dab, p: vec2<f32>, t: vec2<f32>) -> f32 {
+    var through = mask(d, t);
     if (st.grain >= 0 && st.grain_once <= 0.5) {
-        through = grain_combine(through, grain_plain(p), st.grain_depth, st.grain_blend);
+        through = grain_combine(through, grain_plain(d, p), d.grain_depth, st.grain_blend);
     }
-    let b = 8.0 * st.grain_bleed;
-    let bled = (1.0 + b) * through - b / sqrt(max(b * st.grain_press, 1e-4));
-    return clamp(bled, 0.0, 1.0) * st.alpha;
+    let b = 8.0 * d.grain_bleed;
+    let bled = (1.0 + b) * through - b / sqrt(max(b * d.grain_press, 1e-4));
+    return clamp(bled, 0.0, 1.0) * d.alpha;
 }
 
 // What a stamp lays at a canvas pixel: the pixel as it leaves it (dithered, before it is rounded to 8
@@ -578,78 +675,107 @@ struct Deposit {
     shown_set: bool,
 }
 
-// whether canvas pixel `p` is one of the stamp's (within its bounds and the canvas)
-fn in_bbox(p: vec2<i32>) -> bool {
-    return !(p.x >= st.bbox.z || p.y >= st.bbox.w || p.x < 0 || p.y < 0 || p.x >= i32(st.size.x) || p.y >= i32(st.size.y));
+// What a stamp finds at a pixel of the window, and leaves there for the next: the layer as the
+// stroke has left it, the stroke as laid (wet paint laid apart), how much of the paint the pixel
+// has taken and how much of it shows (each of those two read only where the pass keeps it).
+struct Found {
+    work: vec4<f32>,
+    grained: vec4<f32>,
+    amount: f32,
+    shown: f32,
 }
 
-fn deposit(p: vec2<i32>) -> Deposit {
+// what the window holds at canvas pixel `p`
+fn found_at(p: vec2<i32>) -> Found {
+    var f: Found;
+    f.work = work_at(p);
+    f.grained = grained_at(p);
+    f.amount = 0.0;
+    f.shown = 0.0;
+    if (st.mode == 1u && (st.rule != 0u || st.modulated == 1u)) {
+        f.amount = amount_at(p);
+    }
+    if (st.mode == 1u && st.laid_apart != 0u) {
+        f.shown = shown_at(p);
+    }
+    return f;
+}
+
+// whether canvas pixel `p` is one of stamp `d`'s (within its bounds and the canvas)
+fn in_bbox(d: Dab, p: vec2<i32>) -> bool {
+    let outside = any(p < d.bbox.xy) || any(p >= d.bbox.zw);
+    return !(outside || p.x < 0 || p.y < 0 || p.x >= i32(st.size.x) || p.y >= i32(st.size.y));
+}
+
+// what stamp `d` lays at canvas pixel `p`, finding `found` there
+fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
     var dep: Deposit;
     dep.laid = false;
     dep.into_grained = st.laid_apart == 2u;
     dep.amount_set = false;
     dep.shown_set = false;
-    if (!in_bbox(p) || left_out(p)) {
+    if (!in_bbox(d, p) || left_out(p)) {
         return dep;
     }
     // into the stamp's frame
-    let d = vec2<f32>(p) + 0.5 - st.center;
-    let c = cos(st.angle);
-    let s = sin(st.angle);
-    let local = vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c);
-    let t = vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness));
+    let off = vec2<f32>(p) + 0.5 - d.center;
+    let c = cos(d.angle);
+    let s = sin(d.angle);
+    let local = vec2<f32>(off.x * c + off.y * s, -off.x * s + off.y * c);
+    let t = vec2<f32>(local.x / d.radius, local.y / (d.radius * d.roundness));
     // the stamp's quad
-    let half = stamp_half();
+    let half = stamp_half(d);
     let reach = (half + QUAD_REACH) / half;
     if (abs(t.x) > reach.x || abs(t.y) > reach.y) {
         return dep;
     }
-    let shape = mask(t);
-    if (shape * st.alpha <= 0.0) {
+    let shape = mask(d, t);
+    if (shape * d.alpha <= 0.0) {
         return dep;
     }
-    // the grain lets each stamp through as far as it stands: stamps over a pixel build up past
-    // it towards full, the grain showing while they are few or light
-    let g = grain_at(vec2<f32>(p) + 0.5);
-    let m = shape * st.alpha;
-    let w = select(work_at(p), grained_at(p), st.laid_apart == 2u);
-    // smudging: the grain lets less of what is carried through
-    let moved = carried(p);
-    var out = mix(w, moved, m * g);
-    if (st.smear_over == 1u) {
-        out = moved * (m * g) + w * (1.0 - moved.a * m * g);
-    }
-    if (st.mode == 1u) {
+    let w = select(found.work, found.grained, st.laid_apart == 2u);
+    var out = w;
+    if (st.mode == 0u) {
+        // smudging: the grain lets less of what is carried through (the stamps over a pixel build
+        // up past it towards full, the grain showing while they are few or light)
+        let g = grain_at(d, vec2<f32>(p) + 0.5);
+        let m = shape * d.alpha;
+        let moved = carried(p);
+        out = mix(w, moved, m * g);
+        if (st.smear_over == 1u) {
+            out = moved * (m * g) + w * (1.0 - moved.a * m * g);
+        }
+    } else {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there
         // the stamp's plot, or (dry paint laid in place, no plots) the paint itself
-        var laid = vec4<f32>(st.paint.rgb, 1.0);
+        var laid = vec4<f32>(d.paint.rgb, 1.0);
         if (st.count > 0u) {
-            laid = plot_at(PASS_PLOTS, st.index * st.plot * st.plot, st.plot, t);
+            laid = plot_at(PASS_PLOTS, d.index * st.plot * st.plot, st.plot, t);
         }
-        var weight = wet_weight(vec2<f32>(p) + 0.5, t);
+        var weight = wet_weight(d, vec2<f32>(p) + 0.5, t);
         if (st.rule == 1u) {
             // the paint shows as far as the strongest stamp over the pixel
-            dep.amount = max(amount_at(p), weight);
+            dep.amount = max(found.amount, weight);
             dep.amount_set = true;
         } else if (st.rule == 2u) {
             // towards the stamp's transfer by its cover, never past it and never back; the paint
             // mixed by the cover the transfer leaves
-            let held = amount_at(p);
-            dep.amount = max(held, held + weight * (st.transfer - held));
+            let held = found.amount;
+            dep.amount = max(held, held + weight * (d.transfer - held));
             dep.amount_set = true;
-            weight = weight * st.transfer;
+            weight = weight * d.transfer;
         }
         if (st.modulated == 1u) {
             // only as far as the pixel has room left, which fills as it takes paint
-            let held = select(amount_at(p), dep.amount, dep.amount_set);
+            let held = select(found.amount, dep.amount, dep.amount_set);
             weight = weight * (1.0 - held);
             dep.amount = held + weight * (1.0 - held);
             dep.amount_set = true;
         }
         if (st.laid_apart != 0u) {
             // how much of the paint shows there so far, put together with the rest later
-            let held = shown_at(p);
+            let held = found.shown;
             dep.shown = held + weight * (1.0 - held);
             dep.shown_set = true;
         }
@@ -661,9 +787,12 @@ fn deposit(p: vec2<i32>) -> Deposit {
     // outside the selection the layer stays as it is
     out = mix(w, out, selected_at(p));
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
-    // add up as they should instead of rounding away
-    // (wet paint laid apart is kept as it was laid; shown by cs_synthesize)
-    let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
+    // add up as they should instead of rounding away (wet paint laid apart is kept as it was laid;
+    // shown by cs_synthesize). At random by the pixel's place from the stamp's middle pixel, the
+    // same each way round, and by which stamp it is: a symmetry's copies of a stamp, mirrored or
+    // turned by right angles, round each pixel as the stamp does the one it lands on.
+    let o = abs(p - vec2<i32>(floor(d.center)));
+    let h = dither(u32(min(o.x, o.y)), u32(max(o.x, o.y)), d.dither);
     dep.out = clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
     dep.laid = true;
     return dep;
@@ -673,8 +802,43 @@ fn deposit(p: vec2<i32>) -> Deposit {
 // second's went: the paint over the layer as it was, as far as how much of it was laid combines
 // with the grain by its mode, then the second's coverage (cut at its threshold) by the dual mode. Wet
 // paint keeps what it laid: its change to the layer, scaled from how much was laid to that. Only
-// this far: more, and the change's own rounding shows as speckle.
+// this far at a pixel: more, and the change's own rounding shows as speckle; past that, what it adds
+// is the paint as laid over the pixels round about (see `laid_paint_near`).
 const LAID_MOST_SCALE: f32 = 4.0;
+
+// How many pixels each way `laid_paint_near` reads.
+const LAID_NEAR: i32 = 2;
+
+// `c` in the space paint laid apart is shown in over the layer (see `over_layer`).
+fn laid_space(c: vec4<f32>) -> vec4<f32> {
+    return select(c, to_mix(c), st.luminance == 2u);
+}
+
+// The paint laid apart around canvas pixel `p` (in `laid_space`): what the stamps mixed and laid
+// there, which each pixel holds as far as it took it over the layer as it was (`grained` = `was` +
+// (paint - `was`) x how much it took), worked out over the pixels near: their paint less what
+// shows of the layer, over how much they took all told. Kept to 8 bits, a thin wash's change at
+// one pixel is mostly rounding, so its own paint, scaled up to what a second makes of it, would
+// speckle; over a few pixels' worth it is the wash's own colour, and dry paint's plain colour.
+// (A second raising the paint shows more of that paint, over whatever layer: never colour that
+// isn't in it, as plain colour over a thin wash would be: its rim stays a thin wash.)
+fn laid_paint_near(p: vec2<i32>) -> vec4<f32> {
+    let lo = max(st.bbox.xy, vec2<i32>(0));
+    let hi = min(st.bbox.zw, vec2<i32>(st.size)) - 1;
+    var paint = vec4<f32>(0.0);
+    var took = 0.0;
+    for (var dy = -LAID_NEAR; dy <= LAID_NEAR; dy++) {
+        for (var dx = -LAID_NEAR; dx <= LAID_NEAR; dx++) {
+            let q = clamp(p + vec2<i32>(dx, dy), lo, hi);
+            let s = shown_at(q);
+            if (s > 0.0) {
+                paint += laid_space(grained_at(q)) - laid_space(before_at(q)) * (1.0 - s);
+                took += s;
+            }
+        }
+    }
+    return paint / max(took, 1e-6);
+}
 
 // The layer at canvas pixel `p` (one of the stamp's bounds, and selected) once paint laid apart is
 // put together there, dithered, before it is rounded to 8 bits.
@@ -686,19 +850,17 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     let built = select(laid, min(amount_at(p), laid), st.rule != 0u);
     var a = built;
     if (st.wet_edges > 0.0 && built > 0.0) {
-        // the paint pools (see pooled_over), by how much of it shows: wet paint thinned by its
-        // water shows less than it touched (what it took of the room the layer had; over a full
-        // layer, as far as it touched). Where it took none (over paint as strong as itself) it
-        // pools to nothing, as the thinnest paint does
-        var shown = built;
-        if (st.laid_apart == 2u && was.a < 0.999) {
-            let now = grained_at(p).a;
-            shown = clamp((now - was.a) / (1.0 - was.a), 0.0, 1.0) * built / max(laid, 1e-6);
-        }
-        a = built * mix(1.0, pooled_over(shown), st.wet_edges);
+        // the paint pools (see pooled_over) by how far the stroke's stamps built up, wet paint as
+        // dry: water thins the paint they lay, not how far they reach, so thin wet paint over
+        // most of a stroke isn't pooled into a dark rim
+        a = built * mix(1.0, pooled_over(built), st.wet_edges);
     }
     if (st.grain_once > 0.5) {
-        a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
+        a = grain_combine(a, grain_plain(own_dab(), vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
+        // a rise held to what was laid (with a second, once that is combined too)
+        if (st.dual == 0u) {
+            a = rise_held(a, built);
+        }
     }
     // a Normal second's share of the colour: where the first laid little, the second shows in the
     // stroke's own colour (none for any other dual mode)
@@ -722,7 +884,7 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
         out = vec4<f32>(min(added.rgb, vec3<f32>(added.a)), added.a);
     }
     if (st.laid_apart == 2u && laid > 0.0) {
-        // what a second adds past that is laid as plain paint, as it is where none was laid at all
+        // the paint as laid, scaled to how much of it shows with the second (as far as one pixel can)
         let scale = min(a / laid, LAID_MOST_SCALE);
         var kept = over_layer(was, grained_at(p), scale);
         // (the paint as it was laid, for a Normal second)
@@ -738,7 +900,14 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
             kept = over_layer(was, burning, laid * scale);
             first = over_layer(was, burning, laid);
         }
-        out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
+        out = kept;
+        let rest = max(a - laid * scale, 0.0);
+        if (rest > 0.0) {
+            // what the second adds past that: more of the paint as it was laid round about
+            let past = laid_space(kept) + (laid_paint_near(p) - laid_space(was)) * rest;
+            out = clamp(select(past, from_mix(past), st.luminance == 2u), vec4<f32>(0.0), vec4<f32>(1.0));
+            out = vec4<f32>(min(out.rgb, vec3<f32>(out.a)), out.a);
+        }
         if (toward > 0.0) {
             // a Normal second: the paint as laid turned toward the stroke's own colour as far as
             // the second shows where the first laid little, then shown as far as the two together

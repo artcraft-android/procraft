@@ -22,11 +22,104 @@ pub const PANEL_GLYPH: Themed = Themed(0xFFC8C8C8, 0xFF393939);
 pub const CHEVRON_DISC: Themed = Themed(0xFF4C4C4C, 0xFFCFCFCF);
 pub const CHEVRON_GLYPH: Themed = Themed(0xFF2E2E2E, 0xFFE6E6E6);
 
+/// The strip a floating panel's window adds over the panel (its grabber and Close), and under it
+/// (its corner, which sizes it).
+pub const FLOATING_TOP: f32 = 24.0;
+pub const FLOATING_BOTTOM: f32 = 20.0;
+const GRABBER: Themed = Themed(0x7AC6C6C6, 0xFFB0B0B0);
+/// Close: a disc of white over the window with its cross cut out of it (drawn darker).
+const CLOSE_DISC: u32 = 0x26FFFFFF;
+const CLOSE_CROSS: u32 = 0x4D000000;
+
+/// Where a panel shows: hanging from its button (where the button shows, in the panels' space),
+/// or floating in a window of its own at this rect (in its own space, see
+/// [`crate::floating_panels`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hang {
+    Button(Rect),
+    Floating(Rect),
+}
+
+/// What a floating panel's strips had done to them this frame: the grabber strip pressed (its
+/// window moves with the pointer from there), the corner pressed (it is sized), Close tapped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FloatingChrome {
+    pub moving: bool,
+    pub sizing: bool,
+    pub closed: bool,
+}
+
+/// The rect a panel floating in `window` is laid out in as a panel hanging from a button is, its
+/// arrow's room above it: its body under the window's top strip, down to its bottom strip.
+pub fn floating_rect(window: Rect) -> Rect {
+    Rect::from_min_max(
+        pos2(window.left(), window.top() + FLOATING_TOP - ARROW_HEIGHT),
+        pos2(window.right(), window.bottom() - FLOATING_BOTTOM),
+    )
+}
+
+/// The area a panel floating in `window` is drawn in: over the canvas, under the panels hanging
+/// from the bar, kept to the window and clipped to it as the panel measures it.
+pub fn floating_area(ctx: &egui::Context, id: egui::Id, window: Rect) -> egui::Area {
+    egui::Area::new(id).fixed_pos(window.min).order(egui::Order::Middle).constrain_to(screen(ctx))
+}
+
+/// Draws a floating panel's window at `window` (no arrow): the shadow round it, then its frosted
+/// body, whose blur goes into `backdrops`; its layer shown as its space does.
+pub fn floating_panel_frame(ui: &Ui, look: &mut Look, slot: &'static str, window: Rect, backdrops: &mut Vec<f32>) {
+    let to_window = to_window(ui.ctx());
+    ui.ctx().set_transform_layer(ui.layer_id(), to_window);
+    floating_frame(ui, look, slot, window, to_window.scaling, backdrops);
+}
+
+/// A floating panel's strips at `window`: the grabber in the middle of the top one (the whole strip
+/// moves the window) and Close at its right, and two short lines across the lower right corner,
+/// which sizes it. What was done to them.
+pub fn floating_chrome(ui: &Ui, window: Rect) -> FloatingChrome {
+    let grabber = Rect::from_center_size(pos2(window.center().x, window.top() + 12.0), egui::vec2(40.0, 4.0));
+    ui.painter().rect_filled(grabber, 2, argb(GRABBER));
+    let strip = Rect::from_min_size(window.min, egui::vec2(window.width(), FLOATING_TOP));
+    let moving = ui.interact(strip, ui.scope_id().with("floating strip"), Sense::drag()).drag_started();
+    let close = Rect::from_center_size(pos2(window.right() - 14.0 - 20.0, window.top() + 22.0), egui::vec2(40.0, 40.0));
+    let c = close.center();
+    ui.painter().circle_filled(c, 8.5, argb(CLOSE_DISC));
+    let stroke = egui::Stroke::new(1.3, argb(CLOSE_CROSS));
+    for (a, b) in [(egui::vec2(-3.2, -3.2), egui::vec2(3.2, 3.2)), (egui::vec2(3.2, -3.2), egui::vec2(-3.2, 3.2))] {
+        ui.painter().line_segment([c + a, c + b], stroke);
+    }
+    let closed = ui.interact(close, ui.scope_id().with("floating close"), Sense::click()).clicked();
+    let corner = Rect::from_min_size(
+        pos2(window.right() - 6.0 - 36.0, window.bottom() - FLOATING_BOTTOM),
+        egui::vec2(36.0, FLOATING_BOTTOM),
+    );
+    let end = pos2(corner.right() - 12.0, corner.bottom() - 6.0);
+    let line = egui::Stroke::new(2.0, argb(GRABBER));
+    for reach in [10.0, 5.0] {
+        ui.painter().line_segment([end - egui::vec2(reach, 0.0), end - egui::vec2(0.0, reach)], line);
+    }
+    let sizing = ui.interact(corner, ui.scope_id().with("floating corner"), Sense::drag()).drag_started();
+    FloatingChrome { moving, sizing, closed }
+}
+
+/// A panel hanging from its button, while a plugin lets it float: the grabber at the top of its
+/// `body`, and while it is dragged, where the press began and where the pointer is (the window's
+/// points).
+pub fn undock_grabber(ui: &Ui, body: Rect) -> Option<(Pos2, Pos2)> {
+    let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), egui::vec2(40.0, 4.0));
+    ui.painter().rect_filled(grabber, 2, argb(GRABBER));
+    // (narrower than the colour panel's: clear of a title beside it)
+    let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), egui::vec2(100.0, 30.0));
+    let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
+    let (pointer, from) = (held.interact_pointer_pos()?, ui.input(|i| i.pointer.press_origin())?);
+    held.dragged().then(|| (from, to_window(ui.ctx()) * pointer))
+}
+
 /// Where the side bar is, for the panels to keep clear of: whether it shows, and on the right.
 #[derive(Clone, Copy, Default)]
 struct SideBarPlace {
     shown: bool,
     right: bool,
+    centre: f32,
 }
 
 /// How big each part of the interface shows next to the rest of it this frame, as the plugins say
@@ -115,16 +208,19 @@ pub fn area(ctx: &egui::Context, id: egui::Id, rect: Rect) -> egui::Area {
     egui::Area::new(id).fixed_pos(rect.min).order(egui::Order::Foreground).constrain_to(screen(ctx))
 }
 
-/// The side bar shows (or not) on the right (or the left), for the panels placed this frame.
-pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
+/// The side bar shows (or not) on the right (or the left), its centre kept at `centre` (a share of
+/// the window's height), for the panels placed this frame.
+pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool, centre: f32) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right, centre }));
 }
 
 /// Where the side bar shows this frame, if it shows.
 pub fn side_bar_shown_at(ctx: &egui::Context) -> Option<Rect> {
     let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))?;
     let scale = part_scale(ctx, InterfacePart::SideBar);
-    side.shown.then(|| crate::chrome::fit_side_bar(ctx.content_rect(), side.right, scale, bar_shown(ctx)).shown())
+    side.shown.then(|| {
+        crate::chrome::fit_side_bar(ctx.content_rect(), side.right, scale, bar_shown(ctx), side.centre).shown()
+    })
 }
 
 /// Where a panel `width` wide goes, hanging from a button centred at `button_x`: its left edge and
@@ -135,9 +231,11 @@ pub fn place(ctx: &egui::Context, width: f32, button_x: f32) -> (f32, f32) {
     let to_window = to_window(ctx);
     let (k, x) = (to_window.scaling, to_window.translation.x);
     let screen = ctx.content_rect();
-    let side = ctx
-        .data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))
-        .unwrap_or(SideBarPlace { shown: true, right: false });
+    let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place"))).unwrap_or(SideBarPlace {
+        shown: true,
+        right: false,
+        centre: procraft_core::side_bar_first_centre(),
+    });
     let side_bar = pc::SIDE_BAR_WIDTH * part_scale(ctx, InterfacePart::SideBar);
     let clear = if side.shown { side_bar + POPOVER_GAP } else { POPOVER_GAP };
     let (min_left, min_right) = if side.right { (POPOVER_GAP, clear) } else { (clear, POPOVER_GAP) };
@@ -472,7 +570,7 @@ mod tests {
             for side in [1.0, 1.5] {
                 put_part_scales(ctx, [1.0, 1.0, side, 1.0, 1.0]);
                 for right in [false, true] {
-                    side_bar_at(ctx, true, right);
+                    side_bar_at(ctx, true, right, procraft_core::side_bar_first_centre());
                     for scale in [0.5, 1.0, 1.5] {
                         let space = PanelSpace::new(window, pc::BAR_HEIGHT, scale);
                         drawing_panel(ctx, Some(space));

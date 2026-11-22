@@ -9,6 +9,7 @@ mod canvas;
 mod compiler;
 mod kept;
 mod lighting;
+mod placed;
 mod scene;
 mod sphere;
 
@@ -18,11 +19,12 @@ use std::sync::{Arc, OnceLock};
 pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode, LiquifyStamp,
-    MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke,
-    SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
-    TipKind, most_resident, read_texture, start_reading, textures_bytes,
+    Backdrop, Canvas, DisplayLut, FillPreview, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode,
+    LiquifyStamp, MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT,
+    SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
+    Thumbnail, TipKind, VEIL_GRID, VeilCell, VeilCells, most_resident, read_texture, start_reading, textures_bytes,
 };
+pub use canvas::{CanvasPaper, GREY_LOOK, ViewLook};
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{
@@ -54,6 +56,54 @@ pub(crate) fn textures_uncompressed() -> bool {
 /// What a panic said (its message, when it gave one as text).
 pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("")
+}
+
+/// Whether a wait on the GPU that failed has been told in the log: only the first is.
+static WAIT_FAILED_TOLD: AtomicBool = AtomicBool::new(false);
+
+/// Polls `device` as `how` says (waiting for what was sent to it, or not), failing soft: wgpu's own
+/// poll panics where the device is lost or out of memory (errors it can't return), which here is
+/// [`GpuError::Lost`], and any other failure [`GpuError::Failed`], the first of them logged. A wait
+/// that runs out of time fails too, as nothing wrong: not logged. A wait without end goes in slices
+/// (see [`WAIT_SLICE`]).
+pub fn poll(device: &wgpu::Device, how: wgpu::PollType) -> Result<wgpu::PollStatus, GpuError> {
+    let submission_index = match how {
+        wgpu::PollType::Wait { submission_index, timeout: None } => submission_index,
+        how => return polled(|| device.poll(how)),
+    };
+    loop {
+        let slice = wgpu::PollType::Wait { submission_index: submission_index.clone(), timeout: Some(WAIT_SLICE) };
+        let polled_now = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device.poll(slice)));
+        if !matches!(polled_now, Ok(Err(wgpu::PollError::Timeout))) {
+            return told(polled_now);
+        }
+        // the context let go a moment, for a thread waiting on it to take it
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// The longest a wait on the GPU holds it at once: on OpenGL a wait holds the one context the whole
+/// time, and wgpu panics in any other thread kept from it for a second (the window's frame, as an
+/// export waited for a big canvas to be read back). Between slices the context is let go.
+const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// [`poll`] with the poll given, as wgpu's might go.
+fn polled(poll: impl FnOnce() -> Result<wgpu::PollStatus, wgpu::PollError>) -> Result<wgpu::PollStatus, GpuError> {
+    told(std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)))
+}
+
+/// What a poll came to, as [`poll`] gives it, the first failure logged.
+fn told(polled: std::thread::Result<Result<wgpu::PollStatus, wgpu::PollError>>) -> Result<wgpu::PollStatus, GpuError> {
+    let (error, why) = match polled {
+        Ok(Ok(status)) => return Ok(status),
+        Ok(Err(wgpu::PollError::Timeout)) => return Err(GpuError::Failed("the GPU took too long".to_owned())),
+        Ok(Err(e)) => (GpuError::Failed(format!("waiting on the GPU: {e}")), e.to_string()),
+        Err(panic) => (GpuError::Lost, panic_message(panic.as_ref()).to_owned()),
+    };
+    if !WAIT_FAILED_TOLD.swap(true, Ordering::Relaxed) {
+        log::error!("waiting on the GPU failed ({why}); later failures aren't logged");
+    }
+    Err(error)
 }
 
 /// The graphics APIs in `backends` by name ("Vulkan", "Direct3D 12", "OpenGL", ...).
@@ -181,6 +231,9 @@ pub struct Gpu {
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
     /// Made as an old GPU's (see [`Gpu::headless_old`]).
     old: bool,
+    /// Whether its copies are made as Direct3D 12 without unrestricted copy pitches makes them
+    /// (see [`Gpu::emulate_placed_copies`]).
+    placed: Arc<placed::Placed>,
 }
 
 /// Elsewhere there's no Direct3D 12 to choose a shader compiler for.
@@ -268,9 +321,16 @@ impl Gpu {
     /// staged in are let go.
     pub fn flush(&self) {
         self.queue.submit(std::iter::empty());
-        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
-            log::error!("flushing uploads: {e}");
+        let _ = self.wait();
+    }
+
+    /// Waits for everything sent to the device; an error (logged once) if the device is lost or
+    /// the wait fails (see [`poll`]), never a panic.
+    pub fn wait(&self) -> Result<(), GpuError> {
+        if self.is_lost() {
+            return Err(GpuError::Lost);
         }
+        poll(&self.device, wgpu::PollType::wait_indefinitely()).map(|_| ())
     }
 
     /// A device for offscreen work (tests, exports), from the first instance that makes one. With
@@ -288,7 +348,20 @@ impl Gpu {
     #[doc(hidden)]
     pub fn headless_old() -> Result<Gpu, GpuError> {
         let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
-        Gpu::create(instance, None, true)
+        Gpu::create(instance, None, true, false)
+    }
+
+    /// [`Gpu::headless_old`] on the system's software GPU (Direct3D 12's WARP, Vulkan's lavapipe),
+    /// where it has one: a GPU as slow as an old phone's, for testing what waits on the GPU.
+    #[doc(hidden)]
+    pub fn headless_software_old() -> Result<Gpu, GpuError> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::PRIMARY;
+        let gpu = Gpu::create(wgpu::Instance::new(with_compiler(desc)), None, true, true)?;
+        if gpu.adapter.get_info().device_type != wgpu::DeviceType::Cpu {
+            return Err(GpuError::NoAdapter("no software GPU".to_owned()));
+        }
+        Ok(gpu)
     }
 
     /// The app's device, the canvases' pipelines made: from the first instance that makes one
@@ -330,7 +403,7 @@ impl Gpu {
             let last = tries + 1 >= count;
             trying(backend);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Gpu::create(instance, None, false).map(|gpu| {
+                Gpu::create(instance, None, false, false).map(|gpu| {
                     let taken = last || fine(&gpu);
                     (gpu, taken)
                 })
@@ -348,10 +421,17 @@ impl Gpu {
 
     /// A device that can present to `surface` (made from `instance`).
     pub fn for_surface(instance: wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Gpu, GpuError> {
-        Gpu::create(instance, Some(surface), false)
+        Gpu::create(instance, Some(surface), false, false)
     }
 
-    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, old: bool) -> Result<Gpu, GpuError> {
+    /// A device from `instance` (for `surface`), held to an old GPU's limits if `old`, on the
+    /// software GPU if `software`.
+    fn create(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        old: bool,
+        software: bool,
+    ) -> Result<Gpu, GpuError> {
         // a driver's own description can run over several lines: one line in the log
         fn one_line(text: &str) -> String {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -376,7 +456,7 @@ impl Gpu {
             // the faster GPU of a laptop's two, unless `WGPU_POWER_PREF` says (`low`: to try the
             // other when one fails or lags)
             power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance),
-            force_fallback_adapter: false,
+            force_fallback_adapter: software,
             compatible_surface: surface,
             apply_limit_buckets: false,
         }))
@@ -441,6 +521,7 @@ impl Gpu {
             kept: Arc::default(),
             readbacks: Arc::default(),
             old,
+            placed: Arc::default(),
         };
         // what an old GPU can't do, and what the canvas does without it (in the shared log)
         for lack in gpu.lacks() {
@@ -465,6 +546,26 @@ impl Gpu {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
+    }
+
+    /// Makes sure `count` readback buffers of `size` bytes or more are kept (see
+    /// [`Gpu::readback_buffer`]), making those missing now: a reader about to start that many
+    /// copies in a hold of whatever guards what it reads makes them before it, so the memory is
+    /// got (and cleared by the system, a large buffer's slowest part) with nothing waiting on it.
+    pub fn keep_readbacks(&self, size: u64, count: usize) {
+        let have = {
+            let kept = self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            kept.iter().filter(|b| b.size() >= size).count()
+        };
+        for _ in have..count {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(buffer);
+        }
     }
 
     /// Lets go of the readback buffers kept for next time (see [`Gpu::readback_buffer`]).
@@ -571,6 +672,13 @@ impl Gpu {
         WEAK.load(Ordering::Relaxed) || weak_gpu(&info.name, info.device_type)
     }
 
+    /// Whether the GPU's memory is the computer's own: an integrated GPU's (a laptop's Intel or
+    /// AMD graphics, a Mac's) or the system's software one. What it holds, the system and every
+    /// other app go without, and its share of it is smaller than a graphics card's own memory.
+    pub fn shares_memory(&self) -> bool {
+        matches!(self.adapter.get_info().device_type, wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu)
+    }
+
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
@@ -640,6 +748,24 @@ mod tests {
         }
     }
 
+    /// A poll panicking, as wgpu's does on a device lost or out of memory, is the device lost; one
+    /// that fails or runs out of time is an error; neither goes on as a panic.
+    #[test]
+    fn a_poll_that_panics_or_fails_is_an_error() {
+        use super::{GpuError, polled};
+        assert!(matches!(polled(|| Ok(wgpu::PollStatus::QueueEmpty)), Ok(wgpu::PollStatus::QueueEmpty)));
+        assert!(matches!(polled(|| panic!("Error in Device::poll: Parent device is lost")), Err(GpuError::Lost)));
+        assert!(matches!(polled(|| Err(wgpu::PollError::Timeout)), Err(GpuError::Failed(_))));
+        assert!(matches!(polled(|| Err(wgpu::PollError::WrongSubmissionIndex(2, 1))), Err(GpuError::Failed(_))));
+        // a device destroyed: waited on, it is lost, then refused at once
+        let Ok(gpu) = super::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        gpu.device.destroy();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu.wait()));
+        assert!(gpu.is_lost());
+        assert!(matches!(gpu.wait(), Err(GpuError::Lost)));
+        gpu.flush();
+    }
+
     #[test]
     fn array_textures_on_opengl_are_never_taken_for_cube_maps() {
         use super::gl_array_layers;
@@ -701,6 +827,73 @@ mod tests {
     }
 
     use super::*;
+
+    /// A wait goes in slices (see [`WAIT_SLICE`]), each letting OpenGL's one context go, and one
+    /// longer than a slice still waits for everything sent: a picture copied back and forth over
+    /// and over is done, and the device has nothing left to do. Another thread's call into the
+    /// GPU meanwhile is timed (on OpenGL one kept from the context a second panics in wgpu).
+    /// `LONG_WAIT_COPIES` (600) says how much work the GPU is given.
+    #[test]
+    fn a_wait_longer_than_its_slices_still_waits_for_everything_sent() {
+        use std::time::{Duration, Instant};
+        let Ok(gpu) = Gpu::headless() else { return };
+        let copies: usize = std::env::var("LONG_WAIT_COPIES").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let size = wgpu::Extent3d { width: 4096, height: 4096, depth_or_array_layers: 1 };
+        let texture = |label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let (a, b) = (texture("a"), texture("b"));
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for _ in 0..copies {
+            encoder.copy_texture_to_texture(a.as_image_copy(), b.as_image_copy(), size);
+            encoder.copy_texture_to_texture(b.as_image_copy(), a.as_image_copy(), size);
+        }
+        let sent = Instant::now();
+        gpu.queue.submit([encoder.finish()]);
+        let submitted = sent.elapsed();
+        let waiting = {
+            let gpu = gpu.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let done = gpu.wait();
+                (started.elapsed(), done.is_ok())
+            })
+        };
+        let mut longest = Duration::ZERO;
+        while !waiting.is_finished() {
+            let started = Instant::now();
+            let _ = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("meanwhile"),
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            longest = longest.max(started.elapsed());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (waited, done) = waiting.join().unwrap();
+        println!(
+            "{}: sent in {} ms, waited {} ms; a call meanwhile took {} ms at most",
+            gpu.adapter.get_info().name,
+            submitted.as_millis(),
+            waited.as_millis(),
+            longest.as_millis()
+        );
+        assert!(done);
+        // nothing left: the wait didn't end with a slice
+        let left = gpu.device.poll(wgpu::PollType::Poll).unwrap();
+        assert!(left.is_queue_empty(), "{left:?} after the wait");
+        assert_eq!(gpu.errors(), 0);
+    }
 
     #[test]
     fn work_that_fails_on_the_gpu_is_told() {

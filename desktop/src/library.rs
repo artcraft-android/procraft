@@ -14,7 +14,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_any_brushes};
+use procraft_core::{BrushFileReading, BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_brushes_from};
 
 use crate::alert::{Alert, Answer};
 use crate::icons;
@@ -51,6 +51,11 @@ const PREVIEW: (u32, u32) = (530, 162);
 const PREVIEWS_AT_A_TIME: usize = 4;
 /// How often the interface looks for sample strokes drawn while a thread is at them.
 const PREVIEW_LOOK: Duration = Duration::from_millis(16);
+/// How many sample strokes' pictures are kept on the GPU at most (each [`PREVIEW`] big, 343 KB:
+/// 22 MB in all): past it, those out of sight go, the longest unseen first (to come back drawn
+/// already, from the strokes the session keeps). Every brush's, as the library is browsed, came
+/// to 205 MB for the 598 it ships with.
+const PREVIEWS_KEPT: usize = 64;
 /// Menus stay below the top bar; the set's menu sits this far left of it.
 const MENU_TOP: f32 = 57.0;
 const SET_MENU_GAP: f32 = 6.0;
@@ -84,8 +89,11 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
 };
 /// A press moved this far (points) has gone somewhere; held still this long, it shows the brush's
 /// menu (and moved on from there, drags the brush).
-const SLOP: f32 = 8.0;
-const HOLD: Duration = Duration::from_millis(400);
+pub(crate) const SLOP: f32 = 8.0;
+pub(crate) const HOLD: Duration = Duration::from_millis(400);
+/// A dragged brush held this long over a set opens it, to be let go among its brushes (as the
+/// system's own drags do).
+const SPRING_LOAD: Duration = Duration::from_millis(500);
 /// A press slides its brush once this far sideways (points), going this many times further
 /// sideways than up or down: a hand scrolling swings in an arc, and a slide opens onto Delete, so
 /// anything less plainly sideways is left to the list.
@@ -98,15 +106,53 @@ const PINCH_TO_LIBRARIES: f32 = 0.66;
 const PINCH_TO_LIBRARY: f32 = 2.0;
 const PINCH_QUIET: Duration = Duration::from_millis(200);
 
-/// A brush's sample stroke, and whether it runs under the name (which then sits on a dark pill).
+/// A brush's sample stroke, whether it runs under the name (which then sits on a dark pill), and
+/// the frame it was last in sight in.
 struct Preview {
     texture: TextureHandle,
     shaded: bool,
+    seen: u64,
 }
 
 /// A sample stroke drawn on its thread: the brush's, its picture (none if it draws nothing), and
 /// whether it runs under the name.
 type DrawnPreview = ((u32, u32), Option<(egui::ColorImage, bool)>);
+
+/// A brush file to read: where it is, its name, and whether it is taken out once read (one kept
+/// while no canvas was open).
+pub struct BrushFileIn {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub taken: bool,
+}
+
+/// What a plugin's brush engine said of a brush file it had: a title when something went wrong (to
+/// be told with an OK), and its text ("120 brushes imported.").
+pub type ImportNotice = (Option<String>, String);
+
+/// A batch of brush files read: their brushes (none if Cancel stopped it), and what plugins' brush
+/// engines said of them.
+type Imported = (Option<Vec<ReadBrushes>>, Vec<ImportNotice>);
+
+/// What reading a batch of brush files came to: whether any brushes came in, whether to say so, and
+/// what plugins' brush engines said of them.
+pub struct Added {
+    pub any: bool,
+    pub tell: bool,
+    pub notices: Vec<ImportNotice>,
+}
+
+/// A file's size as the import card shows it: "199 MB", "4.2 MB", "380 KB".
+pub fn file_size(bytes: u64) -> String {
+    let mb = bytes as f64 / f64::from(1 << 20);
+    if mb >= 10.0 {
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{} KB", (bytes as f64 / 1024.0).round().max(1.0))
+    }
+}
 
 /// What a press on a brush turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +166,37 @@ enum Way {
     Drag,
     /// Up or down first: the list has it, and scrolls.
     Scroll,
+}
+
+/// The brushes dragged with brush `held`: those `picked` (all of its set) and it, in their order,
+/// when it is one of them (the current brush, `selected`, counts as picked); else it alone.
+fn dragged_together(held: (u32, u32), picked: &[(u32, u32)], selected: bool) -> Vec<(u32, u32)> {
+    if picked.is_empty() || !(selected || picked.contains(&held)) {
+        return vec![held];
+    }
+    let mut going: Vec<(u32, u32)> = picked.iter().copied().filter(|p| p.0 == held.0).collect();
+    if !going.contains(&held) {
+        going.push(held);
+    }
+    going.sort_unstable();
+    going
+}
+
+/// Where brushes `moving` (all of one set) dragged together go, let go at `at`: onto another set
+/// of `sets` (by place), to its top; onto one of `brushes` (by place) not among them, to its place;
+/// nowhere over their own set, over one of them, or over neither.
+fn drop_place(
+    moving: &[(u32, u32)],
+    at: Pos2,
+    sets: &[(usize, Rect)],
+    brushes: &[((u32, u32), Rect)],
+) -> Option<(u32, u32)> {
+    let own = moving.first()?.0;
+    if let Some(&(to, _)) = sets.iter().find(|(_, r)| r.contains(at)) {
+        let to = u32::try_from(to).ok()?;
+        return (to != own).then_some((to, 0));
+    }
+    brushes.iter().find(|(_, r)| r.contains(at)).map(|(k, _)| *k).filter(|k| !moving.contains(k))
 }
 
 /// What a press on a brush that has moved `d` (points) from where it went down is, once it can be
@@ -185,6 +262,12 @@ enum Deleting {
 
 #[derive(Default)]
 pub struct Library {
+    /// Floating in a window of its own: what its strips had done to them this frame.
+    pub chrome: panel::FloatingChrome,
+    /// Hanging from its button, whether a plugin lets it float (its grabber then shows), and while
+    /// the grabber is dragged, where the press began and where the pointer is (the window's points).
+    pub floats: bool,
+    pub undock: Option<(egui::Pos2, egui::Pos2)>,
     /// The set shown, once one is tapped (else the current brush's).
     shown_set: Option<usize>,
     /// The Recent set is shown instead (the brushes last painted with, and those pinned there);
@@ -193,6 +276,8 @@ pub struct Library {
     recent_menu: Menu,
     found: Option<(u32, u32)>,
     previews: HashMap<(u32, u32), Option<Preview>>,
+    /// The frames shown so far, by which the sample strokes are seen.
+    frames: u64,
     /// The brushes in sight without a sample stroke yet, and those being drawn on a thread of
     /// their own (the GPU takes a while over each: the list isn't held up for it).
     wanted: Vec<((u32, u32), String)>,
@@ -241,11 +326,19 @@ pub struct Library {
     swiped: Option<(u32, u32)>,
     /// The brushes of the shown set picked by sliding them right.
     picked: Vec<(u32, u32)>,
+    /// The brushes a dragged one takes with it (it among them, those picked in its set), in their
+    /// order, and the dragged cell's size (its row may go as another set opens); the set it is
+    /// over, and since when (held there a moment, it opens).
+    dragged_with: Vec<(u32, u32)>,
+    dragged_size: Vec2,
+    spring: Option<(usize, Instant)>,
     /// How far the brushes list is scrolled.
     list_at: f32,
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
     set_rects: Vec<(usize, Rect)>,
     brush_rects: Vec<((u32, u32), Rect)>,
+    /// The brush shown highlighted last frame: the one in use, where it is listed.
+    highlighted: Option<(u32, u32)>,
     /// The library changed: the app keeps it; its sample strokes are drawn again next frame (not
     /// dropped in the middle of one that shows them).
     pub changed: bool,
@@ -253,18 +346,42 @@ pub struct Library {
     /// The studio asked for: on the brush now chosen, or on one just made (Cancel throws it away).
     pub studio: Option<Option<(u32, u32)>>,
     /// Brush files read on threads of their own (another app's big ones take a while): each
-    /// batch's brushes come back (a file that held none left out), and whether to say that they
-    /// came in.
-    importing: Vec<(std::sync::mpsc::Receiver<Vec<ReadBrushes>>, bool)>,
+    /// batch's brushes come back (a file that held none left out; none at all if Cancel stopped
+    /// it) with what plugins' brush engines said of them, and whether to say that they came in.
+    importing: Vec<(std::sync::mpsc::Receiver<Imported>, bool)>,
+    /// A brush file picked from a "+" menu, to be read (with the import card, which the app
+    /// shows), and whether to say that its brushes came in.
+    picked_file: Option<(std::path::PathBuf, String, bool)>,
     /// The search: what is typed, whether its field has the keys, whether it has come down into
     /// sight, and whether the sets and the brushes were at their tops last frame.
     query: String,
     searching: bool,
     search_down: bool,
     lists_top: (bool, bool),
+    /// What the sample strokes are tinted with as a plugin colours them (each brush's, then the
+    /// brush in use's), as this frame began; none, as the interface draws them.
+    tints: [Option<Color32>; 2],
+}
+
+/// A colour (0xRRGGBB) to draw.
+pub(crate) fn opaque(rgb: u32) -> Color32 {
+    let [_, r, g, b] = rgb.to_be_bytes();
+    Color32::from_rgb(r, g, b)
 }
 
 impl Library {
+    /// The tint of a sample stroke on a row (`selected`: the brush in use's, on the accent), as a
+    /// plugin colours it, or as the interface draws it: white, black on the light interface's
+    /// rows.
+    pub(crate) fn tint(&self, selected: bool) -> Color32 {
+        let [each, in_use] = self.tints;
+        match if selected { in_use } else { each } {
+            Some(tint) => tint,
+            None if crate::look::light() && !selected => Color32::BLACK,
+            None => Color32::WHITE,
+        }
+    }
+
     /// The tool changed: the library shows its brush's set again.
     pub fn tool_changed(&mut self) {
         self.shown_set = None;
@@ -283,31 +400,88 @@ impl Library {
             || self.card_menu.is_open()
     }
 
-    /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
-    /// library once read (`added`). `tell`: say that they came in (else only that they held none).
-    pub fn add_brushes(&mut self, session: &CanvasSession, files: Vec<(Vec<u8>, String)>, tell: bool) {
+    /// Brush files read where they are on a thread of their own (a brush, set or library file a
+    /// brush at a time, never held whole), `card` showing how far it has come (its Cancel stops
+    /// it) unless an export has it; their brushes added to the library once read (`added`).
+    /// `tell`: say that they came in (else only that they held none).
+    pub fn add_brushes(
+        &mut self,
+        session: &CanvasSession,
+        files: Vec<BrushFileIn>,
+        tell: bool,
+        card: &mut crate::export_card::ExportCard,
+    ) {
         if files.is_empty() {
             return;
         }
         let (done, importing) = std::sync::mpsc::channel();
-        // plugins' brush engines make theirs of the files there too
+        // plugins' brush engines make theirs of the files there too, with what an import may take;
+        // the card says so while they do, with the file's name and size, its pie how much of the
+        // file they have read
         let engines = session.brush_engines();
+        let reading = BrushFileReading::new();
+        let on = Arc::new(std::sync::Mutex::new(String::new()));
+        let (shown, named) = (Arc::clone(&reading), Arc::clone(&on));
+        let progress = move || match shown.engine_size() {
+            0 => shown.progress(),
+            _ => shown.engine_progress(),
+        };
+        let shown = Arc::clone(&reading);
+        let detail: crate::export_card::Detail = Box::new(move || {
+            let size = shown.engine_size();
+            let name = named.lock().map(|n| n.clone()).unwrap_or_default();
+            (size > 0).then(|| ("Importing brushes", format!("{name} · {}", file_size(size))))
+        });
+        let exporting = (!card.busy()).then(|| card.start_importing(progress, detail));
         std::thread::spawn(move || {
-            let read = files
-                .into_iter()
-                .filter_map(|(bytes, name)| read_any_brushes(&bytes, Some(name)))
-                .map(|read| engines.make(read))
-                .collect();
-            let _ = done.send(read);
+            let (read, notices): (Vec<ReadBrushes>, Vec<ImportNotice>) = std::thread::scope(|scope| {
+                let (files, reading) = (&files, &reading);
+                let worker = scope.spawn(move || {
+                    let (mut read, mut notices) = (Vec::new(), Vec::new());
+                    for file in files {
+                        if let Ok(mut name) = on.lock() {
+                            name.clone_from(&file.name);
+                        }
+                        if let Some(brushes) = read_brushes_from(&file.path, Some(file.name.clone()), reading) {
+                            read.push(engines.make_following(brushes, reading));
+                            notices.extend(reading.notice().map(|text| (reading.notice_title(), text)));
+                        }
+                        if file.taken && !reading.cancelled() {
+                            let _ = std::fs::remove_file(&file.path);
+                        }
+                    }
+                    (read, notices)
+                });
+                // Cancel on the card stops the reading at its next brush
+                while !worker.is_finished() {
+                    if exporting.as_ref().is_some_and(crate::export_card::Exporting::cancelled) {
+                        reading.cancel();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+                worker.join().unwrap_or_default()
+            });
+            let cancelled = reading.cancelled();
+            if let Some(exporting) = &exporting {
+                exporting.ended(!cancelled && !read.is_empty());
+            }
+            let notices = if cancelled { vec![(None, procraft_core::IMPORT_CANCELLED.to_owned())] } else { notices };
+            let _ = done.send(((!cancelled).then_some(read), notices));
         });
         self.importing.push((importing, tell));
+    }
+
+    /// A brush file picked from a "+" menu, waiting to be read, and whether to say that its
+    /// brushes came in.
+    pub fn take_picked_file(&mut self) -> Option<(std::path::PathBuf, String, bool)> {
+        self.picked_file.take()
     }
 
     /// Brushes read meanwhile added to the library, each batch's set shown: whether any came in,
     /// and whether to say so. Not while the library holds brushes or sets by their places (a
     /// menu, a question, a set being renamed, a brush pressed, the studio asked for or open:
     /// `studio_open`), which brushes added at the top would move; they wait for that to end.
-    pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<(bool, bool)> {
+    pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<Added> {
         let holding = self.modal()
             || self.renaming_set.is_some()
             || self.renaming_brush.is_some()
@@ -317,15 +491,23 @@ impl Library {
             return Vec::new();
         }
         let mut came = Vec::new();
+        let mut stopped = Vec::new();
         self.importing.retain(|(r, tell)| match r.try_recv() {
-            Ok(read) => {
-                came.push((read, *tell));
+            Ok((Some(read), notices)) => {
+                came.push((read, *tell, notices));
+                false
+            }
+            // stopped with Cancel: nothing to add, only that
+            Ok((None, notices)) => {
+                stopped.push(Added { any: false, tell: false, notices });
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
-        came.into_iter().map(|(read, tell)| (self.add_read(session, read), tell)).collect()
+        let added =
+            came.into_iter().map(|(read, tell, notices)| Added { any: self.add_read(session, read), tell, notices });
+        added.chain(stopped).collect()
     }
 
     /// Brushes read from files added one after another, each into the set the library shows (or
@@ -356,7 +538,7 @@ impl Library {
     /// they are kept with the rest).
     pub fn finish_importing(&mut self, session: &CanvasSession) {
         for (importing, _) in std::mem::take(&mut self.importing) {
-            if let Ok(read) = importing.recv() {
+            if let Ok((Some(read), _)) = importing.recv() {
                 self.add_read(session, read);
             }
         }
@@ -379,18 +561,33 @@ impl Library {
         ctx: &egui::Context,
         look: &mut Look,
         session: &Arc<CanvasSession>,
-        button: Rect,
+        hang: panel::Hang,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = panel::screen(ctx);
-        let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
-        let rect = Rect::from_min_size(
-            pos2(left, top),
-            vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
-        );
+        let (rect, arrow_x, area) = match hang {
+            panel::Hang::Button(button) => {
+                let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
+                let rect = Rect::from_min_size(
+                    pos2(left, top),
+                    vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
+                );
+                (rect, arrow_x, panel::area(ctx, egui::Id::unique("brush library"), rect))
+            }
+            panel::Hang::Floating(window) => (
+                panel::floating_rect(window),
+                0.0,
+                panel::floating_area(ctx, egui::Id::unique("floating brush library"), window),
+            ),
+        };
         // the cards' strokes forgotten last frame are drawn no more
         self.card_retired.clear();
+        // nor the sample strokes out of sight past those kept (before any is drawn this frame)
+        self.keep_previews_seen(PREVIEWS_KEPT);
+        self.frames += 1;
+        // tinted as the plugins say by the colour now, the strokes themselves drawn once
+        self.tints = [false, true].map(|chosen| session.brush_preview_colour(chosen).map(opaque));
         if std::mem::take(&mut self.stale) {
             self.previews.clear();
             self.drawing = None;
@@ -424,8 +621,28 @@ impl Library {
             .or(lifted.map(|p| p.last))
             .and_then(|at| self.set_rects.iter().find(|(_, r)| r.contains(at)).map(|(i, _)| *i))
             .filter(|i| lifted.is_none_or(|p| p.set != *i));
+        // a dragged brush held over another set a moment opens it
+        match (dragging, over_set) {
+            (Some(_), Some(i)) if i != shown || recent => match self.spring {
+                Some((j, since)) if j == i => {
+                    if since.elapsed() >= SPRING_LOAD {
+                        self.spring = None;
+                        self.shown_set = Some(i);
+                        self.recent = false;
+                    } else {
+                        ctx.request_repaint_after(SPRING_LOAD.saturating_sub(since.elapsed()));
+                    }
+                }
+                _ => {
+                    self.spring = Some((i, Instant::now()));
+                    ctx.request_repaint_after(SPRING_LOAD);
+                }
+            },
+            _ => self.spring = None,
+        }
         let mut set_rects = Vec::new();
         let mut brush_rects = Vec::new();
+        let mut highlighted = None;
         let mut plus = Rect::NOTHING;
         let mut lists = Rect::NOTHING;
         let mut set_tapped = None;
@@ -434,10 +651,20 @@ impl Library {
         let mut brush_tapped = None;
         let mut swipe_chose = None;
         let mut title_row = Rect::NOTHING;
-        panel::area(ctx, egui::Id::unique("brush library"), rect).show(ctx, |ui| {
+        area.show(ctx, |ui| {
             // nothing under the panel takes a touch
-            ui.allocate_rect(rect, Sense::click());
-            panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
+            match hang {
+                panel::Hang::Button(_) => {
+                    ui.allocate_rect(rect, Sense::click());
+                    panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
+                    self.undock = if self.floats { panel::undock_grabber(ui, panel::body(rect)) } else { None };
+                }
+                panel::Hang::Floating(window) => {
+                    ui.allocate_rect(window, Sense::click());
+                    panel::floating_panel_frame(ui, look, "floating library frame", window, backdrops);
+                    self.chrome = panel::floating_chrome(ui, window);
+                }
+            }
             let body = panel::body(rect);
             // the library in use's name (typed over while it is renamed), or every library's
             let name = libraries.get(place).map_or("Brush library", |l| l.name.as_str());
@@ -600,12 +827,13 @@ impl Library {
                                 .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
                                 .unwrap_or_default()
                         };
-                        let chosen = library.get(shown).and_then(|set| set.chosen);
                         for (b, pinned) in listed {
-                            // the current brush, or the brush last chosen in this set (in the
-                            // Recent set the current brush alone)
-                            let selected = (b.set, b.index) == (current.set, current.index)
-                                || (!recent && chosen == Some(b.index));
+                            // the brush in use, alone: a set opened brings back its own last
+                            // choice as the brush, so another set's choice never shows chosen
+                            let selected = (b.set, b.index) == (current.set, current.index);
+                            if selected {
+                                highlighted = Some((b.set, b.index));
+                            }
                             let (response, cell) = self.brush_row(ui, look, session, b, selected, pinned);
                             // a brush found from the Recent set is scrolled to in its own
                             if self.found == Some((b.set, b.index)) {
@@ -634,17 +862,19 @@ impl Library {
             if let Some(p) = dragging
                 && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
             {
-                let size = self
-                    .brush_rects
-                    .iter()
-                    .find(|(k, _)| *k == p.key)
-                    .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
-                let at = Rect::from_min_size(p.last - p.grab, size);
+                let at = Rect::from_min_size(p.last - p.grab, self.dragged_size);
                 let painter = ui.painter_at(lists);
                 painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
                 self.preview_in(&painter, (b.set, b.index), at, true);
                 let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
                 painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
+                // several going together: how many
+                if self.dragged_with.len() > 1 {
+                    let badge = pos2(at.right() - 20.0, at.top() + 20.0);
+                    painter.circle_filled(badge, 12.0, Color32::WHITE);
+                    let count = self.dragged_with.len().to_string();
+                    text(&painter, badge, Align2::CENTER_CENTER, &count, 13.0, Weight::SemiBold, argb(pc::ACCENT));
+                }
                 ctx.request_repaint();
             }
             // and the lifted set
@@ -669,6 +899,7 @@ impl Library {
         });
         self.set_rects = set_rects;
         self.brush_rects = brush_rects;
+        self.highlighted = highlighted;
         self.draw_previews(ctx, session);
         self.follow_press(ctx, session);
         // a set let go after it was lifted was dragged, not tapped
@@ -683,6 +914,11 @@ impl Library {
             } else {
                 self.shown_set = Some(i);
                 self.recent = false;
+                // the brush last chosen in it becomes the one in use, as it shows highlighted
+                if let Some(b) = session.brush_set_choice(i as u32) {
+                    session.select_brush(b.set, b.index);
+                    self.changed = true;
+                }
             }
         }
         if recent_tapped {
@@ -702,7 +938,7 @@ impl Library {
             } else {
                 session.select_brush(key.0, key.1);
                 self.changed = true;
-                // a highlighted brush opens in the studio
+                // the brush in use opens in the studio; another becomes the brush
                 if selected {
                     self.studio = Some(None);
                 }
@@ -772,7 +1008,10 @@ impl Library {
                 Some(Deleting::Brush(..) | Deleting::Library(_)) | None => {}
             }
         }
-        rect
+        match hang {
+            panel::Hang::Button(_) => rect,
+            panel::Hang::Floating(window) => window,
+        }
     }
 
     /// In the place of the `plus`: Delete for the picked brushes, and Combine beside it
@@ -866,9 +1105,9 @@ impl Library {
                 self.library_changed();
             }
             _ => {
-                let Some(file) = crate::files::pick_file("Import brushes") else { return };
+                let Some((path, name)) = crate::files::pick_path("Import brushes") else { return };
                 self.shown_set = Some(shown);
-                self.add_brushes(session, vec![file], false);
+                self.picked_file = Some((path, name, false));
             }
         }
     }
@@ -888,17 +1127,16 @@ impl Library {
         let ink = menu::INK;
         let own = library.get(i).map_or(0, |s| s.icon as usize);
         let set_icon = icons::SET_ICONS.get(own).unwrap_or(&icons::BRUSH_SET);
-        let mut entries = vec![
+        let entries = [
             Entry::Item(&icons::MENU_RENAME, "Rename", ink),
             Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink),
             Entry::More(set_icon, "Customize icon", ink),
             menu::DIVIDER,
             Entry::Item(&icons::MENU_SHARE, "Share", ink),
+            // the only set too: the library is then left with none
+            menu::DIVIDER,
+            Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER),
         ];
-        if library.len() > 1 {
-            entries.push(menu::DIVIDER);
-            entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
-        }
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = panel::screen(ctx);
         let top = (set_rect.center().y - size.y / 2.0)
@@ -1124,6 +1362,14 @@ impl Library {
                     if d.length() > SLOP && !self.recent {
                         p.way = Way::Drag;
                         self.brush_menu.close();
+                        let current = session.current_brush();
+                        let selected = (current.set, current.index) == p.key;
+                        self.dragged_with = dragged_together(p.key, &self.picked, selected);
+                        self.dragged_size = self
+                            .brush_rects
+                            .iter()
+                            .find(|(k, _)| *k == p.key)
+                            .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
                         ctx.request_repaint();
                     }
                 }
@@ -1160,15 +1406,18 @@ impl Library {
                 }
             }
             Way::Drag => {
-                // onto a set: to its top; onto a brush of this set: to its place
-                let (set, index) = p.key;
-                let moved = if let Some(&(to, _)) = self.set_rects.iter().find(|(_, r)| r.contains(at)) {
-                    to as u32 != set && session.move_brush(set, index, to as u32, 0)
-                } else if let Some(&(target, _)) = self.brush_rects.iter().find(|(_, r)| r.contains(at)) {
-                    target != p.key && session.move_brush(set, index, target.0, target.1)
-                } else {
-                    false
-                };
+                // onto another set: to its top; onto a brush of the set shown not among them: to
+                // its place (the first of them taking it, the rest after it)
+                let moving = std::mem::take(&mut self.dragged_with);
+                let moving = if moving.is_empty() { vec![p.key] } else { moving };
+                let place = drop_place(&moving, at, &self.set_rects, &self.brush_rects);
+                let moved = place.is_some_and(|(to, index)| match moving.as_slice() {
+                    [(set, from)] => session.move_brush(*set, *from, to, index),
+                    _ => {
+                        let indices = moving.iter().map(|&(_, i)| i).collect();
+                        session.move_brushes(p.key.0, indices, to, index)
+                    }
+                });
                 if moved {
                     self.library_changed();
                 }
@@ -1427,8 +1676,8 @@ impl Library {
         }
         self.want_preview(ui, b, cell);
         let painter = ui.painter_at(cell);
-        // the dragged brush is faint where it was
-        let faint = self.press.is_some_and(|p| p.key == key && p.way == Way::Drag);
+        // the dragged brushes are faint where they were
+        let faint = self.press.is_some_and(|p| p.way == Way::Drag) && self.dragged_with.contains(&key);
         let alpha = if faint { 0.3 } else { 1.0 };
         let picked = self.picked.contains(&key);
         if selected {
@@ -1493,12 +1742,71 @@ impl Library {
         }
     }
 
-    /// Asks for a brush's sample stroke when it is in sight and not drawn yet.
+    /// Asks for a brush's sample stroke when it is in sight and not drawn yet (one drawn is seen).
     fn want_preview(&mut self, ui: &Ui, b: &BrushInfo, cell: Rect) {
         let key = (b.set, b.index);
-        if !self.previews.contains_key(&key) && ui.is_rect_visible(cell) {
-            self.wanted.push((key, b.name.clone()));
+        if !ui.is_rect_visible(cell) {
+            return;
         }
+        match self.previews.get_mut(&key) {
+            Some(Some(p)) => p.seen = self.frames,
+            Some(None) => {}
+            None => self.wanted.push((key, b.name.clone())),
+        }
+    }
+
+    /// Lets go of the sample strokes' pictures out of sight last frame past `most` kept, the
+    /// longest unseen first: one scrolled back into sight is asked for again (and comes from the
+    /// strokes the session keeps, drawn already).
+    fn keep_previews_seen(&mut self, most: usize) {
+        let held = self.previews.values().filter(|p| p.is_some()).count();
+        if held <= most {
+            return;
+        }
+        // (called before the frame's count goes up: those seen last frame were seen at it)
+        let last = self.frames;
+        let mut unseen: Vec<(u64, (u32, u32))> = self
+            .previews
+            .iter()
+            .filter_map(|(k, p)| p.as_ref().filter(|p| p.seen < last).map(|p| (p.seen, *k)))
+            .collect();
+        unseen.sort_unstable();
+        for (_, key) in unseen.into_iter().take(held - most) {
+            self.previews.remove(&key);
+        }
+    }
+
+    /// Lets go of every sample stroke's picture, the cards' too (the GPU short of memory): those in
+    /// sight are asked for again, and come from the strokes the session keeps. Between frames only,
+    /// as one may draw them.
+    pub fn let_go_of_previews(&mut self) {
+        self.previews.clear();
+        self.card_previews.clear();
+        self.card_retired.clear();
+    }
+
+    /// How many sample strokes' pictures are held.
+    #[cfg(test)]
+    fn previews_held(&self) -> usize {
+        self.previews.values().filter(|p| p.is_some()).count()
+    }
+
+    /// The sample strokes of `brushes` (their places and names) for a plugin's panel, as drawn so
+    /// far: those not drawn yet are drawn on the library's thread, a frame asked for as they come.
+    pub fn panel_strokes(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        brushes: &[((u32, u32), String)],
+    ) -> crate::actions::Strokes {
+        for (key, name) in brushes {
+            if !self.previews.contains_key(key) && !self.wanted.iter().any(|(k, _)| k == key) {
+                self.wanted.push((*key, name.clone()));
+            }
+        }
+        self.draw_previews(ctx, session);
+        let drawn = |(key, _): &((u32, u32), String)| Some((*key, self.previews.get(key)?.as_ref()?.texture.id()));
+        brushes.iter().filter_map(drawn).collect()
     }
 
     /// Takes the sample strokes drawn so far, and has those wanted drawn on a thread of their own.
@@ -1509,7 +1817,7 @@ impl Library {
                     Ok((key, drawn)) => {
                         let preview = drawn.map(|(image, shaded)| {
                             let texture = ctx.load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR);
-                            Preview { texture, shaded }
+                            Preview { texture, shaded, seen: self.frames }
                         });
                         self.previews.insert(key, preview);
                     }
@@ -1670,8 +1978,7 @@ impl Library {
         let k = (at.width() / pw).max(at.height() / ph);
         let shown = Rect::from_center_size(at.center(), vec2(pw * k, ph * k));
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        let tint = if crate::look::light() && !selected { Color32::BLACK } else { Color32::WHITE };
-        painter.image(p.texture.id(), shown, uv, tint);
+        painter.image(p.texture.id(), shown, uv, self.tint(selected));
         p.shaded
     }
 }
@@ -1839,7 +2146,7 @@ mod tests {
             let Finger { ctx, look, library, session, .. } = self;
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
-                library.show(ui.ctx(), look, session, button, &mut Vec::new());
+                library.show(ui.ctx(), look, session, crate::panel::Hang::Button(button), &mut Vec::new());
             });
             output.textures_delta.clear();
         }
@@ -1898,6 +2205,176 @@ mod tests {
         }
     }
 
+    /// The library shown in a window of a laptop's size with its sample strokes drawn on the GPU
+    /// (one device) and shown through egui-wgpu as the window shows them (another, whose memory is
+    /// the interface's alone), scrolled by a finger.
+    struct Shown {
+        ctx: egui::Context,
+        look: Look,
+        library: Library,
+        session: Arc<CanvasSession>,
+        showing: procraft_gpu::Gpu,
+        renderer: egui_wgpu::Renderer,
+        time: f64,
+    }
+
+    impl Shown {
+        /// The window's height (points), as a laptop's of 1080 pixels at 1.25 pixels a point.
+        const HEIGHT: f32 = 820.0;
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1500.0, Self::HEIGHT))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Shown { ctx, look, library, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
+                library.show(ui.ctx(), look, session, crate::panel::Hang::Button(button), &mut Vec::new());
+            });
+            let (device, queue) = (&self.showing.device, &self.showing.queue);
+            for (id, deltas) in &output.textures_delta.set {
+                for delta in deltas {
+                    self.renderer.update_texture(device, queue, *id, delta);
+                }
+            }
+            for id in &output.textures_delta.free {
+                self.renderer.free_texture(id);
+            }
+            output.textures_delta.clear();
+        }
+
+        /// Frames until every sample stroke in sight is drawn and shown, and the list is still.
+        fn settle(&mut self) {
+            let mut at = f32::NAN;
+            for _ in 0..20_000 {
+                self.frame(Vec::new());
+                let still = self.library.list_at == at;
+                at = self.library.list_at;
+                if still && self.library.drawing.is_none() && self.library.wanted.is_empty() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// A finger drags the brushes up the list by `by` points, slowly (no fling).
+        fn drag_up(&mut self, by: f32) {
+            let low = Self::HEIGHT - 200.0;
+            let Some(from) = self.library.brush_rects.iter().map(|(_, r)| r.center()).find(|c| c.y > low) else {
+                return;
+            };
+            let touch =
+                |phase, pos| Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos, force: None };
+            let press = |pos, pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![touch(TouchPhase::Start, from), Event::PointerMoved(from), press(from, true)]);
+            let steps = (by / 8.0).ceil() as usize;
+            let mut at = from;
+            for _ in 0..steps {
+                at.y -= 8.0;
+                self.frame(vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+            }
+            // held still a moment, so it isn't flicked on
+            for _ in 0..10 {
+                self.frame(vec![touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+            }
+            self.frame(vec![touch(TouchPhase::End, at), press(at, false)]);
+        }
+
+        /// What the interface's device holds, bytes.
+        fn held(&self) -> u64 {
+            self.showing.flush();
+            self.showing.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        }
+    }
+
+    /// Every set of the library as it ships browsed, scrolled from its top to its end, each brush's
+    /// sample stroke drawn and shown in turn: the pictures held on the GPU stay within those kept
+    /// ([`PREVIEWS_KEPT`]), not every brush's (all 598 of them came to 205 MB, which a laptop's
+    /// integrated GPU runs out of beside a canvas). `PREVIEWS_MEASURED=1` says what was held after
+    /// each set.
+    #[test]
+    fn browsing_every_set_holds_few_sample_strokes_on_the_gpu() {
+        use procraft_gpu::{Gpu, wgpu};
+        let (Ok(drawing), Ok(showing)) = (Gpu::headless(), Gpu::headless()) else {
+            return eprintln!("skipped: no GPU");
+        };
+        let session = CanvasSession::new(64, 64);
+        session.use_gpu(drawing.clone());
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let renderer = egui_wgpu::Renderer::new(&showing.device, format, egui_wgpu::RendererOptions::default());
+        let (ctx, look, library) = (egui::Context::default(), Look::default(), Library::default());
+        let mut shown = Shown { ctx, look, library, session, showing, renderer, time: 0.0 };
+        // laid out first, its fonts' pictures made: what the strokes hold is counted from there
+        shown.frame(Vec::new());
+        shown.frame(Vec::new());
+        let before = shown.held();
+        let drawn = |gpu: &Gpu| {
+            gpu.flush();
+            gpu.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        };
+        let drawing_before = drawn(&drawing);
+        let sets = shown.session.brush_library();
+        let measured = std::env::var_os("PREVIEWS_MEASURED").is_some();
+        let (mut most, mut seen) = (0, std::collections::HashSet::new());
+        for (i, set) in sets.iter().enumerate() {
+            shown.library.shown_set = Some(i);
+            shown.settle();
+            // scrolled down to the set's end, most of a window's height at a time
+            loop {
+                let at = shown.library.list_at;
+                seen.extend(shown.library.previews.iter().filter(|(_, p)| p.is_some()).map(|(k, _)| *k));
+                most = most.max(shown.library.previews_held());
+                shown.drag_up(Shown::HEIGHT - 300.0);
+                shown.settle();
+                if shown.library.list_at <= at + 1.0 {
+                    break;
+                }
+            }
+            seen.extend(shown.library.previews.iter().filter(|(_, p)| p.is_some()).map(|(k, _)| *k));
+            most = most.max(shown.library.previews_held());
+            if measured {
+                let mb = shown.held().saturating_sub(before) as f64 / f64::from(1 << 20);
+                let held = shown.library.previews_held();
+                println!("{:<20} {:3} brushes: {held:3} pictures held, {mb:5.1} MB", set.name, set.brushes.len());
+            }
+        }
+        let brushes: usize = sets.iter().map(|s| s.brushes.len()).sum();
+        let picture = u64::from(PREVIEW.0 * PREVIEW.1 * 4);
+        let bytes = shown.held().saturating_sub(before);
+        let drawing_bytes = drawn(&drawing).saturating_sub(drawing_before);
+        println!("the strokes' own device holds {:.1} MB more", drawing_bytes as f64 / f64::from(1 << 20));
+        println!(
+            "{} of {brushes} brushes' strokes shown in {} sets: at most {most} pictures held, {:.1} MB on the GPU after \
+             (every one's would be {:.1} MB)",
+            seen.len(),
+            sets.len(),
+            bytes as f64 / f64::from(1 << 20),
+            (seen.len() as u64 * picture) as f64 / f64::from(1 << 20)
+        );
+        // every brush's stroke shown on the way (the window shows each in turn)
+        assert!(seen.len() * 10 >= brushes * 9, "{} of {brushes} brushes' strokes shown", seen.len());
+        // those kept and those in sight at once, which is fewer
+        assert!(most <= PREVIEWS_KEPT + 16, "{most} pictures held");
+        // the pictures kept, half more for the device's alignment, and 16 MB for the meshes' buffers
+        // (34 MB on the PC it was written on; every brush's came to 205); where the device can't
+        // say, nothing to compare
+        let bound = PREVIEWS_KEPT as u64 * picture * 3 / 2 + (16 << 20);
+        assert!(bytes <= bound, "{bytes} bytes held on the GPU, past {bound}");
+        // and the strokes' own device, which draws them all on the one canvas kept for them, holds
+        // as much whatever the number drawn (102 MB there)
+        assert!(drawing_bytes <= 160 << 20, "{drawing_bytes} bytes held drawing the strokes");
+        assert_eq!(drawing.errors() + shown.showing.errors(), 0);
+    }
+
     #[test]
     fn the_brushes_keep_up_with_a_finger_and_carry_on_when_flicked() {
         let mut f = Finger::new();
@@ -1925,6 +2402,31 @@ mod tests {
             f.frame(Vec::new());
         }
         assert!(f.top() < lifted - 10.0, "stopped dead: {} to {}", lifted, f.top());
+    }
+
+    #[test]
+    fn the_sample_strokes_show_in_the_colour_a_plugin_gives_by_the_colour_painted_with() {
+        const ID: &str = "io.github.artcraftandroid.coloured-previews";
+        let dir = std::env::temp_dir().join(format!("procraft-library-tints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        let mut f = Finger::new();
+        f.session.use_plugins(Arc::clone(&plugins));
+        f.session.set_color(1.0, 0.0, 0.0);
+        f.frame(Vec::new());
+        let red = Color32::from_rgb(255, 0, 0);
+        // as the interface draws them with the plugin off (it comes so)
+        assert_ne!(f.library.tint(false), red);
+        assert_eq!(f.library.tint(true), Color32::WHITE);
+        // on: each brush's in the colour painted with, the one in use's white on the accent
+        assert!(plugins.set_on(ID.to_owned(), true));
+        f.frame(Vec::new());
+        assert_eq!((f.library.tint(false), f.library.tint(true)), (red, Color32::WHITE));
+        // the colour changed, the next frame shows it, the strokes themselves not drawn again
+        f.session.set_color(0.0, 0.0, 1.0);
+        f.frame(Vec::new());
+        assert_eq!(f.library.tint(false), Color32::from_rgb(0, 0, 255));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1983,6 +2485,90 @@ mod tests {
         f.up(at);
         assert!(f.top() < start - 50.0, "the list stayed: {} to {}", start, f.top());
         assert!(f.library.swiped.is_none(), "a brush opened on a scroll");
+    }
+
+    #[test]
+    fn a_brush_held_then_moved_onto_another_takes_its_place_and_a_still_hold_shows_the_menu() {
+        let mut f = Finger::new();
+        let from = f.on_a_brush();
+        let (key, cell) = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).copied().unwrap();
+        let name = |f: &Finger, (set, index): (u32, u32)| {
+            f.session.brush_library()[set as usize].brushes[index as usize].name.clone()
+        };
+        let held = name(&f, key);
+        // the brush two places further down, as it shows
+        let (target, onto) = f
+            .library
+            .brush_rects
+            .iter()
+            .find(|(k, r)| k.0 == key.0 && k.1 == key.1 + 2 && r.top() > cell.bottom())
+            .map(|(k, r)| (*k, r.center()))
+            .unwrap();
+        // held still: the menu, and nothing moved
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        assert!(f.library.brush_menu.is_open());
+        // moved on and down onto the other brush, let go there: the menu went, the brush took that place
+        let steps = 6;
+        for i in 1..=steps {
+            f.to(from + (onto - from) * (i as f32 / steps as f32));
+        }
+        assert!(!f.library.brush_menu.is_open());
+        f.up(onto);
+        f.frame(Vec::new());
+        assert_eq!(name(&f, target), held);
+        assert_ne!(name(&f, key), held);
+        assert!(!f.library.brush_menu.is_open());
+    }
+
+    /// Brushes picked go with the one held and dragged; held over a set that isn't shown, the set
+    /// opens, and let go on one of its brushes they take its place there, in their order.
+    #[test]
+    fn picked_brushes_dragged_over_a_set_open_it_and_land_among_its_brushes() {
+        let mut f = Finger::new();
+        let names = |f: &Finger, set: usize| -> Vec<String> {
+            f.session.brush_library()[set].brushes.iter().map(|b| b.name.clone()).collect()
+        };
+        let from = f.on_a_brush();
+        let key = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).map(|(k, _)| *k).unwrap();
+        let other =
+            f.library.brush_rects.iter().find(|(k, _)| k.0 == key.0 && k.1 == key.1 + 1).map(|(k, _)| *k).unwrap();
+        let before = names(&f, key.0 as usize);
+        f.library.picked = vec![other, key];
+        // a set other than this one, closed
+        let (to, over) = f
+            .library
+            .set_rects
+            .iter()
+            .find(|(s, r)| *s != key.0 as usize && (0.0..700.0).contains(&r.center().y))
+            .map(|(s, r)| (*s, r.center()))
+            .unwrap();
+        let theirs = names(&f, to);
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        for i in 1..=6 {
+            f.to(from + (over - from) * (i as f32 / 6.0));
+        }
+        assert_eq!(f.library.dragged_with, vec![key, other]);
+        // held there a moment: it opens, its brushes shown
+        std::thread::sleep(SPRING_LOAD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        f.frame(Vec::new());
+        assert_eq!(f.library.shown_set, Some(to));
+        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 as usize == to));
+        // let go on its second brush: both take its place
+        let onto = f.library.brush_rects.iter().find(|(k, _)| k.1 == 1).map(|(_, r)| r.center()).unwrap();
+        for i in 1..=4 {
+            f.to(over + (onto - over) * (i as f32 / 4.0));
+        }
+        f.up(onto);
+        f.frame(Vec::new());
+        let now = names(&f, to);
+        assert_eq!(now.len(), theirs.len() + 2);
+        assert_eq!(now[1..3], [before[key.1 as usize].clone(), before[other.1 as usize].clone()]);
+        assert_eq!(names(&f, key.0 as usize).len(), before.len() - 2);
     }
 
     #[test]
@@ -2081,6 +2667,80 @@ mod tests {
         assert!(f.library.showing_libraries);
         pinch(&mut f, card, 60.0, 130.0);
         assert!(!f.library.showing_libraries);
+    }
+
+    /// In one set with its brush, another set tapped: the brush last chosen there becomes the one
+    /// in use, and it alone shows highlighted. A tap on another of its brushes makes that the
+    /// brush (no studio); a tap on the brush in use opens the studio.
+    #[test]
+    fn a_set_tapped_brings_back_its_brush_and_a_tap_on_another_there_takes_it() {
+        let mut f = Finger::new();
+        let current = |f: &Finger| (f.session.current_brush().set, f.session.current_brush().index);
+        let set_row = |f: &Finger, set: usize| {
+            f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).expect("the set's row")
+        };
+        let brush_cell = |f: &Finger, key: (u32, u32)| {
+            f.library.brush_rects.iter().find(|(k, _)| *k == key).map(|(_, r)| r.center()).expect("the brush's cell")
+        };
+        let tap = |f: &mut Finger, at: Pos2| {
+            f.down(at);
+            f.up(at);
+            f.frame(Vec::new());
+        };
+        // a brush chosen in set 1, then in set 0, which shows
+        assert!(f.session.select_brush(1, 2));
+        assert!(f.session.select_brush(0, 3));
+        f.library.tool_changed();
+        f.frame(Vec::new());
+        assert_eq!(f.library.highlighted, Some((0, 3)));
+        // set 1 tapped: its brush is the one in use, and the one highlighted
+        let row = set_row(&f, 1);
+        tap(&mut f, row);
+        assert_eq!(current(&f), (1, 2));
+        assert_eq!(f.library.highlighted, Some((1, 2)));
+        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 == 1));
+        // another brush there tapped: it is the brush, and the studio stays shut
+        let other = brush_cell(&f, (1, 0));
+        tap(&mut f, other);
+        assert_eq!(current(&f), (1, 0));
+        assert_eq!(f.library.highlighted, Some((1, 0)));
+        assert!(f.library.studio.is_none());
+        // the brush in use tapped: the studio
+        tap(&mut f, other);
+        assert!(f.library.studio.is_some());
+        f.library.studio = None;
+        // back in set 0, its own again
+        let row = set_row(&f, 0);
+        tap(&mut f, row);
+        assert_eq!(current(&f), (0, 3));
+        assert_eq!(f.library.highlighted, Some((0, 3)));
+    }
+
+    /// A set never chosen in, opened, leaves the brush as it is and shows none highlighted; a tap
+    /// on one of its brushes makes it the brush.
+    #[test]
+    fn a_set_with_no_brush_chosen_shows_none_highlighted_and_a_tap_takes_one() {
+        let mut f = Finger::new();
+        let start = f.session.current_brush();
+        let set = f
+            .library
+            .set_rects
+            .iter()
+            .map(|(s, _)| *s)
+            .find(|&s| s as u32 != start.set && f.session.brush_set_choice(s as u32).is_none())
+            .expect("a set never chosen in");
+        let row = f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).unwrap();
+        f.down(row);
+        f.up(row);
+        f.frame(Vec::new());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (start.set, start.index));
+        assert_eq!(f.library.highlighted, None);
+        let cell = f.library.brush_rects.iter().find(|(k, _)| k.1 == 1).map(|(_, r)| r.center()).unwrap();
+        f.down(cell);
+        f.up(cell);
+        f.frame(Vec::new());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (set as u32, 1));
+        assert!(f.library.studio.is_none());
     }
 
     #[test]

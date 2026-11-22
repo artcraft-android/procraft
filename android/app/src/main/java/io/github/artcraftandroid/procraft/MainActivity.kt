@@ -21,7 +21,10 @@ import io.github.artcraftandroid.procraft.canvas.systemShortcutKeys
 import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.keyPress
+import io.github.artcraftandroid.procraft.canvas.KeysTold
+import io.github.artcraftandroid.procraft.canvas.maybePenKeys
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
+import io.github.artcraftandroid.procraft.canvas.pointerKindOf
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
 
@@ -165,7 +168,8 @@ class MainActivity : ComponentActivity() {
      * as they are.
      */
     override fun dispatchTouchEvent(e: android.view.MotionEvent): Boolean {
-        if (!vm.tapAssistance || e.getToolType(0) != android.view.MotionEvent.TOOL_TYPE_FINGER) return super.dispatchTouchEvent(e)
+        // (a mouse or a touchpad moving the pointer is no finger, though a touchpad's says it is)
+        if (!vm.tapAssistance || pointerKindOf(e, 0) != io.github.artcraftandroid.procraft.core.PointerKind.FINGER) return super.dispatchTouchEvent(e)
         when (e.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
                 heldAt = android.graphics.PointF(e.x, e.y)
@@ -191,6 +195,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val penDoubleTaps = PenDoubleTaps()
+    private val keysTold = KeysTold()
 
     /**
      * A hardware keyboard's shortcuts on the canvas, a tablet's express keys' too (keys no text
@@ -205,6 +210,10 @@ class MainActivity : ComponentActivity() {
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true
+        // any other key a pen sends, told once: what a pen's button gives that isn't taken
+        event.device?.takeIf { penButton == null && maybePenKeys(it.sources or event.source, it.name) && keysTold.isNew(it.id, keyCode) }?.let {
+            AppLog.i("keys", "a key from a pen: ${android.view.KeyEvent.keyCodeToString(keyCode)}, meta 0x%x, from %s (source 0x%x)".format(java.util.Locale.ROOT, event.metaState, it.name, event.source))
+        }
         // typing in a text field (a name, the text tool's words): what the field leaves (Ctrl+J,
         // Alt) is still typing, not the canvas's
         if (typing()) return super.onKeyDown(keyCode, event)

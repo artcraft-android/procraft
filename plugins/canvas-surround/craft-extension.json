@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.canvas-surround",
+  "name": "Canvas surround",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Shows the area round the canvas in a colour you pick, black too, or a picture of your own, in place of the interface's grey.",
+  "compat": { "procraft": { "interface": 11 } },
+  "permissions": [],
+  "hooks": ["interface_colour", "surround_picture"],
+  "controls": [
+    { "key": "hue", "type": "slider", "label": "Hue", "least": 0, "most": 360, "step": 1, "starts": 30, "unit": "°", "live": true },
+    {
+      "key": "saturation", "type": "slider", "label": "Saturation", "least": 0, "most": 1, "step": 0.01, "starts": 0.1,
+      "shown_times": 100, "unit": "%", "live": true
+    },
+    {
+      "key": "brightness", "type": "slider", "label": "Brightness", "least": 0, "most": 1, "step": 0.01, "starts": 0.3,
+      "shown_times": 100, "unit": "%", "live": true
+    },
+    { "key": "own", "type": "switch", "label": "A picture of your own", "starts": false },
+    { "key": "picture", "type": "file", "label": "Picture", "accepts": "picture", "under": "own" }
+  ]
+}

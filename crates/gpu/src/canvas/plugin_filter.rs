@@ -650,7 +650,8 @@ impl Canvas {
         };
         // waits for what was sent; whether it finished and the device stands
         let finished = |gpu: &Gpu| -> Result<(), FilterRun> {
-            let waited = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(PIECE_LIMIT) });
+            let waited =
+                crate::poll(&gpu.device, wgpu::PollType::Wait { submission_index: None, timeout: Some(PIECE_LIMIT) });
             if gpu.is_lost() {
                 return Err(FilterRun::Lost);
             }
@@ -659,7 +660,7 @@ impl Canvas {
 
         // what came before goes first, and however long that takes isn't held against the filter
         self.send_now(gpu, encoder, uniforms);
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = gpu.wait();
         let mut run = || -> Result<Duration, FilterRun> {
             if gpu.is_lost() {
                 return Err(FilterRun::Lost);

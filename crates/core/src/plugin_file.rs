@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 6;
+const INTERFACE: u32 = 12;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -158,14 +158,42 @@ pub(crate) struct Manifest {
 
 /// What a manifest says beyond what its card lists: the switch each control and action comes
 /// under, if any (each by its place: shown, listed and run only while that switch is on), the
-/// filters it lists, and the plugins it takes the place of.
+/// filters it lists, the plugins it takes the place of, and its menu.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Shape {
     pub under: Vec<Option<usize>>,
     pub action_under: Vec<Option<usize>>,
+    /// Where else each control shows, beside the card (interface 8).
+    pub places: Vec<plugins::PluginPlace>,
+    /// The press that flips each switch, and runs each action, while the app's shortcuts leave it
+    /// free (interface 8).
+    pub presses: Vec<Option<crate::KeyCombo>>,
+    pub action_presses: Vec<Option<crate::KeyCombo>>,
+    /// Which controls are kept with each artwork rather than with the plugin (interface 8).
+    pub artwork: Vec<bool>,
     /// None for a plugin with one filter, in `filter.wgsl`.
     pub filters: Vec<ListedFilter>,
     pub replaces: Vec<Replaced>,
+    pub menu: Option<Menu>,
+}
+
+/// A menu a plugin with code has somewhere in the interface, from a button of the app's: where,
+/// and its choices.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Menu {
+    pub place: plugins::PluginMenuPlace,
+    pub choices: Vec<MenuChoice>,
+}
+
+/// One of a menu's choices: what picks it (`<id>.<key>`), its words, its icon (path data on the
+/// icons' grid, as [`crate::plugin_icon::icon_path`] writes it), and the value it gives each control
+/// it sets, by the control's place (a switch 1 or 0).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MenuChoice {
+    pub key: String,
+    pub label: String,
+    pub icon: String,
+    pub sets: Vec<(usize, f32)>,
 }
 
 /// A filter of several a plugin lists: what opens it (`<id>.<key>`), its name under Adjustments,
@@ -275,6 +303,80 @@ struct RawManifest {
     filters: Vec<RawFilter>,
     #[serde(default)]
     replaces: Vec<RawReplaced>,
+    #[serde(default)]
+    menu: Option<RawMenu>,
+}
+
+/// A menu of a plugin's own, from a button the app puts at `place`: its choices, each an icon and
+/// words, setting some of the plugin's controls.
+#[derive(Deserialize)]
+struct RawMenu {
+    place: String,
+    choices: Vec<RawChoice>,
+}
+
+#[derive(Deserialize)]
+struct RawChoice {
+    key: String,
+    label: String,
+    icon: String,
+    /// Each control it sets, by its key: a switch's `true` or `false`, a slider's number.
+    sets: std::collections::BTreeMap<String, Value>,
+}
+
+/// The most choices a menu has, and controls one choice sets.
+const MOST_MENU_CHOICES: usize = 8;
+const MOST_SETS: usize = 8;
+
+/// The menu `raw` describes for plugin `id`, if it holds up: a place this app has (another is for a
+/// newer one), a few choices, each with a key of its own, plain words and an icon that holds up,
+/// setting one to a few of `controls` (in their order, `keys` as the manifest names them) that are
+/// switches (to `true` or `false`) or sliders (to a number in their range). Only code has one.
+fn menu_of(
+    id: &str,
+    raw: Option<RawMenu>,
+    keys: &[String],
+    controls: &[PluginControl],
+    code: bool,
+) -> Result<Option<Menu>, Refusal> {
+    let Some(raw) = raw else { return Ok(None) };
+    if !code || raw.choices.is_empty() || raw.choices.len() > MOST_MENU_CHOICES {
+        return Err(Refusal::Described);
+    }
+    let place = plugins::PluginMenuPlace::named(&raw.place).ok_or(Refusal::Newer)?;
+    let mut seen = HashSet::new();
+    let mut choices = Vec::new();
+    for choice in raw.choices {
+        let plain = !choice.label.trim().is_empty() && shows_plainly(&choice.label, 24);
+        let icon = crate::plugin_icon::icon_path(&choice.icon);
+        let sets_fit = (1..=MOST_SETS).contains(&choice.sets.len());
+        if !valid_key(&choice.key) || !seen.insert(choice.key.clone()) || !plain || !sets_fit {
+            return Err(Refusal::Described);
+        }
+        let mut sets = Vec::new();
+        for (key, value) in &choice.sets {
+            let at = keys.iter().position(|k| k == key).ok_or(Refusal::Described)?;
+            let value = match (controls.get(at), value) {
+                (Some(PluginControl::Switch { .. }), Value::Bool(on)) => f32::from(u8::from(*on)),
+                (Some(PluginControl::Slider { control }), Value::Number(n)) => {
+                    let v = n.as_f64().map(|v| v as f32).filter(|v| v.is_finite()).ok_or(Refusal::Described)?;
+                    if !(control.least..=control.most).contains(&v) {
+                        return Err(Refusal::Described);
+                    }
+                    control.stepped(v)
+                }
+                _ => return Err(Refusal::Described),
+            };
+            sets.push((at, value));
+        }
+        choices.push(MenuChoice {
+            key: format!("{id}.{}", choice.key),
+            label: choice.label,
+            icon: icon.ok_or(Refusal::Described)?,
+            sets,
+        });
+    }
+    Ok(Some(Menu { place, choices }))
 }
 
 /// A filter of several in one plugin (interface 5): its key, its name under Adjustments, the keys
@@ -409,6 +511,9 @@ struct RawAction {
     /// The key of the switch it comes under.
     #[serde(default)]
     under: Option<String>,
+    /// The press that runs it.
+    #[serde(default)]
+    press: Option<String>,
 }
 
 /// The most actions a plugin may list.
@@ -496,6 +601,15 @@ struct RawControl {
     /// The key of the switch it comes under.
     #[serde(default)]
     under: Option<String>,
+    /// Where else it shows, beside the card: `canvas`.
+    #[serde(default)]
+    place: Option<String>,
+    /// The press that flips it (a switch).
+    #[serde(default)]
+    press: Option<String>,
+    /// Kept with each artwork rather than with the plugin.
+    #[serde(default)]
+    artwork: Option<bool>,
 }
 
 /// Whether `text`, at most `most` characters, is fit to show: nothing that hides, reorders or
@@ -611,6 +725,7 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
             let accepts = match raw.accepts.as_deref() {
                 _ if raw.keeps.is_some() => return Err(Refusal::Described),
                 Some("sound") => PluginFileKind::Sound,
+                Some("picture") => PluginFileKind::Picture,
                 // a kind of file this app doesn't take
                 Some(_) => return Err(Refusal::Newer),
                 None => return Err(Refusal::Described),
@@ -707,7 +822,7 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if compat.min_app.as_deref().is_some_and(|v| version_parts(v).is_none()) || compat.interface == Some(0) {
         return Err(Refusal::Described);
     }
-    let shape = shape_of(&raw.id, &raw.controls, &raw.actions, &raw.filters, &raw.replaces)?;
+    let mut shape = shape_of(&raw.id, &raw.controls, &raw.actions, &raw.filters, &raw.replaces)?;
     let mut files = Vec::with_capacity(raw.files.len().min(MOST_ENTRIES));
     let mut seen = HashSet::new();
     for file in raw.files {
@@ -732,7 +847,10 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         return Err(Refusal::Described);
     }
     let id = raw.id;
+    let keys: Vec<String> = raw.controls.iter().map(|c| c.key.clone()).collect();
     let controls = raw.controls.into_iter().map(|c| checked_control(&id, c)).collect::<Result<Vec<_>, _>>()?;
+    // a menu of its own, setting its controls
+    shape.menu = menu_of(&id, raw.menu, &keys, &controls, holds.contains(&PluginPart::Hooks))?;
     if id.starts_with(OWN_PREFIX) {
         return Err(Refusal::Described);
     }
@@ -948,6 +1066,40 @@ fn shape_of(
     let under = under.collect::<Result<Vec<_>, _>>()?;
     let action_under = actions.iter().map(|a| a.under.as_deref().map(switch_at).transpose());
     let action_under = action_under.collect::<Result<Vec<_>, _>>()?;
+    // where else a control shows: a switch or a slider, on the card or in a place this app has
+    let mut places = Vec::new();
+    for c in controls {
+        let place = match c.place.as_deref() {
+            None => plugins::PluginPlace::Card,
+            Some(name) => plugins::PluginPlace::named(name).ok_or(Refusal::Newer)?,
+        };
+        let fits = matches!(place, plugins::PluginPlace::Card | plugins::PluginPlace::Canvas);
+        if !fits || (place != plugins::PluginPlace::Card && c.kind == "file") {
+            return Err(Refusal::Described);
+        }
+        places.push(place);
+    }
+    // a press for a switch or an action, each press once
+    let mut pressed = HashSet::new();
+    let mut press_of = |text: Option<&str>, fits: bool| match text {
+        None => Ok(None),
+        Some(text) => {
+            let press = plugin_press(text).filter(|_| fits).ok_or(Refusal::Described)?;
+            if !pressed.insert(press.text()) {
+                return Err(Refusal::Described);
+            }
+            Ok(Some(press))
+        }
+    };
+    let presses = controls.iter().map(|c| press_of(c.press.as_deref(), c.kind == "switch"));
+    let presses = presses.collect::<Result<Vec<_>, _>>()?;
+    let action_presses = actions.iter().map(|a| press_of(a.press.as_deref(), true));
+    let action_presses = action_presses.collect::<Result<Vec<_>, _>>()?;
+    // kept with each artwork: a switch or a slider that keeps no setting the app used to have
+    let artwork: Vec<bool> = controls.iter().map(|c| c.artwork == Some(true)).collect();
+    if controls.iter().zip(&artwork).any(|(c, &kept)| kept && (c.kind == "file" || c.keeps.is_some())) {
+        return Err(Refusal::Described);
+    }
     if listed.len() > MOST_FILTERS || replacing.len() > MOST_REPLACES {
         return Err(Refusal::Described);
     }
@@ -987,7 +1139,13 @@ fn shape_of(
         }
         replaces.push(Replaced { id: r.id.clone(), switch: r.switch.as_deref().map(switch_at).transpose()?, controls });
     }
-    Ok(Shape { under, action_under, filters, replaces })
+    Ok(Shape { under, action_under, places, presses, action_presses, artwork, filters, replaces, menu: None })
+}
+
+/// The press a manifest writes for a switch or an action, if it is one a keyboard sends (not one
+/// of the view's own moves).
+fn plugin_press(text: &str) -> Option<crate::KeyCombo> {
+    crate::KeyCombo::read(text).filter(|press| !press.key.starts_with(crate::keys::VIEW_KEY))
 }
 
 /// What a filter's code calls `controls`, in their order: their keys, without the plugin's id.
@@ -1457,6 +1615,39 @@ pub(crate) fn note_added(dir: &Path, added: &[Added]) -> bool {
         moved
     });
     written.map_err(|e| log::warn!("couldn't note what the app added: {e}")).is_ok()
+}
+
+/// Where the order someone put the plugins in on the Plugins page is written down: an id a line,
+/// the first at the top.
+fn order_note(dir: &Path) -> PathBuf {
+    dir.join("order")
+}
+
+/// The order the plugins were put in, each line that reads as an id, each id once (its first
+/// place); none if it was never written down, or can't be read.
+pub(crate) fn read_order(dir: &Path) -> Vec<String> {
+    let text = read_capped(&order_note(dir), MOST_ADDED).unwrap_or_default();
+    let mut order: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&text).lines().map(str::trim) {
+        if valid_id(line) && !order.iter().any(|id| id == line) {
+            order.push(line.to_owned());
+        }
+    }
+    order
+}
+
+/// Writes down `order`, whole, as [`note_added`] writes its list. False if it couldn't be.
+pub(crate) fn note_order(dir: &Path, order: &[String]) -> bool {
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        let beside = spare(dir, "order");
+        let moved =
+            write_new(&beside, order.join("\n").as_bytes()).and_then(|()| std::fs::rename(&beside, order_note(dir)));
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&beside);
+        }
+        moved
+    });
+    written.map_err(|e| log::warn!("couldn't note the plugins' order: {e}")).is_ok()
 }
 
 /// `path`, if it is a plain file of at most `most` bytes.
@@ -2014,7 +2205,7 @@ pub(crate) mod tests {
             .push(json!({ "key": "f9", "type": "file", "label": "A", "accepts": "sound" }));
         assert_eq!(refusal(&pack(&more, &[(MODULE, module.as_slice())])), Refusal::Described);
         // a kind it doesn't take is a newer app's; none said, or taking an old setting, is wrong
-        for (accepts, why) in [(json!("picture"), Refusal::Newer), (Value::Null, Refusal::Described)] {
+        for (accepts, why) in [(json!("video"), Refusal::Newer), (Value::Null, Refusal::Described)] {
             let mut odd = manifest.clone();
             odd["controls"] = json!([{ "key": "f", "type": "file", "label": "A", "accepts": accepts }]);
             assert_eq!(refusal(&pack(&odd, &[(MODULE, module.as_slice())])), why);
@@ -2123,7 +2314,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(7)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(13)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
@@ -2131,6 +2322,23 @@ pub(crate) mod tests {
         assert_eq!(of("/permissions", json!(["files"])), Refusal::Permissions);
         // and a part that isn't one yet is for a newer one too
         assert_eq!(of("/holds", json!(["module"])), Refusal::Newer);
+    }
+
+    #[test]
+    fn plugins_written_to_every_interface_so_far_still_load_and_the_stroke_fill_hook_needs_its_function() {
+        let module = a_module();
+        for interface in 1..=12 {
+            let manifest = with(coded("org.example.plugin", &module), "/compat/procraft/interface", json!(interface));
+            assert!(read_package(&a_coded_file(&manifest, &module)).is_ok(), "interface {interface}");
+        }
+        let fill = |module: &[u8]| {
+            let manifest = with(coded("org.example.fill", module), "/hooks", json!(["stroke_fill"]));
+            read_package(&a_coded_file(&with(manifest, "/compat/procraft/interface", json!(12)), module))
+        };
+        let fills = r#"(module (func (export "procraft_stroke_fill") (param i32 i32) (result i32) (i32.const 1)))"#;
+        let package = fill(&wat::parse_str(fills).unwrap()).unwrap();
+        assert_eq!(package.manifest.hooks, [Hook::StrokeFill]);
+        assert!(fill(&module).is_err(), "a module without the hook's function");
     }
 
     #[test]
@@ -2174,9 +2382,13 @@ pub(crate) mod tests {
         };
         let package = placed("adjustments").unwrap();
         assert_eq!(package.manifest.actions[0].place, crate::plugins::PluginPlace::Adjustments);
-        for (name, place) in
-            [("layer", crate::plugins::PluginPlace::Layer), ("frame", crate::plugins::PluginPlace::Frame)]
-        {
+        for (name, place) in [
+            ("layer", crate::plugins::PluginPlace::Layer),
+            ("frame", crate::plugins::PluginPlace::Frame),
+            ("canvas", crate::plugins::PluginPlace::Canvas),
+            ("pen", crate::plugins::PluginPlace::Pen),
+            ("layers", crate::plugins::PluginPlace::Layers),
+        ] {
             assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
         }
         assert_eq!(placed("toolbar").err(), Some(Refusal::Newer));
@@ -2184,6 +2396,51 @@ pub(crate) mod tests {
         let filter = with(a_filter(), "/permissions", json!(["brush"]));
         assert_eq!(refusal(&a_filter_file(&filter)), Refusal::Described);
         assert_eq!(of("/compat/procraft/interface", json!(1)), Refusal::Described);
+    }
+
+    #[test]
+    fn controls_and_actions_may_show_in_the_canvas_tab_take_presses_and_be_kept_with_artworks() {
+        // told its controls, and an action
+        let told = r#"(func (export "procraft_control") (param i32 f32))
+            (func (export "procraft_action") (param i32) (result i32) (i32.const 0))"#;
+        let module = crate::plugin_run::tests::position_module(told, "(i64.const 0)");
+        let base = || {
+            let mut manifest = coded("org.example.placed", &module);
+            manifest["compat"]["procraft"]["interface"] = json!(8);
+            manifest["controls"] = json!([
+                { "key": "shown", "type": "switch", "label": "Shown", "place": "canvas", "press": "alt+g", "artwork": true },
+                { "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 1, "step": 0.5, "place": "card" },
+            ]);
+            manifest["actions"] =
+                json!([{ "key": "go", "label": "Go", "place": "canvas", "press": "shift+command+r" }]);
+            manifest
+        };
+        let package = read_package(&a_coded_file(&base(), &module)).unwrap();
+        let shape = &package.manifest.shape;
+        use crate::plugins::PluginPlace::{Canvas, Card};
+        assert_eq!(shape.places, [Canvas, Card]);
+        let press = |text: &str| crate::KeyCombo::read(text);
+        assert_eq!(shape.presses, [press("alt+g"), None]);
+        assert_eq!(shape.action_presses, [press("command+shift+r")]);
+        assert_eq!(shape.artwork, [true, false]);
+        assert_eq!(package.manifest.actions[0].place, Canvas);
+        let of = |at: [&str; 3], value: Value| {
+            let mut manifest = base();
+            let [list, index, field] = at;
+            manifest[list][index.parse::<usize>().unwrap()][field] = value;
+            refusal(&a_coded_file(&manifest, &module))
+        };
+        // a control shows on its card or in the Canvas tab; a place this app doesn't have is for a
+        // newer one
+        assert_eq!(of(["controls", "1", "place"], json!("layer")), Refusal::Described);
+        assert_eq!(of(["controls", "1", "place"], json!("toolbar")), Refusal::Newer);
+        // a press is a switch's or an action's, one a keyboard sends, each once
+        assert_eq!(of(["controls", "1", "press"], json!("alt+h")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("alt+g")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("view:fit")), Refusal::Described);
+        assert_eq!(of(["actions", "0", "press"], json!("hyper+x")), Refusal::Described);
+        // kept with an artwork: not a setting the app used to have
+        assert_eq!(of(["controls", "0", "keeps"], json!("interface_size")), Refusal::Described);
     }
 
     /// A picker plugin's file: its module and its picture's code (`picture`, if any).
@@ -2594,6 +2851,80 @@ pub(crate) mod tests {
         coded_too["compat"]["procraft"]["interface"] = json!(5);
         coded_too["filters"] = json!([{ "key": "tint", "label": "Tint" }]);
         assert_eq!(refusal(&a_coded_file(&coded_too, &module)), Refusal::Described);
+    }
+
+    #[test]
+    fn a_menu_sets_its_plugin_s_own_controls_and_draws_icons_that_hold_up() {
+        let told = r#"(func (export "procraft_control") (param i32 f32)) (memory"#;
+        let module = wat::parse_str(crate::plugin_run::tests::ACTS.replacen("(memory", told, 1)).unwrap();
+        let square = "M3 3L21 3L21 21L3 21Z";
+        let with_menu = || {
+            let mut manifest = coded("org.example.menu", &module);
+            manifest["compat"]["procraft"]["interface"] = json!(2);
+            manifest["hooks"] = json!([]);
+            manifest["permissions"] = json!(["artwork.write"]);
+            manifest["actions"] = json!([{ "key": "grid", "label": "Add a grid layer" }]);
+            manifest["controls"] = json!([
+                { "key": "grid", "type": "switch", "label": "Grid" },
+                { "key": "size", "type": "slider", "label": "Size", "least": 1, "most": 9, "step": 1, "starts": 3 },
+            ]);
+            manifest["menu"] = json!({ "place": "classic", "choices": [
+                { "key": "big", "label": "Big grid", "icon": square, "sets": { "grid": true, "size": 9 } },
+                { "key": "none", "label": "No grid", "icon": "m2 2 h20 v20 h-20 z", "sets": { "grid": false } },
+            ] });
+            manifest
+        };
+        let menu = read_package(&a_coded_file(&with_menu(), &module)).unwrap().manifest.shape.menu.unwrap();
+        assert_eq!(menu.place, plugins::PluginMenuPlace::Classic);
+        let big = MenuChoice {
+            key: "org.example.menu.big".to_owned(),
+            label: "Big grid".to_owned(),
+            icon: square.to_owned(),
+            sets: vec![(0, 1.0), (1, 9.0)],
+        };
+        let none = MenuChoice {
+            key: "org.example.menu.none".to_owned(),
+            label: "No grid".to_owned(),
+            icon: "M2 2L22 2L22 22L2 22Z".to_owned(),
+            sets: vec![(0, 0.0)],
+        };
+        assert_eq!(menu.choices, [big, none]);
+        let of = |path: &str, value: Value| {
+            let mut manifest = with_menu();
+            let (parent, field) = path.rsplit_once('/').unwrap();
+            manifest.pointer_mut(parent).unwrap()[field] = value;
+            refusal(&a_coded_file(&manifest, &module))
+        };
+        // a place this app doesn't have is for a newer one
+        assert_eq!(of("/menu/place", json!("somewhere")), Refusal::Newer);
+        // each choice its own key, plain words, an icon on the grid, and a control of its own set as it can be
+        assert_eq!(of("/menu/choices/1/key", json!("big")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/key", json!("Big!")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/label", json!(" ")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/label", json!("A label far too long to show")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/icon", json!("M0 0L30 30L0 30Z")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/icon", json!("")), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/sets", json!({})), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/sets", json!({ "other": true })), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/sets", json!({ "grid": 1 })), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/sets", json!({ "size": true })), Refusal::Described);
+        assert_eq!(of("/menu/choices/1/sets", json!({ "size": 10 })), Refusal::Described);
+        assert_eq!(of("/menu/choices", json!([])), Refusal::Described);
+        let nine: Vec<Value> = (0..9)
+            .map(|i| json!({ "key": format!("c{i}"), "label": "C", "icon": square, "sets": { "grid": true } }))
+            .collect();
+        assert_eq!(of("/menu/choices", Value::Array(nine)), Refusal::Described);
+        // a slider's value lands on a step
+        let mut stepped = with_menu();
+        stepped["menu"]["choices"][0]["sets"] = json!({ "size": 4.4 });
+        let menu = read_package(&a_coded_file(&stepped, &module)).unwrap().manifest.shape.menu.unwrap();
+        assert_eq!(menu.choices[0].sets, [(1, 4.0)]);
+        // only code has one: a filter's controls are its panel's
+        let mut filtered = a_filter();
+        filtered["menu"] = json!({ "place": "classic", "choices": [
+            { "key": "none", "label": "Off", "icon": square, "sets": { "keep_colour": false } },
+        ] });
+        assert_eq!(refusal(&pack(&filtered, &[(FILTER_CODE, SHADER)])), Refusal::Described);
     }
 
     #[test]

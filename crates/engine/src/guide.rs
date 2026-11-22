@@ -372,8 +372,10 @@ impl Guide {
                 if self.rotational || k % 2 == 0 {
                     out.push((turn(p, a), a, false));
                 } else {
-                    // the mirror axis between the two neighbouring turned copies
-                    let m = axis + a / 2.0;
+                    // mirrored across one of the guide's lines (the parts lie between them):
+                    // the kth part round from the stroke's is its mirror across the line
+                    // (k + 1) / 2 parts round
+                    let m = axis + (a + step) / 2.0;
                     out.push((mirror(p, m), 2.0 * m, true));
                 }
             }
@@ -561,6 +563,33 @@ mod tests {
         // off, nothing moves
         let off = Guide { assisted: false, ..g };
         assert_eq!(off.assist(start, Vec2::new(50.0, 14.0)), Vec2::new(50.0, 14.0));
+    }
+
+    #[test]
+    fn a_kaleidoscope_mirrors_across_its_own_lines_a_copy_to_each_part() {
+        // quadrant, centred at (100, 50): mirrored across the upright line and the level one,
+        // and turned half round
+        let quad = Guide { symmetry: SymmetryKind::Quadrant, ..on(GuideKind::Symmetry) };
+        let mut at: Vec<(i32, i32, bool)> = quad
+            .copies(Vec2::new(70.0, 40.0))
+            .iter()
+            .map(|(q, _, mirrored)| (q.x.round() as i32, q.y.round() as i32, *mirrored))
+            .collect();
+        at.sort();
+        assert_eq!(at, [(70, 60, true), (130, 40, true), (130, 60, false)]);
+        // radial, as usual and turned: the stroke and its copies one to each of the parts the
+        // lines make, the mirrored ones every other part
+        for angle in [0.0, 0.3] {
+            let radial = Guide { symmetry: SymmetryKind::Radial, angle, ..on(GuideKind::Symmetry) };
+            let p = Vec2::new(100.0 + 30.0 * (angle + 0.2).cos(), 50.0 + 30.0 * (angle + 0.2).sin());
+            let part = |q: Vec2| ((q.y - 50.0).atan2(q.x - 100.0) - angle).rem_euclid(TAU) / (TAU / 8.0);
+            let mut parts: Vec<(u32, bool)> =
+                radial.copies(p).iter().map(|(q, _, mirrored)| (part(*q).floor() as u32, *mirrored)).collect();
+            parts.push((part(p).floor() as u32, false));
+            parts.sort();
+            let want: Vec<(u32, bool)> = (0..8).map(|k| (k, k % 2 == 1)).collect();
+            assert_eq!(parts, want, "turned {angle}");
+        }
     }
 
     #[test]

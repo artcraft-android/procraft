@@ -32,6 +32,9 @@ final class CanvasView: UIView {
     private var strokeTouch: ObjectIdentifier?
     /// Where the Pencil last was over or on the canvas (its double-tap acts there).
     private var pencilAt: CGPoint?
+    /// How far the hovering Pencil's outline turns past the brush's own rotation (radians), as the
+    /// core last said.
+    private var hoverTurn: CGFloat = 0
     /// The touches' next wait (a hold, a repeat) running out.
     private var tick: Timer?
     /// The brush's outline where the Pencil or the pointer hovers (shown while hovering only, as
@@ -287,9 +290,12 @@ final class CanvasView: UIView {
             let at = hover.location(in: self)
             pencilAt = at
             obey(session.touchPenHover(hover: penHover(at, height: hover.zOffset, seconds: CACurrentMediaTime())))
+            // the outline turned as a stamp laid there: the way the Pencil goes, as it is held
+            hoverTurn = CGFloat(session.cursorHovers(x: Float(at.x * scale), y: Float(at.y * scale), pen: heldPencil(hover)))
             showHoverCursor()
         default:
             obey(session.touchPenHover(hover: nil))
+            session.cursorHoverGone()
             cursor.hide()
         }
     }
@@ -301,8 +307,11 @@ final class CanvasView: UIView {
         case .began, .changed:
             // a pointer has no height over the glass: one that has is the Pencil, followed above
             guard hover.zOffset == 0 else { return }
-            showCursor(at: hover.location(in: self), hovering: true)
+            let at = hover.location(in: self)
+            let turn = CGFloat(session.cursorHovers(x: Float(at.x * scale), y: Float(at.y * scale), pen: nil))
+            showCursor(at: at, hovering: true, turn: turn)
         default:
+            session.cursorHoverGone()
             cursor.hide()
         }
     }
@@ -313,24 +322,45 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
-        showCursor(at: CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale), hovering: true, alpha: CGFloat(shown.alpha), size: CGFloat(shown.scale))
+        let at = CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale)
+        showCursor(at: at, hovering: true, alpha: CGFloat(shown.alpha), size: CGFloat(shown.scale), turn: hoverTurn)
     }
 
     /// The brush's outline at `point` (points), as long as Brush cursor shows it when hovering (or
-    /// painting); none, it goes.
-    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1) {
+    /// painting); none, it goes. It is `size` of the brush's size, turned `turn` past the brush's
+    /// own rotation.
+    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1, turn: CGFloat = 0) {
         let settings = AppSettings.shared
         let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
         guard let point, settings.brushCursorOn, wanted else {
+            // (hovering again, it goes on from where it comes back)
+            if point == nil {
+                session.cursorHoverGone()
+            }
             cursor.hide()
             return
         }
-        cursor.show(at: point, alpha: alpha, scale: size, session: session, pixels: scale, drawn: settings.cursorStyle)
+        cursor.show(at: point, alpha: alpha, scale: size, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turn)
     }
 
     /// A shape drawn snapped into place: Apple Pencil Pro feels it, where the Pencil is.
     func shapeSnapped() {
         feedback.completed(at: pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// How the hovering Pencil is held, as the core takes it: the way its top leans, clockwise from
+    /// up (as its samples' orientation), and its barrel (Apple Pencil Pro, iPadOS 17.5; 0 else).
+    private func heldPencil(_ hover: UIHoverGestureRecognizer) -> CursorPen {
+        var lean = Double(hover.azimuthAngle(in: self)) + Double.pi / 2
+        lean = lean.truncatingRemainder(dividingBy: 2 * Double.pi)
+        if lean < 0 {
+            lean += 2 * Double.pi
+        }
+        var roll: Float = 0
+        if #available(iOS 17.5, *) {
+            roll = Float(hover.rollAngle)
+        }
+        return CursorPen(azimuth: Float(lean), roll: roll)
     }
 
     /// The Pencil's double-tap, where it hovers (`hovering`, else where it last was): what Gesture

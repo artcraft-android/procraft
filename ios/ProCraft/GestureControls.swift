@@ -123,8 +123,9 @@ struct GestureControls: View {
     private var page: some View {
         let settings = Gestures.shared
         let purpose = model.gesturePage
-        // painting models isn't here yet: its switch would do nothing
-        let options = gestureOptions(purpose: purpose).filter { $0.key != "MODEL_FINGER" }
+        // painting models isn't here yet: its switch would do nothing; and the Pencil has no
+        // second button
+        let options = gestureOptions(purpose: purpose).filter { $0.key != "MODEL_FINGER" && !$0.secondButton }
         return ScrollView {
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
