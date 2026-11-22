@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -264,6 +265,8 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     } else {
         remember(vm) { BrushColor(vm) }
     }
+    // the colour as the panel opened, for a plugin's swatch of the colour before
+    val opened = remember { c.rgb() }
     // the disc, Classic and Value work in the colour model chosen (the background's colour with a place of its own)
     val place = if (background) remember { ColourPlace() } else vm.colourPlace
     val m = remember(c, vm.colourModel, place) { ModelColor(c, vm.colourModel, place) }
@@ -297,7 +300,15 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         val swatch = Modifier.size(43.dp, 25.dp).clip(RoundedCornerShape(6.dp))
-                        Box(swatch.background(rgbColor(vm.colorRgb())).border(1.dp, Pc.SwatchEdge, RoundedCornerShape(6.dp)))
+                        if (Pc.colourBefore) {
+                            // a plugin's: the colour before (a tap goes back to it) beside the colour now
+                            Row(swatch.border(1.dp, Pc.SwatchEdge, RoundedCornerShape(6.dp))) {
+                                Box(Modifier.weight(1f).fillMaxHeight().background(rgbColor(opened)).clickable { c.setRgb(opened) })
+                                Box(Modifier.weight(1f).fillMaxHeight().background(rgbColor(vm.colorRgb())))
+                            }
+                        } else {
+                            Box(swatch.background(rgbColor(vm.colorRgb())).border(1.dp, Pc.SwatchEdge, RoundedCornerShape(6.dp)))
+                        }
                         Box(swatch.background(rgbColor(vm.secondaryRgb)).clickable { vm.swapColors() })
                     }
                 }
@@ -667,13 +678,13 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp,
     if (compact) {
         // the hue only, 240 wide under the 248 square
         if (!ringed) Box(Modifier.padding(start = 10.dp, end = 10.dp).height(40.dp)) {
-            SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
+            SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, 1f / 360f) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         }
         return
     }
     Column(Modifier.padding(horizontal = 20.dp)) {
         val pure = hsvColor(c.hue, 1f, 1f)
-        if (!ringed) SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
+        if (!ringed) SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, 1f / 360f) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
         SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
     }
@@ -1169,11 +1180,16 @@ private val BrightnessTrack = listOf(Color.Black, Color.White)
  * Touching anywhere on the row moves the pill there.
  */
 @Composable
-private fun SliderRow(value: Float, colours: List<Color>, onChange: (Float) -> Unit) {
+private fun SliderRow(value: Float, colours: List<Color>, unit: Float = 0.01f, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
+    val now by rememberUpdatedState(value)
+    val steps = Pc.colourSteps
     Box(
         Modifier.fillMaxWidth().height(36.dp)
-            .pointerInput(Unit) { track { x, _ -> change(x) } }
+            .pointerInput(steps, unit) {
+                // a plugin's: a tap at either end steps one unit
+                if (steps) trackStepping(StepEnd.toPx(), unit, { now }) { change(it) } else track { x, _ -> change(x) }
+            }
             .drawBehind {
                 val trackH = 4.dp.toPx()
                 val y = size.height / 2f
@@ -1561,9 +1577,9 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
     Column(Modifier.padding(horizontal = 8.dp)) {
         ValueGroup(short = short) { ModelRows(c, m) }
         ValueGroup(Modifier.padding(top = 6.dp), short) {
-            ValueRow("R", r / 255f, listOf(Color(0, g, b), Color(255, g, b)), "$r") { c.setRgb(((it * 255f).roundToInt() shl 16) or (g shl 8) or b) }
-            ValueRow("G", g / 255f, listOf(Color(r, 0, b), Color(r, 255, b)), "$g") { c.setRgb((r shl 16) or ((it * 255f).roundToInt() shl 8) or b) }
-            ValueRow("B", b / 255f, listOf(Color(r, g, 0), Color(r, g, 255)), "$b") { c.setRgb((r shl 16) or (g shl 8) or (it * 255f).roundToInt()) }
+            ValueRow("R", r / 255f, listOf(Color(0, g, b), Color(255, g, b)), "$r", 1f / 255f) { c.setRgb(((it * 255f).roundToInt() shl 16) or (g shl 8) or b) }
+            ValueRow("G", g / 255f, listOf(Color(r, 0, b), Color(r, 255, b)), "$g", 1f / 255f) { c.setRgb((r shl 16) or ((it * 255f).roundToInt() shl 8) or b) }
+            ValueRow("B", b / 255f, listOf(Color(r, g, 0), Color(r, g, 255)), "$b", 1f / 255f) { c.setRgb((r shl 16) or (g shl 8) or (it * 255f).roundToInt()) }
         }
         HexRow(rgb) { c.setRgb(it) }
         if (short) Spacer(Modifier.height(2.dp))
@@ -1577,7 +1593,7 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
 @Composable
 private fun ModelRows(c: ColorPick, m: ModelColor?) {
     if (m == null || m.model == ColourModel.HSB) {
-        ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
+        ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°", 1f / 360f) {
             c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
         }
         ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
@@ -1607,7 +1623,7 @@ private fun ModelRows(c: ColorPick, m: ModelColor?) {
     val letters = colourModelLetters(m.model)
     for (i in 0..2) {
         val track = tracks.getOrNull(i) ?: continue
-        ValueRow(letters.getOrElse(i) { "" }, track.place, track.paints(), if (i == 0) degreesShown(coords[0]) else percentShown(coords[i])) {
+        ValueRow(letters.getOrElse(i) { "" }, track.place, track.paints(), if (i == 0) degreesShown(coords[0]) else percentShown(coords[i]), if (i == 0) 1f / 360f else 0.01f) {
             m.set(colourModelSlid(m.model, coords[0], coords[1], coords[2], i.toUInt(), it).toFloatArray())
         }
     }
@@ -1690,7 +1706,7 @@ private fun CompactValue(c: ColorPick, group: Color = CompactGroup, field: Color
 private fun CompactValueRow(letter: String, value: Float, colours: List<Color>, shown: String, onChange: (Float) -> Unit) {
     Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(letter, color = Pc.PanelTitle, fontSize = 15.sp, modifier = Modifier.width(20.dp))
-        Box(Modifier.weight(1f)) { SliderRow(value, colours, onChange) }
+        Box(Modifier.weight(1f)) { SliderRow(value, colours, onChange = onChange) }
         Text(shown, color = Pc.PanelTitle, fontSize = 15.sp, maxLines = 1, textAlign = TextAlign.End, modifier = Modifier.width(48.dp))
     }
 }
@@ -1712,11 +1728,11 @@ private fun ValueGroup(modifier: Modifier = Modifier, height: Dp, gap: Dp, top: 
 
 /** One number slider: its letter, a track from 32 to 296 dp, and the value centred at 326.5. */
 @Composable
-private fun ValueRow(letter: String, value: Float, colours: List<Color>, shown: String, onChange: (Float) -> Unit) {
+private fun ValueRow(letter: String, value: Float, colours: List<Color>, shown: String, unit: Float = 0.01f, onChange: (Float) -> Unit) {
     Box(Modifier.fillMaxWidth().height(44.dp)) {
         Text(letter, color = Pc.PanelTitle, fontSize = 15.sp, modifier = Modifier.align(Alignment.CenterStart).padding(start = 13.dp))
         Box(Modifier.padding(start = 32.dp).width(264.dp).align(Alignment.CenterStart)) {
-            SliderRow(value, colours, onChange)
+            SliderRow(value, colours, unit, onChange)
         }
         Box(Modifier.align(Alignment.CenterStart).padding(start = 304.dp).width(45.dp), contentAlignment = Alignment.Center) {
             Text(shown, color = Pc.PanelTitle, fontSize = 15.sp, maxLines = 1)
@@ -1984,6 +2000,39 @@ private fun ModeTab(icon: ImageVector, label: String, selected: Boolean, modifie
             maxLines = 1,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 41.dp),
         )
+    }
+}
+
+/** How far in from either end of a slider a tap steps it, while a plugin has them step. */
+private val StepEnd = 18.dp
+
+/**
+ * As [track] across, for a slider a plugin has step: a tap within [end] pixels of either end moves
+ * its [value] one [unit] down or up (0..1); a drag from anywhere, or a touch between, goes where it is.
+ */
+private suspend fun PointerInputScope.trackStepping(end: Float, unit: Float, value: () -> Float, onMove: (Float) -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown()
+        down.consume()
+        fun at(p: Offset) = (p.x / size.width).coerceIn(0f, 1f)
+        val side = when {
+            down.position.x < end -> -1f
+            down.position.x > size.width - end -> 1f
+            else -> 0f
+        }
+        var dragging = side == 0f
+        if (dragging) onMove(at(down.position))
+        while (true) {
+            val event = awaitPointerEvent()
+            val c = event.changes.firstOrNull { it.id == down.id } ?: break
+            if (!c.pressed) {
+                if (!dragging) onMove((value() + side * unit).coerceIn(0f, 1f))
+                break
+            }
+            if (!dragging && (c.position - down.position).getDistance() > viewConfiguration.touchSlop) dragging = true
+            if (dragging) onMove(at(c.position))
+            c.consume()
+        }
     }
 }
 

@@ -2128,6 +2128,20 @@ impl Plugins {
         }
     }
 
+    /// Whether the colour panel's sliders step one unit at a tap on either end (a degree of hue, a
+    /// percent, a level of red, green or blue), as a plugin on the colour panel's hook says
+    /// (interface 12).
+    pub fn colour_steps(&self) -> bool {
+        self.hooks().colour_panel(crate::hooks::COLOUR_STEPS)
+    }
+
+    /// Whether the colour panel's swatch shows the colour as the panel opened beside the colour now,
+    /// a tap on the first going back to it, as a plugin on the colour panel's hook says (interface
+    /// 12).
+    pub fn colour_before(&self) -> bool {
+        self.hooks().colour_panel(crate::hooks::COLOUR_BEFORE)
+    }
+
     /// A hardware keyboard's `press` on the canvas (its key named as [`crate::key_shortcut`] takes
     /// it) as a plugin rebinding keys takes it: itself, another press, or none at all (it does
     /// nothing). With none on, itself.
@@ -4269,6 +4283,30 @@ mod tests {
         let pen = (0..3).map(|_| cost(1)).fold(f64::MAX, f64::min);
         println!("a sample through the pressure hook: {off:.3} µs off, {finger:.3} µs a finger's, {pen:.3} µs a pen's");
         assert!(finger < 20.0 && pen < 20.0, "{finger} {pen}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const COLOUR_EXTRAS: &str = "io.github.artcraftandroid.colour-extras";
+
+    #[test]
+    fn colour_extras_steps_the_sliders_and_shows_the_colour_before_each_by_its_switch() {
+        let dir = store("bundled-colour-extras");
+        let plugins = app_at(&dir);
+        // as it comes, off: the panel as it is
+        assert!(!card(&plugins, COLOUR_EXTRAS).on);
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (false, false));
+        assert!(plugins.set_on(COLOUR_EXTRAS.to_owned(), true));
+        // on, each by its switch, both off as it starts
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (false, false));
+        assert!(plugins.set_switch(format!("{COLOUR_EXTRAS}.steps"), true));
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (true, false));
+        assert!(plugins.set_switch(format!("{COLOUR_EXTRAS}.compare"), true));
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (true, true));
+        // off again: as it came, its switches kept for next time
+        assert!(plugins.set_on(COLOUR_EXTRAS.to_owned(), false));
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (false, false));
+        assert!(plugins.set_on(COLOUR_EXTRAS.to_owned(), true));
+        assert_eq!((plugins.colour_steps(), plugins.colour_before()), (true, true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

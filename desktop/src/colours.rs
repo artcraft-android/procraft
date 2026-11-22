@@ -305,6 +305,11 @@ pub struct Colours {
     /// it to the background); and the tick tapped.
     pub background: bool,
     pub background_done: bool,
+    /// A plugin has the sliders step one unit at a click on either end, and the swatch show the
+    /// colour as the panel opened (`before`, while it is open) beside the colour now (interface 12).
+    pub steps: bool,
+    pub before_shown: bool,
+    before: Option<u32>,
 }
 
 impl Default for Colours {
@@ -319,6 +324,9 @@ impl Default for Colours {
             history: ColourHistory::new(),
             palettes: Palettes::open(crate::files::app_dir().join("palettes.json").to_string_lossy().into_owned()),
             pickers: Pickers::default(),
+            steps: false,
+            before_shown: false,
+            before: None,
             mode: Mode::default(),
             harmony: HarmonyKind::default(),
             harmony_menu: crate::menu::Menu::default(),
@@ -588,8 +596,11 @@ impl Colours {
 
     /// Whether the colour panel shows (docked, `docked`, or floating), told each frame: closed on
     /// another colour than it opened on, that one is the previous colour.
-    pub fn panel_shown(&self, docked: bool) {
-        self.history.panel_shown(docked || self.floating.is_some(), to_hex(self.rgb()), self.on_mask);
+    pub fn panel_shown(&mut self, docked: bool) {
+        let shown = docked || self.floating.is_some();
+        self.history.panel_shown(shown, to_hex(self.rgb()), self.on_mask);
+        // the colour as it opened, while it is open
+        self.before = if shown { self.before.or(Some(to_hex(self.rgb()))) } else { None };
     }
 
     /// The current and second colours trade places.
@@ -715,7 +726,23 @@ impl Colours {
                     let model = Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
                     self.model_button(ui, model);
                 }
-                ui.painter().rect_filled(first, 6, srgb(self.rgb()));
+                match self.before.filter(|_| self.before_shown) {
+                    // a plugin's: the colour before (a click goes back to it) beside the colour now
+                    Some(before) => {
+                        let was = Rect::from_min_max(first.min, pos2(first.center().x, first.max.y));
+                        let now = Rect::from_min_max(pos2(first.center().x, first.min.y), first.max);
+                        let left = egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 };
+                        let right = egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 };
+                        ui.painter().rect_filled(was, left, srgb(of_hex(before)));
+                        ui.painter().rect_filled(now, right, srgb(self.rgb()));
+                        if ui.interact(was, ui.scope_id().with("colour before"), Sense::click()).clicked() {
+                            self.set_rgb(session, before);
+                        }
+                    }
+                    None => {
+                        ui.painter().rect_filled(first, 6, srgb(self.rgb()));
+                    }
+                }
                 ui.painter().rect_stroke(first, 6, egui::Stroke::new(1.0, argb(SWATCH_EDGE)), egui::StrokeKind::Inside);
                 ui.painter().rect_filled(second, 6, srgb(self.secondary));
                 if ui.interact(second, ui.scope_id().with("swap"), Sense::click()).clicked() {
@@ -1502,7 +1529,17 @@ impl Colours {
                 );
                 let track =
                     Rect::from_center_size(pos2(row.left() + 32.0 + 132.0, row.center().y), vec2(264.0, SLIDER_ROW));
-                let Some(to) = slider_row(ui, track, ("value", k, i), value, &colours) else { continue };
+                // a plugin's steps: a degree of hue, a percent, a level of red, green or blue
+                let unit = match (k, i) {
+                    (0, 0) if model != ColourModel::Oklab => 1.0 / 360.0,
+                    (0, _) => 0.01,
+                    _ => 1.0 / 255.0,
+                };
+                let Some(to) =
+                    slider_row_stepped(ui, track, ("value", k, i), value, &colours, self.steps.then_some(unit))
+                else {
+                    continue;
+                };
                 let byte = (to * 255.0).round() as u32;
                 match (k, i) {
                     (0, _) if model == ColourModel::Oklab => {
@@ -1980,6 +2017,23 @@ pub(crate) fn slider_row(
     value: f32,
     colours: &[Color32],
 ) -> Option<f32> {
+    slider_row_stepped(ui, rect, id, value, colours, None)
+}
+
+/// How far in from either end of a slider a click steps it, while a plugin has them step.
+const STEP_END: f32 = 18.0;
+
+/// [`slider_row`], stepping `step` (a share of the track) at a click within [`STEP_END`] of either
+/// end, while a plugin has the sliders step: a drag from anywhere, or a click between, goes where it
+/// is.
+pub(crate) fn slider_row_stepped(
+    ui: &Ui,
+    rect: Rect,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    value: f32,
+    colours: &[Color32],
+    step: Option<f32>,
+) -> Option<f32> {
     let response = ui.interact(rect, ui.scope_id().with(id), Sense::click_and_drag());
     let y = rect.center().y;
     let track = Rect::from_min_max(pos2(rect.left(), y - 2.0), pos2(rect.right(), y + 2.0));
@@ -1988,6 +2042,20 @@ pub(crate) fn slider_row(
     let x = (rect.left() + value * rect.width()).clamp(rect.left() + pill.x / 2.0, rect.right() - pill.x / 2.0);
     ui.painter().rect_filled(Rect::from_center_size(pos2(x, y), pill), pill.y / 2.0, colour_along(colours, value));
     let p = response.interact_pointer_pos()?;
+    if let Some(unit) = step {
+        let from = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+        let side = if from.x < rect.left() + STEP_END {
+            -1.0
+        } else if from.x > rect.right() - STEP_END {
+            1.0
+        } else {
+            0.0
+        };
+        if side != 0.0 && !response.dragged() {
+            // pressed at an end: a step as it is let go, nothing until then
+            return response.clicked().then(|| (value + side * unit).clamp(0.0, 1.0));
+        }
+    }
     Some(((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0))
 }
 

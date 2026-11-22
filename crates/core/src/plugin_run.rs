@@ -95,6 +95,9 @@
 //! - `procraft_slider_look(what: i32) -> f32`: for the hook `slider_look` (interface 11), how the
 //!   side bar's slider tracks look: `what` 0 their opacity (0 to 1), 1 whether what is behind them
 //!   is frosted as the bar's glass (1) or only softened (0); below 0 to leave it as it is.
+//! - `procraft_colour_panel(part: i32) -> i32`: for the hook `colour_panel` (interface 12), whether
+//!   the colour panel does `part` of what it may (not 0 for yes): 0 its sliders step one unit at a
+//!   tap on either end, 1 its swatch shows the colour as the panel opened beside the colour now.
 //! - `procraft_surround_picture() -> i32`: for the hook `surround_picture` (interface 11), the place
 //!   in its `controls` of a `file` control of pictures whose picture shows round the canvas, -1 for
 //!   none.
@@ -293,6 +296,7 @@ const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const LAYER_LABEL: &str = "procraft_layer_label";
 const SURROUND_PICTURE: &str = "procraft_surround_picture";
 const SLIDER_LOOK: &str = "procraft_slider_look";
+const COLOUR_PANEL: &str = "procraft_colour_panel";
 const STROKE_FILL: &str = "procraft_stroke_fill";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
@@ -460,6 +464,9 @@ pub(crate) enum Hook {
     SliderLook,
     /// Whether a stroke fills the region its path encloses (interface 12).
     StrokeFill,
+    /// What the colour panel does besides: its sliders' steps, its swatch's colour before
+    /// (interface 12).
+    ColourPanel,
 }
 
 impl Hook {
@@ -500,6 +507,7 @@ impl Hook {
             "surround_picture" => Some(Hook::SurroundPicture),
             "slider_look" => Some(Hook::SliderLook),
             "stroke_fill" => Some(Hook::StrokeFill),
+            "colour_panel" => Some(Hook::ColourPanel),
             _ => None,
         }
     }
@@ -544,6 +552,7 @@ impl Hook {
             Hook::SurroundPicture => "This plugin can show a picture you pick round the canvas.",
             Hook::SliderLook => "This plugin can change how the side bar's sliders look.",
             Hook::StrokeFill => "This plugin can make your strokes fill what they go round.",
+            Hook::ColourPanel => "This plugin can change how the colour panel's sliders and swatch work.",
         }
     }
 
@@ -587,6 +596,7 @@ impl Hook {
             Hook::SurroundPicture => exports(module, SURROUND_PICTURE, &[], &[ValType::I32]),
             Hook::SliderLook => exports(module, SLIDER_LOOK, &[ValType::I32], &[ValType::F32]),
             Hook::StrokeFill => exports(module, STROKE_FILL, &[ValType::I32, ValType::I32], &[ValType::I32]),
+            Hook::ColourPanel => exports(module, COLOUR_PANEL, &[ValType::I32], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -1086,6 +1096,7 @@ pub(crate) struct Running {
     surround_picture: Option<TypedFunc<(), i32>>,
     slider_look: Option<TypedFunc<i32, f32>>,
     stroke_fill: Option<TypedFunc<(i32, i32), i32>>,
+    colour_panel: Option<TypedFunc<i32, i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1246,6 +1257,7 @@ impl Running {
             let surround_picture = instance.get_typed_func(&store, SURROUND_PICTURE).ok();
             let slider_look = instance.get_typed_func(&store, SLIDER_LOOK).ok();
             let stroke_fill = instance.get_typed_func(&store, STROKE_FILL).ok();
+            let colour_panel = instance.get_typed_func(&store, COLOUR_PANEL).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1358,6 +1370,7 @@ impl Running {
                 surround_picture,
                 slider_look,
                 stroke_fill,
+                colour_panel,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -2534,6 +2547,17 @@ impl Running {
             _ if said < 0.0 => Ok(None),
             _ => Ok(Some(said)),
         }
+    }
+
+    /// Whether it says the colour panel does `part` of what it may (not 0 for yes).
+    pub(crate) fn colour_panel(&mut self, part: i32) -> Result<bool, Stop> {
+        let Running { store, colour_panel, .. } = self;
+        let Some(colour_panel) = colour_panel else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            colour_panel.call(&mut *store, part).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
     }
 
     /// Whether it says a stroke beginning with `tool` (0 paint, 1 erase) by `pointer` (numbered as

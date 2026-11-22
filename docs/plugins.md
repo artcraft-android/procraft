@@ -85,7 +85,7 @@ hooks, the `view` permission and actions in the Canvas tab 8, the `pressure` hoo
 panels' rows of colours 10, the recent colours and brushes, actions at the pen, panels' rows of
 brushes and rings, the `interface_colour` hook's surround, the `surround_picture` and `slider_look`
 hooks and `file` controls of pictures 11, and the `stroke_fill` hook, the `paper` hook's tooth and
-picture, actions in the Layers panel and `set_control` 12.
+picture, actions in the Layers panel, `set_control` and the `colour_panel` hook 12.
 
 `id` must have at least two dotted parts, and can't start with `procraft.` or end with `.stopped`.
 `permissions` lists what code may reach when someone taps one of its actions. Leave it empty unless
@@ -762,6 +762,24 @@ past 1, or that isn't a number, stops the plugin. It's asked as the plugins chan
 plugins on this hook, the first by id that answers each part is used.
 
 The Slider look plugin the app comes with makes the tracks frosted and as opaque as its Opacity says.
+
+### `colour_panel`
+
+What the colour panel does besides (interface 12), asked part by part:
+
+```
+procraft_colour_panel(part: i32) -> i32
+```
+
+| `part` | Not 0 for |
+|---|---|
+| 0 | Its sliders step one unit at a tap on either end, within 18 points of it: a degree of hue, a percent of saturation or brightness, a level of red, green or blue. A drag goes where it's dragged, from an end too, and a tap between goes there, as without |
+| 1 | Its swatch of the colour in use shows, beside it, the colour as the panel opened; a tap on that goes back to it |
+
+Answer 0 for a part you don't know: more may come. It's asked as the plugins change. With several
+plugins on this hook, a part is done if any says so.
+
+The Colour extras plugin the app comes with does each by a switch of its own.
 
 ### `pin_panels`
 
@@ -1907,7 +1925,8 @@ hooks, layers' marks (`layer_mark`, `set_layer_mark`) and panels' rows of colour
 the recent colours and brushes (`recent_colour`, `recent_brush`, `current_brush`, `choose_brush`),
 actions at the pen, panels' rows of brushes and rings, the `interface_colour` hook's surround, the
 `surround_picture` and `slider_look` hooks and `file` controls of pictures, and interface 12 the `stroke_fill` hook,
-the `paper` hook's tooth and picture, actions in the Layers panel and `set_control`. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
+the `paper` hook's tooth and picture, actions in the Layers panel, `set_control` and the
+`colour_panel` hook. What comes under a switch at the top of the list, taking the place of other plugins, a menu of
 its own, and controls in the Canvas tab, on a key or kept with each artwork need no newer
 interface: an older app shows every control, leaves the others where they are, shows no menu and
 keeps every control with the plugin. What a

@@ -15,6 +15,10 @@ use crate::{CanvasSession, KeyCombo};
 /// frosted what is behind them is (interface 11).
 pub(crate) const SLIDER_OPACITY: i32 = 0;
 pub(crate) const SLIDER_FROSTED: i32 = 1;
+/// What the colour panel's hook asks (interface 12): whether its sliders step one unit at a tap on
+/// either end, and whether its swatch shows the colour as the panel opened beside the colour now.
+pub(crate) const COLOUR_STEPS: i32 = 0;
+pub(crate) const COLOUR_BEFORE: i32 = 1;
 
 /// The role of the colour hook's that is the area round the canvas (interface 11).
 pub(crate) const SURROUND_ROLE: i32 = 1;
@@ -737,6 +741,13 @@ impl Hooks {
             Some(v) => Ok(Some(v)),
             None => running.slider_look(what),
         })
+    }
+
+    /// The colour panel's hook (interface 12): whether a plugin on it says the panel does `part` of
+    /// what it may ([`COLOUR_STEPS`], [`COLOUR_BEFORE`]).
+    pub(crate) fn colour_panel(&self, part: i32) -> bool {
+        self.has(Hook::ColourPanel)
+            && self.through(Hook::ColourPanel, false, |running, said| Ok(said || running.colour_panel(part)?))
     }
 
     /// The surround picture's hook: the plugin (by id) and the place in its controls of the file
@@ -1769,6 +1780,50 @@ pub(crate) mod tests {
     fn slider_looking(body: &str) -> Running {
         let text = format!(r#"(module (func (export "procraft_slider_look") (param i32) (result f32) {body}))"#);
         Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_colour_panel_does_what_any_plugin_on_its_hook_says_and_nonsense_stops_one() {
+        let hooks = Hooks::default();
+        let asks = |hooks: &Hooks| (hooks.colour_panel(COLOUR_STEPS), hooks.colour_panel(COLOUR_BEFORE));
+        assert_eq!(asks(&hooks), (false, false), "none on");
+        // one that says its sliders step (part 0) alone
+        let steps = "(i32.eqz (local.get 0))";
+        let text = format!(r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) {steps}))"#);
+        hooks.put_on(
+            "a".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert_eq!(asks(&hooks), (true, false));
+        // another that says its swatch shows the colour before (part 1): both
+        let before = "(i32.eq (local.get 0) (i32.const 1))";
+        let text = format!(r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) {before}))"#);
+        hooks.put_on(
+            "b".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert_eq!(asks(&hooks), (true, true));
+        // asked as the panel shows: quick
+        let t = Instant::now();
+        for i in 0..10_000 {
+            std::hint::black_box(hooks.colour_panel(i % 2));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the colour panel's hook asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(200), "{each:?}");
+        // one that traps stops, and goes off its hook
+        let text = r#"(module (func (export "procraft_colour_panel") (param i32) (result i32) unreachable))"#;
+        let hooks = Hooks::default();
+        hooks.put_on(
+            "odd".to_owned(),
+            Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap(),
+            &[Hook::ColourPanel],
+        );
+        assert!(!hooks.colour_panel(COLOUR_STEPS));
+        assert!(!hooks.listens(Hook::ColourPanel));
+        assert_eq!(hooks.take_stopped().len(), 1);
     }
 
     #[test]

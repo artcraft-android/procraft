@@ -615,6 +615,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.sliderLook = plugins.sliderLook()
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
+        io.github.artcraftandroid.procraft.ui.Pc.colourSteps = plugins.colourSteps()
+        io.github.artcraftandroid.procraft.ui.Pc.colourBefore = plugins.colourBefore()
         io.github.artcraftandroid.procraft.ui.Pc.picker = if (plugins.pickerOn()) {
             io.github.artcraftandroid.procraft.ui.ClassicPicker(
                 pick = { x, y -> plugins.pickerPick(x, y) },
