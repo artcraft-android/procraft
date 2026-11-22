@@ -62,8 +62,10 @@ mod layer_store;
 mod layers;
 mod liquify;
 mod liquify_steps;
+mod list_slider;
 mod modes;
 mod open_marks;
+mod pacing;
 mod palettes;
 mod pick;
 mod pickers;
@@ -205,6 +207,7 @@ pub use layers::{
     row_hold_seconds, set_layer_budget, set_resident_budget,
 };
 pub use liquify::liquify_reach;
+pub use list_slider::{ListSliderTouch, list_slider_touch};
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
 pub use open_marks::{opening_ended_app, set_open_marks_file};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
@@ -870,6 +873,11 @@ pub(crate) struct State {
     /// The selection before the feather popover softened it, and the room its feathering works
     /// in (kept while the popover is open, so each step doesn't ask the system for it again).
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
+    /// The feather's slider is held: the line where the selection fades out shows.
+    feather_edge: bool,
+    /// The shapes joined to the selection while the selection tool has been open (canvas pixels,
+    /// each a closed path), which it shows dashed; gone as it closes or the selection goes.
+    selection_outlines: Vec<Vec<Vec2>>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
     /// The stroke being drawn as input (canvas points), for QuickShape,
@@ -2205,6 +2213,8 @@ impl CanvasSession {
             selection_before: None,
             colour_source: None,
             feather_base: None,
+            feather_edge: false,
+            selection_outlines: Vec::new(),
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
             filters: plugin_filter::Filters::default(),

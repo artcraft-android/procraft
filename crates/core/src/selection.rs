@@ -69,6 +69,9 @@ impl State {
         if self.selection.as_ref().is_some_and(Mask::is_empty) {
             self.selection = None;
         }
+        if self.selection.is_none() {
+            self.selection_outlines.clear();
+        }
         if self.selection == before {
             return;
         }
@@ -166,6 +169,7 @@ impl State {
         self.settle();
         let Some(before) = self.selection.take() else { return };
         self.feather_base = None;
+        self.selection_outlines.clear();
         let folded = match (made, self.canvas.as_mut(), self.gpu.as_ref()) {
             (Some(made), Some(canvas), Some(gpu)) => {
                 canvas.change_selection_with_step(gpu, &mut self.doc, None, Some(before.data.clone()), made)
@@ -226,6 +230,8 @@ impl State {
         self.selection =
             self.canvas.as_ref().and_then(|c| c.selection()).map(|c| Mask { width: w, height: h, data: c.to_vec() });
         self.feather_base = None;
+        // the shapes' paths no longer go with what is selected
+        self.selection_outlines.clear();
     }
 
     /// The canvas pixel under window point (`x`, `y`), if there is one: through the view, or on a
@@ -380,14 +386,26 @@ impl CanvasSession {
         let Some((_, kept)) = st.feather_base.as_mut().filter(|(now, _)| *now == base) else { return };
         *kept = room;
         st.selection = Some(m);
+        // while the slider is held, the line where it now fades out to a tenth shows
+        st.feather_edge = true;
         st.show_selection();
         self.shared.frame(st);
+    }
+
+    /// The feather's slider let go of: the line where the selection fades out goes.
+    pub fn select_feather_let_go(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if std::mem::take(&mut st.feather_edge) {
+            self.shared.frame(st);
+        }
     }
 
     /// The feather popover closed: its feathering becomes one undo step.
     pub fn select_feather_done(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.feather_edge = false;
         if let Some((base, _)) = st.feather_base.take() {
             st.record_selection(Some(base), "feather");
             self.shared.frame(st);
@@ -408,6 +426,14 @@ impl CanvasSession {
         self.shared.lock().selection.is_some()
     }
 
+    /// The paths of the shapes joined to the selection while the selection tool has been open,
+    /// each closed (canvas pixels, x and y in turn), to show dashed over the canvas: gone as the
+    /// tool closes, the selection goes or is loaded, or a step is undone or redone.
+    pub fn selection_outlines(&self) -> Vec<Vec<f32>> {
+        let st = self.shared.lock();
+        st.selection_outlines.iter().map(|path| path.iter().flat_map(|p| [p.x, p.y]).collect()).collect()
+    }
+
     /// Keeps the selection to load again later; returns how many are kept.
     pub fn save_selection(&self) -> u32 {
         let mut st = self.shared.lock();
@@ -424,6 +450,7 @@ impl CanvasSession {
         let Some(m) = st.saved_selections.get(index as usize).cloned() else { return false };
         let before = st.selection.replace(m);
         st.feather_base = None;
+        st.selection_outlines.clear();
         st.record_selection(before, "load selection");
         self.shared.frame(st);
         true
@@ -521,16 +548,22 @@ impl CanvasSession {
 
 impl CanvasSession {
     fn select_window_polygon(&self, window: &[Vec2], join: SelectionJoin) {
+        // (read before the canvas is held: the touches are held first where both are)
+        let tool_open = self.selection_tool_open();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let shape = if st.scene_shown() {
+        let (shape, outline) = if st.scene_shown() {
             let Some(shape) = st.scene_mask(window) else { return };
-            shape
+            (shape, None)
         } else {
             let Some(points) = st.to_canvas_points(window) else { return };
-            Mask::polygon(st.doc.width(), st.doc.height(), &points)
+            (Mask::polygon(st.doc.width(), st.doc.height(), &points), Some(points))
         };
         st.join(shape, join, true);
+        // its path shows dashed while the tool is open
+        if let Some(points) = outline.filter(|_| tool_open && st.selection.is_some()) {
+            st.selection_outlines.push(points);
+        }
         self.shared.frame(st);
     }
 

@@ -200,6 +200,27 @@ struct Dab {
     dither: u32,
 }
 
+// Whether `x` is a number (not infinite or NaN), by its bits: a compiler may take x == x to hold.
+fn finite(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+
+fn finite4(c: vec4<f32>) -> bool {
+    return finite(c.x) && finite(c.y) && finite(c.z) && finite(c.w);
+}
+
+// An amount kept between stamps (how much a pixel has taken or shows, 0..1): none where it came out
+// no number, so that one bad value can't stay at a pixel for the rest of the stroke and in its
+// tiles. Where none comes out so, nothing changes.
+fn kept_amount(x: f32) -> f32 {
+    return select(0.0, clamp(x, 0.0, 1.0), finite(x));
+}
+
+// Paint kept between stamps or laid (premultiplied, 0..1): `fallback` where it came out no number.
+fn kept_paint(c: vec4<f32>, fallback: vec4<f32>) -> vec4<f32> {
+    return select(fallback, c, finite4(c));
+}
+
 @group(0) @binding(0) var<uniform> st: SmudgeStamp;
 @group(0) @binding(5) var<uniform> wet_pass: WetPass;
 // a dual brush's paint laid in place: its second's coverage, and the layer as it was
@@ -279,9 +300,14 @@ fn left_out(p: vec2<i32>) -> bool {
     return selected_at(p) <= 0.0;
 }
 
-// the layer as it was before the stroke at canvas pixel `p`
+// the layer as it was before the stroke at canvas pixel `p` (nothing past the texture: a load
+// there gives zero on Vulkan and the others, and reads stray memory on OpenGL ES in wgpu)
 fn before_at(p: vec2<i32>) -> vec4<f32> {
-    return textureLoad(before_tex, p - vec2<i32>(st.origin_x, st.origin_y), 0);
+    let t = p - vec2<i32>(st.origin_x, st.origin_y);
+    if (any(t < vec2<i32>(0)) || any(t >= vec2<i32>(textureDimensions(before_tex)))) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(before_tex, t, 0);
 }
 
 // cell or texel `id` of the dispatch's part, and whether it is one of the part's (and of the `n`
@@ -639,7 +665,10 @@ fn grain_plain(d: Dab, p: vec2<f32>) -> f32 {
         if (own) {
             // unfiltered: the texel under it at its level
             let l = i32(round(level));
-            g = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), st.grain, l).r;
+            g = 0.0;
+            if (l < i32(textureNumLevels(grains))) {
+                g = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), st.grain, l).r;
+            }
         } else {
             g = sharp_grain(g, uv);
         }
@@ -685,11 +714,16 @@ struct Found {
     shown: f32,
 }
 
-// what the window holds at canvas pixel `p`
+// what the window holds at canvas pixel `p` (the stroke as laid only where it is kept: elsewhere a
+// stand-in a few bytes long is bound in its place, and reading past those reads whatever is there
+// on a GPU that doesn't keep reads within a buffer, OpenGL ES's)
 fn found_at(p: vec2<i32>) -> Found {
     var f: Found;
     f.work = work_at(p);
-    f.grained = grained_at(p);
+    f.grained = f.work;
+    if (st.laid_apart == 2u) {
+        f.grained = grained_at(p);
+    }
     f.amount = 0.0;
     f.shown = 0.0;
     if (st.mode == 1u && (st.rule != 0u || st.modulated == 1u)) {
@@ -776,9 +810,10 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
         if (st.laid_apart != 0u) {
             // how much of the paint shows there so far, put together with the rest later
             let held = found.shown;
-            dep.shown = held + weight * (1.0 - held);
+            dep.shown = kept_amount(held + weight * (1.0 - held));
             dep.shown_set = true;
         }
+        dep.amount = kept_amount(dep.amount);
         out = from_mix(mix(to_mix(w), to_mix(laid), weight));
     }
     if (st.preserve_alpha == 1u) {
@@ -793,7 +828,7 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
     // turned by right angles, round each pixel as the stamp does the one it lands on.
     let o = abs(p - vec2<i32>(floor(d.center)));
     let h = dither(u32(min(o.x, o.y)), u32(max(o.x, o.y)), d.dither);
-    dep.out = clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
+    dep.out = clamp(kept_paint(out, w) + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
     dep.laid = true;
     return dep;
 }
@@ -866,7 +901,10 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     // stroke's own colour (none for any other dual mode)
     var toward = 0.0;
     if (st.dual != 0u) {
-        var b = textureLoad(second_tex, p, 0).a;
+        var b = 0.0;
+        if (all(p >= vec2<i32>(0)) && all(p < vec2<i32>(textureDimensions(second_tex)))) {
+            b = textureLoad(second_tex, p, 0).a;
+        }
         if (st.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > st.dual_threshold);
         }
@@ -930,7 +968,7 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     out = mix(was, out, selected_at(p));
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
-    return clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
+    return clamp(kept_paint(out, was) + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
 // a number in 0..1 that looks random, from three

@@ -435,6 +435,11 @@ pub const LEAST_ROUNDNESS: f32 = 0.05;
 /// this; each moves a stamp up to that many times half its diagonal (plus a pixel).
 pub const JITTER_FILE_SCALE: f32 = 3.0;
 
+/// The most the lateral and linear jitter controls reach: the slider ends at 1, but a brush file
+/// can say more, and is thrown as far as it says, up to 3 x 2^2.2 = 13.8 times half the stamp's
+/// diagonal (the farthest any brush of the reference's own throws).
+pub const MOST_JITTER: f32 = 2.0;
+
 /// The brush's controls the builder reads beyond its own fields (see `studio`), read once.
 #[derive(Clone, Copy, Debug, Default)]
 struct Extras {
@@ -546,10 +551,11 @@ impl Extras {
         let unit = |k: &str| b.setting(k).clamp(0.0, 1.0);
         let both = |k: &str| b.setting(k).clamp(-1.0, 1.0);
         let switch = |k: &str| (b.setting(k) >= 0.5).then(|| unit(&format!("{k}_angle")));
+        let jitter = |k: &str| b.setting(k).clamp(0.0, MOST_JITTER);
         Extras {
             spacing_jitter: unit("spacing_jitter"),
-            jitter_lateral: unit("jitter_lateral"),
-            jitter_linear: unit("jitter_linear"),
+            jitter_lateral: jitter("jitter_lateral"),
+            jitter_linear: jitter("jitter_linear"),
             falloff: unit("falloff"),
             count_jitter: unit("count_jitter"),
             pressure_roundness: both("pressure_roundness"),
@@ -5338,6 +5344,41 @@ mod tests {
         for (j, s) in both.iter().zip(&straight) {
             assert!(j.center.distance(s.center) <= 3.0 * reach + 1e-3);
         }
+    }
+
+    #[test]
+    fn a_files_jitter_past_the_sliders_end_throws_its_stamps_as_far_as_it_says() {
+        // a brush file's lateral jitter of 13.67 (a spatter brush's), past the slider's 3: its
+        // control, as the file is read, is 1.99
+        let file = 13.67_f32;
+        let mut brush = plain();
+        brush.set_setting("jitter_lateral", (file / JITTER_FILE_SCALE).powf(1.0 / 2.2));
+        brush.set_setting("jitter_linear", 0.0);
+        let control = brush.setting("jitter_lateral");
+        assert!((control - 1.99).abs() < 0.01, "kept as read: {control}");
+        // a long horizontal line at y = 50, its stamps about two pixels apart
+        let samples: Vec<Sample> =
+            (0..=4000).map(|i| Sample::at(Vec2::new(i as f32, 50.0), 1.0, f64::from(i) * 4.0)).collect();
+        let stamps = StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&samples);
+        // (past where the stroke's way has settled from its first guess)
+        let stamps: Vec<&Stamp> = stamps.iter().filter(|s| s.distance > 200.0).collect();
+        assert!(stamps.len() > 1500, "{}", stamps.len());
+        // each stamp thrown r sin(t) x file x (half its diagonal and a pixel) across, r and t
+        // uniform (0..1 and a whole turn): spread sqrt(1/3 x 1/2) of the farthest, never past it
+        let reach = 10.0 / crate::brushfile::ROUND_TIP_SHARE * 0.5 * std::f32::consts::SQRT_2 + 1.0;
+        let farthest = file * reach;
+        let across: Vec<f32> = stamps.iter().map(|s| s.center.y - 50.0).collect();
+        let n = across.len() as f32;
+        let mean = across.iter().sum::<f32>() / n;
+        let spread = (across.iter().map(|d| (d - mean) * (d - mean)).sum::<f32>() / n).sqrt();
+        let expected = farthest / 6f32.sqrt();
+        assert!((spread / expected - 1.0).abs() < 0.08, "spread {spread} against {expected} (farthest {farthest})");
+        assert!(mean.abs() < 0.1 * expected, "centred: {mean}");
+        let most = across.iter().fold(0.0f32, |m, d| m.max(d.abs()));
+        assert!(most <= farthest + 1e-2 && most > 0.85 * farthest, "{most} of {farthest}");
+        // and none along it: each where it is along the path
+        let along = stamps.iter().map(|s| (s.center.x - s.distance).abs()).fold(0.0f32, f32::max);
+        assert!(along < 0.5, "{along}");
     }
 
     #[test]

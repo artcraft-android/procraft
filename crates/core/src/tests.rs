@@ -5530,6 +5530,63 @@ fn ring_under_an_empty_layer(s: &CanvasSession) -> u64 {
     bottom
 }
 
+/// While the selection tool is open, the paths of the shapes joined to the selection show dashed
+/// (canvas pixels: a rectangle's four corners, an ellipse's 128 points), those taken away too;
+/// inverting and feathering keep them; an undo, closing the tool or deselecting takes them away.
+/// The feather's line shows from a drag of its slider until it is let go.
+#[test]
+fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
+    use crate::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let how = crate::touch::SelectTouch {
+        kind: crate::touch::SelectKind::Rectangle,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+    };
+    s.set_touch_selecting(Some(how));
+    let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p - q).abs() < 0.01);
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    let paths = s.selection_outlines();
+    assert_eq!(paths.len(), 1);
+    assert!(near(&paths[0], &[10.0, 10.0, 40.0, 10.0, 40.0, 40.0, 10.0, 40.0]), "{:?}", paths[0]);
+    s.select_shape(true, 50.0, 50.0, 90.0, 90.0, SelectionJoin::Add);
+    s.select_shape(false, 20.0, 20.0, 30.0, 30.0, SelectionJoin::Remove);
+    let lengths: Vec<usize> = s.selection_outlines().iter().map(Vec::len).collect();
+    assert_eq!(lengths, vec![8, 256, 8]);
+    // inverted and feathered: kept; the feather's line from a drag until let go
+    s.select_invert();
+    s.select_feather(0.1);
+    assert!(s.shared.lock().feather_edge);
+    s.select_feather_let_go();
+    assert!(!s.shared.lock().feather_edge);
+    s.select_feather(0.2);
+    s.select_feather_done();
+    assert!(!s.shared.lock().feather_edge);
+    assert_eq!(s.selection_outlines().len(), 3);
+    // undone: what is selected is the history's, the paths go
+    s.undo();
+    assert!(s.selection_outlines().is_empty());
+    // closing the tool takes them away; open again, deselecting does
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.set_touch_selecting(None);
+    assert!(s.selection_outlines().is_empty());
+    s.set_touch_selecting(Some(how));
+    s.select_shape(false, 60.0, 10.0, 90.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.select_none();
+    assert!(s.selection_outlines().is_empty());
+    // closed as the apps close it (before their touches are told): gone, and not back when it opens
+    s.select_shape(false, 60.0, 10.0, 90.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.select_feather(0.1);
+    assert!(s.shared.lock().feather_edge);
+    s.close_selection_tool(false);
+    assert!(s.selection_outlines().is_empty());
+    assert!(!s.shared.lock().feather_edge, "the feather's line goes with the tool");
+    assert!(s.has_selection());
+}
+
 /// Whether the selection takes canvas pixel (`x`, `y`).
 fn selected(s: &CanvasSession, x: usize, y: usize) -> bool {
     s.shared.lock().selection.as_ref().is_some_and(|m| m.data.get(y * m.width as usize + x).is_some_and(|&v| v > 127))
@@ -5859,6 +5916,8 @@ fn color_fill_shows_exactly_the_fill_it_makes_on_an_alpha_locked_faded_layer() {
     s.set_color(1.0, 0.1, 0.0);
     s.select_shape(false, 30.0, 5.0, 95.0, 70.0, SelectionJoin::Add);
     s.select_feather(0.02);
+    // (its slider let go, as the apps do: the line where it fades out goes)
+    s.select_feather_let_go();
     s.set_selection_display(SelectionDisplay::ColourFill);
     let shown = frame_of(&s, 100);
     assert!(s.close_selection_tool(true));
@@ -8377,10 +8436,14 @@ fn brushes_and_sets_are_made_copied_and_deleted() {
     let start = s.current_brush();
     let set_name = s.brush_library()[start.set as usize].name.clone();
     let first = names(start.set as usize);
-    // a copy goes just above; the tool keeps its brush, now one down
+    // a copy goes just above, numbered ("Yarra" gives "Yarra 2"); the tool keeps its brush, now
+    // one down
+    let name = first[start.index as usize].clone();
     assert_eq!(s.duplicate_brush(start.set, start.index), Some(start.index));
     assert_eq!(names(start.set as usize).len(), first.len() + 1);
     assert_eq!(s.current_brush().index, start.index + 1);
+    assert_eq!(names(start.set as usize)[start.index as usize], format!("{name} 2"));
+    assert_eq!(s.current_brush().name, name);
     // the copy is edited, and the original deleted: the copy stays current
     assert!(s.select_brush(start.set, start.index));
     s.studio_begin();
@@ -9965,23 +10028,42 @@ fn a_moved_layer_snaps_onto_another_layers_bounds() {
     s.transform_end(false);
 }
 
+/// A freehand selection held still stays as drawn, however long it is held with Draw and hold
+/// on: QuickShape is the painting tools' alone. Lifted, the path stays open, as drawn.
 #[test]
-fn a_held_lasso_snaps_to_the_shape_it_looks_like() {
-    // a rough circle, as x and y in turn
-    let pts: Vec<f32> = (0..=60)
-        .flat_map(|i| {
-            let t = i as f32 / 60.0 * std::f32::consts::TAU;
-            [100.0 + 60.0 * t.cos() + 2.0 * (7.0 * t).sin(), 100.0 + 60.0 * t.sin()]
-        })
-        .collect();
-    let outline = crate::quickshape::quickshape_outline(pts).expect("a shape");
-    assert!(outline.len() >= 6 && outline.len().is_multiple_of(2));
-    // every point of it near the circle
-    for p in outline.chunks(2) {
-        let r = ((p[0] - 100.0).powi(2) + (p[1] - 100.0).powi(2)).sqrt();
-        assert!((r - 60.0).abs() < 8.0, "{r}");
+fn a_held_lasso_stays_as_drawn() {
+    let Some(s) = session(300, 300) else { return };
+    let how = crate::touch::SelectTouch {
+        kind: crate::touch::SelectKind::Freehand,
+        join: crate::SelectionJoin::Add,
+        threshold: 0.5,
+    };
+    s.set_touch_selecting(Some(how));
+    // a rough circle, the last point near the first
+    let at = |i: usize| {
+        let t = i as f32 / 40.0 * std::f32::consts::TAU * 0.95;
+        (150.0 + 80.0 * t.cos() + 3.0 * (7.0 * t).sin(), 150.0 + 80.0 * t.sin())
+    };
+    let pen = |(x, y): (f32, f32), ms: f64| vec![sample(x, y, ms)];
+    let _ = s.touch_down(1, PointerKind::Stylus, pen(at(0), 0.0));
+    for i in 1..=40 {
+        let _ = s.touch_move(1, pen(at(i), i as f64 * 16.0));
     }
-    assert!(crate::quickshape::quickshape_outline(vec![1.0, 1.0]).is_none());
+    let drawn = s.freehand_path();
+    assert!(drawn.len() >= 40, "{}", drawn.len());
+    // held still for two seconds, the touches' clock running on
+    let mut held = Vec::new();
+    for k in 1..=20 {
+        let ms = 640.0 + k as f64 * 100.0;
+        held.extend(s.touch_move(1, pen(at(40), ms)));
+        held.extend(s.touch_tick(ms));
+    }
+    assert_eq!(s.freehand_path(), drawn, "held, it stays as drawn");
+    assert!(!held.contains(&crate::TouchCommand::FreehandChanged), "{held:?}");
+    assert!(!held.contains(&crate::TouchCommand::ShapeSnapped), "{held:?}");
+    let _ = s.touch_up(1, pen(at(40), 2700.0));
+    assert_eq!(s.freehand_path(), drawn, "lifted, the path stays open as drawn");
+    assert!(!s.has_selection());
 }
 
 #[test]
@@ -18750,6 +18832,106 @@ fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
     assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_some());
 }
 
+/// A wet stroke goes on without a panic when its graphics device goes under it (as a tablet short
+/// of memory can lose it as a brush's first strokes go down): the renders that look at how fast the
+/// GPU got through the paint laid in place, the stroke's end and the next stroke draw nothing more
+/// and go on (#358).
+#[test]
+fn a_wet_stroke_goes_on_without_a_panic_when_the_graphics_device_is_lost() {
+    let Some(s) = session(160, 160) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(i, l)| {
+            l.brushes.iter().position(|b| b.mixes_wet() && b.secondary.is_none()).map(|j| (i as u32, j as u32))
+        });
+        found.unwrap()
+    };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(0.5);
+    let render = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+    };
+    let at = |e: usize| sample(20.0 + e as f32 * 6.0, 80.0 + (e as f32 * 0.4).sin() * 30.0, e as f64 * 8.0);
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    for e in 1..=10 {
+        s.stroke_add(vec![at(e)]);
+        render(&s);
+    }
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device.destroy();
+    for e in 11..=20 {
+        s.stroke_add(vec![at(e)]);
+        render(&s);
+    }
+    s.stroke_end(vec![]);
+    render(&s);
+    // (seen lost by now, and the next stroke draws nothing more and says nothing)
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    s.stroke_end(vec![]);
+    render(&s);
+}
+
+/// Switching through every stock brush, a stroke and a sample stroke drawn with each, on a GPU held
+/// to wgpu's downlevel limits (what a weak phone's GPU may report, its textures 2048 pixels a side
+/// at most) and with little memory free, draws each without a panic or a GPU error (#358). The
+/// brushes that drew nothing are printed (none expected) and the time it all took.
+#[test]
+fn every_stock_brush_draws_on_a_gpu_held_to_downlevel_limits_with_little_memory() {
+    let Ok(gpu) = Gpu::headless_limited(procraft_gpu::wgpu::Limits::downlevel_defaults()) else {
+        return eprintln!("skipped: no GPU");
+    };
+    crate::device::MEMORY_FREE.with(|m| m.set(Some(600 << 20)));
+    let started = std::time::Instant::now();
+    let s = session_on(gpu.clone(), 400, 300);
+    let layer = s.layers()[0].id;
+    let all: Vec<(String, u32, u32)> = {
+        let st = s.shared.lock();
+        st.library
+            .iter()
+            .enumerate()
+            .flat_map(|(i, set)| set.brushes.iter().enumerate().map(move |(j, b)| (b.name.clone(), i as u32, j as u32)))
+            .collect()
+    };
+    let at = |e: usize| PenSample {
+        pressure: 0.3 + 0.6 * (e as f32 * 0.21).sin().abs(),
+        ..sample(30.0 + e as f32 * 4.0, 150.0 + (e as f32 * 0.09).sin() * 90.0, e as f64 * 8.0)
+    };
+    let mut blank = Vec::new();
+    let mut panicked = Vec::new();
+    for (name, set, index) in &all {
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(s.select_brush(*set, *index));
+            let preview = s.brush_preview(*set, *index, 372, 113);
+            s.set_brush_size(0.4);
+            s.set_color(0.2, 0.5, 0.9);
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=40 {
+                s.stroke_add(vec![at(e)]);
+                if e % 8 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+            let _ = picture(&s);
+            let pixels = s.copy_layer_contents(layer).unwrap().rgba;
+            s.undo();
+            (preview.is_some(), pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0))
+        }));
+        match drawn {
+            Ok((true, true)) => {}
+            Ok(_) => blank.push(name.clone()),
+            Err(_) => panicked.push(name.clone()),
+        }
+    }
+    crate::device::MEMORY_FREE.with(|m| m.set(None));
+    println!("{} brushes in {:.1} s; drew nothing: {blank:?}", all.len(), started.elapsed().as_secs_f32());
+    assert!(panicked.is_empty(), "panicked: {panicked:?}");
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+}
+
 /// A brush's sample stroke drawn once is kept by what the brush looks like: asked for again (a
 /// library redrawing its rows after any change, a set or library shared) it is the same stroke,
 /// not drawn again, wherever the brush has moved; a brush changed in any way that shows draws
@@ -19444,6 +19626,97 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
     assert_eq!(under, placed_under, "the layers under touches");
 }
 
+/// Wet paint comes out the same where a copy from a texture into a buffer writes its rows whole,
+/// the rest of each row but the last written over (as Direct3D 12 does at an offset it can't place
+/// a copy at, and as a phone's driver seems to): every stock brush that mixes wet, its sample
+/// stroke as the library draws it, and wet strokes with a second and building up gradually across
+/// the tiles of a canvas over a picture. A tile's part of a window copied in so wrote over its
+/// neighbours' parts, and the sample strokes and strokes came out with blocks of a tile's size in
+/// solid colour (#357). Alike but for a level or two at a few channels, as the GPU can lay the
+/// same work a level apart from run to run (see the test above).
+#[test]
+fn wet_paint_comes_out_alike_where_copies_write_their_rows_whole() {
+    use procraft_engine::brush::{Brush, Rendering};
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let side = 900u32;
+    let n = side as usize;
+    // every tile of the picture its own
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        *px = [(x / 4 % 256) as u8, (y / 4 % 256) as u8, ((x / 256 * 50 + y / 256 * 90) % 256) as u8, 255];
+    }
+    let runs = [false, true].map(|rows| {
+        gpu.emulate_whole_row_copies(rows);
+        let staged = gpu.placed_copies_staged();
+        let s = session_on(gpu.clone(), side, 700);
+        let wet: Vec<(u32, u32, String)> = {
+            let st = s.shared.lock();
+            let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                set.brushes.iter().enumerate().map(move |(j, b)| (i as u32, j as u32, b.name.clone(), b.mixes_wet()))
+            });
+            all.filter(|b| b.3).map(|(i, j, name, _)| (i, j, name)).collect()
+        };
+        assert!(!wet.is_empty(), "stock brushes that mix wet");
+        let mut pictures: Vec<(String, Vec<u8>)> = wet
+            .iter()
+            .map(|(set, index, name)| {
+                let preview = s.brush_preview(*set, *index, 530, 162).unwrap_or_else(|| panic!("{name}'s preview"));
+                (format!("{name}'s preview"), preview.rgba)
+            })
+            .collect();
+        let layer =
+            s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
+        let layer = layer.unwrap();
+        let find = |want: &dyn Fn(&Brush) -> bool| {
+            let st = s.shared.lock();
+            let found =
+                st.library.iter().enumerate().find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+            found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+        };
+        let gradual = find(&|b: &Brush| b.mixes_wet() && b.rendering == Rendering::Gradual);
+        let second = find(&|b: &Brush| b.mixes_wet() && b.secondary.is_some());
+        for (k, (set, index)) in [gradual, second].into_iter().enumerate() {
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(1.0);
+            s.set_color(0.1 + 0.6 * k as f32, 0.2, 0.7 - 0.5 * k as f32);
+            let at = |e: usize| {
+                let t = e as f32 / 90.0;
+                let (x, y) = (30.0 + t * 840.0, 450.0 + (t * 13.0 + k as f32).sin() * 380.0);
+                PenSample { pressure: 0.5 + 0.5 * (e as f32 * 0.3).sin().abs(), ..sample(x, y, e as f64 * 6.0) }
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=90 {
+                s.stroke_add(vec![at(e)]);
+                if e % 3 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+            let _ = picture(&s);
+        }
+        pictures.push(("the strokes".into(), s.copy_layer_contents(layer).unwrap().rgba));
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        gpu.emulate_whole_row_copies(false);
+        (pictures, gpu.placed_copies_staged() - staged)
+    });
+    let [(direct, _), (whole, staged)] = runs;
+    assert!(staged > 0, "no copy left room between its rows");
+    let differing: Vec<(String, u8, usize, usize)> = direct
+        .iter()
+        .zip(&whole)
+        .map(|((name, a), (_, b))| {
+            assert_eq!(a.len(), b.len(), "{name}");
+            let (most, count) = differ(a, b);
+            (name.clone(), most, count, (a.len() / 10_000).max(16))
+        })
+        .filter(|d| d.2 > 0)
+        .collect();
+    eprintln!("pictures differing (most, channels, allowed): {differing:?}");
+    let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 2 || count > allowed).collect();
+    assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels, allowed): {unlike:?}");
+}
+
 /// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to
 /// the canvas draws alike through Vulkan and Direct3D 12 on the same GPU, square by square: its
 /// paint was packed into half floats as each API rounds, and Direct3D's rounding, carried on frame
@@ -19864,6 +20137,39 @@ fn a_vector_layer_is_saved_with_its_items_beside_its_pixels_and_opens_again() {
     assert!(!data.exists(), "not made up anew");
     assert!(folder.join("layers").join(format!("{vector}.png")).exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Kept selections: each save adds one (the newest last, named by its place, oldest first); a row
+/// slid left and deleted takes its selection out and the rest close up; loading one by its place
+/// makes it the selection.
+#[test]
+fn kept_selections_delete_by_place_and_the_rest_close_up() {
+    use crate::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let mask = |s: &CanvasSession| s.shared.lock().selection.clone().map(|m| m.data);
+    let mut kept = Vec::new();
+    for (i, (x0, x1)) in [(0.0, 20.0), (30.0, 50.0), (60.0, 90.0)].into_iter().enumerate() {
+        s.select_none();
+        s.select_shape(false, x0, 0.0, x1, 100.0, SelectionJoin::Add);
+        kept.push(mask(&s));
+        assert_eq!(s.save_selection(), i as u32 + 1);
+    }
+    assert_eq!(s.saved_selection_count(), 3);
+    // the middle one deleted: two left, the third now second
+    s.delete_saved_selection(1);
+    assert_eq!(s.saved_selection_count(), 2);
+    assert!(s.load_selection(1));
+    assert_eq!(mask(&s), kept[2]);
+    assert!(s.load_selection(0));
+    assert_eq!(mask(&s), kept[0]);
+    // past the last: nothing deleted, nothing loaded
+    s.delete_saved_selection(7);
+    assert_eq!(s.saved_selection_count(), 2);
+    assert!(!s.load_selection(2));
+    // each deleted in turn, from the top of the list (the newest) down
+    s.delete_saved_selection(1);
+    s.delete_saved_selection(0);
+    assert_eq!(s.saved_selection_count(), 0);
 }
 
 /// The library's first brush (set, place) `wanted` says yes to.
@@ -21612,11 +21918,14 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
 
 /// A stand-in for the window the render loop draws into: an offscreen texture of the session's
 /// window size, giving images as `mode` says ([`READY`], [`NO_IMAGE`], [`OUTDATED`],
-/// [`SUBOPTIMAL`]), counting the configures asked for.
+/// [`SUBOPTIMAL`]), counting the configures asked for; the screen's refreshes as `refreshes` has
+/// them (told afresh each time asked), and when each frame was presented.
 struct TestScreen {
     texture: procraft_gpu::wgpu::Texture,
     mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
     configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    refreshes: Option<crate::pacing::Timeline>,
+    presented: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
 const READY: u8 = 0;
@@ -21651,7 +21960,13 @@ impl crate::frame_loop::Screen for TestScreen {
         image.create_view(&Default::default())
     }
 
-    fn present(&mut self, _image: procraft_gpu::wgpu::Texture) {}
+    fn present(&mut self, _image: procraft_gpu::wgpu::Texture) {
+        self.presented.lock().unwrap().push(std::time::Instant::now());
+    }
+
+    fn refreshes(&mut self, _drawing: bool) -> Option<crate::pacing::Timeline> {
+        self.refreshes.map(|t| crate::pacing::Timeline { told: std::time::Instant::now(), ..t })
+    }
 }
 
 /// The render loop running on a thread of its own for a session, into a [`TestScreen`]; stopped
@@ -21661,6 +21976,7 @@ struct LoopRunning {
     thread: Option<std::thread::JoinHandle<()>>,
     mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
     configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    presented: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
 impl Drop for LoopRunning {
@@ -21679,6 +21995,12 @@ impl Drop for LoopRunning {
 
 /// `s`'s render loop started, the window giving images as `mode` says.
 fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
+    run_loop_timed(s, mode, None)
+}
+
+/// `s`'s render loop started, the window giving images as `mode` says, its refreshes told as
+/// `refreshes` has them.
+fn run_loop_timed(s: &CanvasSession, mode: u8, refreshes: Option<crate::pacing::Timeline>) -> LoopRunning {
     let size = s.shared.lock().window_size;
     let gpu = s.shared.lock().gpu.clone().unwrap();
     let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
@@ -21693,8 +22015,14 @@ fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     });
     let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(mode));
     let configures = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut screen =
-        TestScreen { texture, mode: std::sync::Arc::clone(&mode), configures: std::sync::Arc::clone(&configures) };
+    let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut screen = TestScreen {
+        texture,
+        mode: std::sync::Arc::clone(&mode),
+        configures: std::sync::Arc::clone(&configures),
+        refreshes,
+        presented: std::sync::Arc::clone(&presented),
+    };
     let shared = std::sync::Arc::clone(&s.shared);
     {
         let mut st = shared.lock();
@@ -21703,7 +22031,7 @@ fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     }
     let running = std::sync::Arc::clone(&shared);
     let thread = std::thread::spawn(move || crate::frame_loop::draw_loop(&running, &mut screen, || {}));
-    LoopRunning { shared, thread: Some(thread), mode, configures }
+    LoopRunning { shared, thread: Some(thread), mode, configures, presented }
 }
 
 /// Waits until `s` has drawn no frame for a while and owes none: no frame wanted, and no caches
@@ -21788,6 +22116,103 @@ fn an_idle_canvas_draws_no_frames_and_its_render_thread_sleeps() {
     assert!(bands.wakeups <= bands.frames + 2, "a wakeup for each band frame, no more: {bands:?}");
 }
 
+/// Told the screen's refreshes, the render loop draws one frame for each time the compositor takes
+/// one, however fast input comes, each handed over before the latch it is meant for and no more
+/// than a refresh before it; untold, it draws as often as the fastest refresh allows (here at a
+/// 25 Hz screen's latches, against 120 Hz input pacing).
+#[test]
+#[ignore = "timed to the refreshes: run alone, on a machine at rest (frames late under load go untimed)"]
+fn told_the_refreshes_the_render_loop_draws_one_frame_a_latch_just_before_it() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_refresh_rate(120.0);
+    let period = std::time::Duration::from_millis(40);
+    let latch = std::time::Instant::now() + std::time::Duration::from_millis(3);
+    let move_for = |s: &CanvasSession, time: std::time::Duration| {
+        let until = std::time::Instant::now() + time;
+        while std::time::Instant::now() < until {
+            s.view_gesture(150.0, 150.0, 0.5, 0.0, 1.0, 0.0);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    };
+    let timed = run_loop_timed(&s, READY, Some(crate::pacing::Timeline { latch, period, told: latch }));
+    settled(&s);
+    // (a second first, for the frames' timing to settle: the first frames take longer)
+    move_for(&s, std::time::Duration::from_millis(1000));
+    let before = timed.presented.lock().unwrap().len();
+    move_for(&s, std::time::Duration::from_millis(1000));
+    settled(&s);
+    let shown: Vec<_> = timed.presented.lock().unwrap()[before..].to_vec();
+    drop(timed);
+    // each frame's latch: the first at or after it was handed over
+    let tl = crate::pacing::Timeline { latch, period, told: latch };
+    let latches: Vec<_> = shown.iter().map(|&at| tl.latch_from(at)).collect();
+    let early: Vec<f64> = shown.iter().zip(&latches).map(|(&at, &l)| (l - at).as_secs_f64() * 1000.0).collect();
+    let mut distinct = latches.clone();
+    distinct.dedup();
+    eprintln!(
+        "a second of input at a 25 Hz screen's latches: {} frames for {} latches, handed over {:.1}..{:.1} ms before them",
+        shown.len(),
+        distinct.len(),
+        early.iter().copied().fold(f64::MAX, f64::min),
+        early.iter().copied().fold(0.0, f64::max)
+    );
+    assert_eq!(distinct.len(), latches.len(), "never two frames for one latch");
+    // (a busy machine's frame may be late, and its latch go without one; a timed wait on Windows
+    // may end 15 ms late, which the frames' lead takes in)
+    assert!((18..=27).contains(&shown.len()), "a frame a latch: {}", shown.len());
+    let mut sorted = early.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(f64::MAX);
+    assert!(median < 20.0, "handed over before the latch, not a refresh early: {early:?}");
+    // untold: as often as 120 Hz allows
+    let untold = run_loop(&s, READY);
+    settled(&s);
+    let before = untold.presented.lock().unwrap().len();
+    move_for(&s, std::time::Duration::from_millis(1000));
+    settled(&s);
+    let free = untold.presented.lock().unwrap().len() - before;
+    drop(untold);
+    eprintln!("untold: {free} frames");
+    assert!(free >= 40, "more than one a latch: {free}");
+}
+
+/// A pinch while the refreshes are told: a frame each refresh, the view never left unmoved for
+/// more than two (a frame planned for a latch is drawn even when the thread wakes a little after
+/// it was to begin, rather than planned again for the next, which left a pinch jumping). At 25 Hz
+/// refreshes: a timed wait on Windows may end 15 ms late.
+#[test]
+#[ignore = "timed to the refreshes: run alone, on a machine at rest (frames late under load go untimed)"]
+fn a_pinch_timed_to_the_refreshes_draws_every_refresh_with_no_gap_over_two() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_refresh_rate(120.0);
+    let period = std::time::Duration::from_millis(40);
+    let latch = std::time::Instant::now() + std::time::Duration::from_millis(3);
+    let timed = run_loop_timed(&s, READY, Some(crate::pacing::Timeline { latch, period, told: latch }));
+    settled(&s);
+    // zooming in and out a little at a time about the middle, as two fingers spreading and
+    // closing, 0.4 s each way; the first 0.4 s for the frames' timing to settle
+    let pinch = |s: &CanvasSession, time: std::time::Duration| {
+        let began = std::time::Instant::now();
+        while began.elapsed() < time {
+            let out = (began.elapsed().as_millis() / 400) % 2 == 1;
+            s.view_gesture(150.0, 150.0, 0.0, 0.0, if out { 0.998 } else { 1.002 }, 0.0);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    pinch(&s, std::time::Duration::from_millis(400));
+    let before = timed.presented.lock().unwrap().len();
+    pinch(&s, std::time::Duration::from_millis(1600));
+    let ended = std::time::Instant::now();
+    let shown: Vec<_> = timed.presented.lock().unwrap()[before..].iter().copied().filter(|&at| at <= ended).collect();
+    drop(timed);
+    let gaps: Vec<f64> = shown.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0).collect();
+    let widest = gaps.iter().copied().fold(0.0, f64::max);
+    eprintln!("a pinch of 1.6 s at 25 Hz refreshes: {} frames, the widest gap {widest:.1} ms", shown.len());
+    // (a busy machine's frame may be late now and then)
+    assert!(shown.len() >= 34, "a frame a refresh: {}", shown.len());
+    assert!(widest <= 80.0, "no gap over two refreshes: {gaps:?}");
+}
+
 /// The app away (its window possibly still there), nothing is drawn however much is asked for,
 /// and the render thread doesn't wake to draw; shown again, it draws at once.
 #[test]
@@ -21820,6 +22245,60 @@ fn the_app_away_draws_nothing_however_much_changes() {
     // (each ask wakes it to find the app away: 201 asks here)
     assert!(away.wakeups <= 300, "woken by the asks alone, never by itself: {away:?}");
     assert!(back, "drawn again once shown");
+}
+
+/// The brush studio's pad, drawn again a stroke at a time as its brush changes, shows no frame
+/// until it is all drawn: while frames are held the render loop draws none, however often one is
+/// asked for, and draws one as soon as they are let go. (The tablets' render loop drew on, so the
+/// pad showed cleared and half redrawn at each change: it flickered.)
+#[test]
+fn a_pad_being_drawn_again_shows_no_frame_until_it_is_done() {
+    let Some(pad) = session(200, 200) else { return };
+    pad.keep_strokes();
+    pad.begin_own_stroke();
+    pad.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+    pad.stroke_end(vec![sample(190.0, 60.0, 32.0)]);
+    let running = run_loop(&pad, READY);
+    settled(&pad);
+    // held, as while its strokes are drawn again: frames asked for again and again, 40 times
+    pad.shared.lock().holding_frames = true;
+    let before = pad.activity();
+    for _ in 0..40 {
+        pad.shared.lock().needs_frame = true;
+        pad.shared.wake.notify_all();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let held = pad.activity().since(&before);
+    // let go, as a redraw ends: a frame comes
+    {
+        let mut guard = pad.shared.lock();
+        let st = &mut *guard;
+        st.holding_frames = false;
+        st.frame_held = false;
+        pad.shared.frame(st);
+    }
+    let let_go = std::time::Instant::now();
+    let drawn = (0..2000).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        pad.activity().frames > before.frames
+    });
+    let took = let_go.elapsed();
+    // a whole redraw as the studio asks for it, the loop running: done, the stroke there again
+    let studio = CanvasSession::new(64, 64);
+    std::sync::Arc::clone(&pad).sync_pad(std::sync::Arc::clone(&studio), 1.0, 0.0, 0.0);
+    for _ in 0..500 {
+        if !pad.pad_syncing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    settled(&pad);
+    drop(running);
+    eprintln!("held, 40 asks: {held:?}; let go, a frame within {} ms", took.as_millis());
+    assert_eq!(held.frames, 0, "no frame while held: {held:?}");
+    assert!(drawn, "a frame once let go");
+    assert!(!pad.shared.lock().holding_frames);
+    assert_eq!(pixel(&pad, 100, 60)[..3], [255, 0, 0]);
 }
 
 /// A window that gives no image (or a surface that must be configured again and again) is asked

@@ -1,7 +1,8 @@
 //! The side bar's place down its edge of the window. Its centre is kept, from one start to the
 //! next, as a share of the window's height (one share for either edge and either way up), and the
 //! bar stays clear of the top bar and as far from the window's bottom. Its modify button dragged
-//! out from the edge and then up or down moves it; let go, it slides back to its edge.
+//! out from the edge and then up or down moves it, the bar stretching a little toward the finger
+//! with its edge side kept against the window's edge; let go, it settles back to its width.
 //!
 //! Everything here is in the side bar's own points: the window's height and the top bar's bottom
 //! as the bar measures them (divided by how big a plugin shows it).
@@ -28,8 +29,10 @@ const MOVE_AFTER: f32 = 15.0;
 const REST_MS: f64 = 150.0;
 /// ... resting while it moves less than this (points, all told, for a touchscreen's jitter).
 const REST_REACH: f32 = 1.0;
-/// How far out from its edge the bar follows the finger (points).
-const MOST_OUT: f32 = 40.0;
+/// How far the bar stretches toward the finger at most (points): its far side follows the finger
+/// out past where the move began, point for point, up to this, while its edge side stays against
+/// the window's edge (measured: 5 points with the finger 20 out, the move begun at 15; 8 at most).
+const MOST_STRETCH: f32 = 8.0;
 /// How stiffly it gives past the ends of its room (points): the further past, the less it gives.
 const GIVE: f32 = 10.0;
 
@@ -106,13 +109,14 @@ pub enum SideBarDragState {
     Pressing,
 }
 
-/// Where the side bar shows as the touch has it: its top, how far out from its edge it is pulled
-/// (points), and the share of the window's height its centre is kept at.
+/// Where the side bar shows as the touch has it: its top, how far its far side is stretched toward
+/// the finger (points; its edge side stays against the window's edge, and what is on it moves out
+/// with the far side), and the share of the window's height its centre is kept at.
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
 pub struct SideBarShown {
     pub state: SideBarDragState,
     pub top: f32,
-    pub out: f32,
+    pub stretch: f32,
     pub centre: f32,
 }
 
@@ -132,15 +136,18 @@ struct Drag {
     /// Where the finger has taken the bar's top, past the ends of its room too.
     reach: f32,
     top: f32,
-    out: f32,
+    /// How far out from the edge the finger was as the move began, and the bar's stretch.
+    began: f32,
+    stretch: f32,
 }
 
 /// A touch on the side bar's modify button: made as it presses the button, told each move, and
 /// let go. Dragged out from the bar's edge (right for a bar on the left, left for one on the
-/// right) once it has gone 15 points, it moves the bar: out with the finger up to 40 points, and
-/// up or down with it; past the ends of its room it gives less and less, never under the top bar
-/// nor past the window's bottom. Let go, the bar goes back to its edge, inside its room, and its
-/// centre is kept there.
+/// right) once it has gone 15 points, it moves the bar up or down with the finger, the bar
+/// stretching toward the finger as it goes further out (up to 8 points), its edge side staying
+/// against the window's edge; past the ends of its room it gives less and less, never under the top
+/// bar nor past the window's bottom. Let go, the bar settles back to its width, inside its room,
+/// and its centre is kept there.
 #[derive(uniffi::Object)]
 pub struct SideBarDrag {
     drag: Mutex<Drag>,
@@ -168,7 +175,8 @@ impl SideBarDrag {
                 rested: 0.0,
                 reach: fit.top,
                 top: fit.top,
-                out: 0.0,
+                began: 0.0,
+                stretch: 0.0,
             }),
         })
     }
@@ -192,13 +200,13 @@ impl SideBarDrag {
         d.shown()
     }
 
-    /// The finger lifted (or the touch was taken): moved, the bar goes back to its edge, inside its
+    /// The finger lifted (or the touch was taken): moved, the bar settles into its width, inside its
     /// room, and its centre is kept there; else it stays where it was.
     pub fn let_go(&self) -> SideBarShown {
         let mut d = self.lock();
         if d.state == SideBarDragState::Moving {
             d.top = d.top.clamp(d.fit.highest, d.fit.lowest);
-            d.out = 0.0;
+            d.stretch = 0.0;
             d.centre = centre_of(d.height, d.top);
         }
         d.shown()
@@ -218,7 +226,7 @@ impl SideBarDrag {
 
 impl Drag {
     fn shown(&self) -> SideBarShown {
-        SideBarShown { state: self.state, top: self.top, out: self.out, centre: self.centre }
+        SideBarShown { state: self.state, top: self.top, stretch: self.stretch, centre: self.centre }
     }
 
     /// Still waiting, the finger went `step` further at `ms`: rested first, it is the button's
@@ -245,6 +253,7 @@ impl Drag {
             SideBarDragState::Pressing
         };
         if self.state == SideBarDragState::Moving {
+            self.began = across;
             self.follow();
         }
     }
@@ -255,10 +264,10 @@ impl Drag {
         if self.right { -dx } else { dx }
     }
 
-    /// The bar follows the finger: out up to [`MOST_OUT`], and up or down, giving less past the
-    /// ends of its room.
+    /// The bar follows the finger up or down, giving less past the ends of its room, and stretches
+    /// toward it as far as it has gone further out since the move began, up to [`MOST_STRETCH`].
     fn follow(&mut self) {
-        self.out = self.away().clamp(0.0, MOST_OUT);
+        self.stretch = (self.away() - self.began).clamp(0.0, MOST_STRETCH);
         let SideBarFit { highest, lowest, .. } = self.fit;
         // the top bar's bottom, and where the bar's bottom meets the window's
         let (top_most, bottom_most) = (highest - UNDER_TOP_BAR, lowest + highest - UNDER_TOP_BAR);
@@ -422,16 +431,16 @@ mod tests {
         assert_eq!(start.state, SideBarDragState::Waiting);
         // under 15 points it waits, the bar where it was
         let s = go(&drag, (25.0, 400.0), (39.0, 400.0), 7, 0.0);
-        assert_eq!((s.state, s.top, s.out), (SideBarDragState::Waiting, start.top, 0.0));
-        // 15 out: it moves, out with the finger
+        assert_eq!((s.state, s.top, s.stretch), (SideBarDragState::Waiting, start.top, 0.0));
+        // 15 out: it moves, not yet stretched (it doesn't jump out to the finger)
         let s = drag.moved(40.0, 400.0, 80.0);
-        assert_eq!((s.state, s.top, s.out), (SideBarDragState::Moving, start.top, 15.0));
-        // then down with the finger, point for point; out no further than 40
+        assert_eq!((s.state, s.top, s.stretch), (SideBarDragState::Moving, start.top, 0.0));
+        // then down with the finger, point for point; stretched toward it no more than 8
         let s = go(&drag, (40.0, 400.0), (100.0, 425.0), 5, 80.0);
-        assert!(close(s.top, start.top + 25.0) && s.out == 40.0, "{s:?}");
-        // let go: back at its edge where it is, its centre kept there
+        assert!(close(s.top, start.top + 25.0) && s.stretch == MOST_STRETCH, "{s:?}");
+        // let go: its own width again where it is, its centre kept there
         let kept = drag.let_go();
-        assert_eq!((kept.state, kept.out), (SideBarDragState::Moving, 0.0));
+        assert_eq!((kept.state, kept.stretch), (SideBarDragState::Moving, 0.0));
         assert!(close(kept.top, start.top + 25.0));
         assert!(close(kept.centre, (kept.top + BAR / 2.0) / SIDE_WAYS));
         assert!(close(side_bar_fit(SIDE_WAYS, TOP_BAR, kept.centre).top, kept.top));
@@ -441,13 +450,40 @@ mod tests {
     fn on_the_right_it_is_dragged_out_to_the_left() {
         let drag = SideBarDrag::new(1100.0, 400.0, 0.0, true, SIDE_WAYS, TOP_BAR, FIRST_CENTRE);
         let s = go(&drag, (1100.0, 400.0), (1080.0, 400.0), 4, 0.0);
-        assert_eq!((s.state, s.out), (SideBarDragState::Moving, 20.0));
+        assert_eq!((s.state, s.stretch), (SideBarDragState::Moving, 5.0));
         let s = go(&drag, (1080.0, 400.0), (1080.0, 360.0), 4, 40.0);
         assert!(close(s.top, 143.6 - 40.0));
         assert!(close(drag.let_go().top, 103.6));
         // dragged right, toward its edge, it is the button's press
         let drag = SideBarDrag::new(1100.0, 400.0, 0.0, true, SIDE_WAYS, TOP_BAR, FIRST_CENTRE);
         assert_eq!(go(&drag, (1100.0, 400.0), (1120.0, 400.0), 4, 0.0).state, SideBarDragState::Pressing);
+    }
+
+    /// As measured: the finger 20 points out in four even steps (the move begun at
+    /// 15), then down. The bar stretches 5 points toward the finger and stays so as it goes
+    /// down, never past 8 however far out the finger goes; it isn't moved out from its edge.
+    #[test]
+    fn dragged_twenty_out_it_stretches_five_toward_the_finger_and_never_past_eight() {
+        for right in [false, true] {
+            let (x, outward) = if right { (1100.0, -1.0) } else { (25.0, 1.0) };
+            let drag = SideBarDrag::new(x, 400.0, 0.0, right, SIDE_WAYS, TOP_BAR, FIRST_CENTRE);
+            let mut stretched = Vec::new();
+            for k in 1..=4 {
+                let s = drag.moved(x + outward * 5.0 * k as f32, 400.0, 20.0 * f64::from(k));
+                stretched.push(s.stretch);
+            }
+            assert_eq!(stretched, [0.0, 0.0, 0.0, 5.0], "right {right}");
+            let s = go(&drag, (x + outward * 20.0, 400.0), (x + outward * 20.0, 430.0), 30, 80.0);
+            assert_eq!((s.state, s.stretch), (SideBarDragState::Moving, 5.0), "right {right}");
+            assert!(close(s.top, 143.6 + 30.0), "right {right}: {s:?}");
+            // however far out, 8 at most; back toward the edge, less again
+            for (out, most) in [(23.0, 8.0), (60.0, 8.0), (400.0, 8.0), (17.0, 2.0), (10.0, 0.0)] {
+                let s = drag.moved(x + outward * out, 430.0, 500.0);
+                eprintln!("right {right}: the finger {out} out, the bar stretched {}", s.stretch);
+                assert!(s.stretch <= 8.0 && s.stretch == most, "right {right}, {out} out: {s:?}");
+            }
+            assert_eq!(drag.let_go().stretch, 0.0);
+        }
     }
 
     #[test]
@@ -458,7 +494,7 @@ mod tests {
             assert_eq!(s.state, SideBarDragState::Pressing, "{why}");
             // and stays so, however it goes on
             let s = go(&drag, to, (200.0, 600.0), 10, 40.0);
-            assert_eq!((s.state, s.out), (SideBarDragState::Pressing, 0.0), "{why}");
+            assert_eq!((s.state, s.stretch), (SideBarDragState::Pressing, 0.0), "{why}");
             assert!(close(s.top, 143.6), "{why}");
             assert_eq!(drag.let_go().centre, FIRST_CENTRE);
         }

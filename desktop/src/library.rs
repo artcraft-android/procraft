@@ -326,6 +326,8 @@ pub struct Library {
     swiped: Option<(u32, u32)>,
     /// The brushes of the shown set picked by sliding them right.
     picked: Vec<(u32, u32)>,
+    /// Words for the app to show over the canvas (Combine refused), taken by it.
+    pub notice: Option<String>,
     /// The brushes a dragged one takes with it (it among them, those picked in its set), in their
     /// order, and the dragged cell's size (its row may go as another set opens); the set it is
     /// over, and since when (held there a moment, it opens).
@@ -1028,19 +1030,20 @@ impl Library {
         if word(ui, "Delete", delete, "delete picked") {
             self.ask_delete(Deleting::Picked);
         }
+        // two picked (the current brush counts): Combine, which a combined one among them refuses
         let current = session.current_brush();
         let pair = match self.picked[..] {
             [(set, index)] if set == current.set => Some(index),
             _ => None,
         };
-        let pair = pair
-            .filter(|i| !session.brush_is_dual(current.set, *i) && !session.brush_is_dual(current.set, current.index));
         if let Some(second) = pair {
             let combine = Rect::from_min_size(pos2(delete.left() - 4.0 - 80.0, top), vec2(80.0, 32.0));
-            if word(ui, "Combine", combine, "combine picked")
-                && session.combine_brushes(current.set, current.index, second)
-            {
-                self.library_changed();
+            if word(ui, "Combine", combine, "combine picked") {
+                if let Some(refusal) = session.combine_refusal(current.set, current.index, second) {
+                    self.notice = Some(refusal);
+                } else if session.combine_brushes(current.set, current.index, second) {
+                    self.library_changed();
+                }
             }
         }
     }

@@ -50,6 +50,8 @@ static BEGAN: OnceLock<Instant> = OnceLock::new();
 
 std::thread_local! {
     /// Whether this thread is writing into the log's file.
+    // (already const: clippy 1.99 asks for it again when built for Android)
+    #[allow(clippy::missing_const_for_thread_local)]
     static WRITING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

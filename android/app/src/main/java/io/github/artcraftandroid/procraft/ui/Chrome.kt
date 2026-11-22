@@ -191,13 +191,24 @@ private const val DARK_RING_BELOW = 0.35f
 private const val LIGHT_RING_ABOVE = 0.85f
 
 /**
+ * The side bar's body across, in its own pixels ([width] wide from 0), stretched [stretch] toward the
+ * finger: the bar is placed that far out from its edge, so its body reaches back as far on its edge
+ * side (left, or right if [right]-handed) to stay against the window's edge. (left, right).
+ */
+internal fun sideBarBody(width: Float, stretch: Float, right: Boolean): Pair<Float, Float> {
+    val s = stretch.coerceAtLeast(0f)
+    return if (right) 0f to width + s else (0f - s) to width
+}
+
+/**
  * The side bar against the left edge (the right one, [right]-handed): brush size, the modify
  * button, opacity, undo and redo, its tracks [trackHeight] long. On the right everything is
- * mirrored but the glyphs. Pulled [out] from its edge (its modify button dragged), its edge's
- * corners round too.
+ * mirrored but the glyphs. Stretched [stretch] toward the finger (its modify button dragged out),
+ * it is placed that far out by its caller and its glass reaches back as far: its edge side stays
+ * against the window's edge (see [sideBarBody]).
  */
 @Composable
-fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f, out: Dp = 0.dp) {
+fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f, stretch: Dp = 0.dp) {
     // a control's left edge, mirrored on the right
     fun x(left: Dp, width: Dp) = if (right) Pc.SideBarWidth - left - width else left
     // shorter tracks bring what is under each up with them
@@ -206,9 +217,9 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     // its glass slides out with it as the interface hides, its screen side's corners off the screen
     val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
     val moved = Offset(aside, 0f)
-    // its glass goes past the screen's edge (to take that side's corners off the screen), or, pulled
-    // out from the edge, stays its own size
-    val past = if (out > 0.dp) 0.dp else Pc.SideBarCorner
+    // its glass goes past the screen's edge (to take that side's corners off the screen), the
+    // further for its stretch
+    val past = Pc.SideBarCorner + stretch.coerceAtLeast(0.dp)
     val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else past, pastRight = if (right) past else 0.dp)
     // the tracks' own thin glass, unless a plugin has them frosted as the bar is (which the bar's
     // glass under them is already)
@@ -228,10 +239,12 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 }
                 val body = Path().apply {
                     fillType = PathFillType.EvenOdd
-                    val (inner, outer) = CornerRadius(out.toPx().coerceIn(0f, r)) to CornerRadius(r)
+                    // square against the screen's edge, reaching back to it however it is stretched
+                    val (left, rightSide) = sideBarBody(size.width, stretch.toPx(), right)
+                    val (edge, outer) = CornerRadius.Zero to CornerRadius(r)
                     addRoundRect(
-                        if (right) RoundRect(0f, 0f, size.width, size.height, outer, inner, inner, outer)
-                        else RoundRect(0f, 0f, size.width, size.height, inner, outer, outer, inner),
+                        if (right) RoundRect(left, 0f, rightSide, size.height, outer, edge, edge, outer)
+                        else RoundRect(left, 0f, rightSide, size.height, edge, outer, outer, edge),
                     )
                     windows.forEach { addRoundRect(it) }
                 }

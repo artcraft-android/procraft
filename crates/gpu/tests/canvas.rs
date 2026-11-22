@@ -1435,6 +1435,70 @@ fn a_selection_keeps_paint_inside_and_stripes_the_rest() {
     assert!(!canvas.has_selection());
 }
 
+/// A feathered selection's edge, while its feathering is dragged: a dark line where it fades out
+/// to a tenth selected, over the bands or alone (with no look, as Color Fill's fill shows it),
+/// one canvas pixel wide on each row; none once let go.
+#[test]
+fn a_feathered_selection_shows_a_line_where_it_fades_to_a_tenth() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // fully selected up to x 20, fading out to nothing at x 40 (a tenth at x 38)
+    let fade = |x: usize| (255.0 * (1.0 - (x as f32 - 20.0) / 20.0).clamp(0.0, 1.0)).round() as u8;
+    let coverage: Vec<u8> = (0..64 * 64).map(|i| fade(i % 64)).collect();
+    canvas.set_selection(&gpu, Some(&coverage));
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let shown = |canvas: &mut Canvas, doc: &mut Document, look: Option<procraft_gpu::SelectionLook>| {
+        canvas.render(
+            &gpu,
+            doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (64, 64),
+                to_screen: procraft_engine::geom::Affine::IDENTITY,
+                surround: [0.0; 3],
+                grid: None,
+                selection: look,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                look: None,
+            }),
+        );
+        let px = read(&gpu, &texture, 64, 64);
+        (0..64).map(|x| pixel(&px, 64, x, 30)[0]).collect::<Vec<u8>>()
+    };
+    let tenth = (0..64).find(|&x| fade(x) < 26).unwrap();
+    // with no look and no line, the white canvas alone
+    assert!(shown(&mut canvas, &mut doc, None).iter().all(|&v| v == 255));
+    // the line alone: the first pixel under a tenth, dark; the rest white
+    canvas.set_selection_edge(true);
+    let row = shown(&mut canvas, &mut doc, None);
+    let dark: Vec<usize> = (0..64).filter(|&x| row[x] < 100).collect();
+    assert_eq!(dark, vec![tenth], "{row:?}");
+    // over the bands, there too
+    let stripes = procraft_gpu::Stripes { period: 8.0, drift: 0.0, coverage: 0.5 };
+    let row = shown(&mut canvas, &mut doc, Some(procraft_gpu::SelectionLook::Stripes(stripes)));
+    assert!(row[tenth] < 40, "{row:?}");
+    // let go: gone
+    canvas.set_selection_edge(false);
+    assert!(shown(&mut canvas, &mut doc, None).iter().all(|&v| v == 255));
+}
+
 #[test]
 fn adjustments_redraw_the_layer_and_keep_to_the_selection() {
     let Some(gpu) = gpu() else { return };
@@ -2893,6 +2957,55 @@ fn paint_laid_in_place_turns_a_mirrored_stamp_s_shape() {
         let (plain, mirrored) = (shown([false, false]), shown([true, false]));
         assert!(plain.0 > 200 && plain.1 < 40, "{wet_pull:?}: {plain:?}");
         assert!(mirrored.1 > 200 && mirrored.0 < 40, "{wet_pull:?}: {mirrored:?}");
+    }
+}
+
+#[test]
+fn a_shape_lies_upright_and_its_angle_turns_it_clockwise_on_the_canvas() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a shape with its ink in its top left quarter only, stamped turned by each quarter turn of a
+    // brush file's shape orientation (1 upright, 3 a quarter turn, 2 a half, 4 three quarters):
+    // which quarter of the stamp on the canvas holds the ink, wet, laid in place and drawn
+    let n = TEXTURE_SIZE;
+    let pixels: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 && i / n < n / 2 { 255 } else { 0 }).collect();
+    let brush = Brush {
+        shape: procraft_engine::brush::Shape {
+            source: procraft_engine::brush::Source::new(pixels),
+            ..Brush::round_pen().shape
+        },
+        ..Brush::round_pen()
+    };
+    for (wet_pull, laid_in_place) in [(None, false), (None, true), (Some(0.5), false)] {
+        let inked = |angle: f32| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let mut style = StrokeStyle {
+                wet_pull,
+                laid_in_place,
+                rendering: if laid_in_place || wet_pull.is_some() { Rendering::Gradual } else { Rendering::BuildUp },
+                ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+            };
+            canvas.use_sources(&gpu, &mut style, &brush);
+            canvas.begin_stroke(doc.current(), style);
+            canvas.add_stamps(&[Stamp { angle, ..Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0) }]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+            // the stamp's quarters on the canvas: top left, top right, bottom right, bottom left
+            [(22, 22), (42, 22), (42, 42), (22, 42)].map(|(x, y)| pixel(&layer, 64, x, y)[3])
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        for (turns, angle) in [(0, 0.0), (1, quarter), (2, 2.0 * quarter), (3, -quarter)] {
+            let shown = inked(angle);
+            for (k, &a) in shown.iter().enumerate() {
+                if k == turns {
+                    assert!(a > 200, "{wet_pull:?} {laid_in_place}: turned {turns}, {shown:?}");
+                } else {
+                    assert!(a < 40, "{wet_pull:?} {laid_in_place}: turned {turns}, {shown:?}");
+                }
+            }
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 //! Copies between textures and buffers, made as Direct3D 12 without unrestricted copy pitches
-//! makes them where a test asks (see [`Gpu::emulate_placed_copies`]).
+//! makes them where a test asks (see [`Gpu::emulate_placed_copies`]), or as a driver that writes
+//! a copy's rows whole (see [`Gpu::emulate_whole_row_copies`]).
 //!
 //! Direct3D 12 without them (on Windows 10, and with older drivers, as many integrated GPUs have)
 //! places a texture's rows in a buffer only at offsets that are multiples of [`PLACEMENT`]. wgpu
@@ -21,6 +22,9 @@ pub(crate) const PLACEMENT: u64 = 512;
 #[derive(Default)]
 pub(crate) struct Placed {
     on: AtomicBool,
+    /// Copies from a texture whose rows leave room between them in the buffer are made as a
+    /// driver that writes whole rows makes them (see [`Gpu::emulate_whole_row_copies`]).
+    rows: AtomicBool,
     staged: AtomicU64,
 }
 
@@ -44,6 +48,16 @@ impl Gpu {
         self.placed.on.store(on, Ordering::Relaxed);
     }
 
+    /// Copies from a texture into a buffer made from now on as a driver that writes a copy's rows
+    /// whole makes them (`on`), on this device and its clones: one whose rows leave room between
+    /// them in the buffer (a part of a wider picture's rows) goes through a buffer of its own
+    /// holding every byte 255, all of which is copied back, so the rest of each of its rows but
+    /// the last is written over, wherever it starts. For tests on other GPUs.
+    #[doc(hidden)]
+    pub fn emulate_whole_row_copies(&self, on: bool) {
+        self.placed.rows.store(on, Ordering::Relaxed);
+    }
+
     /// How many copies from a texture went through a buffer of their own, which writes over the
     /// rest of their rows but the last (see [`Gpu::emulate_placed_copies`]).
     #[doc(hidden)]
@@ -61,7 +75,8 @@ impl Gpu {
     }
 
     /// `encoder.copy_texture_to_buffer`, made as Direct3D 12 without unrestricted copy pitches
-    /// makes it where a test asks (see [`Gpu::emulate_placed_copies`]).
+    /// makes it, or as a driver that writes a copy's rows whole, where a test asks (see
+    /// [`Gpu::emulate_placed_copies`], [`Gpu::emulate_whole_row_copies`]).
     pub(crate) fn copy_texture_to_buffer(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -72,7 +87,10 @@ impl Gpu {
         let layout = into.layout;
         let block = from.texture.format().block_copy_size(Some(from.aspect)).unwrap_or(4);
         let bytes = spans(layout, size, block);
-        if !self.staged(layout, bytes) {
+        // (rows with room between them, as a driver writing them whole writes over)
+        let gaps = size.height > 1 && layout.bytes_per_row.is_some_and(|row| row > size.width * block);
+        let whole_rows = self.placed.rows.load(Ordering::Relaxed) && gaps;
+        if !whole_rows && !self.staged(layout, bytes) {
             encoder.copy_texture_to_buffer(from, into, size);
             return;
         }

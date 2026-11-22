@@ -91,6 +91,9 @@ pub(super) struct Tile {
     pub(super) more: Vec<wgpu::Texture>,
 }
 
+/// What of a tile a kind of what the stroke keeps is in (none where the stroke doesn't keep it).
+type KeptOf = fn(&Tile) -> Option<&wgpu::Texture>;
+
 /// The buffers a smudge stroke's passes work in (see the module): the layer as the stroke has left
 /// it, the stroke as laid, the amounts (both halves), and the layer as it was.
 pub(super) struct Window {
@@ -298,30 +301,6 @@ pub(super) fn tiles_of(rect: IRect, side: u32) -> impl Iterator<Item = (u32, u32
 pub(super) fn tile_rect((x, y): (u32, u32), side: u32) -> IRect {
     let at = |n: u32| i32::try_from(n.saturating_mul(side)).unwrap_or(i32::MAX);
     IRect::new(at(x), at(y), at(x + 1), at(y + 1))
-}
-
-/// Copies `size` of a texture from `from` into a window's buffer at `into`: at once where that
-/// starts at a multiple of [`PLACEMENT`], else a row at a time (a window too big to be laid out
-/// so, see [`window_reach`]), as a copy of one row writes nothing past it wherever it starts.
-fn copy_to_window(
-    gpu: &Gpu,
-    encoder: &mut wgpu::CommandEncoder,
-    from: wgpu::TexelCopyTextureInfo<'_>,
-    into: wgpu::TexelCopyBufferInfo<'_>,
-    size: wgpu::Extent3d,
-) {
-    let layout = into.layout;
-    if layout.offset.is_multiple_of(u64::from(PLACEMENT)) || size.height <= 1 {
-        gpu.copy_texture_to_buffer(encoder, from, into, size);
-        return;
-    }
-    let row = layout.bytes_per_row.unwrap_or(0);
-    for y in 0..size.height {
-        let from =
-            wgpu::TexelCopyTextureInfo { origin: wgpu::Origin3d { y: from.origin.y + y, ..from.origin }, ..from };
-        let at = layout.offset + u64::from(row) * u64::from(y);
-        gpu.copy_texture_to_buffer(encoder, from, in_buffer(into.buffer, at, row, 1), extent(size.width, 1));
-    }
 }
 
 /// A buffer for a window.
@@ -857,42 +836,79 @@ impl Canvas {
         // the layer as the stroke has left it, and as it was where the stroke hasn't been
         let from_layer = copy_at(&layer.texture, reach.x0, reach.y0);
         gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row, height), size);
-        if before {
-            encoder.copy_texture_to_texture(from_layer, copy_at(&window.before, 0, 0), size);
-        }
-        if let Some(grained) = &window.grained {
-            gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(grained, 0, row, height), size);
-        }
         if let Some(amount) = &window.amount {
             encoder.clear_buffer(amount, 0, Some(bytes * keeps.halves()));
         }
-        // what the stroke keeps where it has been
-        for at in tiles_of(reach, side) {
-            let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = tile_rect(at, side).intersect(reach);
-            if r.is_empty() {
+        // the stroke's tiles under the window: each one's part of it (in the window), and where
+        // that starts in the tile
+        let parts: Vec<(&Tile, IRect, (i32, i32))> = tiles_of(reach, side)
+            .filter_map(|at| {
+                let tile = smudge.tiles.get(&at)?;
+                let t = tile_rect(at, side);
+                let r = t.intersect(reach);
+                (!r.is_empty()).then_some((tile, r, (r.x0 - t.x0, r.y0 - t.y0)))
+            })
+            .collect();
+        // what the stroke keeps where it has been, a kind at a time: put together in the window's
+        // texture first (the layer, or nothing, with each tile's part over it), then copied into
+        // its buffer whole rows at a time. A copy from a texture into the middle of a buffer's rows
+        // can write over the rest of them, as Direct3D 12 without unrestricted copy pitches does
+        // (see `crate::placed`), and as a driver that writes a copy's rows whole would: tiles'
+        // parts copied straight in wrote over their neighbours' (on some phones, blocks of a
+        // tile's size came out in solid colour, #357). The texture ends up holding the layer as it
+        // was, as the passes read it.
+        let at_window = |r: IRect| copy_at(&window.before, r.x0 - reach.x0, r.y0 - reach.y0);
+        let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
+        let whole = u64::from(width) * u64::from(height);
+        let kinds: [(Option<&wgpu::Buffer>, u64, KeptOf, bool); 3] = [
+            (window.grained.as_ref(), 0, |t| t.grained.as_ref(), true),
+            (window.amount.as_ref(), 0, |t| t.amount.as_ref(), false),
+            (window.amount.as_ref(), bytes, |t| t.shown.as_ref(), false),
+        ];
+        for (buffer, start, kept, from_the_layer) in kinds {
+            let Some(buffer) = buffer else { continue };
+            let theirs: Vec<(&wgpu::Texture, IRect, (i32, i32))> =
+                parts.iter().filter_map(|&(tile, r, at)| Some((kept(tile)?, r, at))).collect();
+            if theirs.is_empty() {
+                // (the amounts are cleared already)
+                if from_the_layer {
+                    gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(buffer, start, row, height), size);
+                }
                 continue;
             }
-            let t = tile_rect(at, side);
-            let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
-            let offset = in_window(reach, r);
-            if before {
+            // (under what the tiles' parts don't cover)
+            if theirs.iter().map(|t| area(t.1)).sum::<u64>() < whole {
+                if from_the_layer {
+                    encoder.copy_texture_to_texture(from_layer, copy_at(&window.before, 0, 0), size);
+                } else {
+                    drop(super::render_pass(
+                        encoder,
+                        "smudge window cleared",
+                        &window.before_view,
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    ));
+                }
+            }
+            for (kept, r, (x, y)) in theirs {
+                encoder.copy_texture_to_texture(copy_at(kept, x, y), at_window(r), extent(r.width(), r.height()));
+            }
+            gpu.copy_texture_to_buffer(
+                encoder,
+                copy_at(&window.before, 0, 0),
+                in_buffer(buffer, start, row, height),
+                size,
+            );
+        }
+        if before {
+            if parts.iter().map(|p| area(p.1)).sum::<u64>() < whole {
+                encoder.copy_texture_to_texture(from_layer, copy_at(&window.before, 0, 0), size);
+            }
+            for &(tile, r, (x, y)) in &parts {
                 encoder.copy_texture_to_texture(
                     copy_at(&tile.before, x, y),
-                    copy_at(&window.before, r.x0 - reach.x0, r.y0 - reach.y0),
-                    size,
+                    at_window(r),
+                    extent(r.width(), r.height()),
                 );
-            }
-            let halves = [
-                (&tile.grained, &window.grained, 0),
-                (&tile.amount, &window.amount, 0),
-                (&tile.shown, &window.amount, bytes),
-            ];
-            for (kept, buffer, start) in halves {
-                if let (Some(kept), Some(buffer)) = (kept, buffer) {
-                    let into = in_buffer(buffer, start + offset, row, r.height());
-                    copy_to_window(gpu, encoder, copy_at(kept, x, y), into, size);
-                }
             }
         }
         true
@@ -1217,59 +1233,6 @@ mod tests {
         assert_eq!((tile_for(Some(20.0), false), tile_for(Some(600.0), false)), (THIN_TILE, TILE));
         assert_eq!((tile_for(None, false), tile_for(Some(20.0), true)), (TILE, TILE));
         assert_eq!(part(0, 0, 255, 255), WHOLE);
-    }
-
-    /// A tile's part copied into a window where a copy can't be placed (one too big for a binding
-    /// once laid out from a column copies can start at) writes its rows and nothing between them,
-    /// where Direct3D 12 without unrestricted copy pitches copies to such an offset (see
-    /// `crate::placed`): copied at once, it wrote over its neighbours' rows there.
-    #[test]
-    fn a_tile_s_part_copied_into_a_window_where_copies_aren_t_placed_leaves_the_rest_be() {
-        let Ok(gpu) = Gpu::headless() else { return };
-        let device = &gpu.device;
-        let tile = texture(device, "tile", TILE, TILE, LAYER_FORMAT);
-        let pixels: Vec<u8> = (0..TILE * TILE * 4).map(|i| (i % 251) as u8).collect();
-        gpu.queue.write_texture(
-            copy_at(&tile, 0, 0),
-            &pixels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(TILE * 4), rows_per_image: None },
-            extent(TILE, TILE),
-        );
-        // a window from a column copies can't start at, over the second tile's first rows
-        let t = TILE as i32;
-        let reach = IRect::new(t - 156, 0, t + 144, 20);
-        let row = row_bytes(reach.width());
-        let bytes = u64::from(row) * u64::from(reach.height());
-        let window = window_buffer(device, "window", bytes);
-        let r = tile_rect((1, 0), TILE).intersect(reach);
-        let offset = in_window(reach, r);
-        assert_ne!(offset % u64::from(PLACEMENT), 0);
-        let read = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: bytes,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        gpu.emulate_placed_copies(true);
-        gpu.queue.write_buffer(&window, 0, &vec![0xAB; bytes as usize]);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        let into = in_buffer(&window, offset, row, r.height());
-        copy_to_window(&gpu, &mut encoder, copy_at(&tile, 0, 0), into, extent(r.width(), r.height()));
-        encoder.copy_buffer_to_buffer(&window, 0, &read, 0, bytes);
-        gpu.queue.submit([encoder.finish()]);
-        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let got = read.slice(..).get_mapped_range().unwrap().to_vec();
-        // each row the tile's own where it copied to, and as it was all round
-        let (row, offset, wide) = (row as usize, offset as usize, r.width() as usize * 4);
-        let mut want = vec![0xAB; bytes as usize];
-        for y in 0..r.height() as usize {
-            let from = y * (TILE as usize * 4);
-            want[offset + y * row..offset + y * row + wide].copy_from_slice(&pixels[from..from + wide]);
-        }
-        assert!(got == want, "bytes otherwise: {}", got.iter().zip(&want).filter(|(a, b)| a != b).count());
-        assert!(gpu.placed_copies_staged() > 0);
-        assert_eq!(gpu.errors(), 0);
     }
 
     #[test]
