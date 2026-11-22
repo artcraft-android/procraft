@@ -1470,6 +1470,45 @@ mod tests {
     }
 
     #[test]
+    fn a_files_jitter_past_the_sliders_end_is_kept_and_written_out_again() {
+        // a spatter brush's: 13.67 across and 13.78 along, past the slider's 3
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Spatter");
+        b.fill(
+            &root,
+            &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+            vec![("name", name), ("plotJitter", Value::Real(13.67)), ("plotJitterLongitudinal", Value::Real(13.78))],
+        );
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        let read_back = read(&zip.finish()).unwrap();
+        let mut brush = Brush::round_pen();
+        for (k, v) in &read_back.settings {
+            brush.set_setting(k, *v);
+        }
+        // the controls past 1, as the file says (none cut back to the slider's 3)
+        let file = |control: f32| crate::stroke::JITTER_FILE_SCALE * control.powf(2.2);
+        let (across, along) = (file(brush.setting("jitter_lateral")), file(brush.setting("jitter_linear")));
+        assert!((across - 13.67).abs() < 0.01 && (along - 13.78).abs() < 0.01, "{across} {along}");
+        // and written out as they came in
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+            secondary: None,
+        };
+        let again = read(&write(&brush, "", &pictures)).unwrap();
+        let get = |k: &str| again.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| file(*v));
+        let (across, along) = (get("jitter_lateral").unwrap(), get("jitter_linear").unwrap());
+        assert!((across - 13.67).abs() < 0.01 && (along - 13.78).abs() < 0.01, "{across} {along}");
+    }
+
+    #[test]
     fn a_file_with_its_own_linear_jitter_but_no_tilt_keys_has_its_tilt_off() {
         let mut b = Builder::new();
         let root = b.reserve();
