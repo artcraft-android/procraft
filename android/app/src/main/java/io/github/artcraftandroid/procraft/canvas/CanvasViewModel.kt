@@ -3204,7 +3204,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var sideBarMoving by mutableStateOf<io.github.artcraftandroid.procraft.core.SideBarShown?>(null)
         private set
 
-    /** The side bar was let go where it was dragged: it slides back to its edge, at its kept place. */
+    /** The side bar was let go where it was dragged: it settles into its width, at its kept place. */
     var sideBarSettling by mutableStateOf(false)
 
     private val modifyPress = object : io.github.artcraftandroid.procraft.ui.ModifyPress {
