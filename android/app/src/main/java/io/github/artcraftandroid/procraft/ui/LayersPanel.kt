@@ -518,7 +518,12 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
                 Box(
                     Modifier.animateItem(null, if (dragId != null || blendAt >= 0) null else Motion.rowMove(), null)
                         .padding(top = 10.dp).graphicsLayer { alpha = if (blendAt >= 0) belowShown else 1f },
-                ) { BackgroundRow(vm) }
+                ) {
+                    Column {
+                        BackgroundRow(vm)
+                        PluginLayersRows(vm)
+                    }
+                }
             }
         }
         floating?.let { FloatingBottom(it) }
@@ -1550,6 +1555,24 @@ private fun BackgroundRow(vm: CanvasViewModel) {
             CheckBox(bg.visible, Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
+    }
+}
+
+/**
+ * The actions the plugins that are on put in the Layers panel, under the background's row: a row
+ * each, by its label, as the background's is drawn. A tap runs it, as one in the Canvas tab does.
+ */
+@Composable
+private fun PluginLayersRows(vm: CanvasViewModel) {
+    val actions = remember(vm.pluginList) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.LAYERS) }
+    for (action in actions) {
+        Row(
+            Modifier.padding(top = 10.dp).fillMaxWidth().height(50.dp).clip(RoundedCornerShape(17.dp)).background(Pc.BackgroundRow)
+                .clickable { vm.runPluginAction(action.key) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(action.label, color = Pc.PanelTitle, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 18.dp, end = 18.dp))
+        }
     }
 }
 

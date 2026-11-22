@@ -1,32 +1,42 @@
-//! Paper: a paper for each artwork, chosen in the Actions panel's Canvas tab. Every brush takes its
-//! grain as it paints, a grain fixed to the canvas on top of the brush's own: where the paper is
-//! low its hollows take a share of the paint (Grain says how much). The paper shows under the art,
-//! in a colour of its own or the artwork's background colour, its hollows a little darker. Each
-//! artwork keeps its own paper. The papers are drawn here, a tile that repeats seamlessly: no
-//! picture of anyone's. It's a plugin, not part of the app: `tools/pack_plugin.py` makes a
-//! `.procraft-plugin` file of it.
+//! Paper: a paper for each artwork, set from its row in the Layers panel or the plugin's card. Every
+//! brush takes its grain as it paints, a grain fixed to the canvas on top of the brush's own: where
+//! the paper is low its hollows take a share of the paint (Grain says how much, Tooth how sharply).
+//! The paper shows under the art, in a colour of its own (one of the plugin's, or any from its Hue,
+//! Saturation and Brightness) or the artwork's background colour, its hollows a little darker. Each
+//! artwork keeps its own paper. The papers are drawn here, a tile that repeats seamlessly, or made
+//! of a picture someone picks for Your own paper: no picture of anyone's comes with it. It's a
+//! plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
-//! The app asks the paper's hook for the tile and how it is taken. The interface is written down
-//! at the top of `crates/core/src/plugin_run.rs`.
-
-#![cfg_attr(not(test), no_std)]
+//! The app asks the paper's hook for the tile and how it is taken; for Your own paper the plugin
+//! names its picture control, and the app makes the tile of the picture picked. Its row in the
+//! Layers panel opens a panel of its settings, which it sets as its card would. The interface is
+//! written down at the top of `crates/core/src/plugin_run.rs`.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// The controls by their place, as the manifest starts them.
-static CONTROLS: kit::Controls<5> = kit::Controls::new([0.0, 0.0, 0.6, 1.0, 0.3]);
+static CONTROLS: kit::Controls<11> = kit::Controls::new([0.0, 0.0, 0.6, 1.0, 0.3, 0.0, 0.0, 40.0, 0.1, 0.96, 0.0]);
 kit::controls!(CONTROLS);
 const PAPER: usize = 0;
 const COLOUR: usize = 1;
 const GRAIN: usize = 2;
 const SIZE: usize = 3;
 const SHOWN: usize = 4;
+const TOOTH: usize = 5;
+const OWN_COLOUR: usize = 6;
+const HUE: usize = 7;
+const SATURATION: usize = 8;
+const BRIGHTNESS: usize = 9;
+const PICTURE: usize = 10;
 
 /// The tile's side: what the app asks for.
 const SIDE: usize = 256;
 
-/// The papers, by the Paper control's steps (0 is none).
+/// The Paper control's step that is the picture picked for Your own paper.
+const OWN_STEP: u32 = 6;
+
+/// The papers drawn here, by the Paper control's steps (0 is none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     ColdPress,
@@ -52,6 +62,27 @@ impl Kind {
 /// The colours under the art, by the Paper colour control's steps from White (0xRRGGBB); the
 /// first step is the artwork's own background colour.
 const COLOURS: [i32; 6] = [0xFFFFFF, 0xF4ECD8, 0xF8F4E6, 0xC9C9C6, 0xC2A27A, 0x1C1C1C];
+
+/// `hue` (degrees), `saturation` and `brightness` (0 to 1) as 0xRRGGBB.
+fn rgb(hue: f32, saturation: f32, brightness: f32) -> i32 {
+    let clamp = |v: f32, most: f32| if v.is_nan() { 0.0 } else { v.clamp(0.0, most) };
+    let (s, v) = (clamp(saturation, 1.0), clamp(brightness, 1.0));
+    // the hue in sixths of the wheel, 0 to 6 (360° the same as 0°)
+    let sixths = clamp(hue, 360.0) / 60.0;
+    let sector = (sixths as i32).min(5);
+    let within = sixths - sector as f32;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * within), v * (1.0 - s * (1.0 - within)));
+    let (r, g, b) = match sector {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let byte = |c: f32| (c * 255.0 + 0.5) as i32;
+    (byte(r) << 16) | (byte(g) << 8) | byte(b)
+}
 
 /// A number from a lattice point and a seed, 0 to 1.
 fn hash(x: u32, y: u32, seed: u32) -> f32 {
@@ -165,6 +196,73 @@ fn heights(kind: Kind, out: &mut [f32; SIDE * SIDE]) {
     }
 }
 
+/// The papers by the Paper control's steps, and the colours by the Paper colour control's, as the
+/// panel names them.
+const PAPERS: [&str; 7] = ["None", "Cold press", "Hot press", "Rough", "Canvas", "Laid", "Your own"];
+const COLOUR_NAMES: [&str; 7] = ["Background", "White", "Cream", "Ivory", "Grey", "Kraft", "Black"];
+
+/// The app's function that sets one of the plugin's own controls (interface 12).
+#[cfg(target_arch = "wasm32")]
+mod app {
+    #[link(wasm_import_module = "procraft")]
+    unsafe extern "C" {
+        pub fn set_control(at: i32, value: f32) -> i32;
+    }
+}
+
+/// Control `at` set to `value`, as on the card (the app keeps it, with the artwork open if it's
+/// kept there), and told here at once.
+fn set(at: usize, value: f32) {
+    // SAFETY: plain numbers; the app checks them
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        app::set_control(at as i32, value);
+    }
+    CONTROLS.told(at as i32, value);
+}
+
+/// The panel the Layers panel's Paper row opens, as the controls are now, and what each of its rows
+/// sets: a control, and what the row's value is multiplied by to be its (none for words).
+fn panel() -> (kit::app::Panel, Vec<Option<(usize, f32)>>) {
+    let step = |at: usize| (CONTROLS.get(at) + 0.5) as usize;
+    let shown = |at: usize| (CONTROLS.get(at) * 100.0).round();
+    let mut sets = vec![Some((PAPER, 1.0)), Some((COLOUR, 1.0)), Some((OWN_COLOUR, 1.0))];
+    let mut panel = kit::app::Panel::new("Paper")
+        .choice("Paper", &PAPERS, step(PAPER).min(PAPERS.len() - 1))
+        .choice("Colour", &COLOUR_NAMES, step(COLOUR).min(COLOUR_NAMES.len() - 1))
+        .switch("A colour of your own", CONTROLS.on(OWN_COLOUR));
+    if CONTROLS.on(OWN_COLOUR) {
+        panel = panel
+            .slider("Hue", 0.0, 360.0, 1.0, CONTROLS.get(HUE).round(), "°")
+            .slider("Saturation", 0.0, 100.0, 1.0, shown(SATURATION), "%")
+            .slider("Brightness", 0.0, 100.0, 1.0, shown(BRIGHTNESS), "%");
+        sets.extend([Some((HUE, 1.0)), Some((SATURATION, 0.01)), Some((BRIGHTNESS, 0.01))]);
+    }
+    panel = panel
+        .slider("Grain", 0.0, 100.0, 5.0, shown(GRAIN), "%")
+        .slider("Tooth", 0.0, 100.0, 5.0, shown(TOOTH), "%")
+        .slider("Grain size", 50.0, 400.0, 25.0, shown(SIZE), "%")
+        .slider("Texture under the art", 0.0, 100.0, 5.0, shown(SHOWN), "%");
+    sets.extend([Some((GRAIN, 0.01)), Some((TOOTH, 0.01)), Some((SIZE, 0.01)), Some((SHOWN, 0.01))]);
+    if step(PAPER) as u32 == OWN_STEP && !CONTROLS.on(PICTURE) {
+        panel = panel.text("Pick the picture for Your own paper on the Paper plugin's card.");
+        sets.push(None);
+    }
+    (panel, sets)
+}
+
+kit::actions!(|_| {
+    panel().0.show();
+});
+
+kit::panel!(|row, value| {
+    if let Some(Some((at, times))) = panel().1.get(row) {
+        set(*at, value * times);
+    }
+    // shown again as it is now: a colour of your own's sliders come and go with its switch
+    panel().0.show();
+});
+
 /// Memory of the module's own, written by one call at a time (a plugin's module runs on one thread).
 struct Owned<T>(UnsafeCell<T>);
 // SAFETY: a plugin's module runs on one thread at a time
@@ -200,29 +298,36 @@ pub extern "C" fn procraft_paper(side: i32) -> i32 {
     }
 }
 
+/// The place of the control whose picture is the paper (the app makes the tile of it): Your own
+/// paper's while the Paper control is on its step; else none (-1), the tile drawn here.
+#[unsafe(no_mangle)]
+pub extern "C" fn procraft_paper_picture() -> i32 {
+    if (CONTROLS.get(PAPER) + 0.5) as u32 == OWN_STEP { PICTURE as i32 } else { -1 }
+}
+
 /// How the paper is taken: how strongly its hollows take paint away (0), how many canvas pixels a
-/// pixel of its tile covers (1), how deep it shows under the art (2).
+/// pixel of its tile covers (1), how deep it shows under the art (2), and how sharply only its
+/// peaks take paint (3, its tooth).
 #[unsafe(no_mangle)]
 pub extern "C" fn procraft_paper_look(what: i32) -> f32 {
     match what {
         0 => CONTROLS.get(GRAIN).clamp(0.0, 1.0),
         1 => CONTROLS.get(SIZE).clamp(0.25, 16.0),
         2 => CONTROLS.get(SHOWN).clamp(0.0, 1.0),
+        3 => CONTROLS.get(TOOTH).clamp(0.0, 1.0),
         _ => 0.0,
     }
 }
 
-/// The colour under the art, or -1 for the artwork's own.
+/// The colour under the art: the plugin's own from its Hue, Saturation and Brightness while A colour
+/// of your own is on, else one of its colours, or -1 for the artwork's own.
 #[unsafe(no_mangle)]
 pub extern "C" fn procraft_paper_colour() -> i32 {
+    if CONTROLS.on(OWN_COLOUR) {
+        return rgb(CONTROLS.get(HUE), CONTROLS.get(SATURATION), CONTROLS.get(BRIGHTNESS));
+    }
     let step = (CONTROLS.get(COLOUR) + 0.5) as usize;
     step.checked_sub(1).and_then(|at| COLOURS.get(at)).copied().unwrap_or(-1)
-}
-
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    core::arch::wasm32::unreachable()
 }
 
 #[cfg(test)]
@@ -230,6 +335,13 @@ mod tests {
     use super::*;
 
     const KINDS: [Kind; 5] = [Kind::ColdPress, Kind::HotPress, Kind::Rough, Kind::Canvas, Kind::Laid];
+
+    /// Held by each test that sets the controls, which every test shares.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Paper `kind`'s heights, worked out as its tile is.
     fn worked(kind: Kind) -> Box<[f32; SIDE * SIDE]> {
@@ -260,19 +372,32 @@ mod tests {
     }
 
     #[test]
-    fn the_app_is_given_the_paper_chosen_and_none_for_none() {
+    fn the_app_is_given_the_paper_chosen_and_how_it_is_taken() {
+        let _alone = alone();
         procraft_control(PAPER as i32, 0.0);
-        assert_eq!(procraft_paper(SIDE as i32), 0);
+        assert_eq!((procraft_paper(SIDE as i32), procraft_paper_picture()), (0, -1));
         procraft_control(PAPER as i32, 3.0);
         assert_ne!(procraft_paper(SIDE as i32), 0);
+        assert_eq!(procraft_paper_picture(), -1, "a paper drawn here");
         // a side it doesn't draw
         assert_eq!(procraft_paper(128), 0);
         assert_eq!(tile(Kind::Rough)[5], (worked(Kind::Rough)[5] * 255.0 + 0.5) as u8);
+        // Your own paper: the picture picked for its control, no tile of its own
+        procraft_control(PAPER as i32, OWN_STEP as f32);
+        assert_eq!((procraft_paper(SIDE as i32), procraft_paper_picture()), (0, PICTURE as i32));
         // how it's taken, as the controls say, within the app's ranges
         procraft_control(GRAIN as i32, 0.4);
         procraft_control(SIZE as i32, 2.0);
-        assert_eq!((procraft_paper_look(0), procraft_paper_look(1), procraft_paper_look(2)), (0.4, 2.0, 0.3));
-        assert_eq!(procraft_paper_look(9), 0.0);
+        procraft_control(TOOTH as i32, 0.75);
+        assert_eq!([0, 1, 2, 3].map(|what| procraft_paper_look(what)), [0.4, 2.0, 0.3, 0.75]);
+        procraft_control(TOOTH as i32, 3.0);
+        assert_eq!((procraft_paper_look(3), procraft_paper_look(9)), (1.0, 0.0));
+    }
+
+    #[test]
+    fn the_colour_under_the_art_is_one_of_its_own_or_any_from_its_sliders() {
+        let _alone = alone();
+        procraft_control(OWN_COLOUR as i32, 0.0);
         // the artwork's background colour, then each of its own
         procraft_control(COLOUR as i32, 0.0);
         assert_eq!(procraft_paper_colour(), -1);
@@ -280,5 +405,55 @@ mod tests {
         assert_eq!(procraft_paper_colour(), 0xFFFFFF);
         procraft_control(COLOUR as i32, 6.0);
         assert_eq!(procraft_paper_colour(), 0x1C1C1C);
+        // a colour of your own, as its sliders start: a warm white, whatever the step
+        procraft_control(OWN_COLOUR as i32, 1.0);
+        assert_eq!(procraft_paper_colour(), 0xF5EDDC);
+        procraft_control(HUE as i32, 210.0);
+        procraft_control(SATURATION as i32, 0.5);
+        procraft_control(BRIGHTNESS as i32, 0.4);
+        assert_eq!(procraft_paper_colour(), 0x334D66);
+        procraft_control(OWN_COLOUR as i32, 0.0);
+        assert_eq!(procraft_paper_colour(), 0x1C1C1C);
+    }
+
+    #[test]
+    fn its_panel_shows_its_controls_and_a_touch_sets_them() {
+        let _alone = alone();
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        for (at, value) in [(PAPER, 0.0), (OWN_COLOUR, 0.0), (GRAIN, 0.6), (SIZE, 1.0), (PICTURE, 0.0)] {
+            procraft_control(at as i32, value);
+        }
+        // the paper, its colour, a colour of your own's switch, and its four sliders in percent
+        let (shown, sets) = panel();
+        let json = shown.json();
+        assert!(json.contains(r#""title":"Paper""#) && json.contains(r#""label":"Grain","least":0"#), "{json}");
+        assert!(json.contains(r#""value":60"#) && json.contains(r#""value":100"#), "{json}");
+        assert_eq!(sets.len(), 7);
+        // the switch turned on: the colour's three sliders show after it
+        procraft_panel_event(2, 1.0);
+        assert!(CONTROLS.on(OWN_COLOUR));
+        let sets = panel().1;
+        assert_eq!((sets.len(), sets[3], sets[6]), (10, Some((HUE, 1.0)), Some((GRAIN, 0.01))));
+        // a slider's percent: its control's share
+        procraft_panel_event(6, 40.0);
+        procraft_panel_event(8, 200.0);
+        procraft_panel_event(5, 50.0);
+        assert!(near(CONTROLS.get(GRAIN), 0.4) && near(CONTROLS.get(SIZE), 2.0), "{}", CONTROLS.get(GRAIN));
+        assert!(near(CONTROLS.get(BRIGHTNESS), 0.5));
+        // a choice's place: the step; Your own paper, with no picture picked, says where to pick one
+        procraft_panel_event(1, 4.0);
+        assert_eq!(procraft_paper_colour(), rgb(CONTROLS.get(HUE), CONTROLS.get(SATURATION), 0.5));
+        procraft_panel_event(0, 6.0);
+        assert_eq!(procraft_paper_picture(), PICTURE as i32);
+        assert_eq!((panel().1.len(), panel().1.last().copied()), (11, Some(None)));
+        procraft_control(PICTURE as i32, 1.0);
+        assert_eq!(panel().1.len(), 10);
+        // its switch off again: the colour as chosen
+        procraft_panel_event(2, 0.0);
+        assert_eq!(procraft_paper_colour(), COLOURS[3]);
+        for (at, value) in [(PAPER, 0.0), (COLOUR, 0.0), (GRAIN, 0.6), (SIZE, 1.0), (BRIGHTNESS, 0.96), (PICTURE, 0.0)]
+        {
+            procraft_control(at as i32, value);
+        }
     }
 }

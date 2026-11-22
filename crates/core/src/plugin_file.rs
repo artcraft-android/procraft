@@ -23,7 +23,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 11;
+const INTERFACE: u32 = 12;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -2314,7 +2314,7 @@ pub(crate) mod tests {
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
-        assert_eq!(of("/compat/procraft/interface", json!(12)), Refusal::Newer);
+        assert_eq!(of("/compat/procraft/interface", json!(13)), Refusal::Newer);
         assert_eq!(of("/hooks", json!([])), Refusal::Described);
         assert_eq!(of("/hooks", json!(["position", "position"])), Refusal::Described);
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
@@ -2322,6 +2322,23 @@ pub(crate) mod tests {
         assert_eq!(of("/permissions", json!(["files"])), Refusal::Permissions);
         // and a part that isn't one yet is for a newer one too
         assert_eq!(of("/holds", json!(["module"])), Refusal::Newer);
+    }
+
+    #[test]
+    fn plugins_written_to_every_interface_so_far_still_load_and_the_stroke_fill_hook_needs_its_function() {
+        let module = a_module();
+        for interface in 1..=12 {
+            let manifest = with(coded("org.example.plugin", &module), "/compat/procraft/interface", json!(interface));
+            assert!(read_package(&a_coded_file(&manifest, &module)).is_ok(), "interface {interface}");
+        }
+        let fill = |module: &[u8]| {
+            let manifest = with(coded("org.example.fill", module), "/hooks", json!(["stroke_fill"]));
+            read_package(&a_coded_file(&with(manifest, "/compat/procraft/interface", json!(12)), module))
+        };
+        let fills = r#"(module (func (export "procraft_stroke_fill") (param i32 i32) (result i32) (i32.const 1)))"#;
+        let package = fill(&wat::parse_str(fills).unwrap()).unwrap();
+        assert_eq!(package.manifest.hooks, [Hook::StrokeFill]);
+        assert!(fill(&module).is_err(), "a module without the hook's function");
     }
 
     #[test]
@@ -2370,6 +2387,7 @@ pub(crate) mod tests {
             ("frame", crate::plugins::PluginPlace::Frame),
             ("canvas", crate::plugins::PluginPlace::Canvas),
             ("pen", crate::plugins::PluginPlace::Pen),
+            ("layers", crate::plugins::PluginPlace::Layers),
         ] {
             assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
         }

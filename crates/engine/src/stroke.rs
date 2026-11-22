@@ -1921,6 +1921,25 @@ impl StrokeBuilder {
         line.placed.iter().map(|p| p.center - p.thrown).collect()
     }
 
+    /// A builder walking this one's path alone, made before any input, for a stroke that fills
+    /// what its path encloses: smoothed as this one is (streamline, stabilisation, motion
+    /// filtering), its points as close as stamps can lie (about a pixel apart, whatever the
+    /// brush's size and spacing), none of them thrown off the path. Read with
+    /// [`StrokeBuilder::path`].
+    pub fn fill_path(&self) -> StrokeBuilder {
+        let mut line = self.clone();
+        line.outside = OutsideSlot(None);
+        line.brush.spacing = 0.0;
+        line.quiet = true;
+        line
+    }
+
+    /// Where the stroke's stamps lie on its path, before any jitter threw them, in order: the
+    /// path as smoothed (see [`StrokeBuilder::fill_path`]).
+    pub fn path(&self) -> Vec<Vec2> {
+        self.placed.iter().map(|p| p.center - p.thrown).collect()
+    }
+
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {

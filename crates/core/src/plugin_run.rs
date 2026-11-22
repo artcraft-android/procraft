@@ -74,8 +74,12 @@
 //! - For the hook `paper` (interface 8): `procraft_paper(side: i32) -> i32` answers where the
 //!   paper's tile is in its memory, `side` x `side` bytes, each how high the paper stands (0 for
 //!   none now); `procraft_paper_look(what: i32) -> f32` how strongly its hollows take paint away
-//!   (0), how many canvas pixels a tile's pixel covers (1) and how deep it shows under the art (2);
-//!   `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the artwork's.
+//!   (0), how many canvas pixels a tile's pixel covers (1), how deep it shows under the art (2) and
+//!   (interface 12) how sharply only its peaks take paint, its tooth (3, 0 to 1; one out of range is
+//!   taken as 0); `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the
+//!   artwork's. Interface 12: a module may export `procraft_paper_picture() -> i32` too, the place
+//!   in its controls of a `file` control of pictures whose picture is the paper (the app makes the
+//!   tile of it, and doesn't ask `procraft_paper`), or -1 for the tile it gives.
 //! - `procraft_reference_windows() -> i32`: for the hook `reference_windows` (interface 8), how
 //!   many Reference windows may be open at once, 1 to 8.
 //! - For the hook `pressure` (interface 9): `procraft_pressure(pointer: i32, first: i32, x: f32,
@@ -91,6 +95,9 @@
 //! - `procraft_slider_look(what: i32) -> f32`: for the hook `slider_look` (interface 11), how the
 //!   side bar's slider tracks look: `what` 0 their opacity (0 to 1), 1 whether what is behind them
 //!   is frosted as the bar's glass (1) or only softened (0); below 0 to leave it as it is.
+//! - `procraft_colour_panel(part: i32) -> i32`: for the hook `colour_panel` (interface 12), whether
+//!   the colour panel does `part` of what it may (not 0 for yes): 0 its sliders step one unit at a
+//!   tap on either end, 1 its swatch shows the colour as the panel opened beside the colour now.
 //! - `procraft_surround_picture() -> i32`: for the hook `surround_picture` (interface 11), the place
 //!   in its `controls` of a `file` control of pictures whose picture shows round the canvas, -1 for
 //!   none.
@@ -101,6 +108,11 @@
 //!   `brush_preview_colour` (interface 10), the colour (0xRRGGBB) the brush library draws a brush's
 //!   sample stroke in, told the current colour (0xRRGGBB) and whether the brush is the one in use
 //!   (1, its row on the accent); -1 to leave it as the app draws it.
+//! - `procraft_stroke_fill(tool: i32, pointer: i32) -> i32`: for the hook `stroke_fill`
+//!   (interface 12), asked as each stroke begins, after it is told the brush and its rows: whether
+//!   the stroke fills the region its path encloses (1, shown filling as it is drawn; 2, shown as a
+//!   plain stroke and filled as it ends) or paints as usual (0). `tool` 0 paint, 1 erase; `pointer`
+//!   as the `pressure` hook's.
 //! - For the hook `quickshape_curve` (a curve QuickShape may snap to, the plugin's):
 //!   `procraft_curve_begin(count: i32, best: i32) -> i32` gives where the stroke's `count` points go
 //!   (x and y each, 32-bit floats, window pixels), `best` the kind QuickShape found first (its place
@@ -264,6 +276,7 @@ const VIEW_LOOK: &str = "procraft_view_look";
 const PAPER: &str = "procraft_paper";
 const PAPER_LOOK: &str = "procraft_paper_look";
 const PAPER_COLOUR: &str = "procraft_paper_colour";
+const PAPER_PICTURE: &str = "procraft_paper_picture";
 const REFERENCE_WINDOWS: &str = "procraft_reference_windows";
 /// The most a view look's entry may be, either way.
 const MOST_VIEW_LOOK: f32 = 16.0;
@@ -283,6 +296,8 @@ const BRUSH_PREVIEW_COLOUR: &str = "procraft_brush_preview_colour";
 const LAYER_LABEL: &str = "procraft_layer_label";
 const SURROUND_PICTURE: &str = "procraft_surround_picture";
 const SLIDER_LOOK: &str = "procraft_slider_look";
+const COLOUR_PANEL: &str = "procraft_colour_panel";
+const STROKE_FILL: &str = "procraft_stroke_fill";
 const CURVE_BEGIN: &str = "procraft_curve_begin";
 const CURVE_RUN: &str = "procraft_curve_run";
 const CURVE_NODES: &str = "procraft_curve_nodes";
@@ -447,6 +462,11 @@ pub(crate) enum Hook {
     SurroundPicture,
     /// How the side bar's slider tracks look (interface 11).
     SliderLook,
+    /// Whether a stroke fills the region its path encloses (interface 12).
+    StrokeFill,
+    /// What the colour panel does besides: its sliders' steps, its swatch's colour before
+    /// (interface 12).
+    ColourPanel,
 }
 
 impl Hook {
@@ -486,6 +506,8 @@ impl Hook {
             "layer_label" => Some(Hook::LayerLabel),
             "surround_picture" => Some(Hook::SurroundPicture),
             "slider_look" => Some(Hook::SliderLook),
+            "stroke_fill" => Some(Hook::StrokeFill),
+            "colour_panel" => Some(Hook::ColourPanel),
             _ => None,
         }
     }
@@ -529,6 +551,8 @@ impl Hook {
             Hook::LayerLabel => "This plugin can show a colour on the rows of layers it has marked.",
             Hook::SurroundPicture => "This plugin can show a picture you pick round the canvas.",
             Hook::SliderLook => "This plugin can change how the side bar's sliders look.",
+            Hook::StrokeFill => "This plugin can make your strokes fill what they go round.",
+            Hook::ColourPanel => "This plugin can change how the colour panel's sliders and swatch work.",
         }
     }
 
@@ -571,6 +595,8 @@ impl Hook {
             Hook::LayerLabel => exports(module, LAYER_LABEL, &[ValType::I64], &[ValType::I32]),
             Hook::SurroundPicture => exports(module, SURROUND_PICTURE, &[], &[ValType::I32]),
             Hook::SliderLook => exports(module, SLIDER_LOOK, &[ValType::I32], &[ValType::F32]),
+            Hook::StrokeFill => exports(module, STROKE_FILL, &[ValType::I32, ValType::I32], &[ValType::I32]),
+            Hook::ColourPanel => exports(module, COLOUR_PANEL, &[ValType::I32], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -993,18 +1019,24 @@ struct PaperCalls {
     tile: TypedFunc<i32, i32>,
     look: TypedFunc<i32, f32>,
     colour: TypedFunc<(), i32>,
+    /// Which of its controls' pictures is the paper (interface 12), if it says.
+    picture: Option<TypedFunc<(), i32>>,
 }
 
 /// A paper a plugin gives: its tile, [`PAPER_SIDE`] square, each byte how high the paper stands
-/// there (rows from the top); how strongly its hollows take a stroke's paint away (0..1); how many
-/// canvas pixels a tile's pixel covers; how deep it shows under the art (0..1); and the colour
-/// under the art (0xRRGGBB; none: the artwork's own).
+/// there (rows from the top), or the place in its controls of the `file` control whose picture the
+/// app makes the tile of (`picture`, the tile then empty); how strongly its hollows take a stroke's
+/// paint away (0..1); how many canvas pixels a tile's pixel covers; how deep it shows under the art
+/// (0..1); how sharply only its peaks take paint (`tooth`, 0..1); and the colour under the art
+/// (0xRRGGBB; none: the artwork's own).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Paper {
     pub(crate) tile: Vec<u8>,
+    pub(crate) picture: Option<u32>,
     pub(crate) strength: f32,
     pub(crate) scale: f32,
     pub(crate) depth: f32,
+    pub(crate) tooth: f32,
     pub(crate) colour: Option<u32>,
 }
 
@@ -1063,6 +1095,8 @@ pub(crate) struct Running {
     layer_label: Option<TypedFunc<i64, i32>>,
     surround_picture: Option<TypedFunc<(), i32>>,
     slider_look: Option<TypedFunc<i32, f32>>,
+    stroke_fill: Option<TypedFunc<(i32, i32), i32>>,
+    colour_panel: Option<TypedFunc<i32, i32>>,
     curve: Option<CurveCalls>,
     stroke_sound: Option<SoundCall>,
     sound_prepare: Option<TypedFunc<i32, i32>>,
@@ -1212,6 +1246,7 @@ impl Running {
                     tile: instance.get_typed_func(&store, PAPER).ok()?,
                     look: instance.get_typed_func(&store, PAPER_LOOK).ok()?,
                     colour: instance.get_typed_func(&store, PAPER_COLOUR).ok()?,
+                    picture: instance.get_typed_func(&store, PAPER_PICTURE).ok(),
                 })
             })();
             let reference_windows = instance.get_typed_func(&store, REFERENCE_WINDOWS).ok();
@@ -1221,6 +1256,8 @@ impl Running {
             let layer_label = instance.get_typed_func(&store, LAYER_LABEL).ok();
             let surround_picture = instance.get_typed_func(&store, SURROUND_PICTURE).ok();
             let slider_look = instance.get_typed_func(&store, SLIDER_LOOK).ok();
+            let stroke_fill = instance.get_typed_func(&store, STROKE_FILL).ok();
+            let colour_panel = instance.get_typed_func(&store, COLOUR_PANEL).ok();
             let curve = (|| {
                 Some(CurveCalls {
                     begin: instance.get_typed_func(&store, CURVE_BEGIN).ok()?,
@@ -1332,6 +1369,8 @@ impl Running {
                 layer_label,
                 surround_picture,
                 slider_look,
+                stroke_fill,
+                colour_panel,
                 curve,
                 stroke_sound,
                 sound_prepare,
@@ -1970,6 +2009,12 @@ impl Running {
         (host.panel.take(), std::mem::take(&mut host.close_panel))
     }
 
+    /// Its own controls it set while its action ran or its panel was touched (`set_control`,
+    /// interface 12), by their place, each to the last value it gave: let go.
+    pub(crate) fn take_set_controls(&mut self) -> Vec<(usize, f32)> {
+        std::mem::take(&mut self.store.data_mut().set_controls)
+    }
+
     /// Tells it control `index` has `value`.
     pub(crate) fn control(&mut self, index: usize, value: f32) -> Result<(), Stop> {
         let Running { store, control, .. } = self;
@@ -2347,37 +2392,52 @@ impl Running {
     }
 
     /// The paper it says strokes take and the art shows on (see [`Paper`]); none for none now. A
-    /// tile out of its memory, or a look out of its range, stops it.
+    /// tile out of its memory, a look out of its range or a picture's place past 255 stops it; a
+    /// tooth out of its range is taken as 0, as one written before interface 12 may answer anything
+    /// for it.
     pub(crate) fn paper(&mut self) -> Result<Option<Paper>, Stop> {
         let Running { store, paper, memory, .. } = self;
         let (Some(paper), Some(memory)) = (paper.as_ref(), memory.as_ref()) else { return Ok(None) };
         let until = Instant::now() + MOST_PAPER_TIME;
         let mut left = PAPER_FUEL;
         guarded(|| {
-            let side = PAPER_SIDE as i32;
-            let at = long_call(store, &paper.tile, side, &mut left, until)?;
-            if at == 0 {
-                return Ok(None);
+            // a picture of its controls', which the app makes the tile of, or a tile of its own
+            let picture = match &paper.picture {
+                Some(picture) => match long_call(store, picture, (), &mut left, until)? {
+                    -1 => None,
+                    at @ 0..=255 => Some(at as u32),
+                    _ => return Err(Stop::Nonsense),
+                },
+                None => None,
+            };
+            let mut tile = Vec::new();
+            if picture.is_none() {
+                let side = PAPER_SIDE as i32;
+                let at = long_call(store, &paper.tile, side, &mut left, until)?;
+                if at == 0 {
+                    return Ok(None);
+                }
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                tile = vec![0_u8; PAPER_SIDE * PAPER_SIDE];
+                memory.read(&*store, place, &mut tile).map_err(|_| Stop::Nonsense)?;
             }
-            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
-            let mut tile = vec![0_u8; PAPER_SIDE * PAPER_SIDE];
-            memory.read(&*store, place, &mut tile).map_err(|_| Stop::Nonsense)?;
-            let mut look = [0.0_f32; 3];
+            let mut look = [0.0_f32; 4];
             for (value, what) in look.iter_mut().zip(0..) {
                 *value = long_call(store, &paper.look, what, &mut left, until)?;
             }
-            let [strength, scale, depth] = look;
+            let [strength, scale, depth, tooth] = look;
             let fits =
                 (0.0..=1.0).contains(&strength) && (0.25..=16.0).contains(&scale) && (0.0..=1.0).contains(&depth);
             if !fits {
                 return Err(Stop::Nonsense);
             }
+            let tooth = if (0.0..=1.0).contains(&tooth) { tooth } else { 0.0 };
             let colour = match long_call(store, &paper.colour, (), &mut left, until)? {
                 -1 => None,
                 colour @ 0..=0xFF_FFFF => Some(colour as u32),
                 _ => return Err(Stop::Nonsense),
             };
-            Ok(Some(Paper { tile, strength, scale, depth, colour }))
+            Ok(Some(Paper { tile, picture, strength, scale, depth, tooth, colour }))
         })
     }
 
@@ -2487,6 +2547,43 @@ impl Running {
             _ if said < 0.0 => Ok(None),
             _ => Ok(Some(said)),
         }
+    }
+
+    /// Whether it says the colour panel does `part` of what it may (not 0 for yes).
+    pub(crate) fn colour_panel(&mut self, part: i32) -> Result<bool, Stop> {
+        let Running { store, colour_panel, .. } = self;
+        let Some(colour_panel) = colour_panel else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            colour_panel.call(&mut *store, part).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says a stroke beginning with `tool` (0 paint, 1 erase) by `pointer` (numbered as
+    /// for the pressure hook) fills what it encloses: 0 no, 1 shown filling as it is drawn, 2 shown
+    /// plainly and filled as it ends. Told `brush` first, when that changed. An answer past 0..2
+    /// stops it.
+    pub(crate) fn stroke_fill(
+        &mut self,
+        brush: &crate::stroke_sound::SoundBrush,
+        tool: i32,
+        pointer: i32,
+    ) -> Result<u8, Stop> {
+        if self.stroke_fill.is_none() {
+            return Ok(0);
+        }
+        if self.told_brush != Some(brush.key) {
+            self.tell_brush(brush)?;
+            self.told_brush = Some(brush.key);
+        }
+        let Running { store, stroke_fill, .. } = self;
+        let Some(stroke_fill) = stroke_fill else { return Ok(0) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            stroke_fill.call(&mut *store, (tool, pointer)).map_err(|e| stop_of(&e))
+        })?;
+        u8::try_from(said).ok().filter(|said| *said <= 2).ok_or(Stop::Nonsense)
     }
 
     /// Where it says brush setting `setting` goes, as a share of its range (none: left as it is).
@@ -3189,6 +3286,43 @@ pub(crate) mod tests {
         // a tile past its memory, a strength past 1, a colour that isn't one: it stops
         for bytes in [paper(100_000, "0.5", -1), paper(1024, "3", -1), paper(1024, "0.5", 0x100_0000)] {
             assert_eq!(started(&bytes).paper(), Err(Stop::Nonsense));
+        }
+    }
+
+    #[test]
+    fn a_paper_may_be_a_picture_of_its_controls_and_have_a_tooth() {
+        // a paper whose look answers `tooth` for entry 3, and whose picture is control `picture`
+        let paper = |tooth: &str, picture: Option<i32>| {
+            let picture = picture.map_or(String::new(), |at| {
+                format!(r#"(func (export "procraft_paper_picture") (result i32) (i32.const {at}))"#)
+            });
+            let text = format!(
+                r#"(module (memory (export "memory") 2)
+                (func (export "procraft_paper") (param i32) (result i32) (i32.const 1024))
+                (func (export "procraft_paper_look") (param i32) (result f32)
+                    (if (result f32) (i32.eq (local.get 0) (i32.const 3))
+                        (then (f32.const {tooth}))
+                        (else (if (result f32) (i32.eq (local.get 0) (i32.const 1))
+                            (then (f32.const 1))
+                            (else (f32.const 0.5))))))
+                (func (export "procraft_paper_colour") (result i32) (i32.const -1))
+                {picture})"#
+            );
+            wat::parse_str(text).unwrap()
+        };
+        // its tooth as it says; a tile of its own while it names no picture
+        let given = started(&paper("0.75", Some(-1))).paper().unwrap().unwrap();
+        assert_eq!((given.tooth, given.picture, given.tile.len()), (0.75, None, PAPER_SIDE * PAPER_SIDE));
+        // a picture of its controls': the app makes the tile
+        let given = started(&paper("0", Some(3))).paper().unwrap().unwrap();
+        assert_eq!((given.picture, given.tile.len(), given.strength), (Some(3), 0, 0.5));
+        // a tooth out of range, as one written before may answer: none
+        for odd in ["7", "-1", "nan"] {
+            assert_eq!(started(&paper(odd, None)).paper().unwrap().unwrap().tooth, 0.0, "{odd}");
+        }
+        // a picture's place past 255, or below -1, stops it
+        for odd in [256, -2] {
+            assert_eq!(started(&paper("0", Some(odd))).paper(), Err(Stop::Nonsense), "{odd}");
         }
     }
 

@@ -55,8 +55,9 @@ struct LayerUniform {
     // canvas is read where it is on that canvas
     scaled: vec4<f32>,
     // the paper: how strongly its hollows take the stroke's paint away (0: the stroke takes no
-    // paper), how many canvas pixels a pixel of its tile covers, and how deep it shows in the
-    // background (0: a flat colour)
+    // paper), how many canvas pixels a pixel of its tile covers, how deep it shows in the
+    // background (0: a flat colour), and its tooth (0: soft, 1: only what stands above the
+    // strength takes paint)
     paper: vec4<f32>,
 }
 
@@ -159,7 +160,11 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     // the paper, fixed to the canvas, whatever the brush: its hollows take a share of the paint
     if (lu.paper.x > 0.0) {
         let at = (vec2<f32>(p) + 0.5) / lu.scaled.x + lu.scaled.yz;
-        s = s * (1.0 - lu.paper.x * (1.0 - paper_height(at)));
+        let h = paper_height(at);
+        // soft, a share by how low it is; with a tooth, a step a little below the strength
+        let soft = 1.0 - lu.paper.x * (1.0 - h);
+        let sharp = smoothstep(lu.paper.x - 2.0 * TOOTH_EDGE, lu.paper.x, h);
+        s = s * mix(soft, sharp, lu.paper.w);
     }
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
@@ -307,6 +312,9 @@ fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return select(r, c, lu.clipped == CLIP_BASE);
 }
+
+// how far below the strength a paper's tooth begins to take paint, and is half way
+const TOOTH_EDGE: f32 = 0.04;
 
 // how high the paper stands at canvas point `at` (0 a hollow, 1 a peak): its tile repeated, each
 // of its pixels lu.paper.y canvas pixels across

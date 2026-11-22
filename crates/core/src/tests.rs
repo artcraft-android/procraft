@@ -5,12 +5,12 @@ use procraft_gpu::Gpu;
 
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
-fn sample(x: f32, y: f32, t: f64) -> PenSample {
+pub(crate) fn sample(x: f32, y: f32, t: f64) -> PenSample {
     PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t, roll: 0.0 }
 }
 
 /// A session on a headless GPU with a `window` × `window` "screen", or `None` without a GPU.
-fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
+pub(crate) fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
     match Gpu::headless() {
         Ok(gpu) => Some(session_on(gpu, canvas, window)),
         Err(e) => {
@@ -34,14 +34,14 @@ fn session_on(gpu: Gpu, canvas: u32, window: u32) -> std::sync::Arc<CanvasSessio
 }
 
 /// The current brush draws just where the input goes.
-fn no_streamline(s: &CanvasSession) {
+pub(crate) fn no_streamline(s: &CanvasSession) {
     s.studio_begin();
     s.set_studio_setting("streamline".to_owned(), 0.0);
     s.studio_end(true);
 }
 
 /// Renders what is queued and returns the composite's pixel at canvas (x, y).
-fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
+pub(crate) fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     let mut guard = s.shared.lock();
     let st = &mut *guard;
     let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
@@ -5738,7 +5738,7 @@ fn color_fill_fills_as_the_selection_tool_closes_and_ends_the_selection_in_the_s
 }
 
 /// A frame of `s` drawn as the screen shows it (`side` x `side` window pixels), read back: RGBA8.
-fn frame_of(s: &CanvasSession, side: u32) -> Vec<u8> {
+pub(crate) fn frame_of(s: &CanvasSession, side: u32) -> Vec<u8> {
     use procraft_gpu::wgpu;
     let mut guard = s.shared.lock();
     let st = &mut *guard;

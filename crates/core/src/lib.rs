@@ -53,6 +53,7 @@ mod hues;
 mod import_tests;
 mod interface_size;
 mod keys;
+mod lasso_fill;
 #[cfg(target_os = "ios")]
 mod layer;
 mod layer_bundle;
@@ -68,6 +69,7 @@ mod pick;
 mod pickers;
 /// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
 pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
+mod paper_picture;
 mod plugin_artwork;
 mod plugin_brushes;
 mod plugin_canvas;
@@ -709,6 +711,8 @@ pub(crate) struct State {
     pub(crate) predicting: bool,
     /// The open stroke's pressure as plugins give it.
     pub(crate) pressing: pressure::Pressing,
+    /// The open stroke filling what it encloses, as a plugin said it does.
+    pub(crate) filling: Option<lasso_fill::Filling>,
     /// The open stroke's brush engine, as it is told the colours under the dabs it asks about.
     pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
@@ -740,6 +744,8 @@ pub(crate) struct State {
     pub(crate) plugin_look: Option<ViewLook>,
     /// The paper a plugin on the paper's hook gives, as it said then.
     pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
+    /// The tile of the picture a plugin's paper is, made again only as its file changes.
+    pub(crate) paper_picture: Option<std::sync::Arc<paper_picture::PaperPicture>>,
     /// The colour round the canvas a plugin gives (sRGB 0..1), and the picture shown there in place
     /// of the grid (interface 11), as they said then.
     pub(crate) plugin_surround: Option<[f32; 3]>,
@@ -981,6 +987,10 @@ impl State {
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
+        // a stroke filling what it encloses fills it
+        if self.end_fill(&[]) {
+            return;
+        }
         // a shape kept as it shows, moved since the last frame or not
         self.draw_moved_shape();
         let shape = self.shape.take();
@@ -2147,6 +2157,7 @@ impl CanvasSession {
             ahead_of: Vec::new(),
             predicting: false,
             pressing: pressure::Pressing::default(),
+            filling: None,
             engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
@@ -2162,6 +2173,7 @@ impl CanvasSession {
             grey_view: false,
             plugin_look: None,
             plugin_paper: None,
+            paper_picture: None,
             plugin_surround: None,
             surround_picture: None,
             plugin_values: std::collections::BTreeMap::new(),
@@ -2398,8 +2410,15 @@ impl CanvasSession {
             return;
         }
         let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
-        let (brush, style, diameter) = st.stroke_brush(tool, current);
-        let second = st.second_brush(tool, current, &brush, &style);
+        let (brush, mut style, diameter) = st.stroke_brush(tool, current);
+        // one a plugin says fills what it encloses is laid as a plain stroke's paint, alone, at
+        // the brush's opacity times the slider's
+        let fill = st.fill_asked(tool, pointer, current);
+        if fill.is_some() {
+            style = style.as_fill();
+            style.opacity = st.brush(tool).opacity(st.sliders(tool).opacity);
+        }
+        let second = st.second_brush(tool, current, &brush, &style).filter(|_| fill.is_none());
         let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
         // the tool's brush is one of the Recent set's now (unless pinned there)
@@ -2441,7 +2460,11 @@ impl CanvasSession {
         // a brush a plugin's brush engine made is drawn by it while it is on: its stamps, how they
         // are laid and its second stroke are the engine's
         let first = st.to_canvas(samples.get(..1).unwrap_or_default()).first().map(|s| (s.pos.x, s.pos.y));
-        let outside = st.outside_stroke(&brush, tool, current, pointer, diameter, seed, first);
+        let outside = if fill.is_none() {
+            st.outside_stroke(&brush, tool, current, pointer, diameter, seed, first)
+        } else {
+            None
+        };
         st.airbrush = outside.as_ref().and_then(|o| o.airbrush).zip(samples.last()).map(|(ms, last)| {
             let every = f64::from(ms) * 0.5;
             (every, *last, last.time_ms + every)
@@ -2480,8 +2503,8 @@ impl CanvasSession {
             }
             _ => None,
         };
-        st.began =
-            matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase).then(|| quickshape::LastStroke {
+        st.began = (matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) && fill.is_none()).then(|| {
+            quickshape::LastStroke {
                 layer: current,
                 // as it was laid: a brush engine's, its tips
                 style: laid.as_ref().map_or(style, |(laid, _)| *laid),
@@ -2496,7 +2519,13 @@ impl CanvasSession {
                 samples: Vec::new(),
                 line: builder.clone(),
                 seed,
-            });
+            }
+        });
+        // a fill's path goes on with the stroke's
+        match fill {
+            Some(shown) => st.begin_fill(shown, &builder, &canvas_samples),
+            None => st.filling = None,
+        }
         let Some(canvas) = st.canvas.as_mut() else { return };
         let (style, second) = match laid {
             Some(laid) => laid,
@@ -2523,7 +2552,10 @@ impl CanvasSession {
         }
         // (paint laid in place keeps marks to go back to only if its end may lay it again)
         canvas.may_lay_again(builder.end_may_change_laid());
-        draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
+        // (a fill shown as it grows lays no stamps: the next frame shows its region)
+        if fill != Some(lasso_fill::FillShown::Growing) {
+            draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
+        }
         st.stroke = Some(builder);
         st.second = second_builder;
         st.ahead = false;
@@ -2613,6 +2645,11 @@ impl Shared {
         }
         // a brush engine told the colours under the dabs it asked about before its next samples
         st.tell_under();
+        // a fill shown as it grows: the next frame shows its region
+        if st.fill_add(&canvas_samples) {
+            self.frame(st);
+            return;
+        }
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
         // while the platform predicts input, what runs ahead waits for the frame (its prediction
         // follows these samples): on to the input, until a prediction comes
@@ -2635,8 +2672,8 @@ impl Shared {
         if st.scene_shown() {
             return;
         }
-        // a snapped shape is drawn whole: nothing runs ahead of it
-        if st.shape.is_some() {
+        // a snapped shape is drawn whole: nothing runs ahead of it, nor of a fill as it grows
+        if st.shape.is_some() || st.filling.as_ref().is_some_and(|f| f.shown == lasso_fill::FillShown::Growing) {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
@@ -2701,16 +2738,19 @@ impl CanvasSession {
         st.read_finer(&samples);
         st.ahead = false;
         st.ahead_of.clear();
-        let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
-        let mut second = st.second.take();
-        lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
-        match st.recording.take() {
-            // on a plugin's layer, handed to the plugin
-            Some(mut recording) => {
-                recording.lift(&canvas_samples);
-                st.end_recorded(recording, builder, second);
+        // a stroke filling what it encloses fills it
+        if !st.end_fill(&canvas_samples) {
+            let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
+            let mut second = st.second.take();
+            lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
+            match st.recording.take() {
+                // on a plugin's layer, handed to the plugin
+                Some(mut recording) => {
+                    recording.lift(&canvas_samples);
+                    st.end_recorded(recording, builder, second);
+                }
+                None => close_stroke(canvas, builder, second, &st.doc.stroke_guide()),
             }
-            None => close_stroke(canvas, builder, second, &st.doc.stroke_guide()),
         }
         st.redraw_painted_on();
         st.bake_painted_on();
@@ -2751,6 +2791,7 @@ impl CanvasSession {
         st.shape = None;
         st.began = None;
         st.recording = None;
+        st.filling = None;
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.cancel_stroke();
             // what it painted on is in the adjustment's mask: start that again

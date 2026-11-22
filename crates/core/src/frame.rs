@@ -122,6 +122,8 @@ impl State {
         self.draw_moved_shape();
         // what runs ahead of the open stroke, once however many samples came since the last frame
         self.draw_ahead();
+        // a fill's region as it has grown since, once however many samples came
+        self.show_fill();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;

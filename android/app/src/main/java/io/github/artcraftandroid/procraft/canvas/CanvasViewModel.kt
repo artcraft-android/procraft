@@ -621,6 +621,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.accentGiven = io.github.artcraftandroid.procraft.ui.Pc.accentOf(plugins)
         io.github.artcraftandroid.procraft.ui.Pc.sliderLook = plugins.sliderLook()
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
+        io.github.artcraftandroid.procraft.ui.Pc.colourSteps = plugins.colourSteps()
+        io.github.artcraftandroid.procraft.ui.Pc.colourBefore = plugins.colourBefore()
         io.github.artcraftandroid.procraft.ui.Pc.picker = if (plugins.pickerOn()) {
             io.github.artcraftandroid.procraft.ui.ClassicPicker(
                 pick = { x, y -> plugins.pickerPick(x, y) },
@@ -853,6 +855,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 if (at != null) plugins.runActionAt(key, s, at.x, at.y) else plugins.runAction(key, s)
             }
             pluginPanel = plugins.panel()
+            keepPluginControls(plugins.takeControlsSet())
             followPluginBrush(s)
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
@@ -873,6 +876,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             withContext(Dispatchers.Default) { plugins.panelTouched(row.toUInt(), value, s) }
             pluginPanel = plugins.panel()
+            keepPluginControls(plugins.takeControlsSet())
             followPluginBrush(s)
             s.takeFailure()?.let { showNotice(it) }
             readPlugins()
@@ -909,7 +913,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A choice picked from a plugin's menu by its [key]: the controls it set kept as the card keeps them; one no plugin on offers changes nothing. */
     fun choosePluginChoice(key: String) {
-        val changed = plugins.choose(key)
+        keepPluginControls(plugins.choose(key))
+    }
+
+    /** Plugins' controls [changed] other than on their cards (a menu's choice, their own code): kept as the card keeps them, and the artwork follows. */
+    private fun keepPluginControls(changed: List<io.github.artcraftandroid.procraft.core.PluginControl>) {
         if (changed.isEmpty()) return
         val edit = interfacePrefs.edit()
         for (c in changed) {
