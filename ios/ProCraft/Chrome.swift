@@ -327,7 +327,8 @@ private struct SliderPanelView: View {
                     context.fill(path, with: .color(ink), style: FillStyle(eoFill: true))
                 }
             }
-            (Text(verbatim: size ? "Size" : "Opacity").bold() + Text(verbatim: " \(Int((value * 100).rounded()))%"))
+            // the size as its share of the brush's size range, the opacity as it is (the core's)
+            (Text(verbatim: size ? "Size" : "Opacity").bold() + Text(verbatim: " \(sideSliderShownPercent(size: size, value: value))%"))
                 .font(.system(size: 19))
                 .foregroundStyle(sliderPanelInk)
                 .lineLimit(1)
