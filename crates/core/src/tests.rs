@@ -19440,6 +19440,97 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
     assert_eq!(under, placed_under, "the layers under touches");
 }
 
+/// Wet paint comes out the same where a copy from a texture into a buffer writes its rows whole,
+/// the rest of each row but the last written over (as Direct3D 12 does at an offset it can't place
+/// a copy at, and as a phone's driver seems to): every stock brush that mixes wet, its sample
+/// stroke as the library draws it, and wet strokes with a second and building up gradually across
+/// the tiles of a canvas over a picture. A tile's part of a window copied in so wrote over its
+/// neighbours' parts, and the sample strokes and strokes came out with blocks of a tile's size in
+/// solid colour (#357). Alike but for a level or two at a few channels, as the GPU can lay the
+/// same work a level apart from run to run (see the test above).
+#[test]
+fn wet_paint_comes_out_alike_where_copies_write_their_rows_whole() {
+    use procraft_engine::brush::{Brush, Rendering};
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let side = 900u32;
+    let n = side as usize;
+    // every tile of the picture its own
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        *px = [(x / 4 % 256) as u8, (y / 4 % 256) as u8, ((x / 256 * 50 + y / 256 * 90) % 256) as u8, 255];
+    }
+    let runs = [false, true].map(|rows| {
+        gpu.emulate_whole_row_copies(rows);
+        let staged = gpu.placed_copies_staged();
+        let s = session_on(gpu.clone(), side, 700);
+        let wet: Vec<(u32, u32, String)> = {
+            let st = s.shared.lock();
+            let all = st.library.iter().enumerate().flat_map(|(i, set)| {
+                set.brushes.iter().enumerate().map(move |(j, b)| (i as u32, j as u32, b.name.clone(), b.mixes_wet()))
+            });
+            all.filter(|b| b.3).map(|(i, j, name, _)| (i, j, name)).collect()
+        };
+        assert!(!wet.is_empty(), "stock brushes that mix wet");
+        let mut pictures: Vec<(String, Vec<u8>)> = wet
+            .iter()
+            .map(|(set, index, name)| {
+                let preview = s.brush_preview(*set, *index, 530, 162).unwrap_or_else(|| panic!("{name}'s preview"));
+                (format!("{name}'s preview"), preview.rgba)
+            })
+            .collect();
+        let layer =
+            s.insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false);
+        let layer = layer.unwrap();
+        let find = |want: &dyn Fn(&Brush) -> bool| {
+            let st = s.shared.lock();
+            let found =
+                st.library.iter().enumerate().find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+            found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+        };
+        let gradual = find(&|b: &Brush| b.mixes_wet() && b.rendering == Rendering::Gradual);
+        let second = find(&|b: &Brush| b.mixes_wet() && b.secondary.is_some());
+        for (k, (set, index)) in [gradual, second].into_iter().enumerate() {
+            assert!(s.select_brush(set, index));
+            s.set_brush_size(1.0);
+            s.set_color(0.1 + 0.6 * k as f32, 0.2, 0.7 - 0.5 * k as f32);
+            let at = |e: usize| {
+                let t = e as f32 / 90.0;
+                let (x, y) = (30.0 + t * 840.0, 450.0 + (t * 13.0 + k as f32).sin() * 380.0);
+                PenSample { pressure: 0.5 + 0.5 * (e as f32 * 0.3).sin().abs(), ..sample(x, y, e as f64 * 6.0) }
+            };
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=90 {
+                s.stroke_add(vec![at(e)]);
+                if e % 3 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+            let _ = picture(&s);
+        }
+        pictures.push(("the strokes".into(), s.copy_layer_contents(layer).unwrap().rgba));
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        gpu.emulate_whole_row_copies(false);
+        (pictures, gpu.placed_copies_staged() - staged)
+    });
+    let [(direct, _), (whole, staged)] = runs;
+    assert!(staged > 0, "no copy left room between its rows");
+    let differing: Vec<(String, u8, usize, usize)> = direct
+        .iter()
+        .zip(&whole)
+        .map(|((name, a), (_, b))| {
+            assert_eq!(a.len(), b.len(), "{name}");
+            let (most, count) = differ(a, b);
+            (name.clone(), most, count, (a.len() / 10_000).max(16))
+        })
+        .filter(|d| d.2 > 0)
+        .collect();
+    eprintln!("pictures differing (most, channels, allowed): {differing:?}");
+    let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 2 || count > allowed).collect();
+    assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels, allowed): {unlike:?}");
+}
+
 /// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to
 /// the canvas draws alike through Vulkan and Direct3D 12 on the same GPU, square by square: its
 /// paint was packed into half floats as each API rounds, and Direct3D's rounding, carried on frame
