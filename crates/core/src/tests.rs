@@ -18746,6 +18746,106 @@ fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
     assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_some());
 }
 
+/// A wet stroke goes on without a panic when its graphics device goes under it (as a tablet short
+/// of memory can lose it as a brush's first strokes go down): the renders that look at how fast the
+/// GPU got through the paint laid in place, the stroke's end and the next stroke draw nothing more
+/// and go on (#358).
+#[test]
+fn a_wet_stroke_goes_on_without_a_panic_when_the_graphics_device_is_lost() {
+    let Some(s) = session(160, 160) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(i, l)| {
+            l.brushes.iter().position(|b| b.mixes_wet() && b.secondary.is_none()).map(|j| (i as u32, j as u32))
+        });
+        found.unwrap()
+    };
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(0.5);
+    let render = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+    };
+    let at = |e: usize| sample(20.0 + e as f32 * 6.0, 80.0 + (e as f32 * 0.4).sin() * 30.0, e as f64 * 8.0);
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    for e in 1..=10 {
+        s.stroke_add(vec![at(e)]);
+        render(&s);
+    }
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device.destroy();
+    for e in 11..=20 {
+        s.stroke_add(vec![at(e)]);
+        render(&s);
+    }
+    s.stroke_end(vec![]);
+    render(&s);
+    // (seen lost by now, and the next stroke draws nothing more and says nothing)
+    s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+    s.stroke_end(vec![]);
+    render(&s);
+}
+
+/// Switching through every stock brush, a stroke and a sample stroke drawn with each, on a GPU held
+/// to wgpu's downlevel limits (what a weak phone's GPU may report, its textures 2048 pixels a side
+/// at most) and with little memory free, draws each without a panic or a GPU error (#358). The
+/// brushes that drew nothing are printed (none expected) and the time it all took.
+#[test]
+fn every_stock_brush_draws_on_a_gpu_held_to_downlevel_limits_with_little_memory() {
+    let Ok(gpu) = Gpu::headless_limited(procraft_gpu::wgpu::Limits::downlevel_defaults()) else {
+        return eprintln!("skipped: no GPU");
+    };
+    crate::device::MEMORY_FREE.with(|m| m.set(Some(600 << 20)));
+    let started = std::time::Instant::now();
+    let s = session_on(gpu.clone(), 400, 300);
+    let layer = s.layers()[0].id;
+    let all: Vec<(String, u32, u32)> = {
+        let st = s.shared.lock();
+        st.library
+            .iter()
+            .enumerate()
+            .flat_map(|(i, set)| set.brushes.iter().enumerate().map(move |(j, b)| (b.name.clone(), i as u32, j as u32)))
+            .collect()
+    };
+    let at = |e: usize| PenSample {
+        pressure: 0.3 + 0.6 * (e as f32 * 0.21).sin().abs(),
+        ..sample(30.0 + e as f32 * 4.0, 150.0 + (e as f32 * 0.09).sin() * 90.0, e as f64 * 8.0)
+    };
+    let mut blank = Vec::new();
+    let mut panicked = Vec::new();
+    for (name, set, index) in &all {
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(s.select_brush(*set, *index));
+            let preview = s.brush_preview(*set, *index, 372, 113);
+            s.set_brush_size(0.4);
+            s.set_color(0.2, 0.5, 0.9);
+            s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+            for e in 1..=40 {
+                s.stroke_add(vec![at(e)]);
+                if e % 8 == 0 {
+                    let _ = picture(&s);
+                }
+            }
+            s.stroke_end(vec![]);
+            let _ = picture(&s);
+            let pixels = s.copy_layer_contents(layer).unwrap().rgba;
+            s.undo();
+            (preview.is_some(), pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0))
+        }));
+        match drawn {
+            Ok((true, true)) => {}
+            Ok(_) => blank.push(name.clone()),
+            Err(_) => panicked.push(name.clone()),
+        }
+    }
+    crate::device::MEMORY_FREE.with(|m| m.set(None));
+    println!("{} brushes in {:.1} s; drew nothing: {blank:?}", all.len(), started.elapsed().as_secs_f32());
+    assert!(panicked.is_empty(), "panicked: {panicked:?}");
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+}
+
 /// A brush's sample stroke drawn once is kept by what the brush looks like: asked for again (a
 /// library redrawing its rows after any change, a set or library shared) it is the same stroke,
 /// not drawn again, wherever the brush has moved; a brush changed in any way that shows draws
