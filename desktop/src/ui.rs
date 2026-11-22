@@ -1278,6 +1278,12 @@ impl Interface {
             return;
         }
         if !input.idle() {
+            // the view moved (the middle button, Space, R, or Space and Ctrl held): the outline
+            // goes, nothing being painted where it was; hovering again, it comes back where the
+            // pointer is
+            if input.moving_view() && !input.pressing() {
+                self.overlays.hover(session, info, ctx.pixels_per_point(), None);
+            }
             if painting
                 && input.pressing()
                 && let Some(at) = ctx.pointer_latest_pos().filter(|at| on_canvas(*at))
@@ -3784,6 +3790,43 @@ mod tests {
             w.ctrl_key(Key::Z, true);
             assert_eq!(w.steps(), (true, false), "{size:?}");
         }
+    }
+
+    /// The brush's outline follows the mouse hovering over the canvas; the middle button held to
+    /// move the view takes it away (it stayed where the pointer was when the button went down),
+    /// and hovering after brings it back where the pointer is.
+    #[test]
+    fn the_brush_outline_goes_while_the_middle_button_moves_the_view() {
+        // drawn in light and dark rings, whatever the brush says
+        let prefs = crate::prefs::Prefs { cursor_style: crate::prefs::CursorStyle::Contrast, ..Default::default() };
+        let Some(mut w) = Window::open_with(vec2(1200.0, 800.0), prefs) else { return };
+        let (from, to) = (pos2(600.0, 400.0), pos2(700.0, 450.0));
+        w.hover(from);
+        w.frame();
+        assert!(w.ui.overlays.outline_shown(), "hovering, the outline shows");
+        let middle = |w: &mut Window, at: Pos2, pressed: bool| {
+            let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+            w.canvas_hears(&WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state,
+                button: MouseButton::Middle,
+            });
+            w.hover(at);
+        };
+        let before = w.session.view_matrix();
+        middle(&mut w, from, true);
+        let mut shown = Vec::new();
+        for k in 1..=10 {
+            w.hover(from + (to - from) * (k as f32 / 10.0));
+            shown.push(w.ui.overlays.outline_shown());
+        }
+        middle(&mut w, to, false);
+        let after = w.session.view_matrix();
+        assert_eq!(shown, [false; 10], "no outline while the view moves");
+        assert!((after[4] - before[4] - 100.0).abs() < 1.0 && (after[5] - before[5] - 50.0).abs() < 1.0, "moved");
+        w.hover(to + vec2(5.0, 0.0));
+        w.frame();
+        assert!(w.ui.overlays.outline_shown(), "hovering again, it shows again");
     }
 
     #[test]
