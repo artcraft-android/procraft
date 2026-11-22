@@ -267,6 +267,8 @@ final class CanvasModel {
     private(set) var recentBrushes: [RecentBrush] = []
     /// The library's brush swiped open to its buttons (its key), if one is.
     var swipedBrush: String?
+    /// The brushes of the shown set picked by sliding them right, by place ("set-index").
+    var pickedBrushes: [String] = []
     /// The set whose name is being edited.
     var renamingSet: Int?
     /// The brush whose name is being edited in place, from its menu (its key).
@@ -467,6 +469,7 @@ final class CanvasModel {
     /// would.
     func showSet(_ index: Int) {
         shownSet = index
+        pickedBrushes = []
         if index == Self.recentSet {
             recentBrushes = session.recentBrushes()
             return
@@ -533,6 +536,8 @@ final class CanvasModel {
     /// After a change to the library: read it again, keep it, and draw previews again (they go by
     /// place).
     func libraryChanged() {
+        // picks go by place, which may hold another brush now
+        pickedBrushes = []
         brushSets = session.brushLibrary()
         readLibraries()
         currentBrush = session.currentBrush()
@@ -556,6 +561,54 @@ final class CanvasModel {
 
     func deleteBrush(_ b: BrushInfo) {
         if session.deleteBrush(set: b.set, index: b.index) {
+            libraryChanged()
+        }
+    }
+
+    /// A brush of the shown set slid right: picked, or no longer.
+    func togglePickedBrush(_ b: BrushInfo) {
+        let key = Self.brushKey(b)
+        if let i = pickedBrushes.firstIndex(of: key) {
+            pickedBrushes.remove(at: i)
+        } else {
+            pickedBrushes.append(key)
+        }
+    }
+
+    /// A picked brush's place ("set-index").
+    private func pickedPlace(_ key: String) -> (set: UInt32, index: UInt32)? {
+        let parts = key.split(separator: "-").compactMap { UInt32($0) }
+        guard parts.count == 2 else { return nil }
+        return (parts[0], parts[1])
+    }
+
+    /// One brush is picked, in the current brush's set (which counts as picked): two, so Combine
+    /// shows beside Delete.
+    var canCombinePicked: Bool {
+        guard let c = currentBrush, pickedBrushes.count == 1, let p = pickedBrushes.first.flatMap(pickedPlace) else { return false }
+        return p.set == c.set
+    }
+
+    /// The picked brush becomes the current brush's second; a tool on either has the pair. Either
+    /// a pair already: said so, nothing done.
+    func combinePicked() {
+        guard let c = currentBrush, pickedBrushes.count == 1, let p = pickedBrushes.first.flatMap(pickedPlace) else { return }
+        if let refusal = session.combineRefusal(set: c.set, first: c.index, second: p.index) {
+            showNotice(refusal)
+            return
+        }
+        pickedBrushes = []
+        if session.combineBrushes(set: c.set, first: c.index, second: p.index) {
+            libraryChanged()
+        }
+    }
+
+    /// The picked brushes deleted, from the last up so the places of the rest hold.
+    func deletePickedBrushes() {
+        let places = pickedBrushes.compactMap(pickedPlace).sorted { $0.index > $1.index }
+        pickedBrushes = []
+        let deleted = places.filter { session.deleteBrush(set: $0.set, index: $0.index) }
+        if !deleted.isEmpty {
             libraryChanged()
         }
     }
