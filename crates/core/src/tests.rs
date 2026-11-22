@@ -20080,6 +20080,39 @@ fn a_vector_layer_is_saved_with_its_items_beside_its_pixels_and_opens_again() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Kept selections: each save adds one (the newest last, named by its place, oldest first); a row
+/// slid left and deleted takes its selection out and the rest close up; loading one by its place
+/// makes it the selection.
+#[test]
+fn kept_selections_delete_by_place_and_the_rest_close_up() {
+    use crate::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let mask = |s: &CanvasSession| s.shared.lock().selection.clone().map(|m| m.data);
+    let mut kept = Vec::new();
+    for (i, (x0, x1)) in [(0.0, 20.0), (30.0, 50.0), (60.0, 90.0)].into_iter().enumerate() {
+        s.select_none();
+        s.select_shape(false, x0, 0.0, x1, 100.0, SelectionJoin::Add);
+        kept.push(mask(&s));
+        assert_eq!(s.save_selection(), i as u32 + 1);
+    }
+    assert_eq!(s.saved_selection_count(), 3);
+    // the middle one deleted: two left, the third now second
+    s.delete_saved_selection(1);
+    assert_eq!(s.saved_selection_count(), 2);
+    assert!(s.load_selection(1));
+    assert_eq!(mask(&s), kept[2]);
+    assert!(s.load_selection(0));
+    assert_eq!(mask(&s), kept[0]);
+    // past the last: nothing deleted, nothing loaded
+    s.delete_saved_selection(7);
+    assert_eq!(s.saved_selection_count(), 2);
+    assert!(!s.load_selection(2));
+    // each deleted in turn, from the top of the list (the newest) down
+    s.delete_saved_selection(1);
+    s.delete_saved_selection(0);
+    assert_eq!(s.saved_selection_count(), 0);
+}
+
 /// The library's first brush (set, place) `wanted` says yes to.
 fn library_brush(s: &CanvasSession, wanted: impl Fn(&procraft_engine::brush::Brush) -> bool) -> Option<(u32, u32)> {
     let st = s.shared.lock();
