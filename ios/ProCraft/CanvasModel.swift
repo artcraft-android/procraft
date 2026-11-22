@@ -1075,7 +1075,13 @@ final class CanvasModel {
     /// `button` pressed: the modes it leaves behind end first (keeping what they made), as the
     /// core says; true if it goes on to do what it does.
     private func switchModes(_ button: ModeButton) -> Bool {
-        let change = modeSwitch(button: button, open: openModes())
+        let open = openModes()
+        let change = modeSwitch(button: button, open: open)
+        // the Selection button closing the selection tool lets go of the selection too (with
+        // Color Fill, the fill as it closes does)
+        if modeSwitchDeselects(button: button, open: open, colourFill: selection.colorFill) {
+            selection.clear()
+        }
         if change.end.quickshape { endQuickShape() }
         if change.end.filling { drop.endBand() }
         if change.end.recolor { endRecolor() }
