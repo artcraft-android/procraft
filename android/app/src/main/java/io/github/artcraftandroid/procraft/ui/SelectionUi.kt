@@ -127,7 +127,7 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
                 Spacer(Modifier.height(4.dp))
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
                     val amount = vm.featherAmount
-                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%") { vm.featherTo(it) }
+                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%", onEnd = { vm.featherLetGo() }) { vm.featherTo(it) }
                 }
             }
             SelectionPopup.SAVED -> SavedSelections(vm)

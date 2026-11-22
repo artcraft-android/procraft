@@ -1097,8 +1097,12 @@ impl CanvasSession {
     pub fn close_selection_tool(&self, colour_fill: bool) -> bool {
         let open = self.touches().freehand.len() >= 3;
         self.close_freehand();
-        // the shapes' paths show only while the tool is open
-        self.shared.lock().selection_outlines.clear();
+        // the shapes' paths, and the feather's line, show only while the tool is open
+        {
+            let mut st = self.shared.lock();
+            st.selection_outlines.clear();
+            st.feather_edge = false;
+        }
         if !colour_fill || open {
             return open;
         }

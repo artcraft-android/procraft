@@ -15,7 +15,7 @@ use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, text};
 use crate::transform::{
     Button, DASH, DASH_GAP, MENU_ARROW, MENU_GROUP, MENU_TEXT, MENU_WIDTH, Tapped, button_tip, floating_toolbar,
-    menu_slider, menu_title, popover_frame,
+    menu_slider_let_go, menu_title, popover_frame,
 };
 
 /// The selection toolbar's buttons with room (narrower where the window is).
@@ -350,9 +350,14 @@ impl Selection {
                 let shown =
                     if amount <= 0.0 { "None".to_owned() } else { format!("{}%", (amount * 100.0).round() as i32) };
                 let row = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
-                if let Some(v) = menu_slider(ui, row, "Amount", amount, &shown) {
+                let (value, let_go) = menu_slider_let_go(ui, row, "Amount", amount, &shown);
+                if let Some(v) = value {
                     self.feather = v;
                     session.select_feather(v);
+                }
+                // let go, the line where the selection fades out goes
+                if let_go {
+                    session.select_feather_let_go();
                 }
                 return;
             }

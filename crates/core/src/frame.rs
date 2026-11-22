@@ -151,6 +151,8 @@ impl State {
         let flat = !self.scene_shown() && self.sphere.is_none();
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.set_fill_preview(fill_preview.filter(|_| flat));
+            // the line where the selection fades out, while its feathering is dragged
+            canvas.set_selection_edge(self.feather_edge && self.selection.is_some() && self.transform.is_none());
         }
         // while a transform is open the selection shows no bands: its box shows what moves
         let banded = self.transform.is_none();

@@ -5533,6 +5533,7 @@ fn ring_under_an_empty_layer(s: &CanvasSession) -> u64 {
 /// While the selection tool is open, the paths of the shapes joined to the selection show dashed
 /// (canvas pixels: a rectangle's four corners, an ellipse's 128 points), those taken away too;
 /// inverting and feathering keep them; an undo, closing the tool or deselecting takes them away.
+/// The feather's line shows from a drag of its slider until it is let go.
 #[test]
 fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
     use crate::SelectionJoin;
@@ -5552,9 +5553,15 @@ fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
     s.select_shape(false, 20.0, 20.0, 30.0, 30.0, SelectionJoin::Remove);
     let lengths: Vec<usize> = s.selection_outlines().iter().map(Vec::len).collect();
     assert_eq!(lengths, vec![8, 256, 8]);
+    // inverted and feathered: kept; the feather's line from a drag until let go
     s.select_invert();
+    s.select_feather(0.1);
+    assert!(s.shared.lock().feather_edge);
+    s.select_feather_let_go();
+    assert!(!s.shared.lock().feather_edge);
     s.select_feather(0.2);
     s.select_feather_done();
+    assert!(!s.shared.lock().feather_edge);
     assert_eq!(s.selection_outlines().len(), 3);
     // undone: what is selected is the history's, the paths go
     s.undo();
@@ -5572,8 +5579,11 @@ fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
     // closed as the apps close it (before their touches are told): gone, and not back when it opens
     s.select_shape(false, 60.0, 10.0, 90.0, 40.0, SelectionJoin::Add);
     assert_eq!(s.selection_outlines().len(), 1);
+    s.select_feather(0.1);
+    assert!(s.shared.lock().feather_edge);
     s.close_selection_tool(false);
     assert!(s.selection_outlines().is_empty());
+    assert!(!s.shared.lock().feather_edge, "the feather's line goes with the tool");
     assert!(s.has_selection());
 }
 
@@ -5906,6 +5916,8 @@ fn color_fill_shows_exactly_the_fill_it_makes_on_an_alpha_locked_faded_layer() {
     s.set_color(1.0, 0.1, 0.0);
     s.select_shape(false, 30.0, 5.0, 95.0, 70.0, SelectionJoin::Add);
     s.select_feather(0.02);
+    // (its slider let go, as the apps do: the line where it fades out goes)
+    s.select_feather_let_go();
     s.set_selection_display(SelectionDisplay::ColourFill);
     let shown = frame_of(&s, 100);
     assert!(s.close_selection_tool(true));

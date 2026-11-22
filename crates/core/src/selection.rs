@@ -386,14 +386,26 @@ impl CanvasSession {
         let Some((_, kept)) = st.feather_base.as_mut().filter(|(now, _)| *now == base) else { return };
         *kept = room;
         st.selection = Some(m);
+        // while the slider is held, the line where it now fades out to a tenth shows
+        st.feather_edge = true;
         st.show_selection();
         self.shared.frame(st);
+    }
+
+    /// The feather's slider let go of: the line where the selection fades out goes.
+    pub fn select_feather_let_go(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if std::mem::take(&mut st.feather_edge) {
+            self.shared.frame(st);
+        }
     }
 
     /// The feather popover closed: its feathering becomes one undo step.
     pub fn select_feather_done(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.feather_edge = false;
         if let Some((base, _)) = st.feather_base.take() {
             st.record_selection(Some(base), "feather");
             self.shared.frame(st);

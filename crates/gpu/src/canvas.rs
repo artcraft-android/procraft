@@ -3239,6 +3239,9 @@ pub struct Canvas {
     veil: Option<Veil>,
     /// A colour shown filling what is selected on a layer (see [`Canvas::set_fill_preview`]).
     fill_preview: Option<FillPreview>,
+    /// The line where the selection fades out to a tenth shows (see
+    /// [`Canvas::set_selection_edge`]).
+    selection_edge: bool,
     /// Counts the undo steps ever made, so that a change since some moment shows.
     steps_made: u64,
     /// The steps made when [`Canvas::mark_steps`] was last done.
@@ -3659,6 +3662,7 @@ impl Canvas {
             held_quietly: false,
             veil: None,
             fill_preview: None,
+            selection_edge: false,
             steps_made: 0,
             mark: None,
             next_name: None,
@@ -5980,6 +5984,13 @@ impl Canvas {
     /// The fill shown while something is selected (see [`Canvas::set_fill_preview`]).
     pub fn fill_preview(&self) -> Option<FillPreview> {
         self.fill_preview
+    }
+
+    /// While something is selected, a dark line shows where it fades out to a tenth selected
+    /// (`shown`): the outer reach of its feathering, as that is dragged. Drawn with the selection's
+    /// look, or alone where it has none (Color Fill's fill showing it).
+    pub fn set_selection_edge(&mut self, shown: bool) {
+        self.selection_edge = shown;
     }
 
     /// Copies `layer` aside to transform it (ending a transform still open, kept).
@@ -10743,11 +10754,14 @@ impl Canvas {
             pass.draw(0..6, 0..(VEIL_GRID * VEIL_GRID) as u32);
         }
 
-        // the selection: bands over what is not selected, or what is selected tinted or covered
+        // the selection: bands over what is not selected, or what is selected tinted or covered;
+        // and the line where it fades out, as its feathering is dragged (alone without a look)
+        let edge = self.selection_edge;
+        let shown = target.selection.map(Some).or(edge.then_some(None));
         if let (Some(look), Some(selection), Some(inverse)) =
-            (target.selection, &self.selection, unit_to_canvas.then(target.to_screen).inverse())
+            (shown, &self.selection, unit_to_canvas.then(target.to_screen).inverse())
         {
-            let multiply = matches!(look, SelectionLook::Tint(_));
+            let multiply = matches!(look, Some(SelectionLook::Tint(_)));
             let pipeline = selection_pipelines.entry((target.format, multiply)).or_insert_with(|| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("selection"),
@@ -10778,20 +10792,25 @@ impl Canvas {
             let i = inverse;
             let srgb_flag = if srgb { 1.0 } else { 0.0 };
             let (m1_rest, v) = match look {
-                SelectionLook::Stripes(s) => ([s.period.max(1.0), s.drift], [0.0, 0.0, 0.0, s.coverage]),
-                SelectionLook::Tint(c) => ([1.0, 0.0], [c[0], c[1], c[2], 1.0]),
-                SelectionLook::Fill(c) => ([1.0, 0.0], [c[0], c[1], c[2], 1.0]),
+                Some(SelectionLook::Stripes(s)) => ([s.period.max(1.0), s.drift], [0.0, 0.0, 0.0, s.coverage]),
+                Some(SelectionLook::Tint(c) | SelectionLook::Fill(c)) => ([1.0, 0.0], [c[0], c[1], c[2], 1.0]),
+                // the line alone: in Color Fill's colour where it shows on the layer
+                None => {
+                    ([1.0, 0.0], self.fill_preview.map_or([0.0; 4], |f| [f.colour[0], f.colour[1], f.colour[2], 1.0]))
+                }
             };
+            let coloured_line = look.is_none() && self.fill_preview.is_some();
             let mode = match look {
-                SelectionLook::Stripes(_) => 0.0,
-                SelectionLook::Tint(_) => 1.0,
-                SelectionLook::Fill(_) => 2.0,
+                Some(SelectionLook::Stripes(_)) => 0.0,
+                Some(SelectionLook::Tint(_)) => 1.0,
+                Some(SelectionLook::Fill(_)) => 2.0,
+                None => 3.0,
             };
             let offset = uniforms.push(&SelectionUniform {
                 m0: [i.a, i.b, i.c, i.d],
                 m1: [i.e, i.f, m1_rest[0], m1_rest[1]],
                 v,
-                mode: [mode, srgb_flag, 0.0, 0.0],
+                mode: [mode, srgb_flag, if edge { 1.0 } else { 0.0 }, if coloured_line { 1.0 } else { 0.0 }],
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &selection.bind, &[]);

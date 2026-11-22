@@ -8459,6 +8459,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pourLater("feather") { s.selectFeather(amount) }
     }
 
+    /** The feather's slider let go of: the line where the selection fades out goes (after the feathering on its way). */
+    fun featherLetGo() {
+        val s = session ?: return
+        pourThread.execute { s.selectFeatherLetGo() }
+    }
+
     fun openSelectionPopup(p: SelectionPopup) {
         selectionPopup = if (selectionPopup == p) SelectionPopup.NONE else p
         if (selectionPopup == SelectionPopup.FEATHER) featherAmount = 0f
