@@ -10697,16 +10697,20 @@ fn a_save_made_while_painting_goes_on_is_one_moment_and_opens_whole() {
 /// `autosave_hold_while_painting` bounds it at a 60 Hz frame on a big artwork, alone.
 #[test]
 fn an_autosave_while_painting_goes_on_holds_the_canvas_only_briefly() {
+    // a run that saved while the painting went on and after its last stroke
+    let whole = |r: &SaveRun| r.saves > 0 && r.caught_up.is_some();
     let Some(mut run) = autosave_while_painting(2048, 6, 4, false) else { return };
     run.print();
-    // the quietest of up to three runs: other tests' GPU work beside it can hold a run up
+    // the quietest of up to three runs: other tests' GPU work beside it can hold a run up, or
+    // keep the app from ever being idle, so that a run saves nothing until the painting ends
     for _ in 0..2 {
-        if run.autosave_held < std::time::Duration::from_millis(50) {
+        if whole(&run) && run.autosave_held < std::time::Duration::from_millis(50) {
             break;
         }
         let Some(again) = autosave_while_painting(2048, 6, 4, false) else { return };
         again.print();
-        if again.autosave_held < run.autosave_held {
+        let quieter = again.autosave_held < run.autosave_held;
+        if (whole(&again) && (!whole(&run) || quieter)) || (!whole(&run) && quieter) {
             run = again;
         }
     }
