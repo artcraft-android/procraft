@@ -12,6 +12,10 @@ const ARTWORK_FILE: &str = "artwork.json";
 const STACK_FILE: &str = "stack.json";
 /// The folders' order, one name a line, first first.
 const ORDER_FILE: &str = "order.txt";
+/// A file an import keeps in the folder it is making an artwork in until it is done, saying which
+/// run of the app (its process) makes it: the folder isn't an artwork until it goes, and one left by
+/// a run that has ended (the app stopped mid-import) is taken away when the gallery next opens.
+const IMPORTING: &str = "import.run";
 const UNTITLED: &str = "Untitled Artwork";
 const STACK: &str = "Stack";
 /// The stack the gallery's recovery puts what it finds in.
@@ -333,6 +337,43 @@ fn name_of(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// An import under way in a folder (see [`IMPORTING`]).
+pub(crate) struct Importing(PathBuf);
+
+impl Importing {
+    /// An import into the folder `dir` begins (made if it isn't there).
+    pub(crate) fn begin(dir: &Path) -> Importing {
+        let mark = dir.join(IMPORTING);
+        let _ = fs::create_dir_all(dir);
+        if let Err(e) = fs::write(&mark, std::process::id().to_string()) {
+            log::warn!("noting an import: {e}");
+        }
+        Importing(mark)
+    }
+
+    /// The import is whole: its folder is an artwork. (One that fails leaves its note: its folder
+    /// is taken away by the app, or else when the gallery next opens.)
+    pub(crate) fn done(self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Takes away the folders of imports a run of the app that has ended left half made (it was stopped
+/// during them): in the gallery and in its stacks.
+fn sweep_imports(root: &Path) {
+    let own = std::process::id().to_string();
+    let inside = |d: &PathBuf| if d.join(STACK_FILE).is_file() { folders(d) } else { Vec::new() };
+    let dirs: Vec<PathBuf> = folders(root).iter().flat_map(|d| std::iter::once(d.clone()).chain(inside(d))).collect();
+    for dir in dirs {
+        if let Ok(run) = fs::read_to_string(dir.join(IMPORTING))
+            && run.trim() != own
+        {
+            log::warn!("an import cut short by the app stopping, taken away: {}", dir.display());
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+}
+
 fn folders(at: &Path) -> Vec<PathBuf> {
     fs::read_dir(at).map_or_else(
         |_| Vec::new(),
@@ -395,6 +436,10 @@ fn copy_artwork(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
+    // still being imported
+    if dir.join(IMPORTING).exists() {
+        return None;
+    }
     let file = dir.join(ARTWORK_FILE);
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&file).ok()?).ok()?;
     let document = json.get("document")?;
@@ -585,6 +630,7 @@ impl ArtworkStore {
     pub fn open(root: String) -> Arc<ArtworkStore> {
         let root = PathBuf::from(root);
         let _ = fs::create_dir_all(&root);
+        sweep_imports(&root);
         Arc::new(ArtworkStore { root })
     }
 

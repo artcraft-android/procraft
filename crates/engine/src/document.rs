@@ -551,10 +551,27 @@ const LAYERS_KEPT_BACK: u64 = 4;
 /// How many layers with pixels a canvas `width` × `height` holds on this device: what the budget
 /// holds once four layers' worth are kept back, at most [`MOST_LAYERS`], one at least.
 pub fn layer_cap_for(width: u32, height: u32) -> usize {
+    layer_cap_within(BUDGET.load(std::sync::atomic::Ordering::Relaxed), width, height)
+}
+
+/// How many layers with pixels a canvas `width` × `height` holds when they may take `budget`
+/// bytes: [`layer_room_within`], at most [`MOST_LAYERS`], one at least.
+pub fn layer_cap_within(budget: u64, width: u32, height: u32) -> usize {
+    layer_room_within(budget, width, height).clamp(1, MOST_LAYERS)
+}
+
+/// The layers of a canvas `width` × `height` that `budget` bytes hold once four layers' worth are
+/// kept back for the canvas's own work: none when it can't hold even those, so that a canvas this
+/// size can't be worked on with the memory there is.
+pub fn layer_room_within(budget: u64, width: u32, height: u32) -> usize {
     let bytes = (u64::from(width) * u64::from(height) * 4).max(1);
-    let budget = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
     let room = budget.saturating_sub(bytes.saturating_mul(LAYERS_KEPT_BACK));
-    usize::try_from(room / bytes).unwrap_or(usize::MAX).clamp(1, MOST_LAYERS)
+    usize::try_from(room / bytes).unwrap_or(usize::MAX)
+}
+
+/// [`layer_room_within`] this device's budget.
+pub fn layer_room_for(width: u32, height: u32) -> usize {
+    layer_room_within(BUDGET.load(std::sync::atomic::Ordering::Relaxed), width, height)
 }
 
 /// The memory layers may take on this device, bytes.
@@ -2296,6 +2313,24 @@ mod tests {
         assert!(!d.has_room(1), "its one layer is all it holds");
         // a small canvas: at most a thousand
         assert_eq!(Document::new(100, 100).layer_cap(), MOST_LAYERS);
+    }
+
+    #[test]
+    fn the_layer_cap_is_as_measured_on_a_device_of_8_gb() {
+        // Maximum Layers on a device of 8 GB, whose layers may take 4000 MiB, as measured: 306 at
+        // 1488 x 2266, 894 at 1080 x 1080, the most (1000) at 600 x 600
+        let eight_gb = 4000u64 << 20;
+        assert_eq!(layer_cap_within(eight_gb, 1488, 2266), 306);
+        assert_eq!(layer_cap_within(eight_gb, 1080, 1080), 894);
+        assert_eq!(layer_cap_within(eight_gb, 600, 600), 1000);
+        // 6103 x 1500: 110 there, and 34 on a device of about 2.8 GB, half of it for layers
+        assert_eq!(layer_cap_within(eight_gb, 6103, 1500), 110);
+        assert_eq!(layer_cap_within(1_400_000_000, 6103, 1500), 34);
+        // no room for a layer once four are kept back: none to bring a file into, though a new
+        // canvas still counts one
+        assert_eq!(layer_room_within(2 << 30, 16384, 16384), 0);
+        assert_eq!(layer_cap_within(2 << 30, 16384, 16384), 1);
+        assert_eq!(layer_room_within(2 << 30, 8192, 8192), 4);
     }
 
     #[test]

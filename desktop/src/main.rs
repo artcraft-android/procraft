@@ -263,6 +263,9 @@ fn getting_ready_note(ctx: &egui::Context) {
 fn main() {
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
+    // artworks being opened, noted until they show: one the app ended while opening is asked about
+    // when next picked, not opened at once into the same end
+    procraft_core::set_open_marks_file(files::app_dir().join("opening.txt").to_string_lossy().into_owned());
     // the layers may take half the computer's memory, as on the tablet (so how many a canvas holds
     // grows with it), their textures up to 2 GiB of it; the composite is made around the layers
     // not being worked on, so a frame composites only those
@@ -1251,6 +1254,10 @@ impl App {
     /// Starts reading the artwork in gallery folder `dir` on a thread of its own, to open it (to
     /// share it as `shared_as`, if given).
     fn read_artwork(&mut self, dir: String, shared_as: Option<animated_export::Animated>) {
+        // one whose opening ended the app last time is opened again only when asked to
+        if !files::open_anyway(&dir) {
+            return;
+        }
         let folder = dir.clone();
         let reading = std::thread::spawn(move || CanvasSession::open(folder).map_err(|e| e.to_string()));
         self.reading_artwork = Some((Instant::now(), dir, shared_as, reading));

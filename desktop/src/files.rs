@@ -8,7 +8,7 @@ use procraft_core::{
     CanvasPreset, CanvasSession, KeptGestures, ModelFile, PagesOutcome, PsdOutcome, ThumbnailImage, export_file_name,
     import_pages, import_psd, preset_height, preset_width,
 };
-use rfd::{FileDialog, MessageDialog, MessageLevel};
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
 use crate::ui::Interface;
 
@@ -597,6 +597,10 @@ fn open_model_artwork(path: &Path) -> Result<Arc<CanvasSession>, String> {
         return Err("This file can't be opened.".to_owned());
     }
     let opened = CanvasSession::open(dir).map_err(|e| e.to_string());
+    // its layers' files read before their folder goes (they are read as the canvas is made)
+    if let Ok(session) = &opened {
+        session.hold_opened_files();
+    }
     let _ = std::fs::remove_dir_all(&work);
     opened
 }
@@ -625,7 +629,10 @@ fn open_pdf(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
                 dir.clone(),
                 name.to_owned(),
             ) {
-                PagesOutcome::Imported => CanvasSession::open(dir).map_err(|e| e.to_string()),
+                PagesOutcome::Imported => CanvasSession::open(dir).map_err(|e| e.to_string()).inspect(|s| {
+                    // its layers' files read before their folder goes
+                    s.hold_opened_files();
+                }),
                 PagesOutcome::TooManyPages { most } => {
                     Err(format!("This PDF has more pages than a canvas its size can hold as layers ({most})."))
                 }
@@ -660,8 +667,14 @@ fn open_psd(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
     let _ = std::fs::remove_dir_all(&dir);
     let outcome = import_psd(path.to_string_lossy().into_owned(), dir.to_string_lossy().into_owned(), name.to_owned());
     let opened = match outcome {
-        PsdOutcome::Imported => CanvasSession::open(dir.to_string_lossy().into_owned()).map_err(|e| e.to_string()),
+        PsdOutcome::Imported => {
+            CanvasSession::open(dir.to_string_lossy().into_owned()).map_err(|e| e.to_string()).inspect(|s| {
+                // its layers' files read before their folder goes (they are read as the canvas is made)
+                s.hold_opened_files();
+            })
+        }
         PsdOutcome::TooManyLayers { most } => Err(format!("It has more layers than a canvas its size holds ({most}).")),
+        PsdOutcome::TooLarge => Err("Its canvas is larger than this computer can hold.".into()),
         PsdOutcome::Unsupported => {
             Err("This kind of PSD isn't read (bitmap, indexed, Lab or 32 bits a channel).".into())
         }
@@ -779,6 +792,35 @@ pub fn dialog() -> FileDialog {
         return dialog.set_parent(window);
     }
     dialog
+}
+
+/// Whether to open the artwork in gallery folder `dir`: at once, unless the app ended while opening
+/// it last time (stopped for memory, or crashed); then only if the person says so, so that it can't
+/// take the app down each time it is picked (the gallery stays as it is, the artwork in it).
+pub fn open_anyway(dir: &str) -> bool {
+    if !procraft_core::opening_ended_app(dir.to_owned()) {
+        return true;
+    }
+    log::warn!("the app ended while opening {dir} last time: asking before opening it again");
+    // nothing to ask with (Linux without its dialogs' program): opened as before
+    if cfg!(target_os = "linux") && !has_program("zenity") {
+        return true;
+    }
+    let action = "Open Anyway".to_owned();
+    let answer = message()
+        .set_level(MessageLevel::Warning)
+        .set_title("This artwork closed the app")
+        .set_description(
+            "ProCraft closed while this artwork was opening last time, perhaps for want of memory. Closing other programs first may help.",
+        )
+        .set_buttons(MessageButtons::OkCancelCustom(action.clone(), "Cancel".to_owned()))
+        .show();
+    // (Windows without its newer dialogs shows OK and Cancel)
+    match answer {
+        MessageDialogResult::Ok | MessageDialogResult::Yes => true,
+        MessageDialogResult::Custom(chosen) => chosen == action,
+        _ => false,
+    }
 }
 
 /// A message box, belonging to the app's window as [`dialog`]s do.

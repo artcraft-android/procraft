@@ -819,6 +819,20 @@ fun GalleryScreen(vm: CanvasViewModel) {
             deleting = null
         },
     )
+    // an artwork whose opening closed the app last time: opened again only when asked to (it can
+    // be shared, duplicated or deleted from the gallery meanwhile)
+    Alert(
+        vm.openingEndedApp,
+        title = { "This artwork closed the app" },
+        message = { "ProCraft closed while this artwork was opening last time, perhaps for want of memory. Closing other apps first may help." },
+        action = "Open Anyway",
+        destructive = false,
+        onCancel = { vm.openingEndedApp = null },
+        onAction = { o ->
+            vm.openingEndedApp = null
+            vm.openArtwork(o.artwork, anyway = true, then = o.then)
+        },
+    )
 }
 
 /**

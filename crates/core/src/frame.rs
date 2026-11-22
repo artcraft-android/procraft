@@ -230,9 +230,14 @@ impl State {
             } else if animating {
                 self.frame_due = Some(self.stripes_due());
             }
-            // counted only when the canvas was drawn, so a first frame means the artwork shows
+            // counted only when the canvas was drawn, so a first frame means the artwork shows (and
+            // its opening didn't end the app)
             if !busy {
                 self.frames += 1;
+                if let Some(mark) = self.open_mark.take() {
+                    // (its file written off the frame's thread; on it if no thread can be made)
+                    let _ = std::thread::Builder::new().name("open mark".into()).spawn(move || drop(mark));
+                }
             }
         }
         self.heed_filter_run();

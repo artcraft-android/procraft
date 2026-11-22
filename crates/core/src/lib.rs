@@ -49,6 +49,8 @@ mod history;
 mod hooks;
 mod host;
 mod hues;
+#[cfg(test)]
+mod import_tests;
 mod interface_size;
 mod keys;
 #[cfg(target_os = "ios")]
@@ -60,6 +62,7 @@ mod layers;
 mod liquify;
 mod liquify_steps;
 mod modes;
+mod open_marks;
 mod palettes;
 mod pick;
 mod pickers;
@@ -200,6 +203,7 @@ pub use layers::{
 };
 pub use liquify::liquify_reach;
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
+pub use open_marks::{opening_ended_app, set_open_marks_file};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
@@ -771,6 +775,9 @@ pub(crate) struct State {
     pub(crate) pending_stores: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
+    /// The artwork opened from its folder, noted as being opened until it shows, its canvas fails
+    /// (told), or the session goes: one the app ended while opening is told when next picked.
+    pub(crate) open_mark: Option<open_marks::Mark>,
     /// Layers whose saved files couldn't be read (shown empty): a save leaves each file as it is
     /// until the layer is painted on, and then keeps the file aside before writing the new one.
     pub(crate) unreadable: std::collections::HashSet<procraft_engine::document::LayerId>,
@@ -1320,6 +1327,7 @@ impl State {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
                 self.canvas_failed = true;
+                self.open_mark = None;
                 // what was opened kept
                 self.pending_pixels = pending;
             }
@@ -1846,6 +1854,7 @@ impl Shared {
                 log::error!("canvas: {e}");
                 st.error = Some(e.to_string());
                 st.canvas_failed = true;
+                st.open_mark = None;
             }
         }
     }
@@ -2217,6 +2226,7 @@ impl CanvasSession {
             name,
             pending_pixels: project::opened(pixels),
             canvas_failed: false,
+            open_mark: None,
             unreadable: std::collections::HashSet::new(),
             unreadable_untold: Vec::new(),
             closed: false,

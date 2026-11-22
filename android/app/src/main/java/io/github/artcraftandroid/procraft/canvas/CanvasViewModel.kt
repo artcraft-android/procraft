@@ -222,6 +222,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var opening by mutableStateOf(false)
         private set
+
+    /** An artwork picked whose opening ended the app last time, and what was to follow its opening: asked about before it opens again. */
+    data class OpeningEndedApp(val artwork: Artwork, val then: (() -> Unit)?)
+
+    /** The artwork picked whose opening ended the app last time, while the gallery asks whether to open it anyway. */
+    var openingEndedApp by mutableStateOf<OpeningEndedApp?>(null)
     private var messageText by mutableStateOf<String?>(null)
 
     /**
@@ -1292,6 +1298,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshPalettes()
         // colour profiles the user imported
         io.github.artcraftandroid.procraft.core.setProfileFolder(File(app.filesDir, "icc").path)
+        // artworks being opened, noted until they show: one the app ended while opening is asked
+        // about when next picked, not opened at once into the same end
+        io.github.artcraftandroid.procraft.core.setOpenMarksFile(File(app.filesDir, "opening.txt").path)
         // layers may take half the device's memory, their textures a quarter: past that, those not
         // worked on are kept compressed off the GPU until needed (set before Custom Canvas asks)
         val memory = android.app.ActivityManager.MemoryInfo()
@@ -2651,6 +2660,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             io.github.artcraftandroid.procraft.core.PsdOutcome.Imported -> refreshGallery()
             is io.github.artcraftandroid.procraft.core.PsdOutcome.TooManyLayers ->
                 message = "This file has more layers than a canvas its size can hold (${outcome.most})."
+            io.github.artcraftandroid.procraft.core.PsdOutcome.TooLarge -> message = "This file's canvas is larger than this device can hold."
             io.github.artcraftandroid.procraft.core.PsdOutcome.Unsupported -> message = "This kind of PSD can't be opened."
             io.github.artcraftandroid.procraft.core.PsdOutcome.Unreadable -> message = "This file can't be opened."
         }
@@ -2829,13 +2839,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Opens artwork [a], the gallery zooming into its cell; then [then]. */
-    fun openArtwork(a: Artwork, then: (() -> Unit)? = null) {
+    /**
+     * Opens artwork [a], the gallery zooming into its cell; then [then]. One whose opening ended the
+     * app last time (stopped for memory, or crashed) is asked about first ([openingEndedApp]) unless
+     * opened [anyway], so it can't take the app down each time it is picked.
+     */
+    fun openArtwork(a: Artwork, anyway: Boolean = false, then: (() -> Unit)? = null) {
         // one artwork open at a time: a second session on it would leave the screen on the first
         if (opening || session != null) return
         opening = true
         val cell = thumbAt[a.dir.name]
         viewModelScope.launch {
+            if (!anyway && withContext(Dispatchers.IO) { io.github.artcraftandroid.procraft.core.openingEndedApp(a.dir.path) }) {
+                opening = false
+                openingEndedApp = OpeningEndedApp(a, then)
+                return@launch
+            }
             val s = withContext(Dispatchers.IO) {
                 runCatching {
                     CanvasSession.open(a.dir.path).also {
