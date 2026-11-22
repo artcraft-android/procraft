@@ -179,28 +179,29 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 }
                 val side = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR)
                 // the window as the side bar measures it, at its kept place (its modify button
-                // dragged, it follows the finger, and let go slides back to its edge)
+                // dragged, it follows the finger up or down stretching a little toward it, and let
+                // go settles back to its width)
                 vm.sideBarRoom = floatArrayOf(maxHeight.value / side, Pc.barShown.value / side)
                 val sideBar = io.github.artcraftandroid.procraft.core.sideBarFit(maxHeight.value / side, Pc.barShown.value / side, vm.sideBarCentre)
                 val sideTop = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(sideBar.top) }
-                val sideOut = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+                val sideStretch = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
                 val moving = vm.sideBarMoving
                 androidx.compose.runtime.LaunchedEffect(moving, vm.sideBarSettling, sideBar.top) {
                     when {
                         moving != null -> {
                             sideTop.snapTo(moving.top)
-                            sideOut.snapTo(moving.out)
+                            sideStretch.snapTo(moving.stretch)
                         }
                         vm.sideBarSettling -> {
                             kotlinx.coroutines.coroutineScope {
-                                launch { sideOut.animateTo(0f, Motion.sideBarSettle()) }
+                                launch { sideStretch.animateTo(0f, Motion.sideBarSettle()) }
                                 sideTop.animateTo(sideBar.top, Motion.sideBarSettle())
                             }
                             vm.sideBarSettling = false
                         }
                         else -> {
                             sideTop.snapTo(sideBar.top)
-                            sideOut.snapTo(0f)
+                            sideStretch.snapTo(0f)
                         }
                     }
                 }
@@ -212,7 +213,8 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset {
                         val k = side * density
                         val outward = if (vm.rightHanded) -1f else 1f
-                        androidx.compose.ui.unit.IntOffset((sideOut.value * k * outward).roundToInt(), (sideTop.value * k).roundToInt())
+                        // (stretched, what is on it moves out with its far side; its glass reaches back to the edge)
+                        androidx.compose.ui.unit.IntOffset((sideStretch.value * k * outward).roundToInt(), (sideTop.value * k).roundToInt())
                     },
                     enter = Motion.sideBarIn(vm.rightHanded),
                     exit = Motion.sideBarOut(vm.rightHanded),
@@ -226,7 +228,7 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                             right = vm.rightHanded,
                             trackHeight = sideBar.track.dp,
                             shown = barsShown,
-                            out = sideOut.value.dp,
+                            stretch = sideStretch.value.dp,
                         )
                     }
                 }

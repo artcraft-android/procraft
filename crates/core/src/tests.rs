@@ -21803,11 +21803,14 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
 
 /// A stand-in for the window the render loop draws into: an offscreen texture of the session's
 /// window size, giving images as `mode` says ([`READY`], [`NO_IMAGE`], [`OUTDATED`],
-/// [`SUBOPTIMAL`]), counting the configures asked for.
+/// [`SUBOPTIMAL`]), counting the configures asked for; the screen's refreshes as `refreshes` has
+/// them (told afresh each time asked), and when each frame was presented.
 struct TestScreen {
     texture: procraft_gpu::wgpu::Texture,
     mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
     configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    refreshes: Option<crate::pacing::Timeline>,
+    presented: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
 const READY: u8 = 0;
@@ -21842,7 +21845,13 @@ impl crate::frame_loop::Screen for TestScreen {
         image.create_view(&Default::default())
     }
 
-    fn present(&mut self, _image: procraft_gpu::wgpu::Texture) {}
+    fn present(&mut self, _image: procraft_gpu::wgpu::Texture) {
+        self.presented.lock().unwrap().push(std::time::Instant::now());
+    }
+
+    fn refreshes(&mut self, _drawing: bool) -> Option<crate::pacing::Timeline> {
+        self.refreshes.map(|t| crate::pacing::Timeline { told: std::time::Instant::now(), ..t })
+    }
 }
 
 /// The render loop running on a thread of its own for a session, into a [`TestScreen`]; stopped
@@ -21852,6 +21861,7 @@ struct LoopRunning {
     thread: Option<std::thread::JoinHandle<()>>,
     mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
     configures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    presented: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
 impl Drop for LoopRunning {
@@ -21870,6 +21880,12 @@ impl Drop for LoopRunning {
 
 /// `s`'s render loop started, the window giving images as `mode` says.
 fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
+    run_loop_timed(s, mode, None)
+}
+
+/// `s`'s render loop started, the window giving images as `mode` says, its refreshes told as
+/// `refreshes` has them.
+fn run_loop_timed(s: &CanvasSession, mode: u8, refreshes: Option<crate::pacing::Timeline>) -> LoopRunning {
     let size = s.shared.lock().window_size;
     let gpu = s.shared.lock().gpu.clone().unwrap();
     let texture = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
@@ -21884,8 +21900,14 @@ fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     });
     let mode = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(mode));
     let configures = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut screen =
-        TestScreen { texture, mode: std::sync::Arc::clone(&mode), configures: std::sync::Arc::clone(&configures) };
+    let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut screen = TestScreen {
+        texture,
+        mode: std::sync::Arc::clone(&mode),
+        configures: std::sync::Arc::clone(&configures),
+        refreshes,
+        presented: std::sync::Arc::clone(&presented),
+    };
     let shared = std::sync::Arc::clone(&s.shared);
     {
         let mut st = shared.lock();
@@ -21894,7 +21916,7 @@ fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     }
     let running = std::sync::Arc::clone(&shared);
     let thread = std::thread::spawn(move || crate::frame_loop::draw_loop(&running, &mut screen, || {}));
-    LoopRunning { shared, thread: Some(thread), mode, configures }
+    LoopRunning { shared, thread: Some(thread), mode, configures, presented }
 }
 
 /// Waits until `s` has drawn no frame for a while and owes none: no frame wanted, and no caches
@@ -21977,6 +21999,103 @@ fn an_idle_canvas_draws_no_frames_and_its_render_thread_sleeps() {
     // they drift (a busy machine may draw fewer than 30), and never at the screen's 120
     assert!((3..=40).contains(&bands.frames), "the bands at 30 frames a second, not 120: {bands:?}");
     assert!(bands.wakeups <= bands.frames + 2, "a wakeup for each band frame, no more: {bands:?}");
+}
+
+/// Told the screen's refreshes, the render loop draws one frame for each time the compositor takes
+/// one, however fast input comes, each handed over before the latch it is meant for and no more
+/// than a refresh before it; untold, it draws as often as the fastest refresh allows (here at a
+/// 25 Hz screen's latches, against 120 Hz input pacing).
+#[test]
+#[ignore = "timed to the refreshes: run alone, on a machine at rest (frames late under load go untimed)"]
+fn told_the_refreshes_the_render_loop_draws_one_frame_a_latch_just_before_it() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_refresh_rate(120.0);
+    let period = std::time::Duration::from_millis(40);
+    let latch = std::time::Instant::now() + std::time::Duration::from_millis(3);
+    let move_for = |s: &CanvasSession, time: std::time::Duration| {
+        let until = std::time::Instant::now() + time;
+        while std::time::Instant::now() < until {
+            s.view_gesture(150.0, 150.0, 0.5, 0.0, 1.0, 0.0);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    };
+    let timed = run_loop_timed(&s, READY, Some(crate::pacing::Timeline { latch, period, told: latch }));
+    settled(&s);
+    // (a second first, for the frames' timing to settle: the first frames take longer)
+    move_for(&s, std::time::Duration::from_millis(1000));
+    let before = timed.presented.lock().unwrap().len();
+    move_for(&s, std::time::Duration::from_millis(1000));
+    settled(&s);
+    let shown: Vec<_> = timed.presented.lock().unwrap()[before..].to_vec();
+    drop(timed);
+    // each frame's latch: the first at or after it was handed over
+    let tl = crate::pacing::Timeline { latch, period, told: latch };
+    let latches: Vec<_> = shown.iter().map(|&at| tl.latch_from(at)).collect();
+    let early: Vec<f64> = shown.iter().zip(&latches).map(|(&at, &l)| (l - at).as_secs_f64() * 1000.0).collect();
+    let mut distinct = latches.clone();
+    distinct.dedup();
+    eprintln!(
+        "a second of input at a 25 Hz screen's latches: {} frames for {} latches, handed over {:.1}..{:.1} ms before them",
+        shown.len(),
+        distinct.len(),
+        early.iter().copied().fold(f64::MAX, f64::min),
+        early.iter().copied().fold(0.0, f64::max)
+    );
+    assert_eq!(distinct.len(), latches.len(), "never two frames for one latch");
+    // (a busy machine's frame may be late, and its latch go without one; a timed wait on Windows
+    // may end 15 ms late, which the frames' lead takes in)
+    assert!((18..=27).contains(&shown.len()), "a frame a latch: {}", shown.len());
+    let mut sorted = early.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(f64::MAX);
+    assert!(median < 20.0, "handed over before the latch, not a refresh early: {early:?}");
+    // untold: as often as 120 Hz allows
+    let untold = run_loop(&s, READY);
+    settled(&s);
+    let before = untold.presented.lock().unwrap().len();
+    move_for(&s, std::time::Duration::from_millis(1000));
+    settled(&s);
+    let free = untold.presented.lock().unwrap().len() - before;
+    drop(untold);
+    eprintln!("untold: {free} frames");
+    assert!(free >= 40, "more than one a latch: {free}");
+}
+
+/// A pinch while the refreshes are told: a frame each refresh, the view never left unmoved for
+/// more than two (a frame planned for a latch is drawn even when the thread wakes a little after
+/// it was to begin, rather than planned again for the next, which left a pinch jumping). At 25 Hz
+/// refreshes: a timed wait on Windows may end 15 ms late.
+#[test]
+#[ignore = "timed to the refreshes: run alone, on a machine at rest (frames late under load go untimed)"]
+fn a_pinch_timed_to_the_refreshes_draws_every_refresh_with_no_gap_over_two() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_refresh_rate(120.0);
+    let period = std::time::Duration::from_millis(40);
+    let latch = std::time::Instant::now() + std::time::Duration::from_millis(3);
+    let timed = run_loop_timed(&s, READY, Some(crate::pacing::Timeline { latch, period, told: latch }));
+    settled(&s);
+    // zooming in and out a little at a time about the middle, as two fingers spreading and
+    // closing, 0.4 s each way; the first 0.4 s for the frames' timing to settle
+    let pinch = |s: &CanvasSession, time: std::time::Duration| {
+        let began = std::time::Instant::now();
+        while began.elapsed() < time {
+            let out = (began.elapsed().as_millis() / 400) % 2 == 1;
+            s.view_gesture(150.0, 150.0, 0.0, 0.0, if out { 0.998 } else { 1.002 }, 0.0);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    pinch(&s, std::time::Duration::from_millis(400));
+    let before = timed.presented.lock().unwrap().len();
+    pinch(&s, std::time::Duration::from_millis(1600));
+    let ended = std::time::Instant::now();
+    let shown: Vec<_> = timed.presented.lock().unwrap()[before..].iter().copied().filter(|&at| at <= ended).collect();
+    drop(timed);
+    let gaps: Vec<f64> = shown.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0).collect();
+    let widest = gaps.iter().copied().fold(0.0, f64::max);
+    eprintln!("a pinch of 1.6 s at 25 Hz refreshes: {} frames, the widest gap {widest:.1} ms", shown.len());
+    // (a busy machine's frame may be late now and then)
+    assert!(shown.len() >= 34, "a frame a refresh: {}", shown.len());
+    assert!(widest <= 80.0, "no gap over two refreshes: {gaps:?}");
 }
 
 /// The app away (its window possibly still there), nothing is drawn however much is asked for,

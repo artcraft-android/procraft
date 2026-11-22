@@ -12,6 +12,7 @@ use procraft_gpu::{Gpu, wgpu};
 
 use crate::Shared;
 use crate::activity::Counts;
+use crate::pacing::{Pacer, Plan, Timeline};
 
 /// What the render loop draws into: the window's surface, or a test's stand-in for one.
 pub(crate) trait Screen {
@@ -30,6 +31,47 @@ pub(crate) trait Screen {
 
     /// Shows `image`.
     fn present(&mut self, image: Self::Image);
+
+    /// The screen's refreshes as last told, where the system tells them (see [`crate::pacing`]), fresh
+    /// or not; `drawing`: frames are being drawn, so they are to be kept told.
+    fn refreshes(&mut self, _drawing: bool) -> Option<Timeline> {
+        None
+    }
+
+    /// Whether the GPU has finished the work sent so far (looked at, not waited for).
+    fn gpu_idle(&mut self) -> bool {
+        true
+    }
+}
+
+/// Frames resting this long (none wanted) are timed to the refreshes again after missing too many
+/// latches (see [`Pacer::strained`]).
+const REST: Duration = Duration::from_millis(300);
+
+/// How often the GPU is looked at while a frame handed over may still be being drawn (see
+/// [`Pacer::drawn`]).
+const GPU_LOOK_EVERY: Duration = Duration::from_micros(500);
+
+/// Looks at the GPU at `now` for the last frame handed over, if its end isn't known yet: drawn, or
+/// not by its latch, or not by `next_begins` (the next frame's beginning, which doesn't wait for
+/// it). When to look again, if it is still unknown.
+fn look_at_gpu<S: Screen>(
+    screen: &mut S,
+    pacer: &mut Pacer,
+    now: Instant,
+    next_begins: Option<Instant>,
+) -> Option<Instant> {
+    let until = pacer.drawn_unknown_until()?;
+    if screen.gpu_idle() {
+        pacer.drawn(now);
+        return None;
+    }
+    let until = next_begins.map_or(until, |n| n.min(until));
+    if now >= until {
+        pacer.not_drawn_by(now);
+        return None;
+    }
+    Some((now + GPU_LOOK_EVERY).min(until))
 }
 
 /// What asking the window for an image gave.
@@ -73,7 +115,11 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
     // window whose images keep saying so (one turned from its natural way on some systems) isn't
     // configured again every frame
     let mut suboptimal_at: Option<(u32, u32)> = None;
+    // frames timed to the screen's refreshes where they are told
+    let mut pacer = Pacer::default();
     loop {
+        // the frame planned to the refreshes, if they are told
+        let mut planned: Option<(Timeline, Plan)> = None;
         let (size, reconfigure, wants_wide) = {
             let mut st = shared.lock();
             loop {
@@ -82,6 +128,11 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
                 // (pen input waiting for the canvas asks for one)
                 let wanted = |st: &crate::State| st.needs_frame || shared.input_waiting();
                 while !st.stop && (st.hidden || !wanted(&st) || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
+                    // the GPU's end of the last frame looked for first, a little while at most
+                    if let Some(again) = look_at_gpu(screen, &mut pacer, Instant::now(), None) {
+                        _ = shared.wake.wait_until(&mut st, again);
+                        continue;
+                    }
                     // a frame due later (the selection's bands drifting) comes then, unless asked
                     // sooner
                     let due = st.frame_due.filter(|_| !st.hidden && !st.gpu.as_ref().is_some_and(Gpu::is_lost));
@@ -96,13 +147,47 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
                     }
                     Counts::add(&shared.counts.wakeups);
                 }
-                // no sooner after the last than the screen shows a new one: a frame drawn sooner
-                // would never be seen (while input comes faster than the screen refreshes), and on
-                // a slow GPU it would hold up the one that is. What comes meanwhile goes in it.
-                // (Work done a part a render, remaking the caches, goes on as fast as it can.)
+                // where the screen's refreshes are told, one frame for each time the compositor
+                // takes one, begun just in time for it (see `pacing`): drawn sooner, frames queued
+                // for it and showed refreshes late. The last frame's GPU work is looked at first:
+                // drawn in a refresh, the next is planned once it is known whether it was in time
+                // (planned once: woken a little after it was to begin, the frame goes, rather than be
+                // planned again for the latch after)
+                let now = Instant::now();
+                if last_frame.is_some_and(|at| now.saturating_duration_since(at) >= REST) {
+                    pacer.rested();
+                }
+                // (frames missing too many latches go untimed, queued for the compositor)
+                let told = screen.refreshes(true).filter(|t| t.fresh(now) && !pacer.strained());
+                let mut look = look_at_gpu(screen, &mut pacer, now, planned.map(|(_, p)| p.begin));
+                if planned.is_none() && (look.is_none() || told.is_some_and(|t| !pacer.fits(&t))) {
+                    planned = told.map(|t| (t, pacer.plan(&t, now)));
+                    look = look_at_gpu(screen, &mut pacer, now, planned.map(|(_, p)| p.begin));
+                }
+                // else no sooner after the last than the screen shows a new one: a frame drawn
+                // sooner would never be seen (while input comes faster than the screen refreshes),
+                // and on a slow GPU it would hold up the one that is. What comes meanwhile goes in
+                // it. (Work done a part a render, remaking the caches, goes on as fast as it can
+                // then; timed to the refreshes, a part each.)
                 let working = st.canvas.as_ref().is_some_and(procraft_gpu::Canvas::wants_render);
                 let spacing = st.frame_spacing.filter(|_| !working);
-                let next = last_frame.zip(spacing).map(|(at, spacing)| at + spacing);
+                let next = match planned {
+                    Some((_, plan)) => Some(plan.begin),
+                    // waiting to know whether the last frame was drawn in time
+                    None if look.is_some() && told.is_some() => look,
+                    // (told before but not lately, the frame after one drawn untimed waits a little
+                    // for them to be told again; not while they go untimed for missing latches)
+                    None => screen
+                        .refreshes(true)
+                        .filter(|_| !pacer.strained())
+                        .and_then(|_| pacer.awaiting(now))
+                        .or_else(|| last_frame.zip(spacing).map(|(at, spacing)| at + spacing)),
+                };
+                // (looked at again meanwhile)
+                let next = match (next, look) {
+                    (Some(next), Some(look)) => Some(next.min(look)),
+                    (next, _) => next,
+                };
                 match next {
                     Some(at) if !st.stop && Instant::now() < at => _ = shared.wake.wait_until(&mut st, at),
                     _ => break,
@@ -178,6 +263,13 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             parking_lot::MutexGuard::unlock_fair(guard);
         }
         screen.present(image);
+        // timed from when it was to begin (a wait for the canvas or a late wake counts in it); its
+        // GPU work, which the compositor waits for before it takes the frame, is looked at while
+        // the next frame is waited for
+        match planned {
+            Some((timeline, plan)) => pacer.handed_over(&timeline, plan, plan.begin, Instant::now()),
+            None => pacer.sent_untimed(Instant::now()),
+        }
         Counts::add(&shared.counts.frames);
         // what the frame laid (a stroke committed) may be new to save
         shared.nudge.nudge();

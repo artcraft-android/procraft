@@ -15,7 +15,7 @@ interface BarDrag {
     /** The finger moved to ([x], [y]) at [ms] (the bar's points, on the window). */
     fun moved(x: Float, y: Float, ms: Long): SideBarDragState
 
-    /** The finger lifted, or the touch was taken: a bar it moved goes back to its edge, its place kept. */
+    /** The finger lifted, or the touch was taken: a bar it moved settles into its width, its place kept. */
     fun letGo()
 }
 

@@ -64,6 +64,7 @@ mod liquify;
 mod liquify_steps;
 mod modes;
 mod open_marks;
+mod pacing;
 mod palettes;
 mod pick;
 mod pickers;
