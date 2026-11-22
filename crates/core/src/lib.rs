@@ -65,6 +65,7 @@ mod pick;
 mod pickers;
 /// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
 pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
+mod paper_picture;
 mod plugin_artwork;
 mod plugin_brushes;
 mod plugin_canvas;
@@ -735,6 +736,8 @@ pub(crate) struct State {
     pub(crate) plugin_look: Option<ViewLook>,
     /// The paper a plugin on the paper's hook gives, as it said then.
     pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
+    /// The tile of the picture a plugin's paper is, made again only as its file changes.
+    pub(crate) paper_picture: Option<std::sync::Arc<paper_picture::PaperPicture>>,
     /// The colour round the canvas a plugin gives (sRGB 0..1), and the picture shown there in place
     /// of the grid (interface 11), as they said then.
     pub(crate) plugin_surround: Option<[f32; 3]>,
@@ -2152,6 +2155,7 @@ impl CanvasSession {
             grey_view: false,
             plugin_look: None,
             plugin_paper: None,
+            paper_picture: None,
             plugin_surround: None,
             surround_picture: None,
             plugin_values: std::collections::BTreeMap::new(),

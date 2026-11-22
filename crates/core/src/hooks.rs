@@ -661,15 +661,16 @@ impl Hooks {
         (look != crate::view_look::IDENTITY).then_some(look)
     }
 
-    /// The paper's hook: the paper the first plugin on it (by id) that gives one now gives.
-    pub(crate) fn paper(&self) -> Option<crate::plugin_run::Paper> {
+    /// The paper's hook: the paper the first plugin on it (by id) that gives one now gives, and
+    /// whose it is (a picture of its controls' is that plugin's).
+    pub(crate) fn paper(&self) -> Option<(String, crate::plugin_run::Paper)> {
         if !self.has(Hook::Paper) {
             return None;
         }
         let mut given = None;
-        self.through(Hook::Paper, (), |running, ()| {
+        self.through_by_id(Hook::Paper, (), |id, running, ()| {
             if given.is_none() {
-                given = running.paper()?;
+                given = running.paper()?.map(|paper| (id.to_owned(), paper));
             }
             Ok(())
         });
@@ -1126,14 +1127,30 @@ impl CanvasSession {
             hooks.interface_colour(SURROUND_ROLE).map(|rgb| [16, 8, 0].map(|s| ((rgb >> s) & 0xFF) as f32 / 255.0));
         let kept = self.shared.lock().surround_picture.clone();
         let picture = crate::surround::picture_now(plugins.surround_picture_file(), kept);
-        let paper = hooks.paper().map(|p| procraft_gpu::CanvasPaper {
-            tile: p.tile,
-            strength: p.strength,
-            scale: p.scale,
-            depth: p.depth,
-            colour: p.colour.map(|rgb| [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0)),
+        // a paper's picture made its tile, again only as the file changes
+        let kept_paper = self.shared.lock().paper_picture.clone();
+        let mut paper_picture = None;
+        let paper = hooks.paper().and_then(|(id, p)| {
+            let tile = match p.picture {
+                Some(at) => {
+                    let made = crate::paper_picture::tile_now(plugins.picture_file(&id, at), kept_paper)?;
+                    let tile = made.tile.clone();
+                    paper_picture = Some(made);
+                    tile
+                }
+                None => p.tile,
+            };
+            Some(procraft_gpu::CanvasPaper {
+                tile,
+                strength: p.strength,
+                scale: p.scale,
+                depth: p.depth,
+                tooth: p.tooth,
+                colour: p.colour.map(|rgb| [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0)),
+            })
         });
         let mut st = self.shared.lock();
+        st.paper_picture = paper_picture;
         st.hooks = Some(hooks);
         let mut changed = false;
         if st.plugin_look != look {
@@ -1583,6 +1600,86 @@ pub(crate) mod tests {
                 (else (drop (call $choose (i64.or (i64.const 4294967296) (i64.trunc_f32_u (local.get 1)))))))
             (call $close)
             (i32.const 0)))"#;
+
+    /// Its action sets its slider (control 0) to 0.73 and shows a panel of one switch; a touch on
+    /// that sets its switch (control 1) as touched, and tries a place it has no control at (5) and a
+    /// file control (2).
+    const SETS: &str = r#"(module
+        (import "procraft" "set_control" (func $set (param i32 f32) (result i32)))
+        (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (global $slider (mut f32) (f32.const 0))
+        (global $said (mut i32) (i32.const 0))
+        (data (i32.const 16) "{\"title\":\"S\",\"rows\":[{\"type\":\"switch\",\"label\":\"On\",\"on\":false}]}")
+        (func (export "procraft_control") (param i32 f32)
+            (if (i32.eqz (local.get 0)) (then (global.set $slider (local.get 1)))))
+        (func (export "procraft_view_look") (param i32) (result f32) (global.get $slider))
+        (func (export "procraft_action") (param i32) (result i32)
+            (global.set $said (call $set (i32.const 0) (f32.const 0.73)))
+            (drop (call $show (i32.const 16) (i32.const 64)))
+            (i32.const 0))
+        (func (export "procraft_panel_event") (param i32 f32) (result i32)
+            (drop (call $set (i32.const 1) (local.get 1)))
+            (drop (call $set (i32.const 5) (f32.const 1)))
+            (drop (call $set (i32.const 2) (f32.const 1)))
+            ;; told its slider as set: shown again, the switch's row on while it is
+            (drop (call $show (i32.const 16) (i32.const 64)))
+            (i32.const 0)))"#;
+
+    #[test]
+    fn an_action_in_the_layers_panel_sets_the_plugin_s_own_controls_as_its_card_would() {
+        let s = CanvasSession::new(64, 64);
+        let dir = store("sets-controls");
+        let module = wat::parse_str(SETS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["compat"]["procraft"]["interface"] = json!(12);
+        manifest["hooks"] = json!(["view_look"]);
+        manifest["permissions"] = json!(["panel"]);
+        manifest["controls"] = json!([
+            { "key": "size", "type": "slider", "label": "Size", "least": 0, "most": 1, "step": 0.1, "starts": 0 },
+            { "key": "lit", "type": "switch", "label": "Lit", "starts": false },
+            { "key": "picture", "type": "file", "label": "Picture", "accepts": "picture" }
+        ]);
+        manifest["actions"] = json!([{ "key": "open", "label": "Settings", "place": "layers" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let key = format!("{ID}.open");
+        let listed: Vec<String> = plugins.actions_in(crate::PluginPlace::Layers).into_iter().map(|a| a.key).collect();
+        assert_eq!(listed, vec![key.clone()]);
+        assert!(plugins.actions_in(crate::PluginPlace::Layer).is_empty());
+        // as its card shows them
+        let slider = || match card(&plugins).controls.first() {
+            Some(crate::plugins::PluginControl::Slider { control }) => control.value,
+            other => panic!("{other:?}"),
+        };
+        let switch = || matches!(card(&plugins).controls.get(1), Some(crate::plugins::PluginControl::Switch { control }) if control.on);
+        // its action sets its slider, on its steps, as the card shows it and its hooks are told
+        assert!(plugins.run_action(key.clone(), Arc::clone(&s)));
+        assert!((slider() - 0.7).abs() < 1e-6, "{}", slider());
+        let look = plugins.hooks().view_look().unwrap();
+        assert!((look[0][0] - 0.7).abs() < 1e-6, "{look:?}");
+        // its panel's touch sets its switch; a place with no switch or slider is left alone
+        assert!(!switch());
+        assert!(plugins.panel_touched(0, 1.0, Arc::clone(&s)));
+        assert!(switch());
+        // what was set, for the app to keep as the card keeps it: each once, as it is now
+        let set = plugins.take_controls_set();
+        let keys: Vec<&str> = set.iter().map(|c| c.key()).collect();
+        assert_eq!(keys, [format!("{ID}.size"), format!("{ID}.lit")]);
+        assert!((set[0].number() - 0.7).abs() < 1e-6 && set[1].number() == 1.0, "{set:?}");
+        assert!(plugins.take_controls_set().is_empty());
+        assert!(plugins.panel_touched(0, 0.0, Arc::clone(&s)));
+        assert!(!switch());
+        assert!(plugins.panel().is_some());
+        // a module asking for set_control without the panel permission is refused
+        let mut bare = manifest.clone();
+        bare["id"] = json!("org.example.bare");
+        bare["permissions"] = json!([]);
+        assert!(plugins.install(file(&bare, &module)).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_plugin_reads_the_recent_colours_and_brushes_and_its_ring_opens_where_the_pen_is() {

@@ -507,7 +507,8 @@ impl StrokeStyle {
 /// A paper a plugin gives the canvas ([`Canvas::set_paper`]): a tile, `TEXTURE_SIZE` square, each
 /// byte how high the paper stands there (rows from the top), repeated over the canvas, each of its
 /// pixels `scale` canvas pixels across (0.25 to 16). Every stroke's paint is taken away where the
-/// paper is low, as far as `strength` says (0 to 1: a hollow takes `strength` of it); the
+/// paper is low, as far as `strength` says (0 to 1: a hollow takes `strength` of it), and with a
+/// `tooth` (0 to 1) only where it stands higher than `strength`, as sharply as that says; the
 /// background shows `colour` (none: the artwork's own), its hollows darker as far as `depth` says
 /// (0 to 1).
 #[derive(Clone, Debug, PartialEq)]
@@ -516,6 +517,7 @@ pub struct CanvasPaper {
     pub strength: f32,
     pub scale: f32,
     pub depth: f32,
+    pub tooth: f32,
     pub colour: Option<[f32; 3]>,
 }
 
@@ -5761,7 +5763,10 @@ impl Canvas {
     /// The paper as a stroke's and the background's uniform take it ([`LayerUniform::paper`]).
     fn paper_look(&self) -> [f32; 4] {
         match &self.paper {
-            Some(p) => [p.strength.clamp(0.0, 1.0), p.scale.clamp(0.25, 16.0), p.depth.clamp(0.0, 1.0), 0.0],
+            Some(p) => {
+                let tooth = if p.tooth.is_finite() { p.tooth.clamp(0.0, 1.0) } else { 0.0 };
+                [p.strength.clamp(0.0, 1.0), p.scale.clamp(0.25, 16.0), p.depth.clamp(0.0, 1.0), tooth]
+            }
             None => [0.0, 1.0, 0.0, 0.0],
         }
     }

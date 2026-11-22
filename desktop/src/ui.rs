@@ -799,6 +799,12 @@ impl Interface {
         // the colour panel opened or closed: closed on another colour, the one it opened on is
         // the previous colour
         self.colours.panel_shown(self.open == Some(Popover::Colour));
+        // what a plugin's action or panel set of its own controls: kept as the card keeps them, and
+        // the artwork follows the plugins again
+        if !self.prefs.plugins.take_controls_set().is_empty() {
+            self.prefs.keep();
+            self.prefs.apply(session);
+        }
         // the colour button: tapped it opens the colours, held it goes back to the previous
         // colour (held again, comes back), and dragged out its colour fills where it is let go
         // (ColorDrop)
@@ -2671,6 +2677,7 @@ impl Interface {
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                self.layers.panel_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layers);
                 self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
                 self.layers.floats = self.floating.allowed(procraft_core::FloatingPanel::Layers);
                 let hang = crate::panel::Hang::Button(button);
@@ -2937,6 +2944,7 @@ impl Interface {
             let chrome = match panel {
                 FloatingPanel::Layers => {
                     self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                    self.layers.panel_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layers);
                     self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
                     self.layers.show(ctx, &mut self.look, session, &mut self.colours, hang, backdrops);
                     self.layers_asked(ctx, session);

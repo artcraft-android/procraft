@@ -2387,6 +2387,7 @@ pub(crate) mod tests {
             ("frame", crate::plugins::PluginPlace::Frame),
             ("canvas", crate::plugins::PluginPlace::Canvas),
             ("pen", crate::plugins::PluginPlace::Pen),
+            ("layers", crate::plugins::PluginPlace::Layers),
         ] {
             assert_eq!(placed(name).unwrap().manifest.actions[0].place, place);
         }

@@ -78,6 +78,9 @@ pub(crate) struct Host {
     pub(crate) session: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub(crate) panel: Option<PluginPanel>,
     pub(crate) close_panel: bool,
+    /// Its own controls it set while its action ran or its panel was touched, by their place: set
+    /// as on its card once that ends.
+    pub(crate) set_controls: Vec<(usize, f32)>,
     /// The plugin's id, for what only its own may reach (its brushes' data).
     pub(crate) owner: String,
     /// What the last utility made, until the plugin reads it.
@@ -97,6 +100,7 @@ impl Host {
             session: None,
             panel: None,
             close_panel: false,
+            set_controls: Vec::new(),
             owner: String::new(),
             answer: Vec::new(),
             cancel: None,
@@ -129,6 +133,8 @@ const MOST_PIXELS: u64 = 4096 * 4096;
 const MOST_TEXT: usize = 200;
 /// The most bytes of a panel's description.
 const MOST_PANEL: usize = 16 * 1024;
+/// Past the most controls a plugin may have, of every kind.
+const MOST_CONTROL: usize = 64;
 
 use ValType::{F32, I32, I64};
 
@@ -159,6 +165,7 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
     ("notice", PluginPermission::Notice, &[I32, I32], &[]),
     ("show_panel", PluginPermission::Panel, &[I32, I32], &[I32]),
     ("close_panel", PluginPermission::Panel, &[], &[]),
+    ("set_control", PluginPermission::Panel, &[I32, F32], &[I32]),
     ("brush_data_len", PluginPermission::BrushData, &[], &[I32]),
     ("read_brush_data", PluginPermission::BrushData, &[I32], &[I32]),
     ("write_brush_data", PluginPermission::BrushData, &[I32, I32], &[I32]),
@@ -510,6 +517,16 @@ pub(crate) fn link(linker: &mut Linker<Host>, granted: &[PluginPermission]) -> R
             let host = caller.data_mut();
             host.panel = None;
             host.close_panel = true;
+        })?;
+        // one of its own switches or sliders, set as on its card once the action or touch ends
+        linker.func_wrap(FROM, "set_control", |mut caller: Caller<'_, Host>, at: i32, value: f32| -> i32 {
+            let Some(at) = usize::try_from(at).ok().filter(|&at| at < MOST_CONTROL && value.is_finite()) else {
+                return 0;
+            };
+            let set = &mut caller.data_mut().set_controls;
+            set.retain(|(was, _)| *was != at);
+            set.push((at, value));
+            1
         })?;
     }
     if granted.contains(&PluginPermission::BrushData) {

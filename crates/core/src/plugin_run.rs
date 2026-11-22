@@ -74,8 +74,12 @@
 //! - For the hook `paper` (interface 8): `procraft_paper(side: i32) -> i32` answers where the
 //!   paper's tile is in its memory, `side` x `side` bytes, each how high the paper stands (0 for
 //!   none now); `procraft_paper_look(what: i32) -> f32` how strongly its hollows take paint away
-//!   (0), how many canvas pixels a tile's pixel covers (1) and how deep it shows under the art (2);
-//!   `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the artwork's.
+//!   (0), how many canvas pixels a tile's pixel covers (1), how deep it shows under the art (2) and
+//!   (interface 12) how sharply only its peaks take paint, its tooth (3, 0 to 1; one out of range is
+//!   taken as 0); `procraft_paper_colour() -> i32` the colour under the art, 0xRRGGBB, or -1 for the
+//!   artwork's. Interface 12: a module may export `procraft_paper_picture() -> i32` too, the place
+//!   in its controls of a `file` control of pictures whose picture is the paper (the app makes the
+//!   tile of it, and doesn't ask `procraft_paper`), or -1 for the tile it gives.
 //! - `procraft_reference_windows() -> i32`: for the hook `reference_windows` (interface 8), how
 //!   many Reference windows may be open at once, 1 to 8.
 //! - For the hook `pressure` (interface 9): `procraft_pressure(pointer: i32, first: i32, x: f32,
@@ -269,6 +273,7 @@ const VIEW_LOOK: &str = "procraft_view_look";
 const PAPER: &str = "procraft_paper";
 const PAPER_LOOK: &str = "procraft_paper_look";
 const PAPER_COLOUR: &str = "procraft_paper_colour";
+const PAPER_PICTURE: &str = "procraft_paper_picture";
 const REFERENCE_WINDOWS: &str = "procraft_reference_windows";
 /// The most a view look's entry may be, either way.
 const MOST_VIEW_LOOK: f32 = 16.0;
@@ -1004,18 +1009,24 @@ struct PaperCalls {
     tile: TypedFunc<i32, i32>,
     look: TypedFunc<i32, f32>,
     colour: TypedFunc<(), i32>,
+    /// Which of its controls' pictures is the paper (interface 12), if it says.
+    picture: Option<TypedFunc<(), i32>>,
 }
 
 /// A paper a plugin gives: its tile, [`PAPER_SIDE`] square, each byte how high the paper stands
-/// there (rows from the top); how strongly its hollows take a stroke's paint away (0..1); how many
-/// canvas pixels a tile's pixel covers; how deep it shows under the art (0..1); and the colour
-/// under the art (0xRRGGBB; none: the artwork's own).
+/// there (rows from the top), or the place in its controls of the `file` control whose picture the
+/// app makes the tile of (`picture`, the tile then empty); how strongly its hollows take a stroke's
+/// paint away (0..1); how many canvas pixels a tile's pixel covers; how deep it shows under the art
+/// (0..1); how sharply only its peaks take paint (`tooth`, 0..1); and the colour under the art
+/// (0xRRGGBB; none: the artwork's own).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Paper {
     pub(crate) tile: Vec<u8>,
+    pub(crate) picture: Option<u32>,
     pub(crate) strength: f32,
     pub(crate) scale: f32,
     pub(crate) depth: f32,
+    pub(crate) tooth: f32,
     pub(crate) colour: Option<u32>,
 }
 
@@ -1224,6 +1235,7 @@ impl Running {
                     tile: instance.get_typed_func(&store, PAPER).ok()?,
                     look: instance.get_typed_func(&store, PAPER_LOOK).ok()?,
                     colour: instance.get_typed_func(&store, PAPER_COLOUR).ok()?,
+                    picture: instance.get_typed_func(&store, PAPER_PICTURE).ok(),
                 })
             })();
             let reference_windows = instance.get_typed_func(&store, REFERENCE_WINDOWS).ok();
@@ -1984,6 +1996,12 @@ impl Running {
         (host.panel.take(), std::mem::take(&mut host.close_panel))
     }
 
+    /// Its own controls it set while its action ran or its panel was touched (`set_control`,
+    /// interface 12), by their place, each to the last value it gave: let go.
+    pub(crate) fn take_set_controls(&mut self) -> Vec<(usize, f32)> {
+        std::mem::take(&mut self.store.data_mut().set_controls)
+    }
+
     /// Tells it control `index` has `value`.
     pub(crate) fn control(&mut self, index: usize, value: f32) -> Result<(), Stop> {
         let Running { store, control, .. } = self;
@@ -2361,37 +2379,52 @@ impl Running {
     }
 
     /// The paper it says strokes take and the art shows on (see [`Paper`]); none for none now. A
-    /// tile out of its memory, or a look out of its range, stops it.
+    /// tile out of its memory, a look out of its range or a picture's place past 255 stops it; a
+    /// tooth out of its range is taken as 0, as one written before interface 12 may answer anything
+    /// for it.
     pub(crate) fn paper(&mut self) -> Result<Option<Paper>, Stop> {
         let Running { store, paper, memory, .. } = self;
         let (Some(paper), Some(memory)) = (paper.as_ref(), memory.as_ref()) else { return Ok(None) };
         let until = Instant::now() + MOST_PAPER_TIME;
         let mut left = PAPER_FUEL;
         guarded(|| {
-            let side = PAPER_SIDE as i32;
-            let at = long_call(store, &paper.tile, side, &mut left, until)?;
-            if at == 0 {
-                return Ok(None);
+            // a picture of its controls', which the app makes the tile of, or a tile of its own
+            let picture = match &paper.picture {
+                Some(picture) => match long_call(store, picture, (), &mut left, until)? {
+                    -1 => None,
+                    at @ 0..=255 => Some(at as u32),
+                    _ => return Err(Stop::Nonsense),
+                },
+                None => None,
+            };
+            let mut tile = Vec::new();
+            if picture.is_none() {
+                let side = PAPER_SIDE as i32;
+                let at = long_call(store, &paper.tile, side, &mut left, until)?;
+                if at == 0 {
+                    return Ok(None);
+                }
+                let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+                tile = vec![0_u8; PAPER_SIDE * PAPER_SIDE];
+                memory.read(&*store, place, &mut tile).map_err(|_| Stop::Nonsense)?;
             }
-            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
-            let mut tile = vec![0_u8; PAPER_SIDE * PAPER_SIDE];
-            memory.read(&*store, place, &mut tile).map_err(|_| Stop::Nonsense)?;
-            let mut look = [0.0_f32; 3];
+            let mut look = [0.0_f32; 4];
             for (value, what) in look.iter_mut().zip(0..) {
                 *value = long_call(store, &paper.look, what, &mut left, until)?;
             }
-            let [strength, scale, depth] = look;
+            let [strength, scale, depth, tooth] = look;
             let fits =
                 (0.0..=1.0).contains(&strength) && (0.25..=16.0).contains(&scale) && (0.0..=1.0).contains(&depth);
             if !fits {
                 return Err(Stop::Nonsense);
             }
+            let tooth = if (0.0..=1.0).contains(&tooth) { tooth } else { 0.0 };
             let colour = match long_call(store, &paper.colour, (), &mut left, until)? {
                 -1 => None,
                 colour @ 0..=0xFF_FFFF => Some(colour as u32),
                 _ => return Err(Stop::Nonsense),
             };
-            Ok(Some(Paper { tile, strength, scale, depth, colour }))
+            Ok(Some(Paper { tile, picture, strength, scale, depth, tooth, colour }))
         })
     }
 
@@ -3229,6 +3262,43 @@ pub(crate) mod tests {
         // a tile past its memory, a strength past 1, a colour that isn't one: it stops
         for bytes in [paper(100_000, "0.5", -1), paper(1024, "3", -1), paper(1024, "0.5", 0x100_0000)] {
             assert_eq!(started(&bytes).paper(), Err(Stop::Nonsense));
+        }
+    }
+
+    #[test]
+    fn a_paper_may_be_a_picture_of_its_controls_and_have_a_tooth() {
+        // a paper whose look answers `tooth` for entry 3, and whose picture is control `picture`
+        let paper = |tooth: &str, picture: Option<i32>| {
+            let picture = picture.map_or(String::new(), |at| {
+                format!(r#"(func (export "procraft_paper_picture") (result i32) (i32.const {at}))"#)
+            });
+            let text = format!(
+                r#"(module (memory (export "memory") 2)
+                (func (export "procraft_paper") (param i32) (result i32) (i32.const 1024))
+                (func (export "procraft_paper_look") (param i32) (result f32)
+                    (if (result f32) (i32.eq (local.get 0) (i32.const 3))
+                        (then (f32.const {tooth}))
+                        (else (if (result f32) (i32.eq (local.get 0) (i32.const 1))
+                            (then (f32.const 1))
+                            (else (f32.const 0.5))))))
+                (func (export "procraft_paper_colour") (result i32) (i32.const -1))
+                {picture})"#
+            );
+            wat::parse_str(text).unwrap()
+        };
+        // its tooth as it says; a tile of its own while it names no picture
+        let given = started(&paper("0.75", Some(-1))).paper().unwrap().unwrap();
+        assert_eq!((given.tooth, given.picture, given.tile.len()), (0.75, None, PAPER_SIDE * PAPER_SIDE));
+        // a picture of its controls': the app makes the tile
+        let given = started(&paper("0", Some(3))).paper().unwrap().unwrap();
+        assert_eq!((given.picture, given.tile.len(), given.strength), (Some(3), 0, 0.5));
+        // a tooth out of range, as one written before may answer: none
+        for odd in ["7", "-1", "nan"] {
+            assert_eq!(started(&paper(odd, None)).paper().unwrap().unwrap().tooth, 0.0, "{odd}");
+        }
+        // a picture's place past 255, or below -1, stops it
+        for odd in [256, -2] {
+            assert_eq!(started(&paper("0", Some(odd))).paper(), Err(Stop::Nonsense), "{odd}");
         }
     }
 

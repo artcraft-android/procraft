@@ -5168,6 +5168,7 @@ fn a_paper_takes_paint_in_its_hollows_shows_in_the_background_and_changes_nothin
         strength,
         scale: 1.0,
         depth,
+        tooth: 0.0,
         colour,
     };
     // a stroke across the canvas (painted, or erased from black), what it laid and the canvas
@@ -5221,6 +5222,53 @@ fn a_paper_takes_paint_in_its_hollows_shows_in_the_background_and_changes_nothin
 }
 
 #[test]
+fn a_paper_s_tooth_takes_paint_only_above_its_strength_and_none_leaves_it_as_it_was() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a tile whose left half stands at .3 and right half at .7
+    let n = TEXTURE_SIZE;
+    let tile: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 { 77 } else { 179 }).collect();
+    let paper = |tooth: f32| procraft_gpu::CanvasPaper {
+        tile: tile.clone(),
+        strength: 0.5,
+        scale: 1.0,
+        depth: 0.0,
+        tooth,
+        colour: None,
+    };
+    // a stroke across the canvas: what it laid, and its alpha over the low half and the high half
+    let laid = |paper: Option<&procraft_gpu::CanvasPaper>| {
+        let mut doc = Document::new(256, 16);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_paper(&gpu, paper);
+        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+        canvas.add_stamps(&(0..33).map(|k| dot(Vec2::new(k as f32 * 8.0, 8.0), 6.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let (low, high) = (f32::from(pixel(&layer, 256, 60, 8)[3]), f32::from(pixel(&layer, 256, 190, 8)[3]));
+        (layer, low, high)
+    };
+    let (_, plain_low, plain_high) = laid(None);
+    assert!(plain_low > 200.0 && plain_high > 200.0, "{plain_low} {plain_high}");
+    // `got` within 3 levels of `share` of what was laid with no paper
+    let near = |got: f32, plain: f32, share: f32| (got - plain * share).abs() <= 3.0;
+    // no tooth: a share by height, 1 - .5 × (1 - h): .65 low, .85 high
+    let (soft, low, high) = laid(Some(&paper(0.0)));
+    println!("tooth 0: {low} low, {high} high, of {plain_low} and {plain_high}");
+    assert!(near(low, plain_low, 0.651) && near(high, plain_high, 0.851), "{low} {high}");
+    // all tooth: none below the strength, all above
+    let (_, low, high) = laid(Some(&paper(1.0)));
+    println!("tooth 1: {low} low, {high} high");
+    assert!(low == 0.0 && high == plain_high, "{low} {high}");
+    // half: halfway between
+    let (_, low, high) = laid(Some(&paper(0.5)));
+    assert!(near(low, plain_low, 0.3255) && near(high, plain_high, 0.9255), "{low} {high}");
+    // a tooth that isn't a number is none
+    assert!(laid(Some(&paper(f32::NAN))).0 == soft);
+}
+
+#[test]
 fn a_fill_stroke_lays_its_region_in_place_of_its_stamps_as_its_paint_one_step_and_takes_the_paper() {
     use procraft_engine::geom::IRect;
     let Some(gpu) = gpu() else { return };
@@ -5260,7 +5308,7 @@ fn a_fill_stroke_lays_its_region_in_place_of_its_stamps_as_its_paint_one_step_an
     let tile: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 { 0 } else { 255 }).collect();
     let mut doc = Document::new(256, 16);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-    let paper = procraft_gpu::CanvasPaper { tile, strength: 0.75, scale: 1.0, depth: 0.0, colour: None };
+    let paper = procraft_gpu::CanvasPaper { tile, strength: 0.75, scale: 1.0, depth: 0.0, tooth: 0.0, colour: None };
     canvas.set_paper(&gpu, Some(&paper));
     canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0).as_fill());
     canvas.fill_stroke(IRect::new(0, 0, 256, 16), vec![255; 256 * 16]);
@@ -5338,6 +5386,7 @@ fn a_paper_costs_a_frame_little_more_than_none_and_changes_no_pixel_when_off() {
         strength,
         scale: 1.5,
         depth,
+        tooth: 0.0,
         colour,
     };
     let (w, h) = (2048, 1536);

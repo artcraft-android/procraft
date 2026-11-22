@@ -266,6 +266,8 @@ pub struct Layers {
     pub edit_text: Option<u64>,
     /// The plugins' actions for the current layer's options, and the one tapped there, to run.
     pub plugin_actions: Vec<procraft_core::PluginAction>,
+    /// The plugins' actions for the panel itself: a row each under the background's (interface 12).
+    pub panel_actions: Vec<procraft_core::PluginAction>,
     /// The kinds of layer the plugins on add, which the + offers beside a plain layer.
     pub layer_kinds: Vec<procraft_core::PluginKind>,
     pub run_action: Option<String>,
@@ -650,6 +652,12 @@ impl Layers {
                         if model.is_none() {
                             ui.add_space(10.0);
                             self.pick_background |= background_row(ui, look, session);
+                            for action in &self.panel_actions {
+                                ui.add_space(10.0);
+                                if action_row(ui, &action.label) {
+                                    self.run_action = Some(action.key.clone());
+                                }
+                            }
                         }
                         ui.add_space(12.0);
                         // the pinched rows over the rest, the upper over the lower
@@ -2300,6 +2308,17 @@ fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) -> bool
     }
     let rest = Rect::from_min_max(row.min, pos2(visibility.left(), row.max.y));
     ui.interact(rest, ui.scope_id().with("background colour"), Sense::click()).clicked()
+}
+
+/// A row of a plugin's action under the background's, drawn as that is, its label alone: true when
+/// tapped.
+fn action_row(ui: &mut Ui, label: &str) -> bool {
+    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
+    ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
+    let ink = argb(PANEL_TITLE);
+    let g = galley(ui, label, 17.0, Weight::Regular, ink, row.width() - 36.0);
+    ui.painter().galley(pos2(row.left() + 18.0, row.center().y - g.size().y / 2.0), g, ink);
+    response.clicked()
 }
 
 /// A visibility box: filled with a check cut out of it when shown, an outline when hidden.

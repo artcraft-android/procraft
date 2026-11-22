@@ -165,6 +165,8 @@ pub enum PluginPlace {
     /// Among what Prefs › Pen buttons sets a pen's button to (interface 11): an action run where
     /// the pen is as its button is pressed, see [`Plugins::run_action_at`].
     Pen,
+    /// In the Layers panel, a row of its own under the background's, by its label (interface 12).
+    Layers,
 }
 
 impl PluginPlace {
@@ -177,6 +179,7 @@ impl PluginPlace {
             "frame" => Some(PluginPlace::Frame),
             "canvas" => Some(PluginPlace::Canvas),
             "pen" => Some(PluginPlace::Pen),
+            "layers" => Some(PluginPlace::Layers),
             _ => None,
         }
     }
@@ -401,6 +404,12 @@ impl Plugins {
     /// none.
     pub(crate) fn surround_picture_file(&self) -> Option<std::path::PathBuf> {
         let (id, at) = self.hooks.surround_picture()?;
+        self.picture_file(&id, at)
+    }
+
+    /// The file the picture picked for plugin `id`'s control `at` is kept in: one of its `file`
+    /// controls of pictures, with one picked, while it is on. None for none.
+    pub(crate) fn picture_file(&self, id: &str, at: u32) -> Option<std::path::PathBuf> {
         let store = self.store.as_deref()?;
         let list = self.listed();
         let plugin = list.files.iter().find(|p| p.id == id && p.on)?;
@@ -408,7 +417,7 @@ impl Plugins {
             PluginControl::File { control }
                 if control.accepts == PluginFileKind::Picture && control.chosen.is_some() =>
             {
-                Some(plugin_file::chosen_paths(store, &id, &control.key).0)
+                Some(plugin_file::chosen_paths(store, id, &control.key).0)
             }
             _ => None,
         }
@@ -734,6 +743,8 @@ pub struct Plugins {
     /// The artwork open, the last to take the plugins up: the controls kept with an artwork are
     /// its, and setting one keeps it with it.
     artwork: Mutex<std::sync::Weak<crate::CanvasSession>>,
+    /// The controls plugins' code set of their own since the app last took them (interface 12).
+    controls_set: Mutex<Vec<PluginControl>>,
 }
 
 /// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
@@ -811,6 +822,7 @@ impl Plugins {
             store,
             panel: Mutex::new(None),
             artwork: Mutex::new(std::sync::Weak::new()),
+            controls_set: Mutex::new(Vec::new()),
         })
     }
 
@@ -985,6 +997,38 @@ impl Plugins {
                 plugin_file::write_kept(store, id, &data);
             }
             self.hooks.give_kept(id, &data);
+        }
+        self.set_from(id, running)
+    }
+
+    /// The controls of its own `id`'s code (`running`) set while its action ran or its panel was
+    /// touched (interface 12): each a switch or a slider set as on its card (one kept with each
+    /// artwork, for the artwork open), its hooks told, and `running` told it as set. A place that is
+    /// no switch or slider of its is left as it is.
+    fn set_from(&self, id: &str, running: &mut Running) -> Result<(), Stop> {
+        for (at, value) in running.take_set_controls() {
+            let found = {
+                let list = self.listed();
+                let plugin = list.files.iter().find(|p| p.id == id && p.on);
+                plugin.and_then(|p| p.controls.get(at)).map(|c| (c.key().to_owned(), c.clone()))
+            };
+            let set = match found {
+                Some((key, PluginControl::Switch { .. })) => {
+                    let on = value >= 0.5;
+                    self.set_switch(key, on).then_some(if on { 1.0 } else { 0.0 })
+                }
+                Some((key, PluginControl::Slider { .. })) => self.set_slider(key, value),
+                _ => None,
+            };
+            if let Some(set) = set {
+                running.control(at, set)?;
+                let now = self.listed().files.iter().find(|p| p.id == id).and_then(|p| p.controls.get(at).cloned());
+                let mut kept = self.controls_set.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(now) = now {
+                    kept.retain(|c| c.key() != now.key());
+                    kept.push(now);
+                }
+            }
         }
         Ok(())
     }
@@ -2011,6 +2055,13 @@ impl Plugins {
             }
         }
         choices
+    }
+
+    /// The controls plugins' code set of their own (`set_control`, interface 12) since this was last
+    /// asked, as they are now: for the app to keep as it keeps a switch or a slider set on the card,
+    /// and to have the artwork follow the plugins again.
+    pub fn take_controls_set(&self) -> Vec<PluginControl> {
+        std::mem::take(&mut *self.controls_set.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The menu choice `key` ([`PluginChoice::key`]) picked: each control it sets set so, as if on
@@ -3765,6 +3816,64 @@ mod tests {
         opened.use_plugins(Arc::clone(&plugins));
         assert_eq!(paper_of(&opened), None);
         let _ = std::fs::remove_dir_all(&saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paper_of_your_own_picture_any_colour_and_a_tooth_reach_the_canvas_and_off_leave_it_as_it_was() {
+        const PAPER: &str = "io.github.artcraftandroid.paper";
+        let dir = store("bundled-paper-own");
+        let plugins = app_at(&dir);
+        let s = crate::CanvasSession::new(64, 48);
+        s.use_plugins(Arc::clone(&plugins));
+        let paper_of = |s: &crate::CanvasSession| s.shared.lock().plugin_paper.clone();
+        // as it comes, off: no paper, whatever it is set to
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 6.0).is_some());
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&s), None);
+        assert!(plugins.set_on(PAPER.to_owned(), true));
+        // Your own paper with no picture picked: none
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&s), None);
+        // a picture, dark on its left half and light on its right: the tile made of it
+        let side = 40_usize;
+        let rgba: Vec<u8> =
+            (0..side * side).flat_map(|i| if i % side < side / 2 { [60, 60, 60, 255] } else { [220; 4] }).collect();
+        let png = crate::project::png_of(side as u32, side as u32, &rgba).unwrap();
+        assert!(plugins.set_picture_file(format!("{PAPER}.picture"), "paper.png".to_owned(), png));
+        let t = std::time::Instant::now();
+        s.use_plugins(Arc::clone(&plugins));
+        let made = t.elapsed();
+        let given = paper_of(&s).unwrap();
+        let n = procraft_engine::textures::TEXTURE_SIZE;
+        assert_eq!(given.tile.len(), n * n);
+        assert_eq!((given.tile[100 * n + 60], given.tile[100 * n + 200]), (0, 255));
+        // made once: asked again, the same tile kept
+        let first = s.shared.lock().paper_picture.clone().unwrap();
+        let t = std::time::Instant::now();
+        s.use_plugins(Arc::clone(&plugins));
+        let kept = t.elapsed();
+        println!("a paper's picture made its tile in {made:?}, kept in {kept:?}");
+        assert!(Arc::ptr_eq(&first, s.shared.lock().paper_picture.as_ref().unwrap()));
+        assert_eq!(paper_of(&s).unwrap().tile, given.tile);
+        // its tooth and a colour of its own, as its controls say
+        assert!(plugins.set_slider(format!("{PAPER}.tooth"), 0.5).is_some());
+        assert!(plugins.set_switch(format!("{PAPER}.own_colour"), true));
+        assert!(plugins.set_slider(format!("{PAPER}.brightness"), 0.5).is_some());
+        s.use_plugins(Arc::clone(&plugins));
+        let given = paper_of(&s).unwrap();
+        assert_eq!(given.tooth, 0.5);
+        let colour = given.colour.unwrap();
+        assert!(colour.iter().all(|c| (0.43..0.51).contains(c)) && colour[0] > colour[2], "{colour:?}");
+        // a paper drawn here again: its own tile, no picture kept
+        assert!(plugins.set_slider(format!("{PAPER}.paper"), 1.0).is_some());
+        s.use_plugins(Arc::clone(&plugins));
+        assert_ne!(paper_of(&s).unwrap().tile, given.tile);
+        assert!(s.shared.lock().paper_picture.is_none());
+        // off: as it was
+        assert!(plugins.set_on(PAPER.to_owned(), false));
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(paper_of(&s), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
