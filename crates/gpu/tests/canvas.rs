@@ -2897,6 +2897,55 @@ fn paint_laid_in_place_turns_a_mirrored_stamp_s_shape() {
 }
 
 #[test]
+fn a_shape_lies_upright_and_its_angle_turns_it_clockwise_on_the_canvas() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a shape with its ink in its top left quarter only, stamped turned by each quarter turn of a
+    // brush file's shape orientation (1 upright, 3 a quarter turn, 2 a half, 4 three quarters):
+    // which quarter of the stamp on the canvas holds the ink, wet, laid in place and drawn
+    let n = TEXTURE_SIZE;
+    let pixels: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 && i / n < n / 2 { 255 } else { 0 }).collect();
+    let brush = Brush {
+        shape: procraft_engine::brush::Shape {
+            source: procraft_engine::brush::Source::new(pixels),
+            ..Brush::round_pen().shape
+        },
+        ..Brush::round_pen()
+    };
+    for (wet_pull, laid_in_place) in [(None, false), (None, true), (Some(0.5), false)] {
+        let inked = |angle: f32| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let mut style = StrokeStyle {
+                wet_pull,
+                laid_in_place,
+                rendering: if laid_in_place || wet_pull.is_some() { Rendering::Gradual } else { Rendering::BuildUp },
+                ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+            };
+            canvas.use_sources(&gpu, &mut style, &brush);
+            canvas.begin_stroke(doc.current(), style);
+            canvas.add_stamps(&[Stamp { angle, ..Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0) }]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+            // the stamp's quarters on the canvas: top left, top right, bottom right, bottom left
+            [(22, 22), (42, 22), (42, 42), (22, 42)].map(|(x, y)| pixel(&layer, 64, x, y)[3])
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        for (turns, angle) in [(0, 0.0), (1, quarter), (2, 2.0 * quarter), (3, -quarter)] {
+            let shown = inked(angle);
+            for (k, &a) in shown.iter().enumerate() {
+                if k == turns {
+                    assert!(a > 200, "{wet_pull:?} {laid_in_place}: turned {turns}, {shown:?}");
+                } else {
+                    assert!(a < 40, "{wet_pull:?} {laid_in_place}: turned {turns}, {shown:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn wet_edges_pool_wet_paint_by_how_far_its_stamps_built_up() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
