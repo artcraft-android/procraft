@@ -713,15 +713,6 @@ fn resample(outline: &[Vec2], along: &StrokeAlong) -> Vec<Sample> {
     out
 }
 
-/// The outline (x and y in turn) of the shape a path of points (x and y in turn) looks like, if
-/// any: a freehand selection held still snaps to it.
-#[uniffi::export]
-pub fn quickshape_outline(points: Vec<f32>) -> Option<Vec<f32>> {
-    let path: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-    let shape = recognise(&path).into_iter().next()?;
-    Some(shape.outline().into_iter().flat_map(|p| [p.x, p.y]).collect())
-}
-
 #[uniffi::export]
 impl CanvasSession {
     /// The stroke being drawn has been held still: it snaps to the shape it looks like, if any.

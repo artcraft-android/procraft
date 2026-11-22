@@ -9965,23 +9965,42 @@ fn a_moved_layer_snaps_onto_another_layers_bounds() {
     s.transform_end(false);
 }
 
+/// A freehand selection held still stays as drawn, however long it is held with Draw and hold
+/// on: QuickShape is the painting tools' alone. Lifted, the path stays open, as drawn.
 #[test]
-fn a_held_lasso_snaps_to_the_shape_it_looks_like() {
-    // a rough circle, as x and y in turn
-    let pts: Vec<f32> = (0..=60)
-        .flat_map(|i| {
-            let t = i as f32 / 60.0 * std::f32::consts::TAU;
-            [100.0 + 60.0 * t.cos() + 2.0 * (7.0 * t).sin(), 100.0 + 60.0 * t.sin()]
-        })
-        .collect();
-    let outline = crate::quickshape::quickshape_outline(pts).expect("a shape");
-    assert!(outline.len() >= 6 && outline.len().is_multiple_of(2));
-    // every point of it near the circle
-    for p in outline.chunks(2) {
-        let r = ((p[0] - 100.0).powi(2) + (p[1] - 100.0).powi(2)).sqrt();
-        assert!((r - 60.0).abs() < 8.0, "{r}");
+fn a_held_lasso_stays_as_drawn() {
+    let Some(s) = session(300, 300) else { return };
+    let how = crate::touch::SelectTouch {
+        kind: crate::touch::SelectKind::Freehand,
+        join: crate::SelectionJoin::Add,
+        threshold: 0.5,
+    };
+    s.set_touch_selecting(Some(how));
+    // a rough circle, the last point near the first
+    let at = |i: usize| {
+        let t = i as f32 / 40.0 * std::f32::consts::TAU * 0.95;
+        (150.0 + 80.0 * t.cos() + 3.0 * (7.0 * t).sin(), 150.0 + 80.0 * t.sin())
+    };
+    let pen = |(x, y): (f32, f32), ms: f64| vec![sample(x, y, ms)];
+    let _ = s.touch_down(1, PointerKind::Stylus, pen(at(0), 0.0));
+    for i in 1..=40 {
+        let _ = s.touch_move(1, pen(at(i), i as f64 * 16.0));
     }
-    assert!(crate::quickshape::quickshape_outline(vec![1.0, 1.0]).is_none());
+    let drawn = s.freehand_path();
+    assert!(drawn.len() >= 40, "{}", drawn.len());
+    // held still for two seconds, the touches' clock running on
+    let mut held = Vec::new();
+    for k in 1..=20 {
+        let ms = 640.0 + k as f64 * 100.0;
+        held.extend(s.touch_move(1, pen(at(40), ms)));
+        held.extend(s.touch_tick(ms));
+    }
+    assert_eq!(s.freehand_path(), drawn, "held, it stays as drawn");
+    assert!(!held.contains(&crate::TouchCommand::FreehandChanged), "{held:?}");
+    assert!(!held.contains(&crate::TouchCommand::ShapeSnapped), "{held:?}");
+    let _ = s.touch_up(1, pen(at(40), 2700.0));
+    assert_eq!(s.freehand_path(), drawn, "lifted, the path stays open as drawn");
+    assert!(!s.has_selection());
 }
 
 #[test]

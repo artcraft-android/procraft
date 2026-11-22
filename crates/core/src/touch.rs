@@ -570,12 +570,10 @@ pub(crate) struct Touches {
     /// Continue filling is on: each touch fills; the fill's threshold as slid, and the touch's
     /// last place and time.
     filling: Option<Fill>,
-    /// The selection tool is open; its touch has moved past the slop; a freehand path held still
-    /// snapped to a shape; the colour selection's threshold as slid; the freehand path (canvas
-    /// pixels).
+    /// The selection tool is open; its touch has moved past the slop; the colour selection's
+    /// threshold as slid; the freehand path (canvas pixels).
     selecting: Option<SelectTouch>,
     select_moved: bool,
-    lasso_snapped: bool,
     /// An adjustment's touch went past the slop (it is not a tap), and has begun displacing;
     /// liquify's brush, when it last moved and when time last passed for it, and whether a pen
     /// holds it.
@@ -713,7 +711,6 @@ impl Default for Touches {
             filling: None,
             selecting: None,
             select_moved: false,
-            lasso_snapped: false,
             adjust_moved: false,
             adjust_displacing: false,
             liquify_ms: 0.0,
@@ -1781,21 +1778,6 @@ impl CanvasSession {
                 out.push(TouchCommand::AdjustChanged);
             }
         }
-        // a freehand selection held still snaps to a shape, which the lift then selects
-        if t.mode == Mode::Select
-            && t.quickshape_due.is_some_and(|due| due <= now_ms)
-            && t.selecting.is_some_and(|s| s.kind == SelectKind::Freehand)
-        {
-            t.quickshape_due = None;
-            if t.select_moved && t.settings.draw_and_hold {
-                let flat: Vec<f32> = t.freehand.iter().flat_map(|&(x, y)| [x, y]).collect();
-                if let Some(outline) = crate::quickshape::quickshape_outline(flat).filter(|o| o.len() >= 6) {
-                    t.freehand = outline.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
-                    t.lasso_snapped = true;
-                    out.push(TouchCommand::FreehandChanged);
-                }
-            }
-        }
         if t.quickshape_due.is_some_and(|due| due <= now_ms) {
             t.quickshape_due = None;
             if matches!(t.mode, Mode::Pen | Mode::Finger) && t.settings.draw_and_hold {
@@ -2066,7 +2048,6 @@ impl CanvasSession {
         if t.selecting.is_some() && !self.finger_turns_model(kind, t) {
             t.stroke_pointer = id;
             t.select_moved = false;
-            t.lasso_snapped = false;
             t.hold_at = at;
             t.pour_last = (at.0, now);
             t.select_threshold = t.selecting.map_or(0.5, |s| s.threshold);
@@ -2648,7 +2629,7 @@ impl CanvasSession {
 
     /// A step of the selection tool's touch at `at` (`done` as it lifts): a rectangle or ellipse
     /// dragged out; a freehand path drawn (or tapped point by point, closed by a tap on its first
-    /// point; held still, it snaps to a shape); a colour picked where it went down, its threshold
+    /// point; held still, it stays as drawn); a colour picked where it went down, its threshold
     /// slid left and right, faster the faster it goes.
     fn select_step(&self, at: (f32, f32), ms: f64, done: bool, out: &mut Vec<TouchCommand>) {
         let mut t = self.touches();
@@ -2691,24 +2672,7 @@ impl CanvasSession {
                 }
             }
             SelectKind::Freehand => {
-                // snapped: the shape is kept as it is, and the lift selects it
-                if t.lasso_snapped {
-                    if done {
-                        t.lasso_snapped = false;
-                        drop(t);
-                        self.close_freehand();
-                        out.push(TouchCommand::FreehandChanged);
-                        out.push(TouchCommand::SelectionChanged);
-                    }
-                    return;
-                }
-                if done {
-                    t.quickshape_due = None;
-                } else if moved && dist(at, t.hold_at) > QUICKSHAPE_STILL * t.scale {
-                    // still for the QuickShape delay, it snaps
-                    t.hold_at = at;
-                    t.quickshape_due = t.settings.draw_and_hold.then_some(ms + t.settings.quickshape_ms);
-                }
+                // (a path held still stays as drawn: QuickShape is the painting tools' alone)
                 let scale = t.scale;
                 let last = t.freehand.last().copied();
                 drop(t);
