@@ -62,6 +62,7 @@ mod layer_store;
 mod layers;
 mod liquify;
 mod liquify_steps;
+mod list_slider;
 mod modes;
 mod open_marks;
 mod pacing;
@@ -205,6 +206,7 @@ pub use layers::{
     row_hold_seconds, set_layer_budget, set_resident_budget,
 };
 pub use liquify::liquify_reach;
+pub use list_slider::{ListSliderTouch, list_slider_touch};
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
 pub use open_marks::{opening_ended_app, set_open_marks_file};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
