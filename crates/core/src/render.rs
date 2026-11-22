@@ -101,11 +101,19 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
         let mut st = shared.lock();
         st.reconfigure = true;
         st.needs_frame = true;
-        st.gpu.as_ref().map(|g| g.queue.clone())
+        st.gpu.as_ref().map(|g| (g.queue.clone(), g.clone()))
     };
-    let Some(queue) = queue else { return };
+    let Some((queue, gpu)) = queue else { return };
 
-    let mut screen = WindowScreen { surface, queue, caps: None, config: None };
+    let mut screen = WindowScreen {
+        surface,
+        queue,
+        gpu,
+        caps: None,
+        config: None,
+        #[cfg(target_os = "android")]
+        refreshes: crate::window::Refreshes::start(),
+    };
     let mut pipelines_kept = false;
     crate::frame_loop::draw_loop(&shared, &mut screen, || {
         showing.shown();
@@ -118,12 +126,16 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
 }
 
 /// The window's surface, as the render loop draws into it: its capabilities asked once (they last
-/// as long as it does), and how it was last configured.
+/// as long as it does), how it was last configured, and (on Android 13 and later) the screen's
+/// refreshes as the system tells them.
 struct WindowScreen {
     surface: wgpu::Surface<'static>,
     queue: wgpu::Queue,
+    gpu: Gpu,
     caps: Option<wgpu::SurfaceCapabilities>,
     config: Option<wgpu::SurfaceConfiguration>,
+    #[cfg(target_os = "android")]
+    refreshes: Option<crate::window::Refreshes>,
 }
 
 impl crate::frame_loop::Screen for WindowScreen {
@@ -152,6 +164,18 @@ impl crate::frame_loop::Screen for WindowScreen {
 
     fn present(&mut self, image: wgpu::SurfaceTexture) {
         self.queue.present(image);
+    }
+
+    #[cfg(target_os = "android")]
+    fn refreshes(&mut self, drawing: bool) -> Option<crate::pacing::Timeline> {
+        self.refreshes.as_ref().and_then(|r| r.timeline(drawing))
+    }
+
+    fn gpu_idle(&mut self) -> bool {
+        // looked at, never waited on: a wait with a timeout lost the device on a tablet's driver
+        // (one without, as the canvas's own, never did)
+        let now = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::ZERO) };
+        self.gpu.is_lost() || self.gpu.device.poll(now).is_ok()
     }
 }
 

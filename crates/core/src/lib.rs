@@ -60,6 +60,7 @@ mod layers;
 mod liquify;
 mod liquify_steps;
 mod modes;
+mod pacing;
 mod palettes;
 mod pick;
 mod pickers;

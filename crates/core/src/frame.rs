@@ -250,6 +250,17 @@ pub(crate) fn frame_spacing(hertz: f32) -> Option<Duration> {
     (hertz.is_finite() && hertz >= 1.0).then(|| Duration::from_secs_f32(0.9 / hertz.min(1000.0)))
 }
 
+/// The present mode a surface is configured with, of those it offers: Mailbox, where the screen
+/// shows the newest frame at each refresh and drops any older one waiting (none queue up behind each
+/// other), else Fifo.
+fn present_mode(offered: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if offered.contains(&wgpu::PresentMode::Mailbox) { wgpu::PresentMode::Mailbox } else { wgpu::PresentMode::Fifo }
+}
+
+/// The frames a surface is configured to have in flight: one, the least (the GPU drawing one while
+/// the screen shows the last).
+const FRAME_LATENCY: u32 = 1;
+
 /// The profile a configured surface shows colours in.
 pub fn screen_profile(config: &wgpu::SurfaceConfiguration) -> Profile {
     if config.color_space == wgpu::SurfaceColorSpace::DisplayP3 { Profile::DisplayP3 } else { Profile::Srgb }
@@ -299,12 +310,8 @@ pub(crate) fn configure_with(
         format,
         width: size.0.max(1),
         height: size.1.max(1),
-        present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        },
-        desired_maximum_frame_latency: 1,
+        present_mode: present_mode(&caps.present_modes),
+        desired_maximum_frame_latency: FRAME_LATENCY,
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: Vec::new(),
         color_space: wgpu::SurfaceColorSpace::Auto,
@@ -321,7 +328,7 @@ pub(crate) fn configure_with(
     if p3 {
         config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
     }
-    config.desired_maximum_frame_latency = 1;
+    config.desired_maximum_frame_latency = FRAME_LATENCY;
     // a configure the GPU refuses (it couldn't come idle in time, as while an artwork opens) leaves
     // the surface unconfigured: none, so the next frame tries again (else it stayed blank)
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -339,4 +346,19 @@ pub(crate) fn configure_with(
         config.color_space
     );
     Some(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use procraft_gpu::wgpu::PresentMode;
+
+    /// The desktop's windows and the tablets' are configured alike: the newest frame shown at each
+    /// refresh where the system offers that, one frame in flight.
+    #[test]
+    fn a_surface_shows_the_newest_frame_where_it_can_with_one_in_flight() {
+        assert_eq!(super::present_mode(&[PresentMode::Fifo, PresentMode::Mailbox]), PresentMode::Mailbox);
+        assert_eq!(super::present_mode(&[PresentMode::Fifo, PresentMode::Immediate]), PresentMode::Fifo);
+        assert_eq!(super::present_mode(&[]), PresentMode::Fifo);
+        assert_eq!(super::FRAME_LATENCY, 1);
+    }
 }
