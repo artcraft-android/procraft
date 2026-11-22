@@ -5530,6 +5530,53 @@ fn ring_under_an_empty_layer(s: &CanvasSession) -> u64 {
     bottom
 }
 
+/// While the selection tool is open, the paths of the shapes joined to the selection show dashed
+/// (canvas pixels: a rectangle's four corners, an ellipse's 128 points), those taken away too;
+/// inverting and feathering keep them; an undo, closing the tool or deselecting takes them away.
+#[test]
+fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
+    use crate::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let how = crate::touch::SelectTouch {
+        kind: crate::touch::SelectKind::Rectangle,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+    };
+    s.set_touch_selecting(Some(how));
+    let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p - q).abs() < 0.01);
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    let paths = s.selection_outlines();
+    assert_eq!(paths.len(), 1);
+    assert!(near(&paths[0], &[10.0, 10.0, 40.0, 10.0, 40.0, 40.0, 10.0, 40.0]), "{:?}", paths[0]);
+    s.select_shape(true, 50.0, 50.0, 90.0, 90.0, SelectionJoin::Add);
+    s.select_shape(false, 20.0, 20.0, 30.0, 30.0, SelectionJoin::Remove);
+    let lengths: Vec<usize> = s.selection_outlines().iter().map(Vec::len).collect();
+    assert_eq!(lengths, vec![8, 256, 8]);
+    s.select_invert();
+    s.select_feather(0.2);
+    s.select_feather_done();
+    assert_eq!(s.selection_outlines().len(), 3);
+    // undone: what is selected is the history's, the paths go
+    s.undo();
+    assert!(s.selection_outlines().is_empty());
+    // closing the tool takes them away; open again, deselecting does
+    s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.set_touch_selecting(None);
+    assert!(s.selection_outlines().is_empty());
+    s.set_touch_selecting(Some(how));
+    s.select_shape(false, 60.0, 10.0, 90.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.select_none();
+    assert!(s.selection_outlines().is_empty());
+    // closed as the apps close it (before their touches are told): gone, and not back when it opens
+    s.select_shape(false, 60.0, 10.0, 90.0, 40.0, SelectionJoin::Add);
+    assert_eq!(s.selection_outlines().len(), 1);
+    s.close_selection_tool(false);
+    assert!(s.selection_outlines().is_empty());
+    assert!(s.has_selection());
+}
+
 /// Whether the selection takes canvas pixel (`x`, `y`).
 fn selected(s: &CanvasSession, x: usize, y: usize) -> bool {
     s.shared.lock().selection.as_ref().is_some_and(|m| m.data.get(y * m.width as usize + x).is_some_and(|&v| v > 127))

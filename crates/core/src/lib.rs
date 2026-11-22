@@ -872,6 +872,10 @@ pub(crate) struct State {
     /// The selection before the feather popover softened it, and the room its feathering works
     /// in (kept while the popover is open, so each step doesn't ask the system for it again).
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
+    /// The feather's slider is held: the line where the selection fades out shows.
+    /// The shapes joined to the selection while the selection tool has been open (canvas pixels,
+    /// each a closed path), which it shows dashed; gone as it closes or the selection goes.
+    selection_outlines: Vec<Vec<Vec2>>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
     /// The stroke being drawn as input (canvas points), for QuickShape,
@@ -2207,6 +2211,7 @@ impl CanvasSession {
             selection_before: None,
             colour_source: None,
             feather_base: None,
+            selection_outlines: Vec::new(),
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
             filters: plugin_filter::Filters::default(),

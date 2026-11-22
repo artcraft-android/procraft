@@ -300,7 +300,7 @@ impl Interface {
             look: Look::default(),
             side_bar: SideBar::default(),
             transform: crate::transform::Transform::default(),
-            selection: crate::selection::Selection::default(),
+            selection: crate::selection::Selection::with_color_fill(prefs.selection_color_fill),
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
@@ -948,6 +948,11 @@ impl Interface {
         let bar_bottom = crate::panel::bar_shown(&ctx);
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, bar_bottom, self.model) {
             self.prefs.selection_x_ray = on;
+            self.prefs.keep();
+        }
+        // Color Fill is kept between launches
+        if self.selection.color_fill() != self.prefs.selection_color_fill {
+            self.prefs.selection_color_fill = self.selection.color_fill();
             self.prefs.keep();
         }
         if let Some(asked) = self.adjustments.show(

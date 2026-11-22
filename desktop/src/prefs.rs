@@ -42,6 +42,8 @@ pub struct Prefs {
     pub light_interface: bool,
     /// A selection drawn on a model reaches every surface under it.
     pub selection_x_ray: bool,
+    /// The selection tool's Color Fill is on.
+    pub selection_color_fill: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
     /// The side bar's centre down its edge, a share of the window's height (its modify button
@@ -113,6 +115,7 @@ impl Default for Prefs {
         Prefs {
             light_interface: false,
             selection_x_ray: false,
+            selection_color_fill: false,
             right_handed: false,
             side_bar_centre: procraft_core::side_bar_first_centre(),
             brush_on_screen: false,
@@ -174,6 +177,7 @@ impl Prefs {
             match name {
                 "light_interface" => p.light_interface = on,
                 "selection_x_ray" => p.selection_x_ray = on,
+                "selection_color_fill" => p.selection_color_fill = on,
                 "right_handed" => p.right_handed = on,
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
@@ -243,6 +247,7 @@ impl Prefs {
         let lines = [
             format!("light_interface {}", self.light_interface),
             format!("selection_x_ray {}", self.selection_x_ray),
+            format!("selection_color_fill {}", self.selection_color_fill),
             format!("right_handed {}", self.right_handed),
             format!("{} {}", procraft_core::side_bar_centre_key(), self.side_bar_centre),
             format!("brush_on_screen {}", self.brush_on_screen),

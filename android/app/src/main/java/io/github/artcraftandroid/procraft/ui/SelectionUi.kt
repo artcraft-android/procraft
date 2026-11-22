@@ -219,8 +219,21 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val path = vm.freehand
     val threshold = vm.thresholdDrag
     val taken = vm.takenBox
-    if (drag == null && path.isEmpty() && threshold == null && taken.size != 8) return
+    val outlines = vm.selectionOutlines
+    if (drag == null && path.isEmpty() && threshold == null && taken.size != 8 && outlines.isEmpty()) return
     Canvas(Modifier.fillMaxSize()) {
+        // the shapes joined to the selection while the tool is open: their paths, dashed
+        for (outline in outlines) {
+            if (outline.size < 2) continue
+            val points = outline.map { vm.canvasToWindow(it) }
+            dashed(
+                Path().apply {
+                    moveTo(points[0].x, points[0].y)
+                    for (p in points.drop(1)) lineTo(p.x, p.y)
+                    close()
+                },
+            )
+        }
         // the strokes the selection takes on a plugin's layer: their box, as the transform box shows
         if (taken.size == 8) {
             val m = vm.viewMatrix

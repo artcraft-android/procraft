@@ -66,6 +66,11 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// The tool as it starts, Color Fill on or off as it was left.
+    pub fn with_color_fill(on: bool) -> Selection {
+        Selection { color_fill: on, ..Selection::default() }
+    }
+
     /// Color Fill is on: what is selected is filled as the tool closes.
     pub fn color_fill(&self) -> bool {
         self.color_fill
@@ -481,18 +486,21 @@ impl Selection {
     fn overlay(&self, ctx: &egui::Context, session: &CanvasSession, bar_top: f32) {
         let ppp = ctx.pixels_per_point();
         let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("selection overlay")));
+        let view = session.view_matrix();
+        let [a, b, c, d, e, f] =
+            view.get(..6).and_then(|v| <[f32; 6]>::try_from(v).ok()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let to_window = |x: f32, y: f32| pos2(a * x + c * y + e, b * x + d * y + f) / ppp;
+        // the shapes joined to the selection while the tool is open: their paths, dashed
+        for outline in session.selection_outlines() {
+            let mut points: Vec<Pos2> = outline.as_chunks::<2>().0.iter().map(|&[x, y]| to_window(x, y)).collect();
+            if points.len() >= 2 {
+                points.extend(points.first().copied());
+                dashed(&painter, &points);
+            }
+        }
         // the strokes the selection takes on a plugin's layer: their box, as the transform box shows
         if self.taken.len() == 8 {
-            let view = session.view_matrix();
-            let [a, b, c, d, e, f] =
-                view.get(..6).and_then(|v| <[f32; 6]>::try_from(v).ok()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-            let corners: Vec<Pos2> = self
-                .taken
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&[x, y]| pos2(a * x + c * y + e, b * x + d * y + f) / ppp)
-                .collect();
+            let corners: Vec<Pos2> = self.taken.as_chunks::<2>().0.iter().map(|&[x, y]| to_window(x, y)).collect();
             let mut edge = corners.clone();
             edge.extend(corners.first());
             painter.extend(Shape::dashed_line_with_offset(

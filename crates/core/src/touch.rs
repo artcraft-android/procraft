@@ -815,6 +815,11 @@ impl CanvasSession {
         self.shared.touches.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether the selection tool is open (its touches select).
+    pub(crate) fn selection_tool_open(&self) -> bool {
+        self.touches().selecting.is_some()
+    }
+
     /// Whether the pen is near enough that a hand's touches are taken for its: on the canvas, held
     /// over it (unless Hover's touch takes fingers then), or just gone (lifted before `now_ms`, an
     /// input's time, or no longer held over it).
@@ -1036,9 +1041,20 @@ impl CanvasSession {
     /// The selection tool open (each touch selects, as `how` says) or not.
     pub fn set_touch_selecting(&self, how: Option<SelectTouch>) {
         let mut t = self.touches();
+        let closing = t.selecting.is_some() && how.is_none();
         t.selecting = how;
         if how.is_none() {
             t.freehand.clear();
+        }
+        drop(t);
+        // the tool closed: the shapes' paths go (a selection it opens with has none)
+        if closing {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if !st.selection_outlines.is_empty() {
+                st.selection_outlines.clear();
+                self.shared.frame(st);
+            }
         }
     }
 
@@ -1081,6 +1097,8 @@ impl CanvasSession {
     pub fn close_selection_tool(&self, colour_fill: bool) -> bool {
         let open = self.touches().freehand.len() >= 3;
         self.close_freehand();
+        // the shapes' paths show only while the tool is open
+        self.shared.lock().selection_outlines.clear();
         if !colour_fill || open {
             return open;
         }

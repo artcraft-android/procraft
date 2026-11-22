@@ -1128,8 +1128,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** New shapes take away from the selection instead of adding to it. */
     var selectionRemoves by mutableStateOf(false)
         private set
-    /** Each new selection is filled with the paint colour. */
-    var colorFill by mutableStateOf(false)
+    /** What is selected shows covered by the paint colour, filled with it as the tool closes; kept between launches. */
+    var colorFill by mutableStateOf(transformPrefs.getBoolean(COLOR_FILL, false))
         private set
     var hasSelection by mutableStateOf(false)
         private set
@@ -1157,6 +1157,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     val savedThumbnails = mutableStateMapOf<Int, ImageBitmap>()
     /** The freehand path being drawn, in canvas pixels (closed by tapping its first point). */
     var freehand by mutableStateOf<List<Offset>>(emptyList())
+        private set
+    /** The paths of the shapes joined to the selection while the tool has been open (canvas pixels), shown dashed. */
+    var selectionOutlines by mutableStateOf<List<List<Offset>>>(emptyList())
         private set
     /** A rectangle or ellipse being dragged out: its corners in window pixels. */
     var shapeDrag by mutableStateOf<Pair<Offset, Offset>?>(null)
@@ -3454,6 +3457,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         selecting = false
         hasSelection = false
         freehand = emptyList()
+        selectionOutlines = emptyList()
         tool = ToolKind.PAINT
         applyColor()
         readSliders()
@@ -8493,6 +8497,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Color Fill on or off: what is selected shows covered by the colour, filled as the tool closes. */
     fun toggleColorFill() {
         colorFill = !colorFill
+        transformPrefs.edit().putBoolean(COLOR_FILL, colorFill).apply()
         showSelectionLook()
     }
 
@@ -8522,9 +8527,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshTakenBox()
     }
 
-    /** The box round the strokes the selection takes, read again while the selection tool is open. */
+    /** The box round the strokes the selection takes, and the shapes' paths, read again while the selection tool is open. */
     private fun refreshTakenBox() {
         takenBox = if (selecting && hasSelection) session?.takenPluginItemsBox().orEmpty() else emptyList()
+        selectionOutlines = if (selecting && hasSelection) {
+            session?.selectionOutlines().orEmpty().map { path -> List(path.size / 2) { Offset(path[2 * it], path[2 * it + 1]) } }
+        } else {
+            emptyList()
+        }
     }
 
     /** Window pixels to canvas pixels through the view, or none when it cannot be inverted. */
@@ -9608,6 +9618,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val SNAP_VELOCITY = "snapVelocity"
         private const val ADVANCED_MESH = "advancedMesh"
         private const val SELECTION_KIND = "selectionKind"
+        private const val COLOR_FILL = "selectionColorFill"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val DROP_THRESHOLD = "dropThreshold"
 
