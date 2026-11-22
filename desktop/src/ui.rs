@@ -1793,6 +1793,10 @@ impl Interface {
     /// Brushes read from files meanwhile added to the library and told of (when asked to), the
     /// library kept. True while more are being read or wait to be added.
     fn brushes_added(&mut self, session: &CanvasSession) -> bool {
+        // what the library has to say (Combine refused)
+        if let Some(text) = self.library.notice.take() {
+            self.overlays.notice(text, true);
+        }
         // a file picked from the library's "+"
         if let Some((path, name, tell)) = self.library.take_picked_file() {
             let file = crate::library::BrushFileIn { path, name, taken: false };

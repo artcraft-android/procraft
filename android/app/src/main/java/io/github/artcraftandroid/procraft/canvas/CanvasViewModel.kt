@@ -5555,13 +5555,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (!pickedBrushes.remove(key)) pickedBrushes.add(key)
     }
 
-    /** One brush is picked, in the current brush's set, and neither is a pair already. */
+    /** One brush is picked, in the current brush's set (which counts as picked): two, so Combine shows. */
     val canCombinePicked: Boolean
         get() {
-            val s = session ?: return false
             val c = currentBrush ?: return false
-            val (set, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return false
-            return set == c.set && !s.brushIsDual(set, index) && !s.brushIsDual(c.set, c.index)
+            val (set, _) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return false
+            return set == c.set
         }
 
     private fun pickedPlace(key: String): Pair<UInt, UInt>? {
@@ -5569,11 +5568,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return set to index
     }
 
-    /** The picked brush becomes the current brush's second; a tool on either has the pair. */
+    /** The picked brush becomes the current brush's second; a tool on either has the pair. Either a pair already: said so, nothing done. */
     fun combinePicked() {
         val s = session ?: return
         val c = currentBrush ?: return
         val (_, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return
+        s.combineRefusal(c.set, c.index, index)?.let {
+            showNotice(it)
+            return
+        }
         pickedBrushes.clear()
         if (s.combineBrushes(c.set, c.index, index)) {
             currentBrush = s.currentBrush()

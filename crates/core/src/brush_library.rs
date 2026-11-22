@@ -446,6 +446,9 @@ fn numbered_copy(name: &str, taken: impl Fn(&str) -> bool) -> String {
     format!("{base} {n}")
 }
 
+/// Said when Combine is tapped with a combined brush among the two.
+const COMBINED_ALREADY: &str = "A combined brush can't take another one. Uncombine it first.";
+
 /// Held while a library or its choices are read out and written, and while another library is
 /// brought into use, so that writes from two threads (a window's, one keeping it in the background)
 /// land in the order they read it, and none lands in a library's files once it was left.
@@ -1333,6 +1336,15 @@ impl CanvasSession {
             Some((rs, if ri > b { ri - 1 } else { ri }))
         });
         true
+    }
+
+    /// Why brushes `first` and `second` of `set`, both picked, can't be combined, in words to show;
+    /// none when they can be. A combined brush takes no other until it is uncombined.
+    pub fn combine_refusal(&self, set: u32, first: u32, second: u32) -> Option<String> {
+        let st = self.shared.lock();
+        let brushes = &st.library.get(set as usize)?.brushes;
+        let dual = |i: u32| brushes.get(i as usize).is_some_and(|b| b.secondary.is_some());
+        (dual(first) || dual(second)).then(|| COMBINED_ALREADY.to_owned())
     }
 
     /// Dual brush `index` of `set` comes apart: its second goes back into the set just below it.
@@ -2451,6 +2463,26 @@ mod recent {
     /// The Recent set as places: its list keys its rows by them, and a place twice stops the app.
     fn places(s: &CanvasSession) -> Vec<(u32, u32)> {
         s.recent_brushes().iter().map(|r| (r.set, r.index)).collect()
+    }
+
+    /// Two plain brushes picked combine; a combined one among two picked is refused, in words to
+    /// show, until it is uncombined.
+    #[test]
+    fn combine_refuses_a_combined_brush_until_it_is_uncombined() {
+        let s = CanvasSession::new(32, 32);
+        // in the set of ours from before, whose first brushes are no dual brushes
+        let l = s.brush_library().len() as u32 - 1;
+        assert_eq!(s.combine_refusal(l, 0, 1), None);
+        assert!(s.combine_brushes(l, 0, 1));
+        // the pair is first now, the third brush second
+        let refusal = s.combine_refusal(l, 0, 1).expect("refused");
+        assert!(refusal.contains("Uncombine"), "{refusal}");
+        assert_eq!(s.combine_refusal(l, 1, 0), Some(refusal));
+        assert!(s.uncombine_brush(l, 0));
+        assert_eq!(s.combine_refusal(l, 0, 1), None);
+        // nothing there: nothing to refuse
+        assert_eq!(s.combine_refusal(l, 0, 9999), None);
+        assert_eq!(s.combine_refusal(9999, 0, 1), None);
     }
 
     #[test]
