@@ -1505,13 +1505,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             // when something new was cut or copied here, against the system's clipboard
             if (v !== field) {
                 clipboardAt = System.currentTimeMillis()
+                clipboardCopiedAt = clipboardAt
                 v?.let(::putOnSystemClipboard)
             }
             field = v
+            canPaste = field != null
         }
 
     /** When [clipboard] last took something new (wall clock, as the system clipboard's time is). */
     private var clipboardAt = 0L
+    private var clipboardCopiedAt = 0L
 
     /** Which copy went to the system's clipboard last: one still on its way is left out once a newer one is made. */
     private var clipTurn = 0L
@@ -1592,6 +1595,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         runCatching { systemClipboard?.addPrimaryClipChangedListener(clipChanged) }
+    }
+
+    private fun keepClipboard(image: io.github.artcraftandroid.procraft.core.ThumbnailImage?) {
+        if (image != null) {
+            clipboard = image
+            clipboardCopiedAt = System.currentTimeMillis()
+        }
+        canPaste = clipboard != null
     }
 
     /** The shape the last stroke snapped to (drawn and held), and whether its handles are shown. */
@@ -3594,15 +3605,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun copyCanvas() {
-        val s = session ?: return
-        closePanels()
-        // off the main thread: the picture waits for the canvas to finish any remaking first
-        viewModelScope.launch {
-            val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
-            clipboard = copied ?: clipboard
-            offerPaste()
-            if (copied != null) showDone("Canvas copied")
-        }
+      val s = session ?: return
+      closePanels()
+      // off the main thread: the picture waits for the canvas to finish any remaking first
+      viewModelScope.launch {
+          val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
+          keepClipboard(copied)
+          offerPaste()
+          if (copied != null) showDone("Canvas copied")
+      }
     }
 
     /** Cuts the current layer within the selection, to paste. */
@@ -3618,6 +3629,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return null
         }
         val cut = session?.cutLayer()
+        keepClipboard(cut)
         closePanels()
         refresh()
         if (cut != null) showDone("Layer cut")
@@ -6386,25 +6398,53 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return withContext(Dispatchers.Default) { sourceFrom(bitmap) }
     }
 
-    /** A picture on the clipboard as a source image; none if there isn't one. */
-    suspend fun pastedSource(): ByteArray? = sourceOrSay("pasting into a source editor") { clipboardSource() }
+/** A picture on the clipboard as a source image; none if there isn't one. */
+  suspend fun pastedSource(): ByteArray? = sourceOrSay("pasting into a source editor") { clipboardSource() }
 
-    private suspend fun clipboardSource(): ByteArray? {
-        val clip = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }
-        val uri = clip?.getItemAt(0)?.uri
-        // what was cut or copied here, unless another app's picture went on the clipboard since
-        val own = clipboard
-        val others = uri != null && pastesSystemPicture(uri == clipUri, clip?.description?.timestamp ?: 0L, own != null, clipboardAt, clipPutAt)
-        if (own != null && !others) {
-            val source = withContext(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.sourceFromCopy(own) }
-            if (source.isNotEmpty()) return source
-        }
-        if (uri == null) {
-            message = "There's no picture to paste."
-            return null
-        }
-        return decodedSource(uri)
-    }
+  private suspend fun clipboardSource(): ByteArray? {
+      val clip = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }
+      val uri = clip?.let { c ->
+          (0 until c.itemCount).firstNotNullOfOrNull { i -> c.getItemAt(i)?.uri }
+      }
+      val systemTime = if (uri != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+          clip.description?.timestamp ?: 0L
+      } else {
+          0L
+      }
+      val own = clipboard
+      val others = uri != null && (
+          pastesSystemPicture(uri == clipUri, systemTime, own != null, clipboardAt, clipPutAt) ||
+              (own == null && systemTime >= clipboardCopiedAt)
+      )
+      if (own != null && !others && own.rgba.isNotEmpty()) {
+          val source = withContext(Dispatchers.Default) {
+              val straight = unpremultiplyRgba(own.rgba)
+              io.github.artcraftandroid.procraft.core.sourceFromPicture(straight, own.width, own.height)
+          }
+          if (source.isNotEmpty()) return source
+      }
+      if (uri == null) {
+          message = "There's no picture to paste."
+          return null
+      }
+      return decodedSource(uri)
+  }
+
+  /** Turns premultiplied RGBA8 pixels (as [clipboard] holds) into straight RGBA8 for [sourceFromPicture]. */
+  private fun unpremultiplyRgba(src: ByteArray): ByteArray {
+      val out = src.copyOf()
+      var i = 0
+      while (i + 3 < out.size) {
+          val a = out[i + 3].toInt() and 0xFF
+          if (a in 1..254) {
+              out[i] = (((out[i].toInt() and 0xFF) * 255 + a / 2) / a).coerceIn(0, 255).toByte()
+              out[i + 1] = (((out[i + 1].toInt() and 0xFF) * 255 + a / 2) / a).coerceIn(0, 255).toByte()
+              out[i + 2] = (((out[i + 2].toInt() and 0xFF) * 255 + a / 2) / a).coerceIn(0, 255).toByte()
+          }
+          i += 4
+      }
+      return out
+  }
 
     /** The editor's tick: the studio brush's [kind] of source becomes [pixels], or shipped image [shipped]. */
     fun keepStudioSource(kind: SourceKind, pixels: ByteArray, shipped: Int?) {
@@ -8843,10 +8883,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         session?.setPlayFrame(null)
     }
 
-    fun addFrame() {
+   fun addFrame() {
         stopPlaying()
         frameOptionsOpen = false
         layerChange { if (it.addFrame() == 0uL) message = noRoom() }
+    }
+
+    fun addPage() {
+         frameOptionsOpen = false
+         addRootLayer()
     }
 
     private fun currentFrameLayer(): LayerInfo? = currentFrame?.let { animationFrames.getOrNull(it) }?.let { id -> layers.firstOrNull { it.id == id } }
@@ -8955,6 +9000,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new layer of a plugin's [kind] above the current one. */
     fun addPluginLayer(kind: String) = layerChange { if (it.addPluginLayer(kind) == 0uL) message = noRoom() }
+
+    fun addRootLayer() = layerChange { if (it.addRootLayer() == 0uL) message = noRoom() }
 
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
@@ -9138,7 +9185,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun copyLayerContents(l: LayerInfo) {
-        clipboard = session?.copyLayerContents(l.id) ?: clipboard
+        keepClipboard(session?.copyLayerContents(l.id))
         offerPaste()
     }
 
@@ -9634,4 +9681,3 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 }
-
