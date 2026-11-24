@@ -38,6 +38,7 @@ mod crop_edit;
 mod cursor_turn;
 mod device;
 mod drawn_previews;
+mod fetch;
 mod filter_layers;
 mod floating;
 mod folders;
@@ -121,6 +122,7 @@ mod stand_ins;
 mod stock_brushes;
 mod stock_library;
 mod storage;
+mod store;
 mod stroke_sound;
 mod studio;
 mod surround;
@@ -299,6 +301,7 @@ pub use side_slider::{
     ShadowStep, SideSliderTap, side_slider_drag_share, side_slider_shown_percent, side_slider_tap, side_thumb_shadow,
 };
 pub use storage::{NO_ROOM, save_failure_to_tell, storage_full_writes, storage_was_full};
+pub use store::{Fetched, Installed, ItemKind, SourceInfo, Store, StoreItem, digest_of, package_details};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     small_source, source_from_copy, source_from_picture, source_library, source_size,

@@ -44,6 +44,7 @@ uniffi = { version = "=0.32.2", default-features = false }
 # A patch's module, interpreted: no code is made at run time, which the iPad wouldn't allow. Portable
 # dispatch: the default's tail calls can overflow the stack on a long module, which ends the process.
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "stable", "portable-dispatch"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = { version = "0.15", default-features = false }
