@@ -48,6 +48,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.keptPlugins
 import io.github.artcraftandroid.procraft.canvas.wideColorByDefault
 import io.github.artcraftandroid.procraft.ui.Pc
+import io.github.artcraftandroid.procraft.ui.StoreSheet
 import io.github.artcraftandroid.procraft.ui.Switch
 import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
 
@@ -69,7 +70,16 @@ class SettingsActivity : ComponentActivity() {
                 LocalDensity provides Density(density.density * size, density.fontScale),
                 androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr,
             ) {
-                SettingsScreen(prefs) { finish() }
+                SettingsScreen(
+                    prefs,
+                    onStore = {
+                        // the store's sheet is drawn over the app's own screen, so this page goes:
+                        // under it is where the sheet belongs
+                        StoreSheet.show()
+                        finish()
+                    },
+                    onDone = { finish() },
+                )
             }
         }
     }
@@ -130,7 +140,7 @@ private val Groups: List<Pair<String, List<Setting>>> = listOf(
 )
 
 @Composable
-private fun SettingsScreen(prefs: android.content.SharedPreferences, onDone: () -> Unit) {
+private fun SettingsScreen(prefs: android.content.SharedPreferences, onStore: () -> Unit, onDone: () -> Unit) {
     var licences by remember { mutableStateOf(false) }
     if (licences) return Licences { licences = false }
     Box(Modifier.fillMaxSize().background(Back).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
@@ -152,11 +162,16 @@ private fun SettingsScreen(prefs: android.content.SharedPreferences, onDone: () 
                     }
                 }
             }
-            // the licences of what the app is made with; and the app's log to share, with no canvas
-            // to open for Help's (an artwork that closes the app as it opens, say)
+            // the store, and the licences of what the app is made with; and the app's log to share,
+            // with no canvas to open for Help's (an artwork that closes the app as it opens, say)
             val context = androidx.compose.ui.platform.LocalContext.current
             val scope = androidx.compose.runtime.rememberCoroutineScope()
             Column(Modifier.padding(top = 24.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Group)) {
+                Row(Modifier.fillMaxWidth().clickable(onClick = onStore).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Store", color = Ink, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                    Text("›", color = Dim, fontSize = 20.sp)
+                }
+                Box(Modifier.padding(start = 16.dp).fillMaxWidth().height(1.dp).background(Line))
                 Row(Modifier.fillMaxWidth().clickable { licences = true }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Licenses", color = Ink, fontSize = 17.sp, modifier = Modifier.weight(1f))
                     Text("›", color = Dim, fontSize = 20.sp)

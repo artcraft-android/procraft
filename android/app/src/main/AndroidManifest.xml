@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- the store reads its catalogues and their files from where they are listed -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Save to Gallery on Android 8 and 9, which write into the shared Pictures and Movies
          folders only with this; later versions need nothing to add to the media store -->
     <uses-permission

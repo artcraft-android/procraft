@@ -323,6 +323,11 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Pressure and Smoothing") { page = ActionsPage.PRESSURE },
                 Act("Gesture controls") { vm.gestureControlsOpen = true },
                 Act("Plugins") { page = ActionsPage.PLUGINS },
+                Act("Store") {
+                    // the sheet comes over the work, as it does on the desk: the panel goes first
+                    vm.closePanels()
+                    StoreSheet.show()
+                },
             ),
             listOf(
                 Slide(
