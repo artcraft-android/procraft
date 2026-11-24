@@ -298,6 +298,8 @@ pub struct Library {
     /// The shown set's menu, and which set it is for.
     set_menu: Menu,
     set_menu_for: Option<usize>,
+    /// The store package sheet, and the set it is making.
+    pub store_package: crate::store_package::StorePackage,
     /// The set's icons to choose from (Customize icon), and whether it has been scrolled to the
     /// set's own.
     icon_picker: Menu,
@@ -1041,6 +1043,10 @@ impl Library {
         self.libraries_plus_menu(ctx, look, session, plus, backdrops);
         self.card_menu(ctx, look, session, &libraries, backdrops);
         self.follow_pinch(ctx, session, rect, &libraries);
+        // the store package sheet, over the library and the work
+        if self.store_package.open {
+            self.store_package.show(ctx, look, session);
+        }
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
             match self.delete_what.take() {
                 Some(Deleting::Set(i)) => {
@@ -1193,6 +1199,8 @@ impl Library {
             Entry::More(set_icon, "Customize icon", ink),
             menu::DIVIDER,
             Entry::Item(&icons::MENU_SHARE, "Share", ink),
+            // the same set again, as the folder a store reads
+            Entry::Item(&icons::MENU_FOLDER, "Store Package", ink),
             // the only set too: the library is then left with none
             menu::DIVIDER,
             Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER),
@@ -1259,6 +1267,11 @@ impl Library {
                 if let Some(bytes) = session.brush_set_as_file(i as u32) {
                     crate::files::save_file(&bytes, name, "brushset", "Brush set");
                 }
+            }
+            "Store Package" => {
+                let name = library.get(i).map_or("Brushes", |s| s.name.as_str());
+                let icon = library.get(i).map_or(0, |s| s.icon as usize);
+                self.store_package.begin(ctx, session, i as u32, name, icon);
             }
             _ => self.ask_delete(Deleting::Set(i as u32)),
         }

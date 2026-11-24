@@ -143,6 +143,8 @@ pub struct Interface {
     drop: ColourDrop,
     library: Library,
     overlays: Overlays,
+    /// What the app had to say at length, in its own alert rather than a passing line.
+    said_alert: crate::alert::Alert,
     /// The Layers panel and the brush library floating in windows of their own.
     floating: crate::floating_panels::Floating,
     /// The interface's bars as Edit layout moves them (the core's), and whether it is on (their
@@ -188,6 +190,8 @@ pub struct Interface {
     gesture_controls: crate::gesture_controls::GestureControls,
     /// Canvas information, while it is open.
     canvas_info: Option<crate::canvas_info::CanvasInfo>,
+    /// The store's sheet, and the store it draws.
+    store: crate::store::StoreSheet,
     /// The reference window.
     reference: crate::reference::Reference,
     /// The Reference windows opened besides the artwork's own, while a plugin lets more be open.
@@ -299,6 +303,7 @@ impl Interface {
             drop: ColourDrop::default(),
             library: Library::default(),
             overlays: Overlays::default(),
+            said_alert: crate::alert::Alert::default(),
             floating: crate::floating_panels::Floating::kept(prefs.panel_layout.as_deref(), prefs.floating),
             bars: crate::edit_layout::kept_bars(prefs.bar_layout.as_deref()),
             named_layouts: {
@@ -329,6 +334,7 @@ impl Interface {
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
+            store: crate::store::StoreSheet::default(),
             reference: crate::reference::Reference::default(),
             more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
@@ -380,6 +386,12 @@ impl Interface {
     }
 }
 
+/// Whether a message needs the app's alert rather than the passing line: a long one gets the room,
+/// and an OK to read it at its own pace.
+pub fn said_at_length(text: &str) -> bool {
+    text.chars().count() > 72
+}
+
 impl Interface {
     /// A Save As written meanwhile: its file kept as where the artwork saves, or why it couldn't
     /// be told. True while one is still being written.
@@ -391,7 +403,7 @@ impl Interface {
                 self.path = Some(path);
                 self.saved_edits = edits;
             }
-            Ok(Err(e)) => crate::files::tell("Can't save", &e),
+            Ok(Err(e)) => self.overlays.done(format!("Can't save: {e}"), true),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
         self.saving = None;
@@ -424,6 +436,18 @@ impl Interface {
                     .collect();
             }
             _ => {}
+        }
+    }
+
+    /// Says what the app was told while it ran, in its own passing message: a warning lasts longer.
+    /// A long one is said in the app's own alert, where the whole sentence fits, with an OK.
+    pub fn say_moment(&mut self, text: impl Into<String>, went_wrong: bool) {
+        let text = text.into();
+        if said_at_length(&text) {
+            let title = if went_wrong { "Something went wrong" } else { "ProCraft" };
+            self.said_alert.tell(title, &text, None);
+        } else {
+            self.overlays.done(text, went_wrong);
         }
     }
 
@@ -720,12 +744,25 @@ impl Interface {
             self.popover_open = false;
             return;
         }
+        // the store: a sheet over the work, drawn from what its catalogues list
+        #[cfg(debug_assertions)]
+        crate::store::shot_setup(&mut self.store);
+        #[cfg(debug_assertions)]
+        self.store.shot_install();
+        if self.store.open {
+            self.canvas_rect = Rect::NOTHING;
+            self.animation.reset(session);
+            self.store.show(&ctx, &mut self.look, session, &self.prefs.plugins);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
         // the time-lapse replayed over everything
         if self.time_lapse.replaying() {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
             if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
-                crate::files::tell("Time-lapse", said);
+                self.overlays.done(said, true);
             }
             session.set_backdrops(Vec::new());
             self.popover_open = false;
@@ -739,7 +776,7 @@ impl Interface {
             if let Some(ended) = ended {
                 self.ended_export = self.animated_export.take();
                 if matches!(ended, crate::animated_export::Ended::Failed) {
-                    crate::files::tell("Share", "The animation could not be exported.");
+                    self.overlays.done("Share: the animation could not be exported.", true);
                 }
                 if std::mem::take(&mut self.exporting_from_gallery) {
                     self.actions.push(Action::Gallery);
@@ -754,6 +791,9 @@ impl Interface {
             self.canvas_rect = Rect::EVERYTHING;
             if let Some(notice) = self.lighting.show(&ctx, &mut self.look, session) {
                 self.overlays.notice(notice, true);
+            }
+            if self.said_alert.is_open() {
+                self.said_alert.show(ui.ctx(), &mut self.look);
             }
             self.overlays.show(ui, &mut self.look, colour, false);
             session.set_backdrops(Vec::new());
@@ -785,6 +825,9 @@ impl Interface {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
             self.hover_cursor(&ctx, session, &info, input);
+            if self.said_alert.is_open() {
+                self.said_alert.show(ui.ctx(), &mut self.look);
+            }
             self.overlays.show(ui, &mut self.look, colour, false);
             self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0);
             self.copy_paste_panel(&ctx, session);
@@ -1239,7 +1282,7 @@ impl Interface {
             }
         }
         if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
-            crate::files::tell("Time-lapse", said);
+            self.overlays.done(said, true);
         }
         self.touch_companion(&ctx, session);
         self.advanced_settings(&ctx, session);
@@ -2091,7 +2134,7 @@ impl Interface {
                         crate::files::no_room(session);
                     }
                 }
-                Inserted::Failed(what) => crate::files::tell("Can't insert it", what),
+                Inserted::Failed(what) => self.overlays.done(what, true),
             }
         }
         !self.inserting.is_empty()
@@ -3306,7 +3349,9 @@ impl Interface {
                 self.actions.push(Action::PluginExport(i));
                 self.open = None;
             }
-            Some(Act::About) => crate::files::about(),
+            Some(Act::About) => self
+                .overlays
+                .done(format!("ProCraft version {}", env!("PROCRAFT_VERSION")), false),
             Some(Act::GestureControls) => {
                 self.open = None;
                 self.gesture_controls.open = true;
@@ -3320,6 +3365,10 @@ impl Interface {
             Some(Act::Crop) => {
                 self.open = None;
                 self.crop.begin(session);
+            }
+            Some(Act::Store) => {
+                self.open = None;
+                self.store.open();
             }
             Some(Act::CanvasInfo) => {
                 self.open = None;
@@ -3734,6 +3783,7 @@ impl Interface {
     /// Nothing covers the canvas: no full-screen page or editor is open.
     fn canvas_shown(&self) -> bool {
         !(self.studio.open
+            || self.store.open
             || self.time_lapse.replaying()
             || self.animated_export.is_some()
             || self.lighting.open
@@ -4154,11 +4204,18 @@ fn piece_title(piece: procraft_core::LayoutPiece) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_message_goes_to_the_alert_when_it_needs_the_room() {
+        assert!(!said_at_length("Layer cleared"));
+        assert!(!said_at_length(&"a".repeat(72)));
+        assert!(said_at_length(&"a".repeat(73)));
+    }
+
     use egui::{Event, Pos2, RawInput, pos2};
     use winit::dpi::PhysicalPosition;
     use winit::event::{DeviceId, ElementState, Force, MouseButton, Touch, TouchPhase, WindowEvent};
-
-    use super::*;
 
     /// The interface over a canvas in a window (a pixel a point), its input handed on as the app's
     /// window hands it on: a touch to egui (the first one down its pointer as well, as egui-winit

@@ -8,7 +8,7 @@ use procraft_core::{
     CanvasPreset, CanvasSession, KeptGestures, ModelFile, PagesOutcome, PsdOutcome, ThumbnailImage, export_file_name,
     import_pages, import_psd, preset_height, preset_width,
 };
-use rfd::{FileDialog, MessageDialog, MessageLevel};
+use rfd::FileDialog;
 
 use crate::ui::Interface;
 
@@ -98,11 +98,6 @@ pub fn app_dir() -> PathBuf {
     }
 }
 
-/// Shows a passing message with an OK button.
-pub fn say(text: &str) {
-    message().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
-}
-
 /// Whether the file at `path` holds brushes, by its name (a zip by what it holds): ours (a brush,
 /// a set or a library) or another app's.
 pub fn is_brush_file(path: &Path) -> bool {
@@ -156,42 +151,31 @@ pub fn take_pending_brushes() -> Vec<crate::library::BrushFileIn> {
         .collect()
 }
 
-/// Shows a message with an OK button; it reaches the log and the terminal as well, for a system
-/// with no way of showing it.
+/// What the app was told while it ran, kept for the passing messages it draws itself: nothing here
+/// opens a window of the system's. The flag marks the ones that went wrong.
+static SAID: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Reports a thing that went wrong. It reaches the log and the terminal, and the app says it in its
+/// own passing message the next time it draws.
 pub fn tell(title: &str, text: &str) {
     log::error!("{title}: {text}");
     eprintln!("{title}: {text}");
-    if cfg!(target_os = "linux") && !has_program("zenity") {
-        // what shows the app's dialogs on Linux isn't there: the first that is of the others
-        let shown = other_dialogs(title, text).iter().any(|(program, args)| {
-            std::process::Command::new(program).args(args).status().is_ok_and(|done| done.success())
-        });
-        if shown {
-            return;
-        }
+    if let Ok(mut said) = SAID.lock() {
+        said.push((format!("{title}: {text}"), true));
     }
-    message().set_level(MessageLevel::Error).set_title(title).set_description(text).show();
 }
 
-/// Whether `program` can be run here.
-fn has_program(program: &str) -> bool {
-    std::process::Command::new(program)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+/// Says a short thing the app shows itself, in its own passing message.
+pub fn say(text: &str) {
+    log::info!("{text}");
+    if let Ok(mut said) = SAID.lock() {
+        said.push((text.to_owned(), false));
+    }
 }
 
-/// The programs that can show a message where the app's own dialogs can't, in the order to try
-/// them, each with its arguments.
-fn other_dialogs(title: &str, text: &str) -> [(&'static str, Vec<String>); 3] {
-    let (title, text) = (title.to_owned(), text.to_owned());
-    [
-        ("kdialog", vec!["--title".to_owned(), title.clone(), "--error".to_owned(), text.clone()]),
-        ("xmessage", vec!["-center".to_owned(), format!("{title}\n\n{text}")]),
-        ("notify-send", vec!["--urgency=critical".to_owned(), title, text]),
-    ]
+/// Takes what the app was told while it ran, for the messages it says itself.
+pub fn take_said() -> Vec<(String, bool)> {
+    SAID.lock().map(|mut said| std::mem::take(&mut *said)).unwrap_or_default()
 }
 
 /// Files being written on threads of their own (exports, shares, Save As): since when, whether
@@ -754,15 +738,6 @@ pub fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
     Ok(ThumbnailImage { width: frame.width, height: frame.height, rgba })
 }
 
-/// Shows the app's name and version.
-pub fn about() {
-    message()
-        .set_level(MessageLevel::Info)
-        .set_title("ProCraft")
-        .set_description(format!("Version {}", env!("PROCRAFT_VERSION")))
-        .show();
-}
-
 /// Saves the artwork as a .procraft package, where it was last saved unless `ask` (or it never
 /// was): written on a thread of its own (a large one takes seconds), the interface told when it
 /// is ([`Interface::saved_as`]).
@@ -835,16 +810,6 @@ pub fn reveal(path: &Path) {
     if let Err(e) = shown {
         log::warn!("showing the log: {e}");
     }
-}
-
-/// A message box, belonging to the app's window as [`dialog`]s do.
-fn message() -> MessageDialog {
-    let message = MessageDialog::new();
-    #[cfg(windows)]
-    if let Some(window) = dialog_parent() {
-        return message.set_parent(window);
-    }
-    message
 }
 
 pub fn export(
@@ -1241,12 +1206,10 @@ mod tests {
     }
 
     #[test]
-    fn a_message_has_other_ways_of_showing_with_its_words_in_each() {
-        let ways = other_dialogs("No drawing", "no GPU");
-        assert_eq!(ways.map(|(program, _)| program), ["kdialog", "xmessage", "notify-send"]);
-        for (_, args) in other_dialogs("No drawing", "no GPU") {
-            assert!(args.iter().any(|a| a.contains("no GPU")), "{args:?}");
-        }
+    fn what_it_says_of_a_failure_reaches_the_log() {
+        // no window of the system's is put over the work: the log is where it goes
+        tell("Can't save", "the file was open elsewhere");
+        say("Brushes will be added to the library when a canvas opens.");
     }
 
     fn folder(name: &str) -> PathBuf {

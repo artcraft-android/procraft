@@ -37,10 +37,12 @@ mod icons;
 mod input;
 mod interface_pass;
 mod layer_choice;
+mod install;
 mod layers;
 mod library;
 mod licences;
 mod lighting;
+mod pictures;
 mod liquify;
 mod look;
 mod menu;
@@ -62,6 +64,8 @@ mod shortcuts;
 mod sound;
 mod source_editor;
 mod startup;
+mod store;
+mod store_package;
 mod stroke_sound;
 mod studio;
 mod system_clipboard;
@@ -911,6 +915,11 @@ impl App {
         if self.screen.is_none() {
             return;
         }
+        // what the app was told while it ran is said in its own passing message, never in a window
+        // of the system's
+        for (text, went_wrong) in files::take_said() {
+            self.ui.say_moment(text, went_wrong);
+        }
         // on OpenGL nothing is drawn while the canvases' pipelines are made (see
         // `Screen::gl_busy`), and nothing that would draw is taken in: looked at again soon (the
         // window answers meanwhile)
@@ -1101,6 +1110,12 @@ impl App {
             // the New canvas list offers the kinds of artwork the plugins on make
             gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // a debug hook: a capture of the store needs a work to draw over, so open one as the
+            // New canvas list would, with no hand on the mouse
+            #[cfg(debug_assertions)]
+            if asked.is_none() && std::env::var("PROCRAFT_STORE_SHOT").is_ok() {
+                asked = Some(gallery::Asked::ScreenSize(gallery.folder()));
+            }
             // layers held out of an artwork: held a moment over another, it opens; let go here,
             // they go nowhere
             if let Some(held) = interface.held.as_mut() {

@@ -93,6 +93,8 @@ pub enum Act {
     AdvancedSettings,
     /// The keyboard shortcuts' list.
     Shortcuts,
+    /// The store's own sheet, over the work.
+    Store,
     /// A plugin file to pick and ask about.
     ImportPlugin,
     /// A plugin's action tapped on its card: [`ActionsPanel::take_plugin_action`] says which.
@@ -457,6 +459,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
                     Button("Plugins", None, Some(Act::Page(Page::Plugins))),
+                    Button("Store", None, Some(Act::Store)),
                 ],
                 vec![
                     Slide(
