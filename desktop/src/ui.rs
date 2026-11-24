@@ -576,6 +576,12 @@ impl Interface {
         session.set_fit_insets(left, bar * scale, right, 0.0);
     }
 
+    /// The store's sheet is open over the work. The canvas still draws and animates under it, but
+    /// takes no input: no stroke, gesture, key or panel under the sheet is heard.
+    pub fn store_open(&self) -> bool {
+        self.store.open
+    }
+
     /// The app's fonts and look, set the first time anything shows.
     pub fn style_once(&mut self, ctx: &egui::Context) {
         if !self.styled {
@@ -601,6 +607,11 @@ impl Interface {
         }
         self.typing = ctx.memory(|m| m.focused().is_some());
         input.keys_taken = self.keys_taken();
+        // the store's sheet goes last of all, over the canvas as it is being drawn and over every
+        // bar, panel and popover: its scrim takes the presses that land on any of them
+        if self.store.open {
+            self.store.show(ctx, &mut self.look, session, &self.prefs.plugins);
+        }
     }
 
     fn show_frame(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
@@ -646,7 +657,7 @@ impl Interface {
         // held), where the pointer is; one set to the eyedropper picks while it is held, where the
         // pen hovers, and lets go to take it; with the canvas out of sight they do nothing, then
         // or later: the tool would change unseen (and one held to erase is let go)
-        let covered = self.studio.open || self.time_lapse.replaying();
+        let covered = self.studio.open || self.time_lapse.replaying() || self.store.open;
         let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
         let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
@@ -732,6 +743,11 @@ impl Interface {
         if session.take_brushes_changed() {
             self.library.library_changed();
         }
+        // the store's own hooks (debug builds): a sheet opened, an install made, for a capture
+        #[cfg(debug_assertions)]
+        crate::store::shot_setup(&mut self.store);
+        #[cfg(debug_assertions)]
+        self.store.shot_install();
         if self.studio.open {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
@@ -740,19 +756,6 @@ impl Interface {
                 self.library.library_changed();
                 self.keep_brushes = true;
             }
-            session.set_backdrops(Vec::new());
-            self.popover_open = false;
-            return;
-        }
-        // the store: a sheet over the work, drawn from what its catalogues list
-        #[cfg(debug_assertions)]
-        crate::store::shot_setup(&mut self.store);
-        #[cfg(debug_assertions)]
-        self.store.shot_install();
-        if self.store.open {
-            self.canvas_rect = Rect::NOTHING;
-            self.animation.reset(session);
-            self.store.show(&ctx, &mut self.look, session, &self.prefs.plugins);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
@@ -3772,7 +3775,9 @@ impl Interface {
 
     /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
     fn keys_taken(&self) -> bool {
-        self.text.editing()
+        // the store's sheet takes the keys while it shows (its search field, its Escape)
+        self.store.open
+            || self.text.editing()
             || ((self.open == Some(Popover::Colour)
                 || self.colours.floating.is_some()
                 || self.background_pick.is_some())
@@ -4326,7 +4331,9 @@ mod tests {
         /// A window event to the canvas, which leaves what lands on the interface to it.
         fn canvas_hears(&mut self, event: &WindowEvent) {
             let canvas = self.ui.canvas_rect;
-            let blocked = (self.ui.popover_open && !self.ui.panel_lets_through) || self.ui.editing_layout;
+            let blocked = (self.ui.popover_open && !self.ui.panel_lets_through)
+                || self.ui.store_open()
+                || self.ui.editing_layout;
             let ctx = &self.ctx;
             self.input
                 .on_event(&self.session, event, false, |p| blocked || crate::screen::on_interface(ctx, p, canvas));
@@ -4341,7 +4348,9 @@ mod tests {
                 Touch { device_id: DeviceId::dummy(), phase, location, force: Some(Force::Normalized(0.5)), id: PEN };
             let canvas = self.ui.canvas_rect;
             let ctx = &self.ctx;
-            for heard in self.touches.route(WindowEvent::Touch(touch), |p| crate::screen::on_interface(ctx, p, canvas))
+            for heard in self
+                .touches
+                .route(WindowEvent::Touch(touch), |p| self.ui.store_open() || crate::screen::on_interface(ctx, p, canvas))
             {
                 if let WindowEvent::Touch(t) = heard {
                     self.egui_touch(&t);
@@ -4738,6 +4747,34 @@ mod tests {
         w.frame();
         assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
         assert_eq!(w.steps(), (true, false));
+    }
+
+    /// The store's sheet draws over the work, not in place of it: the canvas keeps its place on the
+    /// screen, the sheet takes the keys, and nothing pressed or dragged on the canvas under it
+    /// reaches the work - which is still the same canvas, and paints again once the sheet goes.
+    #[test]
+    fn the_store_s_sheet_leaves_the_canvas_where_it_is_and_takes_its_presses() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        w.draw_canvas();
+        w.frame();
+        let canvas = w.ui.canvas_rect;
+        let paper = w.paper();
+        let (from, to) = (paper.center() - vec2(80.0, 40.0), paper.center() + vec2(80.0, 40.0));
+        assert!(paper.contains(from) && paper.contains(to), "{from:?} {to:?} {paper:?}");
+        let edits = w.session.edits();
+        // the sheet shows over the work, as the store's does while it is open
+        w.ui.store.open = true;
+        assert_eq!(w.ui.canvas_rect, canvas, "the canvas is not taken off the screen");
+        assert!(!w.ui.canvas_shown() && w.ui.keys_taken(), "the sheet takes the keys");
+        // (no frame in between: the sheet here has no store of its own and would close)
+        w.pen(TouchPhase::Started, from);
+        w.pen(TouchPhase::Moved, to);
+        w.pen(TouchPhase::Ended, to);
+        assert_eq!(w.session.edits(), edits, "nothing is painted under the sheet");
+        // let go of the sheet: the same drag paints, on the canvas that was under it all along
+        w.ui.store.open = false;
+        w.pen_stroke(from, to, 8);
+        assert!(w.session.edits() > edits, "the canvas under the sheet paints once it goes");
     }
 
     #[test]

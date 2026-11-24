@@ -638,7 +638,8 @@ impl ApplicationHandler for App {
         screen.egui.set_clipboard_shortcuts(!canvas_keys);
         // a finger landing on the interface while a hand rests on the canvas takes the pointer over
         let canvas = self.ui.canvas_rect;
-        let heard = self.interface_touches.route(event.clone(), |p| screen.over_interface(p, canvas));
+        let heard =
+            self.interface_touches.route(event.clone(), |p| self.ui.store_open() || screen.over_interface(p, canvas));
         let mut response = egui_winit::EventResponse { consumed: false, repaint: false };
         for each in &heard {
             let one = screen.egui.on_window_event(&screen.window, each);
@@ -701,7 +702,7 @@ impl ApplicationHandler for App {
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
                 // through, to wait there to be a tap or a drag); while the artwork is being
                 // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
-                // started)
+                // started); nor does one while the store's sheet is over the work
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
                 session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
@@ -709,6 +710,7 @@ impl ApplicationHandler for App {
                 // (nor while Edit Layout moves the bars: the canvas takes no press then)
                 let blocked = || {
                     (self.ui.popover_open && !through)
+                        || self.ui.store_open()
                         || self.ui.editing_layout()
                         || files::exporting_since().is_some()
                         || session.pour_finishing()
