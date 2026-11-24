@@ -270,10 +270,10 @@ class MainActivity : ComponentActivity() {
             val items = group.rows.flatMap { row ->
                 row.combos.mapNotNull { c ->
                     val (code, modifiers) = systemShortcutKeys(c.key, c.command, c.shift, c.alt) ?: return@mapNotNull null
-                    android.view.KeyboardShortcutInfo(row.does, code, modifiers)
+                    android.view.KeyboardShortcutInfo(Zh.t(row.does), code, modifiers)
                 }
             }
-            if (items.isNotEmpty()) data.add(android.view.KeyboardShortcutGroup(group.heading, items))
+            if (items.isNotEmpty()) data.add(android.view.KeyboardShortcutGroup(Zh.t(group.heading), items))
         }
     }
 

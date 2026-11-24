@@ -62,7 +62,7 @@ class SaveToDeviceActivity : ComponentActivity() {
                 .getOrDefault(false)
             if (!saved) AppLog.w("ProCraft", "${files.joinToString { it.name }} ($mime) wasn't saved to the device")
             runOnUiThread {
-                if (!saved) Toast.makeText(app, "Couldn't save the file", Toast.LENGTH_LONG).show()
+                if (!saved) Toast.makeText(app, Zh.t("Couldn't save the file"), Toast.LENGTH_LONG).show()
                 finish()
             }
         }

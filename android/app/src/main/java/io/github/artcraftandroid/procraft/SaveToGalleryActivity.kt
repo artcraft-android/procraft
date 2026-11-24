@@ -31,7 +31,7 @@ class SaveToGalleryActivity : ComponentActivity() {
         if (granted) {
             save()
         } else {
-            Toast.makeText(applicationContext, "Couldn't save to Gallery without storage access", Toast.LENGTH_LONG).show()
+            Toast.makeText(applicationContext, Zh.t("Couldn't save to Gallery without storage access"), Toast.LENGTH_LONG).show()
             finish()
         }
     }
@@ -68,7 +68,7 @@ class SaveToGalleryActivity : ComponentActivity() {
                     saved == 0 -> "Couldn't save to Gallery"
                     else -> "Saved $saved of ${files.size} to Gallery"
                 }
-                Toast.makeText(app, text, if (saved == files.size) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                Toast.makeText(app, Zh.t(text), if (saved == files.size) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
                 finish()
             }
         }
