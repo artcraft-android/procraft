@@ -30,6 +30,12 @@ const CATEGORIES: [&str; 8] =
     ["Brushes", "Papers and Textures", "Colour", "Layers", "Interface", "Effects", "Canvas", "Other"];
 /// The licences a maker may pick from, the common ones written out.
 const LICENCES: [&str; 5] = ["CC0-1.0", "CC BY 4.0", "CC BY-SA 4.0", "MIT", "All rights reserved"];
+/// What is being shared: the set the sheet opened from, or a pack of its own file.
+const KINDS: [&str; 2] = ["Brush set", "Asset pack"];
+const BRUSHES: usize = 0;
+const ASSET_PACK: usize = 1;
+/// The files a pack comes as: the asset library's own share file.
+const PACKS: [&str; 3] = ["assetset", "assetlibrary", "asset"];
 
 /// Which field has the keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +54,10 @@ pub struct StorePackage {
     set: u32,
     icon: usize,
     name: String,
+    /// The name the set brought, which a pack picked for the same sheet may take the place of.
+    set_name: String,
+    /// The name the picture carries, so that a listing renamed under it is drawn again.
+    drawn_name: String,
     author: String,
     description: String,
     tags: String,
@@ -57,12 +67,23 @@ pub struct StorePackage {
     scroll: f32,
     /// The picker open under a row: which row asked, the row itself, and the panel it opened.
     picker: Option<(usize, Rect, Rect)>,
-    /// The library the set is in, the picture the app drew for it, and its handle on the GPU.
+    /// The library the set is in, the picture the app made for it, and its handle on the GPU.
     library: u32,
     picture: Option<image::RgbaImage>,
     texture: Option<egui::TextureHandle>,
     /// The pictures they took themselves.
     pictures: Vec<Shot>,
+    /// Whether it is a brush set or a pack, and the pack's own file when it is one.
+    kind: usize,
+    pack: Option<Pack>,
+    /// Whether the picture has to be made again, the kind changing under it.
+    redraw: bool,
+}
+
+/// The asset pack the sheet is making: its file, and the file a listing takes.
+struct Pack {
+    path: std::path::PathBuf,
+    file: String,
 }
 
 /// One of their own pictures: its pixels, and its handle on the GPU.
@@ -77,15 +98,45 @@ impl StorePackage {
         self.reset(name, icon);
         self.set = set;
         self.library = session.brush_libraries().iter().position(|library| library.current).unwrap_or(0) as u32;
-        self.picture = drawn_picture(session, self.library, set);
-        let texture = self.picture.as_ref().map(|picture| {
+        self.draw_brush_picture(ctx, session);
+    }
+
+    /// The set's own picture: its strokes composed the way a store's card shows a brush set.
+    fn draw_brush_picture(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        let picture = session
+            .brush_set_store_preview(self.library, self.set, self.name.clone())
+            .and_then(|preview| image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba))
+            .or_else(|| drawn_picture(session, self.library, self.set));
+        self.picture = picture;
+        self.set_texture(ctx);
+        self.drawn_name = self.name.trim().to_owned();
+    }
+
+    /// The picture's handle on the GPU.
+    fn set_texture(&mut self, ctx: &egui::Context) {
+        self.texture = self.picture.as_ref().map(|picture| {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [picture.width() as usize, picture.height() as usize],
                 picture.as_raw(),
             );
             ctx.load_texture("store package picture", image, egui::TextureOptions::LINEAR)
         });
-        self.texture = texture;
+    }
+
+    /// Draws the picture again, the listing's name having changed under it.
+    fn renew_picture(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        let name = self.name.trim().to_owned();
+        if self.kind == BRUSHES {
+            self.draw_brush_picture(ctx, session);
+            return;
+        }
+        let Some(pack) = &self.pack else { return };
+        let at = pack.path.to_string_lossy().into_owned();
+        if let Some(preview) = procraft_core::asset_pack_store_preview(at, name.clone()) {
+            self.picture = image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba);
+            self.set_texture(ctx);
+            self.drawn_name = name;
+        }
     }
 
     /// The sheet's fields, ready for a new package.
@@ -94,6 +145,8 @@ impl StorePackage {
         self.set = 0;
         self.icon = icon;
         self.name = name.to_owned();
+        self.set_name = name.to_owned();
+        self.drawn_name = name.trim().to_owned();
         self.author.clear();
         self.description.clear();
         self.tags.clear();
@@ -105,6 +158,9 @@ impl StorePackage {
         self.picture = None;
         self.texture = None;
         self.pictures.clear();
+        self.kind = BRUSHES;
+        self.pack = None;
+        self.redraw = false;
     }
 
     /// Their own pictures, taken from the files they pick: four at most after the drawn one.
@@ -136,10 +192,42 @@ impl StorePackage {
         }
     }
 
-    /// The categories or the licences, listed under the row that asked for one.
+    /// Takes the pack's own file: its picture is composed from the pictures the archive holds.
+    fn pick_pack(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Asset packs", &PACKS).pick_file() else { return };
+        let at = path.to_string_lossy().into_owned();
+        let Some(name) = procraft_core::asset_pack_name(at.clone()) else {
+            crate::files::tell("Store", "That file isn't an asset pack.");
+            return;
+        };
+        let preview = procraft_core::asset_pack_store_preview(at.clone(), name.clone());
+        let Some(picture) =
+            preview.and_then(|preview| image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba))
+        else {
+            crate::files::tell("Store", "The pack's picture could not be made.");
+            return;
+        };
+        // the sheet keeps the set's name only until a pack brings one of its own
+        if self.name.trim().is_empty() || self.name == self.set_name {
+            self.name = name.clone();
+        }
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("assetset").to_ascii_lowercase();
+        self.pack = Some(Pack { path, file: format!("file.{extension}") });
+        self.picture = Some(picture);
+        self.set_texture(ctx);
+        self.drawn_name = self.name.trim().to_owned();
+        if self.category == 0 {
+            self.category = 1;
+        }
+    }
+
+    /// The categories, the licences or the kinds, listed under the row that asked for one.
     fn pick_menu(&mut self, ui: &egui::Ui, sheet: Rect, which: usize, anchor: Rect) {
-        let (options, chosen) =
-            if which == 0 { (CATEGORIES.to_vec(), self.category) } else { (LICENCES.to_vec(), self.licence) };
+        let (options, chosen) = match which {
+            0 => (CATEGORIES.to_vec(), self.category),
+            1 => (LICENCES.to_vec(), self.licence),
+            _ => (KINDS.to_vec(), self.kind),
+        };
         let width = 262.0;
         let height = options.len() as f32 * 44.0 + 12.0;
         let below = anchor.bottom() + 6.0;
@@ -175,10 +263,15 @@ impl StorePackage {
                 ui.painter().circle_filled(radio, 4.5, argb(ACCENT));
             }
             if ui.interact(row, ui.scope_id().with(("package pick row", at)), Sense::click()).clicked() {
-                if which == 0 {
-                    self.category = at;
-                } else {
-                    self.licence = at;
+                match which {
+                    0 => self.category = at,
+                    1 => self.licence = at,
+                    _ => {
+                        if self.kind != at {
+                            self.kind = at;
+                            self.redraw = true;
+                        }
+                    }
                 }
                 self.picker = None;
             }
@@ -186,9 +279,13 @@ impl StorePackage {
         }
     }
 
-    /// The three things a listing cannot do without: a name, a description and at least one tag.
+    /// The three things a listing cannot do without: a name, a description and at least one tag;
+    /// and a pack, when it is one.
     fn ready(&self) -> bool {
-        !self.name.trim().is_empty() && !self.description.trim().is_empty() && !self.tags.trim().is_empty()
+        !self.name.trim().is_empty()
+            && !self.description.trim().is_empty()
+            && !self.tags.trim().is_empty()
+            && (self.kind == BRUSHES || self.pack.is_some())
     }
 
     /// Draws the sheet over everything it opened from. Closes on Cancel, on Escape, or on a press
@@ -196,6 +293,10 @@ impl StorePackage {
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, session: &Arc<CanvasSession>) {
         if !self.open {
             return;
+        }
+        // the picture carries the listing's name: one changed under it is drawn again
+        if self.typing.is_none() && self.drawn_name != self.name.trim() {
+            self.renew_picture(ctx, session);
         }
         if ui::escape(ctx) {
             match self.typing.take() {
@@ -344,7 +445,11 @@ impl StorePackage {
                 &painter,
                 Pos2::new(body.left(), y),
                 Align2::LEFT_TOP,
-                "The app drew the first one from the set.",
+                if self.kind == ASSET_PACK {
+                    "The app drew the first one from the pack's pictures. Its strokes go beside it when you export."
+                } else {
+                    "The app drew the first one from the set. Each brush's own stroke goes beside it when you export."
+                },
                 13.0,
                 Weight::Regular,
                 argb(ROW_INK),
@@ -381,16 +486,13 @@ impl StorePackage {
                 }
                 y += ROW_HEIGHT;
             }
-            // Kind is what the set is; the category and the licence are the maker's to say
+            // Kind is what is shared; the category and the licence are the maker's to say
             let line = |at: usize, list: &[&str], fallback: &str| list.get(at).copied().unwrap_or(fallback).to_owned();
-            for (at, (label, value)) in [
-                ("Kind", "Brush set".to_owned()),
-                ("Category", line(self.category, &CATEGORIES, "Brushes")),
-                ("Licence", line(self.licence, &LICENCES, "CC BY 4.0")),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for (menu, label, value) in [
+                (2, "Kind", line(self.kind, &KINDS, "Brush set")),
+                (0, "Category", line(self.category, &CATEGORIES, "Brushes")),
+                (1, "Licence", line(self.licence, &LICENCES, "CC BY 4.0")),
+            ] {
                 let row = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), ROW_HEIGHT));
                 painter.rect_filled(row, 10.0, argb(crate::store::GROUP_FILL));
                 text(
@@ -419,11 +521,47 @@ impl StorePackage {
                     13.0,
                     argb(IDLE),
                 );
-                if area.interact(row, area.scope_id().with(("package pick", at)), Sense::click()).clicked()
-                    && label != "Kind"
-                {
-                    // Category and Licence list what they may say under the row that was tapped
-                    self.picker = Some((at.saturating_sub(1), row, Rect::NOTHING));
+                if area.interact(row, area.scope_id().with(("package pick", label)), Sense::click()).clicked() {
+                    // Kind, Category and Licence list what they may say under the row that was tapped
+                    self.picker = Some((menu, row, Rect::NOTHING));
+                }
+                y += ROW_HEIGHT;
+            }
+            // a pack brings its own file: its pictures are what its card shows
+            if self.kind == ASSET_PACK {
+                let row = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), ROW_HEIGHT));
+                painter.rect_filled(row, 10.0, argb(crate::store::GROUP_FILL));
+                text(
+                    &painter,
+                    Pos2::new(row.left() + 16.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    "Pack file",
+                    17.0,
+                    Weight::Regular,
+                    argb(TITLE),
+                );
+                let shown = self.pack.as_ref().map(|pack| {
+                    pack.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+                });
+                text(
+                    &painter,
+                    Pos2::new(row.right() - 16.0 - 12.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    shown.as_deref().unwrap_or("Choose an .assetset"),
+                    17.0,
+                    Weight::Regular,
+                    argb(if shown.is_some() { ROW_INK } else { HINT }),
+                );
+                look.icon_on(
+                    area,
+                    &painter,
+                    &icons::CHEVRON_LEFT,
+                    Pos2::new(row.right() - 14.0, row.center().y),
+                    13.0,
+                    argb(IDLE),
+                );
+                if area.interact(row, area.scope_id().with("package pick pack"), Sense::click()).clicked() {
+                    self.pick_pack(ctx);
                 }
                 y += ROW_HEIGHT;
             }
@@ -467,14 +605,12 @@ impl StorePackage {
                 y += ROW_HEIGHT + 20.0;
             }
             // the three things a listing cannot do without, named once
-            let galley = wrapped(
-                &painter,
-                "A name, a description and one tag are needed to export.",
-                13.0,
-                Weight::Regular,
-                argb(ROW_INK),
-                body.width(),
-            );
+            let needed = if self.kind == ASSET_PACK && self.pack.is_none() {
+                "A name, a description, one tag and the pack's file are needed to export."
+            } else {
+                "A name, a description and one tag are needed to export."
+            };
+            let galley = wrapped(&painter, needed, 13.0, Weight::Regular, argb(ROW_INK), body.width());
             y += galley.size().y;
             painter.galley(Pos2::new(body.left(), y - galley.size().y), galley, argb(ROW_INK));
             // the choices a tapped row listed, over the sheet
@@ -482,6 +618,17 @@ impl StorePackage {
                 self.pick_menu(area, sheet, which, anchor);
             }
         });
+        // the kind changed under the picture: a set's is drawn again, a pack's again from its
+        // file, or waits for one
+        if std::mem::take(&mut self.redraw) {
+            if self.kind == ASSET_PACK && self.pack.is_none() {
+                self.picture = None;
+                self.texture = None;
+                self.drawn_name = self.name.trim().to_owned();
+            } else {
+                self.renew_picture(ctx, session);
+            }
+        }
         // a press anywhere else closes the picker
         if had_picker
             && ctx.input(|i| i.pointer.any_click())
@@ -495,32 +642,59 @@ impl StorePackage {
         }
     }
 
-    /// Writes the set out: its file, and a details file saying what a listing needs.
+    /// Writes it out: its file, the store's pictures, and a details file saying what a listing
+    /// needs.
     fn export(&mut self, session: &Arc<CanvasSession>) {
         let Some(folder) = rfd::FileDialog::new().set_title("Where the set goes").pick_folder() else { return };
-        let Some(bytes) = session.brush_set_as_file(self.set) else {
-            crate::files::tell("Store", "The set could not be written.");
-            return;
-        };
         let name = self.name.trim().to_owned();
+        // the package's own file, and the kind a listing says it is
+        let (kind, file, bytes) = if self.kind == ASSET_PACK {
+            let Some(pack) = &self.pack else {
+                crate::files::tell("Store", "The pack's file is needed first.");
+                return;
+            };
+            let Ok(bytes) = std::fs::read(&pack.path) else {
+                crate::files::tell("Store", "The pack's file could not be read.");
+                return;
+            };
+            ("asset pack", pack.file.clone(), bytes)
+        } else {
+            let Some(bytes) = session.brush_set_as_file(self.set) else {
+                crate::files::tell("Store", "The set could not be written.");
+                return;
+            };
+            ("brushset", "file.brushset".to_owned(), bytes)
+        };
         let dir = folder.join(folder_of(&name));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             crate::files::tell("Store", &format!("The folder could not be made: {e}"));
             return;
         }
-        if let Err(e) = std::fs::write(dir.join("file.brushset"), &bytes) {
-            crate::files::tell("Store", &format!("The set could not be written: {e}"));
+        if let Err(e) = std::fs::write(dir.join(&file), &bytes) {
+            crate::files::tell("Store", &format!("The file could not be written: {e}"));
             return;
         }
-        // the drawn picture first, then their own, so the store shows them in that order
+        // the app's pictures first - the card, then the set's strokes a page of them at a time -
+        // and then their own, so a store shows them in that order
         let mut pictures = Vec::new();
-        match self.picture.as_ref().and_then(png_bytes).map(|png| std::fs::write(dir.join("preview.png"), png)) {
-            Some(Err(e)) => {
-                crate::files::tell("Store", &format!("The picture could not be written: {e}"));
+        let previews = if self.kind == ASSET_PACK {
+            let Some(pack) = &self.pack else { return };
+            let at = pack.path.to_string_lossy().into_owned();
+            procraft_core::asset_pack_store_preview(at, name.clone()).into_iter().collect()
+        } else {
+            session.brush_set_store_previews(self.library, self.set, name.clone())
+        };
+        for (at, preview) in previews.iter().enumerate() {
+            let Some(picture) = image::RgbaImage::from_raw(preview.width, preview.height, preview.rgba.clone()) else {
+                continue;
+            };
+            let Some(png) = png_bytes(&picture) else { continue };
+            let named = if at == 0 { "preview.png".to_owned() } else { format!("strokes-{at}.png") };
+            if let Err(e) = std::fs::write(dir.join(&named), png) {
+                crate::files::tell("Store", &format!("A picture could not be written: {e}"));
                 return;
             }
-            Some(Ok(())) => pictures.push("preview.png".to_owned()),
-            None => {}
+            pictures.push(named);
         }
         for (at, shot) in self.pictures.iter().enumerate() {
             let Some(png) = png_bytes(&shot.image) else { continue };
@@ -535,7 +709,7 @@ impl StorePackage {
         let category = CATEGORIES.get(self.category).copied().unwrap_or("Brushes");
         let licence = LICENCES.get(self.licence).copied().unwrap_or("CC BY 4.0");
         let details = procraft_core::package_details(
-            "brushset",
+            kind,
             &name,
             self.author.trim(),
             self.description.trim(),
@@ -557,11 +731,13 @@ impl StorePackage {
     fn height(&self) -> f32 {
         let cells = 1 + self.pictures.len() + usize::from(self.pictures.len() < MOST_OWN);
         let rows = cells.div_ceil(PER_ROW) as f32;
+        let pack = if self.kind == ASSET_PACK { ROW_HEIGHT } else { 0.0 };
         16.0 + 18.0
             + (THUMB_H + GAP) * rows
             + 28.0
             + 18.0
             + ROW_HEIGHT * 5.0
+            + pack
             + 8.0
             + 32.0
             + (18.0 + ROW_HEIGHT + 20.0) * 2.0
