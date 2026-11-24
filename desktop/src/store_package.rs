@@ -288,7 +288,7 @@ impl StorePackage {
                         }
                         None => {
                             let icon = icons::SET_ICONS.get(self.icon).unwrap_or(&icons::BRUSH_SET);
-                            look.icon(area, icon, thumb.center(), 30.0, argb(IDLE));
+                            look.icon_on(area, &painter, icon, thumb.center(), 30.0, argb(IDLE));
                         }
                     }
                 } else if at <= self.pictures.len() {
@@ -306,7 +306,7 @@ impl StorePackage {
                     }
                 } else {
                     painter.rect_stroke(thumb, 10.0, Stroke::new(2.0, argb(SEP)), egui::StrokeKind::Inside);
-                    look.icon(area, &icons::PLUS_MEDIUM, thumb.center(), 22.0, argb(ROW_INK));
+                    look.icon_on(area, &painter, &icons::PLUS_MEDIUM, thumb.center(), 22.0, argb(ROW_INK));
                     if area.interact(thumb, area.scope_id().with("package add"), Sense::click()).clicked() {
                         take = true;
                     }
@@ -363,7 +363,7 @@ impl StorePackage {
                     Weight::Regular, argb(TITLE));
                 text(&painter, Pos2::new(row.right() - 16.0 - 12.0, row.center().y), Align2::RIGHT_CENTER, &value,
                     17.0, Weight::Regular, argb(ROW_INK));
-                look.icon(area, &icons::CHEVRON_LEFT, Pos2::new(row.right() - 14.0, row.center().y), 13.0,
+                look.icon_on(area, &painter, &icons::CHEVRON_LEFT, Pos2::new(row.right() - 14.0, row.center().y), 13.0,
                     argb(IDLE));
                 if area.interact(row, area.scope_id().with(("package pick", at)), Sense::click()).clicked()
                     && label != "Kind"

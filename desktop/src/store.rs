@@ -858,7 +858,8 @@ impl StoreSheet {
                 let see = Rect::from_min_max(Pos2::new(head.right() - 92.0, head.top()), head.right_top());
                 text(&painter, Pos2::new(see.right() - 14.0, see.center().y), Align2::RIGHT_CENTER, "See all", 15.0,
                     Weight::Regular, ink(ACCENT));
-                look.icon(ui, &icons::CHEVRON_RIGHT, Pos2::new(see.right() - 3.0, see.center().y), 11.0, ink(ACCENT));
+                look.icon_on(ui, &painter, &icons::CHEVRON_RIGHT, Pos2::new(see.right() - 3.0, see.center().y), 11.0,
+                    ink(ACCENT));
                 if ui.interact(see, ui.scope_id().with(("store see all", kind.text())), Sense::click()).clicked() {
                     self.go(View::SeeAll(kind));
                 }
@@ -925,8 +926,8 @@ impl StoreSheet {
                 let scrim = Rect::from_min_max(Pos2::new(band.left(), band.top() + BAND_HEIGHT * 0.2), band.max);
                 scrim_rounded(painter, scrim, 20.0, 8, 208);
             }
-            None => look.icon(ui, kind_icon(item.kind), Pos2::new(band.right() - 110.0, band.top() + 84.0), 120.0,
-                ink(IDLE).gamma_multiply(0.35)),
+            None => look.icon_on(ui, painter, kind_icon(item.kind), Pos2::new(band.right() - 110.0, band.top() + 84.0),
+                120.0, ink(IDLE).gamma_multiply(0.35)),
         }
         let left = band.left() + 20.0;
         // the words stack above the foot: the app row, then one sentence, the name, the kicker
@@ -942,7 +943,7 @@ impl StoreSheet {
         // the app row: its icon, the publisher, and the state at the end
         let tile = Rect::from_center_size(Pos2::new(left + 12.0, row), Vec2::splat(24.0));
         painter.rect_filled(tile, 6.0, ink(PILL_FILL));
-        look.icon(ui, kind_icon(item.kind), tile.center(), 14.0, ink(TITLE));
+        look.icon_on(ui, painter, kind_icon(item.kind), tile.center(), 14.0, ink(TITLE));
         text(painter, Pos2::new(tile.right() + 8.0, tile.center().y), Align2::LEFT_CENTER, &item.publisher, 13.0,
             Weight::Regular, ink(ROW_INK));
         state_pill(painter, look, ui, installed(store, item), needs_update(store, item), band.right() - 20.0,
@@ -974,7 +975,7 @@ impl StoreSheet {
                 Some(picture) => {
                     painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
                 }
-                None => look.icon(ui, kind_icon(item.kind), art.center(), 36.0, ink(IDLE)),
+                None => look.icon_on(ui, painter, kind_icon(item.kind), art.center(), 36.0, ink(IDLE)),
             }
             text(painter, Pos2::new(left, art.bottom() + 10.0), Align2::LEFT_TOP, &item.name, 15.0,
                 Weight::SemiBold, ink(TITLE));
@@ -1006,7 +1007,7 @@ impl StoreSheet {
             Some(picture) => {
                 painter.image(picture.id(), tile, fill_uv(picture.size_vec2(), tile.size()), Color32::WHITE);
             }
-            None => look.icon(ui, kind_icon(item.kind), tile.center(), 24.0, ink(IDLE)),
+            None => look.icon_on(ui, painter, kind_icon(item.kind), tile.center(), 24.0, ink(IDLE)),
         }
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 11.0);
         text(painter, name, Align2::LEFT_CENTER, &item.name, 17.0, Weight::Regular, ink(TITLE));
@@ -1041,7 +1042,7 @@ impl StoreSheet {
         // the head: the icon, the name with its kind, the publisher, and the one action
         let icon = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::splat(ICON));
         painter.rect_filled(icon, 27.0, ink(TILE_FILL));
-        look.icon(ui, kind_icon(item.kind), icon.center(), 56.0, ink(IDLE));
+        look.icon_on(ui, &painter, kind_icon(item.kind), icon.center(), 56.0, ink(IDLE));
         let mut x = icon.right() + 20.0;
         let name_y = icon.top() + 34.0;
         text(&painter, Pos2::new(x, name_y), Align2::LEFT_CENTER, &item.name, 30.0, Weight::Bold, ink(TITLE));
@@ -1222,7 +1223,7 @@ impl StoreSheet {
                     Some(picture) => {
                         painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
                     }
-                    None => look.icon(ui, kind_icon(other.kind), art.center(), 36.0, ink(IDLE)),
+                    None => look.icon_on(ui, &painter, kind_icon(other.kind), art.center(), 36.0, ink(IDLE)),
                 }
                 text(&painter, Pos2::new(left, art.bottom() + 12.0), Align2::LEFT_TOP, &other.name, 16.0,
                     Weight::SemiBold, ink(TITLE));
@@ -1281,7 +1282,7 @@ impl StoreSheet {
             // a disclosure indicator: the same chevron at the HIG's 13, its trailing edge 16 in
             // from the row's edge, its middle on the row's
             let chev = Pos2::new(row.right() - 16.0 - 6.5, row.center().y);
-            look.icon(ui, &icons::CHEVRON_RIGHT, chev, 13.0, ink(IDLE));
+            look.icon_on(ui, &painter, &icons::CHEVRON_RIGHT, chev, 13.0, ink(IDLE));
             if ui.interact(row, ui.scope_id().with(("store source", source.id.clone())), Sense::click()).clicked() {
                 self.go(View::Source { id: source.id.clone() });
             }
@@ -1602,7 +1603,7 @@ impl StoreSheet {
                 Some(picture) => {
                     painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
                 }
-                None => look.icon(ui, kind_icon(item.kind), art.center(), 40.0, ink(IDLE)),
+                None => look.icon_on(ui, &painter, kind_icon(item.kind), art.center(), 40.0, ink(IDLE)),
             }
             text(&painter, Pos2::new(left, art.bottom() + 12.0), Align2::LEFT_TOP, &item.name, 16.0,
                 Weight::SemiBold, ink(TITLE));
@@ -1701,7 +1702,7 @@ impl StoreSheet {
         }
         let tile = Rect::from_min_size(Pos2::new(row.left() + 16.0, row.center().y - 17.0), Vec2::splat(34.0));
         painter.rect_filled(tile, 8.0, ink(TILE_FILL));
-        look.icon(ui, kind_icon(one.kind), tile.center(), 20.0, ink(IDLE));
+        look.icon_on(ui, painter, kind_icon(one.kind), tile.center(), 20.0, ink(IDLE));
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 10.0);
         text(painter, name, Align2::LEFT_CENTER, &one.name, 17.0, Weight::Regular, ink(TITLE));
         let line = format!("Version {} - {}", one.version, date_text(one.at, false));
@@ -1925,7 +1926,7 @@ fn state_pill(
     painter.rect_filled(pill, PILL_STATE / 2.0, ink(if update { ACCENT } else { PILL_STATE_FILL }));
     let mut x = pill.left() + 14.0;
     if tick {
-        look.icon(ui, &icons::TICK, Pos2::new(x + 7.0, pill.center().y), 15.0, ink(ROW_INK));
+        look.icon_on(ui, painter, &icons::TICK, Pos2::new(x + 7.0, pill.center().y), 15.0, ink(ROW_INK));
         x += 21.0;
     }
     let colour = if update { ACCENT_ON } else if installed { ROW_INK } else { ACCENT };
@@ -2350,5 +2351,86 @@ mod tests {
         assert_eq!(source_line(&stale), "it could not be read");
         let read = source("https://example.org/c.json", "R. Halloway", 1_772_000_000, "");
         assert!(source_line(&read).starts_with("R. Halloway - "));
+    }
+
+    /// The list scrolls under its clip, and the glyphs in it are masked at the list's edge as the
+    /// words beside them are: none of them paints above the edge, however far the list has gone.
+    /// The sheet is drawn whole with a store of its own, then what it painted is read back: every
+    /// picture of a glyph over the edge carries the list's clip, not the sheet's.
+    #[test]
+    fn a_glyph_scrolled_over_the_list_s_edge_is_masked_by_it() {
+        let dir = std::env::temp_dir().join(format!("procraft-store-glyphs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_string_lossy().into_owned();
+        let store = procraft_core::Store::open(path.clone());
+        let session = Arc::new(procraft_core::CanvasSession::new(64, 48));
+        let plugins = procraft_core::Plugins::with_store(dir.join("plugins").to_string_lossy().into_owned());
+        let mut sheet = StoreSheet { store: Some(store), open: true, ..StoreSheet::default() };
+        let mut look = Look::default();
+        // the window it is drawn in, and where the page puts the list's top edge in it: under the
+        // title, the search field and the categories
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 900.0));
+        let size = Vec2::new(WIDTH.min(screen.width() - 40.0), HEIGHT.min(screen.height() - 96.0));
+        let sheet_rect = Rect::from_center_size(screen.center(), size);
+        let body_top = sheet_rect.top() + BAR;
+        let list_top = body_top + 12.0 + TITLE_LINE + 16.0 + SEARCH_HEIGHT + 16.0 + PILL_HEIGHT + 12.0;
+        let above = Rect::from_min_max(
+            Pos2::new(sheet_rect.left() + INSET, body_top),
+            Pos2::new(sheet_rect.right() - INSET, list_top),
+        );
+        let ctx = egui::Context::default();
+        // the fonts' texture is the first egui makes, and it carries the white pixel every solid
+        // shape draws from: laid out once here, as the interface's own words lay it out first in
+        // the app, so the sheet's glyphs take textures of their own
+        let warm = egui::RawInput { screen_rect: Some(screen), ..egui::RawInput::default() };
+        let mut warmed = ctx.run_ui(warm, |ui| {
+            ui.label("warm");
+        });
+        warmed.textures_delta.clear();
+        /// What a frame at `scroll` painted of the glyphs that reached above the list: each glyph's
+        /// own place, and the clip its painter gave it. A glyph is a mesh the size of a glyph: the
+        /// sheet's shadow, its fades and its scrims are meshes too, and are the sheet's own.
+        fn glyphs_above(
+            ctx: &egui::Context,
+            sheet: &mut StoreSheet,
+            look: &mut Look,
+            session: &Arc<procraft_core::CanvasSession>,
+            plugins: &Arc<procraft_core::Plugins>,
+            screen: Rect,
+            above: Rect,
+            scroll: f32,
+        ) -> Vec<(Rect, Rect)> {
+            sheet.scroll = scroll;
+            let input = egui::RawInput { screen_rect: Some(screen), ..egui::RawInput::default() };
+            let mut output = ctx.run_pass(input, |ctx| sheet.show(ctx, look, session, plugins));
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Mesh(mesh) => {
+                        let bounds = mesh.calc_bounds();
+                        (bounds.width() <= 300.0 && bounds.height() <= 300.0 && bounds.intersects(above))
+                            .then_some((bounds, clipped.clip_rect))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        // at rest nothing of the list reaches above it
+        let still = glyphs_above(&ctx, &mut sheet, &mut look, &session, &plugins, screen, above, 0.0);
+        assert!(still.is_empty(), "at rest the list's glyphs stay under its top edge: {still:?}");
+        // scrolled, the band's glyph crosses that edge (the scroll stops where the list ends): it
+        // must still be clipped by the list, as its words are
+        let scrolled = glyphs_above(&ctx, &mut sheet, &mut look, &session, &plugins, screen, above, 420.0);
+        assert!(!scrolled.is_empty(), "the scroll brings a glyph over the list's top edge");
+        assert!(sheet.scroll > 24.0, "the list has room to scroll: {}", sheet.scroll);
+        for (bounds, clip) in &scrolled {
+            assert!(
+                clip.top() >= list_top - 0.5,
+                "a glyph over the edge is clipped to the list, not to the sheet: {bounds:?} clipped {clip:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

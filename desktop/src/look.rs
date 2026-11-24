@@ -541,11 +541,15 @@ impl Look {
     }
 
     /// `icon` shown `width` points across (its frame scaled to it), centred at `centre`, in `colour`.
+    /// It paints through `ui`'s own painter, so it is masked by `ui`'s clip alone: a glyph inside a
+    /// list that scrolls takes [`Look::icon_on`] with the painter its words go through instead, or
+    /// it paints past the list's edge.
     pub fn icon(&mut self, ui: &Ui, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
         self.icon_on(ui, ui.painter(), icon, centre, width, colour);
     }
 
-    /// [`Look::icon`] drawn with `painter`, within what it clips to.
+    /// [`Look::icon`] drawn with `painter`, within what it clips to: a list's painter masks it as it
+    /// masks the words beside it.
     pub fn icon_on(&mut self, ui: &Ui, painter: &Painter, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
         let ppp = self.pixels_per_point(ui);
         let px = (width * ppp).round().max(1.0) as u32;
