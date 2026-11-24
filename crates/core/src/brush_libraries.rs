@@ -298,6 +298,24 @@ fn write(path: &Path, text: &str) -> bool {
     written.is_ok()
 }
 
+impl CanvasSession {
+    /// The brushes of the set at `set` in the library at `library`: the one in use's, or another's
+    /// read from its files (once, and kept a while).
+    pub(crate) fn brush_set_brushes(&self, library: u32, set: u32) -> Option<Vec<Brush>> {
+        let (held, id, dir) = {
+            let st = self.shared.lock();
+            let l = &st.libraries;
+            (l.held.clone(), l.list.get(library as usize)?.id.clone(), l.dir.clone())
+        };
+        if id == held {
+            return self.shared.lock().library.get(set as usize).map(|set| set.brushes.clone());
+        }
+        let dir = dir?;
+        let (sets, _) = self.library_read(&id, &dir)?;
+        sets.get(set as usize).map(|set| set.brushes.clone())
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Every brush library in order, the one in use among them.
@@ -329,16 +347,7 @@ impl CanvasSession {
         width: u32,
         height: u32,
     ) -> Option<ThumbnailImage> {
-        let (held, id, dir) = {
-            let st = self.shared.lock();
-            let l = &st.libraries;
-            (l.held.clone(), l.list.get(library as usize)?.id.clone(), l.dir.clone())
-        };
-        if id == held {
-            return self.brush_preview(set, index, width, height);
-        }
-        let (sets, _) = self.library_read(&id, &dir?)?;
-        let brush = sets.get(set as usize)?.brushes.get(index as usize)?.clone();
+        let brush = self.brush_set_brushes(library, set)?.get(index as usize)?.clone();
         self.drawn_preview(brush, width, height)
     }
 

@@ -25127,3 +25127,50 @@ fn time_lapse_hold_back_to_back() {
     assert!(run.last_all, "a stroke missing from the last frame");
     assert!(run.kept as usize >= run.strokes, "{} frames for {} strokes", run.kept, run.strokes);
 }
+
+/// The store previews real items make, saved as PNGs in `PROCRAFT_DUMP`: a brush set's as the
+/// package sheet draws it (read into a session on a headless GPU), an asset pack's as it is laid
+/// out from the pictures in the archive (no GPU). `BRUSH_SET` and `ASSET_SET` take a `;` separated
+/// list of files each.
+/// `BRUSH_SET=a.brushset ASSET_SET=b.assetset PROCRAFT_DUMP=dir cargo test -p procraft-core
+/// dump_store_previews -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn dump_store_previews() {
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let _ = std::fs::create_dir_all(&root);
+    let paths = |key: &str| -> Vec<std::path::PathBuf> {
+        std::env::var(key)
+            .unwrap_or_default()
+            .split(';')
+            .filter(|path| !path.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect()
+    };
+    let stem = |path: &std::path::Path| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let save = |name: &str, preview: crate::StorePreview| {
+        let png = crate::project::png_of(preview.width, preview.height, &preview.rgba).unwrap();
+        std::fs::write(root.clone() + "/" + name + ".png", png).unwrap();
+    };
+    for path in paths("BRUSH_SET") {
+        let Some(s) = session(100, 100) else { return };
+        let name = stem(&path);
+        let set = s.import_brushes(std::fs::read(&path).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let previews = s.brush_set_store_previews(0, set, name.clone());
+        let brushes = s.brush_library()[set as usize].brushes.len();
+        eprintln!("{name}: {brushes} brushes, {} previews drawn in {:?}", previews.len(), started.elapsed());
+        for (at, preview) in previews.into_iter().enumerate() {
+            let png = crate::project::png_of(preview.width, preview.height, &preview.rgba).unwrap();
+            let file = if at == 0 { format!("{name}.png") } else { format!("{name}-strokes-{at}.png") };
+            std::fs::write(root.clone() + "/" + &file, png).unwrap();
+        }
+    }
+    for path in paths("ASSET_SET") {
+        let name = stem(&path);
+        let started = std::time::Instant::now();
+        let preview = crate::asset_pack_store_preview(path.to_string_lossy().into_owned(), name.clone()).unwrap();
+        eprintln!("{name}: pack preview drawn in {:?}", started.elapsed());
+        save(&name, preview);
+    }
+}

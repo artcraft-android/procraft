@@ -737,7 +737,8 @@ pub fn digest_of(bytes: &[u8]) -> String {
 }
 
 /// The details file a store package carries: what a listing needs to know about the set, and
-/// nothing else. The file itself stays the set's own; this is what the store reads beside it.
+/// nothing else. The file itself stays the set's own; this is what the store reads beside it. Its
+/// first picture is the one a catalogue's card shows, so it is named on its own too.
 pub fn package_details(
     kind: &str,
     name: &str,
@@ -749,6 +750,7 @@ pub fn package_details(
     pictures: &[String],
     exported: &str,
 ) -> String {
+    let preview = pictures.first().map_or("", String::as_str);
     serde_json::json!({
         "schema": 1,
         "kind": kind,
@@ -758,6 +760,7 @@ pub fn package_details(
         "category": category,
         "licence": licence,
         "tags": tags,
+        "preview": preview,
         "pictures": pictures,
         "exported": exported,
     })
@@ -1593,6 +1596,7 @@ mod tests {
         assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("Dry Ink"));
         assert_eq!(value.get("tags").and_then(|v| v.as_array()).map(Vec::len), Some(2));
         assert_eq!(value.get("pictures").and_then(|v| v.as_array()).map(Vec::len), Some(1));
+        assert_eq!(value.get("preview").and_then(|v| v.as_str()), Some("preview.png"));
         assert_eq!(value.get("licence").and_then(|v| v.as_str()), Some("CC BY 4.0"));
     }
 

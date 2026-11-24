@@ -123,6 +123,7 @@ mod stock_brushes;
 mod stock_library;
 mod storage;
 mod store;
+mod store_previews;
 mod stroke_sound;
 mod studio;
 mod surround;
@@ -302,6 +303,12 @@ pub use side_slider::{
 };
 pub use storage::{NO_ROOM, save_failure_to_tell, storage_full_writes, storage_was_full};
 pub use store::{Fetched, Installed, ItemKind, SourceInfo, Store, StoreItem, digest_of, package_details};
+pub use store_previews::{
+    BrushShape, Gesture, MOST_PICTURES, MOST_SHEETS, MOST_SHOWN, PREVIEW_HEIGHT, PREVIEW_WIDTH, PathShape,
+    SHEET_COLUMNS, SHEET_ROWS, SHEET_STROKES, StorePreview, Stroke, Tile, asset_pack_name, asset_pack_store_preview,
+    card_gestures, pack_card, pack_picture_choices, picture_tiles, seed_of, select_brushes, stroke_placements,
+    stroke_sheet, strokes_picture,
+};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     small_source, source_from_copy, source_from_picture, source_library, source_size,

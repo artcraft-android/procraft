@@ -872,6 +872,91 @@ impl CanvasSession {
         canvas.forget_history();
         canvas.read_composite(gpu).ok()
     }
+
+    /// `strokes` painted one after another by the brush engine on a clear canvas `width` ×
+    /// `height`: premultiplied RGBA8 rows, none if the GPU can't draw them.
+    pub(crate) fn painted(&self, strokes: &[Painted], width: u32, height: u32) -> Option<Vec<u8>> {
+        let _drawing = PREVIEWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gpu = self.shared.lock().gpu.clone()?;
+        if gpu.is_lost() {
+            return None;
+        }
+        let drawn = gpu.checked(|| {
+            let mut doc = Document::new(width, height);
+            doc.background_visible = false;
+            let mut canvas = Box::new(Canvas::new(&gpu, &doc).ok()?);
+            canvas.pace(true);
+            let layer = doc.current();
+            for stroke in strokes {
+                let brush = &stroke.brush;
+                let mut style = StrokeStyle::for_brush(brush, StrokeTool::Paint, stroke.ink, 1.0, false);
+                if brush.setting("preview_wet_mix") < 0.5 {
+                    style = style.dry();
+                }
+                style.preview = true;
+                style.sample = true;
+                draw_pictures(brush);
+                canvas.use_sources(&gpu, &mut style, brush);
+                self.use_full_sources(&gpu, &mut canvas, &mut style, brush);
+                // a dual brush's second, along the same path at its own size
+                let second = brush.secondary.as_deref().filter(|_| style.takes_second()).map(|second| {
+                    let second = second.clone().as_second();
+                    let mut second_style =
+                        StrokeStyle::for_brush(&second, StrokeTool::Paint, stroke.ink, 1.0, false).as_second();
+                    second_style.preview = true;
+                    second_style.sample = true;
+                    canvas.use_sources(&gpu, &mut second_style, &second);
+                    self.use_full_sources(&gpu, &mut canvas, &mut second_style, &second);
+                    let mode = brush.setting("dual_blend").round().max(0.0) as u32;
+                    let classic = brush.setting("classic_combine") >= 0.5;
+                    let threshold = second_style.alpha_threshold;
+                    let diameter = preview::diameter(&second);
+                    let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
+                    (second, dual, diameter)
+                });
+                match &second {
+                    Some((_, dual, _)) => canvas.begin_dual_stroke(layer, style, *dual),
+                    None => canvas.begin_stroke(layer, style),
+                }
+                let make = |part: procraft_engine::brush::Brush, diameter: f32| {
+                    StrokeBuilder::new(part, diameter, Pointer::Stylus)
+                        .with_input(InputSettings { tilt_known: false, ..InputSettings::default() })
+                        .steady()
+                        .on_pad(false)
+                };
+                if let Some((second, _, diameter)) = second {
+                    let mut builder = make(second, diameter);
+                    canvas.add_second_stamps(&builder.add(&stroke.samples));
+                    canvas.replace_second_stamps(&builder.finish());
+                }
+                let first = procraft_engine::brush::Brush { pressure_smoothing: 0.0, ..brush.clone() };
+                let mut builder = make(first, stroke.diameter);
+                canvas.add_stamps(&builder.add(&stroke.samples));
+                canvas.replace_stamps(&builder.finish());
+                canvas.end_stroke();
+            }
+            canvas.render(&gpu, &mut doc, None);
+            canvas.forget_history();
+            canvas.read_composite(&gpu).ok()
+        });
+        match drawn {
+            Ok(drawn) => drawn,
+            Err(e) => {
+                log::error!("a card's strokes couldn't be painted: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// One stroke of a card's painting: its brush, the ink it takes, the pen's path along it, and the
+/// diameter it is drawn at.
+pub(crate) struct Painted {
+    pub brush: procraft_engine::brush::Brush,
+    /// sRGB, 0..1.
+    pub ink: [f32; 3],
+    pub samples: Vec<procraft_engine::input::Sample>,
+    pub diameter: f32,
 }
 
 /// What an engine's preview strokes are seeded with: the same each time.
