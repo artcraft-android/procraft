@@ -46,6 +46,11 @@ const CHIP: f32 = 28.0;
 const GROUP_ROW: f32 = 56.0;
 const GROUP_HEAD: f32 = 16.0;
 const GROUP_FOOT: f32 = 26.0;
+// a grouped list's header rhythm: the header's line, and the 8 between it and what it labels
+const GROUP_LINE: f32 = 17.0;
+// a grouped list's separator: inset 16 in from both content edges
+const GROUP_RULE_INSET: f32 = 16.0;
+const GROUP_HEAD_BELOW: f32 = 8.0;
 
 /// The same colours the board writes, as the interface's pairs: dark first, light second.
 pub(crate) const BG: Themed = Themed(0xFF212121, 0xFFF0F0F0);
@@ -832,7 +837,7 @@ impl StoreSheet {
         }        let updated: Vec<&procraft_core::StoreItem> =
             items.iter().filter(|item| needs_update(store, item)).collect();
         if !updated.is_empty() {
-            let head = Rect::from_min_size(Pos2::new(list.left(), y + HEADING_ABOVE), Vec2::new(list.width(), 30.0));
+            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
             text(&painter, head.left_top(), Align2::LEFT_TOP, "Updates", SECTION, Weight::Bold, ink(TITLE));
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
             for (at, item) in updated.iter().take(ROWS_SHOWN).enumerate() {
@@ -846,7 +851,7 @@ impl StoreSheet {
             if group.is_empty() {
                 continue;
             }
-            let head = Rect::from_min_size(Pos2::new(list.left(), y + HEADING_ABOVE), Vec2::new(list.width(), 30.0));
+            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
             text(&painter, head.left_top(), Align2::LEFT_TOP, section_title(kind), SECTION, Weight::Bold, ink(TITLE));
             // a section that hides anything says so, and opens as its own wall
             if group.len() > ROWS_SHOWN {
@@ -880,7 +885,7 @@ impl StoreSheet {
             .filter_map(|one| items.iter().find(|item| item.id == one.id))
             .collect();
         if !took.is_empty() {
-            let head = Rect::from_min_size(Pos2::new(list.left(), y + HEADING_ABOVE), Vec2::new(list.width(), 30.0));
+            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
             text(&painter, head.left_top(), Align2::LEFT_TOP, "Installed", SECTION, Weight::Bold, ink(TITLE));
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
             self.shelf(&painter, look, ui, store, &took, list, y, ink);
@@ -1012,7 +1017,7 @@ impl StoreSheet {
         // every row but a group's first carries the rule above it
         if at > 0 {
             painter.line_segment(
-                [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                 Stroke::new(1.0, ink(SEP)),
             );
         }
@@ -1122,11 +1127,12 @@ impl StoreSheet {
                         Stroke::new(1.0, ink(SEP)),
                     );
                 }
-                let at_x = left + if at == 0 { 0.0 } else { 10.0 };
-                text(&painter, Pos2::new(at_x, strip.top() + 12.0), Align2::LEFT_TOP, label, 11.0, Weight::SemiBold,
-                    ink(IDLE));
-                text(&painter, Pos2::new(at_x, strip.top() + 31.0), Align2::LEFT_TOP, value, 16.0, Weight::SemiBold,
-                    ink(TITLE));
+                let at_x = left + if at == 0 { 16.0 } else { 10.0 };
+                // a header's rhythm here too: 16 over the label, 8 between it and its value
+                text(&painter, Pos2::new(at_x, strip.top() + GROUP_HEAD), Align2::LEFT_TOP, label, 11.0,
+                    Weight::SemiBold, ink(IDLE));
+                text(&painter, Pos2::new(at_x, strip.top() + GROUP_HEAD + GROUP_LINE + GROUP_HEAD_BELOW), Align2::LEFT_TOP,
+                    value, 16.0, Weight::SemiBold, ink(TITLE));
             }
             y = strip.bottom() + 24.0;
         }
@@ -1138,7 +1144,7 @@ impl StoreSheet {
             painter.galley(Pos2::new(body.left(), y - galley.size().y), galley, ink(ROW_INK));
             y += 40.0;
         }
-        text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP, "Details", SECTION, Weight::Bold, ink(TITLE));
+        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "Details", SECTION, Weight::Bold, ink(TITLE));
         y += 30.0 + HEADING_BELOW;
         let rows: Vec<(String, String)> = vec![
             ("Category".to_owned(), item.category.clone()),
@@ -1158,7 +1164,7 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
@@ -1173,7 +1179,7 @@ impl StoreSheet {
                 Vec2::new(card.width(), GROUP_ROW),
             );
             painter.line_segment(
-                [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                 Stroke::new(1.0, ink(SEP)),
             );
             text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, "Tags", 17.0,
@@ -1203,7 +1209,7 @@ impl StoreSheet {
             .take(3)
             .collect();
         if !more.is_empty() {
-            text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP, &format!("More from {}", item.publisher),
+            text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, &format!("More from {}", item.publisher),
                 SECTION, Weight::Bold, ink(TITLE));
             y += 30.0 + HEADING_BELOW;
             let gap = 16.0;
@@ -1251,9 +1257,7 @@ impl StoreSheet {
         let mut y = title.bottom() + 24.0 - self.scroll;
         // Sources: one row each, and the way to add one
         let sources = store.sources();
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "SOURCES", 13.0, Weight::Regular,
-            ink(ROW_INK));
-        y += GROUP_HEAD;
+        y = group_head(&painter, body, y, "SOURCES", ink(ROW_INK));
         let rows = sources.len() + 1;
         let card = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), rows as f32 * GROUP_ROW));
         painter.rect_filled(card, 10.0, ink(GROUP_FILL));
@@ -1264,7 +1268,7 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
@@ -1274,8 +1278,10 @@ impl StoreSheet {
             let line = source_line(source);
             text(&painter, Pos2::new(name.x, row.center().y + 11.0), Align2::LEFT_CENTER, &line, 15.0,
                 Weight::Regular, ink(ROW_INK));
-            let chev = Pos2::new(row.right() - 22.0, row.center().y);
-            look.icon(ui, &icons::CHEVRON_LEFT, chev, 13.0, ink(IDLE));
+            // a disclosure indicator: the same chevron at the HIG's 13, its trailing edge 16 in
+            // from the row's edge, its middle on the row's
+            let chev = Pos2::new(row.right() - 16.0 - 6.5, row.center().y);
+            look.icon(ui, &icons::CHEVRON_RIGHT, chev, 13.0, ink(IDLE));
             if ui.interact(row, ui.scope_id().with(("store source", source.id.clone())), Sense::click()).clicked() {
                 self.go(View::Source { id: source.id.clone() });
             }
@@ -1306,9 +1312,7 @@ impl StoreSheet {
         y += GROUP_FOOT + 26.0;
         // Updates: when the sources were last read, which is the only checking there is so far
         let checked = store.sources().iter().map(|source| source.read).max().unwrap_or(0);
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "UPDATES", 13.0, Weight::Regular,
-            ink(ROW_INK));
-        y += GROUP_HEAD;
+        y = group_head(&painter, body, y, "UPDATES", ink(ROW_INK));
         let updates = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), GROUP_ROW));
         painter.rect_filled(updates, 10.0, ink(GROUP_FILL));
         text(&painter, Pos2::new(updates.left() + 16.0, updates.center().y), Align2::LEFT_CENTER, "Last Checked",
@@ -1324,9 +1328,7 @@ impl StoreSheet {
         // Storage: what came with the app, and what the store installed
         let items = store.items();
         let came = items.iter().filter(|item| item.file.is_empty()).count() + store.installed().len();
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "STORAGE", 13.0, Weight::Regular,
-            ink(ROW_INK));
-        y += GROUP_HEAD;
+        y = group_head(&painter, body, y, "STORAGE", ink(ROW_INK));
         let storage = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), GROUP_ROW * 2.0));
         painter.rect_filled(storage, 10.0, ink(GROUP_FILL));
         for (at, (label, value)) in
@@ -1338,7 +1340,7 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
@@ -1395,7 +1397,7 @@ impl StoreSheet {
                 Vec2::new(card.width(), GROUP_ROW),
             );
             painter.line_segment(
-                [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                 Stroke::new(1.0, ink(SEP)),
             );
             text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
@@ -1432,7 +1434,7 @@ impl StoreSheet {
                 );
                 if at > 0 {
                     painter.line_segment(
-                        [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                        [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                         Stroke::new(1.0, ink(SEP)),
                     );
                 }
@@ -1505,10 +1507,14 @@ impl StoreSheet {
                 }
             }
         }
-        // the field, under its own heading
-        let at = Pos2::new(panel.left() + 16.0, bar.bottom() + 20.0);
+        // the field, under its own heading: a grouped list's 16 over the header, 8 under it, both
+        // starting where the field's own text does
+        let at = Pos2::new(panel.left() + 32.0, bar.bottom() + GROUP_HEAD);
         text(painter, at, Align2::LEFT_TOP, "ADDRESS", 13.0, Weight::Regular, ink(ROW_INK));
-        let field = Rect::from_min_size(Pos2::new(panel.left() + 16.0, at.y + 20.0), Vec2::new(panel.width() - 32.0, 56.0));
+        let field = Rect::from_min_size(
+            Pos2::new(panel.left() + 16.0, at.y + GROUP_LINE + GROUP_HEAD_BELOW),
+            Vec2::new(panel.width() - 32.0, 56.0),
+        );
         painter.rect_filled(field, 10.0, ink(GROUP_FILL));
         let text_at = Pos2::new(field.left() + 16.0, field.center().y);
         if self.address.is_empty() {
@@ -1642,17 +1648,13 @@ impl StoreSheet {
         self.scroll = self.scrolled(ui, body);
         let mut y = title.bottom() + 8.0 - self.scroll;
         // Downloading: nothing, until the fetch exists
-        text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP, "DOWNLOADING", 13.0, Weight::Regular,
-            ink(ROW_INK));
-        y += GROUP_HEAD;
+        y = group_head(&painter, body, y, "DOWNLOADING", ink(ROW_INK));
         text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "Nothing downloading.", 15.0,
             Weight::Medium, ink(ROW_INK));
         y += 30.0;
         // Waiting for You: what the catalogue has moved on from
         if !waiting.is_empty() {
-            text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP, "WAITING FOR YOU", 13.0, Weight::Regular,
-                ink(ROW_INK));
-            y += GROUP_HEAD;
+            y = group_head(&painter, body, y, "WAITING FOR YOU", ink(ROW_INK));
             let card = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(),
                 waiting.len() as f32 * ROW_HEIGHT));
             painter.rect_filled(card, 10.0, ink(GROUP_FILL));
@@ -1663,9 +1665,7 @@ impl StoreSheet {
         }
         // Finished: what the store took, newest first
         if !records.is_empty() {
-            text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP, "FINISHED", 13.0, Weight::Regular,
-                ink(ROW_INK));
-            y += GROUP_HEAD;
+            y = group_head(&painter, body, y, "FINISHED", ink(ROW_INK));
             let card = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(),
                 records.len() as f32 * ROW_HEIGHT));
             painter.rect_filled(card, 10.0, ink(GROUP_FILL));
@@ -1695,7 +1695,7 @@ impl StoreSheet {
         );
         if at > 0 {
             painter.line_segment(
-                [Pos2::new(row.left(), row.top()), Pos2::new(row.right(), row.top())],
+                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
                 Stroke::new(1.0, ink(SEP)),
             );
         }
@@ -2003,9 +2003,26 @@ fn rounded_mesh(
     shape
 }
 
-/// The unit square of a texture: the whole picture.
-fn whole_uv() -> Rect {
-    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+/// The font atlas's one white texel. A mesh of one colour draws with this uv, sampling a white
+/// texel, never the whole atlas - which streaks the shape with whatever glyphs sit at its corner.
+fn white_uv() -> Rect {
+    Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV)
+}
+
+/// A grouped list's head, the only way the store draws one: 16 under whatever came before it, its
+/// own 17 line in 13, and 8 between it and the card or field it labels. Returns where the next
+/// block starts.
+fn group_head(painter: &egui::Painter, body: Rect, y: f32, label: &str, colour: Color32) -> f32 {
+    text(
+        painter,
+        Pos2::new(body.left() + 16.0, y + GROUP_HEAD),
+        Align2::LEFT_TOP,
+        label,
+        13.0,
+        Weight::Regular,
+        colour,
+    );
+    y + GROUP_HEAD + GROUP_LINE + GROUP_HEAD_BELOW
 }
 
 /// A picture drawn inside a rounded rect.
@@ -2029,7 +2046,7 @@ fn fade_down(painter: &egui::Painter, rect: Rect, colour: Color32, top: u8, bott
         let down = ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
         Color32::from_rgba_unmultiplied(r, g, b, (from + (to - from) * down) as u8)
     };
-    let mesh = rounded_mesh(rect, 0.0, whole_uv(), color, egui::TextureId::default());
+    let mesh = rounded_mesh(rect, 0.0, white_uv(), color, egui::TextureId::default());
     painter.add(egui::Shape::mesh(mesh));
 }
 
@@ -2040,7 +2057,7 @@ fn scrim_rounded(painter: &egui::Painter, rect: Rect, corner: f32, top: u8, bott
         let down = ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
         Color32::from_black_alpha((from + (to - from) * down) as u8)
     };
-    let mesh = rounded_mesh(rect, corner, whole_uv(), color, egui::TextureId::default());
+    let mesh = rounded_mesh(rect, corner, white_uv(), color, egui::TextureId::default());
     painter.add(egui::Shape::mesh(mesh));
 }
 
@@ -2193,21 +2210,20 @@ pub(crate) fn date_text(secs: u64, with_year: bool) -> String {
     })
 }
 
-/// The four facts a person checks before taking something, with nothing said twice and nothing
-/// shown that the catalogue left out.
+/// The four facts a person checks before taking something, always four: the size, the version, the
+/// licence and the tags, an absent licence or tag list said as much, then the requirement after them
+/// when the catalogue gives one.
 fn facts_of(item: &procraft_core::StoreItem) -> Vec<(String, String)> {
-    let mut facts = Vec::new();
-    if item.bytes > 0 {
-        facts.push(("Size".to_owned(), size_of(item.bytes)));
-    }
-    if !item.version.is_empty() {
-        facts.push(("Version".to_owned(), item.version.clone()));
-    }
+    let licence = if item.licence.is_empty() { "Not given".to_owned() } else { item.licence.clone() };
+    let tags = if item.tags.is_empty() { "None".to_owned() } else { item.tags.join(", ") };
+    let mut facts = vec![
+        ("Size".to_owned(), size_of(item.bytes)),
+        ("Version".to_owned(), if item.version.is_empty() { "Not given".to_owned() } else { item.version.clone() }),
+        ("Licence".to_owned(), licence),
+        ("Tags".to_owned(), tags),
+    ];
     if !item.requires.is_empty() {
         facts.push(("Requires".to_owned(), item.requires.clone()));
-    }
-    if !item.licence.is_empty() {
-        facts.push(("Licence".to_owned(), item.licence.clone()));
     }
     facts
 }
@@ -2283,8 +2299,9 @@ mod tests {
         assert_eq!((card.top(), card.bottom()), (0.0, 1.0), "the full height stays");
         assert!((card.left() - 0.4).abs() < 0.01, "the sides go: {}", card.left());
         // the same shape as its frame is drawn whole, and nothing at all is the whole picture
-        assert_eq!(fill_uv(Vec2::new(880.0, 260.0), Vec2::new(880.0, 260.0)), whole_uv());
-        assert_eq!(fill_uv(Vec2::ZERO, Vec2::new(10.0, 10.0)), whole_uv());
+        let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        assert_eq!(fill_uv(Vec2::new(880.0, 260.0), Vec2::new(880.0, 260.0)), whole);
+        assert_eq!(fill_uv(Vec2::ZERO, Vec2::new(10.0, 10.0)), whole);
     }
 
     #[test]
@@ -2298,21 +2315,31 @@ mod tests {
     }
 
     #[test]
-    fn the_facts_strip_leaves_out_what_the_catalogue_did_not_say() {
+    fn the_facts_strip_always_shows_four_and_says_what_was_not_given() {
         let all = facts_of(&item("https://example.org/x.brushset", 1844221));
         assert_eq!(
             all,
             vec![
                 ("Size".to_owned(), "1.8 MB".to_owned()),
                 ("Version".to_owned(), "2.1.0".to_owned()),
-                ("Requires".to_owned(), "Interface 2".to_owned()),
                 ("Licence".to_owned(), "CC BY 4.0".to_owned()),
+                ("Tags".to_owned(), "None".to_owned()),
+                ("Requires".to_owned(), "Interface 2".to_owned()),
             ]
         );
         let mut bare = item("https://example.org/x.brushset", 0);
         bare.licence.clear();
         bare.requires.clear();
-        assert_eq!(facts_of(&bare), vec![("Version".to_owned(), "2.1.0".to_owned())]);
+        bare.tags = vec!["ink".into(), "grain".into()];
+        assert_eq!(
+            facts_of(&bare),
+            vec![
+                ("Size".to_owned(), "0 KB".to_owned()),
+                ("Version".to_owned(), "2.1.0".to_owned()),
+                ("Licence".to_owned(), "Not given".to_owned()),
+                ("Tags".to_owned(), "ink, grain".to_owned()),
+            ]
+        );
     }
 
     #[test]
