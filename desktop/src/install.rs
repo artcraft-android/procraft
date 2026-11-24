@@ -39,9 +39,7 @@ pub fn take(
             .import_any_brushes(bytes.to_vec(), None, 0)
             .map(|_| ())
             .ok_or_else(|| "No brushes could be read from it.".to_owned()),
-        ItemKind::AssetPack => {
-            Err("Asset packs need the asset library, which the app does not have yet.".to_owned())
-        }
+        ItemKind::AssetPack => Err("Asset packs need the asset library, which the app does not have yet.".to_owned()),
     }
 }
 
@@ -78,7 +76,10 @@ mod tests {
         let digest = procraft_core::digest_of(bytes);
         assert_eq!(refusal(&item(bytes.len() as u64, &digest), bytes), None, "the one it lists is taken");
         assert!(refusal(&item(bytes.len() as u64 + 1, &digest), bytes).is_some(), "a size that is off is refused");
-        assert!(refusal(&item(bytes.len() as u64, &digest), b"another file").is_some(), "a digest that is off is refused");
+        assert!(
+            refusal(&item(bytes.len() as u64, &digest), b"another file").is_some(),
+            "a digest that is off is refused"
+        );
         assert!(refusal(&item(0, ""), b"").is_some(), "an empty file is refused");
         // nothing said about the file means nothing to check against
         assert_eq!(refusal(&item(0, ""), bytes), None);

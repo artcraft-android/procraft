@@ -3352,9 +3352,7 @@ impl Interface {
                 self.actions.push(Action::PluginExport(i));
                 self.open = None;
             }
-            Some(Act::About) => self
-                .overlays
-                .done(format!("ProCraft version {}", env!("PROCRAFT_VERSION")), false),
+            Some(Act::About) => self.overlays.done(format!("ProCraft version {}", env!("PROCRAFT_VERSION")), false),
             Some(Act::GestureControls) => {
                 self.open = None;
                 self.gesture_controls.open = true;
@@ -4331,9 +4329,8 @@ mod tests {
         /// A window event to the canvas, which leaves what lands on the interface to it.
         fn canvas_hears(&mut self, event: &WindowEvent) {
             let canvas = self.ui.canvas_rect;
-            let blocked = (self.ui.popover_open && !self.ui.panel_lets_through)
-                || self.ui.store_open()
-                || self.ui.editing_layout;
+            let blocked =
+                (self.ui.popover_open && !self.ui.panel_lets_through) || self.ui.store_open() || self.ui.editing_layout;
             let ctx = &self.ctx;
             self.input
                 .on_event(&self.session, event, false, |p| blocked || crate::screen::on_interface(ctx, p, canvas));
@@ -4348,10 +4345,9 @@ mod tests {
                 Touch { device_id: DeviceId::dummy(), phase, location, force: Some(Force::Normalized(0.5)), id: PEN };
             let canvas = self.ui.canvas_rect;
             let ctx = &self.ctx;
-            for heard in self
-                .touches
-                .route(WindowEvent::Touch(touch), |p| self.ui.store_open() || crate::screen::on_interface(ctx, p, canvas))
-            {
+            for heard in self.touches.route(WindowEvent::Touch(touch), |p| {
+                self.ui.store_open() || crate::screen::on_interface(ctx, p, canvas)
+            }) {
                 if let WindowEvent::Touch(t) = heard {
                     self.egui_touch(&t);
                 }

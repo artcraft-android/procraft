@@ -73,14 +73,7 @@ struct Shot {
 
 impl StorePackage {
     /// Begins a package for `set`, in the library in use, drawing its picture from the set itself.
-    pub fn begin(
-        &mut self,
-        ctx: &egui::Context,
-        session: &CanvasSession,
-        set: u32,
-        name: &str,
-        icon: usize,
-    ) {
+    pub fn begin(&mut self, ctx: &egui::Context, session: &CanvasSession, set: u32, name: &str, icon: usize) {
         self.reset(name, icon);
         self.set = set;
         self.library = session.brush_libraries().iter().position(|library| library.current).unwrap_or(0) as u32;
@@ -167,8 +160,15 @@ impl StorePackage {
         for (at, option) in options.iter().enumerate() {
             let row = Rect::from_min_size(Pos2::new(panel.left(), y), Vec2::new(width, 44.0));
             let on = at == chosen;
-            text(ui.painter(), Pos2::new(row.left() + 18.0, row.center().y), Align2::LEFT_CENTER, option, 16.0,
-                Weight::Regular, argb(if on { TITLE } else { ROW_INK }));
+            text(
+                ui.painter(),
+                Pos2::new(row.left() + 18.0, row.center().y),
+                Align2::LEFT_CENTER,
+                option,
+                16.0,
+                Weight::Regular,
+                argb(if on { TITLE } else { ROW_INK }),
+            );
             let radio = Pos2::new(row.right() - 27.0, row.center().y);
             ui.painter().circle_stroke(radio, 8.5, Stroke::new(1.5, argb(if on { ACCENT } else { IDLE })));
             if on {
@@ -232,13 +232,34 @@ impl StorePackage {
             // the bar: Cancel, the sheet's name, and the Export that is the signal when it cannot be taken
             let bar = Rect::from_min_size(sheet.min, Vec2::new(sheet.width(), BAR));
             area.painter().line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, argb(SEP)));
-            text(area.painter(), Pos2::new(bar.left() + INSET, bar.center().y), Align2::LEFT_CENTER, "Cancel",
-                17.0, Weight::Regular, argb(ACCENT));
-            text(area.painter(), Pos2::new(bar.center().x, bar.center().y), Align2::CENTER_CENTER, "Store Details",
-                17.0, Weight::SemiBold, argb(TITLE));
+            text(
+                area.painter(),
+                Pos2::new(bar.left() + INSET, bar.center().y),
+                Align2::LEFT_CENTER,
+                "Cancel",
+                17.0,
+                Weight::Regular,
+                argb(ACCENT),
+            );
+            text(
+                area.painter(),
+                Pos2::new(bar.center().x, bar.center().y),
+                Align2::CENTER_CENTER,
+                "Store Details",
+                17.0,
+                Weight::SemiBold,
+                argb(TITLE),
+            );
             let ready = self.ready();
-            text(area.painter(), Pos2::new(bar.right() - INSET, bar.center().y), Align2::RIGHT_CENTER, "Export",
-                17.0, Weight::SemiBold, argb(if ready { ACCENT } else { HINT }));
+            text(
+                area.painter(),
+                Pos2::new(bar.right() - INSET, bar.center().y),
+                Align2::RIGHT_CENTER,
+                "Export",
+                17.0,
+                Weight::SemiBold,
+                argb(if ready { ACCENT } else { HINT }),
+            );
             for (at, rect) in [
                 Rect::from_min_max(Pos2::new(bar.left(), bar.top()), Pos2::new(bar.left() + 100.0, bar.bottom())),
                 Rect::from_min_max(Pos2::new(bar.right() - 100.0, bar.top()), Pos2::new(bar.right(), bar.bottom())),
@@ -319,21 +340,32 @@ impl StorePackage {
                 self.pick_pictures(ctx);
             }
             y += (THUMB_H + GAP) * cells.div_ceil(PER_ROW) as f32;
-            text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP,
-                "The app drew the first one from the set.", 13.0, Weight::Regular, argb(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(body.left(), y),
+                Align2::LEFT_TOP,
+                "The app drew the first one from the set.",
+                13.0,
+                Weight::Regular,
+                argb(ROW_INK),
+            );
             y += 28.0;
             // the details, one row each, the two pickers reading the file's own
             heading(&painter, body, y, "DETAILS");
             y += 18.0;
-            let fields = [
-                (Field::Name, "Name", self.name.clone()),
-                (Field::Author, "Author", self.author.clone()),
-            ];
+            let fields = [(Field::Name, "Name", self.name.clone()), (Field::Author, "Author", self.author.clone())];
             for (field, label, value) in fields {
                 let row = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), ROW_HEIGHT));
                 painter.rect_filled(row, 10.0, argb(crate::store::GROUP_FILL));
-                text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                    Weight::Regular, argb(TITLE));
+                text(
+                    &painter,
+                    Pos2::new(row.left() + 16.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    17.0,
+                    Weight::Regular,
+                    argb(TITLE),
+                );
                 let at = Pos2::new(row.right() - 16.0, row.center().y);
                 if self.typing == Some(field) {
                     text(&painter, at, Align2::RIGHT_CENTER, &value, 17.0, Weight::Regular, argb(TITLE));
@@ -351,20 +383,42 @@ impl StorePackage {
             }
             // Kind is what the set is; the category and the licence are the maker's to say
             let line = |at: usize, list: &[&str], fallback: &str| list.get(at).copied().unwrap_or(fallback).to_owned();
-            for (at, (label, value)) in [("Kind", "Brush set".to_owned()),
+            for (at, (label, value)) in [
+                ("Kind", "Brush set".to_owned()),
                 ("Category", line(self.category, &CATEGORIES, "Brushes")),
-                ("Licence", line(self.licence, &LICENCES, "CC BY 4.0"))]
-                .into_iter()
-                .enumerate()
+                ("Licence", line(self.licence, &LICENCES, "CC BY 4.0")),
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let row = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), ROW_HEIGHT));
                 painter.rect_filled(row, 10.0, argb(crate::store::GROUP_FILL));
-                text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                    Weight::Regular, argb(TITLE));
-                text(&painter, Pos2::new(row.right() - 16.0 - 12.0, row.center().y), Align2::RIGHT_CENTER, &value,
-                    17.0, Weight::Regular, argb(ROW_INK));
-                look.icon_on(area, &painter, &icons::CHEVRON_LEFT, Pos2::new(row.right() - 14.0, row.center().y), 13.0,
-                    argb(IDLE));
+                text(
+                    &painter,
+                    Pos2::new(row.left() + 16.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    17.0,
+                    Weight::Regular,
+                    argb(TITLE),
+                );
+                text(
+                    &painter,
+                    Pos2::new(row.right() - 16.0 - 12.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    &value,
+                    17.0,
+                    Weight::Regular,
+                    argb(ROW_INK),
+                );
+                look.icon_on(
+                    area,
+                    &painter,
+                    &icons::CHEVRON_LEFT,
+                    Pos2::new(row.right() - 14.0, row.center().y),
+                    13.0,
+                    argb(IDLE),
+                );
                 if area.interact(row, area.scope_id().with(("package pick", at)), Sense::click()).clicked()
                     && label != "Kind"
                 {
@@ -374,9 +428,15 @@ impl StorePackage {
                 y += ROW_HEIGHT;
             }
             y += 8.0;
-            text(&painter, Pos2::new(body.left(), y), Align2::LEFT_TOP,
-                "Kind and category are read from the file. Change them if they are wrong.", 13.0, Weight::Regular,
-                argb(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(body.left(), y),
+                Align2::LEFT_TOP,
+                "Kind and category are read from the file. Change them if they are wrong.",
+                13.0,
+                Weight::Regular,
+                argb(ROW_INK),
+            );
             y += 32.0;
             // the words, and the tags that make it findable
             for (field, heading_text, hint) in [
@@ -407,8 +467,14 @@ impl StorePackage {
                 y += ROW_HEIGHT + 20.0;
             }
             // the three things a listing cannot do without, named once
-            let galley = wrapped(&painter, "A name, a description and one tag are needed to export.", 13.0,
-                Weight::Regular, argb(ROW_INK), body.width());
+            let galley = wrapped(
+                &painter,
+                "A name, a description and one tag are needed to export.",
+                13.0,
+                Weight::Regular,
+                argb(ROW_INK),
+                body.width(),
+            );
             y += galley.size().y;
             painter.galley(Pos2::new(body.left(), y - galley.size().y), galley, argb(ROW_INK));
             // the choices a tapped row listed, over the sheet
@@ -421,9 +487,8 @@ impl StorePackage {
             && ctx.input(|i| i.pointer.any_click())
             && let Some(position) = ctx.input(|i| i.pointer.interact_pos())
         {
-            let inside = self
-                .picker
-                .is_some_and(|(_, anchor, panel)| panel.contains(position) || anchor.contains(position));
+            let inside =
+                self.picker.is_some_and(|(_, anchor, panel)| panel.contains(position) || anchor.contains(position));
             if !inside {
                 self.picker = None;
             }
@@ -492,7 +557,9 @@ impl StorePackage {
     fn height(&self) -> f32 {
         let cells = 1 + self.pictures.len() + usize::from(self.pictures.len() < MOST_OWN);
         let rows = cells.div_ceil(PER_ROW) as f32;
-        16.0 + 18.0 + (THUMB_H + GAP) * rows + 28.0
+        16.0 + 18.0
+            + (THUMB_H + GAP) * rows
+            + 28.0
             + 18.0
             + ROW_HEIGHT * 5.0
             + 8.0
@@ -562,11 +629,7 @@ fn folder_of(name: &str) -> String {
     let kept: String =
         name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' }).collect();
     let trimmed = kept.trim().to_owned();
-    if trimmed.is_empty() {
-        "Untitled Set".to_owned()
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "Untitled Set".to_owned() } else { trimmed }
 }
 
 /// The picture the app draws for a set: its first brush's sample stroke on warm paper, in the 4:3

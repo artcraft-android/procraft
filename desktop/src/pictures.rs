@@ -1,8 +1,8 @@
 //! The store's pictures: fetched once by address on a thread, decoded once, kept as textures.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use procraft_core::Store;
 
@@ -61,11 +61,7 @@ impl Pictures {
         }
         self.waiting = still;
         for (address, fetched) in done {
-            let kept = if fetched.bytes.len() <= PICTURE_BYTES {
-                decode(ctx, &address, &fetched.bytes)
-            } else {
-                None
-            };
+            let kept = if fetched.bytes.len() <= PICTURE_BYTES { decode(ctx, &address, &fetched.bytes) } else { None };
             self.kept.insert(address, kept);
         }
         if !self.waiting.is_empty() {

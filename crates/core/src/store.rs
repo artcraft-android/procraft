@@ -197,12 +197,7 @@ impl Store {
     pub fn open(dir: String) -> Arc<Store> {
         let root = PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&root);
-        Store::with_transport(
-            &root,
-            sources_at(&root),
-            installed_at(&root),
-            std::sync::Arc::new(crate::fetch::Web),
-        )
+        Store::with_transport(&root, sources_at(&root), installed_at(&root), std::sync::Arc::new(crate::fetch::Web))
     }
 
     /// The sources, in the order they were added.
@@ -876,7 +871,8 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
         let mut w: Vec<u32> = block.chunks(4).map(word).collect();
         w.truncate(16);
         // each of the next 48 words is built from the sixteen before it, newest last
-        let back = |words: &[u32], from_end: usize| words.iter().rev().nth(from_end.saturating_sub(1)).copied().unwrap_or(0);
+        let back =
+            |words: &[u32], from_end: usize| words.iter().rev().nth(from_end.saturating_sub(1)).copied().unwrap_or(0);
         while w.len() < 64 {
             let s0 = back(&w, 15).rotate_right(7) ^ back(&w, 15).rotate_right(18) ^ (back(&w, 15) >> 3);
             let s1 = back(&w, 2).rotate_right(17) ^ back(&w, 2).rotate_right(19) ^ (back(&w, 2) >> 10);
@@ -968,11 +964,7 @@ fn item_of(value: &serde_json::Value, saved: &Saved) -> Option<StoreItem> {
         .map(|number| format!("Interface {number}"))
         .unwrap_or_default();
     let named = value.get("category").and_then(|v| v.as_str()).unwrap_or_default();
-    let category = CATEGORIES
-        .iter()
-        .copied()
-        .find(|c| *c == named)
-        .map_or_else(|| "Other".to_owned(), str::to_owned);
+    let category = CATEGORIES.iter().copied().find(|c| *c == named).map_or_else(|| "Other".to_owned(), str::to_owned);
     let tags = tags_of(value.get("tags"))?;
     let previews = links_of(value.get("previews"))?;
     let preview = value
@@ -1221,7 +1213,10 @@ mod tests {
         let read = crate::brush_files::read_any_brushes(&fetched.bytes, Some("Inking.brushset".to_owned()));
         assert!(read.is_some(), "the fetched bytes read as a brush set");
         assert!(store.keep_installed("com.example.inking".to_owned(), digest));
-        assert_eq!(store.installed_one("com.example.inking".to_owned()).map(|one| one.version), Some("1.0.0".to_owned()));
+        assert_eq!(
+            store.installed_one("com.example.inking".to_owned()).map(|one| one.version),
+            Some("1.0.0".to_owned())
+        );
     }
 
     fn dir(name: &str) -> PathBuf {
@@ -1274,10 +1269,7 @@ mod tests {
     }
 
     /// A store whose web addresses answer from `answers`: the address, then what it says.
-    fn web_store(
-        name: &str,
-        answers: Vec<(&str, Result<&str, &str>)>,
-    ) -> (Arc<Store>, PathBuf) {
+    fn web_store(name: &str, answers: Vec<(&str, Result<&str, &str>)>) -> (Arc<Store>, PathBuf) {
         let store = dir(name);
         let table = answers
             .into_iter()
@@ -1314,7 +1306,10 @@ mod tests {
         let big = format!(r#"{{"schema": 1, "store": {{"name": "{}"}}, "items": []}}"#, "x".repeat(CATALOGUE_BYTES));
         assert_eq!(parse(big.as_bytes(), &saved("x")).unwrap_err(), Refusal::TooBig);
         let twice = CATALOGUE.replace("org.example.nudge", "org.example.dry-ink");
-        assert_eq!(parse(twice.as_bytes(), &saved("x")).unwrap_err(), Refusal::DuplicateId("org.example.dry-ink".into()));
+        assert_eq!(
+            parse(twice.as_bytes(), &saved("x")).unwrap_err(),
+            Refusal::DuplicateId("org.example.dry-ink".into())
+        );
     }
 
     #[test]
@@ -1459,10 +1454,7 @@ mod tests {
 
     #[test]
     fn a_web_address_that_does_not_answer_is_not_added_and_says_why() {
-        let (s, store) = web_store(
-            "web-fail",
-            vec![("https://example.org/catalogue.json", Err("it answers 404"))],
-        );
+        let (s, store) = web_store("web-fail", vec![("https://example.org/catalogue.json", Err("it answers 404"))]);
         assert_eq!(s.add_source("https://example.org/catalogue.json".into()), Some("it answers 404".to_owned()));
         assert!(added(&s).is_none(), "nothing that could not be read is added");
         // plain http never reaches the transport at all

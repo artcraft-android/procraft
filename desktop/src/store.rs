@@ -86,10 +86,15 @@ enum View {
     #[default]
     Browse,
     /// One item's own page, by its catalogue id and the source that listed it.
-    Item { source: String, id: String },
+    Item {
+        source: String,
+        id: String,
+    },
     Settings,
     /// One source's own page, by its id.
-    Source { id: String },
+    Source {
+        id: String,
+    },
     /// One kind's whole list, as a section's See all opens it.
     SeeAll(procraft_core::ItemKind),
     Downloads,
@@ -369,9 +374,7 @@ impl StoreSheet {
         }
         // the page that is showing, found before the sheet is drawn
         let item = match &self.view {
-            View::Item { source, id } => {
-                store.items().into_iter().find(|i| &i.id == id && &i.source == source)
-            }
+            View::Item { source, id } => store.items().into_iter().find(|i| &i.id == id && &i.source == source),
             _ => None,
         };
         let source = match &self.view {
@@ -400,8 +403,15 @@ impl StoreSheet {
                 _ => None,
             };
             if let Some(name) = centre {
-                text(area.painter(), Pos2::new(sheet.center().x, back.center().y), Align2::CENTER_CENTER, &name,
-                    17.0, Weight::SemiBold, ink(TITLE));
+                text(
+                    area.painter(),
+                    Pos2::new(sheet.center().x, back.center().y),
+                    Align2::CENTER_CENTER,
+                    &name,
+                    17.0,
+                    Weight::SemiBold,
+                    ink(TITLE),
+                );
             }
             // the trailing end: the page's own action hard on the inset, then the downloads one
             // step in from it, as the board orders the two
@@ -657,8 +667,15 @@ impl StoreSheet {
     ) {
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let title = Rect::from_min_size(Pos2::new(body.left(), body.top() + 12.0), Vec2::new(body.width(), TITLE_LINE));
-        text(&painter, Pos2::new(title.left(), title.center().y), Align2::LEFT_CENTER, "Store", TITLE_SIZE, Weight::Bold,
-            ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(title.left(), title.center().y),
+            Align2::LEFT_CENTER,
+            "Store",
+            TITLE_SIZE,
+            Weight::Bold,
+            ink(TITLE),
+        );
         // the search field, with the drawn magnifier the design gives it
         let search =
             Rect::from_min_size(Pos2::new(body.left(), title.bottom() + 16.0), Vec2::new(body.width(), SEARCH_HEIGHT));
@@ -674,14 +691,31 @@ impl StoreSheet {
             Pos2::new(search.right() - 10.0, search.bottom()),
         );
         if self.query.is_empty() {
-            text(&painter, Pos2::new(typed.left(), typed.center().y), Align2::LEFT_CENTER, "Search", 17.0,
-                Weight::Regular, ink(HINT));
+            text(
+                &painter,
+                Pos2::new(typed.left(), typed.center().y),
+                Align2::LEFT_CENTER,
+                "Search",
+                17.0,
+                Weight::Regular,
+                ink(HINT),
+            );
         } else {
-            text(&painter, Pos2::new(typed.left(), typed.center().y), Align2::LEFT_CENTER, &self.query, 17.0,
-                Weight::Regular, ink(TITLE));
+            text(
+                &painter,
+                Pos2::new(typed.left(), typed.center().y),
+                Align2::LEFT_CENTER,
+                &self.query,
+                17.0,
+                Weight::Regular,
+                ink(TITLE),
+            );
             let width = text_width(&painter, &self.query, 17.0, Weight::Regular).min(typed.width());
             painter.rect_filled(
-                Rect::from_min_size(Pos2::new(typed.left() + width + 1.0, typed.center().y - 10.0), Vec2::new(2.0, 20.0)),
+                Rect::from_min_size(
+                    Pos2::new(typed.left() + width + 1.0, typed.center().y - 10.0),
+                    Vec2::new(2.0, 20.0),
+                ),
                 1.0,
                 ink(ACCENT),
             );
@@ -728,8 +762,15 @@ impl StoreSheet {
         self.filters_at = Some(filters);
         let filtered = self.kind.is_some() || self.from.is_some();
         painter.rect_filled(filters, PILL_HEIGHT / 2.0, ink(PILL_FILL));
-        text(&painter, filters.center(), Align2::CENTER_CENTER, "Filters", 13.0, Weight::Regular,
-            ink(if filtered { ACCENT } else { TITLE }));
+        text(
+            &painter,
+            filters.center(),
+            Align2::CENTER_CENTER,
+            "Filters",
+            13.0,
+            Weight::Regular,
+            ink(if filtered { ACCENT } else { TITLE }),
+        );
         if ui.interact(filters, ui.scope_id().with("store filters"), Sense::click()).clicked() {
             self.menu = if self.menu == Some(MenuKind::Filters) { None } else { Some(MenuKind::Filters) };
         }
@@ -737,8 +778,7 @@ impl StoreSheet {
         // above it, with the day of its copy
         let stale = store.sources().into_iter().find(|source| !source.failure.is_empty() && source.read > 0);
         let stale_room = if stale.is_some() { 26.0 } else { 0.0 };
-        let list =
-            Rect::from_min_max(Pos2::new(body.left(), pills.bottom() + 12.0 + stale_room), body.max);
+        let list = Rect::from_min_max(Pos2::new(body.left(), pills.bottom() + 12.0 + stale_room), body.max);
         if let Some(source) = &stale {
             let said = format!(
                 "{} could not be refreshed. Showing what it had on {}.",
@@ -753,8 +793,15 @@ impl StoreSheet {
                 Stroke::new(1.2, ink(IDLE)),
             );
             painter.circle_filled(Pos2::new(info.x, info.y - 5.0), 0.8, ink(IDLE));
-            text(&painter, Pos2::new(body.left() + 20.0, middle), Align2::LEFT_CENTER, &said, 13.0,
-                Weight::Regular, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(body.left() + 20.0, middle),
+                Align2::LEFT_CENTER,
+                &said,
+                13.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
         }
         let chosen = self.category.checked_sub(1).and_then(|at| names.get(at).cloned());
         let query = self.query.trim().to_lowercase();
@@ -778,16 +825,14 @@ impl StoreSheet {
             String::new()
         };
         // a source that could not be read says so once, above the list, with the day of its copy
-        let groups = [
-            procraft_core::ItemKind::BrushSet,
-            procraft_core::ItemKind::Plugin,
-            procraft_core::ItemKind::AssetPack,
-        ];
+        let groups =
+            [procraft_core::ItemKind::BrushSet, procraft_core::ItemKind::Plugin, procraft_core::ItemKind::AssetPack];
         let content = if empty.is_empty() {
             let mut content = 40.0;
             // the band comes first, and only on the page as it opens: cut by a search, a category
             // or a filter it would be showing something the list below does not
-            let banded = self.query.trim().is_empty() && self.category == 0 && self.kind.is_none() && self.from.is_none();
+            let banded =
+                self.query.trim().is_empty() && self.category == 0 && self.kind.is_none() && self.from.is_none();
             if banded && !items.is_empty() {
                 content += BAND_HEIGHT + BAND_GAP;
             }
@@ -822,8 +867,15 @@ impl StoreSheet {
         let clip = list.intersect(ui.clip_rect());
         let painter = ui.painter().with_clip_rect(clip);
         if !empty.is_empty() {
-            text(&painter, Pos2::new(list.center().x, list.top() + 48.0), Align2::CENTER_TOP, &empty, 15.0,
-                Weight::Medium, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(list.center().x, list.top() + 48.0),
+                Align2::CENTER_TOP,
+                &empty,
+                15.0,
+                Weight::Medium,
+                ink(ROW_INK),
+            );
             return;
         }
         let mut y = list.top() - self.scroll;
@@ -834,10 +886,13 @@ impl StoreSheet {
             let featured = items.iter().find(|item| !item.preview.is_empty()).or_else(|| items.first());
             self.band(&painter, look, ui, store, featured, list, y, ink);
             y += BAND_HEIGHT + BAND_GAP;
-        }        let updated: Vec<&procraft_core::StoreItem> =
-            items.iter().filter(|item| needs_update(store, item)).collect();
+        }
+        let updated: Vec<&procraft_core::StoreItem> = items.iter().filter(|item| needs_update(store, item)).collect();
         if !updated.is_empty() {
-            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
+            let head = Rect::from_min_size(
+                Pos2::new(list.left() + 16.0, y + HEADING_ABOVE),
+                Vec2::new(list.width() - 16.0, 30.0),
+            );
             text(&painter, head.left_top(), Align2::LEFT_TOP, "Updates", SECTION, Weight::Bold, ink(TITLE));
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
             for (at, item) in updated.iter().take(ROWS_SHOWN).enumerate() {
@@ -851,15 +906,31 @@ impl StoreSheet {
             if group.is_empty() {
                 continue;
             }
-            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
+            let head = Rect::from_min_size(
+                Pos2::new(list.left() + 16.0, y + HEADING_ABOVE),
+                Vec2::new(list.width() - 16.0, 30.0),
+            );
             text(&painter, head.left_top(), Align2::LEFT_TOP, section_title(kind), SECTION, Weight::Bold, ink(TITLE));
             // a section that hides anything says so, and opens as its own wall
             if group.len() > ROWS_SHOWN {
                 let see = Rect::from_min_max(Pos2::new(head.right() - 92.0, head.top()), head.right_top());
-                text(&painter, Pos2::new(see.right() - 14.0, see.center().y), Align2::RIGHT_CENTER, "See all", 15.0,
-                    Weight::Regular, ink(ACCENT));
-                look.icon_on(ui, &painter, &icons::CHEVRON_RIGHT, Pos2::new(see.right() - 3.0, see.center().y), 11.0,
-                    ink(ACCENT));
+                text(
+                    &painter,
+                    Pos2::new(see.right() - 14.0, see.center().y),
+                    Align2::RIGHT_CENTER,
+                    "See all",
+                    15.0,
+                    Weight::Regular,
+                    ink(ACCENT),
+                );
+                look.icon_on(
+                    ui,
+                    &painter,
+                    &icons::CHEVRON_RIGHT,
+                    Pos2::new(see.right() - 3.0, see.center().y),
+                    11.0,
+                    ink(ACCENT),
+                );
                 if ui.interact(see, ui.scope_id().with(("store see all", kind.text())), Sense::click()).clicked() {
                     self.go(View::SeeAll(kind));
                 }
@@ -880,13 +951,13 @@ impl StoreSheet {
             }
         }
         // what the store took, at the foot, as the board puts it
-        let took: Vec<&procraft_core::StoreItem> = store
-            .installed()
-            .iter()
-            .filter_map(|one| items.iter().find(|item| item.id == one.id))
-            .collect();
+        let took: Vec<&procraft_core::StoreItem> =
+            store.installed().iter().filter_map(|one| items.iter().find(|item| item.id == one.id)).collect();
         if !took.is_empty() {
-            let head = Rect::from_min_size(Pos2::new(list.left() + 16.0, y + HEADING_ABOVE), Vec2::new(list.width() - 16.0, 30.0));
+            let head = Rect::from_min_size(
+                Pos2::new(list.left() + 16.0, y + HEADING_ABOVE),
+                Vec2::new(list.width() - 16.0, 30.0),
+            );
             text(&painter, head.left_top(), Align2::LEFT_TOP, "Installed", SECTION, Weight::Bold, ink(TITLE));
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
             self.shelf(&painter, look, ui, store, &took, list, y, ink);
@@ -926,8 +997,14 @@ impl StoreSheet {
                 let scrim = Rect::from_min_max(Pos2::new(band.left(), band.top() + BAND_HEIGHT * 0.2), band.max);
                 scrim_rounded(painter, scrim, 20.0, 8, 208);
             }
-            None => look.icon_on(ui, painter, kind_icon(item.kind), Pos2::new(band.right() - 110.0, band.top() + 84.0),
-                120.0, ink(IDLE).gamma_multiply(0.35)),
+            None => look.icon_on(
+                ui,
+                painter,
+                kind_icon(item.kind),
+                Pos2::new(band.right() - 110.0, band.top() + 84.0),
+                120.0,
+                ink(IDLE).gamma_multiply(0.35),
+            ),
         }
         let left = band.left() + 20.0;
         // the words stack above the foot: the app row, then one sentence, the name, the kicker
@@ -944,10 +1021,25 @@ impl StoreSheet {
         let tile = Rect::from_center_size(Pos2::new(left + 12.0, row), Vec2::splat(24.0));
         painter.rect_filled(tile, 6.0, ink(PILL_FILL));
         look.icon_on(ui, painter, kind_icon(item.kind), tile.center(), 14.0, ink(TITLE));
-        text(painter, Pos2::new(tile.right() + 8.0, tile.center().y), Align2::LEFT_CENTER, &item.publisher, 13.0,
-            Weight::Regular, ink(ROW_INK));
-        state_pill(painter, look, ui, installed(store, item), needs_update(store, item), band.right() - 20.0,
-            tile.center().y, ink);
+        text(
+            painter,
+            Pos2::new(tile.right() + 8.0, tile.center().y),
+            Align2::LEFT_CENTER,
+            &item.publisher,
+            13.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
+        state_pill(
+            painter,
+            look,
+            ui,
+            installed(store, item),
+            needs_update(store, item),
+            band.right() - 20.0,
+            tile.center().y,
+            ink,
+        );
         if ui.interact(band, ui.scope_id().with(("store band", item.id.clone())), Sense::click()).clicked() {
             self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
         }
@@ -977,12 +1069,34 @@ impl StoreSheet {
                 }
                 None => look.icon_on(ui, painter, kind_icon(item.kind), art.center(), 36.0, ink(IDLE)),
             }
-            text(painter, Pos2::new(left, art.bottom() + 10.0), Align2::LEFT_TOP, &item.name, 15.0,
-                Weight::SemiBold, ink(TITLE));
-            text(painter, Pos2::new(left, art.bottom() + 32.0), Align2::LEFT_TOP, &second_line(item), 13.0,
-                Weight::Regular, ink(ROW_INK));
-            state_pill(painter, look, ui, installed(store, item), needs_update(store, item), left + each,
-                art.bottom() + 66.0, ink);
+            text(
+                painter,
+                Pos2::new(left, art.bottom() + 10.0),
+                Align2::LEFT_TOP,
+                &item.name,
+                15.0,
+                Weight::SemiBold,
+                ink(TITLE),
+            );
+            text(
+                painter,
+                Pos2::new(left, art.bottom() + 32.0),
+                Align2::LEFT_TOP,
+                &second_line(item),
+                13.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
+            state_pill(
+                painter,
+                look,
+                ui,
+                installed(store, item),
+                needs_update(store, item),
+                left + each,
+                art.bottom() + 66.0,
+                ink,
+            );
             if ui.interact(art, ui.scope_id().with(("shelf art", item.id.clone())), Sense::click()).clicked() {
                 self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
             }
@@ -1011,14 +1125,32 @@ impl StoreSheet {
         }
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 11.0);
         text(painter, name, Align2::LEFT_CENTER, &item.name, 17.0, Weight::Regular, ink(TITLE));
-        text(painter, Pos2::new(name.x, row.center().y + 11.0), Align2::LEFT_CENTER, &second_line(item), 15.0,
-            Weight::Regular, ink(ROW_INK));
-        state_pill(painter, look, ui, installed(store, item), needs_update(store, item), row.right(),
-            row.center().y, ink);
+        text(
+            painter,
+            Pos2::new(name.x, row.center().y + 11.0),
+            Align2::LEFT_CENTER,
+            &second_line(item),
+            15.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
+        state_pill(
+            painter,
+            look,
+            ui,
+            installed(store, item),
+            needs_update(store, item),
+            row.right(),
+            row.center().y,
+            ink,
+        );
         // every row but a group's first carries the rule above it
         if at > 0 {
             painter.line_segment(
-                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                [
+                    Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                    Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                ],
                 Stroke::new(1.0, ink(SEP)),
             );
         }
@@ -1054,8 +1186,15 @@ impl StoreSheet {
         );
         painter.rect_filled(chip, 6.0, ink(TILE_FILL));
         text(&painter, chip.center(), Align2::CENTER_CENTER, &kind, 11.0, Weight::SemiBold, ink(ROW_INK));
-        text(&painter, Pos2::new(icon.right() + 20.0, name_y + 30.0), Align2::LEFT_CENTER, &item.publisher, 15.0,
-            Weight::Regular, ink(ACCENT));
+        text(
+            &painter,
+            Pos2::new(icon.right() + 20.0, name_y + 30.0),
+            Align2::LEFT_CENTER,
+            &item.publisher,
+            15.0,
+            Weight::Regular,
+            ink(ACCENT),
+        );
         // the action, at the trailing end: what came with the app is already in, what the
         // catalogue has changed since is an update, and what is on its way says so
         let is_in = installed(store, item);
@@ -1080,11 +1219,19 @@ impl StoreSheet {
             Rect::from_center_size(Pos2::new(body.right() - width / 2.0, name_y + 4.0), Vec2::new(width, 30.0));
         let filled = problem.is_none() && (!is_in || update || fetching);
         painter.rect_filled(button, 15.0, ink(if filled { ACCENT } else { PILL_STATE_FILL }));
-        text(&painter, button.center(), Align2::CENTER_CENTER, label, 15.0, Weight::SemiBold,
-            ink(if filled { ACCENT_ON } else { ROW_INK }));
+        text(
+            &painter,
+            button.center(),
+            Align2::CENTER_CENTER,
+            label,
+            15.0,
+            Weight::SemiBold,
+            ink(if filled { ACCENT_ON } else { ROW_INK }),
+        );
         // taking something from a catalogue: its file is fetched, and when no fetch of it works
         // the alert offers to take the file from this machine instead
-        if (problem.is_some() || (!is_in || update)) && !fetching
+        if (problem.is_some() || (!is_in || update))
+            && !fetching
             && ui.interact(button, ui.scope_id().with("store install"), Sense::click()).clicked()
         {
             match problem {
@@ -1102,7 +1249,10 @@ impl StoreSheet {
         let galley = wrapped(&painter, caveat, 15.0, Weight::Regular, ink(ROW_INK), PROSE - 24.0);
         let info = Pos2::new(body.left() + 8.0, y + 10.0);
         painter.circle_stroke(info, 7.0, Stroke::new(1.4, ink(IDLE)));
-        painter.line_segment([Pos2::new(info.x, info.y - 3.0), Pos2::new(info.x, info.y + 4.0)], Stroke::new(1.4, ink(IDLE)));
+        painter.line_segment(
+            [Pos2::new(info.x, info.y - 3.0), Pos2::new(info.x, info.y + 4.0)],
+            Stroke::new(1.4, ink(IDLE)),
+        );
         painter.circle_filled(Pos2::new(info.x, info.y - 5.5), 0.9, ink(IDLE));
         let height = galley.size().y;
         painter.galley(Pos2::new(body.left() + 24.0, y), galley, ink(ROW_INK));
@@ -1130,10 +1280,24 @@ impl StoreSheet {
                 }
                 let at_x = left + if at == 0 { 16.0 } else { 10.0 };
                 // a header's rhythm here too: 16 over the label, 8 between it and its value
-                text(&painter, Pos2::new(at_x, strip.top() + GROUP_HEAD), Align2::LEFT_TOP, label, 11.0,
-                    Weight::SemiBold, ink(IDLE));
-                text(&painter, Pos2::new(at_x, strip.top() + GROUP_HEAD + GROUP_LINE + GROUP_HEAD_BELOW), Align2::LEFT_TOP,
-                    value, 16.0, Weight::SemiBold, ink(TITLE));
+                text(
+                    &painter,
+                    Pos2::new(at_x, strip.top() + GROUP_HEAD),
+                    Align2::LEFT_TOP,
+                    label,
+                    11.0,
+                    Weight::SemiBold,
+                    ink(IDLE),
+                );
+                text(
+                    &painter,
+                    Pos2::new(at_x, strip.top() + GROUP_HEAD + GROUP_LINE + GROUP_HEAD_BELOW),
+                    Align2::LEFT_TOP,
+                    value,
+                    16.0,
+                    Weight::SemiBold,
+                    ink(TITLE),
+                );
             }
             y = strip.bottom() + 24.0;
         }
@@ -1145,12 +1309,18 @@ impl StoreSheet {
             painter.galley(Pos2::new(body.left(), y - galley.size().y), galley, ink(ROW_INK));
             y += 40.0;
         }
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "Details", SECTION, Weight::Bold, ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
+            "Details",
+            SECTION,
+            Weight::Bold,
+            ink(TITLE),
+        );
         y += 30.0 + HEADING_BELOW;
-        let rows: Vec<(String, String)> = vec![
-            ("Category".to_owned(), item.category.clone()),
-            ("Published by".to_owned(), item.publisher.clone()),
-        ];
+        let rows: Vec<(String, String)> =
+            vec![("Category".to_owned(), item.category.clone()), ("Published by".to_owned(), item.publisher.clone())];
         // the tags keep a row of their own, chips at the trailing end: three at most, then a count
         let tags_height = if item.tags.is_empty() { 0.0 } else { GROUP_ROW };
         let card = Rect::from_min_size(
@@ -1165,14 +1335,31 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                    [
+                        Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                        Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                    ],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
-            text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                Weight::Regular, ink(TITLE));
-            text(&painter, Pos2::new(row.right() - 16.0, row.center().y), Align2::RIGHT_CENTER, value, 17.0,
-                Weight::Regular, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink(TITLE),
+            );
+            text(
+                &painter,
+                Pos2::new(row.right() - 16.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                value,
+                17.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
         }
         if !item.tags.is_empty() {
             let row = Rect::from_min_size(
@@ -1180,11 +1367,21 @@ impl StoreSheet {
                 Vec2::new(card.width(), GROUP_ROW),
             );
             painter.line_segment(
-                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                [
+                    Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                    Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                ],
                 Stroke::new(1.0, ink(SEP)),
             );
-            text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, "Tags", 17.0,
-                Weight::Regular, ink(TITLE));
+            text(
+                &painter,
+                Pos2::new(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                "Tags",
+                17.0,
+                Weight::Regular,
+                ink(TITLE),
+            );
             let mut chips: Vec<String> = item.tags.iter().take(3).cloned().collect();
             let more = item.tags.len().saturating_sub(3);
             if more > 0 {
@@ -1195,7 +1392,8 @@ impl StoreSheet {
             let total: f32 = widths.iter().sum::<f32>() + 8.0 * chips.len().saturating_sub(1) as f32;
             let mut chip_x = row.right() - 16.0 - total;
             for (chip, width) in chips.iter().zip(widths.iter()) {
-                let at = Rect::from_center_size(Pos2::new(chip_x + width / 2.0, row.center().y), Vec2::new(*width, CHIP));
+                let at =
+                    Rect::from_center_size(Pos2::new(chip_x + width / 2.0, row.center().y), Vec2::new(*width, CHIP));
                 painter.rect_filled(at, CHIP / 2.0, ink(CHIP_FILL));
                 text(&painter, at.center(), Align2::CENTER_CENTER, chip, 13.0, Weight::Medium, ink(ROW_INK));
                 chip_x += width + 8.0;
@@ -1210,8 +1408,15 @@ impl StoreSheet {
             .take(3)
             .collect();
         if !more.is_empty() {
-            text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, &format!("More from {}", item.publisher),
-                SECTION, Weight::Bold, ink(TITLE));
+            text(
+                &painter,
+                Pos2::new(body.left() + 16.0, y),
+                Align2::LEFT_TOP,
+                &format!("More from {}", item.publisher),
+                SECTION,
+                Weight::Bold,
+                ink(TITLE),
+            );
             y += 30.0 + HEADING_BELOW;
             let gap = 16.0;
             let each = (body.width() - gap * 2.0) / 3.0;
@@ -1225,12 +1430,34 @@ impl StoreSheet {
                     }
                     None => look.icon_on(ui, &painter, kind_icon(other.kind), art.center(), 36.0, ink(IDLE)),
                 }
-                text(&painter, Pos2::new(left, art.bottom() + 12.0), Align2::LEFT_TOP, &other.name, 16.0,
-                    Weight::SemiBold, ink(TITLE));
-                text(&painter, Pos2::new(left, art.bottom() + 34.0), Align2::LEFT_TOP, &other.publisher, 14.0,
-                    Weight::Regular, ink(ROW_INK));
-                state_pill(&painter, look, ui, installed(store, other), needs_update(store, other), left + each,
-                    art.bottom() + 34.0, ink);
+                text(
+                    &painter,
+                    Pos2::new(left, art.bottom() + 12.0),
+                    Align2::LEFT_TOP,
+                    &other.name,
+                    16.0,
+                    Weight::SemiBold,
+                    ink(TITLE),
+                );
+                text(
+                    &painter,
+                    Pos2::new(left, art.bottom() + 34.0),
+                    Align2::LEFT_TOP,
+                    &other.publisher,
+                    14.0,
+                    Weight::Regular,
+                    ink(ROW_INK),
+                );
+                state_pill(
+                    &painter,
+                    look,
+                    ui,
+                    installed(store, other),
+                    needs_update(store, other),
+                    left + each,
+                    art.bottom() + 34.0,
+                    ink,
+                );
                 if ui.interact(art, ui.scope_id().with(("more art", other.id.clone())), Sense::click()).clicked() {
                     self.go(View::Item { source: other.source.clone(), id: other.id.clone() });
                 }
@@ -1253,8 +1480,15 @@ impl StoreSheet {
     ) {
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let title = Rect::from_min_size(Pos2::new(body.left(), body.top() + 12.0), Vec2::new(body.width(), TITLE_LINE));
-        text(&painter, Pos2::new(title.left(), title.center().y), Align2::LEFT_CENTER, "Settings", TITLE_SIZE,
-            Weight::Bold, ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(title.left(), title.center().y),
+            Align2::LEFT_CENTER,
+            "Settings",
+            TITLE_SIZE,
+            Weight::Bold,
+            ink(TITLE),
+        );
         let mut y = title.bottom() + 24.0 - self.scroll;
         // Sources: one row each, and the way to add one
         let sources = store.sources();
@@ -1269,16 +1503,33 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                    [
+                        Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                        Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                    ],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
             let name = Pos2::new(row.left() + 16.0, row.center().y - 11.0);
-            text(&painter, name, Align2::LEFT_CENTER, &source.name, 17.0, Weight::Regular,
-                ink(if source.on { TITLE } else { DISABLED }));
+            text(
+                &painter,
+                name,
+                Align2::LEFT_CENTER,
+                &source.name,
+                17.0,
+                Weight::Regular,
+                ink(if source.on { TITLE } else { DISABLED }),
+            );
             let line = source_line(source);
-            text(&painter, Pos2::new(name.x, row.center().y + 11.0), Align2::LEFT_CENTER, &line, 15.0,
-                Weight::Regular, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(name.x, row.center().y + 11.0),
+                Align2::LEFT_CENTER,
+                &line,
+                15.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
             // a disclosure indicator: the same chevron at the HIG's 13, its trailing edge 16 in
             // from the row's edge, its middle on the row's
             let chev = Pos2::new(row.right() - 16.0 - 6.5, row.center().y);
@@ -1298,8 +1549,15 @@ impl StoreSheet {
                 Stroke::new(1.0, ink(SEP)),
             );
         }
-        text(&painter, Pos2::new(add.left() + 16.0, add.center().y), Align2::LEFT_CENTER, "Add Source...", 17.0,
-            Weight::Regular, ink(ACCENT));
+        text(
+            &painter,
+            Pos2::new(add.left() + 16.0, add.center().y),
+            Align2::LEFT_CENTER,
+            "Add Source...",
+            17.0,
+            Weight::Regular,
+            ink(ACCENT),
+        );
         if ui.interact(add, ui.scope_id().with("store add source"), Sense::click()).clicked() {
             self.adding = true;
             self.address.clear();
@@ -1307,24 +1565,50 @@ impl StoreSheet {
             self.typing = Some(Field::Add);
         }
         y = card.bottom() + GROUP_HEAD;
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP,
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
             "The store reads these when it opens. Turning one off hides its items; nothing is uninstalled.",
-            13.0, Weight::Regular, ink(ROW_INK));
+            13.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         y += GROUP_FOOT + 26.0;
         // Updates: when the sources were last read, which is the only checking there is so far
         let checked = store.sources().iter().map(|source| source.read).max().unwrap_or(0);
         y = group_head(&painter, body, y, "UPDATES", ink(ROW_INK));
         let updates = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(), GROUP_ROW));
         painter.rect_filled(updates, 10.0, ink(GROUP_FILL));
-        text(&painter, Pos2::new(updates.left() + 16.0, updates.center().y), Align2::LEFT_CENTER, "Last Checked",
-            17.0, Weight::Regular, ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(updates.left() + 16.0, updates.center().y),
+            Align2::LEFT_CENTER,
+            "Last Checked",
+            17.0,
+            Weight::Regular,
+            ink(TITLE),
+        );
         let when = if checked == 0 { "Never".to_owned() } else { date_text(checked, true) };
-        text(&painter, Pos2::new(updates.right() - 16.0, updates.center().y), Align2::RIGHT_CENTER, &when, 17.0,
-            Weight::Regular, ink(ROW_INK));
+        text(
+            &painter,
+            Pos2::new(updates.right() - 16.0, updates.center().y),
+            Align2::RIGHT_CENTER,
+            &when,
+            17.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         y = updates.bottom() + GROUP_HEAD;
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP,
-            "The store reads its sources when it opens. Nothing is checked in the background.", 13.0, Weight::Regular,
-            ink(ROW_INK));
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
+            "The store reads its sources when it opens. Nothing is checked in the background.",
+            13.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         y += GROUP_FOOT + 26.0;
         // Storage: what came with the app, and what the store installed
         let items = store.items();
@@ -1341,19 +1625,42 @@ impl StoreSheet {
             );
             if at > 0 {
                 painter.line_segment(
-                    [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                    [
+                        Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                        Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                    ],
                     Stroke::new(1.0, ink(SEP)),
                 );
             }
-            text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                Weight::Regular, ink(TITLE));
-            text(&painter, Pos2::new(row.right() - 16.0, row.center().y), Align2::RIGHT_CENTER, value, 17.0,
-                Weight::Regular, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink(TITLE),
+            );
+            text(
+                &painter,
+                Pos2::new(row.right() - 16.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                value,
+                17.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
         }
         y = storage.bottom() + GROUP_HEAD;
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP,
-            "Downloads stop when the store closes. Installed items live in your project.", 13.0, Weight::Regular,
-            ink(ROW_INK));
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
+            "Downloads stop when the store closes. Installed items live in your project.",
+            13.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         y += GROUP_FOOT;
         self.height = (y + self.scroll) - body.top();
         self.scroll = self.scrolled(ui, body);
@@ -1372,8 +1679,14 @@ impl StoreSheet {
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let mut y = body.top() + 24.0 - self.scroll;
         let rows: Vec<(String, String)> = vec![
-            ("Address".to_owned(), if source.address.is_empty() { "Bundled with ProCraft".to_owned() } else { source.address.clone() }),
-            ("Last Refreshed".to_owned(), if source.read == 0 { "Never".to_owned() } else { date_text(source.read, true) }),
+            (
+                "Address".to_owned(),
+                if source.address.is_empty() { "Bundled with ProCraft".to_owned() } else { source.address.clone() },
+            ),
+            (
+                "Last Refreshed".to_owned(),
+                if source.read == 0 { "Never".to_owned() } else { date_text(source.read, true) },
+            ),
         ];
         let card = Rect::from_min_size(
             Pos2::new(body.left(), y),
@@ -1382,10 +1695,17 @@ impl StoreSheet {
         painter.rect_filled(card, 10.0, ink(GROUP_FILL));
         // Enabled, with the switch at the trailing end
         let enabled = Rect::from_min_size(Pos2::new(card.left(), card.top()), Vec2::new(card.width(), GROUP_ROW));
-        text(&painter, Pos2::new(enabled.left() + 16.0, enabled.center().y), Align2::LEFT_CENTER, "Enabled", 17.0,
-            Weight::Regular, ink(TITLE));
-        let track = Rect::from_center_size(Pos2::new(enabled.right() - 16.0 - 25.5, enabled.center().y),
-            Vec2::new(51.0, 31.0));
+        text(
+            &painter,
+            Pos2::new(enabled.left() + 16.0, enabled.center().y),
+            Align2::LEFT_CENTER,
+            "Enabled",
+            17.0,
+            Weight::Regular,
+            ink(TITLE),
+        );
+        let track =
+            Rect::from_center_size(Pos2::new(enabled.right() - 16.0 - 25.5, enabled.center().y), Vec2::new(51.0, 31.0));
         painter.rect_filled(track, 16.0, ink(if source.on { ACCENT } else { SWITCH_OFF }));
         let knob = if source.on { track.right() - 2.0 - 13.5 } else { track.left() + 2.0 + 13.5 };
         painter.circle_filled(Pos2::new(knob, track.center().y), 13.5, Color32::WHITE);
@@ -1398,18 +1718,41 @@ impl StoreSheet {
                 Vec2::new(card.width(), GROUP_ROW),
             );
             painter.line_segment(
-                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                [
+                    Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                    Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                ],
                 Stroke::new(1.0, ink(SEP)),
             );
-            text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                Weight::Regular, ink(TITLE));
-            text(&painter, Pos2::new(row.right() - 16.0, row.center().y), Align2::RIGHT_CENTER, value, 17.0,
-                Weight::Regular, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink(TITLE),
+            );
+            text(
+                &painter,
+                Pos2::new(row.right() - 16.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                value,
+                17.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
         }
         y = card.bottom() + GROUP_HEAD;
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP,
-            "Off hides this source's items from the store. Nothing is uninstalled.", 13.0, Weight::Regular,
-            ink(ROW_INK));
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
+            "Off hides this source's items from the store. Nothing is uninstalled.",
+            13.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         y += GROUP_FOOT + 26.0;
         // what can be done with it, one row each: refreshing a catalogue on this machine, and
         // taking it away. A web address has no Refresh Now: this build cannot read one.
@@ -1435,12 +1778,22 @@ impl StoreSheet {
                 );
                 if at > 0 {
                     painter.line_segment(
-                        [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                        [
+                            Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                            Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                        ],
                         Stroke::new(1.0, ink(SEP)),
                     );
                 }
-                text(&painter, Pos2::new(row.left() + 16.0, row.center().y), Align2::LEFT_CENTER, label, 17.0,
-                    Weight::Regular, ink(*colour));
+                text(
+                    &painter,
+                    Pos2::new(row.left() + 16.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    17.0,
+                    Weight::Regular,
+                    ink(*colour),
+                );
                 if ui.interact(row, ui.scope_id().with(("store source do", *label)), Sense::click()).clicked() {
                     if *label == "Refresh Now" {
                         self.start_refresh(store, source.id.clone());
@@ -1459,9 +1812,15 @@ impl StoreSheet {
                 }
             }
             y = card.bottom() + GROUP_HEAD;
-            text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP,
+            text(
+                &painter,
+                Pos2::new(body.left() + 16.0, y),
+                Align2::LEFT_TOP,
                 "Items you installed from this source stay installed, and their cards keep saying where they came from.",
-                13.0, Weight::Regular, ink(ROW_INK));
+                13.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
             y += GROUP_FOOT;
         }
         self.height = (y + self.scroll) - body.top();
@@ -1485,13 +1844,34 @@ impl StoreSheet {
         // its bar: Cancel, the title, and Add
         let bar = Rect::from_min_size(panel.min, Vec2::new(panel.width(), BAR));
         painter.line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, ink(SEP)));
-        text(painter, Pos2::new(bar.left() + 16.0, bar.center().y), Align2::LEFT_CENTER, "Cancel", 17.0,
-            Weight::Regular, ink(ACCENT));
-        text(painter, Pos2::new(bar.center().x, bar.center().y), Align2::CENTER_CENTER, "Add Source", 17.0,
-            Weight::SemiBold, ink(TITLE));
+        text(
+            painter,
+            Pos2::new(bar.left() + 16.0, bar.center().y),
+            Align2::LEFT_CENTER,
+            "Cancel",
+            17.0,
+            Weight::Regular,
+            ink(ACCENT),
+        );
+        text(
+            painter,
+            Pos2::new(bar.center().x, bar.center().y),
+            Align2::CENTER_CENTER,
+            "Add Source",
+            17.0,
+            Weight::SemiBold,
+            ink(TITLE),
+        );
         let ready = !self.address.trim().is_empty();
-        text(painter, Pos2::new(bar.right() - 16.0, bar.center().y), Align2::RIGHT_CENTER, "Add", 17.0,
-            Weight::SemiBold, ink(if ready { ACCENT } else { DISABLED }));
+        text(
+            painter,
+            Pos2::new(bar.right() - 16.0, bar.center().y),
+            Align2::RIGHT_CENTER,
+            "Add",
+            17.0,
+            Weight::SemiBold,
+            ink(if ready { ACCENT } else { DISABLED }),
+        );
         for (at, rect) in [
             Rect::from_min_max(Pos2::new(bar.left(), bar.top()), Pos2::new(bar.left() + 100.0, bar.bottom())),
             Rect::from_min_max(Pos2::new(bar.right() - 100.0, bar.top()), Pos2::new(bar.right(), bar.bottom())),
@@ -1561,8 +1941,15 @@ impl StoreSheet {
         let kind = *kind;
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let title = Rect::from_min_size(Pos2::new(body.left(), body.top() + 12.0), Vec2::new(body.width(), TITLE_LINE));
-        text(&painter, Pos2::new(title.left(), title.center().y), Align2::LEFT_CENTER, section_title(kind),
-            TITLE_SIZE, Weight::Bold, ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(title.left(), title.center().y),
+            Align2::LEFT_CENTER,
+            section_title(kind),
+            TITLE_SIZE,
+            Weight::Bold,
+            ink(TITLE),
+        );
         // the same cuts the list has, applied to one kind, then the order the bar asked for
         let mut items: Vec<procraft_core::StoreItem> = store.items().into_iter().filter(|i| i.kind == kind).collect();
         if let Some(from) = &self.from {
@@ -1578,8 +1965,15 @@ impl StoreSheet {
         }
         self.sorted(&mut items);
         if items.is_empty() {
-            text(&painter, Pos2::new(body.center().x, title.bottom() + 48.0), Align2::CENTER_TOP, "Nothing here yet.",
-                15.0, Weight::Medium, ink(ROW_INK));
+            text(
+                &painter,
+                Pos2::new(body.center().x, title.bottom() + 48.0),
+                Align2::CENTER_TOP,
+                "Nothing here yet.",
+                15.0,
+                Weight::Medium,
+                ink(ROW_INK),
+            );
             self.height = 0.0;
             return;
         }
@@ -1605,12 +1999,34 @@ impl StoreSheet {
                 }
                 None => look.icon_on(ui, &painter, kind_icon(item.kind), art.center(), 40.0, ink(IDLE)),
             }
-            text(&painter, Pos2::new(left, art.bottom() + 12.0), Align2::LEFT_TOP, &item.name, 16.0,
-                Weight::SemiBold, ink(TITLE));
-            text(&painter, Pos2::new(left, art.bottom() + 34.0), Align2::LEFT_TOP, &second_line(item), 14.0,
-                Weight::Regular, ink(ROW_INK));
-            state_pill(&painter, look, ui, installed(store, item), needs_update(store, item), left + each,
-                art.bottom() + 43.0, ink);
+            text(
+                &painter,
+                Pos2::new(left, art.bottom() + 12.0),
+                Align2::LEFT_TOP,
+                &item.name,
+                16.0,
+                Weight::SemiBold,
+                ink(TITLE),
+            );
+            text(
+                &painter,
+                Pos2::new(left, art.bottom() + 34.0),
+                Align2::LEFT_TOP,
+                &second_line(item),
+                14.0,
+                Weight::Regular,
+                ink(ROW_INK),
+            );
+            state_pill(
+                &painter,
+                look,
+                ui,
+                installed(store, item),
+                needs_update(store, item),
+                left + each,
+                art.bottom() + 43.0,
+                ink,
+            );
             if ui.interact(art, ui.scope_id().with(("wall art", item.id.clone())), Sense::click()).clicked() {
                 self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
             }
@@ -1629,8 +2045,15 @@ impl StoreSheet {
     ) {
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let title = Rect::from_min_size(Pos2::new(body.left(), body.top() + 12.0), Vec2::new(body.width(), TITLE_LINE));
-        text(&painter, Pos2::new(title.left(), title.center().y), Align2::LEFT_CENTER, "Downloads", TITLE_SIZE,
-            Weight::Bold, ink(TITLE));
+        text(
+            &painter,
+            Pos2::new(title.left(), title.center().y),
+            Align2::LEFT_CENTER,
+            "Downloads",
+            TITLE_SIZE,
+            Weight::Bold,
+            ink(TITLE),
+        );
         let records = store.installed();
         let items = store.items();
         let waiting: Vec<&procraft_core::Installed> = records
@@ -1650,14 +2073,23 @@ impl StoreSheet {
         let mut y = title.bottom() + 8.0 - self.scroll;
         // Downloading: nothing, until the fetch exists
         y = group_head(&painter, body, y, "DOWNLOADING", ink(ROW_INK));
-        text(&painter, Pos2::new(body.left() + 16.0, y), Align2::LEFT_TOP, "Nothing downloading.", 15.0,
-            Weight::Medium, ink(ROW_INK));
+        text(
+            &painter,
+            Pos2::new(body.left() + 16.0, y),
+            Align2::LEFT_TOP,
+            "Nothing downloading.",
+            15.0,
+            Weight::Medium,
+            ink(ROW_INK),
+        );
         y += 30.0;
         // Waiting for You: what the catalogue has moved on from
         if !waiting.is_empty() {
             y = group_head(&painter, body, y, "WAITING FOR YOU", ink(ROW_INK));
-            let card = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(),
-                waiting.len() as f32 * ROW_HEIGHT));
+            let card = Rect::from_min_size(
+                Pos2::new(body.left(), y),
+                Vec2::new(body.width(), waiting.len() as f32 * ROW_HEIGHT),
+            );
             painter.rect_filled(card, 10.0, ink(GROUP_FILL));
             for (at, one) in waiting.iter().enumerate() {
                 self.record_row(&painter, look, ui, store, one, card, at, true, ink);
@@ -1667,8 +2099,10 @@ impl StoreSheet {
         // Finished: what the store took, newest first
         if !records.is_empty() {
             y = group_head(&painter, body, y, "FINISHED", ink(ROW_INK));
-            let card = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(body.width(),
-                records.len() as f32 * ROW_HEIGHT));
+            let card = Rect::from_min_size(
+                Pos2::new(body.left(), y),
+                Vec2::new(body.width(), records.len() as f32 * ROW_HEIGHT),
+            );
             painter.rect_filled(card, 10.0, ink(GROUP_FILL));
             for (at, one) in records.iter().enumerate() {
                 self.record_row(&painter, look, ui, store, one, card, at, false, ink);
@@ -1696,7 +2130,10 @@ impl StoreSheet {
         );
         if at > 0 {
             painter.line_segment(
-                [Pos2::new(row.left() + GROUP_RULE_INSET, row.top()), Pos2::new(row.right() - GROUP_RULE_INSET, row.top())],
+                [
+                    Pos2::new(row.left() + GROUP_RULE_INSET, row.top()),
+                    Pos2::new(row.right() - GROUP_RULE_INSET, row.top()),
+                ],
                 Stroke::new(1.0, ink(SEP)),
             );
         }
@@ -1706,8 +2143,15 @@ impl StoreSheet {
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 10.0);
         text(painter, name, Align2::LEFT_CENTER, &one.name, 17.0, Weight::Regular, ink(TITLE));
         let line = format!("Version {} - {}", one.version, date_text(one.at, false));
-        text(painter, Pos2::new(name.x, row.center().y + 10.0), Align2::LEFT_CENTER, &line, 15.0, Weight::Regular,
-            ink(ROW_INK));
+        text(
+            painter,
+            Pos2::new(name.x, row.center().y + 10.0),
+            Align2::LEFT_CENTER,
+            &line,
+            15.0,
+            Weight::Regular,
+            ink(ROW_INK),
+        );
         state_pill(painter, look, ui, true, update, row.right() - 16.0, row.center().y, ink);
         if ui.interact(row, ui.scope_id().with(("download row", one.id.clone())), Sense::click()).clicked()
             && let Some(item) = store.items().into_iter().find(|item| item.id == one.id)
@@ -1735,9 +2179,11 @@ impl StoreSheet {
                     on: self.kind.is_none(),
                     set: Set::Kind(None),
                 });
-                for kind in
-                    [procraft_core::ItemKind::Plugin, procraft_core::ItemKind::BrushSet, procraft_core::ItemKind::AssetPack]
-                {
+                for kind in [
+                    procraft_core::ItemKind::Plugin,
+                    procraft_core::ItemKind::BrushSet,
+                    procraft_core::ItemKind::AssetPack,
+                ] {
                     choices.push(Choice::Pick {
                         label: filter_label(kind).to_owned(),
                         on: self.kind == Some(kind),
@@ -1752,28 +2198,16 @@ impl StoreSheet {
                 });
                 for source in store.sources() {
                     let on = self.from.as_deref() == Some(source.id.as_str());
-                    choices.push(Choice::Pick {
-                        label: source.name,
-                        on,
-                        set: Set::Source(Some(source.id)),
-                    });
+                    choices.push(Choice::Pick { label: source.name, on, set: Set::Source(Some(source.id)) });
                 }
             }
             MenuKind::Sort => {
                 choices.push(Choice::Head("Sort by"));
-                for (label, by) in [
-                    ("Title", SortBy::Title),
-                    ("Author", SortBy::Author),
-                    ("Size", SortBy::Size),
-                ] {
+                for (label, by) in [("Title", SortBy::Title), ("Author", SortBy::Author), ("Size", SortBy::Size)] {
                     choices.push(Choice::Pick { label: label.to_owned(), on: self.sort == by, set: Set::Sort(by) });
                 }
                 choices.push(Choice::Head("Order"));
-                choices.push(Choice::Pick {
-                    label: "Ascending".to_owned(),
-                    on: self.ascending,
-                    set: Set::Order(true),
-                });
+                choices.push(Choice::Pick { label: "Ascending".to_owned(), on: self.ascending, set: Set::Order(true) });
                 choices.push(Choice::Pick {
                     label: "Descending".to_owned(),
                     on: !self.ascending,
@@ -1813,17 +2247,30 @@ impl StoreSheet {
         for (at, choice) in choices.iter().enumerate() {
             match choice {
                 Choice::Head(title) => {
-                    text(ui.painter(), Pos2::new(panel.left() + 18.0, y + 8.0), Align2::LEFT_TOP, title, 13.0,
-                        Weight::Regular, ink(IDLE));
+                    text(
+                        ui.painter(),
+                        Pos2::new(panel.left() + 18.0, y + 8.0),
+                        Align2::LEFT_TOP,
+                        title,
+                        13.0,
+                        Weight::Regular,
+                        ink(IDLE),
+                    );
                     y += 30.0;
                 }
                 Choice::Pick { label, on, set } => {
                     let row = Rect::from_min_size(Pos2::new(panel.left(), y), Vec2::new(width, 44.0));
-                    text(ui.painter(), Pos2::new(row.left() + 18.0, row.center().y), Align2::LEFT_CENTER, label,
-                        16.0, Weight::Regular, ink(if *on { TITLE } else { ROW_INK }));
+                    text(
+                        ui.painter(),
+                        Pos2::new(row.left() + 18.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        16.0,
+                        Weight::Regular,
+                        ink(if *on { TITLE } else { ROW_INK }),
+                    );
                     let radio = Pos2::new(row.right() - 18.0 - 9.0, row.center().y);
-                    ui.painter().circle_stroke(radio, 8.5,
-                        Stroke::new(1.5, ink(if *on { ACCENT } else { IDLE })));
+                    ui.painter().circle_stroke(radio, 8.5, Stroke::new(1.5, ink(if *on { ACCENT } else { IDLE })));
                     if *on {
                         ui.painter().circle_filled(radio, 4.5, ink(ACCENT));
                     }
@@ -1919,7 +2366,13 @@ fn state_pill(
     middle: f32,
     ink: impl Fn(Themed) -> Color32,
 ) {
-    let label = if update { "Update" } else if installed { "Installed" } else { "Get" };
+    let label = if update {
+        "Update"
+    } else if installed {
+        "Installed"
+    } else {
+        "Get"
+    };
     let tick = installed && !update;
     let width = text_width(painter, label, 15.0, Weight::SemiBold) + 28.0 + if tick { 21.0 } else { 0.0 };
     let pill = Rect::from_center_size(Pos2::new(right - width / 2.0, middle), Vec2::new(width, PILL_STATE));
@@ -1929,7 +2382,13 @@ fn state_pill(
         look.icon_on(ui, painter, &icons::TICK, Pos2::new(x + 7.0, pill.center().y), 15.0, ink(ROW_INK));
         x += 21.0;
     }
-    let colour = if update { ACCENT_ON } else if installed { ROW_INK } else { ACCENT };
+    let colour = if update {
+        ACCENT_ON
+    } else if installed {
+        ROW_INK
+    } else {
+        ACCENT
+    };
     text(painter, Pos2::new(x, pill.center().y), Align2::LEFT_CENTER, label, 15.0, Weight::SemiBold, ink(colour));
 }
 
@@ -1952,8 +2411,9 @@ enum Set {
 /// What taking something of each kind means, in the words its item page uses.
 fn caveat(kind: procraft_core::ItemKind) -> &'static str {
     match kind {
-        procraft_core::ItemKind::Plugin =>
-            "Runs code on your hooks. You can turn it off in Plugins, and nothing it draws or stores survives.",
+        procraft_core::ItemKind::Plugin => {
+            "Runs code on your hooks. You can turn it off in Plugins, and nothing it draws or stores survives."
+        }
         procraft_core::ItemKind::BrushSet => "Adds to the brush library.",
         procraft_core::ItemKind::AssetPack => "Adds to the asset library.",
     }
@@ -2027,13 +2487,7 @@ fn group_head(painter: &egui::Painter, body: Rect, y: f32, label: &str, colour: 
 }
 
 /// A picture drawn inside a rounded rect.
-fn picture_rounded(
-    painter: &egui::Painter,
-    texture: &egui::TextureHandle,
-    rect: Rect,
-    corner: f32,
-    uv: Rect,
-) {
+fn picture_rounded(painter: &egui::Painter, texture: &egui::TextureHandle, rect: Rect, corner: f32, uv: Rect) {
     let mesh = rounded_mesh(rect, corner, uv, |_| Color32::WHITE, texture.id());
     painter.add(egui::Shape::mesh(mesh));
 }
@@ -2150,7 +2604,8 @@ fn sort_glyph(painter: &egui::Painter, centre: Pos2, size: f32, colour: Color32)
     painter.line_segment([Pos2::new(left, centre.y + d * 0.6), Pos2::new(left, centre.y - d * 0.6)], stroke);
     painter.line_segment([Pos2::new(left - d * 0.3, centre.y - d * 0.25), Pos2::new(left, centre.y - d * 0.6)], stroke);
     painter.line_segment([Pos2::new(right, centre.y - d * 0.6), Pos2::new(right, centre.y + d * 0.6)], stroke);
-    painter.line_segment([Pos2::new(right + d * 0.3, centre.y + d * 0.25), Pos2::new(right, centre.y + d * 0.6)], stroke);
+    painter
+        .line_segment([Pos2::new(right + d * 0.3, centre.y + d * 0.25), Pos2::new(right, centre.y + d * 0.6)], stroke);
 }
 
 /// The icon a kind's tile draws, as the design's tile does.
@@ -2203,11 +2658,7 @@ pub(crate) fn date_text(secs: u64, with_year: bool) -> String {
     use chrono::TimeZone;
     let millis = i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000);
     chrono::Local.timestamp_millis_opt(millis).single().map_or_else(String::new, |when| {
-        if with_year {
-            when.format("%-d %b %Y").to_string()
-        } else {
-            when.format("%-d %b").to_string()
-        }
+        if with_year { when.format("%-d %b %Y").to_string() } else { when.format("%-d %b").to_string() }
     })
 }
 
@@ -2346,7 +2797,10 @@ mod tests {
     #[test]
     fn a_source_s_second_line_says_whose_it_is_or_why_it_is_stale() {
         assert_eq!(source_line(&source("", "", 0, "")), "Bundled with ProCraft");
-        assert_eq!(source_line(&source("https://example.org/c.json", "R. Halloway", 0, "")), "R. Halloway - not read yet");
+        assert_eq!(
+            source_line(&source("https://example.org/c.json", "R. Halloway", 0, "")),
+            "R. Halloway - not read yet"
+        );
         let stale = source("https://example.org/c.json", "R. Halloway", 1_772_000_000, "it could not be read");
         assert_eq!(source_line(&stale), "it could not be read");
         let read = source("https://example.org/c.json", "R. Halloway", 1_772_000_000, "");
