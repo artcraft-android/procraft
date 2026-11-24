@@ -9,8 +9,7 @@ impl Timeline {
         self.tracks.iter().flat_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(0)
     }
 
-    /// `frames` long, at least a frame: the looped frames kept within it (left out when none of
-    /// them are) and markers past it dropped. It may end before its clips: what is
+    /// `frames` long, at least a frame. It may end before its clips: what is
     /// past the end stays where it is but neither plays, exports nor is drawn on (see
     /// [`Timeline::trim`] and the moves, which leave the length as it is). False if it is that
     /// long already.
@@ -20,8 +19,6 @@ impl Timeline {
             return false;
         }
         self.duration = frames;
-        self.loop_range = self.loop_range.map(|(a, b)| (a, b.min(frames))).filter(|(a, b)| a < b);
-        self.markers.retain(|m| *m < frames);
         true
     }
 
@@ -32,8 +29,8 @@ impl Timeline {
 
     /// `count` frames added before the first (`at_start`) or after the last. Before the first,
     /// everything moves along by `count`: every clip on the timeline's own tracks (their keys,
-    /// a group's own clips and a sound's place in its file going with them), the camera's keys,
-    /// the markers and the looped frames. False for none.
+    /// a group's own clips and a sound's place in its file going with them) and the camera's
+    /// keys. False for none.
     pub fn add_frames(&mut self, at_start: bool, count: u32) -> bool {
         if count == 0 {
             return false;
@@ -49,10 +46,6 @@ impl Timeline {
         for key in &mut self.camera.keys {
             key.frame = key.frame.saturating_add(by);
         }
-        for m in &mut self.markers {
-            *m = m.saturating_add(count);
-        }
-        self.loop_range = self.loop_range.map(|(a, b)| (a.saturating_add(count), b.saturating_add(count)));
         true
     }
 }
@@ -66,7 +59,7 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, clips }
+        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
     }
 
     /// Two tracks: drawings at 2..5 and 8..12 on one, 0..6 on the other; 20 frames long.
@@ -113,19 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn a_shorter_length_keeps_the_loop_and_markers_within_it() {
-        let mut tl = two();
-        tl.loop_range = Some((10, 18));
-        tl.markers = vec![4, 14, 19];
-        assert!(tl.set_length(15));
-        assert_eq!(tl.loop_range, Some((10, 15)));
-        assert_eq!(tl.markers, [4, 14]);
-        tl.loop_range = Some((13, 15));
-        assert!(tl.set_length(13));
-        assert_eq!(tl.loop_range, None, "none of its frames are left");
-    }
-
-    #[test]
     fn fitting_to_the_content() {
         let mut tl = two();
         assert!(tl.fit_to_content());
@@ -139,11 +119,9 @@ mod tests {
     #[test]
     fn frames_added_at_the_end_move_nothing() {
         let mut tl = two();
-        tl.markers = vec![3];
         assert!(tl.add_frames(false, 6));
         assert_eq!(tl.duration, 26);
         assert_eq!(tl.tracks[0].clips[0].start, 2);
-        assert_eq!(tl.markers, [3]);
         assert!(!tl.add_frames(false, 0));
     }
 
@@ -157,8 +135,6 @@ mod tests {
             easing: Easing::Linear,
             path: None,
         });
-        tl.markers = vec![0, 7];
-        tl.loop_range = Some((2, 12));
         let before = tl.plan(9);
         assert!(tl.add_frames(true, 4));
         assert_eq!(tl.duration, 24);
@@ -166,8 +142,6 @@ mod tests {
         assert_eq!(starts, [6, 12, 4]);
         assert_eq!(tl.tracks[0].clips[0].keys.opacity.keys[0].frame, 1, "a clip's keys are its own frames");
         assert_eq!(tl.camera.keys[0].frame, 13);
-        assert_eq!(tl.markers, [4, 11]);
-        assert_eq!(tl.loop_range, Some((6, 16)));
         assert_eq!(tl.plan(13), before, "what showed on frame 9 shows on frame 13");
     }
 

@@ -1,7 +1,7 @@
 //! Clips moved into and out of group clips, a sound's level keyed over time, and the layers
 //! panel's + on a timeline (a layer in the drawing at the playhead).
 
-use procraft_engine::timeline::{ClipContent, ClipId, Easing, Edge, EdgePolicy, Timeline, TrackId};
+use procraft_engine::timeline::{Clip, ClipContent, ClipId, Easing, Edge, EdgePolicy, Timeline, TrackId};
 
 use super::TimelineClipInfo;
 use crate::CanvasSession;
@@ -40,6 +40,63 @@ fn trimmed(tl: &mut Timeline, id: u64, leading: bool, frame: u32, policy: Timeli
     tl.trim(id, edge, frame.saturating_sub(level), policy.policy()).then_some(track)
 }
 
+/// The timeline made as long as its clips, where it is shorter: after what makes a clip last
+/// longer where every frame shows as its own (the grid), so none is left past the end.
+pub(super) fn hold_clips(tl: &mut Timeline) {
+    let end = tl.content_end().min(super::MOST_FRAMES);
+    if end > tl.duration {
+        tl.set_length(end);
+    }
+}
+
+/// Clip `id`'s start (`leading`) or end dragged to timeline frame `frame` in `tl` as the grid's
+/// handles drag it. An end pushes the clips after it along, the timeline growing to hold them. A
+/// start dragged earlier pushes the clips before it earlier, the nearest first, into the empty
+/// frames before them ([`Timeline::close_up_before`]); asked earlier than they have room for
+/// (before the timeline's first frame, even), the clip lasts as many frames longer at its end as
+/// its start fell short, the clips after it pushed along, so it gets as long as was asked either
+/// way. A start dragged later leaves the clips before it where they are. Its track, if that
+/// changed anything (never on a locked track).
+pub(super) fn lengthened(tl: &mut Timeline, id: u64, leading: bool, frame: i32) -> Option<TrackId> {
+    let id = ClipId(id);
+    let level = tl.origin(id)?.checked_sub(tl.clip(id)?.start)?;
+    let track = tl.track_of_clip(id)?;
+    if tl.track(track)?.locked {
+        return None;
+    }
+    let asked = i64::from(frame) - i64::from(level);
+    let to = u32::try_from(asked.max(0)).unwrap_or(0);
+    let changed = if leading {
+        let before = tl.clip(id)?.start;
+        // (a cycling group's start stays put, so nothing is moved out of its way)
+        let cycles = matches!(&tl.clip(id)?.content, ClipContent::Group(g) if g.cycle.is_some());
+        let to = if asked < i64::from(before) && !cycles { tl.close_up_before(id, to)? } else { to };
+        // the way is clear as far as `to` now, and a start dragged later leaves the clips before
+        // it where they are (pushing would move every one of them together, either way)
+        let mut changed = tl.trim(id, Edge::Start, to, EdgePolicy::Clamp);
+        let clip = tl.clip(id)?;
+        let short = i64::from(clip.start) - asked;
+        // (only dragged earlier: a start dragged later than it can go just stops)
+        // (a sound or video starts no earlier than its file does, and no longer for it)
+        let media = matches!(clip.content, ClipContent::Audio(_) | ClipContent::Video(_));
+        if asked < i64::from(before) && short > 0 && !media {
+            let end = clip.end().saturating_add(u32::try_from(short).unwrap_or(u32::MAX));
+            let end = tl.open_up_after(id, end)?;
+            changed |= tl.trim(id, Edge::End, end, EdgePolicy::Clamp);
+        }
+        changed
+    } else {
+        // longer: into the empty frames after it first, the clips it reaches pushed only as far
+        // as they must be. Shorter: nothing else moves
+        let to = if to > tl.clip(id)?.end() { tl.open_up_after(id, to)? } else { to };
+        tl.trim(id, Edge::End, to, EdgePolicy::Clamp)
+    };
+    if changed {
+        hold_clips(tl);
+    }
+    changed.then_some(track)
+}
+
 /// Whether any of clips `ids` is on a locked track (one that isn't there counts as not).
 fn any_locked(tl: &Timeline, ids: &[ClipId]) -> bool {
     ids.iter().any(|id| tl.track_of_clip(*id).and_then(|t| tl.track(t)).is_some_and(|t| t.locked))
@@ -68,6 +125,27 @@ impl CanvasSession {
         let st = self.shared.lock();
         let Some(mut tl) = st.doc.timeline.clone() else { return Vec::new() };
         let Some(track) = trimmed(&mut tl, id, leading, frame, policy) else { return Vec::new() };
+        let offset = tl.level_start(track).unwrap_or(0);
+        tl.track(track).map_or_else(Vec::new, |t| t.clips.iter().map(|c| super::clip_info(c, offset)).collect())
+    }
+
+    /// Clip `id`'s start (`leading`) or end dragged to timeline frame `frame` as the grid's handles
+    /// drag it, as one "Trim" undo step. Longer, it takes up the empty frames beside it first and
+    /// pushes only the clips it reaches, each only as far as it must go; shorter, nothing else
+    /// moves. The timeline grows to hold what goes later, and a start asked earlier than the clips
+    /// before it have room for (`frame` may be negative) makes the clip last that much longer at
+    /// its end instead.
+    /// False if nothing changed.
+    pub fn lengthen_timeline_clip(&self, id: u64, leading: bool, frame: i32) -> bool {
+        self.change("Trim", |d| lengthened(d.timeline.as_mut()?, id, leading, frame).map(|_| ())).is_some()
+    }
+
+    /// The clips of clip `id`'s track as [`CanvasSession::lengthen_timeline_clip`] would leave
+    /// them, changing nothing. Empty if it would change nothing.
+    pub fn timeline_lengthen_preview(&self, id: u64, leading: bool, frame: i32) -> Vec<TimelineClipInfo> {
+        let st = self.shared.lock();
+        let Some(mut tl) = st.doc.timeline.clone() else { return Vec::new() };
+        let Some(track) = lengthened(&mut tl, id, leading, frame) else { return Vec::new() };
         let offset = tl.level_start(track).unwrap_or(0);
         tl.track(track).map_or_else(Vec::new, |t| t.clips.iter().map(|c| super::clip_info(c, offset)).collect())
     }
@@ -136,6 +214,64 @@ impl CanvasSession {
                     d.delete_layer(root);
                 }
                 (!gone.is_empty()).then_some(())
+            })
+            .is_some();
+        if done {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.follow_playhead();
+            self.shared.frame(st);
+        }
+        done
+    }
+
+    /// The drawings of clips `ids` made blank, each clip staying where it is with its length and
+    /// keys: a new empty layer takes the place of the drawing's layers, under its name. One "Clear
+    /// Frames" undo step. Clips that aren't drawings (and adjustment clips) are left as they are.
+    /// False if any is on a locked track, or none was cleared.
+    pub fn clear_timeline_clips(&self, ids: Vec<u64>) -> bool {
+        let ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
+        {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+        }
+        let done = self
+            .change("Clear Frames", |d| {
+                if any_locked(d.timeline.as_ref()?, &ids) {
+                    return None;
+                }
+                let current = d.current();
+                let mut cleared = false;
+                for id in &ids {
+                    let old = match d.timeline.as_ref()?.clip(*id) {
+                        Some(Clip { content: ClipContent::Drawing(dr), adjustment: false, .. }) => dr.root,
+                        _ => continue,
+                    };
+                    // (a layer more, until the old ones go)
+                    if !d.has_room(1) {
+                        continue;
+                    }
+                    let name = d.layer(old).map(|l| l.name.clone());
+                    // a new top-level layer just above the drawing's own
+                    d.set_current(old);
+                    let fresh = d.add_layer();
+                    if let Some(name) = name {
+                        d.rename(fresh, &name);
+                    }
+                    if let Some(Clip { content: ClipContent::Drawing(dr), .. }) = d.timeline.as_mut()?.clip_mut(*id) {
+                        dr.root = fresh;
+                    }
+                    // (a group with its layer in it, as a new drawing is)
+                    d.drawing_group(fresh);
+                    d.delete_layer(old);
+                    cleared = true;
+                }
+                if d.layer(current).is_some() {
+                    d.set_current(current);
+                }
+                cleared.then_some(())
             })
             .is_some();
         if done {

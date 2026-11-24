@@ -87,3 +87,78 @@ fn a_video_clip_draws_its_picture_for_the_time_shown() {
     let after = shown(&mut canvas, 25);
     assert_eq!(pixel(&after, 4, 4)[3], 0);
 }
+
+/// As [`Flashes`], but each picture takes a while to read, as a decoder's does.
+#[derive(Default)]
+struct Slow(Flashes);
+
+impl VideoSource for Slow {
+    fn picture(&self, media: MediaId, seconds: f64) -> Option<VideoPicture> {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        self.0.picture(media, seconds)
+    }
+}
+
+#[test]
+fn pictures_read_aside_never_hold_a_render_up_and_a_render_read_back_still_waits() {
+    let Some(gpu) = gpu() else { return };
+    let mut doc = Document::new(SIDE, SIDE);
+    let mut tl = Timeline::new(10, 1);
+    tl.add_media(Media {
+        id: MediaId(7),
+        name: "Animatic".into(),
+        kind: MediaKind::Video,
+        seconds: 2.0,
+        extension: "mov".into(),
+        size: [4, 4],
+    });
+    tl.add_video(MediaId(7), 0, (SIDE, SIDE)).unwrap();
+    doc.timeline = Some(tl);
+    doc.background_visible = false;
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let source = Arc::new(Slow::default());
+    canvas.set_video_source(Some(source.clone()));
+    canvas.read_videos_aside();
+    assert!(!canvas.videos_pending());
+
+    // a frame drawn to show: it asks for the picture and goes on without it
+    let started = std::time::Instant::now();
+    canvas.set_timeline_frame(0);
+    canvas.invalidate();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(started.elapsed() < std::time::Duration::from_millis(50), "the render waited for the picture");
+    assert!(canvas.videos_pending());
+    // scrubbed on meanwhile: only the newest time asked for is read after the one under way
+    for frame in 1..=7 {
+        canvas.set_timeline_frame(frame);
+        canvas.invalidate();
+        canvas.render(&gpu, &mut doc, None);
+    }
+    // the app renders again while one is on its way; then the frame shows the picture for its time
+    let mut renders = 0;
+    while canvas.videos_pending() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        canvas.render(&gpu, &mut doc, None);
+        renders += 1;
+        assert!(renders < 2000, "the picture never came");
+    }
+    canvas.render_finished(&gpu, &mut doc);
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 4, 4), [0, 0, 255, 255]);
+    let asked = source.0.asked.load(Ordering::SeqCst);
+    assert!(asked <= 3, "every frame scrubbed past was read: {asked}");
+    assert!(source.0.times.lock().unwrap().iter().any(|t| (t - 0.7).abs() < 1e-9));
+
+    // a render that is read back (an export's) waits for its frame's own picture
+    canvas.set_timeline_frame(2);
+    canvas.invalidate();
+    canvas.render_finished(&gpu, &mut doc);
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 4, 4), [255, 0, 0, 255]);
+    // and nothing read aside for another time takes its place afterwards
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        canvas.render(&gpu, &mut doc, None);
+    }
+    assert!(!canvas.videos_pending());
+    canvas.render_finished(&gpu, &mut doc);
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 4, 4), [255, 0, 0, 255]);
+}

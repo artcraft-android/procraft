@@ -63,18 +63,11 @@ pub struct Timeline {
     pub camera: Channel<CameraPose>,
     #[serde(default)]
     pub playback: Playback,
-    /// Frames played over and over while drawing (start, one past the end); none, the whole.
-    #[serde(default)]
-    pub loop_range: Option<(u32, u32)>,
     #[serde(default)]
     pub onion: OnionSkins,
     /// The media its audio and video clips play, in the canvas's package.
     #[serde(default)]
     pub media: Vec<Media>,
-    /// Sync markers on the ruler, frames in order (dropped while playing, to time drawings to a
-    /// beat or a line of dialogue).
-    #[serde(default)]
-    pub markers: Vec<u32>,
     /// The ids the next track and clip take.
     pub next_track: u64,
     pub next_clip: u64,
@@ -107,8 +100,37 @@ pub struct Track {
     pub locked: bool,
     /// Multiplies every clip's own opacity.
     pub opacity: f32,
+    /// How the whole track looks: its colour tag, and the blend mode and mask of its clips that
+    /// have none of their own.
+    #[serde(default)]
+    pub look: TrackLook,
     /// In time order, none overlapping.
     pub clips: Vec<Clip>,
+}
+
+/// A track's own look. Clips never overlap on a track, so a blend mode or mask every clip of it
+/// takes is the track's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TrackLook {
+    /// A colour tag shown on the track's name, sRGB 0..1.
+    pub label: Option<[f32; 3]>,
+    /// The blend mode of its clips whose own is Normal.
+    pub blend: BlendMode,
+    /// How its clips with no mask of their own are masked by the clip on the track below.
+    pub mask: MaskMode,
+}
+
+impl Track {
+    /// The blend mode clip `clip` of it draws with: its own, or the track's where it has none.
+    pub fn blend_of(&self, clip: &Clip) -> BlendMode {
+        if clip.blend == BlendMode::Normal { self.look.blend } else { clip.blend }
+    }
+
+    /// How clip `clip` of it is masked: as it says, or as the track does where it says nothing.
+    pub fn mask_of(&self, clip: &Clip) -> MaskMode {
+        if clip.mask == MaskMode::None { self.look.mask } else { clip.mask }
+    }
 }
 
 /// Something placed on a track for a span of frames, and everything that says how it composites.
@@ -197,6 +219,21 @@ pub struct VideoClip {
     pub trim_start: f64,
     /// Where its picture sits on the canvas: left, top, width, height (canvas pixels).
     pub rect: [f32; 4],
+    /// The sound it plays with its picture, if its file had one and it hasn't been taken out as a
+    /// sound clip of its own (see [`Timeline::separate_audio`]). A video written before videos
+    /// had sound has none.
+    #[serde(default)]
+    pub sound: Option<VideoSound>,
+}
+
+/// A video clip's own sound: the sound taken from its file (kept as media of its own, a sound's),
+/// which plays in step with the picture, from the same place in the file.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VideoSound {
+    pub media: MediaId,
+    pub volume: f32,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 /// A sound.
@@ -530,10 +567,8 @@ impl Timeline {
             tracks: Vec::new(),
             camera: Channel::default(),
             playback: Playback::default(),
-            loop_range: None,
             onion: OnionSkins::default(),
             media: Vec::new(),
-            markers: Vec::new(),
             next_track: 1,
             next_clip: 1,
             onion_track: Unsaved(None),
@@ -574,7 +609,7 @@ impl Timeline {
                 Clip { id, ..c }
             })
             .collect();
-        Track { id, name: name.to_owned(), hidden, locked: false, opacity: 1.0, clips }
+        Track { id, name: name.to_owned(), hidden, locked: false, opacity: 1.0, look: Default::default(), clips }
     }
 
     /// `doc` as a timeline, if it can be one: Animation Assist's frames in order, each a drawing
@@ -583,22 +618,48 @@ impl Timeline {
     /// canvas without Animation Assist becomes one frame with a track for each top-level layer or
     /// group. None for Page Assist, whose pages aren't frames.
     pub fn from_document(doc: &Document) -> Option<Timeline> {
-        let top = doc.members(None);
-        let place = |id: LayerId| top.iter().position(|t| *t == id).unwrap_or(usize::MAX);
-        let name = |id: LayerId| doc.layer(id).map_or_else(|| "Drawing".to_owned(), |l| l.name.clone());
-        let Some(a) = &doc.animation else {
-            let mut tl = Timeline::new(animation::Animation::default().fps, 1);
-            for id in top {
-                let hidden = doc.layer(id).is_none_or(|l| !l.visible);
-                let track = tl.track_of(&name(id), hidden, vec![Clip::drawing(&name(id), id, 0, 1)]);
-                tl.tracks.push(track);
+        let mut tl = match &doc.animation {
+            Some(a) if a.pages => return None,
+            Some(a) => {
+                let mut tl = Timeline::new(a.fps, 1);
+                tl.playback = a.playback;
+                tl.onion = OnionSkins {
+                    count: [a.onion_frames; 2],
+                    opacity: a.onion_opacity,
+                    colors: [a.before, a.after],
+                    blend_primary: a.blend_primary,
+                };
+                tl
             }
-            return Some(tl);
+            None => Timeline::new(animation::Animation::default().fps, 1),
         };
-        if a.pages {
+        tl.duration = 0;
+        let frames_track = tl.take_in(doc, &doc.members(None));
+        tl.duration = tl.duration.max(1);
+        tl.simple = frames_track;
+        Some(tl)
+    }
+
+    /// Tracks, on top of those it has, for `layers` (top-level layers and groups of `doc` no
+    /// drawing of its own shows yet, bottom first), so none of them disappears. With Animation
+    /// Assist on, the visible ones are its frames: one track of them in order, each held as long
+    /// as it was, from the first frame (the frames it always showed, a background and a
+    /// foreground, on tracks under and over it for as long as the timeline lasts), and each
+    /// hidden one a hidden track. Without it, each a track of its own for as long as the timeline
+    /// lasts. The timeline grows to hold the frames. Returns the frames' track, if it made one.
+    fn take_in(&mut self, doc: &Document, layers: &[LayerId]) -> Option<TrackId> {
+        let place = |id: LayerId| layers.iter().position(|t| *t == id).unwrap_or(usize::MAX);
+        let name = |id: LayerId| doc.layer(id).map_or_else(|| "Drawing".to_owned(), |l| l.name.clone());
+        let Some(a) = doc.animation.as_ref().filter(|a| !a.pages) else {
+            let whole = self.duration.max(1);
+            for id in layers {
+                let hidden = doc.layer(*id).is_none_or(|l| !l.visible);
+                let track = self.track_of(&name(*id), hidden, vec![Clip::drawing(&name(*id), *id, 0, whole)]);
+                self.tracks.push(track);
+            }
             return None;
-        }
-        let frames = animation::frames(doc);
+        };
+        let frames: Vec<LayerId> = animation::frames(doc).into_iter().filter(|f| layers.contains(f)).collect();
         let background = frames.first().copied().filter(|_| a.background);
         let foreground = frames.last().copied().filter(|_| a.foreground && frames.len() > 1);
         let mut starts = Vec::with_capacity(frames.len());
@@ -608,40 +669,37 @@ impl Timeline {
             starts.push((*id, at, held));
             at += held;
         }
-        let mut tl = Timeline::new(a.fps, at);
-        tl.playback = a.playback;
-        tl.onion = OnionSkins {
-            count: [a.onion_frames; 2],
-            opacity: a.onion_opacity,
-            colors: [a.before, a.after],
-            blend_primary: a.blend_primary,
-        };
-        let whole = tl.duration;
+        self.duration = self.duration.max(at).max(1);
+        let whole = self.duration;
         // each track goes where its lowest layer was, the frames always shown below and above
         let mut tracks: Vec<((usize, u8), Track)> = Vec::new();
         if let Some(id) = background {
-            let track = tl.track_of("Background", false, vec![Clip::drawing(&name(id), id, 0, whole)]);
+            let track = self.track_of("Background", false, vec![Clip::drawing(&name(id), id, 0, whole)]);
             tracks.push(((place(id), 0), track));
         }
-        let drawn = starts
+        let drawn: Vec<Clip> = starts
             .iter()
             .filter(|(id, ..)| Some(*id) != background && Some(*id) != foreground)
             .map(|(id, start, held)| Clip::drawing(&name(*id), *id, *start, *held))
             .collect();
-        let frames_track = tl.track_of("Animation", false, drawn);
-        tl.simple = Some(frames_track.id);
-        tracks.push(((frames.first().map_or(0, |id| place(*id)), 1), frames_track));
+        // (a timeline with tracks already gets no empty track for frames there are none of)
+        let mut made = None;
+        if !drawn.is_empty() || self.tracks.is_empty() {
+            let frames_track = self.track_of("Animation", false, drawn);
+            made = Some(frames_track.id);
+            tracks.push(((frames.first().map_or(0, |id| place(*id)), 1), frames_track));
+        }
         if let Some(id) = foreground {
-            let track = tl.track_of("Foreground", false, vec![Clip::drawing(&name(id), id, 0, whole)]);
+            let track = self.track_of("Foreground", false, vec![Clip::drawing(&name(id), id, 0, whole)]);
             tracks.push(((place(id), 2), track));
         }
-        for id in top.iter().filter(|id| !frames.contains(id)) {
-            let track = tl.track_of(&name(*id), true, vec![Clip::drawing(&name(*id), *id, 0, whole)]);
+        for id in layers.iter().filter(|id| !frames.contains(id)) {
+            let track = self.track_of(&name(*id), true, vec![Clip::drawing(&name(*id), *id, 0, whole)]);
             tracks.push(((place(*id), 1), track));
         }
         tracks.sort_by_key(|(key, _)| *key);
-        tl.tracks = tracks.into_iter().map(|(_, t)| t).collect();
-        Some(tl)
+        self.tracks.extend(tracks.into_iter().map(|(_, t)| t));
+        made
     }
 
     /// The timeline made consistent with the document's top-level layers `top`: values in range,
@@ -662,7 +720,6 @@ impl Timeline {
         if self.simple.is_some_and(|s| !self.tracks.iter().any(|t| t.id == s)) {
             self.simple = None;
         }
-        self.loop_range = self.loop_range.filter(|(a, b)| a < b && *b <= self.duration);
         let mut media = std::collections::HashSet::new();
         self.media.retain(|m| media.insert(m.id));
         self
@@ -718,7 +775,7 @@ impl Timeline {
                 look: animation::FrameLook::Onion { color, opacity },
                 opacity: clip.keys.opacity_at(0.0).unwrap_or(clip.opacity) * track.opacity,
                 pose: clip.keys.pose_at(0.0),
-                blend: clip.blend,
+                blend: track.blend_of(clip),
             })
         };
         let mut before: Vec<Showing> = drawings
@@ -791,14 +848,47 @@ impl Clip {
 impl Document {
     /// Puts the canvas on a timeline made from it (see [`Timeline::from_document`]), which takes
     /// over from Animation Assist. False if it is on one already, or can't be (Page Assist).
+    ///
+    /// A canvas taken off a timeline before ([`Document::stop_timeline`]) goes back on that one,
+    /// as it was: its tracks, timing, keys, sounds and videos. What changed meanwhile is made to
+    /// fit: a drawing whose layers were deleted is left out, and layers added since get tracks of
+    /// their own on top (Animation Assist's frames one track, see [`Timeline::from_document`]).
     pub fn start_timeline(&mut self) -> bool {
-        if self.timeline.is_some() {
+        if self.timeline.is_some() || self.animation.as_ref().is_some_and(|a| a.pages) {
             return false;
         }
-        let Some(tl) = Timeline::from_document(self) else { return false };
+        let top = self.members(None);
+        let tl = match self.timeline_off.take() {
+            Some(kept) => {
+                let mut tl = kept.repaired(&top);
+                let shown = tl.drawing_roots();
+                let rest: Vec<LayerId> = top.into_iter().filter(|id| !shown.contains(id)).collect();
+                if !rest.is_empty() {
+                    tl.take_in(self, &rest);
+                }
+                tl
+            }
+            None => match Timeline::from_document(self) {
+                Some(tl) => tl,
+                None => return false,
+            },
+        };
         self.timeline = Some(tl);
         self.animation = None;
+        self.mark_adjustment_clips();
         true
+    }
+
+    /// Takes the canvas off its timeline: its layers stay as they are, and the timeline is kept
+    /// aside for [`Document::start_timeline`] to bring back. False if it isn't on one.
+    pub fn stop_timeline(&mut self) -> bool {
+        match self.timeline.take() {
+            Some(tl) => {
+                self.timeline_off = Some(tl);
+                true
+            }
+            None => false,
+        }
     }
 
     /// The top-level layer or group holding `layer` (itself, at the top level).
@@ -946,6 +1036,18 @@ impl Timeline {
             ClipContent::Group(g) => g.tracks.push(track),
             _ => return None,
         }
+        Some(id)
+    }
+
+    /// A new empty track just above track `below`, on its level (the timeline's own tracks or a
+    /// group clip's); none if there is no track `below`.
+    pub fn add_track_above(&mut self, below: TrackId, name: &str) -> Option<TrackId> {
+        level_of_track(&mut self.tracks, below)?;
+        let track = self.track_of(name, false, Vec::new());
+        let id = track.id;
+        let level = level_of_track(&mut self.tracks, below)?;
+        let at = level.iter().position(|t| t.id == below)? + 1;
+        level.insert(at, track);
         Some(id)
     }
 
@@ -1106,7 +1208,7 @@ impl Timeline {
             let clips = taken.into_iter().map(|c| Clip { start: c.start - start, ..c }).collect();
             let id = TrackId(next_track);
             next_track += 1;
-            inner.push(Track { id, name: track.name.clone(), hidden: false, locked: false, opacity: 1.0, clips });
+            inner.push(Track { id, name: track.name.clone(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips });
         }
         let group = Clip {
             id: group_id,
@@ -1127,7 +1229,7 @@ impl Timeline {
             let id = TrackId(next_track);
             next_track += 1;
             home += 1;
-            let track = Track { id, name: name.to_owned(), hidden: false, locked: false, opacity: 1.0, clips: vec![] };
+            let track = Track { id, name: name.to_owned(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips: vec![] };
             level.insert(home.min(level.len()), track);
         }
         let track = level.get_mut(home)?;
@@ -1496,7 +1598,7 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
                 continue;
             }
         };
-        let mask = match (clip.mask, below) {
+        let mask = match (track.mask_of(clip), below) {
             (MaskMode::None, _) | (_, None) => None,
             (mode, Some(source)) => {
                 if mode.consumes_source()
@@ -1514,7 +1616,7 @@ fn sample(tracks: &[Track], frame: u32, fps: u32, out: &mut Vec<PlanItem>) {
             local,
             pose: clip.keys.pose_at(keyed as f32),
             opacity: clip.keys.opacity_at(keyed as f32).unwrap_or(clip.opacity) * track.opacity,
-            blend: clip.blend,
+            blend: track.blend_of(clip),
             mask,
             matte_only: false,
             adjustment: clip.adjustment.then(|| clip.keys.adjustment.value_at(keyed as f32)).flatten(),
@@ -2119,6 +2221,102 @@ impl Clip {
     }
 }
 
+impl Channel<[f32; 2]> {
+    /// The keys on frames `first` to `last` thinned to as few as keep the path they trace: the
+    /// first and last of them stay, and of those between, each that the straight line between
+    /// the kept keys either side of it would miss by more than `tolerance` (found the furthest
+    /// first). Each then goes on to the next in a straight line. What is kept of a move performed
+    /// a frame at a time.
+    pub fn thin(&mut self, first: i32, last: i32, tolerance: f32) {
+        let inside: Vec<usize> =
+            self.keys.iter().enumerate().filter(|(_, k)| k.frame >= first && k.frame <= last).map(|(i, _)| i).collect();
+        let (Some(&a), Some(&b)) = (inside.first(), inside.last()) else { return };
+        let mut keep = vec![false; self.keys.len()];
+        let mut spans = vec![(a, b)];
+        while let Some((i, j)) = spans.pop() {
+            let (Some(from), Some(to)) = (self.keys.get(i), self.keys.get(j)) else { continue };
+            let frames = (to.frame - from.frame).max(1) as f32;
+            let mut furthest: Option<(f32, usize)> = None;
+            for (n, k) in self.keys.iter().enumerate().take(j).skip(i + 1) {
+                let t = (k.frame - from.frame) as f32 / frames;
+                let dx = k.value[0] - (from.value[0] + (to.value[0] - from.value[0]) * t);
+                let dy = k.value[1] - (from.value[1] + (to.value[1] - from.value[1]) * t);
+                let off = dx.hypot(dy);
+                if furthest.is_none_or(|(most, _)| off > most) {
+                    furthest = Some((off, n));
+                }
+            }
+            if let Some((off, n)) = furthest
+                && off > tolerance
+            {
+                keep[n] = true;
+                spans.push((i, n));
+                spans.push((n, j));
+            }
+        }
+        let mut n = 0;
+        self.keys.retain(|_| {
+            let i = n;
+            n += 1;
+            i <= a || i >= b || keep[i]
+        });
+        for k in self.keys.iter_mut().filter(|k| k.frame >= first && k.frame <= last) {
+            k.easing = Easing::Linear;
+            k.path = None;
+        }
+    }
+}
+
+impl Channel<[f32; 2]> {
+    /// The keys on frames `first` to `last` evened out, `passes` times over: each between the
+    /// first and last of them moved a quarter of the way toward each of its neighbours. What
+    /// takes the shake out of a move performed by hand.
+    pub fn even_out(&mut self, first: i32, last: i32, passes: u32) {
+        let inside: Vec<usize> =
+            self.keys.iter().enumerate().filter(|(_, k)| k.frame >= first && k.frame <= last).map(|(i, _)| i).collect();
+        if inside.len() < 3 {
+            return;
+        }
+        for _ in 0..passes {
+            let was: Vec<[f32; 2]> = inside.iter().filter_map(|i| self.keys.get(*i)).map(|k| k.value).collect();
+            for (n, i) in inside.iter().enumerate().take(inside.len() - 1).skip(1) {
+                if let (Some(k), Some(a), Some(b), Some(c)) = (self.keys.get_mut(*i), was.get(n - 1), was.get(n), was.get(n + 1)) {
+                    k.value = [(a[0] + 2.0 * b[0] + c[0]) / 4.0, (a[1] + 2.0 * b[1] + c[1]) / 4.0];
+                }
+            }
+        }
+    }
+
+    /// The keys on frames `first` to `last` given handles that carry the path through each in a
+    /// curve, along the way from the key before it to the key after: `strength` 1 for a full
+    /// curve, 0 for corners (their handles taken away). The first and last of them stay corners.
+    pub fn curve(&mut self, first: i32, last: i32, strength: f32) {
+        let inside: Vec<usize> =
+            self.keys.iter().enumerate().filter(|(_, k)| k.frame >= first && k.frame <= last).map(|(i, _)| i).collect();
+        for (n, i) in inside.iter().enumerate() {
+            let around = (n > 0 && n + 1 < inside.len() && strength > 0.0)
+                .then(|| Some((self.keys.get(inside[n - 1])?.value, self.keys.get(inside[n + 1])?.value)))
+                .flatten();
+            let Some(k) = self.keys.get_mut(*i) else { continue };
+            k.path = around.map(|(a, b)| {
+                let d = [(b[0] - a[0]) / 6.0 * strength, (b[1] - a[1]) / 6.0 * strength];
+                PathHandles { mode: HandleMode::Symmetric, before: [-d[0], -d[1]], after: d }
+            });
+        }
+    }
+}
+
+impl Channel<f32> {
+    /// As a position's [`Channel::thin`], for a single number keyed frame by frame (a turn).
+    pub fn thin(&mut self, first: i32, last: i32, tolerance: f32) {
+        let mut both: Channel<[f32; 2]> = Channel {
+            keys: self.keys.iter().map(|k| Key { frame: k.frame, value: [k.value, 0.0], easing: k.easing.clone(), path: None }).collect(),
+        };
+        both.thin(first, last, tolerance);
+        self.keys = both.keys.into_iter().map(|k| Key { frame: k.frame, value: k.value[0], easing: k.easing, path: None }).collect();
+    }
+}
+
 impl<T> Channel<T> {
     /// Each key's frame times `ratio`, rounded; keys landing on one frame leave the later one.
     pub fn scale_keys(&mut self, ratio: f64) {
@@ -2221,12 +2419,11 @@ fn scaled_u32(frame: u32, ratio: f64) -> u32 {
     if f >= f64::from(u32::MAX) { u32::MAX } else { f.max(0.0) as u32 }
 }
 
-/// Retiming, sync markers and the track clipboard (timeline step 1g).
+/// Retiming and the track clipboard (timeline step 1g).
 impl Timeline {
     /// Played at `fps` frames a second with its timing kept: every clip's start and length, every
-    /// key (clips', the camera's, sounds' volume), the groups' cycles, the length, the loop and
-    /// the markers scaled by the change ("Keep Timing"). Whole ratios (12 to 24)
-    /// are exact; others round to the nearest frame, and a clip rounded onto the one before it
+    /// key (clips', the camera's, sounds' volume), the groups' cycles and the length scaled by the
+    /// change ("Keep Timing"). Whole ratios (12 to 24) are exact; others round to the nearest frame, and a clip rounded onto the one before it
     /// starts where that one ends. A sound keeps its start in seconds: what rounding loses is
     /// carried in its offset. False if the rate stays as it is.
     pub fn retime(&mut self, fps: u32) -> bool {
@@ -2239,51 +2436,9 @@ impl Timeline {
         retime_tracks(&mut self.tracks, ratio, old, fps);
         self.camera.scale_keys(ratio);
         self.duration = scaled_u32(self.duration, ratio).max(1);
-        self.loop_range = self.loop_range.map(|(a, b)| {
-            let a = scaled_u32(a, ratio);
-            (a, scaled_u32(b, ratio).max(a + 1))
-        });
-        let mut markers: Vec<u32> = self.markers.iter().map(|m| scaled_u32(*m, ratio)).collect();
-        markers.dedup();
-        self.markers = markers;
         self.fps = fps;
         self.fit();
-        self.markers.retain(|m| *m < self.duration);
         true
-    }
-
-    /// A marker on frame `frame` (within the timeline); false if there is one there already.
-    pub fn add_marker(&mut self, frame: u32) -> bool {
-        let frame = frame.min(self.duration.saturating_sub(1));
-        match self.markers.binary_search(&frame) {
-            Ok(_) => false,
-            Err(at) => {
-                self.markers.insert(at, frame);
-                true
-            }
-        }
-    }
-
-    /// The marker on frame `from` moved to `to` (within the timeline; onto another, the two become
-    /// one). False if there is none on `from`, or it stays.
-    pub fn move_marker(&mut self, from: u32, to: u32) -> bool {
-        let to = to.min(self.duration.saturating_sub(1));
-        if from == to || !self.remove_marker(from) {
-            return false;
-        }
-        self.add_marker(to);
-        true
-    }
-
-    /// Takes away the marker on frame `frame`; false if there is none.
-    pub fn remove_marker(&mut self, frame: u32) -> bool {
-        match self.markers.binary_search(&frame) {
-            Ok(at) => {
-                self.markers.remove(at);
-                true
-            }
-            Err(_) => false,
-        }
     }
 
     /// Clips `ids` (on tracks of one level), copied with their keys. None if one isn't there or
@@ -2338,6 +2493,7 @@ impl Timeline {
                 hidden: false,
                 locked: false,
                 opacity: 1.0,
+                look: Default::default(),
                 clips: Vec::new(),
             });
             next_track += 1;
@@ -2487,6 +2643,7 @@ mod edits;
 
 #[path = "timeline_trim.rs"]
 mod trim;
+pub use edits::GroupShown;
 pub use trim::Edge;
 
 #[path = "timeline_tracks.rs"]
@@ -2536,7 +2693,7 @@ mod tests {
     }
 
     fn track(clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(1), name: "Lines".into(), hidden: false, locked: false, opacity: 1.0, clips }
+        Track { id: TrackId(1), name: "Lines".into(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
     }
 
     #[test]
@@ -2750,6 +2907,83 @@ mod tests {
     }
 
     #[test]
+    fn a_canvas_taken_off_its_timeline_goes_back_on_it_as_it_was() {
+        let (mut doc, ids) = canvas(4);
+        doc.animation = Some(animation::Animation { fps: 8, ..Default::default() });
+        assert!(doc.start_timeline());
+        // timing, a second track and a key that only the timeline holds
+        let tl = doc.timeline.as_mut().unwrap();
+        let (first, second) = (tl.tracks[0].clips[0].id, tl.tracks[0].clips[1].id);
+        assert!(tl.set_duration(first, 3, true));
+        tl.add_track("Overlay");
+        tl.clip_mut(second).unwrap().keys.opacity.set(0, 0.5, Easing::Linear);
+        let before = doc.timeline.clone().unwrap();
+
+        assert!(doc.stop_timeline());
+        assert!(!doc.stop_timeline(), "it isn't on one");
+        assert!(doc.timeline.is_none());
+        // (kept with the document's file)
+        let json = serde_json::to_string(&doc).unwrap();
+        let mut back: Document = serde_json::from_str::<Document>(&json).unwrap().repaired();
+        assert_eq!(back.timeline_off.as_ref(), Some(&before));
+        assert!(back.start_timeline());
+        assert_eq!(back.timeline.as_ref(), Some(&before));
+        assert!(back.timeline_off.is_none());
+
+        // off it, a drawing's layer deleted and a new layer added: the rest comes back as it was,
+        // the new layer on a track of its own for as long as the timeline lasts
+        assert!(doc.delete_layer(ids[3]));
+        doc.set_current(ids[2]);
+        let added = doc.add_layer();
+        assert!(doc.start_timeline());
+        let tl = doc.timeline.as_ref().unwrap();
+        assert_eq!(tl.tracks[0].clips.len(), 3);
+        assert_eq!(tl.clip(first).map(|c| c.duration), Some(3));
+        assert_eq!(tl.clip(second).map(|c| c.keys.opacity.keys.len()), Some(1));
+        assert_eq!(tl.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()[..2], ["Animation", "Overlay"]);
+        let top = tl.tracks.last().unwrap();
+        assert_eq!(top.clips.len(), 1);
+        assert!(matches!(&top.clips[0].content, ClipContent::Drawing(d) if d.root == added));
+        assert_eq!((top.clips[0].start, top.clips[0].duration), (0, tl.duration));
+        assert!(tl.tracks.iter().all(Track::is_ordered));
+        let mut roots = tl.drawing_roots();
+        roots.sort();
+        let mut all = doc.members(None);
+        all.sort();
+        assert_eq!(roots, all, "every top-level layer is some drawing's");
+    }
+
+    #[test]
+    fn frames_made_with_animation_assist_off_a_timeline_come_back_as_one_track() {
+        let (mut doc, ids) = canvas(2);
+        assert!(doc.start_timeline());
+        assert!(doc.stop_timeline());
+        // Animation Assist meanwhile: three more frames, the second of them held
+        doc.animation = Some(animation::Animation::default());
+        let more: Vec<LayerId> = (0..3).map(|_| doc.add_layer()).collect();
+        doc.animation.as_mut().unwrap().set_hold(more[1], 2);
+        assert!(doc.start_timeline());
+        assert!(doc.animation.is_none());
+        let tl = doc.timeline.as_ref().unwrap();
+        // the two layers it had keep their tracks; the new frames are one track of drawings
+        assert_eq!(tl.tracks.len(), 3);
+        let roots = |t: &Track| -> Vec<LayerId> {
+            t.clips
+                .iter()
+                .filter_map(|c| match &c.content {
+                    ClipContent::Drawing(d) => Some(d.root),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!((roots(&tl.tracks[0]), roots(&tl.tracks[1])), (vec![ids[0]], vec![ids[1]]));
+        assert_eq!(roots(&tl.tracks[2]), more);
+        let spans: Vec<(u32, u32)> = tl.tracks[2].clips.iter().map(|c| (c.start, c.duration)).collect();
+        assert_eq!(spans, [(0, 1), (1, 3), (4, 1)]);
+        assert_eq!(tl.duration, 5);
+    }
+
+    #[test]
     fn keeps_with_the_document() {
         let (mut doc, ids) = canvas(3);
         doc.animation = Some(animation::Animation::default());
@@ -2781,12 +3015,11 @@ mod tests {
         tl.tracks.push(track(vec![drawing(1, 0, 4, 10), drawing(2, 2, 4, 11), drawing(3, 5, 2, 10)]));
         tl.tracks.push(Track { id: TrackId(1), ..track(vec![drawing(1, 0, 1, 12)]) });
         tl.simple = Some(TrackId(7));
-        tl.loop_range = Some((4, 20));
         let tl = tl.repaired(&[LayerId(10), LayerId(11), LayerId(12)]);
         // the overlapping clip goes, the second drawing of layer 10 goes, the repeated track goes
         assert_eq!(tl.tracks.len(), 1);
         assert_eq!(tl.tracks[0].clips.iter().map(|c| c.id.0).collect::<Vec<_>>(), [1]);
-        assert_eq!((tl.simple, tl.loop_range), (None, None));
+        assert_eq!(tl.simple, None);
         assert!(tl.next_track > 1 && tl.next_clip > 3);
     }
 
@@ -3230,5 +3463,43 @@ mod tests {
         ];
         assert_eq!(tl.plan(0).drawings(), [LayerId(11)]);
         assert_eq!(tl.drawn(0, true), [LayerId(10), LayerId(11)]);
+    }
+    #[test]
+    fn a_tracks_blend_and_mask_are_those_of_its_clips_that_have_none() {
+        let mut tl = Timeline::new(12, 8);
+        let mut own = drawing(3, 4, 4, 12);
+        own.blend = BlendMode::Screen;
+        own.mask = MaskMode::Alpha;
+        tl.tracks = vec![
+            Track { id: TrackId(1), ..track(vec![drawing(1, 0, 8, 10)]) },
+            Track { id: TrackId(2), ..track(vec![drawing(2, 0, 4, 11), own]) },
+        ];
+        tl.tracks[1].look = TrackLook { label: Some([1.0, 0.0, 0.5]), blend: BlendMode::Multiply, mask: MaskMode::Clipping };
+        // a clip with none of its own takes the track's
+        let plan = tl.plan(0);
+        assert_eq!(plan.items[1].blend, BlendMode::Multiply);
+        assert_eq!(plan.items[1].mask, Some((MaskMode::Clipping, 0)));
+        assert!(!plan.items[0].matte_only);
+        // one with its own keeps it
+        let plan = tl.plan(5);
+        assert_eq!(plan.items[1].blend, BlendMode::Screen);
+        assert_eq!(plan.items[1].mask, Some((MaskMode::Alpha, 0)));
+        assert!(plan.items[0].matte_only);
+        // a track with no look of its own draws as before
+        assert_eq!((plan.items[0].blend, plan.items[0].mask), (BlendMode::Normal, None));
+    }
+
+    #[test]
+    fn a_track_written_before_tracks_had_a_look_reads_with_none() {
+        let mut tl = Timeline::new(12, 2);
+        tl.tracks = vec![track(vec![drawing(1, 0, 2, 10)])];
+        tl.tracks[0].look.blend = BlendMode::Multiply;
+        let mut older = serde_json::to_value(&tl).unwrap();
+        older["tracks"][0].as_object_mut().unwrap().remove("look");
+        let older: Timeline = serde_json::from_value(older).unwrap();
+        assert_eq!(older.tracks[0].look, TrackLook::default());
+        // and one written with it reads back as it was
+        let again: Timeline = serde_json::from_value(serde_json::to_value(&tl).unwrap()).unwrap();
+        assert_eq!(again.tracks[0].look.blend, BlendMode::Multiply);
     }
 }

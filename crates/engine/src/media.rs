@@ -15,7 +15,7 @@ use std::io::Read;
 use crate::document::BlendMode;
 use crate::timeline::{
     AudioClip, Channel, Clip, ClipContent, ClipId, ClipKeys, Group, MaskMode, Media, MediaId, MediaKind, Timeline,
-    Track, TrackId, VideoClip,
+    Track, TrackId, VideoClip, VideoSound,
 };
 
 /// The loudest a sound plays (its own level).
@@ -279,7 +279,8 @@ impl Timeline {
     /// is. Returns its track and clip.
     pub fn add_video(&mut self, media: MediaId, at: u32, canvas: (u32, u32)) -> Option<(TrackId, ClipId)> {
         let m = self.media_of(media).filter(|m| m.kind == MediaKind::Video)?.clone();
-        let content = ClipContent::Video(VideoClip { media, trim_start: 0.0, rect: fitted_rect(m.size, canvas) });
+        let content =
+            ClipContent::Video(VideoClip { media, trim_start: 0.0, rect: fitted_rect(m.size, canvas), sound: None });
         let clip = Clip::media(&m.name, at, self.frames_of(m.seconds), content);
         let track = self.track_of(&m.name, false, vec![clip]);
         let ids = (track.id, track.clips.first()?.id);
@@ -341,6 +342,9 @@ impl Timeline {
                     }
                     ClipContent::Video(v) => {
                         out.insert(v.media);
+                        if let Some(s) = v.sound {
+                            out.insert(s.media);
+                        }
                     }
                     ClipContent::Group(g) => walk(&g.tracks, out),
                     ClipContent::Drawing(_) => {}
@@ -350,6 +354,60 @@ impl Timeline {
         let mut out = HashSet::new();
         walk(&self.tracks, &mut out);
         out
+    }
+
+    /// Video clip `id` plays sound media `sound` (the sound taken from its file) with its picture,
+    /// at full level. False if it isn't a video or there is no such sound.
+    pub fn set_video_sound(&mut self, id: ClipId, sound: MediaId) -> bool {
+        if self.media_of(sound).is_none_or(|m| m.kind != MediaKind::Audio) {
+            return false;
+        }
+        let Some(ClipContent::Video(v)) = self.clip_mut(id).map(|c| &mut c.content) else { return false };
+        v.sound = Some(VideoSound { media: sound, volume: MAX_VOLUME, muted: false });
+        true
+    }
+
+    /// Video clip `id`'s own sound at `volume` (0 to 1), `muted` or not. False if it has none, or
+    /// nothing changes.
+    pub fn set_video_volume(&mut self, id: ClipId, volume: f32, muted: bool) -> bool {
+        let Some(ClipContent::Video(VideoClip { sound: Some(s), .. })) = self.clip_mut(id).map(|c| &mut c.content) else {
+            return false;
+        };
+        let volume = if volume.is_finite() { volume.clamp(0.0, MAX_VOLUME) } else { MAX_VOLUME };
+        let changed = s.volume != volume || s.muted != muted;
+        s.volume = volume;
+        s.muted = muted;
+        changed
+    }
+
+    /// Video clip `id`'s sound taken out as a sound clip of its own, on a new track just above
+    /// the video's: over the same frames, from the same place in the file, as loud as it was.
+    /// The video plays no sound from then. Returns the sound clip; none if it isn't a video with
+    /// a sound of its own.
+    pub fn separate_audio(&mut self, id: ClipId) -> Option<ClipId> {
+        let track = self.track_of_clip(id)?;
+        let clip = self.clip(id)?;
+        let ClipContent::Video(VideoClip { sound: Some(sound), trim_start, .. }) = &clip.content else { return None };
+        let (sound, trim_start, start, duration) = (*sound, *trim_start, clip.start, clip.duration);
+        let name = self.media_of(sound.media).map_or_else(|| clip.name.clone(), |m| m.name.clone());
+        let content = ClipContent::Audio(AudioClip {
+            media: sound.media,
+            trim_start,
+            offset: 0.0,
+            volume: sound.volume,
+            muted: sound.muted,
+            volume_keys: Channel::default(),
+        });
+        let made = self.track_of(&name, false, vec![Clip::media(&name, start, duration, content)]);
+        let audio = made.clips.first()?.id;
+        // (a track of its own on the video's level, just above it)
+        let above = self.add_track_above(track, &name)?;
+        let place = self.track_mut(above)?;
+        place.clips = made.clips;
+        if let Some(ClipContent::Video(v)) = self.clip_mut(id).map(|c| &mut c.content) {
+            v.sound = None;
+        }
+        Some(audio)
     }
 
     /// Lets go of the media no clip plays.
@@ -450,6 +508,27 @@ fn sounds_of(tl: &Timeline, tracks: &[Track], span: Span, out: &mut Vec<Sound>) 
                         sounds_of(tl, inner, inner_span, out);
                         from += length;
                     }
+                }
+                // a video's own sound, in step with its picture
+                ClipContent::Video(VideoClip { sound: Some(s), trim_start, .. }) => {
+                    let Some(m) = tl.media_of(s.media) else { continue };
+                    let at = first_played as f64 / fps;
+                    let from = trim_start + (first_played - first) as f64 / fps;
+                    let length = (last as f64 / fps - at).min(m.seconds - from);
+                    if length <= 0.0 {
+                        continue;
+                    }
+                    out.push(Sound {
+                        clip: clip.id,
+                        media: s.media,
+                        at,
+                        from,
+                        length,
+                        key_origin: first,
+                        volume: s.volume,
+                        muted: s.muted || hidden,
+                        volume_keys: Channel::default(),
+                    });
                 }
                 ClipContent::Drawing(_) | ClipContent::Video(_) => {}
             }

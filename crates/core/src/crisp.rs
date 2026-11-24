@@ -8,6 +8,7 @@
 //!
 //! - a stroke being drawn is drawn on it too, stamp for stamp as it is made, so the picture stays
 //!   sharp under the pen;
+//! - a lasso's fill shown as it is drawn is shown on it too, where it lies there;
 //! - anything else that changes the picture has it brought up to date before the next frame;
 //! - while the view moves it goes on showing where that part of the artwork now is, over the
 //!   artwork's own canvas, until the view rests and one is made for where it rests.
@@ -22,7 +23,7 @@ use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
 use procraft_engine::profile::Profile;
 use procraft_engine::stroke::Stamp;
 use procraft_engine::vector::{Object, StrokeId, VectorContent, placed};
-use procraft_gpu::{Canvas, Gpu, GpuError, SecondStroke, StrokeEcho, StrokeStyle, StrokeTool};
+use procraft_gpu::{Canvas, Gpu, GpuError, LassoPreview, SecondStroke, StrokeEcho, StrokeStyle, StrokeTool};
 
 use crate::grain_store::GrainStore;
 use crate::{State, ToolKind};
@@ -74,6 +75,12 @@ pub(crate) struct Crisp {
     /// A stroke was drawn on it as it was made, and ended then: it is made again whole once things
     /// have rested, to be sure it is what the layers hold.
     owed: Option<Instant>,
+    /// The lasso's fill the artwork's canvas showed as it was drawn when that was last carried
+    /// onto this one (in the artwork's pixels), to carry it again only when it has changed.
+    lasso: Option<LassoPreview>,
+    /// The stroke being drawn on it has a fill kept under it on its vector layer (Lasso Fill's
+    /// Outline), which only drawing that layer again shows: done as the stroke ends, not waited for.
+    pub(crate) filled_under: bool,
 }
 
 /// How a frame shows the sharp picture.
@@ -317,6 +324,8 @@ impl State {
             layers,
             squares: to_screen.scale_factor() >= self.display_scale,
             owed: None,
+            lasso: None,
+            filled_under: false,
         };
         self.crisp_redo(crisp, None)
     }
@@ -423,6 +432,32 @@ impl State {
         (!gpu.is_lost()).then_some(crisp)
     }
 
+    /// The lasso's fill the artwork's canvas shows as it is drawn (Lasso Fill's Outline, or a
+    /// tool's own lasso) shown on the sharp picture too, where its polygon lies there: that
+    /// picture is what a frame shows in the artwork's place. Done before each frame, and only
+    /// when what the artwork shows has changed since.
+    pub(crate) fn crisp_lasso(&mut self) {
+        let Some(crisp) = self.crisp.as_mut() else { return };
+        let shown = self.canvas.as_ref().and_then(Canvas::lasso_preview);
+        if crisp.lasso.as_ref() == shown {
+            return;
+        }
+        crisp.lasso = shown.cloned();
+        let by = crisp.to_crisp;
+        crisp.canvas.set_lasso_preview(shown.map(|preview| LassoPreview {
+            layer: preview.layer,
+            points: preview
+                .points
+                .iter()
+                .map(|&[x, y]| {
+                    let p = by.apply(Vec2::new(x, y));
+                    [p.x, p.y]
+                })
+                .collect(),
+            color: preview.color,
+        }));
+    }
+
     /// A stroke begins on `layer` of the artwork, drawn as `style` with `brush` (and a dual
     /// brush's `second`): if the sharp picture is showing, the stroke begins on it too, to be
     /// drawn there stamp for stamp as it is made ([`State::crisp_echo`]). Whether it did: the
@@ -520,9 +555,12 @@ impl State {
             crisp.canvas.render(gpu, &mut crisp.doc, None);
             crisp.canvas.forget_history();
         }
-        // it now shows the picture as the stroke left it
+        // it now shows the picture as the stroke left it (but for a fill kept under the stroke,
+        // which the stroke's stamps don't draw: its layer is then drawn again now, so the fill
+        // shows from the frame its preview goes)
+        let filled_under = std::mem::take(&mut crisp.filled_under);
         let Some(picture) = self.crisp_picture() else { return };
-        if kept && !self.doc.is_vector(layer) {
+        if kept && (filled_under || !self.doc.is_vector(layer)) {
             self.crisp = self.crisp_redo(crisp, Some(layer)).map(|made| Crisp { picture, ..made });
         } else {
             self.crisp = Some(Crisp { picture, owed: kept.then(Instant::now).or(crisp.owed), ..crisp });

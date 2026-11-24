@@ -16,6 +16,13 @@
 //! opacity at the playhead rather than setting its own. An adjustment clip's values have no
 //! gesture of the transform's to key them by: they stay keyed from the Keys page.
 //!
+//! A video on the track drawn on, at the playhead, needs no picking: it is what is there to key
+//! (a group there too). And a video has no pixels of the canvas's to move, so the transform tool
+//! poses it with autokey off as well, for its whole length: a channel that isn't animated yet
+//! (no key, or one) gets its one key on the clip's first frame, so the video sits where it was
+//! put on every frame; a channel with two keys or more is keyed at the playhead, as with
+//! autokey on.
+//!
 //! Distort and Warp act as Freeform (a pose can't bend), turning the box alone does nothing, and
 //! Pixelated is let be. The transform's undo takes back the keys it made, one step at a time.
 //! Ending the transform keeps them; cancelling it puts back every keyed clip's keys as they were
@@ -77,6 +84,9 @@ struct Posing {
     began: Vec<(ClipId, ClipKeys)>,
     /// Steps recorded in this transform, which its undo takes back.
     steps: u32,
+    /// Placed for its whole length (a video's, with autokey off): a channel not yet animated
+    /// keeps its one key on the clip's first frame.
+    whole: bool,
 }
 
 /// The clip a transform keys at the playhead: the group or video picked, or the current layer's
@@ -119,19 +129,27 @@ impl State {
     /// How the box's handles act: Distort and Warp as Freeform while keying a pose.
     pub(crate) fn posed_mode(&self) -> TransformMode {
         match self.transform_mode {
-            TransformMode::Distort | TransformMode::Warp if self.posing() => TransformMode::Freeform,
+            TransformMode::Distort | TransformMode::Warp | TransformMode::Puppet if self.posing() => {
+                TransformMode::Freeform
+            }
             m => m,
         }
     }
 
     /// With autokey on, on a timeline and nothing selected: the transform opened over the drawing at
-    /// the playhead, to key its pose (its box; none if there is nothing there to key). None when
-    /// autokey doesn't apply, and the pixels are transformed.
+    /// the playhead, to key its pose (its box; none if there is nothing there to key). With it
+    /// off, the same over a video at the playhead on the track drawn on, to place it for its
+    /// whole length. None when neither applies, and the pixels are transformed.
     pub(crate) fn autokey_begin(&mut self) -> Option<Option<TransformBox>> {
-        if !self.autokey.on || self.doc.timeline.is_none() || self.selection.is_some() {
+        if self.doc.timeline.is_none() || self.selection.is_some() {
             return None;
         }
-        let Ok(target) = self.autokey_target() else { return Some(None) };
+        let target = match self.autokey_target() {
+            Ok(t) => t,
+            Err(_) if self.autokey.on => return Some(None),
+            // (autokey off, and no video there to place: the pixels are transformed)
+            Err(_) => return None,
+        };
         // (a stroke just ended is on its layer before what it paints is measured)
         self.flush();
         let Some([x, y, w, h]) = self.target_box(&target) else { return Some(None) };
@@ -145,6 +163,18 @@ impl State {
         self.autokey.posing = Some(posing);
         self.place_box();
         Some(self.transform_box())
+    }
+
+    /// Whether the current layer's drawing shows at the playhead (always, off a timeline). Where
+    /// the track drawn on has nothing at the playhead, the current layer is still the last
+    /// frame's drawn on: a transform would move the pixels of a frame that isn't the one shown.
+    pub(crate) fn current_shows_here(&self) -> bool {
+        let Some(tl) = self.doc.timeline.as_ref() else { return true };
+        let frame = self.canvas.as_ref().map_or(0, |c| c.timeline_frame());
+        let drawing = self.doc.top_of(self.doc.current()).and_then(|root| tl.drawing_of(root));
+        let Some((_, clip)) = drawing else { return true };
+        let duration = tl.clip(clip).map_or(0, |c| c.duration);
+        tl.local_frame(clip, frame).is_some_and(|l| (0..i64::from(duration)).contains(&l))
     }
 
     /// Why autokey opens no transform here, as the message says it; none if it isn't on, or would.
@@ -168,16 +198,32 @@ impl State {
         Some(why.to_owned())
     }
 
-    /// The group or video picked in the panel if it plays at the playhead; else the drawing at the
-    /// playhead on the track drawn on, made current: as long as it can be keyed.
+    /// The group or video picked in the panel if it plays at the playhead, or the one on the
+    /// track drawn on there; else the drawing at the playhead on the track drawn on, made
+    /// current: as long as it can be keyed. With autokey off, only a video on the track drawn on.
     fn autokey_target(&mut self) -> Result<Target, Refused> {
         if self.canvas.as_ref().is_some_and(|c| c.play_frame().is_some()) {
             return Err(Refused::Playing);
         }
         let at = self.canvas.as_ref().map_or(0, |c| c.timeline_frame());
-        let picked = self.autokey.picked;
+        let on = self.autokey.on;
+        let picked = self.autokey.picked.filter(|_| on);
         if let Some(t) = picked.and_then(|id| picked_target(self.doc.timeline.as_ref()?, id, at)) {
             return t;
+        }
+        // the track drawn on shows a video at the playhead (with autokey on, a group too): that
+        // is what is there to key, picked or not
+        let there = self.drawn_track().and_then(|track| {
+            let tl = self.doc.timeline.as_ref()?;
+            picked_target(tl, super::clip_on(tl, track, at)?.id, at)
+        });
+        match there {
+            Some(Ok(t)) if on || matches!(t.what, What::Video(_)) => return Ok(t),
+            Some(Err(why)) if on => return Err(why),
+            _ => {}
+        }
+        if !on {
+            return Err(Refused::NoDrawing);
         }
         self.follow_playhead();
         let frame = self.canvas.as_ref().map_or(0, |c| c.timeline_frame());
@@ -262,6 +308,7 @@ impl State {
             turn,
             began,
             steps,
+            whole: !self.autokey.on,
         })
     }
 
@@ -308,7 +355,7 @@ impl State {
         let Some(pose) = p.groups.inverse().map(|g| shown.then(g)) else { return };
         let Some(now) = decompose(pose, p.pivot, p.turn) else { return };
         p.turn = now.turn;
-        let keys = keyed(&p.keys, p.local, p.pivot, now, self.autokey.easing.easing());
+        let keys = keyed(&p.keys, p.local, p.pivot, now, self.autokey.easing.easing(), p.whole);
         let clip = p.clip;
         let Some(c) = self.doc.timeline.as_ref().and_then(|tl| tl.clip(clip)) else { return };
         if c.keys != keys {
@@ -420,8 +467,10 @@ fn decompose(pose: Affine, pivot: [f32; 2], near: f32) -> Option<Pose> {
 }
 
 /// `keys` with the channels `now` changes keyed at clip frame `local` (new keys easing as
-/// `easing`), each channel's first key after the clip's start keying its start too.
-fn keyed(keys: &ClipKeys, local: i32, pivot: [f32; 2], now: Pose, easing: Easing) -> ClipKeys {
+/// `easing`), each channel's first key after the clip's start keying its start too. With `whole`,
+/// a channel with no key or one is given its one key on the clip's first frame instead, so the
+/// clip shows as `now` for its whole length.
+fn keyed(keys: &ClipKeys, local: i32, pivot: [f32; 2], now: Pose, easing: Easing, whole: bool) -> ClipKeys {
     let at = local as f32;
     let was = Pose {
         at: keys.position.position_at(at).unwrap_or([0.0; 2]),
@@ -431,18 +480,29 @@ fn keyed(keys: &ClipKeys, local: i32, pivot: [f32; 2], now: Pose, easing: Easing
     let far = |a: [f32; 2], b: [f32; 2], by: f32| (a[0] - b[0]).abs() > by || (a[1] - b[1]).abs() > by;
     let mut out = keys.clone();
     if far(now.at, was.at, MOVED) {
-        key_channel(&mut out.position, local, was.at, now.at, &easing);
+        place_channel(&mut out.position, local, was.at, now.at, &easing, whole);
     }
     if far(now.scale, was.scale, SCALED) {
-        key_channel(&mut out.scale, local, was.scale, now.scale, &easing);
+        place_channel(&mut out.scale, local, was.scale, now.scale, &easing, whole);
     }
     if (now.turn - was.turn).abs() > TURNED {
-        key_channel(&mut out.rotation, local, was.turn, now.turn, &easing);
+        place_channel(&mut out.rotation, local, was.turn, now.turn, &easing, whole);
     }
     if out.pivot.is_none() && out.posed() {
         out.pivot = Some(pivot);
     }
     out
+}
+
+/// As [`key_channel`]; but with `whole`, a channel not yet animated (no key, or one) holds `now`
+/// in one key on the clip's first frame.
+fn place_channel<T: Clone>(ch: &mut Channel<T>, local: i32, was: T, now: T, easing: &Easing, whole: bool) {
+    if whole && ch.keys.len() <= 1 {
+        ch.keys.clear();
+        ch.set(0, now, easing.clone());
+    } else {
+        key_channel(ch, local, was, now, easing);
+    }
 }
 
 /// Channel `ch` keyed `now` at clip frame `local` (a key there keeps how it eases; a new one
@@ -513,6 +573,10 @@ impl CanvasSession {
         let st = &mut *guard;
         st.autokey.on = on;
         st.autokey.easing = easing;
+        // (a video being placed for its whole length is keyed at the playhead from here on)
+        if on && let Some(p) = st.autokey.posing.as_mut() {
+            p.whole = false;
+        }
         if !on && st.posing() {
             st.end_transform(true);
             st.revision += 1;

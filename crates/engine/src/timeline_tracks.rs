@@ -108,12 +108,19 @@ impl Timeline {
         changed
     }
 
-    /// Where playback goes from frame `at` playing `step` (1 forwards, -1 backwards): within the
-    /// loop range if there is one (from its start when `at` is outside it), else the whole
-    /// timeline; at an end it loops, turns back or stops as [`Timeline::playback`] says. The next
-    /// frame and the step from it, none when it stops.
+    /// Where playback goes from frame `at` playing `step` (1 forwards, -1 backwards) through the
+    /// whole timeline: at an end it loops, turns back or stops as [`Timeline::playback`] says.
+    /// The next frame and the step from it, none when it stops.
     pub fn next_played(&self, at: u32, step: i32) -> Option<(u32, i32)> {
-        let (from, to) = self.loop_range.filter(|(a, b)| a < b && *b <= self.duration).unwrap_or((0, self.duration));
+        self.next_played_within(at, step, 0, self.duration)
+    }
+
+    /// As [`Timeline::next_played`], within frames `from` up to (not including) `to`: what a
+    /// panel showing only some of the timeline's frames plays round (from the first of them when
+    /// `at` is outside them). The frames are kept within the timeline; none of them in it,
+    /// nothing plays.
+    pub fn next_played_within(&self, at: u32, step: i32, from: u32, to: u32) -> Option<(u32, i32)> {
+        let to = to.min(self.duration);
         if to <= from {
             return None;
         }
@@ -225,20 +232,31 @@ mod tests {
     }
 
     #[test]
-    fn playback_stays_in_the_loop_range() {
+    fn playback_goes_round_the_whole_timeline_as_its_playback_says() {
         let mut tl = Timeline::new(24, 24);
         assert_eq!(tl.next_played(5, 1), Some((6, 1)));
         assert_eq!(tl.next_played(23, 1), Some((0, 1)));
-        tl.loop_range = Some((4, 8));
-        assert_eq!(tl.next_played(0, 1), Some((4, 1)), "from outside it starts at the range's start");
-        assert_eq!(tl.next_played(6, 1), Some((7, 1)));
-        assert_eq!(tl.next_played(7, 1), Some((4, 1)));
         tl.playback = Playback::PingPong;
-        assert_eq!(tl.next_played(7, 1), Some((6, -1)));
-        assert_eq!(tl.next_played(4, -1), Some((5, 1)));
+        assert_eq!(tl.next_played(23, 1), Some((22, -1)));
+        assert_eq!(tl.next_played(0, -1), Some((1, 1)));
         tl.playback = Playback::OneShot;
-        assert_eq!(tl.next_played(7, 1), None);
-        tl.loop_range = Some((8, 30));
-        assert_eq!(tl.next_played(23, 1), None, "a range past the end is the whole timeline");
+        assert_eq!(tl.next_played(23, 1), None);
+    }
+
+    #[test]
+    fn playback_within_frames_given_goes_round_them() {
+        let mut tl = Timeline::new(24, 24);
+        assert_eq!(tl.next_played_within(10, 1, 8, 12), Some((11, 1)));
+        assert_eq!(tl.next_played_within(11, 1, 8, 12), Some((8, 1)));
+        assert_eq!(tl.next_played_within(3, 1, 8, 12), Some((8, 1)), "from outside them it starts at their first");
+        tl.playback = Playback::PingPong;
+        assert_eq!(tl.next_played_within(11, 1, 8, 12), Some((10, -1)));
+        assert_eq!(tl.next_played_within(8, -1, 8, 12), Some((9, 1)));
+        tl.playback = Playback::OneShot;
+        assert_eq!(tl.next_played_within(11, 1, 8, 12), None);
+        tl.playback = Playback::Loop;
+        assert_eq!(tl.next_played_within(23, 1, 20, 40), Some((20, 1)), "frames past the end aren't played");
+        assert_eq!(tl.next_played_within(0, 1, 30, 40), None, "none of them in the timeline: nothing plays");
+        assert_eq!(tl.next_played_within(5, 1, 5, 6), Some((5, 1)), "one frame, looped, stays on it");
     }
 }

@@ -52,7 +52,7 @@ contributor. `LucideIcons` keeps the Lucide set beside them.
 | Smudge | a hand pointing down to the left (lork's drawing) |
 | Erase | an eraser block with a band at its lower end (lork's drawing, its end drawn whole) |
 | Layers | two rounded sheets, the back one up to the right (lork's drawing, set further apart) |
-| Undo / Redo | a curved arrow turning back / forward |
+| Undo / Redo | a U-turn arrow: a rounded head pointing back (forward), its tail bending round a half circle below it |
 
 ## The Actions panel's tabs
 

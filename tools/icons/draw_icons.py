@@ -240,20 +240,18 @@ def layers():
 
 
 def turning_arrow(mirror):
-    """Undo (or, mirrored, Redo): a curved arrow turning back."""
-    cx, cy, r = 13.0, 13.0, 6.4
-    angles = [math.radians(-150 + 260 * i / 64) for i in range(65)]
-    arc = LineString([(cx + r * math.cos(a), cy + r * math.sin(a)) for a in angles]).buffer(1.25, cap_style='flat')
-    arc = arc.union(Point(cx + r * math.cos(angles[-1]), cy + r * math.sin(angles[-1])).buffer(1.25, quad_segs=10))
-    a = angles[0]
-    sx, sy = cx + r * math.cos(a), cy + r * math.sin(a)
-    back = (math.sin(a), -math.cos(a))
-    normal = (math.cos(a), math.sin(a))
-    tip = (sx + back[0] * 3.6, sy + back[1] * 3.6)
-    head = soft(Polygon([tip, (sx + normal[0] * 3.6, sy + normal[1] * 3.6), (sx - normal[0] * 3.6, sy - normal[1] * 3.6)]), 0.45)
-    shape = unary_union([arc, head])
+    """Undo (or, mirrored, Redo): a U-turn arrow. A rounded head at the top points back to the left;
+    its tail runs right, bends down round a half circle and runs back left along the bottom.
+    Drawn on a 216 grid (one ninth of a unit each) and set on ours."""
+    u = 24 / 216
+    w = 10 * u  # half the line's 20 width
+    cx, cy, r = 139, 124.5, 50.5
+    bend = [(cx + r * math.sin(math.pi * k / 32), cy + r * math.cos(math.pi * k / 32)) for k in range(33)]
+    tail = LineString([(42, 175), *bend, (82, 74)])
+    head = Polygon([(28, 74), (80, 43), (80, 105)])
+    shape = unary_union([scale(tail, u, u, origin=(0, 0)).buffer(w, quad_segs=10),
+                         scale(head, u, u, origin=(0, 0)).buffer(w, quad_segs=10)])
     if mirror:
-        from shapely.affinity import scale
         shape = scale(shape, -1, 1, origin=(12, 12))
     return shape
 

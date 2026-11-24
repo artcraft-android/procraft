@@ -1,5 +1,5 @@
 //! What the timeline panel shows, read in one call: the timeline's settings, its rows of tracks
-//! and clips, every clip's keys, the camera's and each sound's volume keys, the markers, the
+//! and clips, every clip's keys, the camera's and each sound's volume keys, the
 //! clipboard, the looped frames, the onion skins, and a version of each drawing's picture. Each
 //! reading is numbered: a reading the same as the last is given the same number, and the panel,
 //! asking with the number it has, is told nothing has changed rather than sent it all again.
@@ -11,7 +11,7 @@ use super::{
     clipboard::TimelineClipboardInfo,
     groups_inline::TimelineRow,
     key_lanes::{TimelineKeyLane, TimelineLaneKey},
-    menus::{TimelineLoop, TimelineOnion},
+    menus::TimelineOnion,
 };
 use crate::CanvasSession;
 
@@ -37,9 +37,39 @@ pub struct TimelinePicture {
     pub version: u64,
 }
 
+/// A run of a folded group's frames showing the same drawings: its first frame on the timeline,
+/// how many frames it is, and the drawings' layers there (bottom first), each of whose pictures is
+/// `frame_thumbnail`'s.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TimelineGroupShot {
+    pub start: u32,
+    pub frames: u32,
+    pub roots: Vec<u64>,
+    /// Everything it shows there, bottom first: the drawings (as `roots`) and the videos between
+    /// them.
+    pub items: Vec<TimelineShotItem>,
+}
+
+/// One thing a folded group shows on a run of its frames: a drawing's layer (`root`), or, with
+/// `root` 0, the video whose file is at `path` (empty: it can't be found), `seconds` into it on
+/// the run's first frame and a frame's worth further on each frame after.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TimelineShotItem {
+    pub root: u64,
+    pub path: String,
+    pub seconds: f64,
+}
+
+/// What folded group clip `id` shows over its frames, a run at a time.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TimelineGroupShots {
+    pub id: u64,
+    pub shots: Vec<TimelineGroupShot>,
+}
+
 /// Everything the panel reads after a change, as `timeline_info`, `timeline_rows`,
-/// `timeline_keys`, `timeline_camera`, `timeline_camera_keys`, `timeline_markers`,
-/// `timeline_clipboard`, `timeline_loop`, `timeline_onion` and `timeline_lane_keys` give it.
+/// `timeline_keys`, `timeline_camera`, `timeline_camera_keys`, `timeline_clipboard`,
+/// `timeline_onion` and `timeline_lane_keys` give it.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct TimelinePanel {
     /// The reading's number: the same while nothing in it changes.
@@ -51,15 +81,15 @@ pub struct TimelinePanel {
     pub keys: Vec<TimelineClipKeys>,
     pub camera: Option<TimelineCamera>,
     pub camera_keys: Vec<u32>,
-    pub markers: Vec<u32>,
     pub clipboard: TimelineClipboardInfo,
-    pub loop_frames: Option<TimelineLoop>,
     pub onion: Option<TimelineOnion>,
     /// The camera's lane: its keys with their easings.
     pub camera_lane: Vec<TimelineLaneKey>,
     /// The volume keys of each sound in the rows that has some.
     pub volumes: Vec<TimelineVolumeKeys>,
     /// Each drawing in the rows (once each), its picture's version.
+    /// What each folded group clip shows on each of its frames (see [`TimelineGroupShots`]).
+    pub groups: Vec<TimelineGroupShots>,
     pub pictures: Vec<TimelinePicture>,
 }
 
@@ -98,12 +128,11 @@ impl CanvasSession {
             keys: Vec::new(),
             camera: None,
             camera_keys: Vec::new(),
-            markers: Vec::new(),
             clipboard: self.timeline_clipboard(),
-            loop_frames: None,
             onion: None,
             camera_lane: Vec::new(),
             volumes: Vec::new(),
+            groups: Vec::new(),
             pictures: Vec::new(),
         };
         if info.is_none() {
@@ -130,11 +159,22 @@ impl CanvasSession {
             if c.root != 0 && !roots.contains(&c.root) {
                 roots.push(c.root);
             }
+            // a folded group: what it shows on each frame, for its block's pictures (unfolded,
+            // its own tracks' rows show them)
+            if c.kind == TimelineClipKind::Group {
+                let shots = self.timeline_group_shots(c.id, c.start);
+                if let Some(shots) = shots {
+                    for root in shots.iter().flat_map(|s| &s.roots) {
+                        if !roots.contains(root) {
+                            roots.push(*root);
+                        }
+                    }
+                    panel.groups.push(TimelineGroupShots { id: c.id, shots });
+                }
+            }
         }
         panel.camera = self.timeline_camera();
         panel.camera_keys = self.timeline_camera_keys();
-        panel.markers = self.timeline_markers();
-        panel.loop_frames = self.timeline_loop();
         panel.onion = self.timeline_onion();
         panel.camera_lane = self.timeline_lane_keys(TimelineKeyLane::Camera);
         // strokes still being put down count in the versions
@@ -153,6 +193,48 @@ impl CanvasSession {
             })
             .collect();
         panel
+    }
+}
+
+impl CanvasSession {
+    /// Folded group clip `id` (starting on timeline frame `start`)'s shots; none unless it is a
+    /// group and folded.
+    fn timeline_group_shots(&self, id: u64, start: u32) -> Option<Vec<TimelineGroupShot>> {
+        let st = self.shared.lock();
+        let tl = st.doc.timeline.as_ref()?;
+        let id = procraft_engine::timeline::ClipId(id);
+        match &tl.clip(id)?.content {
+            procraft_engine::timeline::ClipContent::Group(g) if g.collapsed => {}
+            _ => return None,
+        }
+        Some(
+            tl.group_shots(id)
+                .into_iter()
+                .map(|(first, frames, shown)| {
+                    use procraft_engine::timeline::GroupShown;
+                    let items: Vec<TimelineShotItem> = shown
+                        .iter()
+                        .map(|s| match s {
+                            GroupShown::Drawing(root) => TimelineShotItem { root: root.0, path: String::new(), seconds: 0.0 },
+                            GroupShown::Video { media, seconds } => TimelineShotItem {
+                                root: 0,
+                                path: tl
+                                    .media_of(*media)
+                                    .and_then(|m| st.media.find(&m.file_name()))
+                                    .map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
+                                seconds: *seconds,
+                            },
+                        })
+                        .collect();
+                    TimelineGroupShot {
+                        start: start + first,
+                        frames,
+                        roots: items.iter().map(|i: &TimelineShotItem| i.root).filter(|r| *r != 0).collect(),
+                        items,
+                    }
+                })
+                .collect(),
+        )
     }
 }
 

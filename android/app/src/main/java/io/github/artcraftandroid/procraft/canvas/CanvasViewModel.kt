@@ -972,6 +972,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var interpolation by mutableStateOf(enumPref(INTERPOLATION, Interpolation.BILINEAR))
         private set
+
+    /**
+     * Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
+     * and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
+     * clean. Kept between transforms; off at first.
+     */
+    var transformPixelated by mutableStateOf(transformPrefs.getBoolean(TRANSFORM_PIXELATED, false))
+        private set
+
+    /** Pixelated on or off: an open transform's content goes onto whole pixels at once. */
+    fun toggleTransformPixelated() {
+        transformPixelated = !transformPixelated
+        session?.transformSetPixelated(transformPixelated)?.let { transformBox = it }
+        transformPrefs.edit().putBoolean(TRANSFORM_PIXELATED, transformPixelated).apply()
+    }
+
+    /**
+     * Selection's Pixelated, for pixel art (in Feather's popover, the selection's edge being what
+     * it sets): the shapes drawn to select with have their points on whole pixels and take whole
+     * pixels only. (Paint's and Eraser's lassos go by their brush's Pixelated.) Kept; off at first.
+     */
+    var selectionPixelated by mutableStateOf(transformPrefs.getBoolean(SELECTION_PIXELATED, false))
+        private set
+
+    fun toggleSelectionPixelated() {
+        selectionPixelated = !selectionPixelated
+        session?.setSelectionPixelated(selectionPixelated)
+        transformPrefs.edit().putBoolean(SELECTION_PIXELATED, selectionPixelated).apply()
+    }
+
     var transformPopup by mutableStateOf(TransformPopup.NONE)
     /** Magnetics, snapping, and snapping's distance (1..50 points) and velocity (0..10). */
     var guides by mutableStateOf(
@@ -1382,6 +1412,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var guideEditing by mutableStateOf(false)
         private set
     var symmetryOptionsOpen by mutableStateOf(false)
+    /** Zoom Fade's popover (held open from its switch). */
+    var zoomFadeOpen by mutableStateOf(false)
 
     /**
      * What was last copied or cut, for pasting (in this artwork or another), kept as it is; it goes
@@ -1688,13 +1720,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Says the canvas holds no more layers, and how many it holds. */
+    /**
+     * Says the canvas holds no more layers, and how many it has: how many it holds goes by what
+     * they take, so no fixed number says it.
+     */
     private fun noRoom(): String {
-        val (w, h) = canvasSize()
-        return "This canvas holds at most ${layersFor(w, h)} layers."
+        val used = session?.layerStats()?.used?.toInt() ?: 0
+        return "No room for another layer: this canvas's $used ${if (used == 1) "layer takes" else "layers take"} all the memory it has for layers."
     }
 
-    /** The layers a canvas [width] × [height] holds on this device (the core's cap). */
+    /** The layers a canvas this size holds: as many as fit full, to as many as fit mostly empty. */
+    fun maximumLayers(width: Int, height: Int): String {
+        val full = layersFor(width, height)
+        val empty = io.github.artcraftandroid.procraft.core.emptyLayersFor(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt())
+            .coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+        return if (empty > full) "$full–$empty" else "$full"
+    }
+
+    /** The layers a canvas [width] × [height] holds on this device however full they are. */
     fun layersFor(width: Int, height: Int): Int =
         io.github.artcraftandroid.procraft.core.layersFor(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt())
             .coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
@@ -3210,6 +3253,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the system's animations off: a dropped colour's fill shows at once
         s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         s.setPourAllLayers(dropAllLayers)
+        s.setSelectionPixelated(selectionPixelated)
         applyPlugins(s)
         // the controls kept with this artwork, as it keeps them
         readPlugins()
@@ -3329,6 +3373,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.guideEditEnd(keep)
         guideEditing = false
         symmetryOptionsOpen = false
+        zoomFadeOpen = false
         guideNodeMenu = null
         followView()
     }
@@ -3336,6 +3381,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun chooseGuideKind(kind: GuideType) {
         guide = session?.setGuideKind(kind)
         symmetryOptionsOpen = false
+        zoomFadeOpen = false
         guideNodeMenu = null
     }
 
@@ -3370,6 +3416,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.setGuideSymmetry(kind, rotational)
     }
 
+    /** The shown grid fades out as the canvas is zoomed out and in as it is zoomed in (Zoom Fade), or doesn't. */
+    fun setGuideFade(on: Boolean) {
+        val g = guide ?: return
+        guide = session?.setGuideFade(on, g.fadeAt)
+    }
+
+    /** The zoom the shown grid starts to fade in at, or none for Auto. */
+    fun setGuideFadeAt(at: Float?) {
+        val g = guide ?: return
+        if (at == g.fadeAt) return
+        guide = session?.setGuideFade(g.fade, at)
+    }
+
     /** Drawing assist on the current layer. */
     fun setGuideAssisted(on: Boolean) {
         guide = session?.setGuideAssisted(on)
@@ -3383,6 +3442,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun guideTouched(touched: Boolean) {
         if (touched) {
             symmetryOptionsOpen = false
+            zoomFadeOpen = false
             guideNodeMenu = null
         }
         guide = session?.guide() ?: guide
@@ -4262,6 +4322,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 ToolKind.PAINT -> "Painting"
                 ToolKind.SMUDGE -> "Smudging"
                 ToolKind.ERASE -> "Erasing"
+                ToolKind.LIGHT -> "Lighting"
             } + " with the current brush",
         )
     }
@@ -7802,6 +7863,33 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropAllLayers by mutableStateOf(transformPrefs.getBoolean(DROP_ALL_LAYERS, false))
         private set
 
+    /**
+     * ColorDrop's Continuous (the band's pill): while Continue filling, a touch dragged across the
+     * canvas fills each area it crosses where nothing is filled yet, instead of sliding the
+     * threshold; the drag is one undo step. Kept from one drop to the next; off at first.
+     */
+    var dropContinuous by mutableStateOf(transformPrefs.getBoolean(DROP_CONTINUOUS, false))
+        private set
+
+    /** Continuous on or off, from the next touch; the band stays up a while longer to see it. */
+    fun chooseDropContinuous(on: Boolean) {
+        if (on == dropContinuous) return
+        dropContinuous = on
+        transformPrefs.edit().putBoolean(DROP_CONTINUOUS, on).apply()
+        keepDropBandUp()
+    }
+
+    /** After a drop, the band offering Continue filling stays up for another while. */
+    private fun keepDropBandUp() {
+        if (dropBand == DropBand.DROPPED) {
+            dropBandTimer?.cancel()
+            dropBandTimer = viewModelScope.launch {
+                kotlinx.coroutines.delay(DROP_BAND_MS)
+                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
+            }
+        }
+    }
+
     /** Whether, without All Layers, a colour is measured on a reference layer (another than the current one). */
     val dropOnReference: Boolean get() = layers.any { it.reference && !it.current }
 
@@ -7811,13 +7899,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropAllLayers = on
         transformPrefs.edit().putBoolean(DROP_ALL_LAYERS, on).apply()
         session?.setPourAllLayers(on)
-        if (dropBand == DropBand.DROPPED) {
-            dropBandTimer?.cancel()
-            dropBandTimer = viewModelScope.launch {
-                kotlinx.coroutines.delay(DROP_BAND_MS)
-                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
-            }
-        }
+        keepDropBandUp()
     }
 
     /** Whether the threshold is being slid: its row shows under the band. */
@@ -7986,7 +8068,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun touchFill(): io.github.artcraftandroid.procraft.core.Fill? {
         if (dropBand != DropBand.FILLING) return null
         val c = dropSwatch ?: colorRgb()
-        return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold, false)
+        return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold, dropContinuous)
     }
 
     /** The touches' fill was let go of (kept, or taken back by a second finger): a slid threshold is kept for the next. */
@@ -8272,6 +8354,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         panel = Panel.NONE
         pickNext = false
         s.transformSetInterpolation(interpolation)
+        s.transformSetPixelated(transformPixelated)
         s.transformSetGuides(guides)
         transformBox = s.transformBegin()
         // nothing there to move: it says so and stays out of transform
@@ -9351,6 +9434,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val HISTORY_SIZE = 10
         private const val TRANSFORM_KIND = "kind"
         private const val INTERPOLATION = "interpolation"
+        private const val TRANSFORM_PIXELATED = "transformPixelated"
+        private const val SELECTION_PIXELATED = "selectionPixelated"
         private const val MAGNETICS = "magnetics"
         private const val SNAPPING = "snapping"
         private const val SNAP_DISTANCE = "snapDistance"
@@ -9362,6 +9447,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val FILL_OPACITY = "fillOpacity"
         private const val DROP_THRESHOLD = "dropThreshold"
         private const val DROP_ALL_LAYERS = "dropAllLayers"
+        private const val DROP_CONTINUOUS = "dropContinuous"
 
         /** How long a widget's tap waits for the window to be measured before opening anyway. */
         private const val WINDOW_WAIT_MS = 3000L

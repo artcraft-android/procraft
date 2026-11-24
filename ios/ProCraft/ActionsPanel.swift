@@ -251,6 +251,9 @@ struct ActionsPanel: View {
                         model.animationAssist.setAssist($0, pages: true)
                     }),
                     .toggle("Timeline", on: model.timeline.on, change: { model.timeline.setOn($0) }),
+                    // only on a timeline: its frame rate, playback, onion skins and length, on a
+                    // page standing on the timeline
+                    .act("Timeline Settings", action: model.timeline.on ? { model.timeline.openSettings() } : nil),
                     .toggle("Drawing Guide", on: model.guideOn, change: { model.setGuideOn($0) }),
                     // only with the guide on
                     .act("Edit Drawing Guide", action: model.guideOn ? { model.guide.open() } : nil),

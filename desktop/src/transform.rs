@@ -104,6 +104,10 @@ pub struct Transform {
     shown: Option<TransformBox>,
     kind: TransformKind,
     interpolation: Interpolation,
+    /// Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
+    /// and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
+    /// clean.
+    pixelated: bool,
     guides: GuideSettings,
     advanced: bool,
     popup: Popup,
@@ -121,6 +125,7 @@ impl Default for Transform {
             shown: None,
             kind: TransformKind::Freeform,
             interpolation: Interpolation::Bilinear,
+            pixelated: false,
             guides: GuideSettings::default(),
             advanced: false,
             popup: Popup::None,
@@ -136,6 +141,7 @@ impl Transform {
     /// what to say when there is nothing there to move.
     pub fn begin(&mut self, session: &CanvasSession) -> Result<(), String> {
         session.transform_set_interpolation(self.interpolation);
+        session.transform_set_pixelated(self.pixelated);
         session.transform_set_guides(self.guides);
         let Some(shown) = session.transform_begin() else { return Err(session.transform_refusal()) };
         // a warp lays its mesh over what began
@@ -366,7 +372,11 @@ impl Transform {
             Button::new(&icons::FLIP_VERTICAL, "Flip Vertical", 50.0),
             Button::new(&icons::ROTATE45, "Rotate 45\u{b0}", 44.0),
             Button::new(&icons::FIT_TO_CANVAS, "Fit to Canvas", 35.0),
-            Button::new(&icons::INTERPOLATION, interpolation_name(self.interpolation, true), 44.0)
+            Button::new(
+                &icons::INTERPOLATION,
+                if self.pixelated { "Pixelated" } else { interpolation_name(self.interpolation, true) },
+                44.0,
+            )
                 .active(self.popup == Popup::Interpolation),
             Button::new(&icons::TRANSFORM_RESET, "Reset", 44.0),
         ];
@@ -395,7 +405,7 @@ impl Transform {
         let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, 7);
         let screen = ctx.content_rect();
         let body_height = match self.popup {
-            Popup::Interpolation => 40.0 + 10.0 + 40.0 * 3.0 + 2.0,
+            Popup::Interpolation => 40.0 + 10.0 + 40.0 * 3.0 + 2.0 + 10.0 + 49.0,
             _ => 40.0 + 4.0 + 49.0 * 2.0 + 1.0 + 10.0 + 59.0 * 2.0 + 1.0,
         } + 20.0;
         let left = (tip_x - MENU_WIDTH / 2.0).clamp(screen.left(), screen.right() - MENU_WIDTH);
@@ -432,7 +442,9 @@ impl Transform {
                             };
                             ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
                         }
-                        let ink = if on { Color32::WHITE } else { argb(MENU_TEXT) };
+                        // Pixelated blends nothing, whichever is chosen
+                        let dim = if self.pixelated { 0.45 } else { 1.0 };
+                        let ink = if on { Color32::WHITE } else { argb(MENU_TEXT) }.gamma_multiply(dim);
                         text(
                             ui.painter(),
                             pos2(row.left() + 11.0, row.center().y),
@@ -448,13 +460,33 @@ impl Transform {
                                 &icons::MENU_TICK,
                                 pos2(row.right() - 14.0 - 14.5, row.center().y),
                                 29.0,
-                                Color32::WHITE,
+                                Color32::WHITE.gamma_multiply(dim),
                             );
                         }
                         if ui.interact(row, ui.scope_id().with(("interpolation", i)), Sense::click()).clicked() {
                             self.interpolation = kind;
                             session.transform_set_interpolation(kind);
                             self.popup = Popup::None;
+                        }
+                    }
+                    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+                    let row =
+                        Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 49.0));
+                    ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
+                    text(
+                        ui.painter(),
+                        pos2(row.left() + 12.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        "Pixelated",
+                        16.0,
+                        Weight::Regular,
+                        argb(MENU_TEXT),
+                    );
+                    switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.pixelated, "Pixelated");
+                    if ui.interact(row, ui.scope_id().with("pixelated"), Sense::click()).clicked() {
+                        self.pixelated = !self.pixelated;
+                        if let Some(shown) = session.transform_set_pixelated(self.pixelated) {
+                            self.shown = Some(shown);
                         }
                     }
                 }

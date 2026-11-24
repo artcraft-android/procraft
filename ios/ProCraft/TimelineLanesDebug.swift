@@ -17,7 +17,6 @@ enum TimelineLanesDebug {
     private static func build(_ name: String, in model: CanvasModel) {
         guard let line = ScreenCapture.timelineKeyed(model) else { return }
         let s = model.session
-        model.timeline.setSimple(false)
         s.setTimelineFrame(frame: 7)
         let next = s.addTimelineDrawing()
         if next != 0 {
@@ -46,12 +45,10 @@ enum TimelineLanesDebug {
                 model.refresh()
                 if name == "timeline-lanes-sound" {
                     model.timeline.picked = sound
-                    model.timeline.clipOpen = true
                     return
                 }
             }
             model.timeline.picked = line
-            model.timeline.keysOpen = true
         }
     }
 

@@ -188,6 +188,8 @@ fn a_sounds_volume_keys_are_a_lane() {
             width: 0,
             height: 0,
             peaks: vec![],
+            sound_path: None,
+            sound_seconds: 0.0,
         })
         .unwrap();
     for (f, v) in [(0, 0.0), (4, 1.0)] {

@@ -29,6 +29,8 @@ fn import_sound(s: &CanvasSession, path: &str, seconds: f64) -> u64 {
         width: 0,
         height: 0,
         peaks: vec![0.25, 1.0, 0.5],
+        sound_path: None,
+        sound_seconds: 0.0,
     })
     .unwrap()
 }
@@ -96,6 +98,8 @@ fn a_sound_brought_in_plays_from_the_playhead_on_a_track_of_its_own() {
         width: 0,
         height: 0,
         peaks: Vec::new(),
+        sound_path: None,
+        sound_seconds: 0.0,
     };
     assert!(s.import_timeline_media(none).is_err());
     let _ = fs::remove_dir_all(&dir);
@@ -181,6 +185,8 @@ fn a_video_is_fitted_under_the_drawings_and_a_timing_track_follows_its_holds() {
             width: 100,
             height: 100,
             peaks: Vec::new(),
+            sound_path: None,
+            sound_seconds: 0.0,
         })
         .unwrap();
     let c = s.timeline_media_clip(clip).unwrap();
@@ -199,7 +205,8 @@ fn a_video_is_fitted_under_the_drawings_and_a_timing_track_follows_its_holds() {
     let holds = vec![AnimaticHold { start: 0, length: 5 }, AnimaticHold { start: 5, length: fps - 5 }];
     let track = s.make_timing_track(clip, holds);
     assert_ne!(track, 0);
-    assert_eq!(s.layers().len(), layers + 2);
+    // (each drawing a group with its layer in it)
+    assert_eq!(s.layers().len(), layers + 4);
     let tracks = s.timeline_tracks();
     let at = tracks.iter().position(|t| t.id == track).unwrap();
     assert_eq!(at, video_at + 1, "just above the video");
@@ -207,6 +214,45 @@ fn a_video_is_fitted_under_the_drawings_and_a_timing_track_follows_its_holds() {
     assert_eq!(spans, vec![(0, 5), (5, fps - 5)]);
     // not for a sound, or with no holds
     assert_eq!(s.make_timing_track(clip, Vec::new()), 0);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_timing_track_for_a_video_inside_a_group_goes_in_the_group() {
+    let dir = folder("video-group");
+    let s = CanvasSession::new(200, 100);
+    assert!(s.start_timeline());
+    let clip = s
+        .import_timeline_media(MediaImport {
+            path: sound_file(&dir, "animatic.mov", 7),
+            name: "animatic.mov".into(),
+            kind: TimelineMediaKind::Video,
+            seconds: 1.0,
+            width: 100,
+            height: 100,
+            peaks: Vec::new(),
+            sound_path: None,
+            sound_seconds: 0.0,
+        })
+        .unwrap();
+    let group = s.group_timeline_clips(vec![clip]);
+    assert_ne!(group, 0);
+    let outside = s.timeline_tracks().len();
+    let layers = s.layers().len();
+    let track = s.make_timing_track(clip, vec![AnimaticHold { start: 0, length: 3 }, AnimaticHold { start: 3, length: 4 }]);
+    assert_ne!(track, 0, "made");
+    assert_eq!(s.layers().len(), layers + 4);
+    // nothing left behind on the timeline's own tracks
+    assert_eq!(s.timeline_tracks().len(), outside);
+    // in the group, just above the video, as the panel shows it with the group open
+    assert!(s.open_timeline_group(Some(group)));
+    let tracks = s.timeline_tracks();
+    let video_at = tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip)).unwrap();
+    assert_eq!(tracks.iter().position(|t| t.id == track), Some(video_at + 1));
+    assert!(s.timeline_rows().iter().any(|r| r.track.id == track));
+    let spans: Vec<(u32, u32)> = tracks[video_at + 1].clips.iter().map(|c| (c.start, c.duration)).collect();
+    let origin = tracks[video_at].clips[0].start;
+    assert_eq!(spans, vec![(origin, 3), (origin + 3, 4)]);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -228,4 +274,50 @@ fn the_detector_finds_holds_in_grey_pictures() {
     // the last hold is too short at a minimum of two
     assert_eq!(animatic_holds(scores, 0.5, 2).len(), 2);
     assert!(animatic_threshold(0.0) > animatic_threshold(1.0));
+}
+
+#[test]
+fn a_video_brought_in_with_its_sound_plays_it_until_it_is_separated() {
+    let dir = folder("video-sound");
+    let s = CanvasSession::new(200, 100);
+    assert!(s.start_timeline());
+    let path = sound_file(&dir, "clip.mov", 5);
+    let sound = sound_file(&dir, "clip.m4a", 9);
+    let clip = s
+        .import_timeline_media(MediaImport {
+            path,
+            name: "clip.mov".into(),
+            kind: TimelineMediaKind::Video,
+            seconds: 2.0,
+            width: 100,
+            height: 100,
+            peaks: vec![0.1, 0.9, 0.4],
+            sound_path: Some(sound),
+            sound_seconds: 2.0,
+        })
+        .unwrap();
+    assert_ne!(clip, 0);
+    let c = s.timeline_media_clip(clip).unwrap();
+    assert_ne!(c.sound, 0);
+    assert_eq!((c.volume, c.muted), (1.0, false));
+    // its waveform is its sound's; the sound plays with it, from the sound's own file
+    assert_eq!(s.timeline_media_peaks(c.sound), vec![0.1, 0.9, 0.4]);
+    let sounds = s.timeline_sounds(0);
+    assert_eq!(sounds.len(), 1);
+    assert_eq!(sounds[0].clip, clip);
+    assert!(sounds[0].path.ends_with(".m4a"), "{}", sounds[0].path);
+    // its level and mute are the video's own
+    assert!(s.set_timeline_sound(clip, 0.25, false, 0.0, true));
+    assert_eq!(s.timeline_media_clip(clip).unwrap().volume, 0.25);
+
+    let tracks = s.timeline_tracks().len();
+    let audio = s.separate_timeline_audio(clip);
+    assert_ne!(audio, 0);
+    assert_eq!(s.timeline_tracks().len(), tracks + 1);
+    assert_eq!(s.timeline_media_clip(clip).unwrap().sound, 0, "the video is silent now");
+    let a = s.timeline_media_clip(audio).unwrap();
+    assert_eq!((a.kind, a.media, a.volume), (TimelineMediaKind::Audio, c.sound, 0.25));
+    assert_eq!(s.timeline_sounds(0).iter().map(|x| x.clip).collect::<Vec<_>>(), [audio]);
+    assert_eq!(s.separate_timeline_audio(clip), 0, "nothing left to take out");
+    let _ = fs::remove_dir_all(&dir);
 }

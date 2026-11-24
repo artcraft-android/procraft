@@ -661,9 +661,15 @@ pub fn solo(tl: &mut Timeline, track: TrackId, frame: u32) {
         if t.hidden {
             continue;
         }
+        // (a track's own mask and blend mode are those of its clips that have none)
+        let look = t.look;
+        if mine {
+            t.look.blend = BlendMode::Normal;
+        }
         let Some(clip) = t.clips.iter_mut().find(|c| c.covers(frame)) else { continue };
         // the same matte, its source no longer drawn
-        if clip.mask == MaskMode::Clipping {
+        let mask = if clip.mask == MaskMode::None { look.mask } else { clip.mask };
+        if mask == MaskMode::Clipping {
             clip.mask = MaskMode::Alpha;
         }
         if mine {

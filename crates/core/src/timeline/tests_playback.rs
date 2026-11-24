@@ -1,7 +1,6 @@
 //! The timeline's length through the session: each change one undo step.
 
 use super::TimelineEdgePolicy;
-use super::menus::TimelineLoop;
 use super::tests_1g::{played, spans, three_drawings};
 
 #[test]
@@ -16,18 +15,15 @@ fn the_length_drags_out_and_back_past_the_clips() {
     assert_eq!(s.timeline_info().unwrap().duration, end + 10);
     assert!(!s.set_timeline_length(end + 10), "that long already");
     s.set_timeline_frame(end + 8);
-    assert!(s.set_timeline_loop(Some(TimelineLoop { start: end, end: end + 9 })));
 
     assert!(s.set_timeline_length(1));
     let info = s.timeline_info().unwrap();
     assert_eq!(info.duration, 1, "shorter than the clips, as it may be");
     assert_eq!(info.frame, 0, "the playhead within it");
-    assert_eq!(s.timeline_loop(), None, "none of the looped frames are left");
     assert_eq!(s.timeline_content_end(), end, "the clips are kept");
 
     assert!(s.undo().is_some());
     assert_eq!(s.timeline_info().unwrap().duration, end + 10);
-    assert!(s.undo().is_some());
     assert!(s.undo().is_some());
     assert_eq!(s.timeline_info().unwrap().duration, was);
 }

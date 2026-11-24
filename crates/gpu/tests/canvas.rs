@@ -5097,6 +5097,150 @@ fn wet_dot(x: f32, radius: f32, time_ms: f64) -> Stamp {
     Stamp { time_ms, distance: x, ..dot(Vec2::new(x, 30.0), radius) }
 }
 
+/// A stroke laid in place along the middle row of a coloured layer, a few stamps an input event
+/// at 120 a second (so wet paint holds some back for the rest of their display frame), with or
+/// without what runs ahead of it laid each time; the layer as it ends up.
+fn laid_in_place(gpu: &Gpu, style: StrokeStyle, second: Option<procraft_gpu::SecondStroke>, ahead: bool) -> Vec<u8> {
+    let mut doc = Document::new(480, 60);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    canvas.fill_layer(doc.current(), [30, 120, 200]);
+    canvas.render(gpu, &mut doc, None);
+    match second {
+        Some(second) => canvas.begin_dual_stroke(doc.current(), style, second),
+        None => canvas.begin_stroke(doc.current(), style),
+    }
+    assert!(canvas.lays_ahead());
+    let at = |i: usize| 10.0 + i as f32 * 5.0;
+    for frame in 0..24usize {
+        let time = |i: usize| (i / 3) as f64 * 8.0 + (i % 3) as f64;
+        let stamps: Vec<Stamp> = (frame * 3..frame * 3 + 3).map(|i| wet_dot(at(i), 8.0, time(i))).collect();
+        if second.is_some() {
+            canvas.add_second_stamps(&stamps.iter().map(|s| Stamp { radius: 6.0, ..*s }).collect::<Vec<_>>());
+        }
+        canvas.add_stamps(&stamps);
+        if ahead {
+            // over several display frames (laid in several passes)
+            let on: Vec<Stamp> = (frame * 3 + 3..frame * 3 + 15).map(|i| wet_dot(at(i), 8.0, time(i))).collect();
+            canvas.set_ahead(&on);
+            // its second's tip runs on with it
+            if second.is_some() {
+                canvas.set_second_tip(&on.iter().map(|s| Stamp { radius: 6.0, ..*s }).collect::<Vec<_>>());
+            }
+        }
+        canvas.render(gpu, &mut doc, None);
+    }
+    canvas.end_stroke();
+    canvas.render(gpu, &mut doc, None);
+    canvas.read_layer(gpu, doc.current()).unwrap()
+}
+
+#[test]
+fn paint_laid_ahead_of_a_stroke_in_place_leaves_it_as_it_would_have_been() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.8, 0.2, 0.1], 1.0);
+    // thinned, its charge running out: what it carries from pass to pass shows
+    let wet = StrokeStyle { wet_pull: Some(0.6), dilution: 0.7, load: 0.3, wet_jitter: 0.5, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint.as_second(), mode: 1, threshold: -1.0, classic: false };
+    let cases: [(&str, StrokeStyle, Option<procraft_gpu::SecondStroke>); 6] = [
+        ("wet", wet, None),
+        ("wet, built up by what is left", StrokeStyle { rendering: Rendering::Gradual, ..wet }, None),
+        ("wet edged (laid apart)", StrokeStyle { wet_edges: 0.6, ..wet }, None),
+        ("wet, a glaze", StrokeStyle { wet_from_before: true, ..wet }, None),
+        ("dry, laid in place", StrokeStyle { laid_in_place: true, rendering: Rendering::Gradual, ..paint }, None),
+        ("wet, with a second", wet, Some(second)),
+    ];
+    for (name, style, second) in cases {
+        let plain = laid_in_place(&gpu, style, second, false);
+        let with_ahead = laid_in_place(&gpu, style, second, true);
+        let differing = plain.iter().zip(&with_ahead).filter(|(a, b)| a != b).count();
+        assert_eq!(differing, 0, "{name}: {differing} bytes differ");
+    }
+}
+
+#[test]
+fn a_wet_dual_brush_shows_on_to_the_pen_cut_by_its_seconds_tip() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(200, 60);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let shown = |canvas: &mut Canvas, doc: &mut Document, x: u32| {
+        canvas.render(&gpu, doc, None);
+        pixel(&canvas.read_composite(&gpu).unwrap(), 200, x, 30)
+    };
+    let white = [255, 255, 255, 255];
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0);
+    let wet = StrokeStyle { wet_pull: Some(0.6), ..paint };
+    // by Multiply: the paint shows only where its second goes too
+    let second = procraft_gpu::SecondStroke { style: paint.as_second(), mode: 1, threshold: -1.0, classic: false };
+    canvas.begin_dual_stroke(doc.current(), wet, second);
+    assert!(!canvas.shows_tip() && canvas.lays_ahead());
+    canvas.add_second_stamps(&[wet_dot(20.0, 8.0, 0.0)]);
+    canvas.add_stamps(&[wet_dot(20.0, 8.0, 0.0), wet_dot(30.0, 8.0, 1.0)]);
+    assert_ne!(shown(&mut canvas, &mut doc, 20), white);
+    // laid on to the pen, but its second isn't there yet: cut
+    canvas.set_ahead(&[wet_dot(100.0, 8.0, 2.0)]);
+    assert_eq!(shown(&mut canvas, &mut doc, 100), white, "no second there");
+    // its second's tip reaches as far (in a frame of its own): it shows
+    canvas.set_second_tip(&[wet_dot(100.0, 8.0, 2.0)]);
+    assert_ne!(shown(&mut canvas, &mut doc, 100), white, "the second's tip under it");
+    // the tip moved on with the pen: what it showed goes with it
+    canvas.set_ahead(&[wet_dot(140.0, 8.0, 3.0)]);
+    canvas.set_second_tip(&[wet_dot(140.0, 8.0, 3.0)]);
+    assert_eq!(shown(&mut canvas, &mut doc, 100), white, "taken off");
+    assert_ne!(shown(&mut canvas, &mut doc, 140), white);
+    // taken off alone, the paint laid ahead is cut again
+    canvas.set_second_tip(&[]);
+    assert_eq!(shown(&mut canvas, &mut doc, 140), white);
+    // none of it kept as the stroke ends, and undo leaves nothing
+    canvas.set_second_tip(&[wet_dot(140.0, 8.0, 3.0)]);
+    canvas.end_stroke();
+    assert_eq!(shown(&mut canvas, &mut doc, 140), white);
+    assert_ne!(shown(&mut canvas, &mut doc, 20), white);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    assert!(layer.chunks_exact(4).all(|px| px[3] == 0), "paint left after undo");
+}
+
+#[test]
+fn wet_paint_shows_on_to_the_pen_and_what_it_holds_back() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(200, 60);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let shown = |canvas: &mut Canvas, doc: &mut Document, x: u32| {
+        canvas.render(&gpu, doc, None);
+        pixel(&canvas.read_composite(&gpu).unwrap(), 200, x, 30)
+    };
+    let white = [255, 255, 255, 255];
+    let wet = StrokeStyle { wet_pull: Some(0.6), ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0) };
+    canvas.begin_stroke(doc.current(), wet);
+    // all in one display frame: held back for the rest of it, and shown meanwhile
+    canvas.add_stamps(&[wet_dot(20.0, 8.0, 0.0), wet_dot(30.0, 8.0, 1.0)]);
+    assert_ne!(shown(&mut canvas, &mut doc, 30), white, "the stamps held back");
+    // on to the pen
+    canvas.set_ahead(&[wet_dot(100.0, 8.0, 2.0)]);
+    assert_ne!(shown(&mut canvas, &mut doc, 100), white, "what runs ahead");
+    // gone again once it is no longer ahead
+    canvas.set_ahead(&[]);
+    assert_eq!(shown(&mut canvas, &mut doc, 100), white, "taken off");
+    assert_ne!(shown(&mut canvas, &mut doc, 30), white);
+    // and none of it kept as the stroke ends
+    canvas.set_ahead(&[wet_dot(100.0, 8.0, 2.0)]);
+    canvas.end_stroke();
+    assert_eq!(shown(&mut canvas, &mut doc, 100), white);
+    assert_ne!(shown(&mut canvas, &mut doc, 30), white);
+    // a stroke called off takes it all off
+    canvas.begin_stroke(doc.current(), wet);
+    canvas.add_stamps(&[wet_dot(150.0, 8.0, 0.0)]);
+    canvas.set_ahead(&[wet_dot(180.0, 8.0, 1.0)]);
+    assert_ne!(shown(&mut canvas, &mut doc, 180), white);
+    canvas.cancel_stroke();
+    assert_eq!(shown(&mut canvas, &mut doc, 180), white);
+    assert_eq!(shown(&mut canvas, &mut doc, 150), white);
+}
+
 #[test]
 fn a_stroke_shows_as_strongly_as_said_while_it_is_drawn_and_is_kept_as_it_is() {
     let Some(gpu) = gpu() else { return };

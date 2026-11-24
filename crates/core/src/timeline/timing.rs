@@ -1,4 +1,4 @@
-//! Retiming a timeline to another frame rate with its timing kept, its sync markers, and the
+//! Retiming a timeline to another frame rate with its timing kept, and the
 //! drawing whose layers the layers panel lists.
 
 use crate::CanvasSession;
@@ -31,36 +31,6 @@ impl CanvasSession {
         st.follow_playhead();
         self.shared.frame(st);
         true
-    }
-
-    /// The sync markers' frames, in order.
-    pub fn timeline_markers(&self) -> Vec<u32> {
-        self.shared.lock().doc.timeline.as_ref().map_or(Vec::new(), |t| t.markers.clone())
-    }
-
-    /// A sync marker on frame `frame` (tapped while playing, the frame playing), as an undo step.
-    /// False if there is one there.
-    pub fn add_timeline_marker(&self, frame: u32) -> bool {
-        self.change("Add Marker", |d| d.timeline.as_mut()?.add_marker(frame).then_some(())).is_some()
-    }
-
-    /// The marker on frame `from` moved to frame `to`, as an undo step.
-    pub fn move_timeline_marker(&self, from: u32, to: u32) -> bool {
-        self.change("Move Marker", |d| d.timeline.as_mut()?.move_marker(from, to).then_some(())).is_some()
-    }
-
-    /// Takes away the marker on frame `frame`, as an undo step.
-    pub fn remove_timeline_marker(&self, frame: u32) -> bool {
-        self.change("Remove Marker", |d| d.timeline.as_mut()?.remove_marker(frame).then_some(())).is_some()
-    }
-
-    /// Takes away every marker, as one undo step.
-    pub fn clear_timeline_markers(&self) -> bool {
-        self.change("Clear Markers", |d| {
-            let tl = d.timeline.as_mut()?;
-            (!tl.markers.is_empty()).then(|| tl.markers.clear())
-        })
-        .is_some()
     }
 
     /// On a timeline, the drawing the layers panel lists the layers of: the current layer's (the

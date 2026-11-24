@@ -70,13 +70,12 @@ fn selected_at(mask: &Mask, p: Vec2) -> bool {
 }
 
 /// How what is transformed on a vector layer is carried to where the transform put it.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum Carried {
     /// Moved, turned, resized or pulled out of square: one map of the canvas onto itself.
     By(Homography),
-    /// Warped: the mesh, and the rectangle of the canvas (its corners, top left first, clockwise)
-    /// it was laid over.
-    Warped { mesh: procraft_engine::warp::Mesh, source: [Vec2; 4] },
+    /// Bent: through a warp's mesh, or a puppet's.
+    Bent(procraft_engine::transform::Bend),
 }
 
 impl Carried {
@@ -84,15 +83,7 @@ impl Carried {
     fn carry(self, content: &mut VectorContent, ids: Option<&[StrokeId]>) -> bool {
         match self {
             Carried::By(map) => content.place(ids, map),
-            Carried::Warped { mesh, source } => {
-                let [top_left, top_right, _, bottom_left] = source;
-                let (w, h) = (top_right.x - top_left.x, bottom_left.y - top_left.y);
-                if !(w.abs() > 1e-6 && h.abs() > 1e-6) {
-                    return false;
-                }
-                content
-                    .bend(ids, &|p| procraft_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h))
-            }
+            Carried::Bent(bend) => content.bend(ids, &|p| bend.point(p)),
         }
     }
 }
@@ -119,9 +110,12 @@ const LIFTED_NAME: &str = "Transforming";
 /// that takes long enough to be felt each time ([`WARP_EXACT_WITHIN`]): a layer of very many
 /// strokes stays as it was drawn while dragged, and is exact once kept.
 ///
-/// Either is done once for each frame drawn, however many times the mesh moved since the last,
-/// and less often than that on a layer that takes long, so the mesh's own handles keep up with
-/// the finger and the lines follow.
+/// Either is done once for each frame drawn, however many times the mesh moved since the last.
+/// On a layer whose strokes take longer than a frame to draw even roughly ([`WARP_EVERY_FRAME`]),
+/// drawing them each time left the lines trailing the mesh by several frames: there, while a
+/// handle is held, the picture of the strokes is pulled through the mesh instead (as any layer's
+/// is, every frame: the lines keep up with the finger, wider and narrower as the mesh stretches
+/// them for as long as it is held), and the strokes are drawn once it is let go.
 pub(crate) struct VectorWarp {
     /// The layer drawn on: the vector layer itself, or the one its selected strokes and fills
     /// were picked up onto.
@@ -140,16 +134,21 @@ pub(crate) struct VectorWarp {
     /// a handle is let go.
     stamps: Option<(Arc<StrokeStamps>, bool)>,
     /// What the target shows now: the mesh it was drawn through, and whether exactly.
-    shown: Option<(procraft_engine::warp::Mesh, bool)>,
+    shown: Option<(procraft_engine::transform::Bend, bool)>,
     /// When it was last drawn, and how long that took.
     drawn: Option<(std::time::Instant, std::time::Duration)>,
+    /// The picture of the strokes is being pulled through the mesh for now (a handle held on a
+    /// layer that takes long to draw), as it was last shown: the layer's pixels are then not
+    /// held, their picture taken up as in any other transform.
+    pulled: Option<procraft_engine::transform::Bend>,
 }
 
 /// Each stroke's stamps as they lie on the canvas, and its second's if it has one, by name.
 pub(crate) type StrokeStamps = std::collections::HashMap<StrokeId, (Vec<Stamp>, Option<Vec<Stamp>>)>;
 
-/// Drawing a warp's strokes again within this long is done every frame; one that takes longer
-/// waits twice as long as it took before the next, so the rest of the app has most of the time.
+/// Drawing a warp's strokes again within this long is done every frame. One that takes longer
+/// shows their picture pulled through the mesh while a handle is held, and with none held waits
+/// twice as long as it took before the next, so the rest of the app has most of the time.
 const WARP_EVERY_FRAME: std::time::Duration = std::time::Duration::from_millis(12);
 
 /// A warp's strokes are drawn exactly each time a handle is let go if that is reckoned to take no
@@ -316,6 +315,13 @@ impl State {
         let kept = !idle && !stroke.samples().is_empty() && self.doc.keep_stroke(layer, stroke);
         if !kept && !filled {
             return;
+        }
+        // (drawn on the sharp picture too, the stroke's stamps leave the fill out there)
+        if filled
+            && self.crisp_stroke == Some(layer)
+            && let Some(crisp) = self.crisp.as_mut()
+        {
+            crisp.filled_under = true;
         }
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.record_document(before);
@@ -1409,7 +1415,8 @@ impl State {
             canvas.end_transform(false);
             canvas.hold_layer_quietly(target);
         }
-        self.vector_warp = Some(VectorWarp { target, moved, from, ids, whole, stamps: None, shown: None, drawn: None });
+        self.vector_warp =
+            Some(VectorWarp { target, moved, from, ids, whole, stamps: None, shown: None, drawn: None, pulled: None });
         true
     }
 
@@ -1419,7 +1426,7 @@ impl State {
     /// it took has passed since the last, and says so (true: draw another frame soon).
     pub(crate) fn vector_warp_draw(&mut self, now: bool) -> bool {
         let Some((mesh, source, held)) =
-            self.transform.as_ref().and_then(|t| Some((t.warp()?, t.source(), t.dragging())))
+            self.transform.as_ref().and_then(|t| Some((t.bend()?, t.source(), t.dragging())))
         else {
             return false;
         };
@@ -1428,7 +1435,28 @@ impl State {
         // goes through the mesh whole can be
         let quick_enough = warp.stamps.as_ref().is_none_or(|(_, exact)| *exact);
         let exactly = !warp.whole || (!held && quick_enough);
-        if warp.shown.is_some_and(|(shown, exact)| shown == mesh && (exact || !exactly)) {
+        if warp.shown.as_ref().is_some_and(|(shown, exact)| *shown == mesh && (*exact || !exactly)) {
+            return false;
+        }
+        // one that takes long to draw, a handle held: the picture pulled through the mesh instead,
+        // every frame (see [`VectorWarp`])
+        let slow = warp.whole && warp.drawn.is_some_and(|(_, took)| took > WARP_EVERY_FRAME);
+        if held && slow && !now {
+            if warp.pulled.as_ref() == Some(&mesh) {
+                return false;
+            }
+            let taken_up = warp.pulled.is_some();
+            let moved = warp.moved.clone();
+            if !taken_up && let Some(canvas) = self.canvas.as_mut() {
+                // the layer's pixels back as they were, and their picture taken up again
+                canvas.release_layer(false, None);
+                canvas.begin_transform_layers(&moved);
+            }
+            self.show_placed();
+            if let Some(warp) = self.vector_warp.as_mut() {
+                warp.pulled = Some(mesh.clone());
+                warp.shown = None;
+            }
             return false;
         }
         let started = std::time::Instant::now();
@@ -1440,6 +1468,14 @@ impl State {
             return true;
         }
         let Some(mut warp) = self.vector_warp.take() else { return false };
+        // (their picture was being pulled through the mesh: put back, and the layer's pixels held
+        // again for the strokes to be drawn on)
+        if warp.pulled.take().is_some()
+            && let Some(canvas) = self.canvas.as_mut()
+        {
+            canvas.end_transform(false);
+            canvas.hold_layer_quietly(warp.target);
+        }
         // each stroke's stamps as they lie unbent, the first time: what drawing them roughly
         // starts from, and (by how long they took) how long drawing them exactly would
         if warp.whole && warp.stamps.is_none() {
@@ -1452,7 +1488,7 @@ impl State {
         let exactly = !warp.whole || (!held && warp.stamps.as_ref().is_none_or(|(_, exact)| *exact));
         let [top_left, top_right, _, bottom_left] = source;
         let (w, h) = (top_right.x - top_left.x, bottom_left.y - top_left.y);
-        let through = |p: Vec2| procraft_engine::warp::point(&mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h);
+        let through = |p: Vec2| mesh.point(p);
         let flat = !(w.abs() > 1e-6 && h.abs() > 1e-6);
         // (the transform is set aside while they are drawn: what settles the canvas on the way, a
         // fill reading what is under it, would end it)
@@ -1480,7 +1516,7 @@ impl State {
             }
             None => {
                 let mut bent = (*warp.from).clone();
-                Carried::Warped { mesh, source }.carry(&mut bent, warp.ids.as_deref());
+                Carried::Bent(mesh.clone()).carry(&mut bent, warp.ids.as_deref());
                 self.draw_vector(warp.target, &bent, None);
             }
         }
@@ -1498,7 +1534,11 @@ impl State {
     pub(crate) fn vector_warp_end(&mut self) -> Option<Vec<LayerId>> {
         let warp = self.vector_warp.take()?;
         if let Some(canvas) = self.canvas.as_mut() {
-            canvas.release_layer(false, None);
+            // (their picture pulled through the mesh for now: that is what there is to put back)
+            match warp.pulled {
+                Some(_) => canvas.end_transform(false),
+                None => canvas.release_layer(false, None),
+            }
         }
         Some(warp.moved)
     }
@@ -3959,6 +3999,99 @@ mod tests {
         assert!(sharp_at(&frame(&s), 0..126));
     }
 
+    #[test]
+    fn zoomed_in_a_lasso_s_fill_shows_on_the_sharp_picture_as_it_is_drawn() {
+        use crate::selection::StrokeFill;
+        let Some(s) = session() else { return };
+        let layer = s.add_vector_layer();
+        s.set_color(0.0, 0.0, 0.0);
+        s.set_brush_size(0.1);
+        // a line near the top, for there to be a sharp picture of: twice as big, it runs along the
+        // window's row 20
+        straight(&s, (90.0, 85.0), (210.0, 85.0));
+        let dir = std::env::temp_dir().join(format!("procraft-lasso-sharp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        s.use_plugins(Arc::clone(&plugins));
+        assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+        s.shared.lock().view = View::centred(Vec2::new(150.0, 150.0), 2.0, 0.0, (300, 300));
+        s.set_vector_crisp(true);
+        frame(&s);
+        frame(&s);
+        assert!(s.shared.lock().crisp.is_some());
+        // (the sharp picture is not made again while this goes on: what shows is what was put on it)
+        s.shared.lock().crisp_rest = std::time::Duration::from_secs(3600);
+        // a square gone round with the pen on the window, a move every 4 px, not lifted
+        let round = |s: &CanvasSession, ms: f64| {
+            s.touch_down(1, PointerKind::Stylus, vec![at(60.0, 60.0, ms)]);
+            let corners = [(60.0, 60.0), (240.0, 60.0), (240.0, 240.0), (60.0, 240.0), (60.0, 70.0)];
+            let mut t = ms;
+            for pair in corners.windows(2) {
+                let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+                let steps = ((bx - ax).abs().max((by - ay).abs()) / 4.0).ceil().max(1.0) as usize;
+                for k in 1..=steps {
+                    let f = k as f32 / steps as f32;
+                    t += 4.0;
+                    s.touch_move(1, vec![at(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+                }
+            }
+            t
+        };
+        let white = [255, 255, 255, 255];
+        s.set_brush_opacity(1.0);
+        s.set_color(1.0, 0.0, 0.0);
+        s.set_secondary_color(0.0, 0.0, 1.0);
+        s.set_lasso_preview_opacity(1.0);
+        // Outline: the stroke is drawn on the sharp picture, and what it goes round shows there
+        s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+        let t = round(&s, 0.0);
+        let during = frame(&s);
+        assert!(s.shared.lock().crisp_stroke.is_some(), "drawn on the sharp picture");
+        assert_eq!(pixel(&during, 150, 150), [0, 0, 255, 255], "the fill shown under the stroke");
+        assert_eq!(pixel(&during, 20, 150), white, "and nowhere else");
+        // lifted: the fill is there at once, with no frame between that shows neither
+        s.touch_up(1, vec![at(60.0, 70.0, t + 4.0)]);
+        let lifted = frame(&s);
+        assert_eq!(s.vector_fill_count(layer), 1);
+        assert_eq!(pixel(&lifted, 150, 150), [0, 0, 255, 255], "filled as it showed");
+        assert_eq!(pixel(&lifted, 20, 150), white);
+        s.undo();
+        assert_eq!(pixel(&frame(&s), 150, 150), white, "nothing left shown once it is taken back");
+        // let go of, a stroke takes what it showed with it
+        round(&s, 1000.0);
+        assert_eq!(pixel(&frame(&s), 150, 150), [0, 0, 255, 255]);
+        s.touch_cancel();
+        assert_eq!(pixel(&frame(&s), 150, 150), white);
+        s.set_stroke_fill(None);
+        // the Pen's own lasso: no stroke is drawn, and its fill shows on the sharp picture all the same
+        s.set_touch_selecting(Some(SelectTouch {
+            kind: SelectKind::Freehand,
+            join: SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: true,
+            lasso_erase: false,
+            lasso_tool: true,
+        }));
+        let t = round(&s, 2000.0);
+        let during = frame(&s);
+        assert!(s.shared.lock().crisp.is_some());
+        assert_eq!(pixel(&during, 150, 150), [255, 0, 0, 255], "shown as it will fill");
+        assert_eq!(pixel(&during, 20, 150), white);
+        s.touch_up(1, vec![at(60.0, 70.0, t + 4.0)]);
+        assert_eq!(s.vector_fill_count(layer), 1);
+        assert_eq!(pixel(&frame(&s), 150, 150), [255, 0, 0, 255], "filled");
+        s.undo();
+        assert_eq!(pixel(&frame(&s), 150, 150), white, "and nothing left shown");
+        // the tool put away mid-lasso takes its preview with it
+        round(&s, 3000.0);
+        assert_eq!(pixel(&frame(&s), 150, 150), [255, 0, 0, 255]);
+        s.set_touch_selecting(None);
+        assert_eq!(pixel(&frame(&s), 150, 150), white);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The open transform's warp, its two middle columns of points all dragged up 40: what it
     /// holds is bent up in the middle (by three quarters of that), its ends staying.
     fn warp_up(s: &CanvasSession) {
@@ -4119,7 +4252,7 @@ mod tests {
         assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
         s.transform_set_kind(crate::TransformKind::Warp);
         let shown =
-            |s: &CanvasSession| s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown).map(|(_, exact)| exact);
+            |s: &CanvasSession| s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact));
         // the mesh up and nothing held: drawn exactly (and no differently yet: nothing has moved,
         // but for how a stroke's input is spaced once it is bent)
         warp_frame(&s);
@@ -4154,6 +4287,104 @@ mod tests {
         assert_eq!(furthest(&pixels(&s, layer), &exact), 0);
         assert_eq!(s.undo().as_deref(), Some("warp transform"));
         assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+    }
+
+    #[test]
+    fn a_puppet_bends_a_vector_layers_strokes_by_its_pins() {
+        let Some(s) = session() else { return };
+        let layer = two_lines_and_a_square(&s);
+        let before = pixels(&s, layer);
+        assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+        s.transform_set_kind(crate::TransformKind::Puppet);
+        // the first line pinned at its ends, its right end taken down
+        s.transform_puppet_tap(50.0, 100.0);
+        assert_eq!(s.transform_puppet_tap(250.0, 100.0).map(|b| b.pins.len()), Some(6));
+        s.transform_grab(crate::TransformHandle::Pin { index: 1 }, 250.0, 100.0);
+        s.transform_drag(250.0, 140.0);
+        s.transform_release();
+        // shown as its strokes bent, as wide as they were
+        let shown = warp_frame(&s);
+        assert!(!shown.is_empty());
+        assert_eq!(s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact)), Some(true));
+        s.transform_end(true);
+        let after = pixels(&s, layer);
+        let ink = |rgba: &[u8], x: usize, y: usize| pixel(rgba, x, y)[3] > 128;
+        assert!(ink(&after, 250, 140) && !ink(&after, 250, 100), "the right end went down");
+        assert!(ink(&after, 50, 100), "the left end stayed");
+        assert!(ink(&after, 150, 200) && ink(&after, 80, 150), "the rest as it was");
+        assert_eq!(s.undo().as_deref(), Some("puppet warp"));
+        assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+    }
+
+    #[test]
+    fn a_warp_that_takes_long_to_draw_keeps_up_with_a_held_handle_and_is_kept_the_same() {
+        let Some(s) = session() else { return };
+        let layer = two_lines_and_a_square(&s);
+        let before = pixels(&s, layer);
+        // (how long its strokes took to draw last, as said: four frames' worth, or no time)
+        let took = |s: &CanvasSession, long: bool| {
+            let mut st = s.shared.lock();
+            let warp = st.vector_warp.as_mut().unwrap();
+            let took = if long { super::WARP_EVERY_FRAME * 4 } else { std::time::Duration::ZERO };
+            warp.drawn = Some((std::time::Instant::now() - std::time::Duration::from_secs(5), took));
+        };
+        let pulled = |s: &CanvasSession| s.shared.lock().vector_warp.as_ref().is_some_and(|w| w.pulled.is_some());
+        let drawn_as_a_frame_is = |s: &CanvasSession, long: bool| {
+            took(s, long);
+            s.shared.lock().vector_warp_draw(false);
+            frame(s)
+        };
+        // the same warp twice: drawn quickly (its strokes at every move), and taking long
+        let mut kept = Vec::new();
+        for takes_long in [false, true] {
+            assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+            s.transform_set_kind(crate::TransformKind::Warp);
+            warp_frame(&s);
+            s.transform_grab(crate::TransformHandle::Mesh { index: 5 }, 150.0, 150.0);
+            s.transform_drag(170.0, 120.0);
+            let first = drawn_as_a_frame_is(&s, takes_long);
+            assert_eq!(pulled(&s), takes_long);
+            // it follows the handle at every move, the layer's picture pulled through the mesh
+            s.transform_drag(190.0, 90.0);
+            let second = drawn_as_a_frame_is(&s, takes_long);
+            assert_eq!(pulled(&s), takes_long);
+            assert_ne!(furthest(&first, &second), 0, "the lines went with the handle");
+            assert_ne!(furthest(&shown_pixels(&s, layer), &before), 0);
+            // (a frame with nothing moved shows the same, drawing nothing again)
+            assert_eq!(furthest(&drawn_as_a_frame_is(&s, takes_long), &second), 0);
+            // let go: the strokes themselves, bent, as keeping it leaves them
+            s.transform_release();
+            drawn_as_a_frame_is(&s, takes_long);
+            assert!(!pulled(&s));
+            let exact = shown_pixels(&s, layer);
+            s.transform_end(true);
+            assert_eq!(furthest(&pixels(&s, layer), &exact), 0, "kept, it is what was shown");
+            kept.push(pixels(&s, layer));
+            assert_eq!(s.undo().as_deref(), Some("warp transform"));
+            assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        }
+        assert_eq!(furthest(&kept[0], &kept[1]), 0, "kept the same, however it was shown meanwhile");
+        // ended with the handle still held (kept, then called off): nothing of the picture pulled
+        // through the mesh is left
+        let step = s.shared.lock().canvas.as_ref().unwrap().undo_step();
+        for keep in [true, false] {
+            assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+            s.transform_set_kind(crate::TransformKind::Warp);
+            warp_frame(&s);
+            s.transform_grab(crate::TransformHandle::Mesh { index: 5 }, 150.0, 150.0);
+            s.transform_drag(190.0, 90.0);
+            drawn_as_a_frame_is(&s, true);
+            assert!(pulled(&s));
+            s.transform_end(keep);
+            assert!(s.shared.lock().vector_warp.is_none());
+            if keep {
+                assert_eq!(furthest(&pixels(&s, layer), &kept[0]), 0);
+                assert_eq!(s.undo().as_deref(), Some("warp transform"));
+            }
+            assert_eq!(furthest(&pixels(&s, layer), &before), 0);
+        }
+        s.shared.lock().canvas.as_mut().unwrap().forget_redo();
+        assert_eq!(s.shared.lock().canvas.as_ref().unwrap().undo_step(), step);
     }
 
     #[test]
@@ -4336,5 +4567,117 @@ mod tests {
             0
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Run with `--ignored --nocapture`: what a drag of a vector layer's transform costs a frame, on
+    /// a canvas a tablet's size: the whole layer moved, some of its strokes picked up and moved,
+    /// and its mesh pulled; with a raster layer of the same picture to compare with.
+    #[test]
+    #[ignore]
+    fn transform_lag() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        let (w, h) = (2048u32, 2732u32);
+        let s = CanvasSession::new(w, h);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (w, h);
+            st.view = Some(View::fit((w, h), (w, h)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        let target = {
+            let st = s.shared.lock();
+            st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+        let view = target.create_view(&Default::default());
+        let started = std::time::Instant::now();
+        let draw = |s: &CanvasSession| {
+            let mut st = s.shared.lock();
+            let srgb = procraft_engine::profile::Profile::Srgb;
+            st.draw_frame(&view, wgpu::TextureFormat::Bgra8UnormSrgb, (w, h), srgb, started);
+            st.needs_frame
+        };
+        let flush = |s: &CanvasSession| {
+            if let Some(g) = s.shared.lock().gpu.clone() {
+                g.flush();
+            }
+        };
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let strokes: usize = std::env::var("LAG_STROKES").ok().and_then(|n| n.parse().ok()).unwrap_or(60);
+        let paint = |s: &CanvasSession| {
+            s.set_color(0.0, 0.0, 0.0);
+            s.set_brush_size(0.2);
+            for k in 0..strokes {
+                let y = 200.0 + (k as f32) * (2300.0 / strokes as f32);
+                straight(s, (150.0, y), (1900.0, y + 120.0));
+            }
+        };
+        for kind in ["raster", "vector", "vector selected", "vector warp", "raster warp"] {
+            if kind.starts_with("vector") {
+                s.add_vector_layer();
+            } else {
+                s.add_layer();
+            }
+            paint(&s);
+            if kind == "vector selected" {
+                s.select_shape(false, 100.0, 150.0, 400.0, 1300.0, SelectionJoin::Add);
+            }
+            draw(&s);
+            flush(&s);
+            let t = std::time::Instant::now();
+            assert!(s.transform_begin().is_some(), "{kind}: {}", s.transform_refusal());
+            if kind.ends_with("warp") {
+                s.transform_set_kind(crate::TransformKind::Warp);
+            }
+            draw(&s);
+            flush(&s);
+            let begun = ms(t);
+            s.transform_grab(crate::TransformHandle::Move, 1000.0, 1300.0);
+            let (mut drags, mut draws, mut wholes, mut again) = (Vec::new(), Vec::new(), Vec::new(), 0);
+            for i in 0..30 {
+                let whole = std::time::Instant::now();
+                let t = std::time::Instant::now();
+                s.transform_drag(1000.0 + i as f32 * 6.0, 1300.0 + i as f32 * 4.0);
+                drags.push(ms(t));
+                let t = std::time::Instant::now();
+                // (a warp drawn each time, however long the last took, to see how long that is)
+                if std::env::var("LAG_WARP_NOW").is_ok() {
+                    s.shared.lock().vector_warp_draw(true);
+                }
+                again += usize::from(draw(&s));
+                draws.push(ms(t));
+                flush(&s);
+                wholes.push(ms(whole));
+            }
+            let t = std::time::Instant::now();
+            s.transform_release();
+            draw(&s);
+            flush(&s);
+            let released = ms(t);
+            let t = std::time::Instant::now();
+            s.transform_end(true);
+            draw(&s);
+            flush(&s);
+            let ended = ms(t);
+            let mid = |v: &mut Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                (v[v.len() / 2], v[v.len() - 1])
+            };
+            let (drag, draw_ms, whole) = (mid(&mut drags), mid(&mut draws), mid(&mut wholes));
+            println!(
+                "{kind:<16} begin {begun:>7.1}  drag {:>6.2} (worst {:>6.2})  frame {:>6.2} (worst {:>6.2})  with gpu {:>6.2} (worst {:>6.2})  put off {again:>2}  release {released:>7.1}  end {ended:>7.1}",
+                drag.0, drag.1, draw_ms.0, draw_ms.1, whole.0, whole.1
+            );
+            s.select_none();
+        }
     }
 }

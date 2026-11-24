@@ -3,7 +3,30 @@
 //! group did (its keys folded into its clips, its cycle laid out), drawings added to as the layers
 //! panel's + does, and sounds and videos split and duplicated.
 
+use std::collections::HashMap;
+
 use super::*;
+
+/// The most of a group's frames [`Timeline::group_shots`] looks at.
+pub const MOST_GROUP_SHOT_FRAMES: u32 = 4000;
+
+/// Something a group shows on a frame: a drawing's layer, or a video at a time in its file.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GroupShown {
+    Drawing(LayerId),
+    Video { media: MediaId, seconds: f64 },
+}
+
+impl GroupShown {
+    /// The same drawing, or the same video whatever the time in it.
+    fn same(&self, other: &GroupShown) -> bool {
+        match (self, other) {
+            (GroupShown::Drawing(a), GroupShown::Drawing(b)) => a == b,
+            (GroupShown::Video { media: a, .. }, GroupShown::Video { media: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
 
 impl Timeline {
     /// How the group clips clip `id` is inside move, scale and turn it on its own frame `frame`
@@ -77,6 +100,7 @@ impl Timeline {
                     hidden: false,
                     locked: false,
                     opacity: 1.0,
+                    look: Default::default(),
                     clips: Vec::new(),
                 };
                 self.next_track += 1;
@@ -202,6 +226,7 @@ impl Timeline {
                 hidden: true,
                 locked: false,
                 opacity: 1.0,
+                look: Default::default(),
                 clips: kept,
             });
             next_track += 1;
@@ -214,6 +239,48 @@ impl Timeline {
         self.next_track = next_track;
         self.next_clip = next_clip;
         self.take_apart(id)
+    }
+
+    /// What group clip `id` shows on each of its frames, as runs of frames showing the same
+    /// drawings and videos: each run's first frame (counted from the group's own first), how many
+    /// frames it is, and what shows there, bottom first (its own tracks', and those of the groups
+    /// inside it; hidden tracks' and disabled clips' left out; a cycle played round), a video at
+    /// the time in its file the run's first frame shows. What a panel draws a folded group's
+    /// frames from. At most [`MOST_GROUP_SHOT_FRAMES`] frames of it.
+    pub fn group_shots(&self, id: ClipId) -> Vec<(u32, u32, Vec<GroupShown>)> {
+        fn drawings_at(g: &Group, frame: i64, fps: u32, out: &mut Vec<GroupShown>) {
+            let local = match g.cycle {
+                Some(c) => frame.rem_euclid(i64::from(c.length.max(1))),
+                None => frame,
+            };
+            for t in g.tracks.iter().filter(|t| !t.hidden) {
+                for c in t.clips.iter().filter(|c| !c.disabled) {
+                    if i64::from(c.start) <= local && local < i64::from(c.end()) {
+                        let within = u32::try_from(local - i64::from(c.start)).unwrap_or(0);
+                        match &c.content {
+                            ClipContent::Drawing(d) => out.push(GroupShown::Drawing(d.root)),
+                            ClipContent::Group(inner) => drawings_at(inner, i64::from(within), fps, out),
+                            ClipContent::Video(v) => {
+                                out.push(GroupShown::Video { media: v.media, seconds: v.picture_at(within, fps) });
+                            }
+                            ClipContent::Audio(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        let Some(clip) = self.clip(id) else { return Vec::new() };
+        let ClipContent::Group(g) = &clip.content else { return Vec::new() };
+        let mut out: Vec<(u32, u32, Vec<GroupShown>)> = Vec::new();
+        for f in 0..clip.duration.min(MOST_GROUP_SHOT_FRAMES) {
+            let mut shown = Vec::new();
+            drawings_at(g, i64::from(f), self.fps, &mut shown);
+            match out.last_mut() {
+                Some(last) if last.2.len() == shown.len() && last.2.iter().zip(&shown).all(|(a, b)| a.same(b)) => last.1 += 1,
+                _ => out.push((f, 1, shown)),
+            }
+        }
+        out
     }
 
     /// Sound or video clip `id` cut at frame `at` (on its level, inside it): it ends there, and a
@@ -251,6 +318,128 @@ impl Timeline {
         track.clips.insert(c + 1, rest);
         self.next_clip += 1;
         Some(ClipId(next))
+    }
+
+    /// The drawing clips a cut of group clip `id` at frame `at` of its level would go through
+    /// (those of its own tracks, and of the groups inside it, that the frame falls inside past
+    /// their first), each with its drawing's layer: [`Timeline::split_group`] wants a copy of each.
+    /// Empty where the group can't be cut there.
+    pub fn group_cut_drawings(&self, id: ClipId, at: u32) -> Vec<(ClipId, LayerId)> {
+        fn walk(g: &Group, cut: u32, out: &mut Vec<(ClipId, LayerId)>) {
+            for c in g.tracks.iter().flat_map(|t| &t.clips).filter(|c| c.start < cut && cut < c.end()) {
+                match &c.content {
+                    ClipContent::Drawing(d) => out.push((c.id, d.root)),
+                    ClipContent::Group(inner) => walk(inner, cut - c.start, out),
+                    ClipContent::Audio(_) | ClipContent::Video(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(clip) = self.clip(id)
+            && let ClipContent::Group(g) = &clip.content
+            && at > clip.start
+            && at < clip.end()
+        {
+            walk(g, at - clip.start, &mut out);
+        }
+        out
+    }
+
+    /// Group clip `id` cut at frame `at` of its level (inside it): it ends there, and a new group
+    /// after it holds the rest, on tracks of its own like the first's. A clip of theirs the cut
+    /// goes through is cut too: a sound or video plays on from there, a group inside is cut the
+    /// same way, and a drawing's second part shows the layer `copies` gives for it (a copy of its
+    /// drawing; see [`Timeline::group_cut_drawings`]). Each second part's keys go on from the
+    /// cut. Returns the new group; none (nothing changed) if it isn't a group, it or a group
+    /// inside it the cut goes through cycles, `at` isn't inside it, or a copy is missing.
+    pub fn split_group(&mut self, id: ClipId, at: u32, copies: &HashMap<ClipId, LayerId>) -> Option<ClipId> {
+        /// The clips of `tracks` from frame `cut` on taken out onto new tracks like them (counted
+        /// from the cut), the clips the cut goes through cut in two.
+        fn cut_tracks(
+            tracks: &mut [Track],
+            cut: u32,
+            fps: f64,
+            copies: &HashMap<ClipId, LayerId>,
+            next: &mut (u64, u64),
+        ) -> Option<Vec<Track>> {
+            let mut rest = Vec::new();
+            for t in tracks.iter_mut() {
+                let (mut stay, mut go) = (Vec::new(), Vec::new());
+                for mut c in std::mem::take(&mut t.clips) {
+                    if c.end() <= cut {
+                        stay.push(c);
+                        continue;
+                    }
+                    if c.start >= cut {
+                        c.start -= cut;
+                        go.push(c);
+                        continue;
+                    }
+                    let before = cut - c.start;
+                    let mut second = c.clone();
+                    second.id = ClipId(next.1);
+                    next.1 += 1;
+                    second.start = 0;
+                    second.duration = c.duration - before;
+                    second.keys = shifted_keys(&second.keys, i64::from(before));
+                    match (&mut c.content, &mut second.content) {
+                        (_, ClipContent::Drawing(d)) => d.root = *copies.get(&c.id)?,
+                        (_, ClipContent::Audio(a)) => {
+                            a.trim_start = (a.trim_start + f64::from(before) / fps - a.offset).max(0.0);
+                            a.offset = 0.0;
+                            a.volume_keys = shifted(&a.volume_keys, i32::try_from(before).unwrap_or(i32::MAX));
+                        }
+                        (_, ClipContent::Video(v)) => v.trim_start += f64::from(before) / fps,
+                        (ClipContent::Group(first), ClipContent::Group(g)) => {
+                            if g.cycle.is_some() {
+                                return None;
+                            }
+                            g.tracks = cut_tracks(&mut first.tracks, before, fps, copies, next)?;
+                        }
+                        _ => return None,
+                    }
+                    c.duration = before;
+                    stay.push(c);
+                    go.push(second);
+                }
+                t.clips = stay;
+                rest.push(Track { id: TrackId(next.0), clips: go, ..t.clone() });
+                next.0 += 1;
+            }
+            Some(rest)
+        }
+
+        // (worked on a copy: a cut that can't be finished leaves nothing half done)
+        let mut work = self.clone();
+        let fps = f64::from(work.fps.max(1));
+        let mut next = (work.next_track, work.next_clip);
+        let (level, t, c) = level_of_clip(&mut work.tracks, id)?;
+        let track = level.get_mut(t)?;
+        let clip = track.clips.get_mut(c)?;
+        if at <= clip.start || at >= clip.end() {
+            return None;
+        }
+        let before = at - clip.start;
+        let mut rest = clip.clone();
+        let ClipContent::Group(g) = &mut clip.content else { return None };
+        if g.cycle.is_some() {
+            return None;
+        }
+        let tracks = cut_tracks(&mut g.tracks, before, fps, copies, &mut next)?;
+        clip.duration = before;
+        rest.id = ClipId(next.1);
+        next.1 += 1;
+        rest.start = at;
+        rest.duration -= before;
+        rest.keys = shifted_keys(&rest.keys, i64::from(before));
+        if let ClipContent::Group(g) = &mut rest.content {
+            g.tracks = tracks;
+        }
+        let made = rest.id;
+        track.clips.insert(c + 1, rest);
+        (work.next_track, work.next_clip) = next;
+        *self = work;
+        Some(made)
     }
 
     /// A copy of sound or video clip `id` just after it, as long; the clips after it move along.

@@ -8,13 +8,6 @@ use procraft_engine::timeline::{ClipId, Timeline, TrackId};
 use crate::CanvasSession;
 use crate::animation::PlayStep;
 
-/// The frames playing goes round: from `start` up to (not including) `end`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct TimelineLoop {
-    pub start: u32,
-    pub end: u32,
-}
-
 /// The onion skins either side of the drawing drawn on: how many, and the colour each side is
 /// screened with (0xRRGGBB; black leaves them as they are).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
@@ -92,6 +85,24 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Clips `ids` (those picked together) all turned off, or all on again, as one undo step:
+    /// those on locked tracks stay as they are. False if none of them changed.
+    pub fn set_timeline_clips_disabled(&self, ids: Vec<u64>, disabled: bool) -> bool {
+        self.change(if disabled { "Turn Clips Off" } else { "Turn Clips On" }, |d| {
+            let tl = d.timeline.as_mut()?;
+            let mut any = false;
+            for id in &ids {
+                any |= clip_edit(tl, *id, |c| {
+                    let changed = c.disabled != disabled;
+                    c.disabled = disabled;
+                    changed
+                });
+            }
+            any.then_some(())
+        })
+        .is_some()
+    }
+
     /// Clip `id` coloured `label` (0xRRGGBB) in the panel, or as it is by default, as an undo step.
     /// False if it already is.
     pub fn set_timeline_clip_label(&self, id: u64, label: Option<u32>) -> bool {
@@ -128,6 +139,46 @@ impl CanvasSession {
                 true
             })
         })
+    }
+
+    /// Track `id`'s name tagged `label` (0xRRGGBB) in the panel, or as it is by default, as an undo
+    /// step. False if it already is.
+    pub fn set_timeline_track_label(&self, id: u64, label: Option<u32>) -> bool {
+        let label = label.map(unpacked);
+        self.change("Track Colour", |d| {
+            let t = d.timeline.as_mut()?.track_mut(TrackId(id))?;
+            let changed = t.look.label.map(packed) != label.map(packed);
+            t.look.label = label;
+            changed.then_some(())
+        })
+        .is_some()
+    }
+
+    /// Track `id` blended by mode `blend` (a blend mode id, see `blend_modes`): each of its clips
+    /// whose own mode is Normal draws with it. An undo step. False if it already is, or the track
+    /// is locked.
+    pub fn set_timeline_track_blend(&self, id: u64, blend: u32) -> bool {
+        let Some(mode) = BlendMode::from_id(blend) else { return false };
+        self.change("Track Blend Mode", |d| {
+            let t = d.timeline.as_mut()?.track_mut(TrackId(id)).filter(|t| !t.locked)?;
+            let changed = t.look.blend != mode;
+            t.look.blend = mode;
+            changed.then_some(())
+        })
+        .is_some()
+    }
+
+    /// Track `id` masked by the track below it: each of its clips with no mask of its own is
+    /// masked `mask` by the clip under it there. An undo step. False if it already is, or the
+    /// track is locked.
+    pub fn set_timeline_track_mask(&self, id: u64, mask: super::TimelineMask) -> bool {
+        self.change("Track Mask", |d| {
+            let t = d.timeline.as_mut()?.track_mut(TrackId(id)).filter(|t| !t.locked)?;
+            let changed = t.look.mask != mask.mode();
+            t.look.mask = mask.mode();
+            changed.then_some(())
+        })
+        .is_some()
     }
 
     /// Track `id` moved to place `to` among the tracks beside it (bottom first), as an undo step:
@@ -180,32 +231,20 @@ impl CanvasSession {
         changed
     }
 
-    /// The frames playing goes round, if part of the timeline is looped.
-    pub fn timeline_loop(&self) -> Option<TimelineLoop> {
-        let st = self.shared.lock();
-        let (start, end) = st.doc.timeline.as_ref()?.loop_range?;
-        Some(TimelineLoop { start, end })
-    }
-
-    /// Playing goes round frames `range` (kept within the timeline), or the whole timeline, as an
-    /// undo step. False if it already does.
-    pub fn set_timeline_loop(&self, range: Option<TimelineLoop>) -> bool {
-        self.change(if range.is_some() { "Loop Playback" } else { "Stop Looping" }, |d| {
-            let tl = d.timeline.as_mut()?;
-            let range = range
-                .map(|r| (r.start.min(tl.duration.saturating_sub(1)), r.end.min(tl.duration)))
-                .filter(|(a, b)| a < b);
-            (tl.loop_range != range).then(|| tl.loop_range = range)
-        })
-        .is_some()
-    }
-
-    /// Where playing goes from frame `at`, moving `step` (1 on, -1 back): round the looped frames
-    /// if some are (starting from the first of them when `at` is outside), else the whole
+    /// Where playing goes from frame `at`, moving `step` (1 on, -1 back), through the whole
     /// timeline, as its playback says at the end. None once a single pass ends.
     pub fn timeline_next_step(&self, at: u32, step: i32) -> Option<PlayStep> {
         let st = self.shared.lock();
         let (at, step) = st.doc.timeline.as_ref()?.next_played(at, step)?;
+        Some(PlayStep { at, step })
+    }
+
+    /// As `timeline_next_step`, round frames `first` up to (not including) `end` only: the frames
+    /// a panel shows, played round. None too where none of them is
+    /// in the timeline.
+    pub fn timeline_next_step_within(&self, at: u32, step: i32, first: u32, end: u32) -> Option<PlayStep> {
+        let st = self.shared.lock();
+        let (at, step) = st.doc.timeline.as_ref()?.next_played_within(at, step, first, end)?;
         Some(PlayStep { at, step })
     }
 

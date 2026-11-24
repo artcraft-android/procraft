@@ -307,7 +307,7 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
                         SizeRow("DPI", if (field == Field.DPI && typed.isNotEmpty()) typed else "${dpi.roundToInt()}", "", field == Field.DPI) { commit(); field = Field.DPI }
                         Line()
                         val p = preset()
-                        SizeRow("Maximum Layers", "${vm.layersFor(p.width, p.height)}", "", false) {}
+                        SizeRow("Maximum Layers", vm.maximumLayers(p.width, p.height), "", false) {}
                     }
                 }
                 1 -> {

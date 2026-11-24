@@ -372,6 +372,8 @@ final class CanvasModel {
     private(set) var recentBrushes: [RecentBrush] = []
     /// The library's brush swiped open to its buttons (its key), if one is.
     var swipedBrush: String?
+    /// The brushes of the shown set picked by a swipe right, by place ("set-index").
+    var pickedBrushes: [String] = []
     /// The set whose name is being edited.
     var renamingSet: Int?
     /// A brush found from the Recent set, to be scrolled to in its own.
@@ -473,6 +475,7 @@ final class CanvasModel {
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setVectorCrisp(on: settings.vectorCrisp)
         session.setLightInterface(on: settings.lightInterface)
+        session.setTimelineVectorFrames(on: UserDefaults.standard.bool(forKey: "timelineVectorFrames"))
         session.setPourAllLayers(on: drop.allLayers)
         // the system's Reduce Motion: a dropped colour's fill shows at once
         session.setReduceMotion(reduce: UIAccessibility.isReduceMotionEnabled)
@@ -701,6 +704,30 @@ final class CanvasModel {
         currentBrush = session.currentBrush()
     }
 
+    /// The Pencil's double-tap or squeeze did what the shared touches set it to: the tool, the
+    /// eyedropper and drawing assist read again as they now are (the core switches them itself,
+    /// saying nothing).
+    func penGestureDone() {
+        let picks = session.pickNext()
+        if picks != pickNextShown {
+            pickNextShown = picks
+        }
+        let now = session.info().tool
+        if now != tool {
+            feedback()
+            endRecolor()
+            if now == .light || now == .paint {
+                penLight = now == .light
+            }
+            tool = now
+            readSliders()
+            currentBrush = session.currentBrush()
+        }
+        if session.guide() != guide.info {
+            guide.read()
+        }
+    }
+
     // MARK: the brush library
 
     /// A brush's key among the previews: its set and place.
@@ -829,6 +856,45 @@ final class CanvasModel {
 
     func deleteBrush(_ b: BrushInfo) {
         if session.deleteBrush(set: b.set, index: b.index) {
+            libraryChanged()
+        }
+    }
+
+    /// Brush `b` picked by a swipe right, or let go if it was.
+    func togglePickedBrush(_ b: BrushInfo) {
+        let key = Self.brushKey(b)
+        if let i = pickedBrushes.firstIndex(of: key) {
+            pickedBrushes.remove(at: i)
+        } else {
+            pickedBrushes.append(key)
+        }
+    }
+
+    private static func pickedPlace(_ key: String) -> (set: UInt32, index: UInt32)? {
+        let parts = key.split(separator: "-").compactMap { UInt32($0) }
+        return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
+
+    /// One brush is picked, in the current brush's set, and neither is a pair already.
+    var canCombinePicked: Bool {
+        guard let c = currentBrush, pickedBrushes.count == 1, let p = Self.pickedPlace(pickedBrushes[0]) else { return false }
+        return p.set == c.set && !session.brushIsDual(set: p.set, index: p.index) && !session.brushIsDual(set: c.set, index: c.index)
+    }
+
+    /// The picked brush becomes the current brush's second; a tool on either has the pair.
+    func combinePicked() {
+        guard let c = currentBrush, pickedBrushes.count == 1, let p = Self.pickedPlace(pickedBrushes[0]) else { return }
+        pickedBrushes.removeAll()
+        if session.combineBrushes(set: c.set, first: c.index, second: p.index) {
+            libraryChanged()
+        }
+    }
+
+    func deletePickedBrushes() {
+        // from the last up, so the places of the rest hold
+        let places = pickedBrushes.compactMap(Self.pickedPlace).sorted { $0.index > $1.index }
+        pickedBrushes.removeAll()
+        if places.filter({ session.deleteBrush(set: $0.set, index: $0.index) }).count > 0 {
             libraryChanged()
         }
     }
@@ -2231,16 +2297,15 @@ final class CanvasModel {
         showNotice(vectorCrisp ? "Crisp Zoom On" : "Crisp Zoom Off")
     }
 
-    /// Says how many layers this canvas holds, there being no room for another.
-    /// Says the canvas holds no more layers, and how many it holds.
+    /// Says the canvas holds no more layers, and how many it has: how many it holds goes by what
+    /// they take, so no fixed number says it.
     func noRoomSaid() -> String {
-        let info = session.info()
-        return "This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers."
+        let used = session.layerStats().used
+        return "No room for another layer: this canvas's \(used) \(used == 1 ? "layer takes" : "layers take") all the memory it has for layers."
     }
 
     func noRoomForLayers() {
-        let info = session.info()
-        showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)
+        showNotice(noRoomSaid(), warning: true)
     }
 
     func selectLayer(_ id: UInt64) {

@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -85,7 +86,8 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
         ToolbarButton(PcIcons.SelectRemove, "Remove", active = joins && vm.selectionRemoves, enabled = joins, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(true) }
         ToolbarButton(PcIcons.Invert, "Invert", enabled = has, width = w, iconSize = 44.dp) { vm.invertSelection() }
         ToolbarButton(PcIcons.SelectCopyPaste, "Copy & Paste", enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) { vm.copySelectionToLayer() }
-        ToolbarButton(PcIcons.Feather, "Feather", active = vm.selectionPopup == SelectionPopup.FEATHER, enabled = has || drawing, width = w, iconSize = 44.dp) {
+        // always there to tap: its Pixelated is for the shapes yet to be drawn
+        ToolbarButton(PcIcons.Feather, "Feather", active = vm.selectionPopup == SelectionPopup.FEATHER, width = w, iconSize = 44.dp) {
             vm.openSelectionPopup(SelectionPopup.FEATHER)
         }
         ToolbarButton(PcIcons.SaveLoad, "Save & Load", active = vm.selectionPopup == SelectionPopup.SAVED, enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) {
@@ -121,9 +123,17 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
             SelectionPopup.FEATHER -> {
                 MenuTitle("Feather")
                 Spacer(Modifier.height(4.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
+                // the amount softens what is selected: nothing to soften, it waits
+                val softens = vm.hasSelection || vm.freehand.isNotEmpty()
+                Column(Modifier.fillMaxWidth().alpha(if (softens) 1f else 0.4f).clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
                     val amount = vm.featherAmount
-                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%") { vm.featherTo(it) }
+                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%") { if (softens) vm.featherTo(it) }
+                }
+                Spacer(Modifier.height(10.dp))
+                // the other end of the same thing: no soft edge at all, for pixel art (shapes on
+                // whole pixels, taking whole pixels only)
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                    SwitchRow("Pixelated", vm.selectionPixelated) { vm.toggleSelectionPixelated() }
                 }
             }
             SelectionPopup.SAVED -> SavedSelections(vm)

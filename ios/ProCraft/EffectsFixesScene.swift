@@ -104,7 +104,6 @@ enum EffectsFixesScene {
             s.setTimelineFrame(frame: 4)
             model.refresh()
             model.timeline.picked = clip
-            model.timeline.keysOpen = true
         default:
             break
         }

@@ -357,6 +357,19 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     if (mode == 29u) {
         return b + s * (1.0 - b.a);
     }
+    // add and lighten: the source as far as it covers (its colour times its alpha, faded to
+    // black) blended with the backdrop, rather than the blend at full strength faded back to the
+    // backdrop. A soft white edge added over blue lifts each channel by as much as it covers, so
+    // the channels nearest full fill first and the edge glows; faded the other way it would only
+    // whiten, as Normal does. Where there is no backdrop, the source laid as it is.
+    if (mode == 6u || mode == 9u) {
+        let a = s.a + b.a * (1.0 - s.a);
+        var under = min(b.rgb + s.rgb * b.a, vec3<f32>(b.a * CEILING));
+        if (mode == 6u) {
+            under = max(b.rgb, s.rgb * b.a);
+        }
+        return vec4<f32>(s.rgb * (1.0 - b.a) + under, a);
+    }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);
     let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(CEILING));
@@ -368,6 +381,13 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
 // the backdrop is: the backdrop's colour changes as far as the source covers it and its alpha
 // stays, so where it is thin the source is as thin and none of what it covers shows through
 fn blend_atop(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
+    // add and lighten: the source faded to black as far as it covers, as `blend` lays them
+    if (mode == 9u) {
+        return vec4<f32>(min(b.rgb + s.rgb * b.a, vec3<f32>(b.a * CEILING)), b.a);
+    }
+    if (mode == 6u) {
+        return vec4<f32>(max(b.rgb, s.rgb * b.a), b.a);
+    }
     let mixed = clamp(blend_rgb(unpremultiply(b), unpremultiply(s), mode), vec3<f32>(0.0), vec3<f32>(CEILING));
     return vec4<f32>((1.0 - s.a) * b.rgb + s.a * b.a * mixed, b.a);
 }

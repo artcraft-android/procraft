@@ -63,6 +63,7 @@ final class TimelineMediaTool {
             let outcome: Result<UInt64, Error>
             do {
                 let read = try await MediaReading.read(url, kind: kind)
+                defer { MediaReading.forget(read) }
                 outcome = .success(try session.importTimelineMedia(import: read))
             } catch {
                 outcome = .failure(error)
@@ -163,8 +164,9 @@ final class TimelineMediaTool {
         sounds.stop()
     }
 
-    /// Scrubbed onto `frame`: a frame's sound, the slice under it.
+    /// Scrubbed onto `frame`: a frame's sound, the slice under it. Nothing with the pref off.
     func blip(_ frame: UInt32) {
+        guard UserDefaults.standard.object(forKey: "timelineScrubSound") as? Bool ?? true else { return }
         let fps = Double(max(model.timeline.info?.fps ?? 24, 1))
         sounds.blip(session.timelineSounds(frame: frame), at: Double(frame) / fps, length: max(1 / fps, 0.06))
     }
@@ -187,7 +189,7 @@ enum MediaReading {
             }
             return MediaImport(
                 path: url.path, name: url.lastPathComponent, kind: .audio, seconds: seconds, width: 0, height: 0,
-                peaks: peaks(url)
+                peaks: peaks(url), soundPath: nil, soundSeconds: 0
             )
         case .video:
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -195,10 +197,44 @@ enum MediaReading {
             }
             let (size, turn) = try await track.load(.naturalSize, .preferredTransform)
             let shown = size.applying(turn)
+            // its sound, if it has one, as a sound file of its own: it plays with the picture,
+            // and can be taken out as a sound clip
+            let sound = await sound(of: asset)
+            let soundSeconds = sound.map { AVURLAsset(url: $0) }
             return MediaImport(
                 path: url.path, name: url.lastPathComponent, kind: .video, seconds: seconds,
-                width: UInt32(abs(shown.width).rounded()), height: UInt32(abs(shown.height).rounded()), peaks: []
+                width: UInt32(abs(shown.width).rounded()), height: UInt32(abs(shown.height).rounded()),
+                peaks: sound.map { peaks($0) } ?? [], soundPath: sound?.path,
+                soundSeconds: (try? await soundSeconds?.load(.duration).seconds) ?? 0
             )
+        }
+    }
+
+    /// A video's sound written out as a sound file in a folder of its own in the temporary
+    /// folder (the core copies it; `forget` removes it); none if the video has no sound or it
+    /// can't be written.
+    static func sound(of asset: AVURLAsset) async -> URL? {
+        guard (try? await asset.loadTracks(withMediaType: .audio).isEmpty) == false,
+              let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else { return nil }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("procraft-sound-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let out = folder.appendingPathComponent("sound.m4a")
+        export.outputURL = out
+        export.outputFileType = .m4a
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            export.exportAsynchronously { done.resume() }
+        }
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: folder)
+            return nil
+        }
+        return out
+    }
+
+    /// The sound file `sound(of:)` wrote for `read` is removed, once the core has its own copy.
+    static func forget(_ read: MediaImport) {
+        if let path = read.soundPath {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path).deletingLastPathComponent())
         }
     }
 
@@ -235,38 +271,75 @@ enum MediaReading {
     }
 }
 
-/// Videos' pictures for the canvas, read with AVFoundation: one image generator a file, scaled
-/// to the side asked for. Called from the canvas's rendering, off the main thread.
+/// Videos' pictures for the canvas, read with AVFoundation, scaled to the side asked for: read on
+/// by a `VideoRun` while the times asked for go steadily forward (playing, an export, a scrub
+/// carried on), found afresh by an image generator when they jump. Either way the picture is the
+/// frame showing at the time asked, so a frame drawn over is the same one however the playhead
+/// came to it. Called from the canvas's own threads, off the main one; one picture at a time.
 final class VideoFrameReader: VideoFrames, @unchecked Sendable {
     static let shared = VideoFrameReader()
 
-    private let lock = NSLock()
-    private var generators: [String: AVAssetImageGenerator] = [:]
-
-    func picture(path: String, seconds: Double, maxSide: UInt32) -> ThumbnailImage? {
-        let generator = generator(path, side: maxSide)
-        let time = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
-        guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
-        return Self.rgba(image)
+    private final class Video {
+        var generator: AVAssetImageGenerator?
+        var run: VideoRun?
+        /// No run reads it (it is shown skewed or mirrored): always the generator.
+        var unread = false
+        /// The time last asked for.
+        var last: Double?
     }
 
-    private func generator(_ path: String, side: UInt32) -> AVAssetImageGenerator {
+    private let lock = NSLock()
+    /// By the file and the side its pictures are scaled to.
+    private var videos: [String: Video] = [:]
+
+    func picture(path: String, seconds: Double, maxSide: UInt32) -> ThumbnailImage? {
         lock.lock()
         defer { lock.unlock() }
-        if let g = generators[path] {
-            return g
+        let key = "\(maxSide) \(path)"
+        let v = videos[key] ?? Video()
+        videos[key] = v
+        let t = max(seconds, 0)
+        let last = v.last
+        v.last = t
+        // on from the frame its run has
+        if let run = v.run, run.follows(t), let p = run.picture(at: t) {
+            return p
         }
-        let g = AVAssetImageGenerator(asset: AVURLAsset(url: URL(fileURLWithPath: path)))
-        g.appliesPreferredTrackTransform = true
-        // near enough a frame for drawing over, and quick to find while playing
-        let near = CMTime(value: 1, timescale: 100)
-        g.requestedTimeToleranceBefore = near
-        g.requestedTimeToleranceAfter = near
-        if side > 0 {
-            g.maximumSize = CGSize(width: Int(side), height: Int(side))
+        // a short step forward from the last time asked: they are going steadily on, so a run
+        // starts here
+        if let last, t > last, t - last <= VideoRun.reach, !v.unread {
+            if v.run == nil {
+                v.run = VideoRun(path: path, maxSide: Int(maxSide))
+                v.unread = v.run == nil
+            }
+            if let p = v.run?.picture(at: t) {
+                return p
+            }
         }
-        generators[path] = g
-        return g
+        // a jump: found afresh, and the run (with the frames it has read ahead) let go
+        v.run = nil
+        return generate(v, path, t, maxSide)
+    }
+
+    private func generate(_ v: Video, _ path: String, _ seconds: Double, _ side: UInt32) -> ThumbnailImage? {
+        let generator: AVAssetImageGenerator
+        if let has = v.generator {
+            generator = has
+        } else {
+            generator = AVAssetImageGenerator(asset: AVURLAsset(url: URL(fileURLWithPath: path)))
+            generator.appliesPreferredTrackTransform = true
+            // the frame showing at the time asked, as a run gives it: one a hundredth of a
+            // second off would be the next frame as often as not
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            if side > 0 {
+                generator.maximumSize = CGSize(width: Int(side), height: Int(side))
+            }
+            v.generator = generator
+        }
+        let time = CMTime(seconds: seconds + VideoRun.slack, preferredTimescale: 90000)
+        guard let image = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
+        return Self.rgba(image)
     }
 
     /// `image`'s pixels as RGBA8, rows top to bottom.
@@ -320,22 +393,33 @@ final class SoundPlayer {
         return f
     }
 
+    /// The audio session and the engine are being made ready, off the main thread.
+    private var readying = false
+
+    /// Whether sounds can be scheduled now. The first time, and after the system took the audio
+    /// away, the session and the engine are made ready off the main thread (see `AppAudio`: its
+    /// calls can hold the interface up, and were made here before every play and every scrubbed
+    /// frame) and this says no meanwhile: what is asked for then is silent, and playing picks the
+    /// sounds up on its next frame, where they are by then.
     private func ready() -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, options: [.mixWithOthers])
-        try? session.setActive(true)
-        if !engine.isRunning {
+        if AppAudio.inForce == .playback, engine.isRunning {
+            return true
+        }
+        guard !readying else { return false }
+        readying = true
+        let engine = engine
+        AppAudio.use(.playback, work: {
+            // (nothing else touches the engine while `readying`)
+            guard !engine.isRunning else { return }
             // (the mixer, and its way out, are made when first asked for: an engine started with
             // neither throws)
             _ = engine.mainMixerNode
             engine.prepare()
-            do {
-                try engine.start()
-            } catch {
-                return false
-            }
-        }
-        return true
+            try? engine.start()
+        }, then: { [weak self] in
+            self?.readying = false
+        })
+        return false
     }
 
     /// `sounds` playing as from `time` seconds into the timeline; returns how long until they
@@ -387,7 +471,8 @@ final class SoundPlayer {
     }
 
     func stop() {
-        for (node, _) in players {
+        // (none can be playing while the engine is being made ready)
+        for (node, _) in players where !readying {
             node.stop()
             engine.detach(node)
         }

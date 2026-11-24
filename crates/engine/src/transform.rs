@@ -8,8 +8,15 @@
 //!
 //! A warp lays a 4 × 4 mesh (`warp.rs`) over the content; once there is one it places the content,
 //! and the box is its corners.
+//!
+//! A puppet (`puppet.rs`) lays a mesh of triangles over the painted pixels and bends it by pins.
+//! It bends the content where it is in the source rectangle, before the box places it: the box's
+//! handles still move, turn and scale the puppet as a whole.
+
+use std::sync::{Arc, Mutex};
 
 use crate::geom::{Affine, Homography, Vec2};
+use crate::puppet::{self, PuppetFrame, PuppetMesh, Solver};
 use crate::warp::{self, Mesh};
 
 /// How the box's handles change the content.
@@ -23,6 +30,8 @@ pub enum TransformMode {
     Distort,
     /// The content is bent through a mesh: its points, or the surface between them, are dragged.
     Warp,
+    /// The content is bent by pins put on a mesh over it: a pin is dragged, or turned by its ring.
+    Puppet,
 }
 
 /// What a drag holds.
@@ -40,16 +49,97 @@ pub enum Handle {
     Move,
     /// One of a warp's 16 control points, row by row.
     Mesh(u8),
+    /// A puppet's pin, by its place among them: moves it.
+    Pin(u32),
+    /// The ring around a puppet's pin: turns the mesh about it.
+    PinRing(u32),
+    /// A puppet's mesh away from its pins: a tap puts a pin there.
+    OnMesh,
+}
+
+/// A puppet's pin as a transform keeps it: where it is on the mesh at rest, where that point has
+/// been taken, and the turn it holds there (none: it turns as the mesh bends), all in source
+/// coordinates. Kept by place, not by triangle, so the mesh can be laid again under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PuppetPin {
+    pub rest: Vec2,
+    pub at: Vec2,
+    pub angle: Option<f32>,
 }
 
 /// Four corners: top left, top right, bottom right, bottom left.
 pub type Quad = [Vec2; 4];
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Placement {
     content: Quad,
     frame: Quad,
     warp: Option<Mesh>,
+    /// A puppet's pins; none (or none of them) leaves the content unbent.
+    pins: Option<Arc<[PuppetPin]>>,
+}
+
+impl Placement {
+    fn pins(&self) -> &[PuppetPin] {
+        self.pins.as_deref().unwrap_or_default()
+    }
+
+    fn with_pins(&self, pins: Vec<PuppetPin>) -> Placement {
+        Placement { pins: (!pins.is_empty()).then(|| pins.into()), ..self.clone() }
+    }
+}
+
+/// How the content is bent, when it is: through a warp's mesh laid over the source rectangle, or
+/// a puppet's. Two are alike when they bend alike (a puppet's when it is the same frame).
+#[derive(Clone, Debug)]
+pub enum Bend {
+    Grid { mesh: Mesh, source: Quad },
+    Puppet(Arc<PuppetFrame>),
+}
+
+impl PartialEq for Bend {
+    fn eq(&self, other: &Bend) -> bool {
+        match (self, other) {
+            (Bend::Grid { mesh: a, source: s }, Bend::Grid { mesh: b, source: t }) => a == b && s == t,
+            (Bend::Puppet(a), Bend::Puppet(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Bend {
+    /// Where canvas point `p` of the content as it began goes.
+    pub fn point(&self, p: Vec2) -> Vec2 {
+        match self {
+            Bend::Grid { mesh, source } => {
+                let [top_left, top_right, _, bottom_left] = *source;
+                let (w, h) = (top_right.x - top_left.x, bottom_left.y - top_left.y);
+                if !(w.abs() > 1e-6 && h.abs() > 1e-6) {
+                    return p;
+                }
+                warp::point(mesh, (p.x - top_left.x) / w, (p.y - top_left.y) / h)
+            }
+            Bend::Puppet(frame) => frame.point(p),
+        }
+    }
+}
+
+/// An open puppet: its mesh, whether new pins turn as it bends, the pin chosen, and what was last
+/// worked out for it (shared by the transform's copies, keyed by what it was worked out for).
+#[derive(Clone, Debug)]
+struct PuppetRig {
+    mesh: Arc<PuppetMesh>,
+    auto_rotate: bool,
+    selected: Option<usize>,
+    worked: Arc<Mutex<Worked>>,
+}
+
+#[derive(Debug, Default)]
+struct Worked {
+    solver: Option<Arc<Solver>>,
+    /// The pins and content quad the frame is for, the frame, and each pin as shown (canvas
+    /// point and angle).
+    frame: Option<(Vec<PuppetPin>, Quad, Arc<PuppetFrame>, Vec<(Vec2, f32)>)>,
 }
 
 /// An open transform.
@@ -69,6 +159,9 @@ pub struct Transform {
     snapped: [Option<f32>; 2],
     /// Pixel art: the content keeps to whole pixels however it is moved or sized ([`on_pixels`]).
     pixelated: bool,
+    puppet: Option<PuppetRig>,
+    /// A pin's ring held: where the pin is shown (canvas pixels) and the angle it held (source).
+    ring: Option<(Vec2, f32)>,
 }
 
 /// What a drag is pulled towards.
@@ -97,7 +190,7 @@ impl Transform {
     pub fn new(x: f32, y: f32, width: f32, height: f32, hull: Vec<Vec2>) -> Transform {
         let source =
             [Vec2::new(x, y), Vec2::new(x + width, y), Vec2::new(x + width, y + height), Vec2::new(x, y + height)];
-        let now = Placement { content: source, frame: source, warp: None };
+        let now = Placement { content: source, frame: source, warp: None, pins: None };
         Transform {
             source,
             hull,
@@ -107,6 +200,8 @@ impl Transform {
             snap_lines: (Vec::new(), Vec::new()),
             snapped: [None; 2],
             pixelated: false,
+            puppet: None,
+            ring: None,
         }
     }
 
@@ -123,7 +218,7 @@ impl Transform {
     /// Whether the content lies along the canvas's own axes (unturned, or turned by quarter
     /// turns) with no warp: then its pixels stay whole pixels wherever it goes.
     pub fn is_upright(&self) -> bool {
-        self.now.warp.is_none() && upright(self.now.content)
+        self.now.warp.is_none() && self.now.pins().is_empty() && upright(self.now.content)
     }
 
     /// The placement as it is kept: on whole pixels, for pixel art.
@@ -168,6 +263,10 @@ impl Transform {
     /// Lays a warp's mesh evenly over the content, unless there is one already (not a step of its
     /// own: nothing moves).
     pub fn start_warp(&mut self) {
+        // a puppet and a warp don't bend together: its pins go, as a step of their own
+        if !self.now.pins().is_empty() {
+            self.change(|p| Some(p.with_pins(Vec::new())));
+        }
         if self.now.warp.is_none() {
             self.now.warp = Some(warp::over_quad(self.now.content));
             self.now.frame = self.now.content;
@@ -176,22 +275,36 @@ impl Transform {
 
     /// A drag of `handle` starts at canvas point `at`.
     pub fn grab(&mut self, handle: Handle, at: Vec2) {
-        self.drag = Some((handle, at, self.now));
+        if let (Handle::Pin(i) | Handle::PinRing(i), Some(rig)) = (handle, self.puppet.as_mut()) {
+            rig.selected = Some(i as usize);
+        }
+        // a ring turns the pin from the angle it shows: a free pin's, the turn the bend gives it
+        self.ring = match handle {
+            Handle::PinRing(i) => self.puppet_frame().and_then(|(_, shown)| {
+                let (centre, _) = *shown.get(i as usize)?;
+                let pin = self.now.pins().get(i as usize)?;
+                Some((centre, pin.angle.or_else(|| self.source_angle(shown.get(i as usize)?.1))?))
+            }),
+            _ => None,
+        };
+        self.drag = Some((handle, at, self.now.clone()));
     }
 
     /// The drag reached canvas point `to`, in `mode`, pulled by `guides`. Returns whether
     /// anything moved.
     pub fn drag(&mut self, mode: TransformMode, to: Vec2, guides: &Guides) -> bool {
-        let Some((handle, from, start)) = self.drag else { return false };
+        let Some((handle, from, start)) = self.drag.clone() else { return false };
         if !to.is_finite() {
             return false;
         }
-        let next = self.kept(self.dragged(handle, mode, from, to, start, guides).unwrap_or(start));
+        let next = self.dragged(handle, mode, from, to, &start, guides).unwrap_or(start);
+        let next = self.kept(next);
         let moved = next != self.now;
+        let frame = next.frame;
         self.now = next;
         // a moved box sitting on a line it snaps to shows that line while held
         self.snapped = match (handle, guides.snap) {
-            (Handle::Move, Some(_)) => lines_under(next.frame, guides.canvas, &self.snap_lines),
+            (Handle::Move, Some(_)) => lines_under(frame, guides.canvas, &self.snap_lines),
             _ => [None; 2],
         };
         moved
@@ -202,7 +315,7 @@ impl Transform {
     /// [`Transform::grab`] took it, the box with it (a box stays the shape it is, whatever the
     /// mode). Returns whether anything moved.
     pub fn pinch(&mut self, from: [Vec2; 2], to: [Vec2; 2]) -> bool {
-        let Some((_, _, start)) = self.drag else { return false };
+        let Some((_, _, start)) = &self.drag else { return false };
         let (was, now) = (from[1] - from[0], to[1] - to[0]);
         if !(from.iter().chain(&to).all(|p| p.is_finite()) && was.length() > 1e-3 && now.length() > 1e-3) {
             return false;
@@ -212,7 +325,7 @@ impl Transform {
             .then(Affine::scale((now.length() / was.length()).max(MIN_SCALE)))
             .then(Affine::rotate(angle(now) - angle(was)))
             .then(Affine::translate(middle));
-        let next = self.kept(map_placement(&start, m));
+        let next = self.kept(map_placement(start, m));
         let moved = next != self.now;
         self.now = next;
         moved
@@ -250,7 +363,7 @@ impl Transform {
             // a mesh mirrors by taking its columns in the other order
             let warp =
                 p.warp.map(|m| std::array::from_fn(|k| m.get(k / 4 * 4 + 3 - k % 4).copied().unwrap_or_default()));
-            Some(Placement { content, frame: p.frame, warp })
+            Some(Placement { content, frame: p.frame, warp, pins: p.pins.clone() })
         });
     }
 
@@ -261,7 +374,7 @@ impl Transform {
             let content = carry(p, [d, c, b, a])?;
             let warp =
                 p.warp.map(|m| std::array::from_fn(|k| m.get((3 - k / 4) * 4 + k % 4).copied().unwrap_or_default()));
-            Some(Placement { content, frame: p.frame, warp })
+            Some(Placement { content, frame: p.frame, warp, pins: p.pins.clone() })
         });
     }
 
@@ -321,7 +434,11 @@ impl Transform {
     /// that the box as it is turned (the upright rectangle around it, a warp's mesh too) just fits
     /// a `width` × `height` canvas, centred on it.
     pub fn fit(&mut self, width: f32, height: f32) {
-        let mesh = self.now.warp.map(|m| m.to_vec()).unwrap_or_default();
+        let mut mesh = self.now.warp.map(|m| m.to_vec()).unwrap_or_default();
+        // a puppet's mesh as it is bent, too
+        if let Some((frame, _)) = self.puppet_frame() {
+            mesh.extend(frame.edge_lines().as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)));
+        }
         let (mut low, mut high) = (Vec2::new(f32::MAX, f32::MAX), Vec2::new(f32::MIN, f32::MIN));
         for p in self.now.frame.iter().chain(&mesh) {
             low = Vec2::new(low.x.min(p.x), low.y.min(p.y));
@@ -353,7 +470,7 @@ impl Transform {
     /// Puts the content back where it started.
     pub fn reset(&mut self) {
         let source = self.source;
-        self.change(|_| Some(Placement { content: source, frame: source, warp: None }));
+        self.change(|_| Some(Placement { content: source, frame: source, warp: None, pins: None }));
     }
 
     /// Takes back the last change. Returns whether there was one.
@@ -371,13 +488,15 @@ impl Transform {
     /// Applies `f` to the placement, kept as an undo step when it changes anything.
     fn change(&mut self, f: impl FnOnce(&Placement) -> Option<Placement>) {
         self.drag = None;
-        let finite =
-            |n: &Placement| n.content.iter().chain(&n.frame).chain(n.warp.iter().flatten()).all(|v| v.is_finite());
+        let finite = |n: &Placement| {
+            n.content.iter().chain(&n.frame).chain(n.warp.iter().flatten()).all(|v| v.is_finite())
+                && n.pins().iter().all(|p| p.rest.is_finite() && p.at.is_finite() && p.angle.is_none_or(f32::is_finite))
+        };
         if let Some(next) = f(&self.now).filter(finite).map(|next| self.kept(next))
             && next != self.now
         {
-            self.history.push(self.now);
-            self.now = next;
+            let was = std::mem::replace(&mut self.now, next);
+            self.history.push(was);
         }
     }
 
@@ -387,7 +506,7 @@ impl Transform {
         mode: TransformMode,
         from: Vec2,
         to: Vec2,
-        start: Placement,
+        start: &Placement,
         guides: &Guides,
     ) -> Option<Placement> {
         let f = start.frame;
@@ -395,7 +514,13 @@ impl Transform {
         if mode == TransformMode::Warp
             && let Some(mesh) = start.warp
         {
-            return Some(warped(mesh, handle, from, delta));
+            return Some(warped(mesh, handle, from, delta, start.pins.clone()));
+        }
+        match handle {
+            Handle::Pin(i) => return self.pin_dragged(start, i as usize, from, to),
+            Handle::PinRing(i) => return self.pin_turned(start, i as usize, from, to, guides),
+            Handle::OnMesh => return Some(start.clone()),
+            _ => {}
         }
         let distort = mode == TransformMode::Distort;
         let next = match handle {
@@ -411,7 +536,7 @@ impl Transform {
                 if let Some(reach) = guides.snap {
                     delta = delta + snap_offset(f.map(|p| p + delta), guides.canvas, &self.snap_lines, reach);
                 }
-                map_placement(&start, Affine::translate(delta))
+                map_placement(start, Affine::translate(delta))
             }
             Handle::Rotate => {
                 let c = centre(f);
@@ -422,7 +547,7 @@ impl Transform {
                     turn = ((was + turn) / MAGNETIC_STEP).round() * MAGNETIC_STEP - was;
                 }
                 map_placement(
-                    &start,
+                    start,
                     Affine::translate(Vec2::ZERO - c).then(Affine::rotate(turn)).then(Affine::translate(c)),
                 )
             }
@@ -431,16 +556,16 @@ impl Transform {
                 let turn = angle(to - c) - angle(from - c);
                 let [a, b, ..] = f;
                 let frame = self.fit_box(&start, angle(b - a) + turn)?;
-                Placement { frame, ..start }
+                Placement { frame, ..start.clone() }
             }
-            Handle::Mesh(_) => start,
+            Handle::Mesh(_) | Handle::Pin(_) | Handle::PinRing(_) | Handle::OnMesh => start.clone(),
             Handle::Corner(i) => {
                 let i = usize::from(i % 4);
                 let (corner, anchor) = (at(f, i), at(f, i + 2));
                 if distort {
                     let mut frame = f;
                     set(&mut frame, i, corner + delta);
-                    return carry_all(&start, frame);
+                    return carry_all(start, frame);
                 }
                 let target = corner + delta;
                 let m = if mode == TransformMode::Uniform {
@@ -453,7 +578,7 @@ impl Transform {
                     let sy = if c.y.abs() > 1e-6 { (t.y / c.y).max(MIN_SCALE) } else { 1.0 };
                     axes_scale_about(f, anchor, sx, sy)?
                 };
-                map_placement(&start, m)
+                map_placement(start, m)
             }
             Handle::Edge(k) => {
                 let k = usize::from(k % 4);
@@ -461,7 +586,7 @@ impl Transform {
                     let mut frame = f;
                     set(&mut frame, k, at(f, k) + delta);
                     set(&mut frame, k + 1, at(f, k + 1) + delta);
-                    return carry_all(&start, frame);
+                    return carry_all(start, frame);
                 }
                 let mid = at(f, k).lerp(at(f, k + 1), 0.5);
                 let anchor = at(f, k + 2).lerp(at(f, k + 3), 0.5);
@@ -473,7 +598,7 @@ impl Transform {
                 } else {
                     axes_scale_about(f, anchor, s, 1.0)?
                 };
-                map_placement(&start, m)
+                map_placement(start, m)
             }
         };
         Some(next)
@@ -645,7 +770,7 @@ fn whole_span(lo: f32, hi: f32) -> (f32, f32) {
 /// corner or middle, so it moves by half pixels at most. A warp is left as it is.
 fn on_pixels(p: &Placement) -> Placement {
     if p.warp.is_some() {
-        return *p;
+        return p.clone();
     }
     if !upright(p.content) {
         let c = centre(p.content);
@@ -658,7 +783,7 @@ fn on_pixels(p: &Placement) -> Placement {
         });
     let (w, h) = (hi.x - lo.x, hi.y - lo.y);
     if !(w > 1e-6 && h > 1e-6) {
-        return *p;
+        return p.clone();
     }
     let ((x0, x1), (y0, y1)) = (whole_span(lo.x, hi.x), whole_span(lo.y, hi.y));
     let m = Affine::translate(Vec2::ZERO - lo)
@@ -672,6 +797,7 @@ fn map_placement(p: &Placement, m: Affine) -> Placement {
         content: p.content.map(|v| m.apply(v)),
         frame: p.frame.map(|v| m.apply(v)),
         warp: p.warp.map(|w| w.map(|v| m.apply(v))),
+        pins: p.pins.clone(),
     }
 }
 
@@ -689,12 +815,12 @@ fn carry_all(p: &Placement, frame: Quad) -> Option<Placement> {
         }
         None => None,
     };
-    Some(Placement { content, frame, warp })
+    Some(Placement { content, frame, warp, pins: p.pins.clone() })
 }
 
 /// A drag in a warp: a control point (a corner node is its control point), or the surface under the
 /// touch; off the mesh, the whole mesh moves. The box follows the mesh's corners.
-fn warped(mesh: Mesh, handle: Handle, from: Vec2, delta: Vec2) -> Placement {
+fn warped(mesh: Mesh, handle: Handle, from: Vec2, delta: Vec2, pins: Option<Arc<[PuppetPin]>>) -> Placement {
     let point = match handle {
         Handle::Mesh(k) => Some(usize::from(k % 16)),
         Handle::Corner(i) => [0, 3, 15, 12].get(usize::from(i % 4)).copied(),
@@ -714,7 +840,7 @@ fn warped(mesh: Mesh, handle: Handle, from: Vec2, delta: Vec2) -> Placement {
         },
     };
     let corners = [next[0], next[3], next[15], next[12]];
-    Placement { content: corners, frame: corners, warp: Some(next) }
+    Placement { content: corners, frame: corners, warp: Some(next), pins }
 }
 
 /// The content carried along as the box goes from where it is to `frame`.
@@ -722,6 +848,207 @@ fn carry(p: &Placement, frame: Quad) -> Option<Quad> {
     let h = Homography::quad_to_quad(p.frame, frame)?;
     let [a, b, c, d] = p.content;
     Some([h.apply(a)?, h.apply(b)?, h.apply(c)?, h.apply(d)?])
+}
+
+/// A puppet: its mesh laid over the content, pins put on it, moved and turned.
+impl Transform {
+    /// Lays a puppet's mesh over the content, its pins (if it has any) laid again on it where they
+    /// are at rest. A warp goes, as a step of its own: the two don't bend together.
+    pub fn start_puppet(&mut self, mesh: PuppetMesh) {
+        if self.now.warp.is_some() {
+            self.change(|p| Some(Placement { warp: None, ..p.clone() }));
+        }
+        let (auto_rotate, selected) = self.puppet.as_ref().map_or((true, None), |r| (r.auto_rotate, r.selected));
+        self.puppet =
+            Some(PuppetRig { mesh: Arc::new(mesh), auto_rotate, selected, worked: Arc::new(Mutex::new(Worked::default())) });
+    }
+
+    /// Whether a puppet's mesh is laid.
+    pub fn has_puppet(&self) -> bool {
+        self.puppet.is_some()
+    }
+
+    /// Whether new pins turn as the mesh bends (else each holds the turn it was put at).
+    pub fn puppet_auto_rotate(&self) -> bool {
+        self.puppet.as_ref().is_none_or(|r| r.auto_rotate)
+    }
+
+    /// Pins turn as the mesh bends from now on, or not; those there are freed, or held at the
+    /// angle they show, as a step.
+    pub fn set_puppet_auto_rotate(&mut self, on: bool) {
+        let shown = self.puppet_frame().map(|(_, s)| s).unwrap_or_default();
+        let held: Vec<Option<f32>> = shown.iter().map(|&(_, a)| self.source_angle(a)).collect();
+        let Some(rig) = self.puppet.as_mut() else { return };
+        rig.auto_rotate = on;
+        let pins: Vec<PuppetPin> = self
+            .now
+            .pins()
+            .iter()
+            .enumerate()
+            .map(|(k, p)| PuppetPin {
+                angle: if on { None } else { p.angle.or_else(|| held.get(k).copied().flatten()).or(Some(0.0)) },
+                ..*p
+            })
+            .collect();
+        self.change(|p| Some(p.with_pins(pins)));
+    }
+
+    /// Puts a pin where canvas point `at` is on the mesh as it is bent, and chooses it. Whether
+    /// one went (not off the mesh).
+    pub fn add_pin(&mut self, at: Vec2) -> bool {
+        let Some((frame, _)) = self.puppet_frame() else { return false };
+        let Some(to_source) = frame.place.inverse() else { return false };
+        let Some(at) = to_source.apply(at) else { return false };
+        let Some((rest, turn)) = frame.find_bent(at) else { return false };
+        let auto = self.puppet_auto_rotate();
+        let mut pins = self.now.pins().to_vec();
+        pins.push(PuppetPin { rest, at, angle: (!auto).then_some(turn) });
+        let added = pins.len() - 1;
+        self.change(|p| Some(p.with_pins(pins)));
+        if let Some(rig) = self.puppet.as_mut() {
+            rig.selected = Some(added);
+        }
+        true
+    }
+
+    /// Whether canvas point `at` is on the puppet's mesh as it is bent.
+    pub fn on_puppet(&self, at: Vec2) -> bool {
+        self.puppet_frame().is_some_and(|(frame, _)| {
+            frame.place.inverse().and_then(|h| h.apply(at)).is_some_and(|p| frame.find_bent(p).is_some())
+        })
+    }
+
+    /// Takes pin `i` away, as a step.
+    pub fn remove_pin(&mut self, i: usize) {
+        let mut pins = self.now.pins().to_vec();
+        if i >= pins.len() {
+            return;
+        }
+        pins.remove(i);
+        self.change(|p| Some(p.with_pins(pins)));
+        if let Some(rig) = self.puppet.as_mut() {
+            rig.selected = None;
+        }
+    }
+
+    /// The pin chosen, if any.
+    pub fn selected_pin(&self) -> Option<usize> {
+        self.puppet.as_ref().and_then(|r| r.selected).filter(|&i| i < self.now.pins().len())
+    }
+
+    pub fn select_pin(&mut self, pin: Option<usize>) {
+        if let Some(rig) = self.puppet.as_mut() {
+            rig.selected = pin;
+        }
+    }
+
+    /// Each pin as it is shown: where (canvas pixels) and the angle it holds or the bend gives it
+    /// (radians, clockwise on screen).
+    pub fn puppet_pins(&self) -> Vec<(Vec2, f32)> {
+        self.puppet_frame().map(|(_, shown)| shown).unwrap_or_default()
+    }
+
+    /// The puppet's mesh as it is shown: its edges (x0, y0, x1, y1 in turn, canvas pixels).
+    pub fn puppet_edges(&self) -> Vec<f32> {
+        self.puppet_frame().map(|(frame, _)| frame.edge_lines()).unwrap_or_default()
+    }
+
+    /// How the content is bent, if it is: by a warp, or by a puppet with pins.
+    pub fn bend(&self) -> Option<Bend> {
+        if let Some(mesh) = self.now.warp {
+            return Some(Bend::Grid { mesh, source: self.source });
+        }
+        if self.now.pins().is_empty() {
+            return None;
+        }
+        self.puppet_frame().map(|(frame, _)| Bend::Puppet(frame))
+    }
+
+    /// The puppet as it is now, worked out (or as it was last, when nothing has changed), and
+    /// each pin as it is shown.
+    fn puppet_frame(&self) -> Option<(Arc<PuppetFrame>, Vec<(Vec2, f32)>)> {
+        let rig = self.puppet.as_ref()?;
+        let (pins, content) = (self.now.pins(), self.now.content);
+        let mut worked = rig.worked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((p, q, frame, shown)) = &worked.frame
+            && p.as_slice() == pins
+            && *q == content
+        {
+            return Some((frame.clone(), shown.clone()));
+        }
+        let place = Homography::quad_to_quad(self.source, content)?;
+        // each pin laid on the mesh where it is at rest (one the mesh no longer reaches is left out)
+        let laid: Vec<(usize, puppet::Pin)> = pins
+            .iter()
+            .enumerate()
+            .filter_map(|(k, p)| {
+                let pin = puppet::Pin::new(&rig.mesh, p.rest, p.angle)?;
+                Some((k, puppet::Pin { at: p.at, ..pin }))
+            })
+            .collect();
+        let bound: Vec<puppet::Pin> = laid.iter().map(|(_, p)| *p).collect();
+        let solver = match &worked.solver {
+            Some(s) if s.fits(&bound) => s.clone(),
+            _ => Arc::new(Solver::new(&rig.mesh, &bound)),
+        };
+        worked.solver = Some(solver.clone());
+        let bent = solver.solve(&rig.mesh, &bound);
+        let mut shown: Vec<(Vec2, f32)> =
+            pins.iter().map(|p| (place.apply(p.at).unwrap_or(p.at), self.shown_angle(p.angle.unwrap_or(0.0)))).collect();
+        for ((k, _), angle) in laid.iter().zip(&bent.angles) {
+            if let Some(s) = shown.get_mut(*k) {
+                s.1 = self.shown_angle(*angle);
+            }
+        }
+        let frame = Arc::new(PuppetFrame { mesh: rig.mesh.clone(), bent, place });
+        worked.frame = Some((pins.to_vec(), content, frame.clone(), shown.clone()));
+        Some((frame, shown))
+    }
+
+    /// Whether the box has mirrored the content.
+    fn mirrored(&self) -> bool {
+        let [a, b, _, d] = self.now.content;
+        (b - a).cross(d - a) < 0.0
+    }
+
+    /// A turn of the source as the box shows it (radians, clockwise on screen).
+    fn shown_angle(&self, source: f32) -> f32 {
+        let [a, b, ..] = self.now.content;
+        angle(b - a) + if self.mirrored() { -source } else { source }
+    }
+
+    /// A turn as shown, back in the source; none if the box has flattened it.
+    fn source_angle(&self, shown: f32) -> Option<f32> {
+        let [a, b, ..] = self.now.content;
+        let turn = shown - angle(b - a);
+        turn.is_finite().then_some(if self.mirrored() { -turn } else { turn })
+    }
+
+    /// Pin `i` dragged from canvas point `from` to `to`.
+    fn pin_dragged(&self, start: &Placement, i: usize, from: Vec2, to: Vec2) -> Option<Placement> {
+        let to_source = Homography::quad_to_quad(start.content, self.source)?;
+        let moved = to_source.apply(to)? - to_source.apply(from)?;
+        let mut pins = start.pins().to_vec();
+        let pin = pins.get_mut(i)?;
+        pin.at = pin.at + moved;
+        Some(start.with_pins(pins))
+    }
+
+    /// Pin `i`'s ring turned from canvas point `from` to `to`: it holds the turn it is given.
+    fn pin_turned(&self, start: &Placement, i: usize, from: Vec2, to: Vec2, guides: &Guides) -> Option<Placement> {
+        let (centre, held) = self.ring?;
+        let mut turn = angle(to - centre) - angle(from - centre);
+        if self.mirrored() {
+            turn = -turn;
+        }
+        let mut next = held + turn;
+        if guides.magnetics {
+            next = (next / MAGNETIC_STEP).round() * MAGNETIC_STEP;
+        }
+        let mut pins = start.pins().to_vec();
+        pins.get_mut(i)?.angle = Some(next);
+        Some(start.with_pins(pins))
+    }
 }
 
 /// For a transform that keys a pose rather than moving pixels (a timeline clip's, with autokey):
@@ -735,7 +1062,7 @@ impl Transform {
     /// The content and its box go where `m` carries the source rectangle (no warp), as no step
     /// of its own: what the transform's undo takes back is kept.
     pub fn place(&mut self, m: Affine) {
-        let source = Placement { content: self.source, frame: self.source, warp: None };
+        let source = Placement { content: self.source, frame: self.source, warp: None, pins: None };
         self.now = map_placement(&source, m);
     }
 }
@@ -1151,5 +1478,96 @@ mod tests {
         t.grab(Handle::Move, Vec2::new(50.0, 50.0));
         t.drag(TransformMode::Freeform, Vec2::new(50.4, 50.0), &NONE);
         assert!(quad_close(t.content(), rect(10.4, 20.0, 100.0, 200.0)));
+    }
+
+    /// A transform of a bar 200 × 40 at (100, 100), its puppet's mesh laid.
+    fn puppet() -> Transform {
+        let mut t = Transform::new(100.0, 100.0, 200.0, 40.0, Vec::new());
+        let mesh = PuppetMesh::build(&[255u8; 200 * 40], 200, Vec2::new(100.0, 100.0), puppet::MeshSettings::default());
+        t.start_puppet(mesh.unwrap());
+        t
+    }
+
+    #[test]
+    fn pins_go_on_the_mesh_and_each_change_is_a_step() {
+        let mut t = puppet();
+        assert!(t.has_puppet() && t.bend().is_none() && !t.puppet_edges().is_empty());
+        assert!(!t.add_pin(Vec2::new(50.0, 50.0)), "off the mesh");
+        assert!(t.add_pin(Vec2::new(110.0, 120.0)) && t.add_pin(Vec2::new(290.0, 120.0)));
+        assert_eq!(t.selected_pin(), Some(1));
+        assert_eq!(t.puppet_pins().len(), 2);
+        // the far pin dragged down: the bar bends, the near end stays
+        t.grab(Handle::Pin(1), Vec2::new(290.0, 120.0));
+        assert!(t.drag(TransformMode::Puppet, Vec2::new(270.0, 200.0), &NONE));
+        t.release();
+        let bend = t.bend().unwrap();
+        assert!(close_to(bend.point(Vec2::new(290.0, 120.0)), Vec2::new(270.0, 200.0), 0.5));
+        assert!(close_to(bend.point(Vec2::new(110.0, 120.0)), Vec2::new(110.0, 120.0), 0.5));
+        assert!(close_to(t.puppet_pins()[1].0, Vec2::new(270.0, 200.0), 1e-3));
+        // the ring turns the mesh about its pin
+        let (centre, before) = t.puppet_pins()[1];
+        t.grab(Handle::PinRing(1), centre + Vec2::new(30.0, 0.0));
+        t.drag(TransformMode::Puppet, centre + Vec2::new(0.0, 30.0), &NONE);
+        t.release();
+        let after = t.puppet_pins()[1].1;
+        assert!((after - before - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "{before} {after}");
+        // each was a step: undone, the pin is free and where it was taken, then back where it was put
+        assert!(t.undo());
+        assert!((t.puppet_pins()[1].1 - before).abs() < 1e-3);
+        assert!(t.undo());
+        assert!(close_to(t.puppet_pins()[1].0, Vec2::new(290.0, 120.0), 1e-3));
+        t.remove_pin(0);
+        assert_eq!(t.puppet_pins().len(), 1);
+        assert!(t.undo() && t.puppet_pins().len() == 2);
+        // a warp takes the pins away, as a step
+        t.start_warp();
+        assert!(matches!(t.bend(), Some(Bend::Grid { .. })));
+        assert!(t.undo() && t.warp().is_none() && t.puppet_pins().len() == 2);
+    }
+
+    fn close_to(a: Vec2, b: Vec2, tolerance: f32) -> bool {
+        a.distance(b) <= tolerance
+    }
+
+    #[test]
+    fn a_puppet_bends_before_the_box_places_it() {
+        let mut t = puppet();
+        assert!(t.add_pin(Vec2::new(110.0, 120.0)) && t.add_pin(Vec2::new(290.0, 120.0)));
+        // the box moved and turned a quarter: the pins go with it
+        t.grab(Handle::Move, Vec2::ZERO);
+        t.drag(TransformMode::Freeform, Vec2::new(50.0, 0.0), &NONE);
+        t.release();
+        assert!(close_to(t.puppet_pins()[0].0, Vec2::new(160.0, 120.0), 1e-3));
+        t.rotate(std::f32::consts::FRAC_PI_2);
+        let [(near, _), (far, _)] = [t.puppet_pins()[0], t.puppet_pins()[1]];
+        assert!((near.x - far.x).abs() < 1e-2 && far.y > near.y, "{near:?} {far:?}");
+        // a pin dragged on the canvas goes where it is dragged
+        t.grab(Handle::Pin(1), far);
+        t.drag(TransformMode::Puppet, far + Vec2::new(40.0, -10.0), &NONE);
+        t.release();
+        assert!(close_to(t.puppet_pins()[1].0, far + Vec2::new(40.0, -10.0), 1e-2));
+        assert!(close_to(t.bend().unwrap().point(Vec2::new(290.0, 120.0)), far + Vec2::new(40.0, -10.0), 0.5));
+        // a pin put on the bent mesh goes where it is put
+        let middle = t.bend().unwrap().point(Vec2::new(200.0, 120.0));
+        assert!(t.add_pin(middle));
+        assert!(close_to(t.puppet_pins()[2].0, middle, 1e-2));
+    }
+
+    #[test]
+    fn auto_rotate_off_holds_each_pin_at_the_turn_it_shows() {
+        let mut t = puppet();
+        assert!(t.puppet_auto_rotate());
+        assert!(t.add_pin(Vec2::new(110.0, 120.0)) && t.add_pin(Vec2::new(290.0, 120.0)));
+        t.grab(Handle::Pin(1), Vec2::new(290.0, 120.0));
+        t.drag(TransformMode::Puppet, Vec2::new(250.0, 220.0), &NONE);
+        t.release();
+        let shown = t.puppet_pins();
+        t.set_puppet_auto_rotate(false);
+        assert!(!t.puppet_auto_rotate());
+        for (a, b) in t.puppet_pins().iter().zip(&shown) {
+            assert!((a.1 - b.1).abs() < 0.05, "{a:?} {b:?}");
+        }
+        // a pin put now holds the turn there
+        assert!(t.add_pin(t.bend().unwrap().point(Vec2::new(200.0, 120.0))));
     }
 }

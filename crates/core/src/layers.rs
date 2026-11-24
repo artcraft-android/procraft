@@ -372,11 +372,29 @@ pub fn set_layer_budget(bytes: u64) {
     procraft_engine::document::set_layer_budget(bytes);
 }
 
-/// How many layers a canvas `width` × `height` holds on this device (Custom Canvas's Maximum
-/// Layers).
+/// How many layers a canvas `width` × `height` holds on this device however full they are, each
+/// counted at its full size (the least of Custom Canvas's Maximum Layers; what a PDF's pages may
+/// come to).
 #[uniffi::export]
 pub fn layers_for(width: u32, height: u32) -> u32 {
     u32::try_from(procraft_engine::document::layer_cap_for(width, height)).unwrap_or(u32::MAX)
+}
+
+/// How many layers a canvas `width` × `height` holds on this device while they are mostly empty
+/// (the most of Custom Canvas's Maximum Layers): where the layers not worked on are kept
+/// compressed, as many as fit by what they take; else [`layers_for`]'s.
+#[uniffi::export]
+pub fn empty_layers_for(width: u32, height: u32) -> u32 {
+    use procraft_engine::document::{LayerMemory, least_layer_bytes};
+    let mut doc = Document::new(width, height);
+    let (w, h) = (doc.width(), doc.height());
+    let budget = canvas_budget(w, h);
+    if budget != 0 {
+        let full = u64::from(w) * u64::from(h) * 4;
+        let resident = procraft_gpu::most_resident(budget, w, h, 4);
+        doc.set_layer_memory(Some(LayerMemory { resident, compressed: least_layer_bytes(full), layers: 1 }));
+    }
+    u32::try_from(doc.layer_cap()).unwrap_or(u32::MAX)
 }
 
 /// What the layers' textures may take on this device, bytes: past it, layers not worked on are

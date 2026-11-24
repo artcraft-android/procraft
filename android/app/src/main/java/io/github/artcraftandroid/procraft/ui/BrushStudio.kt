@@ -64,6 +64,7 @@ import io.github.artcraftandroid.procraft.canvas.PadSurfaceView
 import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.curveSamples
 import io.github.artcraftandroid.procraft.core.sliderExtras
+import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntRect
@@ -129,7 +130,7 @@ private val TabsWidth = 81.dp
  * [FOLLOW] and [GRADE] to a name of their own), [DOUBLE] reads 100% at its middle; [METAL] and
  * [GLOSS] name their ends as a material's metalness and roughness.
  */
-enum class Shown { PERCENT, BOTH, COUNT, TIP, MOVEMENT, ZOOM, CHARGE, SIZE, FOLLOW, GRADE, DOUBLE, TWICE, METAL, GLOSS }
+enum class Shown { PERCENT, BOTH, COUNT, TIP, MOVEMENT, ZOOM, CHARGE, SIZE, FOLLOW, GRADE, DOUBLE, TWICE, METAL, GLOSS, STRETCH }
 
 /** One control in the brush studio. */
 sealed class StudioControl {
@@ -217,6 +218,12 @@ val STUDIO_TABS: List<StudioTab> by lazy {
                 StudioControl.Roundness, slider("pressure_roundness", "Pressure Roundness", Shown.BOTH),
                 slider("tilt_roundness", "Tilt roundness", Shown.BOTH), slider("roundness_jitter_y", "Roundness Vertical Jitter"),
                 slider("roundness_jitter_x", "Roundness Horizontal Jitter"),
+            )),
+            // the shape stretched along the stroke as one strip (a shape image's; the round tip
+            // stamps), its tiles as long as the strip is wide at the scale's middle
+            StudioSection("Ribbon", listOf(
+                toggle("ribbon", "Ribbon"),
+                slider("ribbon_scale", "Ribbon scale", Shown.STRETCH, enabledBy = "ribbon" to 1),
             )),
             StudioSection("Shape filtering", listOf(StudioControl.Choice("shape_filtering", FILTERING))),
         )),
@@ -626,6 +633,9 @@ private fun shownValue(v: Float, shown: Shown, most: Float = 16f): String {
         // turning with the stroke: all the way reads as following it
         Shown.FOLLOW -> if (v >= 1f) "Follow stroke" else belowTop
         Shown.COUNT -> "${1 + (v * 15).roundToInt()}"
+        // how long a ribbon's tile is against its own proportions: a quarter to four times, as the
+        // engine's `Brush::ribbon_tile` takes the control
+        Shown.STRETCH -> "${(ribbonStretch(v) * 100).roundToInt()}%"
         Shown.TIP -> if (v <= 0f) "Sharp" else if (v >= 1f) "Blunt" else between
         Shown.MOVEMENT -> if (v <= 0f) "Stamp" else if (v >= 1f) "Rolling" else between
         Shown.ZOOM -> if (v <= 0f) "Follow size" else if (v >= 1f) "Cropped" else between
@@ -1293,6 +1303,9 @@ internal fun StudioSlider(
  * How a slider's value is typed: the largest number, whether it may be negative (a "-" key), and what
  * a number makes of the value.
  */
+/** A ribbon's tile length against its proportions for the slider's [v]: a quarter to four times. */
+private fun ribbonStretch(v: Float): Float = 4.0.pow(2.0 * v.coerceIn(0f, 1f) - 1).toFloat()
+
 private class Typed(val most: Int, val signed: Boolean, val toValue: (Int) -> Float)
 
 /**
@@ -1304,6 +1317,7 @@ private fun typedNumber(shown: Shown, most: Float): Typed = when (shown) {
     Shown.DOUBLE, Shown.TWICE -> Typed(200, false) { n -> n / 200f }
     Shown.BOTH, Shown.FOLLOW, Shown.GRADE -> Typed(100, true) { n -> n / 100f }
     Shown.COUNT -> Typed(16, false) { n -> (n.coerceAtLeast(1) - 1) / 15f }
+    Shown.STRETCH -> Typed(400, false) { n -> ((ln(n.coerceIn(25, 400) / 100.0) / ln(4.0) + 1) / 2).toFloat() }
     Shown.SIZE -> Typed((most * 100f).roundToInt(), false) { n -> ((n / 100f) / most.coerceAtLeast(1e-3f)).coerceIn(0f, 1f).toDouble().pow(1.0 / 2.2).toFloat() }
 }
 

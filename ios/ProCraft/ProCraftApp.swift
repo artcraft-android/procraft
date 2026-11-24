@@ -9,10 +9,13 @@ import UniformTypeIdentifiers
 @main
 struct ProCraftApp: App {
     init() {
-        // the layers' textures may take a quarter of what the app may use (an iPad app is ended
-        // well short of the device's memory); none said (the simulator), all of them
+        // the layers may take half of what the app may use (an iPad app is ended well short of the
+        // device's memory, so not half the device's as on Android), their textures a quarter: past
+        // that, those not worked on are kept compressed off the GPU until needed. None said (the
+        // simulator): the core's own 2 GiB, and all the textures kept
         let available = os_proc_available_memory()
         if available > 0 {
+            setLayerBudget(bytes: UInt64(available / 2))
             setResidentBudget(bytes: UInt64(available / 4))
             // and timeline frames kept for scrubbing and playing an eighth (the core's own
             // default where none is said)
@@ -540,12 +543,8 @@ enum ScreenCapture {
             TimelineBigDebug.open(name, in: model)
             return
         }
-        if TimelinePagesDebug.scenes.contains(name) {
-            TimelinePagesDebug.open(name, in: model)
-            return
-        }
-        if TimelineFixesDebug.scenes.contains(name) {
-            TimelineFixesDebug.open(name, in: model)
+        if TimelineGridDebug.scenes.contains(name) {
+            TimelineGridDebug.open(name, in: model)
             return
         }
         if let page = pages[name] {
@@ -757,28 +756,13 @@ enum ScreenCapture {
             }
         case "timeline-keys", "timeline-path":
             guard let clip = timelineKeyed(model) else { break }
-            model.timeline.picked = clip
-            model.timeline.keysOpen = true
+            // its track's rows of keys out
+            if let track = model.timeline.clip(clip)?.0.id {
+                model.timeline.gridKeyTracks.insert(track)
+            }
             if name == "timeline-path" {
                 // the last key bent: its handles show
                 model.timeline.bendPath(clip, at: 7)
-            }
-        case "timeline-camera", "timeline-camera-play":
-            // the keyed line, the camera pushing in and turning over its eight frames
-            timelineKeyed(model)
-            let s = model.session
-            let size = s.info()
-            s.setTimelineFrame(frame: 0)
-            _ = s.setTimelineCameraKey(x: Float(size.width) / 2, y: Float(size.height) / 2, zoom: 1, rotation: 0, easing: .smooth, done: true)
-            s.setTimelineFrame(frame: 7)
-            _ = s.setTimelineCameraKey(x: 900, y: 1300, zoom: 2, rotation: 20, easing: .smooth, done: true)
-            s.setTimelineFrame(frame: 3)
-            model.refresh()
-            if name == "timeline-camera-play" {
-                model.timeline.setCameraView(true)
-                s.setTimelinePlaying(frame: 7)
-            } else {
-                model.timeline.cameraOpen = true
             }
         case "timeline-matte":
             // a broad black stroke below, a red layer above it masked by it (an alpha matte)
@@ -799,7 +783,6 @@ enum ScreenCapture {
             _ = s.setTimelineClipMask(id: above.id, mask: .alpha)
             model.refresh()
             model.timeline.picked = above.id
-            model.timeline.clipOpen = true
         case "timeline-group", "timeline-group-open":
             // four drawings, the first two grouped and cycling
             model.animationAssist.setAssist(true, pages: false)
@@ -807,55 +790,15 @@ enum ScreenCapture {
                 model.addLayer()
             }
             model.timeline.setOn(true)
-            model.timeline.setSimple(false)
             let s = model.session
             guard let track = s.timelineTracks().first(where: { $0.clips.count >= 2 }) else { break }
             let group = s.groupTimelineClips(ids: [track.clips[0].id, track.clips[1].id])
             _ = s.setTimelineClipDuration(id: group, duration: 6, push: true)
             _ = s.setTimelineCycle(id: group, length: 2, continueAcross: false)
             model.refresh()
-            if name == "timeline-group-open" {
-                model.timeline.open(group)
-            } else {
-                model.timeline.picked = group
-                model.timeline.clipOpen = true
-            }
-        case "timeline-sync", "timeline-sync-keys", "timeline-sync-settings", "timeline-sync-onion", "timeline-sync-layers":
-            // the keyed line on the tracks view with two more drawings, the camera keyed, two
-            // sync markers, and the line copied (its keys too)
-            guard let clip = timelineKeyed(model) else { break }
-            let s = model.session
-            for _ in 0 ..< 2 {
-                _ = s.addTimelineDrawing()
-            }
-            let size = s.info()
-            for (f, zoom) in [(UInt32(0), Float(1)), (5, 1.5)] {
-                s.setTimelineFrame(frame: f)
-                _ = s.setTimelineCameraKey(x: Float(size.width) / 2, y: Float(size.height) / 2, zoom: zoom, rotation: 0, easing: .smooth, done: true)
-            }
-            _ = s.addTimelineMarker(frame: 2)
-            _ = s.addTimelineMarker(frame: 7)
-            s.setTimelineFrame(frame: 3)
-            model.timeline.setSimple(false)
+            // (open: its own tracks' rows out under it; else put away)
+            _ = s.setTimelineGroupFolded(id: group, folded: name != "timeline-group-open")
             model.refresh()
-            model.timeline.picked = clip
-            switch name {
-            case "timeline-sync-keys":
-                model.timeline.copyKeys(clip, here: false)
-                model.timeline.keysOpen = true
-            case "timeline-sync-settings":
-                model.timeline.settingsOpen = true
-            case "timeline-sync-onion":
-                // the settings open on the onion skins' page
-                onionOpens = true
-                model.timeline.settingsOpen = true
-            case "timeline-sync-layers":
-                model.toggle(.layers)
-            default:
-                _ = s.copyTimelineClips(ids: [clip])
-                model.refresh()
-                model.timeline.clipOpen = true
-            }
         case "timeline", "timeline-tracks":
             model.animationAssist.setAssist(true, pages: false)
             for _ in 0 ..< 3 {
@@ -863,7 +806,6 @@ enum ScreenCapture {
             }
             model.timeline.setOn(true)
             if name == "timeline-tracks" {
-                model.timeline.setSimple(false)
                 model.timeline.addTrack()
             }
         case "export-sheet", "export-frames":

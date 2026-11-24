@@ -107,6 +107,42 @@ fn separable_blend_modes_match_the_definitions() {
     }
 }
 
+/// Add and lighten blend a see-through layer as its colour faded to black as far as it covers:
+/// white at half over a blue lifts each channel by a half (green fills, and the edge glows cyan)
+/// or raises it to a half, not halfway to white, which is what Normal would do.
+#[test]
+fn add_and_lighten_fade_a_see_through_layer_to_black() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let bottom = doc.current();
+    let top = doc.add_layer();
+    fill(&mut canvas, &doc, bottom, [0, 179, 255]);
+    fill(&mut canvas, &doc, top, [255, 255, 255]);
+    doc.set_opacity(top, 0.5);
+    for (mode, want) in [(BlendMode::Add, [128, 255, 255]), (BlendMode::Lighten, [128, 179, 255])] {
+        doc.set_blend(top, mode);
+        canvas.invalidate();
+        let got = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+        for c in 0..3 {
+            assert!((i32::from(got[c]) - want[c]).abs() <= 2, "{mode:?} channel {c}: got {got:?} want {want:?}");
+        }
+        assert_eq!(got[3], 255);
+    }
+    // with nothing below, either is the layer laid as it is
+    doc.set_visible(bottom, false);
+    doc.background_visible = false;
+    doc.set_blend(top, BlendMode::Normal);
+    canvas.invalidate();
+    let normal = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+    for mode in [BlendMode::Add, BlendMode::Lighten] {
+        doc.set_blend(top, mode);
+        canvas.invalidate();
+        let got = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
+        for c in 0..4 {
+            assert!((i32::from(got[c]) - i32::from(normal[c])).abs() <= 1, "{mode:?} over clear: {got:?} vs {normal:?}");
+        }
+    }
+}
+
 #[test]
 fn shade_darkens_and_shows_nothing_over_clear() {
     let Some((gpu, mut doc, mut canvas)) = setup() else { return };

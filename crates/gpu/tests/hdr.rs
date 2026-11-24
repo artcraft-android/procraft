@@ -112,8 +112,9 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 }
 
 /// The scene's composite on a standard canvas as it was drawn before HDR documents came (on
-/// Apple's GPUs, where this was taken: other GPUs round some blends otherwise).
-const STANDARD_SCENE: u64 = 0x10f5_b85b_b68e_51d1;
+/// Apple's GPUs, where this was taken: other GPUs round some blends otherwise), retaken when Add
+/// came to fade a see-through layer to black rather than its blend back to the backdrop.
+const STANDARD_SCENE: u64 = 0x60eb_c0c8_d51f_544d;
 
 #[test]
 fn a_standard_document_draws_as_it_always_has() {

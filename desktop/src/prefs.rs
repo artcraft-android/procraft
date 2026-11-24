@@ -103,6 +103,12 @@ pub struct Prefs {
     pub drag_image_format: usize,
     /// Recolor's Flood, kept from one time to the next.
     pub recolor_threshold: f32,
+    /// ColorDrop's All Layers: a dropped colour fills up to what every visible layer shows.
+    pub drop_all_layers: bool,
+    /// ColorDrop's Continuous: while filling, a drag fills each unfilled area it crosses.
+    pub drop_continuous: bool,
+    /// Selection's Pixelated: shapes drawn to select with take whole pixels only.
+    pub selection_pixelated: bool,
 }
 
 impl Default for Prefs {
@@ -145,6 +151,9 @@ impl Default for Prefs {
             drag_format: 0,
             drag_image_format: 0,
             recolor_threshold: 0.0,
+            drop_all_layers: false,
+            drop_continuous: false,
+            selection_pixelated: false,
         }
     }
 }
@@ -210,6 +219,9 @@ impl Prefs {
                     p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
+                "drop_all_layers" => p.drop_all_layers = on,
+                "drop_continuous" => p.drop_continuous = on,
+                "selection_pixelated" => p.selection_pixelated = on,
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 name if floating_at(name).is_some() => {
                     if let Some(slot) = floating_at(name).and_then(|at| p.floating.get_mut(at)) {
@@ -269,6 +281,9 @@ impl Prefs {
             format!("drag_format {}", self.drag_format),
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
+            format!("drop_all_layers {}", self.drop_all_layers),
+            format!("drop_continuous {}", self.drop_continuous),
+            format!("selection_pixelated {}", self.selection_pixelated),
         ];
         let floating = crate::floating_panels::PANELS.into_iter().zip(self.floating).filter_map(|(panel, window)| {
             Some(format!("{} {}", procraft_core::floating_key(panel), procraft_core::floating_kept(window?)))
@@ -283,6 +298,8 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_selection_x_ray(self.selection_x_ray);
         session.set_fill_opacity(self.fill_opacity);
+        session.set_pour_all_layers(self.drop_all_layers);
+        session.set_selection_pixelated(self.selection_pixelated);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_vector_crisp(self.vector_crisp);
         session.set_selection_visibility(self.selection_visibility);

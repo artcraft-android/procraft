@@ -245,3 +245,112 @@ fn the_keys_page_easing_reaches_autokey_without_turning_it_off_and_on() {
     let last = keys.iter().find(|k| k.frame == 4 && k.channel == TimelineChannel::Position).unwrap();
     assert_eq!(last.easing, TimelineEasing::Hold);
 }
+
+/// A video one second long brought into `s` at the playhead, its track the one drawn on.
+fn video(s: &CanvasSession, name: &str) -> u64 {
+    let dir = std::env::temp_dir().join(format!("procraft-autokey-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("clip.mov");
+    std::fs::write(&path, name.as_bytes().repeat(200)).unwrap();
+    let clip = s
+        .import_timeline_media(crate::media::MediaImport {
+            path: path.to_string_lossy().into_owned(),
+            name: "clip.mov".into(),
+            kind: crate::media::TimelineMediaKind::Video,
+            seconds: 1.0,
+            width: 20,
+            height: 10,
+            peaks: Vec::new(),
+            sound_path: None,
+            sound_seconds: 0.0,
+        })
+        .unwrap();
+    assert_ne!(clip, 0);
+    clip
+}
+
+#[test]
+fn a_video_on_the_track_drawn_on_is_placed_whole_without_autokey_and_keyed_with_it() {
+    let Some(s) = three_drawings() else { return };
+    s.set_timeline_simple(false);
+    s.set_timeline_frame(0);
+    let clip = video(&s, "placed");
+    // its track is the one drawn on; three frames in, nothing picked, autokey off
+    s.set_timeline_frame(3);
+    assert!(!s.timeline_autokey_posing());
+    let rect = s.timeline_media_clip(clip).unwrap().rect;
+    let b = s.transform_begin().expect("a box around the video's picture");
+    assert!(s.timeline_autokey_posing(), "a video is posed, having no pixels of the canvas's");
+    let (cx, cy) = middle(&b);
+    assert!((cx - (rect[0] + rect[2] / 2.0)).abs() < 1.0 && (cy - (rect[1] + rect[3] / 2.0)).abs() < 1.0);
+    s.transform_grab(TransformHandle::Move, cx, cy);
+    s.transform_drag(cx + 6.0, cy + 2.0);
+    s.transform_release();
+    // one key, on its first frame: it sits there for its whole length
+    assert_eq!(keyed(&s, clip, TimelineChannel::Position), [0]);
+    // moved again, from another frame: still the one key
+    s.set_timeline_frame(5);
+    let b = s.timeline_autokey_box().expect("the box follows the playhead");
+    let (cx, cy) = middle(&b);
+    s.transform_grab(TransformHandle::Move, cx, cy);
+    s.transform_drag(cx - 2.0, cy);
+    s.transform_release();
+    s.transform_end(true);
+    assert_eq!(keyed(&s, clip, TimelineChannel::Position), [0]);
+    let pose = |frame: u32| {
+        s.set_timeline_frame(frame);
+        let p = s.timeline_pose(clip).unwrap();
+        (p.x, p.y)
+    };
+    for frame in [0, 3, 5, 9] {
+        let (x, y) = pose(frame);
+        assert!((x - 4.0).abs() < 0.01 && (y - 2.0).abs() < 0.01, "frame {frame}: ({x}, {y})");
+    }
+    // each drag was a step of its own, the video's rect untouched
+    assert_eq!(s.timeline_media_clip(clip).unwrap().rect, rect);
+    assert_eq!(s.undo().as_deref(), Some("Key"));
+    assert_eq!(pose(3), (6.0, 2.0));
+    assert!(s.redo().is_some());
+
+    // with autokey on it is keyed at the playhead, picked in the panel or not
+    s.set_timeline_autokey(true, TimelineEasing::Linear);
+    s.set_timeline_frame(6);
+    let b = s.transform_begin().expect("a box around the video, unpicked");
+    let (cx, cy) = middle(&b);
+    s.transform_grab(TransformHandle::Move, cx, cy);
+    s.transform_drag(cx + 10.0, cy);
+    s.transform_release();
+    s.transform_end(true);
+    assert_eq!(keyed(&s, clip, TimelineChannel::Position), [0, 6]);
+    assert!((pose(0).0 - 4.0).abs() < 0.01 && (pose(6).0 - 14.0).abs() < 0.01 && (pose(3).0 - 9.0).abs() < 0.01);
+
+    // autokey off again: an animated channel is keyed at the playhead still, a still one placed whole
+    s.set_timeline_autokey(false, TimelineEasing::Linear);
+    s.set_timeline_frame(6);
+    let b = s.transform_begin().expect("a box around the video");
+    let (cx, cy) = middle(&b);
+    s.transform_grab(TransformHandle::Move, cx, cy);
+    s.transform_drag(cx, cy + 5.0);
+    s.transform_release();
+    s.transform_end(true);
+    assert_eq!(keyed(&s, clip, TimelineChannel::Position), [0, 6]);
+    assert!((pose(6).1 - 7.0).abs() < 0.01 && (pose(0).1 - 2.0).abs() < 0.01);
+
+    // on a drawing's track without autokey, the pixels move as ever
+    let drawing = s.timeline_tracks().into_iter().find(|t| t.clips.iter().any(|c| c.root != 0)).unwrap();
+    s.select_timeline_track(drawing.id);
+    s.set_timeline_frame(0);
+    assert!(s.transform_begin().is_some());
+    assert!(!s.timeline_autokey_posing());
+    s.transform_end(false);
+
+    // back on the video's track, past the video's end: nothing there, and the drawing that was
+    // current (another frame's) is not what the transform takes up
+    let track = s.timeline_tracks().into_iter().find(|t| t.clips.iter().any(|c| c.id == clip)).unwrap();
+    s.select_timeline_track(track.id);
+    let end = track.clips.iter().find(|c| c.id == clip).map(|c| c.start + c.duration).unwrap();
+    s.rest_timeline_frame(end + 2);
+    assert!(s.transform_begin().is_none());
+    assert_eq!(s.transform_refusal(), "Nothing on this track at this frame to transform");
+}

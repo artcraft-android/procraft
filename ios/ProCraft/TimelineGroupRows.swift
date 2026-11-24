@@ -10,8 +10,6 @@ import UIKit
 
 /// How far a row's name steps in for each group it is inside.
 private let indentStep: CGFloat = 14
-private var shadeFill: Color { Look.shared.light ? Color.black.opacity(0.10) : Color.black.opacity(0.22) }
-private var repeatEdge: Color { Look.shared.light ? Color(argb: 0xFF9A_9A9A) : Color(argb: 0xFF6E_6E6E) }
 
 /// A cycling group's end being dragged: how many frames it lasted when the drag began, how many
 /// it would now, the most it has room for, and the frames in a cycle.
@@ -45,12 +43,6 @@ extension TimelineTool {
     /// they are.
     func held(_ t: TimelineTrackInfo) -> Bool {
         t.locked || place(t.id)?.lockedAbove == true
-    }
-
-    /// Clip `id` is inside a group: the group open, or one unfolded.
-    func inGroup(_ id: UInt64) -> Bool {
-        guard let (t, _) = clip(id) else { return false }
-        return info?.openGroups.isEmpty == false || (place(t.id)?.group ?? 0) != 0
     }
 
     /// Whether group clip `id` shows its tracks unfolded under its own.
@@ -107,136 +99,3 @@ extension TimelineTool {
     }
 }
 
-/// A row inside unfolded groups: shaded outside the frames its group plays its clips in, and its
-/// clips' repeats in a cycling group's later cycles drawn faintly where they play.
-struct GroupRowShade: View {
-    let row: TimelineRow
-    let width: CGFloat
-    let height: CGFloat
-    let pitch: CGFloat
-
-    var body: some View {
-        Canvas { ctx, size in
-            let from = CGFloat(row.start) * pitch
-            let to = min(CGFloat(row.end) * pitch, size.width)
-            if from > 0 {
-                ctx.fill(Path(CGRect(x: 0, y: 0, width: from, height: size.height)), with: .color(shadeFill))
-            }
-            if to < size.width {
-                ctx.fill(Path(CGRect(x: to, y: 0, width: size.width - to, height: size.height)), with: .color(shadeFill))
-            }
-            // the frames its group plays its clips in, edged on either side
-            for x in [from, to] where x > 0 && x < size.width {
-                ctx.fill(Path(CGRect(x: x - 0.5, y: 0, width: 1, height: size.height)), with: .color(repeatEdge.opacity(0.6)))
-            }
-            for r in row.repeats {
-                let rect = CGRect(x: CGFloat(r.start) * pitch + 1, y: 3, width: max(CGFloat(r.duration) * pitch - 2, 3), height: size.height - 6)
-                let shape = Path(roundedRect: rect, cornerRadius: 8)
-                ctx.fill(shape, with: .color(repeatEdge.opacity(0.18)))
-                ctx.stroke(shape, with: .color(repeatEdge), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            }
-        }
-        .frame(width: width, height: height)
-        .allowsHitTesting(false)
-    }
-}
-
-/// The steps in front of a row's name, a line for each group it is inside.
-struct GroupRowGuides: View {
-    let depth: UInt32
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(0 ..< Int(depth), id: \.self) { _ in
-                Rectangle()
-                    .fill(Pc.accent.opacity(0.45))
-                    .frame(width: 2)
-                    .padding(.vertical, 6)
-                    .frame(width: indentStep, alignment: .center)
-            }
-        }
-        .padding(.leading, 6)
-        .allowsHitTesting(false)
-    }
-}
-
-/// The disclosure on a group clip: tapped, its tracks unfold under its own, or fold away.
-struct GroupFoldButton: View {
-    let tool: TimelineTool
-    let clip: TimelineClipInfo
-    let tint: Color
-
-    var body: some View {
-        let open = tool.unfolded(clip.id)
-        Image(systemName: "chevron.right")
-            .font(.system(size: 11, weight: .bold))
-            .foregroundStyle(tint)
-            .rotationEffect(.degrees(open ? 90 : 0))
-            .frame(width: 20, height: 28)
-            .contentShape(Rectangle())
-            .onTapGesture { tool.fold(clip.id, open) }
-            .accessibilityLabel(open ? "Fold group" : "Unfold group")
-    }
-}
-
-/// The grip on a picked cycling group's end: dragged, the group grows or shrinks a frame at a
-/// time, snapping to whole cycles (within reach) with a tick of haptics, as long as its track has
-/// room for, shown as it goes; let go, one undo step.
-struct CycleGrip: View {
-    let tool: TimelineTool
-    let clip: TimelineClipInfo
-    let pitch: CGFloat
-    let height: CGFloat
-    @Binding var drag: CycleDrag?
-    /// How near a whole cycle's end, in points, the end snaps onto it.
-    private let reach: CGFloat = 10
-
-    var body: some View {
-        Capsule()
-            .fill(Color.white)
-            .frame(width: 5, height: height - 14)
-            .frame(width: 22, height: height)
-            .contentShape(Rectangle())
-            .overlay(alignment: .top) {
-                if let d = drag, d.clip == clip.id {
-                    Text(verbatim: d.tag)
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Pc.accent))
-                        .fixedSize()
-                        .offset(y: -18)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .highPriorityGesture(
-                // measured on the screen: the clip grows and shrinks under the finger
-                DragGesture(minimumDistance: 2, coordinateSpace: .global)
-                    .onChanged { g in
-                        let d = drag?.clip == clip.id ? drag : tool.groupRoom(clip.id).map {
-                            CycleDrag(clip: clip.id, from: Int(clip.duration), frames: Int(clip.duration), most: $0,
-                                      length: Int(max(clip.cycle, 1)))
-                        }
-                        guard var next = d else { return }
-                        let at = CGFloat(next.from) + g.translation.width / max(pitch, 0.01)
-                        // a whole cycle's end, if near enough; else the frame under the finger
-                        let whole = max((at / CGFloat(next.length)).rounded(), 1) * CGFloat(next.length)
-                        let snapped = abs(whole - at) * pitch <= reach
-                        let frames = min(max(Int(snapped ? whole : at.rounded()), 1), max(next.most, next.from))
-                        if frames != next.frames, frames % next.length == 0 {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                        }
-                        next.frames = frames
-                        drag = next
-                    }
-                    .onEnded { _ in
-                        guard let d = drag, d.clip == clip.id else { return }
-                        drag = nil
-                        if d.frames != d.from {
-                            tool.setGroupLength(clip.id, d.frames)
-                        }
-                    }
-            )
-    }
-}

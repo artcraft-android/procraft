@@ -50,6 +50,83 @@ impl Timeline {
 }
 
 impl Timeline {
+    /// Makes room for clip `id`'s end to go as late as frame `to` of its own level (one past its
+    /// last frame): the clips after it on its track are moved later, the nearest first and each
+    /// only as far as it must, so the empty frames between them are taken up before a clip
+    /// further on moves at all. Returns how late its end can go now: `to`, or sooner for a sound
+    /// or video, which lasts no longer than what is left of its file; its own end, when asked for
+    /// no later.
+    pub fn open_up_after(&mut self, id: ClipId, to: u32) -> Option<u32> {
+        let clip = self.clip(id)?;
+        let most = self.media_frames_left(clip).map_or(u32::MAX, |left| clip.start.saturating_add(left.max(1)));
+        let to = to.min(most).max(clip.end());
+        let track = self.track_of_clip(id)?;
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        let mut next = to;
+        for x in level.get_mut(t)?.clips.iter_mut().skip(c + 1) {
+            if x.start >= next {
+                break;
+            }
+            x.start = next;
+            next = x.end();
+        }
+        // (a group whose own clips went later lasts long enough to hold them)
+        self.cover(track);
+        Some(to)
+    }
+
+    /// The run of empty frames that frame `at` (of the track's own level) is in on track `id`:
+    /// its first frame and how many it is, the count none where no clip comes after it (it goes
+    /// on to wherever the timeline ends). None where a clip is on that frame.
+    pub fn gap_at(&self, id: TrackId, at: u32) -> Option<(u32, Option<u32>)> {
+        let track = self.track(id)?;
+        if track.clips.iter().any(|c| c.start <= at && at < c.end()) {
+            return None;
+        }
+        let start = track.clips.iter().filter(|c| c.end() <= at).map(Clip::end).max().unwrap_or(0);
+        let next = track.clips.iter().filter(|c| c.start > at).map(|c| c.start).min();
+        Some((start, next.map(|n| n - start)))
+    }
+
+    /// That run made `length` frames long (0: closed up), every clip after it on the track
+    /// moving earlier or later to suit. False where frame `at` has a clip on it, no clip comes
+    /// after the run, or it is that long already.
+    pub fn set_gap(&mut self, id: TrackId, at: u32, length: u32) -> bool {
+        let Some((start, Some(now))) = self.gap_at(id, at) else { return false };
+        if now == length {
+            return false;
+        }
+        let Some(track) = self.track_mut(id) else { return false };
+        for c in track.clips.iter_mut().filter(|c| c.start >= start + now) {
+            c.start = (c.start - now).saturating_add(length);
+        }
+        true
+    }
+
+    /// Makes room for clip `id`'s start to go as early as frame `to` of its own level: the clips
+    /// before it on its track are moved earlier, the nearest first and each only as far as it
+    /// must, so the empty frames between them are taken up before a clip further back moves, and
+    /// none goes before the first frame. (Where [`EdgePolicy::Push`] moves every clip before a
+    /// start together, the gaps between them kept, and so stops as soon as the first of them is
+    /// on the first frame.) Returns the earliest frame the start can go to now: `to`, or later
+    /// where the clips before it have no more room; its own start, when asked for no earlier.
+    pub fn close_up_before(&mut self, id: ClipId, to: u32) -> Option<u32> {
+        let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
+        let track = level.get_mut(t)?;
+        // packed from the first frame, the clips before it take this many
+        let taken: u32 = track.clips[..c].iter().map(|x| x.duration).sum();
+        let to = to.max(taken).min(track.clips[c].start);
+        // each ends no later than where the one after it now starts
+        let mut next = to;
+        for x in track.clips[..c].iter_mut().rev() {
+            if x.end() > next {
+                x.start = next - x.duration;
+            }
+            next = x.start;
+        }
+        Some(to)
+    }
+
     /// Clips `ids` each made to last through the empty frames after it on its track: up to the
     /// next clip there or, with none after it, to the end of the timeline it is on (the
     /// document's; a group's own, which is as long as the group lasts, or as one cycle of it). Its
@@ -270,7 +347,7 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, clips }
+        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
     }
 
     fn timeline(tracks: Vec<Track>) -> Timeline {
@@ -463,5 +540,79 @@ mod tests {
         assert!(tl.trim(ClipId(10), Edge::End, 9, EdgePolicy::Clamp));
         assert_eq!(spans(&tl), [(4, 13)]);
         assert_eq!(tl.duration, 13);
+    }
+    #[test]
+    fn room_is_made_before_a_clip_by_closing_the_gaps_nearest_it_first() {
+        let spans = |tl: &Timeline| tl.tracks[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>();
+        let made = || timeline(vec![track(1, vec![drawing(1, 1, 2), drawing(2, 5, 1), drawing(3, 8, 2), drawing(4, 10, 1)])]);
+        // a frame of room wanted before the clip at 8: the gap just before it has two
+        let mut tl = made();
+        assert_eq!(tl.close_up_before(ClipId(3), 7), Some(7));
+        assert_eq!(spans(&tl), [(1, 2), (5, 1), (8, 2), (10, 1)]);
+        // four wanted: the clip before it goes back past its own gap, the first stays
+        let mut tl = made();
+        assert_eq!(tl.close_up_before(ClipId(3), 4), Some(4));
+        assert_eq!(spans(&tl), [(1, 2), (3, 1), (8, 2), (10, 1)]);
+        // more than there is: the clips before it packed from the first frame, and no further
+        let mut tl = made();
+        assert_eq!(tl.close_up_before(ClipId(3), 0), Some(3));
+        assert_eq!(spans(&tl), [(0, 2), (2, 1), (8, 2), (10, 1)]);
+        assert_eq!(tl.close_up_before(ClipId(3), 0), Some(3), "nothing more to close up");
+        // asked for no earlier than it starts, nothing moves; a clip that isn't there
+        let mut tl = made();
+        assert_eq!(tl.close_up_before(ClipId(3), 9), Some(8));
+        assert_eq!(spans(&tl), [(1, 2), (5, 1), (8, 2), (10, 1)]);
+        assert_eq!(tl.close_up_before(ClipId(99), 0), None);
+    }
+
+    #[test]
+    fn room_is_made_after_a_clip_by_taking_up_the_gaps_nearest_it_first() {
+        let spans = |tl: &Timeline| tl.tracks[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>();
+        let made = || timeline(vec![track(1, vec![drawing(1, 0, 2), drawing(2, 4, 1), drawing(3, 5, 2), drawing(4, 10, 1)])]);
+        // two frames more: the gap after it has them, and nothing moves
+        let mut tl = made();
+        assert_eq!(tl.open_up_after(ClipId(1), 4), Some(4));
+        assert_eq!(spans(&tl), [(0, 2), (4, 1), (5, 2), (10, 1)]);
+        // four more: the two clips it reaches go two later, into the gap after them; the last stays
+        let mut tl = made();
+        assert_eq!(tl.open_up_after(ClipId(1), 6), Some(6));
+        assert_eq!(spans(&tl), [(0, 2), (6, 1), (7, 2), (10, 1)]);
+        // more than every gap: all of them pushed, each just past the one before
+        let mut tl = made();
+        assert_eq!(tl.open_up_after(ClipId(1), 9), Some(9));
+        assert_eq!(spans(&tl), [(0, 2), (9, 1), (10, 2), (12, 1)]);
+        // asked for no later than it ends, nothing moves
+        let mut tl = made();
+        assert_eq!(tl.open_up_after(ClipId(1), 1), Some(2));
+        assert_eq!(spans(&tl), [(0, 2), (4, 1), (5, 2), (10, 1)]);
+        assert_eq!(tl.open_up_after(ClipId(99), 5), None);
+    }
+
+    #[test]
+    fn a_run_of_empty_frames_is_made_longer_or_shorter_or_closed() {
+        let spans = |tl: &Timeline| tl.tracks[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>();
+        let mut tl = timeline(vec![track(1, vec![drawing(1, 2, 1), drawing(2, 6, 2), drawing(3, 9, 1)])]);
+        // the frames before the first clip, between two, and after the last
+        assert_eq!(tl.gap_at(TrackId(1), 0), Some((0, Some(2))));
+        assert_eq!(tl.gap_at(TrackId(1), 4), Some((3, Some(3))));
+        assert_eq!(tl.gap_at(TrackId(1), 8), Some((8, Some(1))));
+        assert_eq!(tl.gap_at(TrackId(1), 30), Some((10, None)), "no clip after it: it has no end");
+        assert_eq!(tl.gap_at(TrackId(1), 6), None, "a clip is there");
+        // one frame shorter: every clip after it a frame earlier, those before it as they were
+        assert!(tl.set_gap(TrackId(1), 4, 2));
+        assert_eq!(spans(&tl), [(2, 1), (5, 2), (8, 1)]);
+        assert!(!tl.set_gap(TrackId(1), 4, 2), "already");
+        // longer
+        assert!(tl.set_gap(TrackId(1), 3, 5));
+        assert_eq!(spans(&tl), [(2, 1), (8, 2), (11, 1)]);
+        // closed
+        assert!(tl.set_gap(TrackId(1), 5, 0));
+        assert_eq!(spans(&tl), [(2, 1), (3, 2), (6, 1)]);
+        assert!(tl.set_gap(TrackId(1), 0, 0));
+        assert_eq!(spans(&tl), [(0, 1), (1, 2), (4, 1)]);
+        // nothing after it to move, a frame with a clip on it, a track that isn't there
+        assert!(!tl.set_gap(TrackId(1), 20, 3));
+        assert!(!tl.set_gap(TrackId(1), 1, 3));
+        assert!(!tl.set_gap(TrackId(9), 0, 3));
     }
 }

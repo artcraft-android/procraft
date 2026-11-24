@@ -40,6 +40,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
@@ -301,7 +302,7 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
             ToolbarButton(PcIcons.FlipVertical, "Flip Vertical", width = w, iconSize = 50.dp) { vm.transformAction(TransformAction.FLIP_VERTICAL) }
             ToolbarButton(PcIcons.Rotate45, "Rotate 45°", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.ROTATE45) }
             ToolbarButton(PcIcons.FitToCanvas, "Fit to Canvas", width = w, iconSize = 35.dp) { vm.transformAction(TransformAction.FIT_TO_CANVAS) }
-            ToolbarButton(PcIcons.Interpolation, interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
+            ToolbarButton(PcIcons.Interpolation, if (vm.transformPixelated) "Pixelated" else interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
                 vm.transformPopup = if (popup == TransformPopup.INTERPOLATION) TransformPopup.NONE else TransformPopup.INTERPOLATION
             }
             ToolbarButton(PcIcons.TransformReset, "Reset", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.RESET) }
@@ -567,10 +568,17 @@ private fun InterpolationMenu(vm: CanvasViewModel) {
                     .padding(start = 11.dp, end = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                MenuLabel(interpolationName(kind, short = false), if (selected) Color.White else MenuText, Modifier.weight(1f))
-                if (selected) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp))
+                // Pixelated blends nothing, whichever is chosen
+                val dim = Modifier.alpha(if (vm.transformPixelated) 0.45f else 1f)
+                MenuLabel(interpolationName(kind, short = false), if (selected) Color.White else MenuText, Modifier.weight(1f).then(dim))
+                if (selected) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp).then(dim))
             }
         }
+    }
+    Spacer(Modifier.height(10.dp))
+    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+        SwitchRow("Pixelated", vm.transformPixelated) { vm.toggleTransformPixelated() }
     }
 }
 

@@ -4,7 +4,6 @@
 use std::path::Path;
 
 use super::key_lanes::TimelineKeyLane;
-use super::menus::TimelineLoop;
 use super::panel::TimelinePanel;
 use super::tests_1g::three_drawings;
 use super::{TimelineChannel, TimelineClipKind, TimelineEasing};
@@ -25,8 +24,6 @@ fn busy() -> Option<std::sync::Arc<CanvasSession>> {
     assert_ne!(s.group_timeline_clips(clips[1..].to_vec()), 0);
     s.set_timeline_frame(1);
     assert!(s.set_timeline_camera_key(20.0, 20.0, 1.2, 0.0, TimelineEasing::Smooth, true));
-    assert!(s.add_timeline_marker(2));
-    assert!(s.set_timeline_loop(Some(TimelineLoop { start: 0, end: 4 })));
     // the sound starts at the playhead
     s.set_timeline_frame(0);
     let dir = std::env::temp_dir().join(format!("procraft-panel-test-{}", std::process::id()));
@@ -44,6 +41,8 @@ fn busy() -> Option<std::sync::Arc<CanvasSession>> {
             width: 0,
             height: 0,
             peaks: vec![],
+            sound_path: None,
+            sound_seconds: 0.0,
         })
         .unwrap();
     for (f, v) in [(0, 0.2), (3, 1.0)] {
@@ -87,12 +86,11 @@ fn one_at_a_time(s: &CanvasSession) -> TimelinePanel {
         keys,
         camera: s.timeline_camera(),
         camera_keys: s.timeline_camera_keys(),
-        markers: s.timeline_markers(),
         clipboard: s.timeline_clipboard(),
-        loop_frames: s.timeline_loop(),
         onion: s.timeline_onion(),
         camera_lane: s.timeline_lane_keys(TimelineKeyLane::Camera),
         volumes,
+        groups: Vec::new(),
         pictures: Vec::new(),
     }
 }
@@ -100,6 +98,7 @@ fn one_at_a_time(s: &CanvasSession) -> TimelinePanel {
 /// The reading without its number and pictures, to set beside `one_at_a_time`'s.
 fn without_pictures(mut p: TimelinePanel) -> TimelinePanel {
     p.generation = 0;
+    p.groups = Vec::new();
     p.pictures = Vec::new();
     p
 }
@@ -119,8 +118,6 @@ fn the_reading_is_what_the_calls_one_at_a_time_give() {
     assert_eq!(p.keys.len(), 1);
     assert_eq!(p.volumes.len(), 1);
     assert_eq!(p.camera_lane.len(), 1);
-    assert_eq!(p.markers, [2]);
-    assert_eq!(p.loop_frames, Some(TimelineLoop { start: 0, end: 4 }));
     assert_eq!(without_pictures(p.clone()), before);
     // each drawing once, in the rows' order: the first and the two inside the group (a group clip
     // has no drawing of its own)

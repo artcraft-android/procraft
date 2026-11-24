@@ -139,6 +139,8 @@ impl State {
         } else {
             self.crisp_frame(size, screen)
         };
+        // (a lasso's fill shown as it is drawn shows there too)
+        self.crisp_lasso();
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
@@ -224,7 +226,8 @@ impl State {
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
             let busy = canvas.busy();
-            if canvas.wants_render() {
+            // (a video's picture being read off this thread shows on the frame after it comes)
+            if canvas.wants_render() || canvas.videos_pending() {
                 self.needs_frame = true;
             } else if animating {
                 self.frame_due = Some(self.stripes_due());

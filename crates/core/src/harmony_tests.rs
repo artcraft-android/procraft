@@ -192,6 +192,8 @@ fn import(s: &CanvasSession, path: &Path, name: &str, seconds: f64) -> u64 {
         width: 0,
         height: 0,
         peaks: Vec::new(),
+        sound_path: None,
+        sound_seconds: 0.0,
     })
     .unwrap()
 }

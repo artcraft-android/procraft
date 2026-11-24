@@ -1,6 +1,6 @@
 //! The timeline panel's clip and track pages through the session: each change one undo step.
 
-use super::menus::{TimelineLoop, TimelineOnion};
+use super::menus::TimelineOnion;
 use super::tests_1g::{played, three_drawings};
 use crate::CanvasSession;
 
@@ -109,17 +109,11 @@ fn playing_goes_round_the_looped_frames() {
         onion_frames: info.onion_frames,
         onion_opacity: info.onion_opacity,
     });
-    assert!(s.set_timeline_loop(Some(TimelineLoop { start: 2, end: 5 })));
-    assert_eq!(s.timeline_loop(), Some(TimelineLoop { start: 2, end: 5 }));
-    assert!(!s.set_timeline_loop(Some(TimelineLoop { start: 2, end: 5 })));
-    let step = |at| s.timeline_next_step(at, 1).map(|p| p.at);
-    assert_eq!([step(0), step(2), step(4)], [Some(2), Some(3), Some(2)]);
-    assert!(s.set_timeline_loop(Some(TimelineLoop { start: 9, end: 40 })));
-    assert_eq!(s.timeline_loop(), Some(TimelineLoop { start: 9, end: 12 }), "kept within the timeline");
-    assert!(s.undo().is_some());
-    assert!(s.set_timeline_loop(None));
-    assert_eq!(s.timeline_loop(), None);
-    assert_eq!(step(11), Some(0));
+    // round the frames a panel shows, and round the whole timeline
+    let within = |at| s.timeline_next_step_within(at, 1, 2, 5).map(|p| p.at);
+    assert_eq!([within(0), within(2), within(4)], [Some(2), Some(3), Some(2)]);
+    assert_eq!(s.timeline_next_step_within(11, 1, 9, 40).map(|p| p.at), Some(9), "kept within the timeline");
+    assert_eq!(s.timeline_next_step(11, 1).map(|p| p.at), Some(0));
 }
 
 /// The frame as it shows while drawing at `frame`: onion skins and all.

@@ -3,8 +3,10 @@ import SwiftUI
 // Autokey (a keyframe mode): with it on, the transform tool on a timeline moves, scales and
 // turns the drawing at the playhead by keying its clip's pose there, rather than moving its pixels
 // (the core's `timeline::autokey`). A group or video clip picked in the panel, playing at the
-// playhead, is keyed in its place, and the clip page's opacity keys the clip's opacity at the
-// playhead. Turned on from the full view's header, it opens the transform tool; while the
+// playhead, is keyed in its place (as is one on the chosen track there, picked or not), and the
+// clip page's opacity keys the clip's opacity at the playhead. A video on the chosen track is
+// posed by the transform tool with autokey off too, for its whole length (it has no pixels of
+// the canvas's to move): a badge says so. Turned on from the full view's header, it opens the transform tool; while the
 // transform keys, a badge over the canvas says which frame it keys, and tapped turns autokey off
 // (the transform's toolbar stands over the header then).
 
@@ -66,12 +68,6 @@ extension TimelineTool {
         canvasModel.session.setTimelineAutokeyEasing(easing: keyEasing)
     }
 
-    /// Clip `id`'s opacity as its slider shows it: keyed at the playhead while autokey is on, its
-    /// own otherwise.
-    func opacityShown(_ clip: TimelineClipInfo) -> Float {
-        autokey ? canvasModel.session.timelineClipOpacityHere(id: clip.id) : clip.opacity
-    }
-
     /// With autokey on, clip `id`'s opacity keyed at the playhead (one "Key Opacity" step when
     /// `done`). False when autokey is off, and the opacity is the clip's own to set.
     func autokeyOpacity(_ id: UInt64, _ opacity: Float, done: Bool) -> Bool {
@@ -84,21 +80,6 @@ extension TimelineTool {
             canvasModel.refresh()
         }
         return true
-    }
-}
-
-/// The header's Autokey: red, a dot before it, while on.
-struct AutokeyWord: View {
-    let model: CanvasModel
-
-    var body: some View {
-        let on = model.timeline.autokey
-        HStack(spacing: 6) {
-            if on {
-                Circle().fill(autokeyRed).frame(width: 8, height: 8)
-            }
-            BarWord(label: "Autokey", bold: on, tint: on ? autokeyRed : nil) { model.setAutokey(!on) }
-        }
     }
 }
 
@@ -127,6 +108,17 @@ struct AutokeyBadge: View {
             .onTapGesture { model.setAutokey(false) }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .offset(y: Pc.barHeight + 10)
+        } else if model.transform.box != nil, model.session.timelineAutokeyPosing() {
+            // a video placed with autokey off: where it is put holds for its whole length
+            Text(verbatim: "Placing the video for its whole length")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background(Capsule().fill(Color(argb: 0xE63A_3A3C)))
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .offset(y: Pc.barHeight + 10)
         }
     }
 }

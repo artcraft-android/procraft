@@ -70,9 +70,21 @@ final class StudioModel {
     @ObservationIgnored var brandNew = false
     @ObservationIgnored private var previewJob: DispatchWorkItem?
 
+    /// The brush is a dual brush, and its second part shows.
+    private(set) var isDual = false
+    private(set) var showsSecond = false
+    /// Its two parts' sample strokes, and how they combine (a mode of `combineModes`).
+    private(set) var parts: [UIImage?] = [nil, nil]
+    private(set) var combineMode = 0
+    /// The page the part not shown was left on.
+    @ObservationIgnored private var otherPartTab = 0
+    @ObservationIgnored private var partsJob: DispatchWorkItem?
+
     /// The modes a brush and its burnt edges blend by, and those a brush's grain does.
     @ObservationIgnored let brushModes = brushBlendModes()
     @ObservationIgnored let grainModes = grainBlendModes()
+    /// The modes a dual brush's two parts combine by.
+    @ObservationIgnored let combineModes = combineBlendModes()
 
     init(model: CanvasModel) {
         self.model = model
@@ -91,6 +103,11 @@ final class StudioModel {
             model.closePanels()
         }
         name = session.studioBegin()
+        isDual = session.studioIsDual()
+        showsSecond = false
+        otherPartTab = 0
+        parts = [nil, nil]
+        combineMode = Int(session.studioCombineMode())
         // each visit's pad paints in white, black with the light interface
         padColor = AppSettings.shared.lightInterface ? padBlack : padWhite
         read()
@@ -219,8 +236,68 @@ final class StudioModel {
         )
     }
 
+    // MARK: a dual brush's parts
+
+    /// Shows a dual brush's first or `second` part, each on the page it was left on.
+    func showPart(second: Bool) {
+        guard isDual, second != showsSecond else { return }
+        showsSecond = second
+        session.studioShowSecond(second: second)
+        let settings = AppSettings.shared
+        let left = settings.studioTab
+        settings.studioTab = otherPartTab
+        otherPartTab = left
+        read()
+    }
+
+    func changeCombineMode(_ mode: Int) {
+        session.setStudioCombineMode(mode: UInt32(mode))
+        combineMode = mode
+        refreshPreview()
+        syncPad()
+    }
+
+    /// Asks first, then parts the dual brush into its two brushes: the studio closes keeping its
+    /// edits, and the second follows the first in the set.
+    func askUncombine() {
+        model.question = Question(
+            title: "Uncombine these brushes?",
+            message: "The pair becomes two brushes again, side by side in the set. It can't be undone.",
+            action: "Uncombine", icon: PcIcons.alertQuestion, destructive: false
+        ) { [weak self] in self?.uncombine() }
+    }
+
+    private func uncombine() {
+        guard let b = model.currentBrush else { return }
+        close(keep: true)
+        if session.uncombineBrush(set: b.set, index: b.index) {
+            model.libraryChanged()
+        }
+    }
+
+    /// Draws the parts' sample strokes again, a moment after the last change.
+    private func refreshParts() {
+        guard isDual else { return }
+        partsJob?.cancel()
+        let session = session
+        let job = DispatchWorkItem { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let made = [false, true].map { second in
+                    session.studioPartPreview(second: second, width: 680, height: 222).flatMap { CanvasModel.image($0) }
+                }
+                DispatchQueue.main.async {
+                    guard let self, self.isOpen else { return }
+                    self.parts = made
+                }
+            }
+        }
+        partsJob = job
+        DispatchQueue.main.asyncAfter(deadline: .now() + previewDelay, execute: job)
+    }
+
     /// Draws the brush's sample stroke again, a moment after the last change.
     private func refreshPreview() {
+        refreshParts()
         guard let b = model.currentBrush else { return }
         previewJob?.cancel()
         let session = session

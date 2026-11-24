@@ -44,6 +44,8 @@ fn point(k: usize, pace: f32) -> PenSample {
 fn shown_to(s: &CanvasSession) -> f32 {
     let mut guard = s.shared.lock();
     let st = &mut *guard;
+    // (as a frame does: what runs ahead of the stroke drawn if no prediction drew it)
+    st.draw_ahead();
     let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
     canvas.render(gpu, &mut st.doc, None);
     let px = canvas.read_composite(gpu).unwrap();
@@ -51,7 +53,8 @@ fn shown_to(s: &CanvasSession) -> f32 {
     for x in (0..w).rev() {
         for y in 0..w {
             let i = (y * w + x) * 4;
-            if px[i..i + 3].iter().any(|&c| c < 250) {
+            // (the faintest paint counts: a grainy brush's leading edge is thin)
+            if px[i..i + 3].iter().any(|&c| c < 255) {
                 return x as f32;
             }
         }
@@ -204,11 +207,7 @@ fn choose_dual(s: &CanvasSession, first: &str, second: &str, mode: u32) {
     s.set_brush_opacity(1.0);
 }
 
-// (not so since the merge with upstream's wet paint, laid in windows: paint laid in place is no
-// longer shown ahead of what is laid, so a wet dual brush trails the pen by its second's
-// streamline again. Kept for when showing ahead is built on the new wet paint.)
 #[test]
-#[ignore = "wet paint shown ahead to the pen did not carry over the upstream merge"]
 fn a_wet_dual_brush_shows_up_to_the_pen_as_it_is_drawn() {
     let Some(s) = session() else { return };
     s.set_color(0.0, 0.0, 0.0);

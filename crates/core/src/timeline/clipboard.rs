@@ -357,7 +357,10 @@ impl State {
 fn media_of(clip: &Clip, out: &mut Vec<procraft_engine::timeline::MediaId>) {
     match &clip.content {
         ClipContent::Audio(a) => out.push(a.media),
-        ClipContent::Video(v) => out.push(v.media),
+        ClipContent::Video(v) => {
+            out.push(v.media);
+            out.extend(v.sound.map(|s| s.media));
+        }
         ClipContent::Group(g) => g.tracks.iter().flat_map(|t| &t.clips).for_each(|c| media_of(c, out)),
         ClipContent::Drawing(_) => {}
     }

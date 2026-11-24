@@ -15,8 +15,8 @@ options:
 settings:
   base:
     # build-ipa.sh sets these from android/gradle.properties
-    MARKETING_VERSION: "0.0.3"
-    CURRENT_PROJECT_VERSION: "301"
+    MARKETING_VERSION: "0.0.7"
+    CURRENT_PROJECT_VERSION: "701"
 targets:
   ProCraft:
     type: application
@@ -45,6 +45,13 @@ targets:
       # the app's picture, for About
       - path: ../android/app/src/main/res/drawable-nodpi/procraft_mark.png
         buildPhase: resources
+    # what more the system lets the app do, written by XcodeGen like the Info.plist
+    entitlements:
+      path: Generated/ProCraft.entitlements
+      properties:
+        # the memory an iPad with more of it lets an app use, not the usual share (the layers'
+        # budget is half of it: on a 16 GB iPad, several times the layers)
+        com.apple.developer.kernel.increased-memory-limit: true
     preBuildScripts:
       - name: The core and its bindings (Rust)
         script: bash "$PROJECT_DIR/build-rust.sh"

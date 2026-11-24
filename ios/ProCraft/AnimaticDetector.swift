@@ -128,12 +128,22 @@ struct AnimaticSheet: View {
     @State private var picture: UIImage?
     @State private var reading: Task<Void, Never>?
 
+    @State private var refused: String?
+
     private var holds: [AnimaticHold] {
         animaticHolds(scores: scores, sensitivity: Float(sensitivity), minimumHold: UInt32(shortest))
     }
 
+    /// How many more layers the canvas has room for: each drawing of the track takes one.
+    private var layersLeft: Int {
+        let stats = model.session.layerStats()
+        return Int(stats.maximum) - Int(stats.used)
+    }
+
     var body: some View {
         let holds = holds
+        let left = layersLeft
+        let fits = holds.count <= left
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Button("Cancel") { dismiss() }
@@ -142,7 +152,9 @@ struct AnimaticSheet: View {
                 Spacer()
                 Button("Make Track") { make(holds) }
                     .fontWeight(.semibold)
-                    .disabled(holds.isEmpty)
+                    .disabled(holds.isEmpty || !fits)
+                    // (the header's colour would hide that it is off)
+                    .opacity(holds.isEmpty || !fits ? 0.4 : 1)
             }
             .foregroundStyle(Pc.panelTitle)
             .padding(.bottom, 4)
@@ -168,6 +180,13 @@ struct AnimaticSheet: View {
                 Text(verbatim: summary(holds))
                     .font(.system(size: 15).monospacedDigit())
                     .foregroundStyle(Pc.slideLabel)
+                // each drawing takes a layer: say so before Make Track can't
+                if let line = refused ?? (fits ? nil : tooMany(holds.count, left: left)) {
+                    Text(verbatim: line)
+                        .font(.system(size: 15))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ChangeGraph(scores: scores, threshold: animaticThreshold(sensitivity: Float(sensitivity)),
                             cuts: holds.dropFirst().map { Int($0.start) }, at: at) { frame in
                     at = frame
@@ -187,6 +206,8 @@ struct AnimaticSheet: View {
         .background(Pc.popoverFill)
         .presentationDetents([.large])
         .onAppear(perform: start)
+        .onChange(of: sensitivity) { refused = nil }
+        .onChange(of: shortest) { refused = nil }
         .onDisappear { reading?.cancel() }
     }
 
@@ -232,10 +253,20 @@ struct AnimaticSheet: View {
         }
     }
 
+    /// Why `count` drawings can't be made with room for `left` more layers, and what to change.
+    private func tooMany(_ count: Int, left: Int) -> String {
+        let room = left <= 0 ? "no room for more layers" : "room for \(left) more \(left == 1 ? "layer" : "layers")"
+        return "\(count) drawings take a layer each, and this canvas has \(room). Lower the sensitivity or lengthen the shortest hold."
+    }
+
     private func make(_ holds: [AnimaticHold]) {
-        if model.session.makeTimingTrack(id: clip, holds: holds) != 0 {
-            model.refresh()
+        guard model.session.makeTimingTrack(id: clip, holds: holds) != 0 else {
+            // stays open, saying why, rather than closing on nothing
+            refused = holds.count > layersLeft ? tooMany(holds.count, left: layersLeft) : "The timing track couldn't be made."
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            return
         }
+        model.refresh()
         dismiss()
     }
 }

@@ -79,7 +79,6 @@ fn a_cut_drawing_pastes_back_as_it_was_though_its_undo_step_is_gone() {
     assert_ne!(played(&s, 1), green);
     // nothing in the history keeps the cut drawing's pixels now: only the clipboard does
     s.shared.lock().canvas.as_mut().unwrap().forget_history();
-    assert!(s.add_timeline_marker(0));
     let _ = played(&s, 0);
     s.set_timeline_frame(1);
     let pasted = s.paste_timeline_clips();
@@ -156,32 +155,14 @@ fn keys_copy_and_paste_onto_the_clip_at_the_playhead() {
 fn retiming_keeps_the_timing_and_the_playhead() {
     let Some(s) = three_drawings() else { return };
     let fps = s.timeline_info().unwrap().fps;
-    assert!(s.add_timeline_marker(2));
     s.set_timeline_frame(1);
     assert!(s.retime_timeline(fps * 2));
     assert!(!s.retime_timeline(fps * 2));
     let info = s.timeline_info().unwrap();
     assert_eq!((info.fps, info.duration, info.frame), (fps * 2, 6, 2));
     assert_eq!(spans(&s, 0), [(0, 2), (2, 2), (4, 2)]);
-    assert_eq!(s.timeline_markers(), [4]);
     assert_eq!(s.undo().as_deref(), Some("Change Frame Rate"));
     assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1)]);
-}
-
-#[test]
-fn markers_are_dropped_moved_and_taken_away_as_undo_steps() {
-    let Some(s) = three_drawings() else { return };
-    assert!(s.add_timeline_marker(1));
-    assert!(!s.add_timeline_marker(1));
-    assert!(s.add_timeline_marker(0));
-    assert_eq!(s.timeline_markers(), [0, 1]);
-    assert!(s.move_timeline_marker(1, 2));
-    assert!(s.remove_timeline_marker(0));
-    assert_eq!(s.timeline_markers(), [2]);
-    assert_eq!(s.undo().as_deref(), Some("Remove Marker"));
-    assert!(s.clear_timeline_markers());
-    assert!(!s.clear_timeline_markers());
-    assert!(s.timeline_markers().is_empty());
 }
 
 #[test]

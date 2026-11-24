@@ -305,3 +305,45 @@ fn repairing_keeps_media_values_in_range_and_unused_media_can_go() {
     tl.prune_media();
     assert_eq!(tl.media.iter().map(|m| m.id.0).collect::<Vec<_>>(), vec![1, 2]);
 }
+
+#[test]
+fn a_video_plays_its_own_sound_until_it_is_taken_out_as_a_sound_of_its_own() {
+    let mut tl = Timeline::new(10, 100);
+    tl.add_media(video(1, 6.0, [640, 360]));
+    tl.add_media(sound(2, 6.0));
+    let (track, clip) = tl.add_video(MediaId(1), 20, (640, 360)).unwrap();
+    assert!(tl.sounds().is_empty(), "a video has no sound until it is given its file's");
+    assert!(!tl.set_video_sound(clip, MediaId(1)), "a video is no sound");
+    assert!(tl.set_video_sound(clip, MediaId(2)));
+    assert!(tl.used_media().contains(&MediaId(2)));
+
+    // in step with the picture: from frame 20, two seconds in once its start is trimmed that far
+    assert!(tl.trim(clip, Edge::Start, 40, EdgePolicy::Clamp));
+    let s = &tl.sounds()[0];
+    assert_eq!((s.clip, s.media, s.at, s.from, s.length), (clip, MediaId(2), 4.0, 2.0, 4.0));
+    assert!((s.volume - 1.0).abs() < 1e-6 && !s.muted);
+    assert!(tl.set_video_volume(clip, 0.5, true));
+    assert!(!tl.set_video_volume(clip, 0.5, true), "already");
+    assert!(tl.sounds()[0].muted && tl.sounds()[0].gain_at(45) == 0.0);
+    assert!(tl.set_video_volume(clip, 0.5, false));
+
+    // taken out: a sound clip over the same frames on a track just above, the video silent
+    let audio = tl.separate_audio(clip).unwrap();
+    assert_eq!(tl.tracks.len(), 2);
+    assert_eq!(tl.tracks[0].id, track);
+    assert_eq!(tl.track_of_clip(audio), Some(tl.tracks[1].id));
+    let a = audio_of(&tl, audio);
+    assert_eq!((a.media, a.trim_start, a.volume, a.muted), (MediaId(2), 2.0, 0.5, false));
+    let c = tl.clip(audio).unwrap();
+    assert_eq!((c.start, c.duration), (40, 40));
+    let sounds = tl.sounds();
+    assert_eq!(sounds.len(), 1, "it plays once, as the sound clip");
+    assert_eq!((sounds[0].clip, sounds[0].at, sounds[0].from, sounds[0].length), (audio, 4.0, 2.0, 4.0));
+    assert!(tl.separate_audio(clip).is_none(), "nothing left to take out");
+    assert!(tl.separate_audio(audio).is_none(), "not a video");
+
+    // a video written before videos had sound reads with none
+    let json = serde_json::to_value(&tl).unwrap().to_string().replace(",\"sound\":null", "");
+    let old: Timeline = serde_json::from_str(&json).unwrap();
+    assert!(matches!(&old.clip(clip).unwrap().content, ClipContent::Video(v) if v.sound.is_none()));
+}

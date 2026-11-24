@@ -11,7 +11,6 @@ enum MediaDebug {
 
     static func open(_ name: String, in model: CanvasModel) {
         model.timeline.setOn(true)
-        model.timeline.setSimple(false)
         Task { @MainActor in
             let video = name == "timeline-video" || name == "timeline-animatic"
             guard let url = video ? animatic() : beeps(),
@@ -24,7 +23,6 @@ enum MediaDebug {
             case "timeline-video":
                 model.timeline.goTo(9)
                 model.timeline.picked = clip
-                model.timeline.clipOpen = true
             case "timeline-animatic":
                 model.media.detecting = clip
             case "timeline-sound-trim":
@@ -34,19 +32,19 @@ enum MediaDebug {
                 else { return }
                 model.refresh()
                 let gap = Int(first.start + first.duration) + 6
-                model.timeline.move(again, to: track.id, start: gap)
+                model.timeline.drop(again, on: track.id, start: gap, later: true)
                 let fps = Double(max(model.session.timelineInfo()?.fps ?? 12, 1))
                 _ = model.session.slipTimelineMedia(id: again, trimStart: 10 / fps, done: true)
                 model.refresh()
                 model.timeline.picked = again
             default:
-                model.timeline.clipOpen = true
+                break
             }
         }
     }
 
     /// Two seconds of beeps getting louder, as a WAV.
-    private static func beeps() -> URL? {
+    static func beeps() -> URL? {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Beeps.wav")
         try? FileManager.default.removeItem(at: url)
         let rate = 44100.0

@@ -68,10 +68,11 @@ struct CanvasScreen: View {
                 if model.selecting || (model.lassoToolOn && model.lassoPreviewOnScreen) {
                     SelectionOverlay(model: model)
                 }
-                // the picked clip's motion path and the camera's frame, over the canvas but under the
+                // the motion path of the block under the playhead, over the canvas but under the
                 // bars and the timeline's panels (beside the vector nodes in what they are)
                 MotionPathOverlay(model: model)
-                CameraFrameOverlay(model: model)
+                // a move about to be performed takes the next touch on the canvas
+                GridPerformOverlay(model: model)
                 ColorDropBand(drop: model.drop, width: screen.size.width)
                 EraserBand(model: model, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade
@@ -153,6 +154,8 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.adjusting, model.adjustment != .liquify, !hidden {
                         AdjustmentPanel(model: model, screen: screen.size)
+                            // (over the timeline's bar, not on it)
+                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
                             .transition(.move(edge: .bottom))
                     }
                 }
@@ -161,6 +164,8 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.transforming, !hidden {
                         TransformToolbar(model: model, screenWidth: screen.size.width)
+                            // (over the timeline's bar, not on it)
+                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
                             .transition(.move(edge: .bottom))
                     }
                 }
@@ -173,6 +178,7 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.selecting, !hidden {
                         SelectionToolbar(model: model, screenWidth: screen.size.width)
+                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
                             .transition(.move(edge: .bottom))
                     }
                 }
@@ -575,6 +581,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             }
         }
         canvas.afterTouches = { [weak self] ended in self?.model.layerOpacityTouched(ended: ended) }
+        // no brush outline under the hovering Pencil while a selection or a transform is open
+        canvas.cursorStaysAway = { [weak self] in self?.model.selecting == true || self?.model.transforming == true }
         canvas.onLoneFinger = { [weak self] in self?.model.loneFinger($0) }
         let pencil = UIPencilInteraction()
         pencil.delegate = self
@@ -852,11 +860,13 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             return
         }
         canvas.pencilDoubleTapped(at: nil, action: UIPencilInteraction.preferredTapAction)
+        model.penGestureDone()
     }
 
     @available(iOS 17.5, *)
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
         canvas.pencilDoubleTapped(at: tap.hoverPose?.location, action: UIPencilInteraction.preferredTapAction)
+        model.penGestureDone()
     }
 
     @available(iOS 17.5, *)
@@ -869,5 +879,6 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             model.closePopovers()
         }
         canvas.pencilSqueezed(squeeze, action: action)
+        model.penGestureDone()
     }
 }

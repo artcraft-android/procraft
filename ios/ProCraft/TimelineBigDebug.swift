@@ -19,7 +19,6 @@ enum TimelineBigDebug {
     private static func build(_ model: CanvasModel) {
         let s = model.session
         model.timeline.setOn(true)
-        model.timeline.setSimple(false)
         var made = 0
         building: for t in 0 ..< 20 {
             if t > 0 {

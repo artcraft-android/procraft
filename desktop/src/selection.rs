@@ -61,6 +61,10 @@ pub struct Selection {
     pub lasso_fills: bool,
     /// Color Fill's Opacity (kept in the preferences), 0..1.
     pub fill_opacity: f32,
+    /// Pixelated, for pixel art (in Feather's popover, kept in the preferences): the shapes drawn
+    /// to select with have their points on whole pixels and take whole pixels only. (Paint's and
+    /// Eraser's lassos go by their brush's Pixelated.)
+    pub pixelated: bool,
     /// How many buttons the toolbar has, for where a popover points.
     buttons: usize,
     feather: f32,
@@ -102,6 +106,7 @@ impl Default for Selection {
             lasso_fill: false,
             lasso_fills: false,
             fill_opacity: 1.0,
+            pixelated: false,
             buttons: 8,
             feather: 0.0,
             popup: Popup::None,
@@ -257,7 +262,8 @@ impl Selection {
             Button::new(&icons::SELECT_REMOVE, "Remove", 44.0).active(joins && self.removes).enabled(joins),
             Button::new(&icons::INVERT, "Invert", 44.0).enabled(has),
             Button::new(&icons::SELECT_COPY_PASTE, "Copy & Paste", 44.0).enabled(has || drawing),
-            Button::new(&icons::FEATHER, "Feather", 44.0).active(self.popup == Popup::Feather).enabled(has || drawing),
+            // always there to tap: its Pixelated is for the shapes yet to be drawn
+            Button::new(&icons::FEATHER, "Feather", 44.0).active(self.popup == Popup::Feather),
             Button::new(&icons::SAVE_LOAD, "Save & Load", 44.0)
                 .active(self.popup == Popup::Saved)
                 .enabled(has || drawing),
@@ -363,7 +369,7 @@ impl Selection {
         let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, self.buttons);
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
         let height = match self.popup {
-            Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0,
+            Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0 + 10.0 + 49.0,
             // (Lasso Fill's row only with its plugin on)
             Popup::ColorFill => 40.0 + 4.0 + if self.lasso_fills { 49.0 + 10.0 } else { 0.0 } + 59.0 + 16.0,
             _ => 40.0 + 8.0 + 172.0,
@@ -383,9 +389,34 @@ impl Selection {
                 let shown =
                     if amount <= 0.0 { "None".to_owned() } else { format!("{}%", (amount * 100.0).round() as i32) };
                 let row = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
-                if let Some(v) = menu_slider(ui, row, "Amount", amount, &shown) {
-                    self.feather = v;
-                    session.select_feather(v);
+                // the amount softens what is selected: nothing to soften, it waits
+                let softens = self.has || !session.freehand_path().is_empty();
+                ui.scope(|ui| {
+                    if !softens {
+                        ui.set_opacity(0.4);
+                    }
+                    if let Some(v) = menu_slider(ui, row, "Amount", amount, &shown).filter(|_| softens) {
+                        self.feather = v;
+                        session.select_feather(v);
+                    }
+                });
+                // the other end of the same thing: no soft edge at all, for pixel art (shapes on
+                // whole pixels, taking whole pixels only)
+                let row = Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 49.0));
+                ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
+                text(
+                    ui.painter(),
+                    pos2(row.left() + 12.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    "Pixelated",
+                    16.0,
+                    Weight::Regular,
+                    argb(MENU_TEXT),
+                );
+                switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.pixelated, "Pixelated");
+                if ui.interact(row, ui.scope_id().with("pixelated"), Sense::click()).clicked() {
+                    self.pixelated = !self.pixelated;
+                    session.set_selection_pixelated(self.pixelated);
                 }
                 return;
             }

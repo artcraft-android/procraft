@@ -993,6 +993,7 @@ impl super::Smudge {
         tiles
             .chain(self.window.as_ref().map(|w| &w.before))
             .chain(self.passed.as_ref().map(|p| &p.0))
+            .chain(self.keep.textures())
             .chain(fragments)
             .collect()
     }

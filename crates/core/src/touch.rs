@@ -2824,6 +2824,9 @@ impl CanvasSession {
                 } else if grabbed {
                     out.push(TouchCommand::TransformMoved { transform: self.transform_release() });
                     out.push(TouchCommand::TransformLetGo { handle, x: at.0, y: at.1 });
+                } else if tapped && self.puppeting() {
+                    // a puppet's tap puts a pin, chooses one or takes the chosen one away
+                    out.push(TouchCommand::TransformMoved { transform: self.transform_puppet_tap(at.0, at.1) });
                 } else if tapped && handle == crate::TransformHandle::Move {
                     // a tap off the nodes nudges the content a pixel towards it
                     out.push(TouchCommand::TransformMoved { transform: self.transform_nudge(at.0, at.1) });
@@ -3156,6 +3159,15 @@ impl CanvasSession {
     /// What a transform's touch at `at` takes: a warp's shown control point, or the box's nearest
     /// node, else the content.
     fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
+        // a puppet's touches take its pins, their rings and its mesh, never the box
+        {
+            let st = self.shared.lock();
+            if st.transform_mode == procraft_engine::transform::TransformMode::Puppet
+                && st.transform.as_ref().is_some_and(procraft_engine::transform::Transform::has_puppet)
+            {
+                return st.puppet_handle_at(at);
+            }
+        }
         let (shown, view, density, warping) = {
             let st = self.shared.lock();
             let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
@@ -3170,6 +3182,13 @@ impl CanvasSession {
         }
         crate::screen_box(b.corners, view, density)
             .map_or(crate::TransformHandle::Move, |s| crate::handle_at(s, at.0, at.1, density))
+    }
+
+    /// Whether the open transform is a puppet's, its mesh laid.
+    fn puppeting(&self) -> bool {
+        let st = self.shared.lock();
+        st.transform_mode == procraft_engine::transform::TransformMode::Puppet
+            && st.transform.as_ref().is_some_and(procraft_engine::transform::Transform::has_puppet)
     }
 
     /// Typing a tapped node's numbers beside it: where the node is, and which side of the box.

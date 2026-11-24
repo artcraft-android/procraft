@@ -1,4 +1,4 @@
-//! Timeline step 1g: retiming, sync markers and the track clipboard.
+//! Timeline step 1g: retiming and the track clipboard.
 
 use std::collections::HashMap;
 
@@ -9,7 +9,7 @@ fn drawing(id: u64, start: u32, duration: u32, root: u64) -> Clip {
 }
 
 fn track(id: u64, clips: Vec<Clip>) -> Track {
-    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, clips }
+    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
 }
 
 fn spans(t: &Track) -> Vec<(u32, u32)> {
@@ -35,15 +35,13 @@ fn retiming_up_doubles_spans_and_keys() {
     keyed.keys.opacity.keys = vec![opacity_key(0, 0.0), opacity_key(1, 1.0)];
     let mut tl = timeline(vec![track(1, vec![drawing(1, 0, 1, 1), drawing(2, 1, 1, 2), keyed])]);
     tl.camera.keys = vec![Key { frame: 3, value: CameraPose::still(10.0, 10.0), easing: Easing::Linear, path: None }];
-    tl.markers = vec![1, 3];
-    tl.loop_range = Some((1, 3));
     assert!(tl.retime(24));
     assert!(!tl.retime(24), "the same rate is no change");
     let t = tl.tracks.first().unwrap();
     assert_eq!(spans(t), [(0, 2), (2, 2), (4, 4)]);
     assert_eq!(t.clips.last().unwrap().keys.opacity.keys.iter().map(|k| k.frame).collect::<Vec<_>>(), [0, 2]);
     assert_eq!(tl.camera.keys.first().unwrap().frame, 6);
-    assert_eq!((tl.fps, tl.duration, tl.markers.clone(), tl.loop_range), (24, 8, vec![2, 6], Some((2, 6))));
+    assert_eq!((tl.fps, tl.duration), (24, 8));
 }
 
 #[test]
@@ -52,7 +50,6 @@ fn retiming_down_keeps_clips_apart_and_the_later_key() {
     keyed.keys.opacity.keys = vec![opacity_key(0, 0.0), opacity_key(1, 0.5), opacity_key(2, 1.0)];
     let clips = vec![drawing(1, 0, 1, 1), drawing(2, 1, 1, 2), drawing(3, 2, 1, 3), keyed];
     let mut tl = timeline(vec![track(1, clips)]);
-    tl.markers = vec![0, 1, 2];
     assert!(tl.retime(6));
     let t = tl.tracks.first().unwrap();
     assert!(t.is_ordered(), "{:?}", spans(t));
@@ -60,7 +57,6 @@ fn retiming_down_keeps_clips_apart_and_the_later_key() {
     // 0, 1, 2 at half: 0, 1 (half rounds away from zero), 1, the later one kept
     let keys = &t.clips.last().unwrap().keys.opacity.keys;
     assert_eq!(keys.iter().map(|k| (k.frame, k.value)).collect::<Vec<_>>(), [(0, 0.0), (1, 1.0)]);
-    assert_eq!(tl.markers, [0, 1], "markers on one frame become one");
 }
 
 #[test]
@@ -98,32 +94,6 @@ fn retiming_scales_groups_on_their_own_frames_and_keeps_sounds_in_seconds() {
     assert!((f64::from(s.start) / 25.0 + a.offset - seconds).abs() < 1e-9, "the sound starts when it did");
     assert!(a.offset >= 0.0 && a.offset < 1.0 / 25.0);
     assert_eq!(a.volume_keys.keys.first().map(|k| k.frame), Some(8));
-}
-
-#[test]
-fn markers_stay_in_order_one_a_frame_within_the_timeline() {
-    let mut tl = timeline(vec![track(1, vec![drawing(1, 0, 10, 1)])]);
-    assert!(tl.add_marker(6));
-    assert!(tl.add_marker(2));
-    assert!(!tl.add_marker(6), "one a frame");
-    assert!(tl.add_marker(50), "past the end: on the last frame");
-    assert_eq!(tl.markers, [2, 6, 9]);
-    assert!(tl.move_marker(2, 7));
-    assert!(tl.move_marker(7, 6), "onto another: one");
-    assert_eq!(tl.markers, [6, 9]);
-    assert!(!tl.move_marker(3, 4), "none there");
-    assert!(tl.remove_marker(9));
-    assert!(!tl.remove_marker(9));
-    assert_eq!(tl.markers, [6]);
-}
-
-#[test]
-fn markers_are_read_from_older_files_as_none() {
-    let tl = timeline(vec![track(1, vec![drawing(1, 0, 2, 1)])]);
-    let mut json = serde_json::to_value(&tl).unwrap();
-    json.as_object_mut().unwrap().remove("markers");
-    let read: Timeline = serde_json::from_value(json).unwrap();
-    assert!(read.markers.is_empty());
 }
 
 #[test]

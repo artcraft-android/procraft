@@ -18,10 +18,13 @@ use crate::{CanvasSession, State};
 pub(crate) mod autokey;
 mod clipboard;
 mod edits;
+mod gaps;
 mod groups_inline;
 mod key_lanes;
 mod menus;
+mod moves;
 pub(crate) mod panel;
+mod perform;
 mod picked;
 mod playback;
 #[cfg(test)]
@@ -30,6 +33,8 @@ mod tests_1g;
 mod tests_autokey;
 #[cfg(test)]
 mod tests_edits;
+#[cfg(test)]
+mod tests_grid;
 #[cfg(test)]
 mod tests_groups_inline;
 #[cfg(test)]
@@ -192,7 +197,16 @@ pub struct TimelineTrackInfo {
     /// Its opacity (0..1), over its clips'; whether it shows alone (see `solo_timeline_track`).
     pub opacity: f32,
     pub soloed: bool,
+    /// The colour its name is tagged with in the panel (0xRRGGBB; none, the panel's own), and the
+    /// blend mode (an id, see `blend_modes`) and mask of its clips that have none of their own.
+    pub label: Option<u32>,
+    pub blend: u32,
+    pub mask: TimelineMask,
 }
+
+/// How far past the timeline's last frame the playhead may rest: on an empty frame there nothing
+/// shows, and a drawing made there makes the timeline that much longer.
+pub(crate) const PAST_END: u32 = 64;
 
 fn playback_of(p: Playback) -> AnimationPlayback {
     match p {
@@ -204,8 +218,9 @@ fn playback_of(p: Playback) -> AnimationPlayback {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Puts the canvas on a timeline made from it (Animation Assist's frames, or each layer for a
-    /// still canvas), as an undo step. False if it is on one already, or is a Page Assist canvas.
+    /// Puts the canvas on a timeline, as an undo step: the one it was taken off before, as it
+    /// was, or one made from it (Animation Assist's frames, or each layer for a still canvas).
+    /// False if it is on one already, or is a Page Assist canvas.
     pub fn start_timeline(&self) -> bool {
         let started = self.change("Use Timeline", |d| d.start_timeline().then_some(())).is_some();
         if started {
@@ -223,9 +238,11 @@ impl CanvasSession {
         started
     }
 
-    /// Takes the canvas off its timeline, as an undo step: its layers stay as they are.
+    /// Takes the canvas off its timeline, as an undo step: its layers stay as they are, and the
+    /// timeline is kept with the artwork, so [`CanvasSession::start_timeline`] brings it back as
+    /// it was (tracks, timing, keys, sounds and videos).
     pub fn stop_timeline(&self) -> bool {
-        let stopped = self.change("Stop Using Timeline", |d| d.timeline.take().map(|_| ())).is_some();
+        let stopped = self.change("Stop Using Timeline", |d| d.stop_timeline().then_some(())).is_some();
         if stopped {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
@@ -281,6 +298,9 @@ impl CanvasSession {
                 clips: t.clips.iter().map(|c| clip_info(c, offset)).collect(),
                 opacity: t.opacity,
                 soloed: tl.soloed(t.id),
+                label: t.look.label.map(menus::packed),
+                blend: t.look.blend.id(),
+                mask: TimelineMask::of(t.look.mask),
             })
             .collect()
     }
@@ -291,7 +311,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(tl) = st.doc.timeline.as_mut() else { return };
         tl.fps = s.fps.clamp(1, MAX_FPS);
-        // shorter than its clips if so (as the end tab's), its looped frames and markers kept within
+        // shorter than its clips if so (as the end flap's)
         let resized = tl.set_length(s.duration.min(MOST_FRAMES));
         tl.exposure = s.exposure.clamp(1, MAX_EXPOSURE);
         tl.playback = match s.playback {
@@ -333,14 +353,14 @@ impl CanvasSession {
     /// Draws on frame `frame` (kept within the timeline), its onion skins around it; a layer of the
     /// drawing there on the track drawn on becomes current.
     pub fn set_timeline_frame(&self, frame: u32) {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let Some(last) = st.doc.timeline.as_ref().map(|t| t.duration.saturating_sub(1)) else { return };
-        if let Some(c) = st.canvas.as_mut() {
-            c.set_timeline_frame(frame.min(last));
-        }
-        st.follow_playhead();
-        self.shared.frame(st);
+        self.go_to_timeline_frame(frame, 0);
+    }
+
+    /// As [`CanvasSession::set_timeline_frame`], but the playhead may rest a little past the
+    /// timeline's end (the grid shows empty frames there): nothing shows on one until something is
+    /// drawn or added there, which makes the timeline that long.
+    pub fn rest_timeline_frame(&self, frame: u32) {
+        self.go_to_timeline_frame(frame, PAST_END);
     }
 
     /// Draws on track `id` (simple mode then shows it): a layer of its drawing at the playhead
@@ -442,15 +462,21 @@ impl CanvasSession {
         .is_some()
     }
 
-    /// A new drawing (an empty layer) at the playhead on the track drawn on (just after the
+    /// Whether a timeline's new drawings start as vector layers, their strokes kept as lines,
+    /// and not as paint layers. Off at first; the app keeps it.
+    pub fn set_timeline_vector_frames(&self, on: bool) {
+        self.shared.lock().vector_frames = on;
+    }
+
+    /// A new drawing (an empty layer, a vector one if new drawings start as those) at the playhead on the track drawn on (just after the
     /// drawing there, the ones after it moving along), made current, as an undo step; returns its
     /// clip, or 0 when it can't be made (no timeline, a locked track, no room for a layer).
     pub fn add_timeline_drawing(&self) -> u64 {
-        let (frame, track) = {
+        let (frame, track, vector) = {
             let st = self.shared.lock();
-            (st.canvas.as_ref().map_or(0, |c| c.timeline_frame()), st.drawn_track())
+            (st.canvas.as_ref().map_or(0, |c| c.timeline_frame()), st.drawn_track(), st.vector_frames)
         };
-        let made = self.change("Add Drawing", |d| add_drawing(d, track, frame));
+        let made = self.change("Add Drawing", |d| add_drawing(d, track, frame, vector));
         let Some((track, clip, start)) = made else { return 0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -489,9 +515,11 @@ impl CanvasSession {
     }
 
     /// Clip `id` cut at the playhead: a drawing's is copied for the rest, a sound or video plays
-    /// on from there. False unless the playhead is inside it (not on its first frame).
+    /// on from there, and a group becomes two groups, the clips inside it that the cut goes
+    /// through cut the same way. False unless the playhead is inside it (not on its first frame);
+    /// a repeating group isn't cut.
     pub fn split_timeline_clip(&self, id: u64) -> bool {
-        let (frame, root, media) = {
+        let (frame, root, media, group) = {
             let st = self.shared.lock();
             let tl = st.doc.timeline.as_ref();
             let clip = tl.and_then(|t| t.clip(ClipId(id)));
@@ -504,8 +532,11 @@ impl CanvasSession {
                 _ => None,
             });
             let media = inside.is_some_and(|c| matches!(c.content, ClipContent::Audio(_) | ClipContent::Video(_)));
-            (frame, root, media)
+            (frame, root, media, inside.is_some_and(|c| matches!(c.content, ClipContent::Group(_))))
         };
+        if group {
+            return self.split_timeline_group(ClipId(id), frame);
+        }
         if media {
             return self.change("Split", |d| d.timeline.as_mut()?.split_media(ClipId(id), frame)).is_some();
         }
@@ -518,6 +549,57 @@ impl CanvasSession {
         .is_some()
     }
 
+}
+
+impl CanvasSession {
+    /// Group clip `id` cut at frame `frame` of its level, as one "Split" undo step: each drawing
+    /// the cut goes through gets a copy of its layers for its second part. False (nothing changed)
+    /// if it can't be cut there, its track is locked, or there is no room for the copies.
+    fn split_timeline_group(&self, id: ClipId, frame: u32) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let Some(tl) = st.doc.timeline.as_ref() else { return false };
+        if tl.track_of_clip(id).and_then(|t| tl.track(t)).is_none_or(|t| t.locked) {
+            return false;
+        }
+        let through = tl.group_cut_drawings(id, frame);
+        // (tried first with the drawings themselves standing in for their copies: where it can't
+        // be cut, nothing is copied)
+        let stand_ins = through.iter().copied().collect();
+        if tl.clone().split_group(id, frame, &stand_ins).is_none() {
+            return false;
+        }
+        let before = st.doc.clone();
+        let current = st.doc.current();
+        let mut copies = std::collections::HashMap::new();
+        let mut pairs = Vec::new();
+        for (clip, root) in through {
+            let Some((copy, made)) = st.doc.duplicate(root) else {
+                st.doc = before;
+                return false;
+            };
+            copies.insert(clip, copy);
+            pairs.extend(made);
+        }
+        if st.doc.timeline.as_mut().and_then(|tl| tl.split_group(id, frame, &copies)).is_none() {
+            st.doc = before;
+            return false;
+        }
+        st.doc.set_current(current);
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step("Split");
+            canvas.duplicate_layers(pairs, before);
+        }
+        st.revision += 1;
+        self.shared.frame(st);
+        true
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
     /// A copy of clip `id` (a drawing's layers, or a sound or video) just after it, as long, the
     /// clips after it moving along; returns the copy's clip, or 0.
     pub fn duplicate_timeline_clip(&self, id: u64) -> u64 {
@@ -576,9 +658,9 @@ impl CanvasSession {
     }
 }
 
-/// A new drawing on `track` (or the first track, one made if there is none) at `frame`, in `d`:
-/// (its track, its clip, its first frame).
-fn add_drawing(d: &mut Document, track: Option<TrackId>, frame: u32) -> Option<(TrackId, ClipId, u32)> {
+/// A new drawing on `track` (or the first track, one made if there is none) at `frame`, in `d`,
+/// its layer a vector one if `vector`: (its track, its clip, its first frame).
+fn add_drawing(d: &mut Document, track: Option<TrackId>, frame: u32, vector: bool) -> Option<(TrackId, ClipId, u32)> {
     if !d.has_room(1) {
         return None;
     }
@@ -601,16 +683,38 @@ fn add_drawing(d: &mut Document, track: Option<TrackId>, frame: u32) -> Option<(
     if let Some(top) = d.top_of(d.current()) {
         d.set_current(top);
     }
-    let layer = d.add_layer();
+    let layer = if vector { d.add_vector_layer() } else { d.add_layer() };
     let name = format!("Drawing {n}");
     d.rename(layer, &name);
     let tl = d.timeline.as_mut()?;
     let clip = tl.add_drawing(track, frame, layer, &name)?;
     let start = tl.clip(clip)?.start + level;
+    // a drawing is a group from the start (the layers panel shows it as one, to add layers to),
+    // its first layer in it and current
+    d.drawing_group(layer)?;
     Some((track, clip, start))
 }
 
 impl CanvasSession {
+    /// The playhead on `frame`, no further than `past` frames past the timeline's last.
+    fn go_to_timeline_frame(&self, frame: u32, past: u32) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(last) = st
+            .doc
+            .timeline
+            .as_ref()
+            .map(|t| (t.duration.saturating_sub(1) + past).min(MOST_FRAMES.saturating_sub(1)))
+        else {
+            return;
+        };
+        if let Some(c) = st.canvas.as_mut() {
+            c.set_timeline_frame(frame.min(last));
+        }
+        st.follow_playhead();
+        self.shared.frame(st);
+    }
+
     /// Before a stroke on a timeline: if the current layer's drawing isn't showing at the playhead,
     /// the track drawn on's drawing there becomes current, or (none there, and painting) a new
     /// drawing is made for the stroke.

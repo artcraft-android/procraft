@@ -194,7 +194,7 @@ fn media_file(name: &str, seed: u8) -> String {
 fn import(s: &CanvasSession, path: &str, kind: TimelineMediaKind, seconds: f64) -> u64 {
     let (width, height) = if kind == TimelineMediaKind::Video { (32, 18) } else { (0, 0) };
     let name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
-    s.import_timeline_media(MediaImport { path: path.to_owned(), name, kind, seconds, width, height, peaks: vec![] })
+    s.import_timeline_media(MediaImport { path: path.to_owned(), name, kind, seconds, width, height, peaks: vec![], sound_path: None, sound_seconds: 0.0 })
         .unwrap()
 }
 

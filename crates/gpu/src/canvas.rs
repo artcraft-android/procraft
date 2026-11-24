@@ -24,6 +24,7 @@ use wgpu::util::DeviceExt;
 use crate::{Gpu, GpuError};
 pub use frame_cache::{FrameCacheStats, frame_cache_budget, set_frame_cache_budget};
 
+mod ahead;
 #[cfg(test)]
 mod effects_tests;
 mod fragments;
@@ -2189,6 +2190,10 @@ struct Smudge {
     /// Where paint laid apart has been put together so far: all of it is put together once more
     /// as the stroke ends, from what the stroke and its second laid in the end.
     synthesized: IRect,
+    /// What is laid ahead of the stroke for now (see [`Canvas::lay_ahead`]), and where what it
+    /// went over is kept meanwhile.
+    laid_ahead: Option<ahead::Laid>,
+    keep: ahead::Keep,
 }
 
 /// How much of a wet stroke's paint shows at a pixel, by its glaze: as far as its stamps took it
@@ -3247,6 +3252,11 @@ pub struct Canvas {
     smudge_spare: [wgpu::Buffer; 2],
     /// Stamps of input that hasn't happened yet (predicted), drawn over the canvas for one frame.
     prediction: Vec<StampInstance>,
+    /// Paint laid in place from the open stroke's last stamps on to the pen (see
+    /// [`Canvas::set_ahead`]), with its wet-mix scaling and place in the stroke; and whether it
+    /// changed since it was last laid.
+    ahead: Vec<(StampInstance, [f32; 8], Paced)>,
+    ahead_changed: bool,
     /// How strongly the open stroke shows while it is drawn, 0..1 of how it is kept (see
     /// [`Canvas::set_stroke_shown`]); 1 again with each stroke begun.
     stroke_shown: f32,
@@ -3674,6 +3684,8 @@ impl Canvas {
             wet_params: wet_params(device, 4),
             wet_capacity: 4,
             prediction: Vec::new(),
+            ahead: Vec::new(),
+            ahead_changed: false,
             stroke_shown: 1.0,
             laid: None,
             laid_second: None,
@@ -4078,6 +4090,7 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
+        self.drop_ahead();
         self.stroke_shown = 1.0;
         self.laid = Some(Vec::new());
         (self.laid_count, self.laid_second_count) = (0, 0);
@@ -4286,6 +4299,8 @@ impl Canvas {
     /// [`Canvas::add_stamps`], an echo not told of it (it was told of the whole they end).
     fn add_stamps_untold(&mut self, stamps: &[Stamp]) {
         self.untip();
+        // (what ran ahead of them is behind them now)
+        self.drop_ahead();
         self.push_stamps(stamps, false);
         keep_laid(&mut self.laid, stamps);
         self.laid_count += stamps.len();
@@ -4314,6 +4329,7 @@ impl Canvas {
             return;
         }
         self.tip = None;
+        self.drop_ahead();
         self.push_stamps(stamps, true);
         if self.laid.is_some() {
             self.laid = (stamps.len() <= LAID_KEPT_MOST).then(|| stamps.to_vec());
@@ -4563,17 +4579,46 @@ impl Canvas {
         );
     }
 
-    /// Whether the open stroke lays what runs ahead of it into its layer for now. Never here:
-    /// paint laid in place (wet or dry) shows no further than it is laid, and no tip or
-    /// prediction (see `smudge.rs`, which lays it a pass a display frame).
+    /// Whether the open stroke lays what runs ahead of it into its layer for now (see
+    /// [`Canvas::set_ahead`]): paint laid in place, wet or dry, where the GPU runs compute passes
+    /// (not into a layer's store). It shows no tip or prediction.
     pub fn lays_ahead(&self) -> bool {
-        false
+        self.pipelines.compute.is_some()
+            && self
+                .active
+                .is_some_and(|a| !a.pencil && a.style.paints_in_place() && a.style.ribbon.is_none() && a.style.store == 0)
     }
 
-    /// Stamps of paint laid in place from the open stroke's last stamps on to the pen: an echo is
-    /// told of them, and nothing is laid (see [`Canvas::lays_ahead`]).
+    /// Stamps of paint laid in place from the open stroke's last stamps on to the pen (and where
+    /// it is predicted to go): laid into the layer as they would be, with those the stroke holds
+    /// back for the rest of their display frame, until the next stamps or these again, then taken
+    /// off (see `ahead.rs`). Wet paint shows up to the pen, and as it will be laid.
     pub fn set_ahead(&mut self, stamps: &[Stamp]) {
         self.tell(|| StrokeEcho::Ahead(stamps.to_vec()));
+        self.ahead.clear();
+        self.ahead_changed = true;
+        if self.measuring || !self.lays_ahead() {
+            return;
+        }
+        let Some(style) = self.active.map(|a| a.style) else { return };
+        let by_rule_here = self.pipelines.compute.is_some() || self.pipelines.fragments.is_some();
+        let (px, scaled) = (self.artwork_pixel, self.scaled);
+        let finite = |s: &&Stamp| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite();
+        self.ahead.extend(stamps.iter().filter(finite).map(|s| {
+            // given in another canvas's pixels: drawn here as much bigger
+            let s = scaled.map_or(*s, |(origin, k)| scaled_stamp(s, origin, k));
+            let radius = drawn_radius(&style, s.radius, s.taper, px);
+            let radius = scaled.map_or(radius, |(_, k)| scaled_radius(&style, radius, k));
+            (stamp_instance(&s, &style, by_rule_here, false, radius), stamp_wet(&s), stamp_paced(&s))
+        }));
+    }
+
+    /// Nothing more is laid ahead of the open stroke (until [`Canvas::set_ahead`] again).
+    fn drop_ahead(&mut self) {
+        if !self.ahead.is_empty() {
+            self.ahead.clear();
+            self.ahead_changed = true;
+        }
     }
 
     /// The layer the open stroke goes onto as it ends, if it is laid apart from it (not one laid in
@@ -4618,6 +4663,11 @@ impl Canvas {
         self.dirty = self.dirty.union(self.lasso_shown).union(shown);
         self.lasso = preview;
         self.lasso_due = true;
+    }
+
+    /// The lasso's fill being shown as it is drawn, if any (see [`Canvas::set_lasso_preview`]).
+    pub fn lasso_preview(&self) -> Option<&LassoPreview> {
+        self.lasso.as_ref()
     }
 
     /// The lasso preview's polygon drawn into its coverage (made the first time): antialiased,
@@ -4678,6 +4728,7 @@ impl Canvas {
 
     pub fn end_stroke(&mut self) {
         self.prediction.clear();
+        self.drop_ahead();
         self.laid = None;
         self.laid_second = None;
         self.untip();
@@ -5112,6 +5163,7 @@ impl Canvas {
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
+        self.drop_ahead();
         self.laid = None;
         self.laid_second = None;
         self.tip = None;
@@ -5517,6 +5569,8 @@ impl Canvas {
     /// Renders until the caches are remade, so the composite is the picture as it is (to read it
     /// back: a save's, an export's).
     pub fn render_finished(&mut self, gpu: &Gpu, doc: &mut Document) {
+        // (each video's picture at its own time, waited for: see `video`)
+        let exact = std::mem::replace(&mut self.videos.exact, true);
         self.render(gpu, doc, None);
         // each render remakes at least one item, so this ends well before the bound
         for _ in 0..100_000 {
@@ -5525,6 +5579,7 @@ impl Canvas {
             }
             self.render(gpu, doc, None);
         }
+        self.videos.exact = exact;
     }
 
     /// Whether the canvas has work that more renders do (caches being remade, layers being
@@ -5594,6 +5649,25 @@ impl Canvas {
     /// Layers to count as changed again (a save of them that failed).
     pub fn mark_changed(&mut self, ids: impl IntoIterator<Item = LayerId>) {
         self.changed.extend(ids);
+    }
+
+    /// What `doc`'s layers take on this canvas, for [`Document::set_layer_memory`]: none while it
+    /// keeps every layer's texture (each then takes its full size).
+    pub fn layer_memory(&self, doc: &Document) -> Option<procraft_engine::document::LayerMemory> {
+        if self.resident_budget == 0 {
+            return None;
+        }
+        let full = u64::from(self.width) * u64::from(self.height) * u64::from(self.pixel_bytes());
+        let least = procraft_engine::document::least_layer_bytes(full);
+        let (mut layers, mut compressed) = (0, 0u64);
+        for id in doc.pixel_layer_ids() {
+            layers += 1;
+            let kept = self.parked.get(&id).map_or(0, |p| p.lz4.len() as u64);
+            compressed = compressed.saturating_add(kept.max(least));
+        }
+        // the textures' whole budget (the history takes from it what the textures leave)
+        let resident = most_resident(self.resident_budget, self.width, self.height, self.pixel_bytes());
+        Some(procraft_engine::document::LayerMemory { resident, compressed, layers })
     }
 
     /// How many layers are parked (kept compressed, without a texture).
@@ -6575,7 +6649,17 @@ impl Canvas {
         // ends. Too few passes and none of it is written: the stroke, started again, comes out
         // with nothing (a stamp cut into windows takes more uniforms: `smudge.rs` makes room)
         let held = self.smudge.as_ref().map_or(0, |s| s.pending.len() as u64);
-        let first = (2 * held + 1, held + 1);
+        // and what is laid ahead of it (see `ahead.rs`): at most those held back, those of this
+        // render's and those on to the pen, and put together once
+        let laid_now: u64 = ops
+            .iter()
+            .map(|op| match op {
+                Op::Stamps { instances, style, second: false, .. } if style.in_place() => instances.len() as u64,
+                _ => 0,
+            })
+            .sum();
+        let ahead = self.ahead_most(laid_now);
+        let first = (2 * held + 1 + 2 * ahead + 2, held + 1 + ahead + 1);
         let (smudge_count, wet_count) = ops.iter().fold(first, |(slots, passes), op| match op {
             Op::Stamps { second: true, .. } | Op::Untip { second: true, .. } => (slots + 1, passes),
             Op::Stamps { instances, style, .. } if style.in_place() => {
@@ -6619,6 +6703,12 @@ impl Canvas {
             .map(|_| started + self.relay_at_once);
         let mut relaid = false;
         self.relaying = false;
+        // paint laid ahead of a stroke laid in place comes off before any more of it is laid, and
+        // is laid again after it (on to where the pen is now)
+        let relay_ahead = std::mem::take(&mut self.ahead_changed) || !ops.is_empty();
+        if relay_ahead {
+            self.take_back_ahead(&mut encoder);
+        }
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
             if let (Some(until), Op::Stamps { .. }) = (relay_until, &op)
@@ -7671,6 +7761,10 @@ impl Canvas {
                 self.stroke_step = Some((number, self.steps_made));
             }
         }
+        // (work left for a render after this one: laid ahead once that is done)
+        if relay_ahead && self.ops.is_empty() {
+            self.lay_ahead(gpu, &mut encoder, (&mut smudge_uniforms, &mut wet_uniforms));
+        }
         if history_changed {
             self.collect_layers(doc);
         }
@@ -7772,6 +7866,8 @@ impl Canvas {
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
         self.pack_history(gpu);
+        // what the layers take now, for how many more the document has room for
+        doc.set_layer_memory(self.layer_memory(doc));
         // the work held back, in a submission after this one's (a stroke being laid again goes on in
         // the next render that shows the canvas)
         if deferred && !self.relaying {
@@ -7862,7 +7958,8 @@ impl Canvas {
                     } else {
                         u64::from(SMUDGE_GRID * SMUDGE_GRID) * 16 * 3
                     },
-                    usage: wgpu::BufferUsages::STORAGE,
+                    // (copied from and into while paint is laid ahead, see `ahead.rs`)
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
             });
@@ -7900,6 +7997,8 @@ impl Canvas {
                 laid: false,
                 stalled: false,
                 synthesized: IRect::EMPTY,
+                laid_ahead: None,
+                keep: ahead::Keep::default(),
             });
         }
         if style.paints_in_place() {
@@ -12988,10 +13087,13 @@ impl<'scope> Makers<'scope> {
         let (work, asked) = mpsc::channel::<Box<dyn FnOnce() + Send + 'scope>>();
         let asked = Arc::new(Mutex::new(asked));
         let mut started = 0;
+        // (as urgent as the thread that waits for what they make: see the engine's `qos`)
+        let qos = procraft_engine::qos::Qos::current();
         for _ in 0..threads {
             let asked = Arc::clone(&asked);
             let maker =
                 std::thread::Builder::new().name("procraft-pipelines".to_owned()).spawn_scoped(scope, move || {
+                    qos.adopt();
                     loop {
                         // (the next piece taken, the others free to take theirs while it is made)
                         let next = asked.lock().unwrap_or_else(PoisonError::into_inner).recv();
@@ -13947,6 +14049,15 @@ fn without_passing_tips(ops: Vec<Op>) -> Vec<Op> {
         kept.push(op);
     }
     kept
+}
+
+/// The pixels a stamp of paint laid in place can change.
+fn wet_reach(s: &StampInstance) -> IRect {
+    if s.radius <= 0.0 {
+        return IRect::EMPTY;
+    }
+    let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+    IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
 }
 
 /// A stamp as drawn, `radius` across (see [`drawn_radius`]).

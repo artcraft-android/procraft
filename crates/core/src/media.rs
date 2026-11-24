@@ -71,7 +71,13 @@ pub struct MediaImport {
     pub width: u32,
     pub height: u32,
     /// A sound's waveform: the loudest sample in each of [`PEAKS_PER_SECOND`]ths of a second, 0..1.
+    /// A video's: its own sound's, when it has one.
     pub peaks: Vec<f32>,
+    /// A video's own sound, which the app took out of it as a sound file of its own (it is copied
+    /// too, and plays with the video's picture), and how long that is, seconds. None for a sound,
+    /// or a video with none.
+    pub sound_path: Option<String>,
+    pub sound_seconds: f64,
 }
 
 /// How many waveform peaks a second of sound has.
@@ -100,8 +106,12 @@ pub struct TimelineMediaClip {
     pub trim_start: f64,
     /// A sound's start after its first frame, seconds (under a frame).
     pub offset: f64,
+    /// A sound's volume and whether it is muted; a video's own sound's.
     pub volume: f32,
     pub muted: bool,
+    /// The media of a video's own sound (its waveform is that media's); 0 where it has none, or
+    /// for a sound.
+    pub sound: u64,
     /// A video's place on the canvas: left, top, width, height.
     pub rect: Vec<f32>,
     /// A sound's level at the playhead: keyed, or its volume.
@@ -226,10 +236,15 @@ pub(crate) struct MediaToSave {
 impl MediaToSave {
     pub(crate) fn of(store: &MediaStore, doc: &Document) -> MediaToSave {
         store.know(doc);
-        let keep = doc.timeline.as_ref().map_or_else(Vec::new, |tl| {
-            let used = tl.used_media();
-            tl.media.iter().filter(|m| used.contains(&m.id)).flat_map(|m| [m.file_name(), m.peaks_name()]).collect()
-        });
+        // (a timeline the canvas was taken off keeps its files too: it may be gone back to)
+        let keep = [&doc.timeline, &doc.timeline_off]
+            .into_iter()
+            .flatten()
+            .flat_map(|tl| {
+                let used = tl.used_media();
+                tl.media.iter().filter(move |m| used.contains(&m.id)).flat_map(|m| [m.file_name(), m.peaks_name()])
+            })
+            .collect();
         MediaToSave { store: store.clone(), keep }
     }
 
@@ -316,6 +331,8 @@ impl crate::State {
         {
             self.media.know(&self.doc);
             c.set_video_source(Some(Arc::new(self.media.clone())));
+            // the app's decoder is never waited on by a frame drawn to the screen
+            c.read_videos_aside();
         }
     }
 }
@@ -330,6 +347,7 @@ impl CanvasSession {
         st.media.know(&st.doc);
         if let Some(c) = st.canvas.as_mut() {
             c.set_video_source(Some(Arc::new(st.media.clone())));
+            c.read_videos_aside();
         }
         self.shared.frame(st);
     }
@@ -354,7 +372,31 @@ impl CanvasSession {
             extension: media_extension(&import.path),
             size: [import.width, import.height],
         };
-        bring_in(&path, &media, &import.peaks)?;
+        // a video's own sound is media of its own (a sound's), with the waveform
+        let sound = match (&import.sound_path, import.kind) {
+            (Some(from), TimelineMediaKind::Video) => {
+                let from = PathBuf::from(from);
+                let file = fs::File::open(&from).map_err(|e| file_error("reading the file", e))?;
+                let id = media_id_of(std::io::BufReader::new(file)).map_err(|e| file_error("reading the file", e))?;
+                let seconds = if import.sound_seconds.is_finite() && import.sound_seconds > 0.0 {
+                    import.sound_seconds
+                } else {
+                    import.seconds
+                };
+                let sound = Media {
+                    id,
+                    name: media.name.clone(),
+                    kind: MediaKind::Audio,
+                    seconds,
+                    extension: media_extension(&from.to_string_lossy()),
+                    size: [0, 0],
+                };
+                bring_in(&from, &sound, &import.peaks)?;
+                Some(sound)
+            }
+            _ => None,
+        };
+        bring_in(&path, &media, if sound.is_some() { &[] } else { &import.peaks })?;
         let frame = self.timeline_playhead();
         let step = match import.kind {
             TimelineMediaKind::Audio => "Add Sound",
@@ -369,7 +411,14 @@ impl CanvasSession {
             tl.add_media(media.clone());
             match media.kind {
                 MediaKind::Audio => tl.add_sound(id, frame),
-                MediaKind::Video => tl.add_video(id, frame, canvas),
+                MediaKind::Video => {
+                    let made = tl.add_video(id, frame, canvas)?;
+                    if let Some(sound) = &sound {
+                        tl.add_media(sound.clone());
+                        tl.set_video_sound(made.1, sound.id);
+                    }
+                    Some(made)
+                }
             }
         });
         let Some((track, clip)) = made else { return Ok(0) };
@@ -391,8 +440,19 @@ impl CanvasSession {
         let clip = tl.clip(ClipId(id))?;
         let (media, trim_start, offset, volume, muted, rect) = match &clip.content {
             ClipContent::Audio(a) => (a.media, a.trim_start, a.offset, a.volume, a.muted, Vec::new()),
-            ClipContent::Video(v) => (v.media, v.trim_start, 0.0, 1.0, false, v.rect.to_vec()),
+            ClipContent::Video(v) => (
+                v.media,
+                v.trim_start,
+                0.0,
+                v.sound.map_or(1.0, |s| s.volume),
+                v.sound.is_some_and(|s| s.muted),
+                v.rect.to_vec(),
+            ),
             ClipContent::Drawing(_) | ClipContent::Group(_) => return None,
+        };
+        let sound = match &clip.content {
+            ClipContent::Video(v) => v.sound.map_or(0, |s| s.media.0),
+            _ => 0,
         };
         let m = tl.media_of(media)?;
         let [width, height] = m.size;
@@ -419,6 +479,7 @@ impl CanvasSession {
             offset,
             volume,
             muted,
+            sound,
             rect,
             level,
             volume_keys,
@@ -478,8 +539,27 @@ impl CanvasSession {
     /// its first frame (under a frame): one "Sound" undo step when `done`.
     pub fn set_timeline_sound(&self, id: u64, volume: f32, muted: bool, offset: f64, done: bool) -> bool {
         self.change_live("Sound", done, |d| {
-            d.timeline.as_mut().is_some_and(|tl| tl.set_sound(ClipId(id), volume, muted, offset))
+            d.timeline.as_mut().is_some_and(|tl| {
+                // (a video's own sound has a level and a mute, no start of its own)
+                tl.set_sound(ClipId(id), volume, muted, offset) || tl.set_video_volume(ClipId(id), volume, muted)
+            })
         })
+    }
+
+    /// Video clip `id`'s own sound taken out as a sound clip on a new track just above the
+    /// video's, over the same frames; the video plays none from then. One "Separate Audio and
+    /// Video" undo step. Returns the sound clip; 0 where it has no sound of its own, or its
+    /// track is locked.
+    pub fn separate_timeline_audio(&self, id: u64) -> u64 {
+        let made = self.change("Separate Audio and Video", |d| {
+            let tl = d.timeline.as_mut()?;
+            let track = tl.track_of_clip(ClipId(id))?;
+            if tl.track(track)?.locked {
+                return None;
+            }
+            tl.separate_audio(ClipId(id))
+        });
+        made.map_or(0, |c| c.0)
     }
 
     /// Video clip `id` drawn into `rect` (left, top, width, height on the canvas): one "Place
@@ -515,6 +595,7 @@ impl CanvasSession {
             let tl = d.timeline.as_ref()?;
             let clip = tl.clip(ClipId(id)).filter(|c| matches!(c.content, ClipContent::Video(_)))?;
             let (start, duration, name) = (clip.start, clip.duration, clip.name.clone());
+            // (the video may be inside a group: the track goes on the video's level)
             let video_track = tl.track_of_clip(ClipId(id))?;
             let mut layers = Vec::new();
             for n in 0..holds.len() {
@@ -523,7 +604,12 @@ impl CanvasSession {
                 layers.push(layer);
             }
             let tl = d.timeline.as_mut()?;
-            timing_track(tl, video_track, &format!("{name} Timing"), &name, start, duration, &holds, &layers)
+            let track = timing_track(tl, video_track, &format!("{name} Timing"), &name, start, duration, &holds, &layers)?;
+            // each a group with its layer in it, as a new drawing is
+            for layer in &layers {
+                d.drawing_group(*layer);
+            }
+            Some(track)
         });
         let Some(track) = made else { return 0 };
         let mut guard = self.shared.lock();
@@ -535,9 +621,9 @@ impl CanvasSession {
     }
 }
 
-/// A track named `name` just above `below` (on its level) holding a drawing of each of `layers`
-/// (named `drawing` 1, 2...) for each of `holds` (frames from `start`, cut off at `duration`).
-/// Returns the track.
+/// A track named `name` just above `below` (on its level: the timeline's own tracks or a group's)
+/// holding a drawing of each of `layers` (named `drawing` 1, 2...) for each of `holds` (frames
+/// from `start`, cut off at `duration`). Returns the track.
 fn timing_track(
     tl: &mut Timeline,
     below: TrackId,
@@ -548,12 +634,7 @@ fn timing_track(
     holds: &[AnimaticHold],
     layers: &[procraft_engine::document::LayerId],
 ) -> Option<TrackId> {
-    let track = tl.add_track(name);
-    // just above the video's track
-    let from = tl.tracks.iter().position(|t| t.id == track)?;
-    let to = tl.tracks.iter().position(|t| t.id == below)? + 1;
-    let moved = tl.tracks.remove(from);
-    tl.tracks.insert(to.min(tl.tracks.len()), moved);
+    let track = tl.add_track_above(below, name)?;
     for (n, (hold, layer)) in holds.iter().zip(layers).enumerate() {
         if hold.start >= duration || hold.length == 0 {
             continue;

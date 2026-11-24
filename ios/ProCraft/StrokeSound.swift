@@ -20,6 +20,8 @@ final class StrokeSound {
     private var running = false
 
     private var queue: AudioQueueRef?
+    /// The audio session is being set up for it (off the main thread): the queue starts after.
+    private var starting = false
     private let fills = DispatchQueue(label: "procraft-stroke-sound", qos: .userInteractive)
 
     private init() {}
@@ -37,10 +39,25 @@ final class StrokeSound {
         }
     }
 
+    /// The audio session set up first, off the main thread (see `AppAudio`), then the queue.
     private func start() {
+        guard !starting else { return }
+        starting = true
         // heard alongside what else plays (music goes on), and quiet with the device silenced
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        AppAudio.use(.ambient) { [weak self] in
+            guard let self else { return }
+            self.starting = false
+            // (turned off again meanwhile)
+            self.lock.lock()
+            let wanted = self.heard != nil
+            self.lock.unlock()
+            if wanted, self.queue == nil {
+                self.startQueue()
+            }
+        }
+    }
+
+    private func startQueue() {
         var format = AudioStreamBasicDescription(
             mSampleRate: Float64(Self.rate),
             mFormatID: kAudioFormatLinearPCM,

@@ -186,6 +186,15 @@ struct CustomCanvas: View {
         }
     }
 
+    /// The layers a canvas of `p`'s size holds: as many as fit however full they are, to as many
+    /// as fit mostly empty (where layers not worked on are kept compressed).
+    private func maximumLayers(_ p: CanvasPreset) -> String {
+        let (w, h) = (presetWidth(preset: p), presetHeight(preset: p))
+        let full = layersFor(width: w, height: h)
+        let empty = emptyLayersFor(width: w, height: h)
+        return empty > full ? "\(full)–\(empty)" : "\(full)"
+    }
+
     private func group<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: 16, style: .circular)
         return VStack(spacing: 0) {
@@ -332,7 +341,7 @@ struct CustomCanvas: View {
                         field = .dpi
                     }
                     line
-                    sizeRow("Maximum Layers", "\(layersFor(width: presetWidth(preset: p), height: presetHeight(preset: p)))", unit: "", editing: false) {}
+                    sizeRow("Maximum Layers", maximumLayers(p), unit: "", editing: false) {}
                 }
             }
         case 1:

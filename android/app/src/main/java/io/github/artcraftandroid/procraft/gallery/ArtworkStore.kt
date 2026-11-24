@@ -152,6 +152,8 @@ data class CanvasPreset(
     fun core() = io.github.artcraftandroid.procraft.core.CanvasPreset(
         name, unit, sizeWidth, sizeHeight, dpi, background.toUInt(), backgroundHidden,
         timeLapse.resolution.toUInt(), timeLapse.quality.toUInt(), timeLapse.hevc, profile,
+        // HDR canvases aren't offered on Android yet
+        hdr = false,
     )
 
     companion object {

@@ -18838,8 +18838,13 @@ fn a_timeline_is_edited_through_the_session() {
     };
     assert_eq!(spans(&s, 0), [(0, 1), (1, 2), (3, 1), (4, 1)]);
     assert_eq!(s.timeline_info().unwrap().frame, 1);
-    let new_layer = s.timeline_tracks()[0].clips[1].root;
-    assert_eq!(current(&s), new_layer);
+    // (a new drawing is a group from the start, its one layer in it and current)
+    let new_drawing = procraft_engine::document::LayerId(s.timeline_tracks()[0].clips[1].root);
+    {
+        let st = s.shared.lock();
+        assert_eq!(st.doc.layer(new_drawing).map(|l| l.kind), Some(procraft_engine::document::LayerKind::Group));
+        assert_eq!(st.doc.members(Some(new_drawing)), [st.doc.current()]);
+    }
     // painting where a track has nothing makes a drawing there for the stroke
     let second = s.add_timeline_track();
     s.set_timeline_frame(2);
@@ -18848,7 +18853,11 @@ fn a_timeline_is_edited_through_the_session() {
     let made = &s.timeline_tracks()[1];
     assert_eq!((made.id, made.clips.len()), (second, 1));
     assert_eq!((made.clips[0].start, made.clips[0].duration), (2, 2));
-    assert_eq!(current(&s), made.clips[0].root);
+    {
+        let st = s.shared.lock();
+        let root = procraft_engine::document::LayerId(made.clips[0].root);
+        assert_eq!(st.doc.members(Some(root)), [st.doc.current()], "the stroke's layer, in its drawing's group");
+    }
     // hold, split, duplicate, move and delete
     let held = s.timeline_tracks()[1].clips[0].id;
     assert!(s.set_timeline_clip_duration(held, 4, true));
@@ -18864,7 +18873,8 @@ fn a_timeline_is_edited_through_the_session() {
     assert_eq!(s.timeline_info().unwrap().duration, long, "moved past the end, it waits there");
     let layers_before = s.layers().len();
     assert!(s.delete_timeline_clip(copy, false));
-    assert_eq!(s.layers().len(), layers_before - 1);
+    // (its group and the layer in it)
+    assert_eq!(s.layers().len(), layers_before - 2);
     assert_eq!(spans(&s, 1), [(2, 2), (6, 2)]);
     // and every edit undoes
     assert_eq!(s.undo().as_deref(), Some("Delete Drawing"));
@@ -18872,8 +18882,20 @@ fn a_timeline_is_edited_through_the_session() {
     // simple mode follows the track drawn on
     s.set_timeline_simple(true);
     assert!(s.timeline_info().unwrap().simple);
+    // taken off its timeline it is a still canvas, and put back on it, as it was
+    let before = (spans(&s, 0), spans(&s, 1), s.timeline_info().unwrap().duration);
     assert!(s.stop_timeline());
     assert!(s.timeline_info().is_none());
+    assert!(s.start_timeline());
+    assert_eq!((spans(&s, 0), spans(&s, 1), s.timeline_info().unwrap().duration), before);
+    assert_eq!(s.timeline_tracks().len(), 2);
+    // the picked frames turned off and on together, one step each
+    let both: Vec<u64> = s.timeline_tracks()[1].clips.iter().map(|c| c.id).collect();
+    assert!(s.set_timeline_clips_disabled(both.clone(), true));
+    assert!(s.timeline_tracks()[1].clips.iter().all(|c| c.disabled));
+    assert!(!s.set_timeline_clips_disabled(both.clone(), true), "already");
+    assert_eq!(s.undo().as_deref(), Some("Turn Clips Off"));
+    assert!(s.timeline_tracks()[1].clips.iter().all(|c| !c.disabled));
 }
 
 /// A timeline's settings to change, from what it has.
@@ -20190,4 +20212,42 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
     let px = c.copy_layer_contents(top).unwrap();
     let r = crate::layer_ops::painted_rect(&px.rgba, 400).unwrap();
     assert_eq!((r.x0, r.y0, r.x1, r.y1), (270, 270, 290, 290));
+}
+
+#[test]
+fn a_puppet_bends_the_layer_by_its_pins_as_one_undo_step() {
+    use crate::transform::{TransformHandle, TransformKind};
+    let Some(s) = session(200, 200) else { return };
+    no_streamline(&s);
+    s.set_brush_size(0.3);
+    // a bar across the canvas
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 100.0, 0.0)]);
+    s.stroke_add((1..14).map(|k| sample(30.0 + 10.0 * k as f32, 100.0, 10.0 * f64::from(k))).collect());
+    s.stroke_end(vec![sample(170.0, 100.0, 150.0)]);
+    assert_eq!(pixel(&s, 160, 100), [0, 0, 0, 255]);
+    s.transform_begin().unwrap();
+    let laid = s.transform_set_kind(TransformKind::Puppet).unwrap();
+    assert!(!laid.puppet_edges.is_empty() && laid.pins.is_empty() && laid.selected_pin == -1);
+    // a tap off the mesh puts no pin; on it, a pin each
+    assert!(s.transform_puppet_tap(100.0, 20.0).unwrap().pins.is_empty());
+    s.transform_puppet_tap(40.0, 100.0);
+    let pinned = s.transform_puppet_tap(160.0, 100.0).unwrap();
+    assert_eq!(pinned.pins.len(), 6);
+    assert_eq!(pinned.selected_pin, 1);
+    // the far one dragged down
+    s.transform_grab(TransformHandle::Pin { index: 1 }, 160.0, 100.0);
+    s.transform_drag(160.0, 130.0);
+    let bent = s.transform_drag(160.0, 160.0).unwrap();
+    assert!((bent.pins[3] - 160.0).abs() < 0.5 && (bent.pins[4] - 160.0).abs() < 0.5, "{:?}", bent.pins);
+    assert!(s.transform_release().unwrap().can_undo);
+    // the chosen pin tapped again goes, and comes back undone
+    assert_eq!(s.transform_puppet_tap(160.0, 160.0).unwrap().pins.len(), 3);
+    assert_eq!(s.transform_apply(crate::transform::TransformAction::Undo).unwrap().pins.len(), 6);
+    s.transform_end(true);
+    assert_eq!(pixel(&s, 40, 100), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 160, 160), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 165, 100), [255, 255, 255, 255]);
+    s.undo();
+    assert_eq!(pixel(&s, 165, 100), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 160, 160), [255, 255, 255, 255]);
 }

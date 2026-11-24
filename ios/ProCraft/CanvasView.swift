@@ -30,10 +30,16 @@ final class CanvasView: UIView {
     /// A finger alone on the canvas slid, lifted or was taken back (the QuickMenu follows the
     /// finger that opened it).
     var onLoneFinger: (FingerStep) -> Void = { _ in }
+    /// Whether the brush's outline stays away: a mode is open in which a touch doesn't paint (a
+    /// selection, a transform). The core says so too, but only learns of the mode as the first
+    /// touch comes down, and the Pencil hovers before that.
+    var cursorStaysAway: () -> Bool = { false }
     /// A touch is down on the canvas.
     var touching: Bool { !ids.isEmpty }
 
     private var attached = false
+    /// Hears the window's scene going inactive.
+    private var deactivates: NSObjectProtocol?
     /// The window as last given to the session, and the way up it was at.
     private var windowWidth: UInt32 = 0
     private var windowHeight: UInt32 = 0
@@ -145,9 +151,21 @@ final class CanvasView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        if let deactivates {
+            NotificationCenter.default.removeObserver(deactivates)
+            self.deactivates = nil
+        }
         if window == nil {
+            cancelAllTouches()
             detach()
         } else {
+            // the scene going inactive (resized into Split View or Slide Over, the app switcher)
+            // may end the touches without saying so
+            deactivates = NotificationCenter.default.addObserver(
+                forName: UIScene.willDeactivateNotification, object: window?.windowScene, queue: .main
+            ) { [weak self] _ in
+                self?.cancelAllTouches()
+            }
             setNeedsLayout()
         }
     }
@@ -287,6 +305,7 @@ final class CanvasView: UIView {
         keepFastRefresh()
         // painting, the hovering outline goes (Brush cursor may show one as it paints)
         cursor.hide()
+        dropLostTouches(beginning: touches, in: event)
         if ids.isEmpty {
             beforeTouches()
         }
@@ -394,6 +413,58 @@ final class CanvasView: UIView {
         afterTouches(ids.isEmpty)
     }
 
+    /// Touches the system lost without a word: those still held down here that the event coming
+    /// down no longer carries, or whose touch object comes again as a new one. The window resizing
+    /// (Split View, Slide Over, Stage Manager) or the scene going inactive mid-touch can end a
+    /// touch without its end or cancel ever coming; held down, it would make every later stroke a
+    /// second finger (a gesture, never paint). They are taken back as the system would have.
+    private func dropLostTouches(beginning touches: Set<UITouch>, in event: UIEvent?) {
+        guard !ids.isEmpty, let all = event?.allTouches else { return }
+        let live = Set(all.filter { $0.phase != .ended && $0.phase != .cancelled }.map(ObjectIdentifier.init))
+        let beginning = Set(touches.map(ObjectIdentifier.init))
+        // a touch beginning now isn't one held from before, even at the same address
+        let lost = ids.keys.filter { !live.contains($0) || beginning.contains($0) }
+        guard !lost.isEmpty else { return }
+        var out: [TouchCommand] = []
+        for key in lost {
+            guard let id = ids.removeValue(forKey: key) else { continue }
+            if id == penId {
+                if pencil.cancel() {
+                    out += session.touchCancelOne(id: id)
+                }
+                penId = nil
+            } else {
+                out += session.touchCancelOne(id: id)
+            }
+            if strokeTouch == key {
+                strokeTouch = nil
+            }
+        }
+        if ids.isEmpty {
+            strokeTouch = nil
+            onLoneFinger(.takenBack)
+        }
+        obey(out)
+        afterTouches(ids.isEmpty)
+    }
+
+    /// Every touch held down here is taken back: the scene went inactive or the canvas left its
+    /// window, and the system may never say how the touches ended.
+    func cancelAllTouches() {
+        // a stroke already lifted and only waiting on its last samples ends with what is known
+        pencil.finish()
+        let hadPen = penId != nil
+        let started = pencil.cancel()
+        penId = nil
+        guard !ids.isEmpty || hadPen || started else { return }
+        ids.removeAll()
+        strokeTouch = nil
+        onLoneFinger(.takenBack)
+        // (the core lets go of every pointer it holds, the pen's stroke undone)
+        obey(session.touchCancel())
+        afterTouches(true)
+    }
+
     /// True values for samples given as estimates: the stroke waiting on them goes on.
     override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
         pencil.update(touches, sample: sample)
@@ -450,7 +521,7 @@ final class CanvasView: UIView {
     func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1) {
         let settings = AppSettings.shared
         let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
-        guard let point, settings.brushCursorOn, wanted else {
+        guard let point, settings.brushCursorOn, wanted, !cursorStaysAway() else {
             cursor.hide()
             return
         }

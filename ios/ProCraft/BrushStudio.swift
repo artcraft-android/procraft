@@ -47,6 +47,7 @@ enum StudioInk {
     static var aboutRowInk: Color { pick(0xFFBB_BBBB, 0xFF4A_4A4A) }
     static var aboutSignature: Color { pick(0xFF59_5959, 0xFFA8_A8A8) }
     static var padBehind: Color { back }
+    static var partCard: Color { pick(0xFF21_2121, 0xFFDD_DDDD) }
     static let switchFixed = Color(argb: 0xFF51_5153)
     static let switchFixedKnob = Color(argb: 0xFF9B_9B9B)
     static var done: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
@@ -58,6 +59,10 @@ final class StudioUi {
     var keypad: KeypadAsk?
     var blendList: BlendListAsk?
     var nodeMenu: NodeMenuAsk?
+    /// A dual brush's parts opened as cards, over where their rows are.
+    var partCards: CGRect?
+    /// The Secondary card held: the Uncombine callout under where the press was.
+    var uncombineAt: CGPoint?
 }
 
 /// The brush studio: tabs down the left, the drawing pad above, the tab's settings below; turned
@@ -78,7 +83,7 @@ struct BrushStudio: View {
                 StudioInk.back
                 if landscape {
                     HStack(spacing: 0) {
-                        StudioPagesCard()
+                        StudioPagesCard(studio: studio, ui: ui)
                         StudioSettings(model: model, ui: ui, landscape: true)
                             .frame(width: settingsWidth)
                         StudioInk.line.frame(width: 1)
@@ -97,6 +102,12 @@ struct BrushStudio: View {
                 }
                 if studio.padMenuOpen {
                     PadMenu(studio: studio, width: screen.size.width)
+                }
+                if let at = ui.partCards {
+                    PartCards(studio: studio, ui: ui, at: at)
+                }
+                if let at = ui.uncombineAt {
+                    UncombineCallout(studio: studio, ui: ui, at: at)
                 }
                 if let ask = ui.blendList {
                     BlendModeList(ask: ask, height: screen.size.height) { picked in
@@ -157,6 +168,9 @@ private struct StudioRail: View {
 /// Landscape: the pages by icon and name on a card headed "Brush Studio", the list scrolling under
 /// the title.
 private struct StudioPagesCard: View {
+    let studio: StudioModel
+    let ui: StudioUi
+
     var body: some View {
         let settings = AppSettings.shared
         let shape = RoundedRectangle(cornerRadius: 20, style: .circular)
@@ -169,7 +183,11 @@ private struct StudioPagesCard: View {
                 .padding(.top, 19)
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(Array(studioTabs.enumerated()), id: \.offset) { i, tab in
+                    if studio.isDual {
+                        StudioParts(studio: studio, ui: ui)
+                    }
+                    // a dual brush's second has only its own pages: the first has the rest, which go for the pair
+                    ForEach(Array(studioTabs.enumerated()).filter { !studio.showsSecond || secondPages.contains($0.element.name) }, id: \.offset) { i, tab in
                         let on = settings.studioTab == i
                         HStack(spacing: 0) {
                             PcIconView(tab.icon, size: tab.iconSize, color: on ? .white : StudioInk.tabIcon)
@@ -199,6 +217,193 @@ private struct StudioPagesCard: View {
         .clipShape(shape)
         .padding(.leading, 10)
         .padding(.vertical, 10)
+    }
+}
+
+/// The pages a dual brush's second has: the first alone has the rest, which go for the pair.
+private let secondPages: Set<String> = ["Stroke path", "Stabilization", "Taper", "Shape", "Grain", "Rendering", "Dynamics", "Stylus", "Properties"]
+/// The two parts heading the pages' card: each this tall, this far apart; the bar by the one shown.
+private let partHeight: CGFloat = 61
+private let partGap: CGFloat = 3
+private let partBar: CGFloat = 5
+/// The room they take before the pages (with the list's own 4 gap).
+private let partsHeight: CGFloat = 146
+/// Tapped, the part shown opens both as cards, Combine Mode between.
+private let partCardWidth: CGFloat = 340
+private let partCardHeight: CGFloat = 111
+private let combineRow: CGFloat = 51
+private let combineListLeft: CGFloat = 368
+/// The Uncombine callout a held Secondary card shows: its size, how far under the press it hangs,
+/// its light fill and dark word.
+private let calloutWidth: CGFloat = 104
+private let calloutHeight: CGFloat = 36
+private let calloutDrop: CGFloat = 10
+private let calloutFill = Color(argb: 0xFFE9_E9E9)
+private let calloutInk = Color(argb: 0xFF1C_1C1C)
+
+/// A dual brush's two parts: the one shown barred; tapped, it opens their cards, and the other shows.
+private struct StudioParts: View {
+    let studio: StudioModel
+    let ui: StudioUi
+
+    var body: some View {
+        GeometryReader { g in
+            VStack(spacing: partGap) {
+                ForEach([false, true], id: \.self) { second in
+                    let shown = second == studio.showsSecond
+                    ZStack(alignment: .leading) {
+                        if let image = studio.parts[second ? 1 : 0] {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        if shown {
+                            RoundedRectangle(cornerRadius: 2, style: .circular)
+                                .fill(Pc.accent)
+                                .frame(width: partBar, height: partHeight - 1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: partHeight)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if shown {
+                            ui.partCards = g.frame(in: .named(studioSpace))
+                        } else {
+                            studio.showPart(second: second)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(height: partsHeight)
+    }
+}
+
+/// A dual brush's parts as cards over their rows, Combine Mode between: a tap outside closes them.
+private struct PartCards: View {
+    let studio: StudioModel
+    let ui: StudioUi
+    let at: CGRect
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { ui.partCards = nil }
+            VStack(spacing: partGap) {
+                PartCard(studio: studio, ui: ui, name: "Primary", second: false)
+                HStack(spacing: 0) {
+                    Text(verbatim: "Combine Mode")
+                        .font(.system(size: 17))
+                        .foregroundStyle(StudioInk.dim)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text(verbatim: studio.combineModes.first { Int($0.id) == studio.combineMode }?.name ?? "")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Pc.accent)
+                        .lineLimit(1)
+                    PcIconView(PcIcons.chevronRight, size: 24, color: StudioInk.dim)
+                        .padding(.leading, 6)
+                }
+                .padding(.leading, 11)
+                .padding(.trailing, 12)
+                .frame(height: combineRow)
+                .contentShape(Rectangle())
+                .overlay {
+                    GeometryReader { g in
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                ui.blendList = BlendListAsk(
+                                    modes: studio.combineModes, current: studio.combineMode,
+                                    centreY: g.frame(in: .named(studioSpace)).midY, left: combineListLeft
+                                ) { studio.changeCombineMode($0) }
+                            }
+                    }
+                }
+                PartCard(studio: studio, ui: ui, name: "Secondary", second: true)
+            }
+            .frame(width: partCardWidth)
+            .background(RoundedRectangle(cornerRadius: 12, style: .circular).fill(StudioInk.tabs))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .circular))
+            .offset(x: at.minX, y: at.minY)
+        }
+    }
+}
+
+/// A part as a card: blue when it shows; tapped, it shows, the cards staying; the Secondary held,
+/// the Uncombine callout under its middle.
+private struct PartCard: View {
+    let studio: StudioModel
+    let ui: StudioUi
+    let name: String
+    let second: Bool
+    /// The card's middle on the screen, which the Uncombine callout hangs under.
+    @State private var middle = CGPoint.zero
+
+    var body: some View {
+        let on = second == studio.showsSecond
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 12, style: .circular)
+                .fill(on ? Pc.accent : StudioInk.partCard)
+            if let image = studio.parts[second ? 1 : 0] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 20)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Text(verbatim: name)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(on ? Color.white : StudioInk.pageInk)
+                .lineLimit(1)
+                .padding(.leading, 11)
+                .padding(.top, 7)
+        }
+        .frame(height: partCardHeight)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { middle = CGPoint(x: g.frame(in: .named(studioSpace)).midX, y: g.frame(in: .named(studioSpace)).midY) }
+        })
+        .contentShape(Rectangle())
+        .onTapGesture { studio.showPart(second: second) }
+        .onLongPressGesture {
+            if second {
+                ui.uncombineAt = middle
+            }
+        }
+    }
+}
+
+/// Uncombine, under where the Secondary card was held: tapped, the cards close and it asks first;
+/// a tap outside lets it go.
+private struct UncombineCallout: View {
+    let studio: StudioModel
+    let ui: StudioUi
+    let at: CGPoint
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { ui.uncombineAt = nil }
+            Text(verbatim: "Uncombine")
+                .font(.system(size: 15))
+                .foregroundStyle(calloutInk)
+                .lineLimit(1)
+                .frame(width: calloutWidth, height: calloutHeight)
+                .background(Capsule().fill(calloutFill))
+                .contentShape(Capsule())
+                .onTapGesture {
+                    ui.uncombineAt = nil
+                    ui.partCards = nil
+                    studio.askUncombine()
+                }
+                .offset(x: at.x - calloutWidth / 2, y: at.y + calloutDrop)
+        }
     }
 }
 

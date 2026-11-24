@@ -209,6 +209,19 @@ fun DropBandUi(vm: CanvasViewModel) {
                         chosen = if (vm.dropAllLayers) 1 else 0, ink = ink, blue = blue,
                     ) { vm.chooseDropAllLayers(it == 1) }
                     Spacer(Modifier.width(13.dp))
+                    // what a drag does while filling: fill every unfilled area it crosses
+                    if (width >= BandRoomForContinuous) {
+                        val on = vm.dropContinuous
+                        Box(
+                            Modifier.size(ContinuousWidth, 20.dp).clip(RoundedCornerShape(10.dp))
+                                .background(if (on) blue else if (Pc.light) Color(0x1F000000) else Color(0x33FFFFFF))
+                                .press { vm.chooseDropContinuous(!on) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("Continuous", color = if (on) Color.White else ink, fontSize = 11.7.sp, maxLines = 1)
+                        }
+                        Spacer(Modifier.width(13.dp))
+                    }
                     if (what == DropBand.FILLING) {
                         // the tick ends filling
                         Box(Modifier.size(20.dp).clip(CircleShape).background(blue).press { vm.endFilling() }) {
@@ -334,7 +347,10 @@ private val EraserRoomForNames: Dp = 268.dp
 private val SegmentWidth = 68.dp
 
 /** Under this, the band leaves its title out for the segmented control. */
-private val BandRoomForTitle: Dp = 380.dp
+private val BandRoomForTitle: Dp = 470.dp
+/** Continuous's pill across, and the band's width under which it is left out. */
+private val ContinuousWidth: Dp = 76.dp
+private val BandRoomForContinuous: Dp = 360.dp
 
 /** The segmented control's track, dark and light. */
 private val TrackDark = Color(0x33FFFFFF)

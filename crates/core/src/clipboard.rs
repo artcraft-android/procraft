@@ -263,6 +263,26 @@ impl CanvasSession {
         self.add_picture(premultiplied(image), true, private)
     }
 
+    /// `image` (a photo or file, straight RGBA8) as a new frame of the timeline, centred and
+    /// scaled down to fit: a new drawing at the playhead on the track drawn on (where there is
+    /// one already, just after it, the playhead going onto it, as `add_timeline_drawing` does)
+    /// with the picture on its layer. Returns that layer; none off a timeline, on a locked track
+    /// or with no room for a layer.
+    pub fn insert_image_frame(&self, image: ThumbnailImage) -> Option<u64> {
+        let (w, h) = {
+            let st = self.shared.lock();
+            st.doc.timeline.as_ref()?;
+            (st.doc.width(), st.doc.height())
+        };
+        let pixels = placed(premultiplied(image), w, h, true)?;
+        if self.add_timeline_drawing() == 0 {
+            return None;
+        }
+        // the new drawing's own layer is the one drawn on now
+        let layer = self.shared.lock().doc.current().0;
+        self.picture_onto(layer, pixels, w, h)
+    }
+
     /// The current mask holding `image` (from another app, straight RGBA8), centred and scaled
     /// down to fit, if a plugin says to and it can; whether it does.
     pub fn paste_picture_into_mask(&self, image: ThumbnailImage) -> bool {
@@ -407,14 +427,33 @@ impl CanvasSession {
             (st.doc.width(), st.doc.height())
         };
         let pixels = placed(image, w, h, fit)?;
-        // none if there is no room for it (the new layer may take the last)
-        let id = self.change("new layer", |d| {
-            d.has_room(1).then(|| {
-                let id = d.add_layer();
-                d.set_private(id, private);
-                id.0
-            })
-        })?;
+        // none if there is no room for it (the new layer may take the last). On a timeline it
+        // goes in the drawing at the playhead, as a new layer does: a layer of its own beside the
+        // drawings would be in none of them, and never show
+        let on_timeline = self.shared.lock().doc.timeline.is_some();
+        let id = if on_timeline {
+            let id = self.add_timeline_layer();
+            if id == 0 {
+                return None;
+            }
+            if private {
+                self.shared.lock().doc.set_private(LayerId(id), true);
+            }
+            id
+        } else {
+            self.change("new layer", |d| {
+                d.has_room(1).then(|| {
+                    let id = d.add_layer();
+                    d.set_private(id, private);
+                    id.0
+                })
+            })?
+        };
+        self.picture_onto(id, pixels, w, h)
+    }
+
+    /// New layer `id`, clear so far, given `pixels` (the canvas's size, premultiplied RGBA8).
+    fn picture_onto(&self, id: u64, pixels: Vec<u8>, w: u32, h: u32) -> Option<u64> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         // only what is painted is sent (the new layer is clear elsewhere): a copied layer comes

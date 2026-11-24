@@ -35,7 +35,7 @@ pub struct TimelineTrackClips {
 
 /// Clip `id` put on track `track` at timeline frame `start` in `tl`, pushing aside what it covers
 /// (`later`, else earlier); false if it can't go there or either track is locked.
-fn placed(tl: &mut Timeline, id: u64, track: u64, start: u32, later: bool) -> bool {
+pub(super) fn placed(tl: &mut Timeline, id: u64, track: u64, start: u32, later: bool) -> bool {
     let (id, track) = (ClipId(id), TrackId(track));
     let locked = |tl: &Timeline, t: TrackId| tl.track(t).is_none_or(|t| t.locked);
     if locked(tl, track) || tl.track_of_clip(id).is_none_or(|t| locked(tl, t)) {
@@ -89,11 +89,36 @@ fn span_of(tl: &Timeline, ids: &[ClipId]) -> Option<u32> {
 /// Clips `ids` put down `by` frames along on the tracks as many places up or down as track
 /// `track` is from clip `primary`'s, pushing aside what they cover, in `tl`: the tracks that
 /// changed. None if they can't go there.
-fn placed_together(tl: &mut Timeline, ids: &[ClipId], primary: u64, track: u64, by: i32, later: bool) -> Option<Vec<TrackId>> {
+pub(super) fn placed_together(tl: &mut Timeline, ids: &[ClipId], primary: u64, track: u64, by: i32, later: bool) -> Option<Vec<TrackId>> {
     tl.place_clips(ids, ClipId(primary), TrackId(track), i64::from(by), later)
 }
 
-fn ids_of(ids: Vec<u64>) -> Vec<ClipId> {
+/// Clips `ids` each `by` frames longer (shorter, when negative) at its end, or, `leading`, at its
+/// start, in `tl`, the timeline growing to hold what goes later: the tracks that changed. Each
+/// goes as one clip's alone does (see `lengthen_timeline_clip`): longer, into the empty frames
+/// beside it first, the clips it reaches pushed only as far as they must be (a start with no
+/// more room before it makes the clip longer at its end instead); shorter, nothing else moves.
+/// The latest goes first, so the room one makes isn't taken by the next.
+fn lengthened_together(tl: &mut Timeline, ids: &[ClipId], leading: bool, by: i32) -> Vec<TrackId> {
+    let mut order: Vec<(u32, ClipId)> = ids.iter().filter_map(|id| Some((tl.origin(*id)?, *id))).collect();
+    order.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut changed = Vec::new();
+    for (_, id) in order {
+        // (where its edge is now: one after it may have moved it)
+        let Some(start) = tl.origin(id) else { continue };
+        let Some(length) = tl.clip(id).map(|c| c.duration) else { continue };
+        let edge = if leading { i64::from(start) } else { i64::from(start) + i64::from(length) };
+        let to = i32::try_from(edge + i64::from(by)).unwrap_or(if by < 0 { i32::MIN } else { i32::MAX });
+        if let Some(track) = super::edits::lengthened(tl, id.0, leading, to)
+            && !changed.contains(&track)
+        {
+            changed.push(track);
+        }
+    }
+    changed
+}
+
+pub(super) fn ids_of(ids: Vec<u64>) -> Vec<ClipId> {
     let mut ids: Vec<ClipId> = ids.into_iter().map(ClipId).collect();
     ids.sort();
     ids.dedup();
@@ -223,6 +248,58 @@ impl CanvasSession {
             (!tl.trim_clips(&ids, edge, i64::from(by), policy.policy()).is_empty()).then_some(())
         })
         .is_some()
+    }
+
+    /// Clips `ids` (on one level) played in the opposite order: each mirrored across the frames
+    /// they span together, its length and keys kept, as one "Flip Frames" undo step. False, and
+    /// nothing changed, if one is on a locked track, one would land on a clip that isn't among
+    /// them, or there is nothing to turn round.
+    pub fn reverse_timeline_clips(&self, ids: Vec<u64>) -> bool {
+        let ids = ids_of(ids);
+        let done = self
+            .change("Flip Frames", |d| {
+                let tl = d.timeline.as_mut()?;
+                if any_locked(tl, &ids) {
+                    return None;
+                }
+                tl.reverse_clips(&ids).then_some(())
+            })
+            .is_some();
+        if done {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.follow_playhead();
+            self.shared.frame(st);
+        }
+        done
+    }
+
+    /// As [`CanvasSession::trim_timeline_clips`] with the clips beyond each edge pushed along,
+    /// the timeline growing to hold what goes later: what the grid's handle on the frames picked
+    /// together does. One "Trim Clips" undo step.
+    pub fn lengthen_timeline_clips(&self, ids: Vec<u64>, leading: bool, by: i32) -> bool {
+        let ids = ids_of(ids);
+        self.change("Trim Clips", |d| {
+            let tl = d.timeline.as_mut()?;
+            if any_locked(tl, &ids) {
+                return None;
+            }
+            (!lengthened_together(tl, &ids, leading, by).is_empty()).then_some(())
+        })
+        .is_some()
+    }
+
+    /// The tracks [`CanvasSession::lengthen_timeline_clips`] would change, with their clips as
+    /// it would leave them, changing nothing. Empty if it would change nothing.
+    pub fn timeline_lengthens_preview(&self, ids: Vec<u64>, leading: bool, by: i32) -> Vec<TimelineTrackClips> {
+        let ids = ids_of(ids);
+        let st = self.shared.lock();
+        let Some(mut tl) = st.doc.timeline.clone() else { return Vec::new() };
+        if any_locked(&tl, &ids) {
+            return Vec::new();
+        }
+        let changed = lengthened_together(&mut tl, &ids, leading, by);
+        changed.into_iter().map(|t| TimelineTrackClips { track: t.0, clips: clips_of(&tl, t) }).collect()
     }
 
     /// The tracks [`CanvasSession::trim_timeline_clips`] would change, with their clips as it

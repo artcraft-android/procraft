@@ -13,6 +13,9 @@ private let swipeGap: CGFloat = 5.5
 private let swipeFill = Color(argb: 0xFF3F_3F3F)
 private let swipeInk = Color(argb: 0xFFC5_C5C5)
 private let swipeDelete = Color(argb: 0xFFFF_3A46)
+/// A brush swiped right is picked, this fill over its row; it follows the finger this far.
+private let pickedBrush = Color(argb: 0xFF2C_5281)
+private let pickReach: CGFloat = 72
 private let searchFill = Color(argb: 0x1F76_7680)
 private let searchHint = Color(argb: 0x4DEB_EBF5)
 private let resultFill = Color(argb: 0x14FF_FFFF)
@@ -232,11 +235,24 @@ struct BrushLibrary: View {
                 onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } },
                 rename: renaming ? { model.renameLibrary(model.libraryPlace, name: $0) } : nil
             ) {
-                PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
-                    .frame(width: 41, height: 40)
-                    .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(Motion.menuOpen) { ui.adding = true } }
-                    .padding(.top, 12)
+                // brushes picked: Delete in the plus's place, and Combine for one with the current brush
+                if !model.pickedBrushes.isEmpty {
+                    HStack(spacing: 4) {
+                        if model.canCombinePicked {
+                            pickedButton("Combine", width: 80) { model.combinePicked() }
+                        }
+                        pickedButton("Delete", width: 63) {
+                            model.question = Question(title: "Delete these brushes?") { model.deletePickedBrushes() }
+                        }
+                    }
+                    .padding(.top, 16)
+                } else {
+                    PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
+                        .frame(width: 41, height: 40)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation(Motion.menuOpen) { ui.adding = true } }
+                        .padding(.top, 12)
+                }
             }
             VStack(spacing: 0) {
                 // the search field scrolls away with the lists: out of sight at first, it comes down
@@ -278,6 +294,9 @@ struct BrushLibrary: View {
         .onPreferenceChange(BrushFrames.self) { ui.brushFrames = $0 }
         .overlay(alignment: .topLeading) { LibraryMenus(model: model, ui: ui, origin: origin, screen: screen) }
         .overlay(alignment: .topLeading) { DragGhost(model: model, ui: ui) }
+        // brushes picked are let go as the library closes, or another set shows
+        .onDisappear { model.pickedBrushes.removeAll() }
+        .onChange(of: model.shownSet) { _, _ in model.pickedBrushes.removeAll() }
         .fileImporter(isPresented: $ui.importing, allowedContentTypes: [.item]) { result in
             if case let .success(url) = result {
                 model.importBrushes(from: url)
@@ -310,6 +329,17 @@ struct BrushLibrary: View {
         }
         #endif
     }
+}
+
+/// A word in the header's place for the plus while brushes are picked.
+private func pickedButton(_ label: String, width: CGFloat, action: @escaping () -> Void) -> some View {
+    Text(verbatim: label)
+        .font(.system(size: 15))
+        .foregroundStyle(swipeInk)
+        .lineLimit(1)
+        .frame(width: width, height: 32)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
 }
 
 /// The library's search field: a magnifier, what is typed, and a button clearing it.
@@ -737,13 +767,15 @@ private struct SwipeAction: Identifiable {
 }
 
 /// A brush that slides away to the left, showing its `actions` in its place: Share, Duplicate and
-/// Delete; in the Recent set Find, Pin (or Unpin) and Clear.
+/// Delete; in the Recent set Find, Pin (or Unpin) and Clear. Slid right past half of `pickReach`
+/// it springs back and is picked or let go (`onPick`).
 private struct SwipeRow<Content: View>: View {
     let open: Bool
     /// How far a finger has slid along the row, while one does (the library's `RowTouches` tell).
     let slide: CGFloat?
     let onOpen: (Bool) -> Void
     let actions: [SwipeAction]
+    var onPick: (() -> Void)?
     @ViewBuilder let content: () -> Content
 
     @State private var width: CGFloat = 0
@@ -790,9 +822,13 @@ private struct SwipeRow<Content: View>: View {
             withAnimation(Motion.swipeSettle) { offset = rest }
         }
         .onChange(of: slide) { _, now in
+            let reach = onPick == nil || open ? 0 : pickReach
             if let now {
-                offset = min(max(rest + now, -width), 0)
+                offset = min(max(rest + now, -width), reach)
                 return
+            }
+            if reach > 0, offset > reach / 2 {
+                onPick?()
             }
             // let go: open past a third of the way, else back
             let opened = offset < -width / 3
@@ -842,19 +878,23 @@ private struct BrushRow: View {
         let selected = recent
             ? model.currentBrush.map { $0.set == brush.set && $0.index == brush.index } == true
             : model.highlighted(brush)
+        let picked = model.pickedBrushes.contains(key)
         let preview = model.previews[key]
         let shape = RoundedRectangle(cornerRadius: 12, style: .circular)
+        let b = brush
         SwipeRow(
             open: model.swipedBrush == key, slide: ui.slid == key ? ui.slidBy : nil,
-            onOpen: { model.swipedBrush = $0 ? key : nil }, actions: actions
+            onOpen: { model.swipedBrush = $0 ? key : nil }, actions: actions,
+            // the current brush counts as picked already
+            onPick: recent || selected ? nil : { model.togglePickedBrush(b) }
         ) {
             ZStack(alignment: .topLeading) {
-                shape.fill(selected ? Pc.rowSelected : Color.clear)
+                shape.fill(selected ? Pc.rowSelected : picked ? pickedBrush : Color.clear)
                 if let preview {
                     // the samples are drawn white: dark on the light interface's cells
-                    SampleStroke(image: preview, tint: Look.shared.light && !selected ? .black : nil)
+                    SampleStroke(image: preview, tint: Look.shared.light && !selected && !picked ? .black : nil)
                 }
-                BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
+                BrushName(name: brush.name, selected: selected || picked, shaded: model.shadedNames[key] == true)
                     .padding(.leading, 18)
                     .padding(.top, 11.75)
                 // a pinned brush's mark, at the cell's top right
@@ -876,6 +916,11 @@ private struct BrushRow: View {
                 // with a brush swiped open, a tap only closes it
                 if model.swipedBrush != nil {
                     model.swipedBrush = nil
+                    return
+                }
+                // and with brushes picked, only lets them go
+                if !model.pickedBrushes.isEmpty {
+                    model.pickedBrushes.removeAll()
                     return
                 }
                 model.chooseBrush(brush)

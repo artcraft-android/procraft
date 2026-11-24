@@ -1103,6 +1103,8 @@ struct BlendListAsk {
     let current: Int
     /// Where the row's middle is on the screen.
     let centreY: CGFloat
+    /// How far from the screen's left the list stands; none: 10 from its right.
+    var left: CGFloat?
     let onPick: (Int) -> Void
 }
 
@@ -1171,7 +1173,7 @@ struct BlendModeList: View {
         let top = ask.centreY - (CGFloat(chosen - first) + 0.5) * (rowHeight + 1)
         let y = min(max(top, 10), max(height - 10 - tall, 10))
         let shape = RoundedRectangle(cornerRadius: 13, style: .circular)
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: ask.left == nil ? .topTrailing : .topLeading) {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture { onDone(nil) }
@@ -1211,8 +1213,8 @@ struct BlendModeList: View {
             .background(shape.fill(Color(argb: 0xFFE1_E1E1)))
             .clipShape(shape)
             .shadow(color: .black.opacity(0.35), radius: 12)
-            .padding(.trailing, 10)
-            .offset(y: y)
+            .padding(.trailing, ask.left == nil ? 10 : 0)
+            .offset(x: ask.left ?? 0, y: y)
         }
     }
 }

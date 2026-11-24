@@ -76,10 +76,57 @@ fn slider_to_size(v: f32) -> f32 {
     10.0 + v * v * 490.0
 }
 
+/// Zoom Fade's switch beside a grid's size, across.
+const FADE_WIDTH: f32 = 140.0;
+
+/// The zooms Zoom Fade's slider stops at, evenly along it: Auto (none), then 25% to 3200%.
+const FADE_STOPS: [Option<f32>; 14] = [
+    None,
+    Some(0.25),
+    Some(0.5),
+    Some(1.0),
+    Some(1.5),
+    Some(2.0),
+    Some(3.0),
+    Some(4.0),
+    Some(6.0),
+    Some(8.0),
+    Some(12.0),
+    Some(16.0),
+    Some(24.0),
+    Some(32.0),
+];
+
+/// Zoom Fade's slider's place for a zoom (or Auto), at its nearest stop, and back.
+fn fade_at_to_slider(at: Option<f32>) -> f32 {
+    let i = at.map_or(0, |z| {
+        (1..FADE_STOPS.len())
+            .min_by(|&a, &b| {
+                let d = |i: usize| FADE_STOPS[i].map_or(f32::INFINITY, |s| (s - z).abs());
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap_or(0)
+    });
+    i as f32 / (FADE_STOPS.len() - 1) as f32
+}
+
+fn slider_to_fade_at(v: f32) -> Option<f32> {
+    let i = (v.clamp(0.0, 1.0) * (FADE_STOPS.len() - 1) as f32).round() as usize;
+    FADE_STOPS[i.min(FADE_STOPS.len() - 1)]
+}
+
+/// A zoom as a percentage: whole, or to a tenth under 10%.
+fn zoom_percent(zoom: f32) -> String {
+    let percent = zoom * 100.0;
+    if percent >= 10.0 { format!("{}%", percent.round() as i32) } else { format!("{percent:.1}%") }
+}
+
 #[derive(Default)]
 pub struct GuideEditor {
     pub open: bool,
     symmetry_open: bool,
+    /// Zoom Fade's options (held open from its switch, or opened with a right click on it).
+    fade_open: bool,
     /// The grid size's keypad, while it is up.
     keypad: Option<SizeKeypad>,
     /// The menu of a handle tapped, while it shows: a perspective guide's point (its place) or the
@@ -216,6 +263,7 @@ impl GuideEditor {
         session.set_touch_guide_editing(true);
         self.open = true;
         self.symmetry_open = false;
+        self.fade_open = false;
         self.keypad = None;
         self.node_menu = None;
     }
@@ -225,6 +273,7 @@ impl GuideEditor {
         session.guide_edit_end(keep);
         self.open = false;
         self.symmetry_open = false;
+        self.fade_open = false;
         self.keypad = None;
         self.node_menu = None;
     }
@@ -232,6 +281,7 @@ impl GuideEditor {
     /// A touch came down on the canvas: symmetry's options and a handle's menu close.
     pub fn touched(&mut self) {
         self.symmetry_open = false;
+        self.fade_open = false;
         self.node_menu = None;
     }
 
@@ -378,6 +428,8 @@ impl GuideEditor {
         let (w, h) = if wide { (screen.width() - 16.0, 137.0) } else { (652.0, 199.0) };
         let rect = panel_rect(screen, w, h);
         let mut options_button = Rect::NOTHING;
+        let mut fade_button = Rect::NOTHING;
+        let grid = matches!(g.kind, GuideType::Grid | GuideType::Isometric);
         let set_look =
             |opacity: f32, thickness: f32, size: f32| _ = session.set_guide_look(opacity, thickness, size, g.hue);
         panel(ctx, "guide toolbar", rect, |ui| {
@@ -388,9 +440,19 @@ impl GuideEditor {
             {
                 session.set_guide_kind(k.0);
                 self.symmetry_open = false;
+                self.fade_open = false;
                 self.node_menu = None;
             }
-            let (slider_w, gap) = if wide { (257.0, 19.0) } else { (300.0, 20.0) };
+            // a grid's sliders narrow on a wide screen where Zoom Fade wouldn't fit beside them
+            let (slider_w, gap) = if wide && grid {
+                (((screen.width() - 499.0) / 3.0).floor().min(257.0), 19.0)
+            } else if wide {
+                (257.0, 19.0)
+            } else {
+                (300.0, 20.0)
+            };
+            // upright, the grid's size shares its row with Zoom Fade and Assisted Drawing
+            let third_w = if !wide && grid { 240.0 } else { slider_w };
             let row_top = if wide { rect.top() + 16.0 + 34.0 + 16.0 } else { rect.top() + 14.0 + 34.0 + 14.0 };
             let left = if wide { rect.left() + 16.0 } else { rect.center().x - 310.0 };
             if let Some(v) = option_slider(
@@ -426,7 +488,7 @@ impl GuideEditor {
                     if let Some(v) = option_slider(
                         ui,
                         pos2(third, third_top),
-                        slider_w,
+                        third_w,
                         "Grid size",
                         size_to_slider(g.size),
                         "",
@@ -435,8 +497,35 @@ impl GuideEditor {
                     ) {
                         set_look(g.opacity, g.thickness, slider_to_size(v));
                     }
-                    if size_chip(ui, pos2(third, third_top), slider_w, &g.size_label) {
+                    if size_chip(ui, pos2(third, third_top), third_w, &g.size_label) {
                         self.keypad = Some(SizeKeypad { typed: g.size_text.clone(), unit: g.unit });
+                    }
+                    // a grid's lines fade out as the canvas is zoomed out and in as it is zoomed
+                    // in; held (or right-clicked), where they start to
+                    fade_button = Rect::from_min_size(pos2(third + third_w + gap, third_top), vec2(FADE_WIDTH, 54.0));
+                    let y = third_top + 27.0;
+                    text(
+                        ui.painter(),
+                        pos2(fade_button.left() + 8.0, y),
+                        Align2::LEFT_CENTER,
+                        "Zoom Fade",
+                        15.0,
+                        Weight::Regular,
+                        argb(LABEL),
+                    );
+                    let switch_at = pos2(fade_button.right() - 63.0, y - 14.0);
+                    crate::transform::switch(ui, switch_at, g.fade, "zoom fade");
+                    let held = ui.interact(fade_button, ui.scope_id().with("zoom fade row"), Sense::click());
+                    let tap = ui.interact(
+                        Rect::from_min_size(switch_at, vec2(63.0, 28.0)),
+                        ui.scope_id().with("zoom fade"),
+                        Sense::click(),
+                    );
+                    if tap.long_touched() || tap.secondary_clicked() || held.long_touched() || held.secondary_clicked()
+                    {
+                        self.fade_open = !self.fade_open;
+                    } else if tap.clicked() {
+                        session.set_guide_fade(!g.fade, g.fade_at);
                     }
                 }
                 GuideType::Symmetry => {
@@ -462,7 +551,8 @@ impl GuideEditor {
             let right = if wide { rect.right() - 22.0 } else { third + slider_w + gap + slider_w };
             let switch_at = pos2(right - 63.0, switch_y - 14.0);
             crate::transform::switch(ui, switch_at, g.assisted, "assisted");
-            let label_at = pos2(if wide { switch_at.x - 12.0 } else { third + slider_w + gap + 8.0 }, switch_y);
+            let beside = if grid { third_w + gap + FADE_WIDTH + gap } else { slider_w + gap };
+            let label_at = pos2(if wide { switch_at.x - 12.0 } else { third + beside + 8.0 }, switch_y);
             let align = if wide { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
             text(ui.painter(), label_at, align, "Assisted Drawing", 15.0, Weight::Regular, argb(LABEL));
             let tap = Rect::from_min_size(switch_at, vec2(63.0, 28.0));
@@ -472,6 +562,51 @@ impl GuideEditor {
         });
         if self.symmetry_open && g.kind == GuideType::Symmetry {
             self.symmetry_options(ctx, look, session, g, options_button);
+        }
+        if self.fade_open && grid {
+            self.fade_options(ctx, session, g, fade_button);
+        }
+    }
+
+    /// Zoom Fade's options over its switch: on or off, and the zoom its grid starts to fade in at
+    /// (whole at four times that): Auto (as its lines come a few pixels apart, the zoom that is
+    /// for its size shown), or one of the slider's stops.
+    fn fade_options(&mut self, ctx: &egui::Context, session: &CanvasSession, g: &GuideInfo, button: Rect) {
+        let mut open = true;
+        options_menu(ctx, &mut open, button, "Zoom Fade", 40.0 + 8.0 + 54.0, |ui, inner| {
+            let row = Rect::from_min_size(inner.min, vec2(inner.width(), 40.0));
+            text(
+                ui.painter(),
+                pos2(row.left() + 6.0, row.center().y),
+                Align2::LEFT_CENTER,
+                "Zoom Fade",
+                15.0,
+                Weight::Regular,
+                argb(LABEL),
+            );
+            crate::transform::switch(ui, pos2(row.right() - 63.0, row.center().y - 14.0), g.fade, "zoom fade option");
+            if ui.interact(row, ui.scope_id().with("zoom fade switch"), Sense::click()).clicked() {
+                session.set_guide_fade(!g.fade, g.fade_at);
+            }
+            let shown = g.fade_at.map_or_else(|| format!("Auto ({})", zoom_percent(g.fade_auto_at)), zoom_percent);
+            if let Some(v) = option_slider(
+                ui,
+                pos2(inner.left(), row.bottom() + 8.0),
+                inner.width(),
+                "Fade In At",
+                fade_at_to_slider(g.fade_at),
+                &shown,
+                false,
+                LABEL,
+            ) {
+                let at = slider_to_fade_at(v);
+                if at != g.fade_at {
+                    session.set_guide_fade(g.fade, at);
+                }
+            }
+        });
+        if !open {
+            self.fade_open = false;
         }
     }
 

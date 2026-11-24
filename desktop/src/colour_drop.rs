@@ -319,8 +319,16 @@ impl ColourDrop {
     }
 
     /// Draws the band hanging from `top` and the dragged colour's dot; keeps the touches filling
-    /// with the colour (`current`, unless a swatch was dropped) while filling goes on.
-    pub fn show(&mut self, ctx: &egui::Context, session: &CanvasSession, current: u32, top: f32) {
+    /// with the colour (`current`, unless a swatch was dropped) while filling goes on. The band's
+    /// All Layers and Continuous are kept in `prefs`.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        current: u32,
+        top: f32,
+        prefs: &mut crate::prefs::Prefs,
+    ) {
         // a press whose colour went away (a swatch taken out, a panel closed) ends with the pointer
         if self.press.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
             let at = ctx.input(|i| i.pointer.interact_pos());
@@ -338,7 +346,7 @@ impl ColourDrop {
         }
         let fill = (self.band == Band::Filling).then(|| {
             let [r, g, b] = of_hex(self.swatch.unwrap_or(current));
-            Fill { r, g, b, threshold: self.threshold, continuous: false }
+            Fill { r, g, b, threshold: self.threshold, continuous: prefs.drop_continuous }
         });
         session.set_touch_filling(fill);
         if self.band != Band::None {
@@ -359,6 +367,11 @@ impl ColourDrop {
         }
         let window = ctx.content_rect();
         let what = self.shown;
+        // what a colour fills up to: the current layer (or the reference layer) or All Layers
+        let on_reference = session.layers().iter().any(|l| l.reference && !l.current);
+        let chosen = usize::from(prefs.drop_all_layers);
+        let at = ctx.animate_value_with_time(Id::unique("colour drop thumb"), chosen as f32, 0.33);
+        let pill = ctx.animate_bool_with_time(Id::unique("colour drop continuous"), prefs.drop_continuous, 0.2);
         let lined = matches!(what, Band::Dragging | Band::Filling);
         let height = BAND_HEIGHT + if self.sliding { ROW_HEIGHT } else { 0.0 } + if lined { LINE_HEIGHT } else { 0.0 };
         let y = top - (1.0 - out) * height;
@@ -373,12 +386,55 @@ impl ColourDrop {
                 painter.rect_filled(band, 0, argb(BAND_FILL));
                 let ink = argb(INK);
                 let blue = argb(pc::ACCENT);
-                // "ColorDrop", then the tick that ends filling or the offer to continue
-                let name = painter.layout_no_wrap("ColorDrop".into(), Weight::Bold.font(16.5), ink).size().x;
+                // "ColorDrop" (on a narrow screen the controls have the band to themselves), what
+                // it fills up to, Continuous, then the tick that ends filling or the offer to
+                // continue
+                let titled = window.width() >= ROOM_FOR_TITLE;
+                let continuous = window.width() >= ROOM_FOR_CONTINUOUS;
+                let name = if titled {
+                    painter.layout_no_wrap("ColorDrop".into(), Weight::Bold.font(16.5), ink).size().x + 13.0
+                } else {
+                    0.0
+                };
+                let track_width = SEGMENT * 2.0;
+                let pill_width = if continuous { CONTINUOUS_WIDTH + 13.0 } else { 0.0 };
                 let button = vec2(if what == Band::Filling { 20.0 } else { 101.0 }, 20.0);
-                let left = band.center().x - (name + 13.0 + button.x) / 2.0;
-                text(painter, pos2(left, band.center().y), Align2::LEFT_CENTER, "ColorDrop", 16.5, Weight::Bold, ink);
-                let button = Rect::from_min_size(pos2(left + name + 13.0, band.center().y - button.y / 2.0), button);
+                let left = band.center().x - (name + track_width + 13.0 + pill_width + button.x) / 2.0;
+                if titled {
+                    text(painter, pos2(left, band.center().y), Align2::LEFT_CENTER, "ColorDrop", 16.5, Weight::Bold, ink);
+                }
+                let track = Rect::from_min_size(pos2(left + name, band.center().y - 10.0), vec2(track_width, 20.0));
+                painter.rect_filled(track, 10, argb(SEGMENT_TRACK));
+                let thumb = Rect::from_min_size(pos2(track.left() + SEGMENT * at, track.top()), vec2(SEGMENT, 20.0));
+                painter.rect_filled(thumb, 10, blue);
+                let mut all_layers = None;
+                for (i, label) in [if on_reference { "Reference" } else { "Layer" }, "All Layers"].into_iter().enumerate() {
+                    let cell =
+                        Rect::from_min_size(pos2(track.left() + SEGMENT * i as f32, track.top()), vec2(SEGMENT, 20.0));
+                    let colour = if i == chosen { Color32::WHITE } else { ink };
+                    text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 11.7, Weight::Regular, colour);
+                    if ui.interact(cell, ui.scope_id().with(("colour drop segment", i)), Sense::click()).clicked() {
+                        all_layers = Some(i == 1);
+                    }
+                }
+                let mut toggled = false;
+                if continuous {
+                    // Continuous: a pill that is blue while on
+                    let rect = Rect::from_min_size(
+                        pos2(track.right() + 13.0, band.center().y - 10.0),
+                        vec2(CONTINUOUS_WIDTH, 20.0),
+                    );
+                    let off = argb(SEGMENT_TRACK);
+                    ui.painter().rect_filled(rect, 10, off.lerp_to_gamma(blue, pill));
+                    let word = ink.lerp_to_gamma(Color32::WHITE, pill);
+                    text(ui.painter(), rect.center(), Align2::CENTER_CENTER, "Continuous", 11.7, Weight::Regular, word);
+                    toggled = ui.interact(rect, ui.scope_id().with("colour drop continuous"), Sense::click()).clicked();
+                }
+                let painter = ui.painter();
+                let button = Rect::from_min_size(
+                    pos2(track.right() + 13.0 + pill_width, band.center().y - button.y / 2.0),
+                    button,
+                );
                 if what == Band::Filling {
                     painter.circle_filled(button.center(), 10.0, blue);
                     let c = button.center();
@@ -399,6 +455,20 @@ impl ColourDrop {
                         Weight::Regular,
                         Color32::WHITE,
                     );
+                }
+                if all_layers.is_some_and(|on| on != prefs.drop_all_layers) || toggled {
+                    if let Some(on) = all_layers {
+                        prefs.drop_all_layers = on;
+                        session.set_pour_all_layers(on);
+                    }
+                    if toggled {
+                        prefs.drop_continuous = !prefs.drop_continuous;
+                    }
+                    prefs.keep();
+                    // after a drop, the band offering Continue filling stays up for another while
+                    if let Band::Dropped(_) = self.band {
+                        self.band = Band::Dropped(Instant::now());
+                    }
                 }
                 if ui.interact(button, ui.scope_id().with("colour drop button"), Sense::click()).clicked() {
                     if what == Band::Filling {
@@ -423,11 +493,19 @@ impl ColourDrop {
                     ui.painter().rect_filled(line, 0, blue);
                 }
             });
-        if out < 1.0 {
+        if out < 1.0 || (at - chosen as f32).abs() > 1e-3 || pill.fract() != 0.0 {
             ctx.request_repaint();
         }
     }
 }
+
+/// ColorDrop's segments, each with room for "All Layers" and "Reference".
+const SEGMENT: f32 = 68.0;
+/// Continuous's pill across.
+const CONTINUOUS_WIDTH: f32 = 76.0;
+/// Under these, the band leaves its title, then Continuous, out for its other controls.
+const ROOM_FOR_TITLE: f32 = 470.0;
+const ROOM_FOR_CONTINUOUS: f32 = 360.0;
 
 /// The Eraser band's segments, each with room for "Whole Stroke" and "To Crossing".
 const ERASER_SEGMENT: f32 = 84.0;

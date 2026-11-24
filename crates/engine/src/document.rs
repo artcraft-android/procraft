@@ -717,6 +717,38 @@ pub fn set_layer_budget(bytes: u64) {
     BUDGET.store(bytes.clamp(256 << 20, 64 << 30), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// What a canvas's layers take, as the canvas showing them measured it ([`Document::set_layer_memory`]).
+/// A canvas that keeps the layers not worked on compressed off the GPU holds textures for only so
+/// many: the rest take what their pixels compress to, so a mostly empty layer takes little, and
+/// the layers a canvas holds are counted by that rather than each at its full size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerMemory {
+    /// How many layers' textures (each the canvas's size) the canvas keeps at once.
+    pub resident: usize,
+    /// What the layers' compressed copies take, bytes, each counted as at least
+    /// [`least_layer_bytes`] (a layer with a texture and no copy too: its texture is one of the
+    /// textures counted, and once it is let go its copy is measured).
+    pub compressed: u64,
+    /// How many layers with pixels were measured: each one added since takes the least.
+    pub layers: usize,
+}
+
+/// The least a layer is counted as taking, of `full` (its whole texture's bytes), however little
+/// its pixels compress to: its small pictures and the room to draw something on it.
+pub fn least_layer_bytes(full: u64) -> u64 {
+    (full / 64).max(1)
+}
+
+/// A measure kept with a document that never makes two documents differ.
+#[derive(Clone, Copy, Debug, Default)]
+struct Measured(Option<LayerMemory>);
+
+impl PartialEq for Measured {
+    fn eq(&self, _: &Measured) -> bool {
+        true
+    }
+}
+
 /// Where layers brought into a document go ([`Document::insert_copies`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
@@ -770,6 +802,11 @@ pub struct Document {
     /// clips, each drawing one of the top-level layers or groups. None: a still canvas.
     #[serde(default, deserialize_with = "or_default", skip_serializing_if = "Option::is_none")]
     pub timeline: Option<crate::timeline::Timeline>,
+    /// The timeline it was on when it was last taken off one (`Document::stop_timeline`), kept
+    /// whole so that going back on a timeline brings its tracks, timing, keys, sounds and videos
+    /// back (`Document::start_timeline`). Nothing reads it meanwhile: the canvas is a still one.
+    #[serde(default, deserialize_with = "or_default", skip_serializing_if = "Option::is_none")]
+    pub timeline_off: Option<crate::timeline::Timeline>,
     /// The colour profile its pixels and colours are in.
     #[serde(default, deserialize_with = "or_default")]
     pub profile: crate::profile::Profile,
@@ -788,6 +825,10 @@ pub struct Document {
     /// white kept). Chosen as the canvas is made; its canvas's pixel format follows it.
     #[serde(default, skip_serializing_if = "DynamicRange::is_standard")]
     pub range: DynamicRange,
+    /// What its layers take, as its canvas last measured them (see [`LayerMemory`]); none (no
+    /// canvas yet, or one that keeps every layer's texture) counts each at its full size.
+    #[serde(skip)]
+    memory: Measured,
 }
 
 /// How much light a document's pixels keep.
@@ -898,11 +939,13 @@ impl Document {
             dpi: default_dpi(),
             animation: None,
             timeline: None,
+            timeline_off: None,
             profile: crate::profile::Profile::Srgb,
             icc: None,
             solo: None,
             text_style: None,
             range: DynamicRange::Standard,
+            memory: Measured::default(),
         };
         doc.add_layer();
         doc
@@ -938,11 +981,53 @@ impl Document {
         self.width
     }
 
-    /// How many layers with pixels (paint layers and masks) a canvas this size holds.
+    /// How many layers with pixels (paint layers and masks) this canvas holds: by what its layers
+    /// take as last measured (more layers each taking the least), else as many as its size holds
+    /// each taking its whole texture.
     pub fn layer_cap(&self) -> usize {
-        // an HDR layer takes twice the memory
-        let cap = layer_cap_for(self.width, self.height);
-        if self.range.is_high() { cap.div_ceil(2) } else { cap }
+        let Some(m) = self.memory.0.filter(|m| m.resident != usize::MAX) else {
+            // an HDR layer takes twice the memory
+            let cap = layer_cap_for(self.width, self.height);
+            return if self.range.is_high() { cap.div_ceil(2) } else { cap };
+        };
+        let full = self.full_layer_bytes();
+        let room = layer_budget().saturating_sub(full.saturating_mul(LAYERS_KEPT_BACK));
+        // the most whose bytes fit (they grow with the count)
+        let (mut fits, mut over) = (0, MOST_LAYERS + 1);
+        while over - fits > 1 {
+            let mid = fits + (over - fits) / 2;
+            if self.layers_bytes(&m, mid) <= room {
+                fits = mid;
+            } else {
+                over = mid;
+            }
+        }
+        fits.max(1)
+    }
+
+    /// What `count` layers with pixels take as `m` measured them, bytes: their textures, those
+    /// kept compressed, and each one more than measured the least.
+    fn layers_bytes(&self, m: &LayerMemory, count: usize) -> u64 {
+        let full = self.full_layer_bytes();
+        let textures = full.saturating_mul(count.min(m.resident) as u64);
+        let added = count.saturating_sub(m.layers) as u64;
+        textures.saturating_add(m.compressed).saturating_add(added.saturating_mul(least_layer_bytes(full)))
+    }
+
+    /// Bytes a layer's whole texture takes.
+    fn full_layer_bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * self.range.bytes_per_pixel()
+    }
+
+    /// Keeps what its canvas measured its layers to take (none: each counted at its full size),
+    /// for [`Document::layer_cap`].
+    pub fn set_layer_memory(&mut self, memory: Option<LayerMemory>) {
+        self.memory = Measured(memory);
+    }
+
+    /// What its canvas last measured its layers to take.
+    pub fn layer_memory(&self) -> Option<LayerMemory> {
+        self.memory.0
     }
 
     /// Whether `more` more layers with pixels fit under [`Document::layer_cap`].
@@ -956,6 +1041,8 @@ impl Document {
         let mut d = self.clone();
         d.width = width.clamp(1, MAX_CANVAS_EDGE);
         d.height = height.clamp(1, MAX_CANVAS_EDGE);
+        // measured at the old size
+        d.memory = Measured::default();
         d.guide.centre = [d.width as f32 / 2.0, d.height as f32 / 2.0];
         d.guide.vanishing.clear();
         d
@@ -2669,6 +2756,33 @@ mod tests {
         assert!(!d.has_room(1), "its one layer is all it holds");
         // a small canvas: at most a thousand
         assert_eq!(Document::new(100, 100).layer_cap(), MOST_LAYERS);
+    }
+
+    #[test]
+    fn layers_kept_compressed_are_counted_by_what_they_take() {
+        const MIB: u64 = 1 << 20;
+        // 2048 square: 16 MiB a texture, a quarter of a MiB the least; (2048 - 4 x 16) MiB of room
+        let mut d = Document::new(2048, 2048);
+        let measured = |resident, compressed_mib: u64, layers| {
+            Some(LayerMemory { resident, compressed: compressed_mib * MIB, layers })
+        };
+        // fifty textures (800 MiB) and empty layers past them: as many as any canvas holds
+        d.set_layer_memory(measured(50, 0, 1));
+        assert_eq!(d.layer_cap(), MOST_LAYERS);
+        assert!(d.has_room(500), "five hundred empty layers fit");
+        // a hundred layers drawn on, compressed to 1100 MiB: 84 MiB left, a quarter MiB each more
+        d.set_layer_memory(measured(50, 1100, 100));
+        assert_eq!(d.layer_cap(), 100 + 336);
+        // more than the room: as many textures as fit beside what is kept
+        d.set_layer_memory(measured(50, 1500, 100));
+        assert_eq!(d.layer_cap(), 30);
+        // a canvas keeping every texture: each layer its full size, as unmeasured
+        d.set_layer_memory(measured(usize::MAX, 0, 1));
+        assert_eq!(d.layer_cap(), 124);
+        // the measure never makes documents differ, and isn't kept at another size
+        d.set_layer_memory(measured(50, 0, 1));
+        assert_eq!(d, Document::new(2048, 2048));
+        assert_eq!(d.resized(1024, 1024).layer_memory(), None);
     }
 
     #[test]

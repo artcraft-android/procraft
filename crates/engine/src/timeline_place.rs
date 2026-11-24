@@ -124,6 +124,52 @@ impl Timeline {
         changed
     }
 
+    /// Clips `ids` (all on one level) played in the opposite order: each mirrored across the
+    /// frames they span together, its length kept, so the first of them becomes the last and the
+    /// gaps between them turn round with them. A clip's keys, counted from its own start, go with
+    /// it. All of them move or none does: false, and nothing changed, if they aren't all on one
+    /// level, one is on a locked track, one would land on a clip that isn't among them, or
+    /// mirroring leaves every one where it was.
+    pub fn reverse_clips(&mut self, ids: &[ClipId]) -> bool {
+        let picked: HashSet<ClipId> = ids.iter().copied().collect();
+        let Some(&first) = ids.first() else { return false };
+        let Some((level, _, _)) = level_of_clip(&mut self.tracks, first) else { return false };
+        let on_level: Vec<&Clip> = level.iter().flat_map(|t| &t.clips).filter(|c| picked.contains(&c.id)).collect();
+        if on_level.len() != picked.len() {
+            return false;
+        }
+        let Some(lo) = on_level.iter().map(|c| c.start).min() else { return false };
+        let hi = on_level.iter().map(|c| c.end()).max().unwrap_or(lo);
+        let mut moved = false;
+        let mut next: Vec<(usize, Vec<Clip>)> = Vec::new();
+        for (t, track) in level.iter().enumerate() {
+            if !track.clips.iter().any(|c| picked.contains(&c.id)) {
+                continue;
+            }
+            if track.locked {
+                return false;
+            }
+            let mut clips = track.clips.clone();
+            for c in clips.iter_mut().filter(|c| picked.contains(&c.id)) {
+                let start = lo + (hi - c.end());
+                moved |= start != c.start;
+                c.start = start;
+            }
+            clips.sort_by_key(|c| c.start);
+            if clips.windows(2).any(|w| w[0].end() > w[1].start) {
+                return false;
+            }
+            next.push((t, clips));
+        }
+        if !moved {
+            return false;
+        }
+        for (t, clips) in next {
+            level[t].clips = clips;
+        }
+        true
+    }
+
     /// Where clips `ids` (all on one level) start being copied just after: the lowest of their
     /// tracks, and the frame (on that level) one past the last of them. None if one isn't there
     /// or they aren't all on one level.
@@ -333,7 +379,7 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, clips }
+        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
     }
 
     fn timeline(tracks: Vec<Track>) -> Timeline {
@@ -555,5 +601,57 @@ mod tests {
         ]);
         assert_eq!(tl.picked_span(&[ClipId(2), ClipId(1)]), Some((TrackId(1), 8)));
         assert_eq!(tl.picked_span(&[ClipId(2), ClipId(77)]), None);
+    }
+    fn starts(tl: &Timeline, track: usize) -> Vec<(u64, u32, u32)> {
+        tl.tracks[track].clips.iter().map(|c| (c.id.0, c.start, c.duration)).collect()
+    }
+
+    #[test]
+    fn reversed_clips_swap_places_in_time_with_their_lengths_kept() {
+        // a frame, a frame held for three, a frame: mirrored across the five frames they span
+        let mut tl = timeline(vec![track(1, vec![drawing(1, 2, 1), drawing(2, 3, 3), drawing(3, 6, 1)])]);
+        assert!(tl.reverse_clips(&[ClipId(1), ClipId(2), ClipId(3)]));
+        assert_eq!(starts(&tl, 0), [(3, 2, 1), (2, 3, 3), (1, 6, 1)]);
+        // and back again
+        assert!(tl.reverse_clips(&[ClipId(3), ClipId(2), ClipId(1)]));
+        assert_eq!(starts(&tl, 0), [(1, 2, 1), (2, 3, 3), (3, 6, 1)]);
+    }
+
+    #[test]
+    fn reversed_clips_turn_their_gaps_round_and_leave_the_others() {
+        // a gap of two after the first picked clip becomes a gap of two before the last
+        let mut tl = timeline(vec![track(1, vec![drawing(9, 0, 1), drawing(1, 1, 1), drawing(2, 4, 2), drawing(8, 10, 1)])]);
+        assert!(tl.reverse_clips(&[ClipId(1), ClipId(2)]));
+        assert_eq!(starts(&tl, 0), [(9, 0, 1), (2, 1, 2), (1, 5, 1), (8, 10, 1)]);
+    }
+
+    #[test]
+    fn clips_reversed_on_several_tracks_mirror_across_all_they_span() {
+        let mut tl = timeline(vec![
+            track(1, vec![drawing(1, 0, 2), drawing(2, 2, 1)]),
+            track(2, vec![drawing(3, 4, 2)]),
+        ]);
+        assert!(tl.reverse_clips(&[ClipId(1), ClipId(2), ClipId(3)]));
+        // they span frames 0 to 6: what ended last now starts first
+        assert_eq!(starts(&tl, 0), [(2, 3, 1), (1, 4, 2)]);
+        assert_eq!(starts(&tl, 1), [(3, 0, 2)]);
+    }
+
+    #[test]
+    fn nothing_is_reversed_onto_another_clip_on_a_locked_track_or_alone() {
+        // the clip between them isn't picked: the longer one would land on it
+        let tracks = vec![track(1, vec![drawing(1, 0, 3), drawing(7, 3, 1), drawing(2, 4, 1)])];
+        let mut tl = timeline(tracks.clone());
+        assert!(!tl.reverse_clips(&[ClipId(1), ClipId(2)]));
+        assert_eq!(tl.tracks, tracks);
+        // one alone has nothing to change places with
+        assert!(!tl.reverse_clips(&[ClipId(1)]));
+        // a clip that isn't there
+        assert!(!tl.reverse_clips(&[ClipId(1), ClipId(99)]));
+        // a locked track's clips stay put
+        let mut tl = timeline(vec![track(1, vec![drawing(1, 0, 1), drawing(2, 1, 2)])]);
+        tl.tracks[0].locked = true;
+        assert!(!tl.reverse_clips(&[ClipId(1), ClipId(2)]));
+        assert_eq!(starts(&tl, 0), [(1, 0, 1), (2, 1, 2)]);
     }
 }

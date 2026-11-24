@@ -745,7 +745,7 @@ impl Interface {
             self.canvas_rect = Rect::EVERYTHING;
             self.hover_cursor(&ctx, session, &info, input);
             self.overlays.show(ui, &mut self.look, colour, false);
-            self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0);
+            self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0, &mut self.prefs);
             self.copy_paste_panel(&ctx, session);
             self.layer_choice(&ctx, session);
             self.quick_menu(&ctx, session);
@@ -932,17 +932,22 @@ impl Interface {
         self.selection.lasso_fill = self.prefs.lasso_fill;
         self.selection.lasso_fills = self.prefs.plugins.lasso_fills();
         self.selection.fill_opacity = self.prefs.fill_opacity;
+        self.selection.pixelated = self.prefs.selection_pixelated;
         // the bars and panels that hang from the top bar hang from where it ends as it shows
         let bar_bottom = crate::panel::bar_shown(&ctx);
         if let Some(on) = self.selection.show(&ctx, &mut self.look, session, bar_bottom, self.model) {
             self.prefs.selection_x_ray = on;
             self.prefs.keep();
         }
-        // Color Fill's Lasso Fill turned on or off, or its Opacity slid, in its popover, kept
-        if self.selection.lasso_fill != self.prefs.lasso_fill || self.selection.fill_opacity != self.prefs.fill_opacity
+        // Color Fill's Lasso Fill turned on or off, or its Opacity slid, in its popover, or
+        // Feather's Pixelated turned on or off, kept
+        if self.selection.lasso_fill != self.prefs.lasso_fill
+            || self.selection.fill_opacity != self.prefs.fill_opacity
+            || self.selection.pixelated != self.prefs.selection_pixelated
         {
             self.prefs.lasso_fill = self.selection.lasso_fill;
             self.prefs.fill_opacity = self.selection.fill_opacity;
+            self.prefs.selection_pixelated = self.selection.pixelated;
             self.prefs.keep();
         }
         if let Some(asked) = self.adjustments.show(
@@ -1010,7 +1015,7 @@ impl Interface {
             && !self.drop.banded()
             && session.layers().iter().any(|l| l.current && l.vector);
         crate::colour_drop::eraser_band(&ctx, session, erasing_vector, bar_bottom);
-        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), bar_bottom);
+        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), bar_bottom, &mut self.prefs);
         self.copy_paste_panel(&ctx, session);
         self.layer_choice(&ctx, session);
         self.quick_menu(&ctx, session);

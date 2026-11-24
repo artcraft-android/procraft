@@ -133,7 +133,7 @@ fn a_sound_starts_on_a_whole_frame() {
 }
 
 fn track(id: u64, clips: Vec<Clip>) -> Track {
-    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, clips }
+    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
 }
 
 fn drawing(id: u64, start: u32, duration: u32, mask: MaskMode) -> Clip {

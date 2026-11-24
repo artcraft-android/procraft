@@ -206,8 +206,8 @@ pub use layer_bundle::{LayerBundle, LayerDrop};
 pub use layer_style::{LayerEffectInfo, layer_effect_names, style_size, style_size_slider};
 pub use layers::{
     BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ROW_HOLD_SECONDS, RowDrop,
-    ShownRow, ThumbnailImage, blend_modes, brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for,
-    row_hold_seconds, set_layer_budget, set_resident_budget,
+    ShownRow, ThumbnailImage, blend_modes, brush_blend_modes, combine_blend_modes, empty_layers_for, grain_blend_modes,
+    layers_for, row_hold_seconds, set_layer_budget, set_resident_budget,
 };
 pub use liquify::liquify_reach;
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
@@ -274,8 +274,9 @@ pub use touch::{
     SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
 };
 pub use transform::{
-    GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
-    mesh_handle_at, screen_box, shown_mesh_points,
+    GuideSettings, Interpolation, PuppetSettings, ScreenBox, TransformAction, TransformBox, TransformHandle,
+    TransformKind, handle_at, mesh_handle_at, puppet_density_range, puppet_expansion_max, puppet_ring_radius,
+    screen_box, shown_mesh_points,
 };
 pub use vector_layer::{VectorApply, VectorEraser};
 pub use workspaces::{Workspace, Workspaces};
@@ -890,6 +891,9 @@ pub(crate) struct State {
     pub(crate) screen_follow: f32,
     /// The gallery's turn follows the canvas's (Canvas Orientation Memory); else it stays.
     pub(crate) turns_follow_view: bool,
+    /// A timeline's new drawings start as vector layers (see
+    /// [`CanvasSession::set_timeline_vector_frames`]).
+    pub(crate) vector_frames: bool,
     /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
     /// apart from the document, so that undoing never moves it.
     pub(crate) reference_window: procraft_engine::reference_window::ReferenceWindow,
@@ -907,6 +911,10 @@ pub(crate) struct State {
     interpolation: transform::Interpolation,
     /// Transform's Pixelated: the content keeps to whole pixels and nothing is blended.
     transform_pixelated: bool,
+    /// What an open transform took up, as how much of each pixel it covers (one byte a pixel over
+    /// the rectangle it was read from): what a puppet's mesh is laid over.
+    transform_alpha: Option<(procraft_engine::geom::IRect, Vec<u8>)>,
+    puppet_settings: transform::PuppetSettings,
     /// Selection's Pixelated: shapes land on whole pixels and take whole pixels only.
     selection_pixelated: bool,
     transform_guides: transform::GuideSettings,
@@ -1597,10 +1605,15 @@ impl State {
         }
         let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
         let guide = self.doc.stroke_guide();
+        // a dual brush's second runs ahead with it (after the stroke's own: that takes this off)
+        let second_tip = self.second.as_mut().and_then(|second| second_ahead(canvas, second, &[], &guide));
         if canvas.shows_tip() && builder.shows_tip() {
             canvas.set_tip(&guide::mirrored(&guide, &builder.tip_now()));
         } else {
             show_ahead(canvas, builder, &[], &guide);
+        }
+        if let Some(second_tip) = &second_tip {
+            canvas.set_second_tip(second_tip);
         }
     }
 }
@@ -2048,11 +2061,17 @@ pub(crate) const ROOMY_STACK: usize = 8 << 20;
 /// be made.
 pub(crate) fn on_roomy_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     let mut work = Some(work);
+    // (as urgent as the thread that waits here for it: see the engine's `qos`)
+    let qos = procraft_engine::qos::Qos::current();
     let done = std::thread::scope(|scope| {
-        let made = std::thread::Builder::new()
-            .name("procraft roomy".to_owned())
-            .stack_size(ROOMY_STACK)
-            .spawn_scoped(scope, || work.take().map(|work| work()));
+        let made =
+            std::thread::Builder::new().name("procraft roomy".to_owned()).stack_size(ROOMY_STACK).spawn_scoped(
+                scope,
+                || {
+                    qos.adopt();
+                    work.take().map(|work| work())
+                },
+            );
         match made.map(|thread| thread.join()) {
             Ok(Ok(done)) => done,
             // its panic goes on here, as it would have
@@ -2235,6 +2254,8 @@ impl CanvasSession {
             transform_mode: procraft_engine::transform::TransformMode::Freeform,
             interpolation: transform::Interpolation::Bilinear,
             transform_pixelated: false,
+            transform_alpha: None,
+            puppet_settings: transform::PuppetSettings::default(),
             selection_pixelated: false,
             transform_guides: transform::GuideSettings::default(),
             snap_pending: None,
@@ -2292,6 +2313,7 @@ impl CanvasSession {
             turns: 0,
             screen_follow: 0.0,
             turns_follow_view: true,
+            vector_frames: false,
             reference_window: Default::default(),
             reference_picture: None,
             media: Default::default(),
@@ -2338,6 +2360,9 @@ impl CanvasSession {
             let handle = std::thread::Builder::new()
                 .name("procraft-render".to_owned())
                 .spawn(move || {
+                    // the interface waits on this thread all the time (every touch takes the
+                    // state it draws from): it is as urgent as the interface's own
+                    procraft_engine::qos::Qos::INTERACTIVE.adopt();
                     // a panic (in a driver's wrapper, say) leaves the canvas saying it can't draw
                     // rather than waiting on a thread that is gone
                     let run = Arc::clone(&shared);
