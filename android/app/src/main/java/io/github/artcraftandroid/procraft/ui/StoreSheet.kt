@@ -260,6 +260,12 @@ private val MORE_FOOT = 56.dp
 
 // the pages behind the bar, as settings_page, source_page, downloads_page, see_all_page draw them
 private val GROUP_HEAD = 16.dp
+// a grouped list's header rhythm: 16 above the header, 8 between it and what it labels
+private val GROUP_HEAD_ABOVE = 16.dp
+private val GROUP_HEAD_LINE = 17.dp
+private val GROUP_HEAD_BELOW = 8.dp
+// the separator's inset from the leading and trailing content edge
+private val GROUP_RULE_INSET = 16.dp
 private val GROUP_FOOT = 26.dp
 private val SWITCH_W = 51.dp
 private val SWITCH_H = 31.dp
@@ -1409,9 +1415,12 @@ private fun ItemPage(
         Text(words, color = ROW_INK, fontSize = 16.sp)
         Spacer(Modifier.height(40.dp))
     }
-    // the details
+    // the details, its title on the row content's own 16 in from the page edge
     Box(Modifier.fillMaxWidth().height(HEADING_LINE)) {
-        Text("Details", color = TITLE, fontSize = SECTION, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.TopStart))
+        Text(
+            "Details", color = TITLE, fontSize = SECTION, fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 16.dp),
+        )
     }
     Spacer(Modifier.height(HEADING_BELOW))
     DetailsCard(item)
@@ -1423,7 +1432,7 @@ private fun ItemPage(
             Text(
                 "More from ${item.publisher}",
                 color = TITLE, fontSize = SECTION, fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.TopStart),
+                modifier = Modifier.align(Alignment.TopStart).padding(start = 16.dp),
             )
         }
         Spacer(Modifier.height(HEADING_BELOW))
@@ -1445,15 +1454,17 @@ private fun FactsStrip(facts: List<Pair<String, String>>) {
                                 .padding(vertical = 12.dp).background(SEP),
                         )
                     }
-                    val inset = if (at == 0) 0.dp else 10.dp
+                    // the first column shares the row content's 16, so the strip has one left edge
+                    val inset = 16.dp
+                    // a header's rhythm inside the strip too: 16 over the label, 8 under it
                     Text(
                         label, color = IDLE, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.offset(x = inset, y = 12.dp),
+                        modifier = Modifier.offset(x = inset, y = 16.dp),
                     )
                     Text(
                         value, color = TITLE, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.offset(x = inset, y = 31.dp).fillMaxWidth().padding(end = 10.dp),
+                        modifier = Modifier.offset(x = inset, y = 41.dp).fillMaxWidth().padding(end = 10.dp),
                     )
                 }
             }
@@ -1528,13 +1539,15 @@ private fun MoreFrom(items: List<StoreItem>, front: StoreFront, onItem: (StoreIt
     }
 }
 
-/** The facts the strip carries: the ones the catalogue gave, in the desktop's order. */
+/** The facts the strip carries: always the four the mock shows, then the requirement when given. */
 private fun factsOf(item: StoreItem): List<Pair<String, String>> {
-    val facts = mutableListOf<Pair<String, String>>()
-    if (item.bytes > 0uL) facts += "Size" to sizeText(item.bytes)
-    if (item.version.isNotEmpty()) facts += "Version" to item.version
+    val facts = mutableListOf(
+        "Size" to sizeText(item.bytes),
+        "Version" to item.version.ifEmpty { "Not given" },
+        "Licence" to item.licence.ifEmpty { "Not given" },
+        "Tags" to if (item.tags.isEmpty()) "None" else item.tags.joinToString(", "),
+    )
     if (item.requires.isNotEmpty()) facts += "Requires" to item.requires
-    if (item.licence.isNotEmpty()) facts += "Licence" to item.licence
     return facts
 }
 
@@ -1559,7 +1572,9 @@ private fun SettingsPage(front: StoreFront, onSource: (SourceInfo) -> Unit, onAd
                     Text(source.name, color = if (source.on) TITLE else IDLE, fontSize = 17.sp)
                     Text(sourceLine(source), color = ROW_INK, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Icon(PcIcons.ChevronLeft, contentDescription = null, tint = IDLE, modifier = Modifier.size(13.dp))
+                // a disclosure chevron: the app's own glyph at 13, its trailing edge 16 in from the
+                // row's edge (the row's own 16 of padding), its middle on the row's
+                Icon(PcIcons.ChevronRight, contentDescription = null, tint = IDLE, modifier = Modifier.size(13.dp))
             }
         }
         if (front.sources.isNotEmpty()) GroupRule()
@@ -1658,7 +1673,7 @@ private fun SourcePage(front: StoreFront, source: SourceInfo, onRefresh: () -> U
 private fun DownloadsPage(front: StoreFront, onItem: (StoreItem) -> Unit) {
     PageTitle("Downloads")
     Spacer(Modifier.height(8.dp))
-    GroupHead("DOWNLOADING", inset = false)
+    GroupHead("DOWNLOADING")
     Text(
         "Nothing downloading.",
         color = ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.Medium,
@@ -1670,12 +1685,12 @@ private fun DownloadsPage(front: StoreFront, onItem: (StoreItem) -> Unit) {
         .filter { front.standing(it) == Standing.UPDATE }
     val finished = front.installed.values.mapNotNull { one -> front.items.firstOrNull { it.id == one.id } }
     if (waiting.isNotEmpty()) {
-        GroupHead("WAITING FOR YOU", inset = false)
+        GroupHead("WAITING FOR YOU")
         RecordsCard(waiting, front, onItem)
         Spacer(Modifier.height(24.dp))
     }
     if (finished.isNotEmpty()) {
-        GroupHead("FINISHED", inset = false)
+        GroupHead("FINISHED")
         RecordsCard(finished, front, onItem)
     }
 }
@@ -1902,7 +1917,9 @@ private fun AddSheet(front: StoreFront, onClose: () -> Unit) {
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(SEP))
-            GroupHead("ADDRESS")
+            // a grouped list's header rhythm: 16 over ADDRESS, 8 between it and the field
+            // the field's text starts 16 in from the panel edge, so the label starts there too
+            Box(Modifier.padding(start = 16.dp)) { GroupHead("ADDRESS") }
             BasicTextField(
                 value = address,
                 onValueChange = { address = it },
@@ -1958,11 +1975,16 @@ private fun PageTitle(text: String) {
     }
 }
 
-/** A small heading over a card: 13, quiet, 16 in from the side the rows are. */
+/** A small heading over a card: 13, quiet, 16 above it and 8 under it, as a grouped list's is. */
 @Composable
 private fun GroupHead(text: String, inset: Boolean = true) {
-    Box(Modifier.fillMaxWidth().height(GROUP_HEAD)) {
-        Text(text, color = ROW_INK, fontSize = 13.sp, modifier = Modifier.offset(x = if (inset) 16.dp else 0.dp))
+    Column(Modifier.fillMaxWidth()) {
+        Spacer(Modifier.height(GROUP_HEAD_ABOVE))
+        Text(
+            text, color = ROW_INK, fontSize = 13.sp,
+            modifier = Modifier.height(GROUP_HEAD_LINE).fillMaxWidth().offset(x = if (inset) 16.dp else 0.dp),
+        )
+        Spacer(Modifier.height(GROUP_HEAD_BELOW))
     }
 }
 
@@ -1995,10 +2017,10 @@ private fun RowsCard(rows: List<Pair<String, String>>) {
     }
 }
 
-/** The rule a card draws above every row but its first. */
+/** The rule a card draws above every row but its first: inset 16 in from both content edges. */
 @Composable
 private fun GroupRule() {
-    Box(Modifier.fillMaxWidth().height(1.dp).background(SEP))
+    Box(Modifier.fillMaxWidth().padding(horizontal = GROUP_RULE_INSET).height(1.dp).background(SEP))
 }
 
 /** What a source's row says under its name: its failure, where it came from, or when it was read. */
