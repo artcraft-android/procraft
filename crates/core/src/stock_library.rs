@@ -151,7 +151,23 @@ mod tests {
     }
 
     #[test]
-    fn stock_brushes_carry_no_preview_maker_or_names_of_images() {
+    fn every_stock_brush_has_a_bundled_quick_look() {
+        let session = crate::CanvasSession::new(64, 64);
+        for set in session.brush_library() {
+            for brush in set.brushes {
+                assert!(
+                    session.brush_preview(brush.set, brush.index, 530, 162).is_some(),
+                    "{} / {}",
+                    set.name,
+                    brush.name
+                );
+            }
+        }
+        assert!(session.preview_canvas_bytes().is_none());
+    }
+
+    #[test]
+    fn stock_brush_definitions_carry_no_preview_maker_or_names_of_images() {
         for brush in shipped()[LEGACY_SETS..].iter().flat_map(|s| &s.brushes) {
             for b in std::iter::once(brush).chain(brush.secondary.as_deref()) {
                 assert!(b.thumbnail.is_none() && b.author.is_none() && b.engine.is_none(), "{}", b.name);

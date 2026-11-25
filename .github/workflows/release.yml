@@ -55,11 +55,40 @@ env:
   NDK_VERSION: "29.0.14206865"
 
 jobs:
+  stock-quick-looks:
+    name: Render bundled brush previews
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-stock-quick-looks
+      - name: Install the software Vulkan renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+      - name: Render stock Quick Look PNGs
+        run: cargo run --locked -p procraft-core --example stock_quick_looks -- "$RUNNER_TEMP/quick-look.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: ${{ runner.temp }}/quick-look.zip
+          if-no-files-found: error
+
   apk:
+    needs: stock-quick-looks
     name: APK
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version
@@ -156,6 +185,7 @@ jobs:
         run: rm -f "$RUNNER_TEMP/release.p12"
 
   desktop:
+    needs: stock-quick-looks
     name: Desktop (${{ matrix.name }})
     strategy:
       matrix:
@@ -173,6 +203,10 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version
@@ -226,6 +260,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    needs: stock-quick-looks
     name: Desktop (macos-universal)
     # only once the Mac app is to ship: the repository's variable RELEASE_MAC set to true
     if: ${{ !github.event.repository.private && vars.RELEASE_MAC == 'true' }}
@@ -235,6 +270,10 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version
@@ -282,6 +321,7 @@ jobs:
 
   # the iPad app: unsigned for sideloading tools; on manual runs also signed for testers
   ipados:
+    needs: stock-quick-looks
     name: iPadOS (IPA)
     # released once the repository's variable RELEASE_IPAD is true; built on manual runs always
     if: ${{ !github.event.repository.private && (github.event_name == 'workflow_dispatch' || vars.RELEASE_IPAD == 'true') }}
@@ -291,6 +331,10 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version
@@ -355,6 +399,7 @@ jobs:
 
   # Windows on ARM: cross-built on the x64 runner, which has Visual Studio's ARM64 build tools
   windows-arm64:
+    needs: stock-quick-looks
     name: Desktop (windows-arm64)
     runs-on: windows-2025
     continue-on-error: true
@@ -365,6 +410,10 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version
@@ -407,6 +456,7 @@ jobs:
   # Linux on 64-bit ARM: built on GitHub's ARM runner, on the public repository alone (a private
   # one has no ARM runners on its plan); an older Ubuntu, as for x86_64, for glibc 2.35 or newer
   linux-aarch64:
+    needs: stock-quick-looks
     name: Desktop (linux-aarch64)
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-22.04-arm
@@ -415,6 +465,10 @@ jobs:
       DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stock-quick-looks
+          path: assets/brushes
 
       - id: v
         name: Resolve version

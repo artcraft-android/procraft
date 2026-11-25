@@ -4,16 +4,51 @@
 //! finds its stroke here, whatever its place, and a brush changed in any way that shows draws
 //! anew, as it isn't the brush its kept stroke was drawn from.
 
-use std::collections::VecDeque;
-use std::hash::Hasher;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use procraft_engine::brush::Brush;
+use procraft_engine::zip::ZipReader;
 
 /// How many bytes of kept strokes are held at most (each a PNG of the sample stroke's canvas,
-/// some tens of KB; the library as it ships takes about 20 MB): past it the least recently used
-/// go.
+/// some tens of KB): past it the least recently used go.
 pub(crate) const KEPT_BYTES: usize = 32 << 20;
+
+/// The stock Quick Look PNGs, rendered by the build's host tool and embedded for every platform.
+static STOCK: LazyLock<Option<ZipReader<'static>>> = LazyLock::new(|| {
+    let archive = ZipReader::new(include_bytes!("../../../assets/brushes/quick-look.zip"))?;
+    (archive.read("stock-brushes")?.as_slice() == env!("PROCRAFT_STOCK_BRUSH_KEY").as_bytes()).then_some(archive)
+});
+
+// Match edits against this platform's stock brushes. The ZIP uses catalogue positions so the
+// same build assets work even when a brush's calculated floating-point fields vary by platform.
+static STOCK_POSITIONS: LazyLock<HashMap<u64, (usize, usize)>> = LazyLock::new(|| {
+    crate::brush_library::LibrarySet::shipped(&crate::stock_library::shipped())
+        .iter()
+        .enumerate()
+        .flat_map(|(set, row)| {
+            row.brushes.iter().enumerate().map(move |(index, brush)| (look_key(brush), (set, index)))
+        })
+        .collect()
+});
+
+pub(crate) fn stock_png(key: u64) -> Option<Vec<u8>> {
+    let archive = STOCK.as_ref()?;
+    let (set, index) = STOCK_POSITIONS.get(&key)?;
+    archive.read(&format!("{set}/{index}/QuickLook/Thumbnail.png"))
+}
+
+/// The version changes if the disk image format or the appearance key changes.
+pub(crate) fn directory(library: &Path) -> PathBuf {
+    library.join("brush-previews-v1")
+}
+
+fn cache_path(directory: &Path, key: u64) -> PathBuf {
+    directory.join(format!("{key:016x}.png"))
+}
 
 /// The strokes kept, the most recently used last.
 #[derive(Default)]
@@ -53,6 +88,55 @@ impl DrawnPreviews {
         while self.bytes > KEPT_BYTES {
             let Some((_, old)) = self.kept.pop_front() else { break };
             self.bytes -= old.len();
+        }
+    }
+
+    /// Reads a generated preview from an earlier session.
+    pub(crate) fn read(directory: &Path, key: u64) -> Option<Arc<[u8]>> {
+        let mut file = fs::File::open(cache_path(directory, key)).ok()?.take(KEPT_BYTES as u64 + 1);
+        let mut png = Vec::new();
+        file.read_to_end(&mut png).ok()?;
+        (png.len() <= KEPT_BYTES).then(|| png.into())
+    }
+
+    /// Keeps generated previews across sessions. If the directory goes over budget, older
+    /// generated files are expendable because the brush settings are kept separately.
+    pub(crate) fn write(directory: &Path, key: u64, png: &[u8]) {
+        if png.len() > KEPT_BYTES || fs::create_dir_all(directory).is_err() {
+            return;
+        }
+        let target = cache_path(directory, key);
+        if crate::project::write_atomically(&target, |path| {
+            fs::write(path, png).map_err(|e| crate::project::file_error("keeping a brush preview", e))
+        })
+        .is_err()
+        {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(directory) else { return };
+        let mut total = 0u64;
+        let mut files: Vec<_> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                path.extension().filter(|extension| *extension == "png")?;
+                let metadata = entry.metadata().ok()?;
+                metadata.is_file().then_some(())?;
+                total = total.saturating_add(metadata.len());
+                Some((metadata.modified().ok(), metadata.len(), path))
+            })
+            .collect();
+        if total <= KEPT_BYTES as u64 {
+            return;
+        }
+        files.sort_unstable();
+        for (_, size, path) in files {
+            if path != target && fs::remove_file(path).is_ok() {
+                total = total.saturating_sub(size);
+                if total <= KEPT_BYTES as u64 {
+                    break;
+                }
+            }
         }
     }
 
@@ -100,16 +184,25 @@ const WHITE_WITHIN: u8 = 2;
 /// the stroke, not what can't (its name, its place, its notches and sliders, its author, the
 /// preview it came with, the point it resets to).
 pub(crate) fn look_key(brush: &Brush) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut into = HashWriter(&mut hasher);
-    // (formatted straight into the hash: nothing is held)
+    let mut into = HashWriter(0xcbf2_9ce4_8422_2325);
+    // The key must be reproducible across app launches.
     let _ = std::fmt::Write::write_fmt(&mut into, format_args!("{:?}", looks(brush)));
-    hasher.finish()
+    into.0
 }
 
 /// `brush` without what doesn't show in its stroke (see [`look_key`]), its second the same.
 fn looks(brush: &Brush) -> Brush {
-    Brush {
+    let mut grain_file = brush.grain_file_now().cloned();
+    if let Some(full) = grain_file.as_mut().and_then(|file| file.full.as_mut()) {
+        full.pixels = None;
+    }
+    let mut shape_file = brush.shape_file_now().cloned();
+    if let Some(file) = &mut shape_file {
+        file.full.pixels = None;
+    }
+    let mut visual = Brush {
+        grain_file,
+        shape_file,
         name: String::new(),
         notches: Default::default(),
         sliders: [None; 3],
@@ -118,15 +211,28 @@ fn looks(brush: &Brush) -> Brush {
         reset_point: None,
         secondary: brush.secondary.as_deref().map(|second| Box::new(looks(second))),
         ..brush.clone()
+    };
+    // An explicitly stored default must match the same control left unset. Keep wet_pull
+    // because its presence also tells the renderer that this brush mixes wet paint.
+    let keys: Vec<_> = visual.extra.keys().filter(|key| *key != "wet_pull").cloned().collect();
+    for key in keys {
+        if let Some(value) = visual.extra.remove(&key)
+            && value != visual.setting(&key)
+        {
+            visual.extra.insert(key, value);
+        }
     }
+    visual
 }
 
 /// Text written into a hash.
-struct HashWriter<'h>(&'h mut std::collections::hash_map::DefaultHasher);
+struct HashWriter(u64);
 
-impl std::fmt::Write for HashWriter<'_> {
+impl std::fmt::Write for HashWriter {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.0.write(s.as_bytes());
+        for byte in s.bytes() {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
         Ok(())
     }
 }
@@ -160,6 +266,34 @@ mod tests {
     }
 
     #[test]
+    fn generated_pngs_are_reused_by_a_fresh_session() {
+        let root = std::env::temp_dir().join(format!("procraft-edited-brush-preview-{}", std::process::id()));
+        let path = root.to_string_lossy().into_owned();
+        let original = crate::CanvasSession::new(64, 64);
+        original.open_brushes(path.clone());
+        original.studio_begin();
+        original.set_studio_setting("preview_size".to_owned(), 0.4567);
+        original.studio_end(true);
+        let (set, index, lookup) = {
+            let st = original.shared.lock();
+            let (set, index) = st.brush_ref(st.tool);
+            (set as u32, index as u32, look_key(&st.library[set].brushes[index]))
+        };
+        assert!(original.keep_brushes(path.clone()));
+        drop(original);
+        let cw = procraft_engine::preview::CANVAS.0 as u32;
+        let ch = procraft_engine::preview::CANVAS.1 as u32;
+        let pixels = vec![123u8; (cw * ch * 4) as usize];
+        let png = packed(cw, ch, &pixels).unwrap();
+        DrawnPreviews::write(&directory(&root), lookup, &png);
+        let fresh = crate::CanvasSession::new(64, 64);
+        assert!(fresh.open_brushes(path));
+        assert_eq!(fresh.brush_preview(set, index, cw, ch).unwrap().rgba, pixels);
+        assert!(fresh.preview_canvas_bytes().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_white_stroke_is_kept_as_its_coverage_and_any_other_as_it_is() {
         let white: Vec<u8> = (0..64u32).flat_map(|i| [(i * 4) as u8; 4]).collect();
         let packed_white = packed(8, 8, &white).unwrap();
@@ -184,6 +318,9 @@ mod tests {
         assert_eq!(key, look_key(&pen.clone()));
         let renamed = Brush { name: "Another".to_owned(), sliders: [Some([0.2, 0.3]); 3], ..pen.clone() };
         assert_eq!(look_key(&renamed), key);
+        let mut explicit_default = pen.clone();
+        explicit_default.set_setting("preview_size", pen.setting("preview_size"));
+        assert_eq!(look_key(&explicit_default), key);
         let mut spaced = pen.clone();
         spaced.set_setting("spacing", 0.5);
         assert_ne!(look_key(&spaced), key);
@@ -203,5 +340,14 @@ mod tests {
         let before = look_key(&shaped);
         let _ = source.pixels.shared();
         assert_eq!(look_key(&shaped), before);
+        // A full-size shape has the same key after the library writes its pixels to disk.
+        shaped.shape_file = Some(procraft_engine::brush::ShapeFile {
+            source: source.id,
+            full: procraft_engine::brush::FullGrain::new(2, vec![33; 4]).unwrap(),
+        });
+        let full = look_key(&shaped);
+        assert_ne!(full, before);
+        shaped.shape_file.as_mut().unwrap().full.pixels = None;
+        assert_eq!(look_key(&shaped), full);
     }
 }

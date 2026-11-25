@@ -1476,6 +1476,7 @@ impl CanvasSession {
         // where the first is once the second has left
         let at = if a > b { a - 1 } else { a };
         let Some(dual) = entry.brushes.get_mut(at) else { return false };
+        dual.thumbnail = None;
         dual.secondary = Some(Box::new(joining));
         st.move_brush_refs(|(rs, ri)| {
             if rs != s {
@@ -1504,7 +1505,9 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         let (s, i) = (set as usize, index as usize);
         let Some(entry) = st.library.get_mut(s) else { return false };
-        let Some(second) = entry.brushes.get_mut(i).and_then(|brush| brush.secondary.take()) else { return false };
+        let Some(first) = entry.brushes.get_mut(i) else { return false };
+        let Some(second) = first.secondary.take() else { return false };
+        first.thumbnail = None;
         entry.brushes.insert(i + 1, *second);
         if i < entry.origins.len() {
             entry.origins.insert(i + 1, None);
@@ -1522,6 +1525,8 @@ impl CanvasSession {
         };
         let Some(mut second) = brush.secondary.take() else { return false };
         std::mem::swap(brush, &mut *second);
+        brush.thumbnail = None;
+        second.thumbnail = None;
         brush.secondary = Some(second);
         true
     }
