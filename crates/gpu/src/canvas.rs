@@ -53,7 +53,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 176;
+const UNIFORM_SIZE: u64 = 224;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -105,9 +105,7 @@ struct OverlayUniform {
     shape: i32,
     srgb: u32,
     shape_lod_cap: f32,
-    path: u32,
-    canvas_size: [f32; 2],
-    _pad: [f32; 2],
+    _pad: u32,
 }
 /// The most painting sent to the GPU as one piece of work, by [`stamp_work`]. A driver stops work
 /// that runs too long and takes the device, and all it holds, with it: an Adreno 750 did at under
@@ -1350,6 +1348,10 @@ struct LayerUniform {
     paper: [f32; 4],
     /// Where the grain fixed to the canvas starts, in tiles (x, y; the rest unused).
     grain_start: [f32; 4],
+    /// Maps the displayed pixel to the open stroke's texel during a QuickShape drag.
+    stroke_from_x: [f32; 4],
+    stroke_from_y: [f32; 4],
+    stroke_source: [f32; 4],
 }
 
 impl Default for LayerUniform {
@@ -1384,6 +1386,9 @@ impl Default for LayerUniform {
             scaled: [1.0, 0.0, 0.0, 0.0],
             paper: [0.0, 1.0, 0.0, 0.0],
             grain_start: [0.0; 4],
+            stroke_from_x: [0.0; 4],
+            stroke_from_y: [0.0; 4],
+            stroke_source: [0.0; 4],
         }
     }
 }
@@ -2454,6 +2459,11 @@ struct ActiveStroke {
     second: Option<SecondStroke>,
     /// Lays its pixels only within this (see [`Canvas::lay_within`]).
     within: Option<IRect>,
+}
+
+struct ShapePreview {
+    to_source: Affine,
+    bounds: IRect,
 }
 
 impl ActiveStroke {
@@ -3544,8 +3554,7 @@ pub struct Canvas {
     smudge_spare: [wgpu::Buffer; 2],
     /// Stamps of input that hasn't happened yet (predicted), drawn over the canvas for one frame.
     prediction: Vec<StampInstance>,
-    /// Segments of a QuickShape being dragged, drawn in the display pass only.
-    shape_preview: Vec<StampInstance>,
+    shape_preview: Option<ShapePreview>,
     /// The open stroke's stamps as laid so far, and a dual brush's second's, so that one redrawn
     /// whole with them still at its start lays only what comes after (see
     /// [`Canvas::replace_stamps`]); none past [`LAID_KEPT_MOST`].
@@ -3968,7 +3977,7 @@ impl Canvas {
             wet_params: wet_params(device, WET_PASSES_MADE),
             wet_capacity: WET_PASSES_MADE,
             prediction: Vec::new(),
-            shape_preview: Vec::new(),
+            shape_preview: None,
             laid: None,
             laid_second: None,
             laid_count: 0,
@@ -4892,61 +4901,40 @@ impl Canvas {
         );
     }
 
-    pub fn has_shape_preview(&self) -> bool {
-        !self.shape_preview.is_empty()
-    }
-
-    pub fn shape_uses_expensive_brush(&self) -> bool {
-        self.active.is_some_and(|stroke| stroke.style.in_place() || stroke.second.is_some())
-    }
-
-    pub fn clear_shape_preview(&mut self) {
-        self.shape_preview.clear();
-    }
-
-    /// Shows a dragged QuickShape as round-ended segments on the display. On the first update,
-    /// removes the previous open stroke's pixels, keeping its layer and brush ready to redraw.
-    pub fn set_shape_preview(&mut self, segments: impl IntoIterator<Item = (Vec2, Vec2)>, diameter: f32) -> bool {
-        let Some(stroke) = self.active.filter(|a| !a.pencil && !self.measuring) else { return false };
-        let first = !self.has_shape_preview();
-        self.shape_preview.clear();
-        self.shape_preview.extend(segments.into_iter().filter_map(|(a, b)| {
-            let center = a.lerp(b, 0.5);
-            let span = (b - a) * 0.5;
-            (center.is_finite() && span.is_finite()).then(|| StampInstance {
-                center: [center.x, center.y],
-                radius: diameter * 0.5,
-                alpha: 1.0,
-                // The overlay's path mode reads this as the vector from the midpoint to the end.
-                grain_offset: [span.x, span.y],
-                ..bytemuck::Zeroable::zeroed()
-            })
-        }));
-        if self.shape_preview.is_empty() {
+    /// Shows the already painted open stroke at its new position, in its own layer. If the
+    /// source was clipped or the brush writes to the layer directly, the caller redraws it.
+    pub fn transform_shape_preview(&mut self, transform: Affine) -> bool {
+        let full = self.full();
+        let Some(stroke) = self
+            .active
+            .filter(|s| !s.pencil && !s.style.in_place() && s.within.is_none() && s.style.tool != StrokeTool::Laid)
+        else {
+            return false;
+        };
+        let r = stroke.bounds;
+        if self.selection.is_some() || r.is_empty() || r.x0 <= 0 || r.y0 <= 0 || r.x1 >= full.x1 || r.y1 >= full.y1 {
             return false;
         }
-        if first {
-            // Cancel the painted preview (also restoring in-place paint), with the active stroke
-            // itself still open so finishing the shape creates a single undo step.
-            let preview = std::mem::take(&mut self.shape_preview);
-            self.cancel_stroke();
-            let mut empty = ActiveStroke::new(stroke.layer, stroke.style, stroke.pencil, stroke.within);
-            empty.second = stroke.second;
-            self.active = Some(empty);
-            self.laid = Some(Vec::new());
-            (self.laid_count, self.laid_second_count) = (0, 0);
-            if let Some(second) = stroke.second {
-                self.laid_second = Some(Vec::new());
-                self.ops.push(Op::ClearSecond(second));
-            }
-            self.shape_preview = preview;
-        }
+        let Some(to_source) = transform.inverse().filter(|m| m.is_finite()) else { return false };
+        let bounds = [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y1)]
+            .into_iter()
+            .map(|(x, y)| transform.apply(Vec2::new(x as f32, y as f32)))
+            .fold(IRect::EMPTY, |bounds, p| bounds.union(IRect::around(p, 1.0)))
+            .intersect(full);
+        let previous = self.shape_preview.replace(ShapePreview { to_source, bounds });
+        self.dirty = self.dirty.union(previous.map_or(r, |p| p.bounds)).union(bounds);
         true
     }
 
+    pub fn clear_shape_preview(&mut self) {
+        if let Some(preview) = self.shape_preview.take() {
+            self.dirty = self.dirty.union(preview.bounds);
+        }
+    }
+
     pub fn end_stroke(&mut self) {
-        self.prediction.clear();
         self.clear_shape_preview();
+        self.prediction.clear();
         self.laid = None;
         self.laid_second = None;
         self.untip();
@@ -5678,8 +5666,8 @@ impl Canvas {
 
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
-        self.prediction.clear();
         self.clear_shape_preview();
+        self.prediction.clear();
         self.laid = None;
         self.laid_second = None;
         self.tip = None;
@@ -7168,8 +7156,7 @@ impl Canvas {
         // the predicted tail goes last, drawn with the canvas
         let predicted_first = u32::try_from(instances.len()).unwrap_or(u32::MAX);
         if target.is_some() {
-            let overlay = if self.has_shape_preview() { &self.shape_preview } else { &self.prediction };
-            instances.extend_from_slice(overlay);
+            instances.extend_from_slice(&self.prediction);
         }
         let predicted = predicted_first..u32::try_from(instances.len()).unwrap_or(u32::MAX);
         let needed = instances.len() as u64;
@@ -11501,6 +11488,18 @@ impl Canvas {
         .with_paper(stroke.is_some(), self.paper_look())
         .with_dual(stroke.as_ref())
         .with_fill(fill, mask);
+        let uniform = if let (Some(stroke), Some(preview)) = (stroke, &self.shape_preview) {
+            let m = preview.to_source;
+            let r = stroke.bounds;
+            LayerUniform {
+                stroke_from_x: [m.a, m.c, m.e, 1.0],
+                stroke_from_y: [m.b, m.d, m.f, 0.0],
+                stroke_source: [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32],
+                ..uniform
+            }
+        } else {
+            uniform
+        };
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             gpu,
@@ -11597,11 +11596,8 @@ impl Canvas {
         } = &*self.pipelines;
         let kept = self.pipelines.cache.as_ref();
         // the images a predicted tail reads, if they are a brush file's own
-        let shape_preview = self.has_shape_preview();
-        let own_images = self
-            .active
-            .filter(|_| !predicted.is_empty() && !shape_preview)
-            .and_then(|a| self.full_grain_bind(device, &a.style));
+        let own_images =
+            self.active.filter(|_| !predicted.is_empty()).and_then(|a| self.full_grain_bind(device, &a.style));
         let ScreenPipelines {
             display,
             surround: surround_pipelines,
@@ -11824,9 +11820,8 @@ impl Canvas {
             pass.draw(0..3, 0..1);
         }
 
-        // The predicted tail of a painting stroke, or a QuickShape's temporary outline.
-        let style =
-            self.active.filter(|a| !a.pencil).map(|a| a.style).filter(|s| shape_preview || s.tool == StrokeTool::Paint);
+        // the predicted tail of a painting stroke, over the canvas
+        let style = self.active.filter(|a| !a.pencil).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint);
         if let Some(style) = style.filter(|_| !predicted.is_empty()) {
             let overlay_pipeline = overlay.entry(target.format).or_insert_with(|| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -11864,20 +11859,13 @@ impl Canvas {
                 m0: [c.a, c.b, c.c, c.d],
                 m1: [c.e, c.f, target.to_screen.scale_factor(), style.hardness.clamp(0.0, 1.0)],
                 color: {
-                    let [r, g, b] = if style.tool == StrokeTool::Paint {
-                        convert_colour(style.color, target.convert)
-                    } else {
-                        [0.5; 3]
-                    };
-                    let alpha = if shape_preview { 1.0 } else { style.opacity.clamp(0.0, 1.0) };
-                    [r, g, b, alpha]
+                    let [r, g, b] = convert_colour(style.color, target.convert);
+                    [r, g, b, style.opacity.clamp(0.0, 1.0)]
                 },
                 shape: style.shape.map_or(-1, |s| s as i32),
                 srgb: u32::from(srgb),
                 shape_lod_cap: style.shape_lod_cap,
-                path: u32::from(shape_preview),
-                canvas_size: [self.width as f32, self.height as f32],
-                _pad: [0.0; 2],
+                _pad: 0,
             });
             let size = size_of::<StampInstance>() as u64;
             pass.set_pipeline(overlay_pipeline);
