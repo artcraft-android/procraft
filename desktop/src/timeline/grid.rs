@@ -312,6 +312,12 @@ impl TimelineGrid {
             // the whole bar takes its presses: none reach the canvas under it
             ui.allocate_rect(place.bar, Sense::click_and_drag());
             crate::screen::claim(ui, place.bar);
+            // the bar's ground, under the header's buttons drawn next
+            ui.painter().add(
+                egui::epaint::Shadow { offset: [0, 6], blur: 16, spread: 0, color: Color32::from_black_alpha(77) }
+                    .as_shape(place.bar, CornerRadius::same(BAR_CORNER)),
+            );
+            ui.painter().rect_filled(place.bar, BAR_CORNER, argb(PANEL));
             if let Some(said) = self.header(ui, look, session, &place, now) {
                 self.tell(said, true);
             }
@@ -937,11 +943,6 @@ impl TimelineGrid {
         let Some(info) = panel.info.as_ref() else { return };
         let painter = ui.painter();
         let bar = place.bar;
-        painter.add(
-            egui::epaint::Shadow { offset: [0, 6], blur: 16, spread: 0, color: Color32::from_black_alpha(77) }
-                .as_shape(bar, CornerRadius::same(BAR_CORNER)),
-        );
-        painter.rect_filled(bar, BAR_CORNER, argb(PANEL));
         painter.rect_filled(
             Rect::from_min_size(pos2(bar.left(), place.header.bottom()), vec2(bar.width(), 1.0)),
             0,
