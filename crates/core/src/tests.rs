@@ -24169,7 +24169,6 @@ fn paint_laid_in_place_laid_again_as_it_ends_goes_back_to_a_mark_and_ends_as_lai
 /// taper of their own.
 #[test]
 fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_again() {
-    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 512;
     let point = |k: usize| PenSample {
         pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
@@ -24182,14 +24181,15 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
         // the layer, the dispatches at its end, and whether it held its start: ended as it ends, laid
         // again from scratch (no marks to go back to), or all of it laid again whole
         let ended = |rewinds: bool, whole: bool| -> Option<(Vec<u8>, u64, bool)> {
-            let s = session_on(gpu.clone(), side, side);
-            let (set, index) = library_brush(&s, |b| b.name == name && timed(b))?;
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name && timed(b))
+                .unwrap_or_else(|| panic!("{name}: no stock brush of paint laid in place with a timed start taper"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(0.3);
             s.set_color(0.1, 0.3, 0.7);
             {
                 let mut st = s.shared.lock();
-                let canvas = st.canvas.as_mut()?;
+                let canvas = st.canvas.as_mut().expect("test canvas");
                 canvas.lay_ends_whole(whole);
                 canvas.set_rewinds(rewinds, None);
             }
@@ -24203,19 +24203,20 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
             picture(&s);
             let (before, held) = {
                 let st = s.shared.lock();
-                (st.canvas.as_ref()?.compute_dispatches(), st.stroke.as_ref()?.holds_start())
+                (
+                    st.canvas.as_ref().expect("test canvas").compute_dispatches(),
+                    st.stroke.as_ref().expect("active stroke").holds_start(),
+                )
             };
             s.stroke_end(vec![point(241)]);
             picture(&s);
-            let sent = s.shared.lock().canvas.as_ref()?.compute_dispatches() - before;
+            let sent = s.shared.lock().canvas.as_ref().expect("test canvas").compute_dispatches() - before;
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((layer_rgba(&s, current), sent, held))
         };
-        let (Some((rest, sent_rest, held)), Some((scratch, ..)), Some((whole, sent_whole, _))) =
-            (ended(true, false), ended(false, false), ended(false, true))
-        else {
-            panic!("{name}: no stock brush of paint laid in place with a timed start taper");
-        };
+        let Some((rest, sent_rest, held)) = ended(true, false) else { return };
+        let Some((scratch, ..)) = ended(false, false) else { return };
+        let Some((whole, sent_whole, _)) = ended(false, true) else { return };
         let (most, count) = differ(&whole, &rest);
         println!(
             "{name}: {sent_rest} dispatches at its end, {sent_whole} laid again whole; {count} of {} channels within {most} of that",
@@ -24244,7 +24245,6 @@ const TIMED_START_WET: [&str; 5] = ["Lundy", "Kingsley", "Dunlin", "Copperwing",
 /// and as the stroke ends, in fewer windows.
 #[test]
 fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_its_own() {
-    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 512;
     let point = |k: usize| PenSample {
         pressure: 0.3 + 0.6 * (k as f32 * 0.05).sin().abs(),
@@ -24258,12 +24258,13 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
     for (name, size) in brushes {
         // the picture every tenth event, the layer as it ends, and the windows laid while drawn
         let drawn = |joined: bool| -> Option<(Vec<Vec<u8>>, Vec<u8>, u64)> {
-            let s = session_on(gpu.clone(), side, side);
-            let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())?;
+            let s = session(side, side)?;
+            let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())
+                .unwrap_or_else(|| panic!("{name}: no stock dual brush of that name"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
             s.set_color(0.2, 0.5, 0.3);
-            s.shared.lock().canvas.as_mut()?.join_synthesis(joined);
+            s.shared.lock().canvas.as_mut().expect("test canvas").join_synthesis(joined);
             let windows = || s.shared.lock().canvas.as_deref().map_or(0, procraft_gpu::Canvas::smudge_windows);
             let before = windows();
             let mut frames = Vec::new();
@@ -24283,11 +24284,8 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((frames, layer_rgba(&s, current), laid))
         };
-        let (Some((shown, ended, windows)), Some((shown_apart, ended_apart, windows_apart))) =
-            (drawn(true), drawn(false))
-        else {
-            panic!("{name}: no stock dual brush of that name");
-        };
+        let Some((shown, ended, windows)) = drawn(true) else { return };
+        let Some((shown_apart, ended_apart, windows_apart)) = drawn(false) else { return };
         println!(
             "{name}@{size}: {windows} windows while drawn, against {windows_apart} with its second put together apart"
         );
@@ -24420,7 +24418,6 @@ fn a_wet_dual_brushs_stroke_gone_back_to_a_mark_ends_as_with_its_second_put_toge
 /// Either way it comes out the same, pixel for pixel. Prints what each holds.
 #[test]
 fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
-    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 1024;
     let point = |k: usize| PenSample {
         pressure: 0.5 + 0.3 * (k as f32 * 0.05).sin(),
@@ -24430,13 +24427,14 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
         // the layer, the most the canvas held past what it held before, the side of its tiles, and
         // whether it is on OpenGL
         let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32, bool)> {
-            let s = session_on(gpu.clone(), side, side);
-            let (set, index) = library_brush(&s, |b| b.name == name)?;
+            let s = session(side, side)?;
+            let (set, index) =
+                library_brush(&s, |b| b.name == name).unwrap_or_else(|| panic!("{name}: no stock brush of that name"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
             s.set_color(0.3, 0.2, 0.6);
-            s.shared.lock().canvas.as_mut()?.set_smudge_tiles(tiles);
-            let gl = s.shared.lock().gpu.as_ref()?.is_gl();
+            s.shared.lock().canvas.as_mut().expect("test canvas").set_smudge_tiles(tiles);
+            let gl = s.shared.lock().gpu.as_ref().expect("test GPU").is_gl();
             picture(&s);
             let held =
                 |s: &CanvasSession| s.shared.lock().canvas.as_deref().map_or(0, procraft_gpu::Canvas::texture_bytes);
@@ -24456,11 +24454,9 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((layer_rgba(&s, current), most, tile, gl))
         };
-        let (Some((own, held_own, tile, gl)), Some((thin_tiles, held_thin, ..)), Some((big_tiles, held_big, ..))) =
-            (drawn(None), drawn(Some(256)), drawn(Some(512)))
-        else {
-            panic!("{name}: no stock brush of that name");
-        };
+        let Some((own, held_own, tile, gl)) = drawn(None) else { return };
+        let Some((thin_tiles, held_thin, ..)) = drawn(Some(256)) else { return };
+        let Some((big_tiles, held_big, ..)) = drawn(Some(512)) else { return };
         let mb = |b: u64| b as f64 / 1048576.0;
         println!(
             "{name}@{size}: tiles {tile} across, the stroke holding {:.1} MB; {:.1} MB in tiles 256 across, {:.1} MB in tiles 512 across",
